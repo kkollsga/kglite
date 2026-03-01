@@ -9,7 +9,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -59,6 +59,10 @@ pub struct EdgePattern {
     /// Variable-length path configuration: (min_hops, max_hops)
     /// None means exactly 1 hop (normal edge)
     pub var_length: Option<(usize, usize)>,
+    /// When false, variable-length expansion skips path tracking and uses
+    /// global BFS dedup.  Set by the query planner when the query doesn't
+    /// reference path info (no `p = ...` assignment, no named edge variable).
+    pub needs_path_info: bool,
 }
 
 /// Direction of edge traversal
@@ -79,6 +83,9 @@ pub enum PropertyMatcher {
     /// from WITH/UNWIND before pattern matching. Example:
     /// `WITH "Oslo" AS city MATCH (n:Person {city: city})`
     EqualsVar(String),
+    /// IN-list matching: value must be one of these values.
+    /// Pushed from `WHERE n.prop IN [v1, v2, ...]` by the planner.
+    In(Vec<Value>),
 }
 
 // ============================================================================
@@ -582,6 +589,7 @@ impl Parser {
             direction,
             properties,
             var_length,
+            needs_path_info: true,
         })
     }
 
@@ -938,10 +946,12 @@ impl<'a> PatternExecutor<'a> {
                                 let mut new_match = current_match.clone();
                                 if let Some(ref var) = edge_pattern.variable {
                                     new_match.bindings.push((var.clone(), edge_binding));
-                                } else if matches!(
-                                    edge_binding,
-                                    MatchBinding::VariableLengthPath { .. }
-                                ) {
+                                } else if edge_pattern.needs_path_info
+                                    && matches!(
+                                        edge_binding,
+                                        MatchBinding::VariableLengthPath { .. }
+                                    )
+                                {
                                     new_match
                                         .bindings
                                         .push((format!("__anon_vlpath_{}", i), edge_binding));
@@ -1016,7 +1026,9 @@ impl<'a> PatternExecutor<'a> {
                         let mut new_match = current_match.clone();
                         if let Some(ref var) = edge_pattern.variable {
                             new_match.bindings.push((var.clone(), edge_binding));
-                        } else if matches!(edge_binding, MatchBinding::VariableLengthPath { .. }) {
+                        } else if edge_pattern.needs_path_info
+                            && matches!(edge_binding, MatchBinding::VariableLengthPath { .. })
+                        {
                             new_match
                                 .bindings
                                 .push((format!("__anon_vlpath_{}", i), edge_binding));
@@ -1123,6 +1135,21 @@ impl<'a> PatternExecutor<'a> {
         node_type: &str,
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
+        // Fast path: IN on id field — O(k) lookups via id index
+        if let Some(PropertyMatcher::In(values)) = props.get("id") {
+            let mut result = Vec::with_capacity(values.len());
+            for val in values {
+                if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, val) {
+                    result.push(idx);
+                }
+            }
+            // Apply remaining property filters if any (e.g. {id: IN [...], status: "active"})
+            if props.len() > 1 {
+                result.retain(|&idx| self.node_matches_properties(idx, props));
+            }
+            return Some(result);
+        }
+
         // Extract equality values from PropertyMatcher (resolve params)
         let mut equality_props: Vec<(&String, &Value)> = props
             .iter()
@@ -1131,8 +1158,8 @@ impl<'a> PatternExecutor<'a> {
                 PropertyMatcher::EqualsParam(name) => {
                     self.params.get(name.as_str()).map(|val| (k, val))
                 }
-                // EqualsVar should be resolved before reaching here; skip for index lookup
-                PropertyMatcher::EqualsVar(_) => None,
+                // EqualsVar / In are handled separately; skip for equality index lookup
+                PropertyMatcher::EqualsVar(_) | PropertyMatcher::In(_) => None,
             })
             .collect();
 
@@ -1242,6 +1269,7 @@ impl<'a> PatternExecutor<'a> {
             // EqualsVar should be resolved to Equals before pattern matching.
             // If it reaches here unresolved, no match is possible.
             PropertyMatcher::EqualsVar(_) => false,
+            PropertyMatcher::In(values) => values.iter().any(|v| values_equal(value, v)),
         }
     }
 
@@ -1341,6 +1369,129 @@ impl<'a> PatternExecutor<'a> {
         Ok(results)
     }
 
+    /// Fast variable-length path expansion using global BFS dedup.
+    /// Used when path info is not needed (no `p = ...`, no named edge variable).
+    /// Each node is visited at most once, eliminating redundant re-exploration
+    /// from hub nodes at deeper depths.
+    fn expand_var_length_fast(
+        &self,
+        source: NodeIndex,
+        edge_pattern: &EdgePattern,
+        node_pattern: &NodePattern,
+        min_hops: usize,
+        max_hops: usize,
+    ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        use std::collections::VecDeque;
+
+        let directions: &[Direction] = match edge_pattern.direction {
+            EdgeDirection::Outgoing => &[Direction::Outgoing],
+            EdgeDirection::Incoming => &[Direction::Incoming],
+            EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
+        };
+
+        // Global visited set — each node is explored at most once
+        let mut visited = HashSet::new();
+        visited.insert(source);
+
+        // Queue: (node, depth) — no path vector needed
+        let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
+        queue.push_back((source, 0));
+
+        let mut results = Vec::new();
+        let mut iter_count: usize = 0;
+
+        while let Some((current, depth)) = queue.pop_front() {
+            iter_count += 1;
+            if iter_count & 511 == 0 {
+                if let Some(dl) = self.deadline {
+                    if Instant::now() > dl {
+                        return Err("Query timed out".to_string());
+                    }
+                }
+            }
+            if depth >= max_hops {
+                continue;
+            }
+
+            for &direction in directions {
+                let edges = self.graph.graph.edges_directed(current, direction);
+
+                for edge in edges {
+                    let edge_data = edge.weight();
+
+                    // Check connection type
+                    if let Some(ref conn_type) = edge_pattern.connection_type {
+                        if &edge_data.connection_type != conn_type {
+                            continue;
+                        }
+                    }
+
+                    // Check edge properties
+                    if let Some(ref props) = edge_pattern.properties {
+                        let matches = props.iter().all(|(key, matcher)| {
+                            edge_data
+                                .properties
+                                .get(key)
+                                .map(|v| self.value_matches(v, matcher))
+                                .unwrap_or(false)
+                        });
+                        if !matches {
+                            continue;
+                        }
+                    }
+
+                    let target = match direction {
+                        Direction::Outgoing => edge.target(),
+                        Direction::Incoming => edge.source(),
+                    };
+
+                    // Global dedup — skip if already visited at any depth
+                    if !visited.insert(target) {
+                        continue;
+                    }
+
+                    let new_depth = depth + 1;
+
+                    // Check if target is a valid result (within hop range + matches node pattern)
+                    if new_depth >= min_hops {
+                        let node_matches = if let Some(ref node_type) = node_pattern.node_type {
+                            self.graph
+                                .graph
+                                .node_weight(target)
+                                .map(|n| &n.node_type == node_type)
+                                .unwrap_or(false)
+                        } else {
+                            true
+                        };
+
+                        let props_match = if let Some(ref props) = node_pattern.properties {
+                            self.node_matches_properties(target, props)
+                        } else {
+                            true
+                        };
+
+                        if node_matches && props_match {
+                            let edge_binding = MatchBinding::VariableLengthPath {
+                                source,
+                                target,
+                                hops: new_depth,
+                                path: Vec::new(),
+                            };
+                            results.push((target, edge_binding));
+                        }
+                    }
+
+                    // Continue exploring if we haven't reached max depth
+                    if new_depth < max_hops {
+                        queue.push_back((target, new_depth));
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Expand via variable-length path (BFS within hop range)
     /// Optimized: Only clones paths when branching (multiple valid targets from same node)
     fn expand_var_length(
@@ -1351,6 +1502,17 @@ impl<'a> PatternExecutor<'a> {
         min_hops: usize,
         max_hops: usize,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
+        // Fast path: when path info isn't needed, use global-dedup BFS
+        if !edge_pattern.needs_path_info {
+            return self.expand_var_length_fast(
+                source,
+                edge_pattern,
+                node_pattern,
+                min_hops,
+                max_hops,
+            );
+        }
+
         use std::collections::VecDeque;
 
         let mut results = Vec::new();

@@ -69,7 +69,7 @@ users_df = pd.DataFrame({
 graph.add_nodes(data=users_df, node_type='User', unique_id_field='user_id', node_title_field='name')
 ```
 
-### Blueprint Loading (CSV → Graph) — [docs](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)
+### Blueprint Loading (CSV → Graph) — [docs](https://kglite.readthedocs.io/en/latest/guides/blueprints.html)
 
 ```python
 import kglite
@@ -133,7 +133,8 @@ Full documentation is available at **[kglite.readthedocs.io](https://kglite.read
 | [Core Concepts](https://kglite.readthedocs.io/en/latest/core-concepts.html) | Nodes, relationships, selections, return types |
 | [Cypher Guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html) | Queries, mutations, transactions, parameters |
 | [Cypher Reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html) | Full reference for every clause and function |
-| [Data Loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html) | Fluent API, blueprints, conflict handling |
+| [Data Loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html) | Fluent API, conflict handling, batch updates |
+| [Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html) | Declarative CSV-to-graph loading via JSON |
 | [Querying](https://kglite.readthedocs.io/en/latest/guides/querying.html) | Filtering, traversal, schema introspection |
 | [Fluent API Reference](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html) | Full reference for every fluent method |
 | [Semantic Search](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html) | Embeddings, vector search, `text_score()` |

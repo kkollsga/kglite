@@ -35,6 +35,7 @@ core-concepts
 
 guides/cypher
 guides/data-loading
+guides/blueprints
 guides/querying
 guides/semantic-search
 guides/spatial

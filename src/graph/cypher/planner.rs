@@ -19,6 +19,37 @@ pub fn optimize(query: &mut CypherQuery, graph: &DirGraph, params: &HashMap<Stri
     fuse_vector_score_order_limit(query);
     fuse_order_by_top_k(query);
     reorder_predicates_by_cost(query);
+    mark_fast_var_length_paths(query);
+}
+
+/// Mark variable-length edges that don't need path tracking.
+///
+/// When a MATCH clause has no path assignments (`p = ...`) and the edge
+/// has no named variable (`[r:T*1..N]`), the full path vector is never
+/// read downstream.  Setting `needs_path_info = false` lets the pattern
+/// executor use a fast BFS with global dedup instead of tracking every path.
+fn mark_fast_var_length_paths(query: &mut CypherQuery) {
+    for clause in &mut query.clauses {
+        let mc = match clause {
+            Clause::Match(mc) | Clause::OptionalMatch(mc) => mc,
+            _ => continue,
+        };
+
+        // If there are path assignments, path info is needed for all patterns
+        if !mc.path_assignments.is_empty() {
+            continue;
+        }
+
+        for pattern in &mut mc.patterns {
+            for element in &mut pattern.elements {
+                if let PatternElement::Edge(ep) = element {
+                    if ep.var_length.is_some() && ep.variable.is_none() {
+                        ep.needs_path_info = false;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Fuse MATCH + RETURN into O(1)/O(types) count short-circuits.
@@ -334,14 +365,18 @@ fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<String, Value
             continue;
         };
 
-        // Split predicate into pushable equality conditions and remainder
-        let (pushable, remaining) = extract_pushable_equalities(&where_pred, &match_vars, params);
+        // Split predicate into pushable conditions and remainder
+        let (pushable, pushable_in, remaining) =
+            extract_pushable_equalities(&where_pred, &match_vars, params);
 
         // Apply pushable conditions to MATCH patterns
-        if !pushable.is_empty() {
+        if !pushable.is_empty() || !pushable_in.is_empty() {
             if let Clause::Match(ref mut m) = query.clauses[i] {
                 for (var_name, property, value) in &pushable {
                     apply_property_to_patterns(&mut m.patterns, var_name, property, value.clone());
+                }
+                for (var_name, property, values) in pushable_in {
+                    apply_in_property_to_patterns(&mut m.patterns, &var_name, &property, values);
                 }
             }
 
@@ -788,31 +823,42 @@ fn collect_pattern_variables(
     vars
 }
 
-/// Extract simple equality predicates that can be pushed into MATCH patterns.
-/// Returns (pushable_conditions, remaining_predicate).
+/// (equality_conditions, in_conditions, remaining_predicate)
+type PushableResult = (
+    Vec<(String, String, Value)>,
+    Vec<(String, String, Vec<Value>)>,
+    Option<Predicate>,
+);
+
+/// Extract pushable predicates from a WHERE clause into MATCH patterns.
+/// Returns (equality_conditions, in_conditions, remaining_predicate).
 ///
 /// Pushes conditions of the form:
-/// - `variable.property = literal_value`
-/// - `variable.property = $param` (resolved from params map)
+/// - `variable.property = literal_value` (equality)
+/// - `variable.property = $param` (equality with param)
+/// - `variable.property IN [literal, ...]` (IN list)
 ///
 /// The variable must be defined in MATCH.
 fn extract_pushable_equalities(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
-) -> (Vec<(String, String, Value)>, Option<Predicate>) {
+) -> PushableResult {
     let mut pushable = Vec::new();
-    let remaining = extract_from_predicate(pred, match_vars, params, &mut pushable);
-    (pushable, remaining)
+    let mut pushable_in = Vec::new();
+    let remaining =
+        extract_from_predicate(pred, match_vars, params, &mut pushable, &mut pushable_in);
+    (pushable, pushable_in, remaining)
 }
 
-/// Recursively extract pushable equalities from a predicate.
+/// Recursively extract pushable predicates from a predicate tree.
 /// Returns the remaining predicate (None if fully consumed).
 fn extract_from_predicate(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
     params: &HashMap<String, Value>,
     pushable: &mut Vec<(String, String, Value)>,
+    pushable_in: &mut Vec<(String, String, Vec<Value>)>,
 ) -> Option<Predicate> {
     match pred {
         Predicate::Comparison {
@@ -828,9 +874,33 @@ fn extract_from_predicate(
                 Some(pred.clone()) // Keep as-is
             }
         }
+        Predicate::In { expr, list } => {
+            // Push variable.property IN [literal, ...] into MATCH pattern
+            if let Expression::PropertyAccess { variable, property } = expr {
+                if match_vars.iter().any(|(v, _)| v == variable) {
+                    let all_literals: Option<Vec<Value>> = list
+                        .iter()
+                        .map(|item| {
+                            if let Expression::Literal(val) = item {
+                                Some(val.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if let Some(values) = all_literals {
+                        pushable_in.push((variable.clone(), property.clone(), values));
+                        return None; // Fully consumed
+                    }
+                }
+            }
+            Some(pred.clone())
+        }
         Predicate::And(left, right) => {
-            let left_remaining = extract_from_predicate(left, match_vars, params, pushable);
-            let right_remaining = extract_from_predicate(right, match_vars, params, pushable);
+            let left_remaining =
+                extract_from_predicate(left, match_vars, params, pushable, pushable_in);
+            let right_remaining =
+                extract_from_predicate(right, match_vars, params, pushable, pushable_in);
 
             match (left_remaining, right_remaining) {
                 (None, None) => None,
@@ -907,6 +977,26 @@ fn apply_property_to_patterns(
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
                     props.insert(property.to_string(), PropertyMatcher::Equals(value));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Apply an IN-list property condition to the matching node pattern in MATCH
+fn apply_in_property_to_patterns(
+    patterns: &mut [crate::graph::pattern_matching::Pattern],
+    var_name: &str,
+    property: &str,
+    values: Vec<Value>,
+) {
+    for pattern in patterns.iter_mut() {
+        for element in &mut pattern.elements {
+            if let PatternElement::Node(ref mut np) = element {
+                if np.variable.as_deref() == Some(var_name) {
+                    let props = np.properties.get_or_insert_with(Default::default);
+                    props.insert(property.to_string(), PropertyMatcher::In(values));
                     return;
                 }
             }
