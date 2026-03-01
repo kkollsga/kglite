@@ -107,6 +107,30 @@ fn extract_cypher_param(obj: Option<&Bound<'_, PyAny>>) -> PyResult<introspectio
     ))
 }
 
+/// Extract `FluentDetail` from a Python `bool | list[str] | None` parameter.
+fn extract_fluent_param(obj: Option<&Bound<'_, PyAny>>) -> PyResult<introspection::FluentDetail> {
+    let Some(obj) = obj else {
+        return Ok(introspection::FluentDetail::Off);
+    };
+    if let Ok(b) = obj.extract::<bool>() {
+        return Ok(if b {
+            introspection::FluentDetail::Overview
+        } else {
+            introspection::FluentDetail::Off
+        });
+    }
+    if let Ok(list) = obj.cast::<PyList>() {
+        let topics: Vec<String> = list
+            .iter()
+            .map(|item| item.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(introspection::FluentDetail::Topics(topics));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "fluent must be bool or list of strings",
+    ))
+}
+
 /// Resolve any `Value::NodeRef` in Cypher result rows to node titles.
 /// Called just before Python conversion so that NodeRef (an internal
 /// representation used to preserve node identity through collect/WITH)
@@ -4466,26 +4490,30 @@ impl KnowledgeGraph {
 
     /// Return an XML description of this graph for AI agents (progressive disclosure).
     ///
-    /// Three independent axes:
+    /// Four independent axes:
     /// - `types` → Node type detail (None=inventory, list=focused)
     /// - `connections` → Connection type docs (True=overview, list=deep-dive)
     /// - `cypher` → Cypher language reference (True=compact, list=detailed topics)
+    /// - `fluent` → Fluent API reference (True=compact, list=detailed topics)
     ///
-    /// When `connections` or `cypher` is set, only those tracks are returned.
-    #[pyo3(signature = (types=None, connections=None, cypher=None))]
+    /// When `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
+    #[pyo3(signature = (types=None, connections=None, cypher=None, fluent=None))]
     fn describe(
         &self,
         types: Option<Vec<String>>,
         connections: Option<&Bound<'_, PyAny>>,
         cypher: Option<&Bound<'_, PyAny>>,
+        fluent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<String> {
         let conn_detail = extract_detail_param(connections, "connections")?;
         let cypher_detail = extract_cypher_param(cypher)?;
+        let fluent_detail = extract_fluent_param(fluent)?;
         introspection::compute_description(
             &self.inner,
             types.as_deref(),
             &conn_detail,
             &cypher_detail,
+            &fluent_detail,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }

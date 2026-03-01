@@ -1389,10 +1389,11 @@ class KnowledgeGraph:
         types: list[str] | None = None,
         connections: bool | list[str] | None = None,
         cypher: bool | list[str] | None = None,
+        fluent: bool | list[str] | None = None,
     ) -> str:
         """Return an XML description of this graph for AI agents.
 
-        Three independent axes for progressive disclosure:
+        Four independent axes for progressive disclosure:
 
         **Node types** (``types`` parameter):
 
@@ -1414,17 +1415,25 @@ class KnowledgeGraph:
         - ``describe(cypher=['cluster', 'MATCH'])`` — Detailed docs with
           parameters and examples for specific topics.
 
-        When ``connections`` or ``cypher`` is set, only those tracks are
-        returned (no node inventory).
+        **Fluent API** (``fluent`` parameter):
+
+        - ``describe(fluent=True)`` — Compact fluent API reference: all
+          methods grouped by area with signatures and descriptions.
+        - ``describe(fluent=['traverse', 'where', 'spatial'])`` — Detailed
+          docs with parameters and examples for specific topics.
+
+        When ``connections``, ``cypher``, or ``fluent`` is set, only those
+        tracks are returned (no node inventory).
 
         Args:
             types: Node type names for focused detail.
             connections: True for overview, list for deep-dive into specific types.
             cypher: True for compact reference, list for detailed topic docs.
+            fluent: True for compact reference, list for detailed topic docs.
 
         Raises:
             ValueError: If any type/connection/topic is not found.
-            TypeError: If connections or cypher has wrong type.
+            TypeError: If connections, cypher, or fluent has wrong type.
         """
         ...
 
