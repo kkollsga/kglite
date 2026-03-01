@@ -5,6 +5,22 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.75] - 2026-03-01
+
+### Added
+
+- **`keys()` function** — `keys(n)` / `keys(r)` returns property names of nodes and relationships as a JSON list
+- **Math functions** — `log`/`ln`, `log10`, `exp`, `pow`/`power`, `pi`, `rand`/`random` (previously documented but not implemented)
+- **`datetime()` alias** — `datetime('2020-01-15')` works identically to `date()`
+- **DateTime property accessors** — `d.year`, `d.month`, `d.day` on DateTime values (via WITH alias)
+- **Scientific notation** — tokenizer now parses `1e6`, `1.5e-3`, `2E+10` as float literals
+
+### Fixed
+
+- **String function auto-coercion** — `substring`, `left`, `right`, `split`, `replace`, `trim`, `reverse` now auto-coerce DateTime/numeric/boolean values to strings instead of returning NULL
+- **`describe()` algorithm hint** — fixed misleading `YIELD node, score|community|cluster` that didn't mention `component`; now shows which yield name belongs to which procedure
+- **Spatial coordinate order note** — added documentation clarifying WKT uses (longitude latitude) while `point()` uses (latitude, longitude)
+
 ## [0.5.74] - 2026-03-01
 
 ### Added

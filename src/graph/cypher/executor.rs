@@ -3161,6 +3161,16 @@ impl<'a> CypherExecutor<'a> {
                 }
                 return Ok(Value::Null);
             }
+            // DateTime property accessors: .year, .month, .day
+            if let Value::DateTime(date) = val {
+                use chrono::Datelike;
+                return Ok(match property {
+                    "year" => Value::Int64(date.year() as i64),
+                    "month" => Value::Int64(date.month() as i64),
+                    "day" => Value::Int64(date.day() as i64),
+                    _ => Value::Null,
+                });
+            }
             return Ok(val.clone());
         }
 
@@ -3221,7 +3231,7 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(&args[0], row)?;
                 Ok(to_float(&val))
             }
-            "date" => {
+            "date" | "datetime" => {
                 if args.len() != 1 {
                     return Err("date() requires 1 argument: date('2020-01-15')".into());
                 }
@@ -3350,6 +3360,40 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
+            "keys" => {
+                // keys(n) or keys(r) — return property names as a JSON list
+                if let Some(Expression::Variable(var)) = args.first() {
+                    if let Some(&idx) = row.node_bindings.get(var) {
+                        if let Some(node) = self.graph.graph.node_weight(idx) {
+                            let mut keys: Vec<&str> = vec!["id", "title", "type"];
+                            keys.extend(node.properties.keys().map(|k| k.as_str()));
+                            keys.sort();
+                            return Ok(Value::String(format!(
+                                "[{}]",
+                                keys.iter()
+                                    .map(|k| format!("\"{}\"", k))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
+                    if let Some(edge) = row.edge_bindings.get(var) {
+                        if let Some(edge_data) = self.graph.graph.edge_weight(edge.edge_index) {
+                            let mut keys: Vec<&str> = vec!["type"];
+                            keys.extend(edge_data.properties.keys().map(|k| k.as_str()));
+                            keys.sort();
+                            return Ok(Value::String(format!(
+                                "[{}]",
+                                keys.iter()
+                                    .map(|k| format!("\"{}\"", k))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
+                }
+                Ok(Value::Null)
+            }
             "coalesce" => {
                 // coalesce(expr1, expr2, ...) returns first non-null
                 for arg in args {
@@ -3365,7 +3409,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("split() requires 2 arguments: string, delimiter".into());
                 }
-                let str_val = self.evaluate_expression(&args[0], row)?;
+                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 let delim_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &delim_val) {
                     (Value::String(s), Value::String(delim)) => {
@@ -3386,7 +3430,7 @@ impl<'a> CypherExecutor<'a> {
                         "replace() requires 3 arguments: string, search, replacement".into(),
                     );
                 }
-                let str_val = self.evaluate_expression(&args[0], row)?;
+                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 let search_val = self.evaluate_expression(&args[1], row)?;
                 let replace_val = self.evaluate_expression(&args[2], row)?;
                 match (&str_val, &search_val, &replace_val) {
@@ -3402,7 +3446,7 @@ impl<'a> CypherExecutor<'a> {
                         "substring() requires 2-3 arguments: string, start [, length]".into(),
                     );
                 }
-                let str_val = self.evaluate_expression(&args[0], row)?;
+                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 let start_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &start_val) {
                     (Value::String(s), Value::Int64(start)) => {
@@ -3429,7 +3473,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("left() requires 2 arguments: string, length".into());
                 }
-                let str_val = self.evaluate_expression(&args[0], row)?;
+                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 let len_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &len_val) {
                     (Value::String(s), Value::Int64(len)) => {
@@ -3443,7 +3487,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 2 {
                     return Err("right() requires 2 arguments: string, length".into());
                 }
-                let str_val = self.evaluate_expression(&args[0], row)?;
+                let str_val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 let len_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &len_val) {
                     (Value::String(s), Value::Int64(len)) => {
@@ -3459,7 +3503,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("trim() requires 1 argument: string".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim().to_string())),
                     _ => Ok(Value::Null),
@@ -3469,7 +3513,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("ltrim() requires 1 argument: string".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                     _ => Ok(Value::Null),
@@ -3479,7 +3523,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("rtrim() requires 1 argument: string".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                     _ => Ok(Value::Null),
@@ -3489,7 +3533,7 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("reverse() requires 1 argument: string".into());
                 }
-                let val = self.evaluate_expression(&args[0], row)?;
+                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
                 match val {
                     Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
                     _ => Ok(Value::Null),
@@ -4082,6 +4126,62 @@ impl<'a> CypherExecutor<'a> {
                         None => Ok(Value::Null),
                     },
                 }
+            }
+            "log" | "ln" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) if f > 0.0 => Ok(Value::Float64(f.ln())),
+                        _ => Ok(Value::Null),
+                    },
+                }
+            }
+            "log10" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) if f > 0.0 => Ok(Value::Float64(f.log10())),
+                        _ => Ok(Value::Null),
+                    },
+                }
+            }
+            "exp" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => Ok(Value::Float64(f.exp())),
+                        None => Ok(Value::Null),
+                    },
+                }
+            }
+            "pow" | "power" => {
+                if args.len() != 2 {
+                    return Err("pow() requires 2 arguments: base, exponent".into());
+                }
+                let base_val = self.evaluate_expression(&args[0], row)?;
+                let exp_val = self.evaluate_expression(&args[1], row)?;
+                match (value_to_f64(&base_val), value_to_f64(&exp_val)) {
+                    (Some(base), Some(exp)) => Ok(Value::Float64(base.powf(exp))),
+                    _ => Ok(Value::Null),
+                }
+            }
+            "pi" => Ok(Value::Float64(std::f64::consts::PI)),
+            "rand" | "random" => {
+                // Simple time-seeded PRNG (no external crate needed)
+                use std::time::SystemTime;
+                let seed = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                // xorshift64
+                let mut x = seed as u64 | 1;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                Ok(Value::Float64((x as f64) / (u64::MAX as f64)))
             }
 
             // ── Temporal filtering functions ──────────────────────────────
@@ -7291,6 +7391,16 @@ fn format_value_json(val: &Value) -> String {
 fn value_to_f64(val: &Value) -> Option<f64> {
     value_operations::value_to_f64(val)
 }
+
+/// Auto-coerce non-string types (DateTime, Int64, Float64, Boolean) to String
+/// for use in string functions. Null stays Null.
+fn coerce_to_string(val: Value) -> Value {
+    match &val {
+        Value::String(_) | Value::Null => val,
+        _ => Value::String(format_value_compact(&val)),
+    }
+}
+
 /// Parse a JSON-style float list string "[1.0, 2.0, 3.0]" into Vec<f32>.
 fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
     let trimmed = s.trim();
@@ -8835,32 +8945,48 @@ mod tests {
     }
 
     #[test]
-    fn test_string_functions_null_safety() {
-        // String functions on non-string values should return Null
+    fn test_string_functions_auto_coerce() {
+        // String functions on non-string values should auto-coerce to string
         let mut graph = DirGraph::new();
         let setup = super::super::parser::parse_cypher("CREATE (n:Item {num: 42})").unwrap();
         execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
 
-        for query in [
-            "MATCH (n:Item) RETURN split(n.num, '/')",
-            "MATCH (n:Item) RETURN replace(n.num, 'a', 'b')",
-            "MATCH (n:Item) RETURN substring(n.num, 0)",
-            "MATCH (n:Item) RETURN left(n.num, 3)",
-            "MATCH (n:Item) RETURN right(n.num, 3)",
-            "MATCH (n:Item) RETURN trim(n.num)",
-            "MATCH (n:Item) RETURN reverse(n.num)",
-        ] {
-            let q = super::super::parser::parse_cypher(query).unwrap();
-            let no_params = HashMap::new();
-            let executor = CypherExecutor::with_params(&graph, &no_params, None);
-            let result = executor.execute(&q).unwrap();
-            assert_eq!(
-                result.rows[0].get(0),
-                Some(&Value::Null),
-                "Expected Null for query: {}",
-                query
-            );
-        }
+        // split(42, '/') → ["42"] (coerced to "42", no '/' found)
+        let q =
+            super::super::parser::parse_cypher("MATCH (n:Item) RETURN split(n.num, '/')").unwrap();
+        let no_params = HashMap::new();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("[\"42\"]".to_string())),
+        );
+
+        // substring(42, 0) → "42"
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN substring(n.num, 0)")
+            .unwrap();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("42".to_string())),
+        );
+
+        // reverse(42) → "24"
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN reverse(n.num)").unwrap();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(
+            result.rows[0].get(0),
+            Some(&Value::String("24".to_string())),
+        );
+
+        // Null input should still return Null
+        let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN substring(n.missing, 0)")
+            .unwrap();
+        let executor = CypherExecutor::with_params(&graph, &no_params, None);
+        let result = executor.execute(&q).unwrap();
+        assert_eq!(result.rows[0].get(0), Some(&Value::Null),);
     }
 
     #[test]

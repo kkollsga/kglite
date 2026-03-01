@@ -66,6 +66,16 @@ pub enum CypherDetail {
     Topics(Vec<String>),
 }
 
+/// Level of fluent API documentation requested via `describe(fluent=...)`.
+pub enum FluentDetail {
+    /// No fluent docs (default).
+    Off,
+    /// Compact reference: all methods grouped by area with 1-line descriptions.
+    Overview,
+    /// Detailed docs with params and examples for specific topics.
+    Topics(Vec<String>),
+}
+
 /// Level of connection documentation requested via `describe(connections=...)`.
 pub enum ConnectionDetail {
     /// No standalone connection docs (default — connections shown in inventory).
@@ -1152,8 +1162,9 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
             "    <semantic hint=\"text_score(n, 'col', 'query text') — similarity 0..1\"/>\n",
         );
     }
-    xml.push_str("    <algorithms hint=\"CALL pagerank/betweenness/degree/closeness/louvain/label_propagation/connected_components/cluster({params}) YIELD node, score|community|cluster\"/>\n");
+    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference, describe(fluent=['topic']) for detailed docs.\"/>\n");
     if graph.graph.edge_count() > 0 {
         xml.push_str("    <connections hint=\"describe(connections=True) for all connection types, describe(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
     }
@@ -1270,7 +1281,7 @@ fn write_cypher_overview(xml: &mut String) {
 
     // Functions
     xml.push_str("  <functions>\n");
-    xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, toInteger, toFloat</group>\n");
+    xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, log10, exp, pow(x,y), pi, rand, toInteger, toFloat</group>\n");
     xml.push_str("    <group name=\"string\">toString, toUpper, toLower, trim, lTrim, rTrim, replace, substring, left, right, split, reverse</group>\n");
     xml.push_str(
         "    <group name=\"aggregate\">count, sum, avg, min, max, collect, stDev</group>\n",
@@ -1279,7 +1290,7 @@ fn write_cypher_overview(xml: &mut String) {
         "    <group name=\"graph\">size, length, id, labels, type, coalesce, range, keys</group>\n",
     );
     xml.push_str("    <group name=\"spatial\">distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m</group>\n");
-    xml.push_str("    <group name=\"temporal\">valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to')</group>\n");
+    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), d.year/d.month/d.day, valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to')</group>\n");
     xml.push_str("  </functions>\n");
 
     // Procedures
@@ -1553,7 +1564,7 @@ fn write_topic_operators(xml: &mut String) {
 fn write_topic_functions(xml: &mut String) {
     xml.push_str("  <functions>\n");
     xml.push_str("    <desc>All built-in functions grouped by category.</desc>\n");
-    xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), toInteger(x)/toInt(x), toFloat(x)</group>\n");
+    xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), log(x)/ln(x), log10(x), exp(x), pow(x,y), pi(), rand(), toInteger(x)/toInt(x), toFloat(x)</group>\n");
     xml.push_str("    <group name=\"string\">toString(x), toUpper(s), toLower(s), trim(s), lTrim(s), rTrim(s), replace(s,from,to), substring(s,start[,len]), left(s,n), right(s,n), split(s,delim), reverse(s), size(s)</group>\n");
     xml.push_str("    <group name=\"aggregate\">count(*)/count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr), stDev(expr)/std(expr)</group>\n");
     xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]), keys(node)</group>\n");
@@ -1746,6 +1757,7 @@ fn write_topic_spatial(xml: &mut String) {
     xml.push_str("  <spatial>\n");
     xml.push_str("    <desc>Spatial functions for geographic queries. Requires set_spatial() config on the node type (location or geometry). All distance/area/perimeter results are in meters.</desc>\n");
     xml.push_str("    <setup>Python: g.set_spatial('Field', location=('lat', 'lon')) or g.set_spatial('Area', geometry='wkt')</setup>\n");
+    xml.push_str("    <note>WKT uses (longitude latitude) order per OGC standard. point(lat, lon) uses latitude-first. These conventions differ — be careful when mixing them.</note>\n");
     xml.push_str("    <functions>\n");
     xml.push_str("      <fn name=\"distance(a, b)\">Geodesic distance in meters between two spatial nodes. Returns Null if either node has no location.</fn>\n");
     xml.push_str("      <fn name=\"contains(a, b)\">True if geometry a fully contains geometry b (or point b).</fn>\n");
@@ -2185,25 +2197,598 @@ fn build_focused_detail(graph: &DirGraph, types: &[String]) -> Result<String, St
     Ok(xml)
 }
 
+// ── Fluent API reference ──────────────────────────────────────────────────
+
+const FLUENT_TOPIC_LIST: &str = "select, where, traverse, spatial, temporal, \
+    retrieval, statistics, algorithms, vectors, timeseries, mutation, \
+    loading, export, indexes, set_operations, subgraph, schema, transactions";
+
+/// Tier 2: compact fluent API reference grouped by functional area.
+fn write_fluent_overview(xml: &mut String) {
+    xml.push_str("<fluent_api>\n");
+    xml.push_str("  <note>Selection model: most methods return a new KnowledgeGraph with updated selection. Data is materialised only on retrieval (collect, to_df, etc.).</note>\n");
+
+    // Selection & filtering
+    xml.push_str("  <group name=\"selection\">\n");
+    xml.push_str("    <method sig=\"select(type, sort=None, limit=None)\">Select all nodes of a type. Returns lazy selection.</method>\n");
+    xml.push_str("    <method sig=\"where({prop: value})\">Filter by property: exact, comparison (&gt;,&lt;,&gt;=,&lt;=), string (contains, starts_with, ends_with, regex), in, is_null, is_not_null, negated variants.</method>\n");
+    xml.push_str(
+        "    <method sig=\"where_any([{...}, {...}])\">OR logic across condition sets.</method>\n",
+    );
+    xml.push_str("    <method sig=\"where_connected(conn_type, direction='any')\">Keep nodes that have a specific connection.</method>\n");
+    xml.push_str("    <method sig=\"where_orphans(include_orphans=True)\">Filter by connectivity: orphans only or connected only.</method>\n");
+    xml.push_str("    <method sig=\"sort(prop, ascending=True)\">Sort selection. Multi-col: sort([('a', True), ('b', False)]).</method>\n");
+    xml.push_str("    <method sig=\"limit(n)\">Limit to first n results.</method>\n");
+    xml.push_str("    <method sig=\"offset(n)\">Skip first n results (for pagination).</method>\n");
+    xml.push_str("    <method sig=\"expand(hops=1)\">BFS expansion — include all nodes within n hops.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Traversal
+    xml.push_str("  <group name=\"traversal\">\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, direction='outgoing', target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. Returns target nodes as new selection.</method>\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, method='contains')\">Spatial containment traversal (point-in-polygon).</method>\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, method='distance', max_m=N)\">Distance-based traversal within meters.</method>\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, method='text_score', query='...', min_score=0.5)\">Semantic similarity traversal.</method>\n");
+    xml.push_str("    <method sig=\"traverse(conn_type, method='cluster', features=[...], algorithm='kmeans', n_clusters=N)\">Cluster-based grouping.</method>\n");
+    xml.push_str("    <method sig=\"add_properties(conn_type, properties={alias: source_prop}, direction='outgoing')\">Copy properties from connected nodes onto current selection.</method>\n");
+    xml.push_str("    <method sig=\"create_connections(conn_type)\">Materialise direct edges from traversal chain.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Spatial
+    xml.push_str("  <group name=\"spatial\">\n");
+    xml.push_str("    <method sig=\"set_spatial(type, lat_field, lon_field, geometry_field=None)\">Declare spatial fields for a node type.</method>\n");
+    xml.push_str("    <method sig=\"near_point(lat, lon, max_distance_deg)\">Filter by distance in degrees (fast, approximate).</method>\n");
+    xml.push_str("    <method sig=\"near_point_m(lat, lon, max_distance_m)\">Filter by geodesic distance in meters (WGS84).</method>\n");
+    xml.push_str("    <method sig=\"within_bounds(min_lat, min_lon, max_lat, max_lon)\">Bounding-box filter.</method>\n");
+    xml.push_str("    <method sig=\"contains_point(lat, lon)\">Point-in-polygon test (requires WKT geometry).</method>\n");
+    xml.push_str("    <method sig=\"intersects_geometry(wkt)\">Geometry overlap test.</method>\n");
+    xml.push_str("    <method sig=\"bounds()\">Geographic bounding box of selection.</method>\n");
+    xml.push_str("    <method sig=\"centroid()\">Average lat/lon of selection.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Temporal
+    xml.push_str("  <group name=\"temporal\">\n");
+    xml.push_str("    <method sig=\"valid_at(date, from_col='valid_from', to_col='valid_to')\">Point-in-time filter: keep nodes valid at a specific date.</method>\n");
+    xml.push_str("    <method sig=\"valid_during(start, end, from_col='valid_from', to_col='valid_to')\">Range overlap filter: keep nodes valid during a period.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Retrieval
+    xml.push_str("  <group name=\"retrieval\">\n");
+    xml.push_str("    <method sig=\"collect()\">Materialise full node data as ResultView (iterable, indexable).</method>\n");
+    xml.push_str("    <method sig=\"to_df()\">Export selection as pandas DataFrame.</method>\n");
+    xml.push_str(
+        "    <method sig=\"to_gdf()\">Export as GeoDataFrame (requires WKT geometry).</method>\n",
+    );
+    xml.push_str(
+        "    <method sig=\"ids()\">Lightweight retrieval: id + type + title only.</method>\n",
+    );
+    xml.push_str("    <method sig=\"node(type, id)\">O(1) lookup by type + id. Returns dict or None.</method>\n");
+    xml.push_str("    <method sig=\"count(group_by=None)\">Count nodes, optionally grouped by property.</method>\n");
+    xml.push_str("    <method sig=\"len()\">O(1) count of selected nodes.</method>\n");
+    xml.push_str("    <method sig=\"sample(n)\">Random sample as ResultView.</method>\n");
+    xml.push_str("    <method sig=\"titles()\">Title-only retrieval.</method>\n");
+    xml.push_str("    <method sig=\"get_properties(props)\">Specific properties as list of tuples.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Statistics
+    xml.push_str("  <group name=\"statistics\">\n");
+    xml.push_str("    <method sig=\"statistics(properties=None, group_by=None)\">Descriptive stats: count, mean, std, min, max, sum.</method>\n");
+    xml.push_str("    <method sig=\"calculate(expression, store_as=None)\">Math expressions on properties. store_as saves result as new property.</method>\n");
+    xml.push_str("    <method sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</method>\n");
+    xml.push_str(
+        "    <method sig=\"degrees(connection_type=None)\">Node degree counts.</method>\n",
+    );
+    xml.push_str("  </group>\n");
+
+    // Graph algorithms
+    xml.push_str("  <group name=\"algorithms\">\n");
+    xml.push_str("    <method sig=\"shortest_path(source_type, source_id, target_type, target_id, connection_type=None, directed=True)\">Full path with node details.</method>\n");
+    xml.push_str("    <method sig=\"shortest_path_length(...)\">Hop count only.</method>\n");
+    xml.push_str("    <method sig=\"all_paths(source_type, source_id, target_type, target_id, max_hops=5)\">Enumerate all paths.</method>\n");
+    xml.push_str("    <method sig=\"pagerank(damping_factor=0.85, connection_type=None)\">PageRank centrality.</method>\n");
+    xml.push_str("    <method sig=\"betweenness_centrality(connection_type=None)\">Betweenness centrality.</method>\n");
+    xml.push_str("    <method sig=\"louvain_communities(resolution=1.0, connection_type=None)\">Community detection (Louvain).</method>\n");
+    xml.push_str("    <method sig=\"connected_components(mode='weak', connection_type=None)\">Connected component analysis.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Vector search
+    xml.push_str("  <group name=\"vectors\">\n");
+    xml.push_str("    <method sig=\"set_embedder(model_name_or_callable)\">Register embedding model for text search.</method>\n");
+    xml.push_str("    <method sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</method>\n");
+    xml.push_str("    <method sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic text search (auto-embeds query).</method>\n");
+    xml.push_str("    <method sig=\"vector_search(vector, type, column=None, top_k=10, min_score=None)\">Search with pre-computed query vector.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Timeseries
+    xml.push_str("  <group name=\"timeseries\">\n");
+    xml.push_str("    <method sig=\"set_timeseries(type, resolution, channels, units=None)\">Declare timeseries schema for a node type.</method>\n");
+    xml.push_str("    <method sig=\"add_timeseries(df, type, fk_field, time_key, channels)\">Bulk load timeseries data from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"timeseries(type, id, channel=None)\">Retrieve timeseries for a node (all channels or specific).</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Mutation
+    xml.push_str("  <group name=\"mutation\">\n");
+    xml.push_str("    <method sig=\"update({prop: value}, conflict_handling='update')\">Batch property update on selected nodes.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Data loading
+    xml.push_str("  <group name=\"loading\">\n");
+    xml.push_str("    <method sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, timeseries=None)\">Load nodes from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"add_connections(df, conn_type, source_type, source_id, target_type, target_id)\">Load edges from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Export & persistence
+    xml.push_str("  <group name=\"export\">\n");
+    xml.push_str("    <method sig=\"export(path, format='graphml')\">Export as GraphML, GEXF, JSON (D3), or CSV.</method>\n");
+    xml.push_str("    <method sig=\"export_csv(directory)\">CSV tree + blueprint.json (round-trips with from_blueprint).</method>\n");
+    xml.push_str("    <method sig=\"save(path)\">Binary .kgl file.</method>\n");
+    xml.push_str("    <method sig=\"kglite.load(path)\">Restore from .kgl file.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Set operations
+    xml.push_str("  <group name=\"set_operations\">\n");
+    xml.push_str("    <method sig=\"union(other)\">Nodes in either selection.</method>\n");
+    xml.push_str("    <method sig=\"intersection(other)\">Nodes in both selections.</method>\n");
+    xml.push_str("    <method sig=\"difference(other)\">Nodes in first but not second.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Indexes
+    xml.push_str("  <group name=\"indexes\">\n");
+    xml.push_str("    <method sig=\"create_index(type, property)\">Equality index for fast lookup.</method>\n");
+    xml.push_str("    <method sig=\"create_range_index(type, property)\">B-tree for range queries.</method>\n");
+    xml.push_str("    <method sig=\"create_composite_index(type, [prop1, prop2])\">Multi-column index.</method>\n");
+    xml.push_str("  </group>\n");
+
+    // Transactions
+    xml.push_str("  <group name=\"transactions\">\n");
+    xml.push_str(
+        "    <method sig=\"begin()\">Read-write transaction (context manager).</method>\n",
+    );
+    xml.push_str("    <method sig=\"begin_read()\">Read-only transaction, O(1) cost (context manager).</method>\n");
+    xml.push_str("  </group>\n");
+
+    xml.push_str("  <hint>Use describe(fluent=['traverse','where','spatial',...]) for detailed docs with examples.</hint>\n");
+    xml.push_str("</fluent_api>\n");
+}
+
+/// Tier 3: detailed fluent API docs for specific topics with params and examples.
+fn write_fluent_topics(xml: &mut String, topics: &[String]) -> Result<(), String> {
+    if topics.is_empty() {
+        write_fluent_overview(xml);
+        return Ok(());
+    }
+
+    xml.push_str("<fluent_api>\n");
+    for topic in topics {
+        let key = topic.to_lowercase();
+        match key.as_str() {
+            "select" | "selection" | "where" | "filtering" => write_fluent_topic_selection(xml),
+            "traverse" | "traversal" => write_fluent_topic_traversal(xml),
+            "spatial" => write_fluent_topic_spatial(xml),
+            "temporal" => write_fluent_topic_temporal(xml),
+            "retrieval" | "collect" => write_fluent_topic_retrieval(xml),
+            "statistics" | "calculate" => write_fluent_topic_statistics(xml),
+            "algorithms" | "graph_algorithms" => write_fluent_topic_algorithms(xml),
+            "vectors" | "embeddings" | "search" => write_fluent_topic_vectors(xml),
+            "timeseries" => write_fluent_topic_timeseries(xml),
+            "mutation" | "update" => write_fluent_topic_mutation(xml),
+            "loading" | "data_loading" => write_fluent_topic_loading(xml),
+            "export" | "persistence" => write_fluent_topic_export(xml),
+            "indexes" => write_fluent_topic_indexes(xml),
+            "set_operations" => write_fluent_topic_set_operations(xml),
+            "subgraph" => write_fluent_topic_subgraph(xml),
+            "schema" => write_fluent_topic_schema(xml),
+            "transactions" => write_fluent_topic_transactions(xml),
+            _ => {
+                return Err(format!(
+                    "Unknown fluent API topic '{}'. Available: {}",
+                    topic, FLUENT_TOPIC_LIST
+                ));
+            }
+        }
+    }
+    xml.push_str("</fluent_api>\n");
+    Ok(())
+}
+
+// ── Fluent tier 3: topic detail functions ──────────────────────────────────
+
+fn write_fluent_topic_selection(xml: &mut String) {
+    xml.push_str("  <selection>\n");
+    xml.push_str("    <desc>Select and filter nodes using method chaining. All filter methods return a new lazy selection.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"select(type, sort=None, limit=None)\">Start a selection on a node type.</m>\n");
+    xml.push_str("      <m sig=\"where({prop: value})\">Exact match, comparison (&gt;, &lt;, &gt;=, &lt;=), string predicates (contains, starts_with, ends_with, regex), in-list, null checks, negated variants (not_in, not_contains).</m>\n");
+    xml.push_str("      <m sig=\"where_any([{...}, {...}])\">OR logic: keep nodes matching any condition set.</m>\n");
+    xml.push_str("      <m sig=\"where_connected(conn_type, direction='any')\">Keep only nodes that have a specific connection.</m>\n");
+    xml.push_str(
+        "      <m sig=\"where_orphans(include_orphans=True)\">Filter by connectivity.</m>\n",
+    );
+    xml.push_str("      <m sig=\"sort(prop, ascending=True)\">Sort by property. Multi-col: sort([('a', True), ('b', False)]).</m>\n");
+    xml.push_str("      <m sig=\"limit(n) / offset(n)\">Pagination.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"exact match\">graph.select('Person').where({'city': 'Oslo'})</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"comparison\">graph.select('Product').where({'price': {'&gt;=': 100, '&lt;=': 500}})</ex>\n");
+    xml.push_str("      <ex desc=\"string search\">graph.select('Person').where({'name': {'contains': 'ali'}})</ex>\n");
+    xml.push_str("      <ex desc=\"IN list\">graph.select('Person').where({'city': {'in': ['Oslo', 'Bergen']}})</ex>\n");
+    xml.push_str("      <ex desc=\"null check\">graph.select('Person').where({'email': {'is_not_null': True}})</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"regex\">graph.select('Person').where({'name': {'regex': '^A.*'}})</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"OR logic\">graph.select('Person').where_any([{'city': 'Oslo'}, {'age': {'&gt;': 60}}])</ex>\n");
+    xml.push_str("      <ex desc=\"pagination\">graph.select('Person').sort('name').offset(20).limit(10)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </selection>\n");
+}
+
+fn write_fluent_topic_traversal(xml: &mut String) {
+    xml.push_str("  <traversal>\n");
+    xml.push_str("    <desc>Follow edges to navigate the graph. traverse() returns target nodes as a new selection that can be further chained.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, direction='outgoing', target_type=None, where=None, where_connection=None, sort=None, limit=None)\">Follow edges. direction: 'outgoing', 'incoming', 'any'.</m>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, method='contains')\">Spatial: keep targets whose geometry contains the source point.</m>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, method='distance', max_m=5000)\">Spatial: keep targets within distance (meters).</m>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, method='text_score', query='...', column='desc', min_score=0.5)\">Semantic: rank by text similarity.</m>\n");
+    xml.push_str("      <m sig=\"traverse(conn_type, method='cluster', features=['x','y'], algorithm='kmeans', n_clusters=5)\">Cluster targets by features.</m>\n");
+    xml.push_str("      <m sig=\"add_properties(conn_type, properties={alias: source_prop}, direction='outgoing', aggregate=None)\">Copy/aggregate properties from connected nodes.</m>\n");
+    xml.push_str("      <m sig=\"create_connections(conn_type)\">Materialise direct edges from a traversal chain.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic outgoing\">graph.select('Person').traverse('WORKS_AT').collect()</ex>\n");
+    xml.push_str("      <ex desc=\"incoming with filter\">graph.select('Company').traverse('WORKS_AT', direction='incoming', where={'age': {'&gt;': 30}})</ex>\n");
+    xml.push_str("      <ex desc=\"target type filter\">graph.select('Well').traverse('OF_FIELD', direction='incoming', target_type='ProductionProfile')</ex>\n");
+    xml.push_str("      <ex desc=\"multi-hop chain\">graph.select('Person').traverse('WORKS_AT').traverse('LOCATED_IN').collect()</ex>\n");
+    xml.push_str("      <ex desc=\"spatial containment\">graph.select('Well').traverse('IN_BLOCK', method='contains')</ex>\n");
+    xml.push_str("      <ex desc=\"distance traversal\">graph.select('Platform').traverse('NEAR_FIELD', method='distance', max_m=10000)</ex>\n");
+    xml.push_str("      <ex desc=\"copy properties\">graph.select('Well').add_properties('OF_FIELD', properties={'field_name': 'title'})</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </traversal>\n");
+}
+
+fn write_fluent_topic_spatial(xml: &mut String) {
+    xml.push_str("  <spatial>\n");
+    xml.push_str("    <desc>Spatial filtering and aggregation. Requires set_spatial() or column_types during add_nodes().</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"set_spatial(type, lat_field, lon_field, geometry_field=None)\">Declare spatial fields for a node type.</m>\n");
+    xml.push_str("      <m sig=\"near_point(lat, lon, max_distance_deg)\">Filter by distance in degrees (fast, approximate). ~111km per degree at equator.</m>\n");
+    xml.push_str("      <m sig=\"near_point_m(lat, lon, max_distance_m)\">Geodesic distance filter in meters (WGS84, Vincenty).</m>\n");
+    xml.push_str("      <m sig=\"within_bounds(min_lat, min_lon, max_lat, max_lon)\">Bounding-box filter.</m>\n");
+    xml.push_str("      <m sig=\"contains_point(lat, lon)\">Point-in-polygon test (requires WKT geometry).</m>\n");
+    xml.push_str("      <m sig=\"intersects_geometry(wkt)\">Geometry overlap test.</m>\n");
+    xml.push_str("      <m sig=\"bounds()\">Bounding box of current selection: {min_lat, min_lon, max_lat, max_lon}.</m>\n");
+    xml.push_str("      <m sig=\"centroid()\">Average lat/lon: {lat, lon}.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"setup\">graph.set_spatial('City', 'latitude', 'longitude')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"near point (degrees)\">graph.select('City').near_point(59.91, 10.75, 0.5)</ex>\n");
+    xml.push_str("      <ex desc=\"near point (meters)\">graph.select('City').near_point_m(59.91, 10.75, 50000)</ex>\n");
+    xml.push_str("      <ex desc=\"bounding box\">graph.select('Field').within_bounds(55.0, 0.0, 65.0, 15.0)</ex>\n");
+    xml.push_str("      <ex desc=\"point in polygon\">graph.select('Block').contains_point(60.5, 4.2)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </spatial>\n");
+}
+
+fn write_fluent_topic_temporal(xml: &mut String) {
+    xml.push_str("  <temporal>\n");
+    xml.push_str("    <desc>Temporal validity filtering. Nodes must have valid_from / valid_to (or custom-named) date properties.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"valid_at(date, from_col='valid_from', to_col='valid_to')\">Keep nodes valid at a specific date. date can be 'YYYY-MM-DD' string or datetime.</m>\n");
+    xml.push_str("      <m sig=\"valid_during(start, end, from_col='valid_from', to_col='valid_to')\">Keep nodes whose validity overlaps a date range.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"point in time\">graph.select('Licence').valid_at('2020-06-15')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"range overlap\">graph.select('Licence').valid_during('2020-01-01', '2020-12-31')</ex>\n");
+    xml.push_str("      <ex desc=\"custom columns\">graph.select('Contract').valid_at('2023-01-01', from_col='start_date', to_col='end_date')</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </temporal>\n");
+}
+
+fn write_fluent_topic_retrieval(xml: &mut String) {
+    xml.push_str("  <retrieval>\n");
+    xml.push_str("    <desc>Materialise selected nodes. Most selectors are lazy — these methods trigger data retrieval.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"collect()\">Full node data as ResultView (iterable, indexable, .to_list(), .to_df()).</m>\n");
+    xml.push_str("      <m sig=\"to_df()\">Pandas DataFrame with all properties as columns.</m>\n");
+    xml.push_str("      <m sig=\"to_gdf()\">GeoDataFrame with geometry column (requires spatial config).</m>\n");
+    xml.push_str("      <m sig=\"ids()\">Lightweight: id + type + title only.</m>\n");
+    xml.push_str(
+        "      <m sig=\"node(type, id)\">O(1) single-node lookup. Returns dict or None.</m>\n",
+    );
+    xml.push_str(
+        "      <m sig=\"count(group_by=None)\">Count, optionally grouped by property.</m>\n",
+    );
+    xml.push_str("      <m sig=\"len()\">O(1) selection size.</m>\n");
+    xml.push_str("      <m sig=\"sample(n)\">Random n nodes as ResultView.</m>\n");
+    xml.push_str("      <m sig=\"titles()\">Title-only list.</m>\n");
+    xml.push_str("      <m sig=\"get_properties(props)\">Specific properties as tuples.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"collect all\">results = graph.select('Person').where({'city': 'Oslo'}).collect()</ex>\n");
+    xml.push_str("      <ex desc=\"to dataframe\">df = graph.select('Person').to_df()</ex>\n");
+    xml.push_str("      <ex desc=\"single lookup\">node = graph.node('Person', 42)</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"count by group\">graph.select('Person').count(group_by='city')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"random sample\">graph.select('Person').sample(5)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </retrieval>\n");
+}
+
+fn write_fluent_topic_statistics(xml: &mut String) {
+    xml.push_str("  <statistics>\n");
+    xml.push_str("    <desc>Descriptive statistics, calculations, and aggregations on selected nodes.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"statistics(properties=None, group_by=None)\">Count, mean, std, min, max, sum for numeric properties.</m>\n");
+    xml.push_str("      <m sig=\"calculate(expression, store_as=None)\">Math expression on properties. store_as persists result.</m>\n");
+    xml.push_str("      <m sig=\"unique_values(property, store_as=None)\">Distinct values for a property.</m>\n");
+    xml.push_str(
+        "      <m sig=\"degrees(connection_type=None)\">In/out/total degree counts per node.</m>\n",
+    );
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic stats\">graph.select('Product').statistics(['price', 'quantity'])</ex>\n");
+    xml.push_str("      <ex desc=\"grouped stats\">graph.select('Product').statistics(['price'], group_by='category')</ex>\n");
+    xml.push_str("      <ex desc=\"calculate\">graph.select('Product').calculate('price * quantity', store_as='revenue')</ex>\n");
+    xml.push_str("      <ex desc=\"unique\">graph.select('Person').unique_values('city')</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </statistics>\n");
+}
+
+fn write_fluent_topic_algorithms(xml: &mut String) {
+    xml.push_str("  <algorithms>\n");
+    xml.push_str("    <desc>Graph algorithms: paths, centrality, community detection.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"shortest_path(src_type, src_id, tgt_type, tgt_id, connection_type=None, directed=True)\">Full path with node details.</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_length(src_type, src_id, tgt_type, tgt_id, ...)\">Hop count only (integer).</m>\n");
+    xml.push_str("      <m sig=\"shortest_path_ids(src_type, src_id, tgt_type, tgt_id, ...)\">Path as list of (type, id) tuples.</m>\n");
+    xml.push_str("      <m sig=\"all_paths(src_type, src_id, tgt_type, tgt_id, max_hops=5)\">All paths up to max_hops.</m>\n");
+    xml.push_str("      <m sig=\"pagerank(damping_factor=0.85, connection_type=None)\">PageRank centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"betweenness_centrality(connection_type=None)\">Betweenness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"degree_centrality(connection_type=None, normalized=True)\">Degree centrality → dict.</m>\n");
+    xml.push_str("      <m sig=\"closeness_centrality(connection_type=None)\">Closeness centrality → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"louvain_communities(resolution=1.0, connection_type=None)\">Community detection → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"label_propagation(max_iterations=100)\">Label propagation communities → ResultView.</m>\n");
+    xml.push_str("      <m sig=\"connected_components(mode='weak', connection_type=None)\">Component analysis → ResultView.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"shortest path\">graph.shortest_path('Person', 1, 'Person', 42)</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"path length\">graph.shortest_path_length('City', 'Oslo', 'City', 'Bergen', connection_type='ROAD')</ex>\n");
+    xml.push_str("      <ex desc=\"pagerank\">graph.pagerank(connection_type='CITES')</ex>\n");
+    xml.push_str("      <ex desc=\"communities\">graph.louvain_communities(resolution=1.5)</ex>\n");
+    xml.push_str("      <ex desc=\"components\">graph.connected_components(mode='weak')</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </algorithms>\n");
+}
+
+fn write_fluent_topic_vectors(xml: &mut String) {
+    xml.push_str("  <vectors>\n");
+    xml.push_str("    <desc>Embedding storage and semantic search. Requires set_embedder() or pre-computed vectors.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"set_embedder(model_name_or_callable)\">Register embedding model (sentence-transformers name or callable).</m>\n");
+    xml.push_str("      <m sig=\"embed_texts(type, column)\">Compute and store embeddings for a text column.</m>\n");
+    xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict)\">Provide pre-computed embeddings {id: vector}.</m>\n");
+    xml.push_str("      <m sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic search — auto-embeds query string.</m>\n");
+    xml.push_str("      <m sig=\"vector_search(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"setup\">graph.set_embedder('all-MiniLM-L6-v2')</ex>\n");
+    xml.push_str("      <ex desc=\"embed\">graph.embed_texts('Paper', 'abstract')</ex>\n");
+    xml.push_str("      <ex desc=\"text search\">graph.search_text('machine learning for graphs', 'Paper', top_k=5)</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"min score\">graph.search_text('NLP', 'Paper', min_score=0.7)</ex>\n",
+    );
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </vectors>\n");
+}
+
+fn write_fluent_topic_timeseries(xml: &mut String) {
+    xml.push_str("  <timeseries>\n");
+    xml.push_str("    <desc>Time-indexed data per node. Declare schema, bulk-load from DataFrame, retrieve per node.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"set_timeseries(type, resolution, channels, units=None)\">Declare timeseries schema. resolution: 'day'|'month'|'year'.</m>\n");
+    xml.push_str("      <m sig=\"add_timeseries(df, type, fk_field, time_key, channels)\">Bulk load from DataFrame with foreign key to nodes.</m>\n");
+    xml.push_str("      <m sig=\"timeseries(type, id, channel=None)\">Retrieve all channels or a specific channel for one node.</m>\n");
+    xml.push_str("      <m sig=\"timeseries_config(type)\">Query timeseries metadata (resolution, channels, units).</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"schema\">graph.set_timeseries('Field', resolution='month', channels=['oil', 'gas'], units={'oil': 'MSm3'})</ex>\n");
+    xml.push_str("      <ex desc=\"bulk load\">graph.add_timeseries(prod_df, 'Field', fk_field='field_id', time_key='date', channels=['oil', 'gas'])</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"retrieve\">ts = graph.timeseries('Field', 123, channel='oil')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"inline loading\">graph.add_nodes(df, 'Prod', 'id', 'name', timeseries={'time': 'date', 'channels': ['oil', 'gas']})</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </timeseries>\n");
+}
+
+fn write_fluent_topic_mutation(xml: &mut String) {
+    xml.push_str("  <mutation>\n");
+    xml.push_str("    <desc>Update properties on selected nodes.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"update({prop: value}, conflict_handling='update')\">Batch property update. conflict_handling: 'update'|'preserve'|'replace'.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"set property\">graph.select('Person').where({'city': 'Oslo'}).update({'country': 'Norway'})</ex>\n");
+    xml.push_str("      <ex desc=\"preserve existing\">graph.select('Person').update({'status': 'active'}, conflict_handling='preserve')</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </mutation>\n");
+}
+
+fn write_fluent_topic_loading(xml: &mut String) {
+    xml.push_str("  <loading>\n");
+    xml.push_str(
+        "    <desc>Load nodes and connections from DataFrames or blueprint files.</desc>\n",
+    );
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. column_types maps columns to spatial/temporal types.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(df, conn_type, source_type, source_id_field, target_type, target_id_field, properties=None)\">Load edges.</m>\n");
+    xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
+    xml.push_str(
+        "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",
+    );
+    xml.push_str("      <m sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"basic nodes\">graph.add_nodes(df, 'Person', 'id', 'name')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"with spatial\">graph.add_nodes(df, 'City', 'id', 'name', column_types={'lat': 'location.lat', 'lon': 'location.lon'})</ex>\n");
+    xml.push_str("      <ex desc=\"edges\">graph.add_connections(df, 'WORKS_AT', 'Person', 'person_id', 'Company', 'company_id')</ex>\n");
+    xml.push_str("      <ex desc=\"blueprint\">graph = kglite.from_blueprint('blueprint.json', verbose=True)</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </loading>\n");
+}
+
+fn write_fluent_topic_export(xml: &mut String) {
+    xml.push_str("  <export>\n");
+    xml.push_str("    <desc>Export graph data and persist to disk.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"export(path, format='graphml')\">Export as 'graphml', 'gexf', 'json' (D3), or 'csv'.</m>\n");
+    xml.push_str(
+        "      <m sig=\"export_string(format='graphml')\">Export to string (no file).</m>\n",
+    );
+    xml.push_str("      <m sig=\"export_csv(directory)\">CSV directory tree + blueprint.json (round-trips with from_blueprint).</m>\n");
+    xml.push_str(
+        "      <m sig=\"save(path)\">Binary .kgl file (fast, complete graph state).</m>\n",
+    );
+    xml.push_str("      <m sig=\"kglite.load(path)\">Restore from .kgl file.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str(
+        "      <ex desc=\"graphml\">graph.export('graph.graphml', format='graphml')</ex>\n",
+    );
+    xml.push_str("      <ex desc=\"csv roundtrip\">graph.export_csv('output/'); g2 = kglite.from_blueprint('output/blueprint.json')</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"binary\">graph.save('graph.kgl'); g2 = kglite.load('graph.kgl')</ex>\n",
+    );
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </export>\n");
+}
+
+fn write_fluent_topic_indexes(xml: &mut String) {
+    xml.push_str("  <indexes>\n");
+    xml.push_str("    <desc>Create property indexes for faster lookups. Type indices are automatic.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"create_index(type, property)\">Equality index: fast exact-match lookup.</m>\n");
+    xml.push_str("      <m sig=\"create_range_index(type, property)\">B-tree index: fast range queries (&gt;, &lt;, &gt;=, &lt;=).</m>\n");
+    xml.push_str("      <m sig=\"create_composite_index(type, [prop1, prop2, ...])\">Multi-property index.</m>\n");
+    xml.push_str("      <m sig=\"drop_index(type, property) / drop_range_index / drop_composite_index\">Remove indexes.</m>\n");
+    xml.push_str("      <m sig=\"list_indexes() / list_composite_indexes()\">Enumerate existing indexes.</m>\n");
+    xml.push_str(
+        "      <m sig=\"index_stats(type, property)\">Index metadata and hit count.</m>\n",
+    );
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"equality\">graph.create_index('Person', 'email')</ex>\n");
+    xml.push_str("      <ex desc=\"range\">graph.create_range_index('Product', 'price')</ex>\n");
+    xml.push_str("      <ex desc=\"composite\">graph.create_composite_index('Person', ['city', 'age'])</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </indexes>\n");
+}
+
+fn write_fluent_topic_set_operations(xml: &mut String) {
+    xml.push_str("  <set_operations>\n");
+    xml.push_str("    <desc>Combine selections using set logic.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"union(other)\">Nodes in either selection.</m>\n");
+    xml.push_str("      <m sig=\"intersection(other)\">Nodes in both selections.</m>\n");
+    xml.push_str("      <m sig=\"difference(other)\">In first but not second.</m>\n");
+    xml.push_str("      <m sig=\"symmetric_difference(other)\">In exactly one selection.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"union\">oslo_or_young = graph.select('Person').where({'city': 'Oslo'}).union(graph.select('Person').where({'age': {'&lt;': 25}}))</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"intersection\">oslo_and_young = oslo.intersection(young)</ex>\n",
+    );
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </set_operations>\n");
+}
+
+fn write_fluent_topic_subgraph(xml: &mut String) {
+    xml.push_str("  <subgraph>\n");
+    xml.push_str(
+        "    <desc>Extract a subset of the graph into a new independent KnowledgeGraph.</desc>\n",
+    );
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"to_subgraph()\">Extract selected nodes + inter-edges into a new graph.</m>\n");
+    xml.push_str("      <m sig=\"subgraph_stats()\">Preview extraction: node/edge counts without materialising.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"extract\">sub = graph.select('Person').where({'city': 'Oslo'}).to_subgraph()</ex>\n");
+    xml.push_str("      <ex desc=\"preview\">graph.select('Person').subgraph_stats()</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </subgraph>\n");
+}
+
+fn write_fluent_topic_schema(xml: &mut String) {
+    xml.push_str("  <schema>\n");
+    xml.push_str("    <desc>Inspect and enforce graph schema.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"schema()\">Full schema dict: node types, connections, indexes, counts.</m>\n");
+    xml.push_str("      <m sig=\"schema_text()\">Human-readable schema summary.</m>\n");
+    xml.push_str("      <m sig=\"properties(type)\">Per-property statistics: type, non_null, unique, samples.</m>\n");
+    xml.push_str(
+        "      <m sig=\"connection_types()\">All connection types with counts and endpoints.</m>\n",
+    );
+    xml.push_str(
+        "      <m sig=\"describe(types=['...'])\">AI-optimised XML for specific types.</m>\n",
+    );
+    xml.push_str("      <m sig=\"define_schema(schema_dict)\">Enforce schema constraints on future loads.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"full schema\">graph.schema()</ex>\n");
+    xml.push_str("      <ex desc=\"text overview\">print(graph.schema_text())</ex>\n");
+    xml.push_str("      <ex desc=\"property detail\">graph.properties('Person')</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </schema>\n");
+}
+
+fn write_fluent_topic_transactions(xml: &mut String) {
+    xml.push_str("  <transactions>\n");
+    xml.push_str("    <desc>Transactional access with automatic rollback on error.</desc>\n");
+    xml.push_str("    <methods>\n");
+    xml.push_str("      <m sig=\"begin()\">Read-write transaction. Use as context manager.</m>\n");
+    xml.push_str("      <m sig=\"begin_read()\">Read-only transaction (O(1) cost, no copy). Use as context manager.</m>\n");
+    xml.push_str("    </methods>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"read-write\">with graph.begin() as tx: tx.select('Person').update({'verified': True})</ex>\n");
+    xml.push_str("      <ex desc=\"read-only\">with graph.begin_read() as ro: count = ro.select('Person').len()</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </transactions>\n");
+}
+
 // ── Describe: entry point ──────────────────────────────────────────────────
 
 /// Build an XML description of the graph for AI agents (progressive disclosure).
 ///
-/// Three independent axes:
+/// Four independent axes:
 /// - `types` → Node type deep-dive (None=inventory, Some=focused detail).
 /// - `connections` → Connection type docs (Off=in inventory, Overview=all, Topics=specific).
 /// - `cypher` → Cypher language reference (Off=hint, Overview=compact, Topics=detailed).
+/// - `fluent` → Fluent API reference (Off=hint, Overview=compact, Topics=detailed).
 ///
-/// When `connections` or `cypher` is not Off, only those tracks are returned (no node inventory).
+/// When `connections`, `cypher`, or `fluent` is not Off, only those tracks are returned.
 pub fn compute_description(
     graph: &DirGraph,
     types: Option<&[String]>,
     connections: &ConnectionDetail,
     cypher: &CypherDetail,
+    fluent: &FluentDetail,
 ) -> Result<String, String> {
-    // If connections or cypher is requested, return only those tracks
-    let standalone =
-        !matches!(connections, ConnectionDetail::Off) || !matches!(cypher, CypherDetail::Off);
+    // If connections, cypher, or fluent is requested, return only those tracks
+    let standalone = !matches!(connections, ConnectionDetail::Off)
+        || !matches!(cypher, CypherDetail::Off)
+        || !matches!(fluent, FluentDetail::Off);
 
     if standalone {
         let mut result = String::with_capacity(4096);
@@ -2219,6 +2804,13 @@ pub fn compute_description(
             CypherDetail::Overview => write_cypher_overview(&mut result),
             CypherDetail::Topics(ref topics) => {
                 write_cypher_topics(&mut result, topics)?;
+            }
+        }
+        match fluent {
+            FluentDetail::Off => {}
+            FluentDetail::Overview => write_fluent_overview(&mut result),
+            FluentDetail::Topics(ref topics) => {
+                write_fluent_topics(&mut result, topics)?;
             }
         }
         return Ok(result);

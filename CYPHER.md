@@ -114,7 +114,8 @@ graph.cypher("""
 | `type(r)` | Relationship type |
 | `id(n)` | Node ID |
 | `labels(n)` | Node type (string, not list — single-label) |
-| `date(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
+| `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
+| `date(str)` / `datetime(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
 | `coalesce(a, b, ...)` | First non-null argument |
 | `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
 | `length(p)` | Path hop count |
@@ -169,6 +170,8 @@ Built-in spatial functions for geographic queries. All node-aware functions auto
 
 All functions accept both nodes (auto-resolved via spatial config) and raw values (WKT strings, Points).
 
+> **Coordinate order:** `point(lat, lon)` uses **latitude-first** (geographic convention). WKT strings use **longitude-first** per OGC standard: `POLYGON((lon lat, lon lat, ...))`. These conventions differ — be careful when mixing them.
+
 ```python
 # Node-aware spatial — with spatial config declared via column_types
 graph.cypher("""
@@ -221,6 +224,8 @@ Date-range filtering on nodes and relationships with explicit field names.
 
 | Function | Description |
 |----------|-------------|
+| `date(str)` / `datetime(str)` | Parse date string to DateTime value |
+| `d.year`, `d.month`, `d.day` | Extract component from a DateTime value (use `WITH` to alias first) |
 | `valid_at(entity, date, 'from_field', 'to_field')` | True if entity is active at a point in time |
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
@@ -270,11 +275,12 @@ graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_fro
 | `round(x, d)` | Round to `d` decimal places (e.g. `round(3.14159, 2)` → 3.14) |
 | `sqrt(x)` | Square root |
 | `sign(x)` | Sign: -1, 0, or 1 |
-| `log(x)` | Natural logarithm |
+| `log(x)` / `ln(x)` | Natural logarithm (x must be > 0) |
+| `log10(x)` | Base-10 logarithm (x must be > 0) |
 | `exp(x)` | e^x |
-| `pow(x, y)` | x^y |
+| `pow(x, y)` / `power(x, y)` | x^y |
 | `pi()` | π constant |
-| `rand()` | Random float [0, 1) |
+| `rand()` / `random()` | Random float [0, 1) |
 
 ## String Functions
 
@@ -288,6 +294,8 @@ graph.cypher("MATCH (e:Estimate) WHERE valid_at(e, date('2020-06-15'), 'date_fro
 | `trim(str)` | Remove leading/trailing whitespace |
 | `ltrim(str)` / `rtrim(str)` | Left/right trim |
 | `reverse(str)` | Reverse a string |
+
+> **Auto-coercion:** String functions accept non-string values (DateTime, numbers, booleans) and auto-convert them to strings. For example, `substring(date('2020-06-15'), 0, 4)` returns `"2020"`.
 
 ```python
 graph.cypher("RETURN split('a,b,c', ',') AS parts")         # ["a", "b", "c"]
@@ -781,11 +789,11 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]`, `any/all/none/single(...)` |
-| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `coalesce`, `date`, `range`, `nodes(p)`, `relationships(p)`, `round` |
+| **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `keys`, `coalesce`, `date`/`datetime`, `range`, `nodes(p)`, `relationships(p)`, `round` |
 | **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
-| **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`, `exp`, `pow`, `pi`, `rand` |
+| **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
-| **Temporal** | `valid_at(entity, date, 'from', 'to')`, `valid_during(entity, start, end, 'from', 'to')` — NULL = open-ended |
+| **Temporal** | `date(str)`/`datetime(str)`, `d.year`/`d.month`/`d.day`, `valid_at(entity, date, 'from', 'to')`, `valid_during(entity, start, end, 'from', 'to')` — NULL = open-ended |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
@@ -857,13 +865,14 @@ Clause-by-clause comparison with the openCypher specification.
 | `type(r)` | Full | Returns relationship type |
 | `id(n)` | Full | Returns node id |
 | `labels(n)` | Full | Returns single label (string, not list — single-label model) |
-| `date(str)` | Full | Parse date string to DateTime |
+| `keys(n)` / `keys(r)` | Full | Returns property names as JSON list |
+| `date(str)` / `datetime(str)` | Full | Parse date string to DateTime; `d.year`, `d.month`, `d.day` accessors |
 | `coalesce` | Full | |
 | `range(start, end [, step])` | Full | Inclusive integer range |
 | `round(x [, precision])` | Full | |
 | `nodes(p)`, `relationships(p)` | Full | Path decomposition |
-| String functions | Full | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
-| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`, `exp`, `pow`, `pi`, `rand` |
+| String functions | Full | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` — auto-coerce non-strings |
+| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
 | Spatial functions | Full | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter` |
 | Temporal functions | Full | `valid_at`, `valid_during` — NULL = open-ended |
 

@@ -301,6 +301,17 @@ pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
                     }
                     i += 1;
                 }
+                // Scientific notation: e.g. 1e6, 1.5e-3, 2E+10
+                if i < len && (chars[i] == 'e' || chars[i] == 'E') {
+                    has_dot = true; // Force float parsing
+                    i += 1;
+                    if i < len && (chars[i] == '+' || chars[i] == '-') {
+                        i += 1;
+                    }
+                    while i < len && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
                 let num_str: String = chars[start..i].iter().collect();
                 if has_dot {
                     let f: f64 = num_str
