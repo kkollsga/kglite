@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (code_tree — Swift)
+
+- **Swift parser.** New `src/code_tree/parsers/swift.rs` via
+  `tree-sitter-swift = "0.7.2"`. Coverage in 0.9.34:
+
+  - `class` / `struct` / `actor` / `enum` declarations — emitted as
+    Class/Struct nodes with kind tagged from the grammar's
+    `declaration_kind` field (Swift's grammar collapses all five
+    into one AST node).
+  - `protocol` declarations → Interface nodes with `kind="protocol"`.
+  - Top-level and method `func` declarations → Function nodes with
+    HAS_METHOD edges from their owning type.
+  - `import Foundation` → FileInfo.imports → File→Module IMPORTS.
+  - Visibility (`public` / `internal` / `fileprivate` / `private`).
+  - CALLS edges resolve via the existing 5-tier name resolver.
+
+  Follow-up scope (separate PRs): `extension` IMPLEMENTS edges,
+  `init` / `subscript` / computed properties, `@objc` / `@MainActor`
+  attributes as decorators, `async` / `throws` flags. The parser
+  structure leaves clean slots for each.
+
 ### Added (code_tree)
 
 - **File → File IMPORTS edges.** Sibling to the existing File → Module

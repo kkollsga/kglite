@@ -1764,6 +1764,9 @@ pub fn load_into_graph(
     for name in super::super::parsers::cpp::CPP_NOISE_NAMES {
         noise.insert(*name);
     }
+    for name in super::super::parsers::swift::SWIFT_NOISE_NAMES {
+        noise.insert(*name);
+    }
     let call_edges =
         super::call_edges::build_call_edges(&result.functions, &result.files, &noise, 5);
     if !call_edges.is_empty() {

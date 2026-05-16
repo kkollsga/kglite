@@ -10,6 +10,7 @@ pub mod java;
 pub mod python;
 pub mod rust_lang;
 pub mod shared;
+pub mod swift;
 pub mod typescript;
 
 use crate::code_tree::models::ParseResult;
@@ -65,6 +66,7 @@ pub const EXTENSION_MAP: &[(&str, &str)] = &[
     ("hpp", "cpp"),
     ("hh", "cpp"),
     ("hxx", "cpp"),
+    ("swift", "swift"),
 ];
 
 /// Look up a language identifier for a file path by extension.
@@ -163,6 +165,7 @@ pub fn get_parser(language: &str) -> Option<Box<dyn LanguageParser + Send + Sync
         "csharp" => Some(Box::new(csharp::CSharpParser::new())),
         "c" => Some(Box::new(cpp::CppParser::c())),
         "cpp" => Some(Box::new(cpp::CppParser::cpp())),
+        "swift" => Some(Box::new(swift::SwiftParser::new())),
         _ => None,
     }
 }
