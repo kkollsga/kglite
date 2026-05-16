@@ -25,6 +25,23 @@ pub struct ImportEdge {
     pub module: String,
 }
 
+/// `File -[IMPORTS]-> File` — direct file-to-file dependency.
+///
+/// Sibling to `ImportEdge` (File → Module). Each source file's import strings
+/// are resolved against the project's `module_path → file_path` reverse index
+/// using the same longest-prefix walk as `build_import_edges`. Multiple
+/// imports from the same source file resolving to the same target file are
+/// aggregated into a single edge with `import_count` ≥ 1.
+///
+/// Powers transitive file-level impact analysis: "given changed files, which
+/// other files are affected?" is one Cypher hop (e.g.
+/// `MATCH (f:File)-[:IMPORTS]->(t:File {is_test: true}) ...`).
+pub struct FileImportEdge {
+    pub source: String,
+    pub target: String,
+    pub import_count: i64,
+}
+
 pub struct UsesTypeEdge {
     pub function: String,
     pub type_name: String,
@@ -112,6 +129,46 @@ pub fn build_import_edges(files: &[FileInfo], known_modules: &HashSet<String>) -
         }
     }
     out
+}
+
+/// `File -[IMPORTS]-> File` edges — resolve each import string to a project
+/// file via the `module_path → file_path` reverse index.
+///
+/// Walks the import path from longest to shortest prefix (mirroring
+/// `build_import_edges`'s module resolution) and lands on the first file
+/// whose `module_path` matches a prefix candidate. Self-imports are skipped.
+/// Multiple imports from the same source resolving to the same target are
+/// aggregated into a single edge whose `import_count` records the multiplicity.
+pub fn build_file_import_edges(
+    files: &[FileInfo],
+    module_to_file: &HashMap<String, String>,
+) -> Vec<FileImportEdge> {
+    let mut counts: HashMap<(String, String), i64> = HashMap::new();
+    for f in files {
+        let sep = get_separator(&f.language);
+        for use_path in &f.imports {
+            let parts: Vec<&str> = use_path.split(sep).collect();
+            for end in (1..=parts.len()).rev() {
+                let candidate = parts[..end].join(sep);
+                if let Some(target_file) = module_to_file.get(&candidate) {
+                    if target_file != &f.path {
+                        *counts
+                            .entry((f.path.clone(), target_file.clone()))
+                            .or_insert(0) += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((source, target), import_count)| FileImportEdge {
+            source,
+            target,
+            import_count,
+        })
+        .collect()
 }
 
 /// USES_TYPE edges: scan function signature/return_type for known type names.

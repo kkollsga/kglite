@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (code_tree)
+
+- **File → File IMPORTS edges.** Sibling to the existing File → Module
+  IMPORTS, resolved via a `module_path → file_path` reverse index using
+  the same longest-prefix walk as the module resolver. Multiple imports
+  from one source to the same target collapse into a single edge whose
+  `import_count` property records the multiplicity. Enables direct
+  file-level impact analysis in one Cypher hop —
+  `MATCH (changed:File {path: 'src/foo.py'})<-[:IMPORTS*1..]-(impacted:File)`
+  — without joining through Module nodes. Lands as groundwork for an
+  upcoming `affected_tests` Cypher procedure.
+
 ## [0.9.33] — 2026-05-14
 
 mcp-methods 0.3.37 adopted both operator-reported fixes from the

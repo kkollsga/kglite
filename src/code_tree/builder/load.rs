@@ -891,6 +891,17 @@ fn import_edges_df(edges: &[super::other_edges::ImportEdge]) -> DataFrame {
     ])
 }
 
+fn file_import_edges_df(edges: &[super::other_edges::FileImportEdge]) -> DataFrame {
+    let src: Vec<Option<String>> = edges.iter().map(|e| Some(e.source.clone())).collect();
+    let tgt: Vec<Option<String>> = edges.iter().map(|e| Some(e.target.clone())).collect();
+    let count: Vec<Option<i64>> = edges.iter().map(|e| Some(e.import_count)).collect();
+    build_df(vec![
+        ("source", ColumnType::String, str_col(src)),
+        ("target", ColumnType::String, str_col(tgt)),
+        ("import_count", ColumnType::Int64, int_col(count)),
+    ])
+}
+
 fn call_edges_df(edges: &[super::call_edges::CallEdge]) -> DataFrame {
     let caller: Vec<Option<String>> = edges.iter().map(|e| Some(e.caller.clone())).collect();
     let callee: Vec<Option<String>> = edges.iter().map(|e| Some(e.callee.clone())).collect();
@@ -1545,6 +1556,32 @@ pub fn load_into_graph(
             "file_path".into(),
             "Module".into(),
             "module".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
+    // File IMPORTS File — direct file-level dependency edges, resolved via
+    // the project's `module_path → file_path` reverse index. Sibling to the
+    // File → Module IMPORTS edge above; both ship per build.
+    let module_to_file: HashMap<String, String> = result
+        .files
+        .iter()
+        .filter(|f| !f.module_path.is_empty())
+        .map(|f| (f.module_path.clone(), f.path.clone()))
+        .collect();
+    let file_imports = super::other_edges::build_file_import_edges(&result.files, &module_to_file);
+    if !file_imports.is_empty() {
+        maintain::add_connections(
+            graph,
+            file_import_edges_df(&file_imports),
+            "IMPORTS".into(),
+            "File".into(),
+            "source".into(),
+            "File".into(),
+            "target".into(),
             None,
             None,
             None,
