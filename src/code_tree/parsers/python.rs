@@ -26,6 +26,14 @@ fn constant_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^[A-Z][A-Z_0-9]+$").expect("constant regex compiles"))
 }
 
+/// Framework-specific identifiers that break SCREAMING_SNAKE convention
+/// but warrant treatment as top-level constants. Currently:
+///   - `urlpatterns` — the canonical Django URL-routing list. Picked up
+///     by the route-extractor pass.
+fn is_framework_constant(name: &str) -> bool {
+    matches!(name, "urlpatterns")
+}
+
 pub const PYTHON_NOISE_NAMES: &[&str] = &[
     "len",
     "str",
@@ -1048,7 +1056,9 @@ impl LanguageParser for PythonParser {
                                     }
                                 }
                             }
-                        } else if constant_re().is_match(&first_id) {
+                        } else if constant_re().is_match(&first_id)
+                            || is_framework_constant(&first_id)
+                        {
                             let mut type_ann: Option<String> = None;
                             let mut default_val: Option<String> = None;
                             let mut scan3 = sub.walk();

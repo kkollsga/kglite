@@ -18,6 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MATCH (changed:File {path: 'src/foo.py'})<-[:IMPORTS*1..]-(impacted:File)`
   — without joining through Module nodes.
 
+### Added (code_tree — routes)
+
+- **Web-framework Route extraction.** New `Route` node type plus
+  `Route -[HANDLES]-> Function` edges, synthesized from decorators and
+  `urlpatterns` constants. Three frameworks in v1: **Flask** (`@app.route`,
+  `@app.get`/`@app.post`/..., blueprints), **FastAPI** (`@router.get`,
+  `@app.get`, all HTTP verbs), and **Django** (`urlpatterns = [path('x/', view)]`
+  in any urls.py-shaped file). `@app.route` decorators with `methods=[...]`
+  fan out to one Route per method so `WHERE r.method = 'DELETE'` queries
+  match correctly. Express, Axum, Rails, Spring, Laravel land as follow-up
+  PRs — they need parser-side capture of call arguments which the
+  parser model doesn't preserve today; the per-framework module layout
+  under `builder/routes/` makes each subsequent framework a single-file
+  addition.
+
+  ```cypher
+  MATCH (r:Route)-[:HANDLES]->(f:Function)
+  WHERE r.framework = 'fastapi' AND r.method = 'POST'
+  RETURN r.path, f.qualified_name
+  ```
+
+- **`urlpatterns` is now extracted as a top-level constant on Python
+  files.** The constant-extraction filter previously required
+  SCREAMING_SNAKE_CASE; a narrow framework-allowlist now also lets
+  Django's lowercase `urlpatterns` through so the route extractor can
+  read the list literal. Other lowercase names remain filtered out.
+
 ### Added (code_tree — DECORATES)
 
 - **Function → Function DECORATES edges.** The Python/TS/Java/C# parsers

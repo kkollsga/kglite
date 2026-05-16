@@ -3,6 +3,7 @@
 pub mod call_edges;
 pub mod load;
 pub mod other_edges;
+pub mod routes;
 pub mod type_edges;
 
 use crate::code_tree::models::ParseResult;

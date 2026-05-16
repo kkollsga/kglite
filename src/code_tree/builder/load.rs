@@ -902,6 +902,37 @@ fn file_import_edges_df(edges: &[super::other_edges::FileImportEdge]) -> DataFra
     ])
 }
 
+fn route_nodes_df(nodes: &[super::routes::RouteNode]) -> DataFrame {
+    let id: Vec<Option<String>> = nodes.iter().map(|n| Some(n.id.clone())).collect();
+    let name: Vec<Option<String>> = nodes.iter().map(|n| Some(n.name.clone())).collect();
+    let path: Vec<Option<String>> = nodes.iter().map(|n| Some(n.path.clone())).collect();
+    let method: Vec<Option<String>> = nodes.iter().map(|n| Some(n.method.clone())).collect();
+    let framework: Vec<Option<String>> = nodes.iter().map(|n| Some(n.framework.clone())).collect();
+    let file_path: Vec<Option<String>> = nodes.iter().map(|n| Some(n.file_path.clone())).collect();
+    let line_number: Vec<Option<i64>> = nodes.iter().map(|n| Some(n.line_number as i64)).collect();
+    build_df(vec![
+        ("id", ColumnType::String, str_col(id)),
+        ("name", ColumnType::String, str_col(name)),
+        ("path", ColumnType::String, str_col(path)),
+        ("method", ColumnType::String, str_col(method)),
+        ("framework", ColumnType::String, str_col(framework)),
+        ("file_path", ColumnType::String, str_col(file_path)),
+        ("line_number", ColumnType::Int64, int_col(line_number)),
+    ])
+}
+
+fn route_edges_df(edges: &[super::routes::RouteEdge]) -> DataFrame {
+    let route_id: Vec<Option<String>> = edges.iter().map(|e| Some(e.route_id.clone())).collect();
+    let func: Vec<Option<String>> = edges
+        .iter()
+        .map(|e| Some(e.function_qname.clone()))
+        .collect();
+    build_df(vec![
+        ("route_id", ColumnType::String, str_col(route_id)),
+        ("function_qname", ColumnType::String, str_col(func)),
+    ])
+}
+
 fn decorates_edges_df(edges: &[super::other_edges::DecoratesEdge]) -> DataFrame {
     let dec: Vec<Option<String>> = edges.iter().map(|e| Some(e.decorator.clone())).collect();
     let fun: Vec<Option<String>> = edges.iter().map(|e| Some(e.function.clone())).collect();
@@ -1496,6 +1527,41 @@ pub fn load_into_graph(
     }
 
     mark(t_typeedges, "type_edges build+external stubs");
+    let t_routes = std::time::Instant::now();
+    // Route nodes + HANDLES edges — web-framework URL endpoints
+    // synthesized from decorators and urls.py constants. Per-framework
+    // detectors live under `builder/routes/`. Adding a new framework is
+    // one new file in that directory plus a line in routes/mod.rs.
+    let (route_nodes, route_edges) =
+        super::routes::build_routes(&result.functions, &result.constants);
+    if !route_nodes.is_empty() {
+        maintain::add_nodes(
+            graph,
+            route_nodes_df(&route_nodes),
+            "Route".into(),
+            "id".into(),
+            Some("name".into()),
+            None,
+        )
+        .map_err(py_err)?;
+    }
+    if !route_edges.is_empty() {
+        maintain::add_connections(
+            graph,
+            route_edges_df(&route_edges),
+            "HANDLES".into(),
+            "Route".into(),
+            "route_id".into(),
+            "Function".into(),
+            "function_qname".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
+    mark(t_routes, "routes");
     let t_edges = std::time::Instant::now();
     // ── Edge insertions ─────────────────────────────────────────
     // Module HAS_SUBMODULE Module — built from submodule declarations.
