@@ -15,6 +15,7 @@ pub mod blueprint;
 pub mod core;
 pub mod dir_graph;
 pub mod embedder;
+pub mod explore;
 pub mod features;
 pub mod introspection;
 pub mod io;

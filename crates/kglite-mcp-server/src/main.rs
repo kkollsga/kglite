@@ -33,6 +33,7 @@ use rmcp::ServiceExt;
 mod code_source;
 mod csv_http;
 mod cypher_tools;
+mod explore;
 mod tools;
 use crate::tools::GraphState;
 
@@ -373,6 +374,12 @@ async fn main() -> Result<()> {
         source_roots_provider.clone(),
     )
     .context("read_code_source registration failed")?;
+    explore::register(
+        &mut server,
+        graph_state.clone(),
+        source_roots_provider.clone(),
+    )
+    .context("explore registration failed")?;
 
     // `extensions.embedder:` in the manifest selects a Rust-native
     // embedder backend (fastembed-rs in 0.9.18). The 0.9.17-and-prior
@@ -457,6 +464,10 @@ async fn main() -> Result<()> {
             .add_bundled(BundledSkill {
                 name: "read_code_source",
                 body: include_str!("../../../kglite/mcp_server/skills/read_code_source.md"),
+            })
+            .add_bundled(BundledSkill {
+                name: "explore",
+                body: include_str!("../../../kglite/mcp_server/skills/explore.md"),
             })
             .merge_framework_defaults()
             .auto_detect_project_layer(&m.yaml_path)

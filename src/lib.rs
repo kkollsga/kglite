@@ -35,6 +35,7 @@ pub mod api {
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
+    pub use crate::graph::explore::{explore_markdown, ExploreOptions};
     pub use crate::graph::introspection::describe::compute_description;
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;

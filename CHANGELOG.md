@@ -18,6 +18,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MATCH (changed:File {path: 'src/foo.py'})<-[:IMPORTS*1..]-(impacted:File)`
   — without joining through Module nodes.
 
+### Added (explore)
+
+- **`KnowledgeGraph.explore(query)` and matching `explore` MCP tool.**
+  One-call codebase exploration over a code-tree graph: lexically
+  ranks Function/Class/Interface/Struct/Trait/Protocol/Enum nodes
+  against a free-text query (name > signature > docstring), takes
+  the top `max_entities`, 2-hop traverses CALLS / USES_TYPE /
+  HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown
+  report with entry points, a relationship-map neighborhood, and
+  grouped source slices for the entry points. Designed for the
+  "how does X work in this codebase" Explore-agent question that
+  would otherwise turn into chained grep + read calls — closes the
+  feature gap with colbymchenry/codegraph's `codegraph_explore` tool
+  while composing existing primitives rather than building a parallel
+  index.
+
+  Pyfunction signature:
+  ```python
+  kg.explore(query, max_entities=10, max_depth=2,
+             include_source=True, source_roots=None)
+  ```
+  MCP tool ships with bundled methodology
+  (`kglite/mcp_server/skills/explore.md`) gated on
+  `graph_has_node_type: [Function, Class]` so it only activates on
+  code-tree graphs.
+
 ### Added (code_tree — routes)
 
 - **Web-framework Route extraction.** New `Route` node type plus

@@ -1472,6 +1472,56 @@ impl KnowledgeGraph {
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
     }
 
+    /// One-call codebase exploration: lexical search over Function/Class/
+    /// Interface names + docstrings + signatures, 2-hop traversal along
+    /// CALLS/USES_TYPE/HAS_METHOD/DEFINES/REFERENCES_FN, and grouped
+    /// source slices for the entry points. Returns a markdown string.
+    ///
+    /// Designed for the "how does X work in this codebase" question that
+    /// would otherwise turn into a chain of grep+read calls. Composes
+    /// FTS + traversal + source slicing into one Rust-side call.
+    ///
+    /// - `query` — free-text topic; matched against Function/Class names,
+    ///   signatures, and docstrings.
+    /// - `max_entities` — top N entry points after lexical ranking (default 10).
+    /// - `max_depth` — hops for the neighborhood traversal (default 2).
+    /// - `include_source` — whether to include grouped source slices for
+    ///   the entry points (default True). Set False for a faster, smaller
+    ///   response when you just want the entity list.
+    /// - `source_roots` — list of filesystem roots to resolve `file_path`
+    ///   properties against. Files matched literally are tried first;
+    ///   roots are searched in order. Default: cwd only.
+    #[pyo3(signature = (
+        query,
+        max_entities=10,
+        max_depth=2,
+        include_source=true,
+        source_roots=None,
+    ))]
+    fn explore(
+        &self,
+        query: &str,
+        max_entities: usize,
+        max_depth: usize,
+        include_source: bool,
+        source_roots: Option<Vec<String>>,
+    ) -> PyResult<String> {
+        let roots: Vec<std::path::PathBuf> = source_roots
+            .unwrap_or_default()
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let opts = crate::graph::explore::ExploreOptions {
+            max_entities,
+            max_depth,
+            include_source,
+            ..Default::default()
+        };
+        Ok(crate::graph::explore::explore_markdown(
+            self, query, &opts, &roots,
+        ))
+    }
+
     /// File a bug report to `reported_bugs.md`.
     ///
     /// Appends a timestamped, version-tagged report to the top of the file

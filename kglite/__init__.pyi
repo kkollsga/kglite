@@ -1887,6 +1887,49 @@ class KnowledgeGraph:
         """
         ...
 
+    def explore(
+        self,
+        query: str,
+        max_entities: int = 10,
+        max_depth: int = 2,
+        include_source: bool = True,
+        source_roots: list[str] | None = None,
+    ) -> str:
+        """One-call codebase exploration over a code-tree graph.
+
+        Lexically ranks ``Function`` / ``Class`` / ``Interface`` /
+        ``Struct`` / ``Trait`` / ``Protocol`` / ``Enum`` nodes against
+        ``query`` (matched against name + signature + docstring), takes
+        the top ``max_entities``, 2-hop traverses CALLS / USES_TYPE /
+        HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown
+        report with entry points, a relationship map, and grouped source
+        slices for the entry points.
+
+        Designed for the "how does X work in this codebase" question
+        that would otherwise require a chain of grep + read calls.
+        Composes FTS + traversal + source-slicing into a single Rust-
+        side call.
+
+        Args:
+            query: Free-text topic. Matched against name + signature +
+                docstring. Exact name matches rank highest.
+            max_entities: Top N entry points after ranking (default 10).
+            max_depth: Hops for the neighborhood traversal (default 2).
+            include_source: Whether to include source slices for entry
+                points (default ``True``). Set False for a smaller,
+                faster response when the entity list is all you need.
+            source_roots: Filesystem roots to resolve ``file_path``
+                properties against. Files matched literally are tried
+                first; roots are searched in order. Default: cwd only.
+
+        Returns:
+            A markdown string with ``## Query`` / ``## Entry points`` /
+            ``## Related`` / ``## Source`` sections. Empty queries and
+            graphs with no matching entities return a clear no-match
+            message rather than raising.
+        """
+        ...
+
     def bug_report(
         self,
         query: str,

@@ -148,6 +148,16 @@ When a plan has multiple phases (Step 1 / 2 / 3 / …), follow this rhythm:
    phase — that defeats the point of an approved plan. The only reason
    to stop mid-plan is a genuine blocker (failing test you can't fix,
    architectural surprise that invalidates a later step).
+5. **End every multi-phase plan with a performance gate.** Before the
+   final release commit, add (or extend) a benchmark that covers the
+   new functionality and run it. Then re-run an existing in-memory
+   benchmark on the same fixture pre/post — the rule from the
+   "Performance Work Protocol" section applies even when no phase was
+   explicitly perf-focused, because compound changes are how
+   regressions creep in. Record the numbers in the release commit
+   message (or the `[x.y.z]` CHANGELOG block) so future bisects know
+   what was measured. If a regression appears, fix it before the
+   release commit, not in a follow-up.
 
 Rationale: clean per-phase commits make `git bisect` useful when the
 operator (or CI) flags a regression days later. Bundling phases into one

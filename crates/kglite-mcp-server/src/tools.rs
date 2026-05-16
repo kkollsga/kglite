@@ -120,6 +120,18 @@ impl GraphState {
         }
     }
 
+    /// Borrow the active `KnowledgeGraph` for read-only inspection.
+    /// Returns `None` when no graph is loaded — callers format their
+    /// own "no graph active" message so the surrounding tool can give
+    /// a tool-specific hint.
+    pub fn with_kg<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
+    {
+        let guard = self.inner.read().unwrap();
+        guard.as_ref().map(|active| f(&active.kg))
+    }
+
     /// Resolve a code-entity qualified name to its source location via
     /// `KnowledgeGraph::source_location`. Used by the `read_code_source`
     /// tool to bridge the qualified-name → file path lookup.
