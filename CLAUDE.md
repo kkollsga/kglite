@@ -141,6 +141,13 @@ When a plan has multiple phases (Step 1 / 2 / 3 / …), follow this rhythm:
    before phase commit; if a phase is "scaffolding only" (e.g. adding
    pyo3 classes that aren't called from Python yet), at minimum the
    build + lint gate still applies.
+4. **Don't pause for review between phases — keep going to the end.**
+   Once the plan is approved, execute every phase straight through:
+   commit, mark the task done, start the next phase. The final commit
+   is the version bump + push. Don't ask "should I continue?" after a
+   phase — that defeats the point of an approved plan. The only reason
+   to stop mid-plan is a genuine blocker (failing test you can't fix,
+   architectural surprise that invalidates a later step).
 
 Rationale: clean per-phase commits make `git bisect` useful when the
 operator (or CI) flags a regression days later. Bundling phases into one

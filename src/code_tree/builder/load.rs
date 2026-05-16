@@ -902,6 +902,20 @@ fn file_import_edges_df(edges: &[super::other_edges::FileImportEdge]) -> DataFra
     ])
 }
 
+fn decorates_edges_df(edges: &[super::other_edges::DecoratesEdge]) -> DataFrame {
+    let dec: Vec<Option<String>> = edges.iter().map(|e| Some(e.decorator.clone())).collect();
+    let fun: Vec<Option<String>> = edges.iter().map(|e| Some(e.function.clone())).collect();
+    let name: Vec<Option<String>> = edges
+        .iter()
+        .map(|e| Some(e.decorator_name.clone()))
+        .collect();
+    build_df(vec![
+        ("decorator", ColumnType::String, str_col(dec)),
+        ("function", ColumnType::String, str_col(fun)),
+        ("decorator_name", ColumnType::String, str_col(name)),
+    ])
+}
+
 fn call_edges_df(edges: &[super::call_edges::CallEdge]) -> DataFrame {
     let caller: Vec<Option<String>> = edges.iter().map(|e| Some(e.caller.clone())).collect();
     let callee: Vec<Option<String>> = edges.iter().map(|e| Some(e.callee.clone())).collect();
@@ -1982,6 +1996,29 @@ pub fn load_into_graph(
     }
 
     mark(t_refs_fn, "references_fn");
+    let t_decorates = std::time::Instant::now();
+    // Function DECORATES Function — resolve `FunctionInfo.decorators` strings
+    // against the project's function set. Skips unresolved (third-party)
+    // decorators silently; the `decorator_name` property keeps the raw
+    // source literal.
+    let decorates = super::other_edges::build_decorates_edges(&result.functions);
+    if !decorates.is_empty() {
+        maintain::add_connections(
+            graph,
+            decorates_edges_df(&decorates),
+            "DECORATES".into(),
+            "Function".into(),
+            "decorator".into(),
+            "Function".into(),
+            "function".into(),
+            None,
+            None,
+            None,
+        )
+        .map_err(py_err)?;
+    }
+
+    mark(t_decorates, "decorates");
     let t_ffi = std::time::Instant::now();
     // FFI EXPOSES.
     let ffi = super::other_edges::build_ffi_exposes_edges(&result.functions, &result.classes);

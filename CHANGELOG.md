@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MATCH (changed:File {path: 'src/foo.py'})<-[:IMPORTS*1..]-(impacted:File)`
   — without joining through Module nodes.
 
+### Added (code_tree — DECORATES)
+
+- **Function → Function DECORATES edges.** The Python/TS/Java/C# parsers
+  already extracted `FunctionInfo.decorators` as raw strings; a new
+  builder pass now resolves each to a target Function via the same
+  bare-name lookup CALLS uses. Strips call-args (`@app.route('/x')` →
+  `app.route`) and the namespace prefix (`functools.wraps` → `wraps`).
+  Edge property `decorator_name` preserves the original literal so
+  downstream queries don't have to re-parse the Function.decorators
+  property. Unresolved (third-party) and ambiguous decorators are
+  silently dropped — same stance as the call-edge resolver.
+
+  ```cypher
+  MATCH (d:Function)-[:DECORATES]->(f:Function)
+  WHERE d.name = 'cache' RETURN f.qualified_name
+  ```
+
 ### Added (Cypher)
 
 - **`CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth`**

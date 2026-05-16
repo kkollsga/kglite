@@ -365,6 +365,30 @@ pub struct ReferencesFnEdge {
     pub line: u32,
 }
 
+/// `Function -[DECORATES]-> Function` — resolved decorator-to-decoratee edges.
+///
+/// Per-language parsers already populate `FunctionInfo.decorators` with the
+/// raw decorator strings (`"property"`, `"functools.wraps"`, `"app.route('/x')"`).
+/// This pass strips any call-args, extracts the terminal segment as a bare
+/// name, and resolves it against the project's Function set the same way
+/// `build_call_edges` does for CALLS.
+///
+/// Direction: `decorator -[DECORATES]-> function` reads naturally as
+/// "this decorator decorates that function". Third-party decorators
+/// (`@pytest.fixture`, `@app.route` from a Flask app) that don't have a
+/// matching Function node are silently dropped — the absence of an edge
+/// is correct (we can't resolve into code we don't parse) and mirrors
+/// `build_call_edges`'s same-file/global-fallback handling.
+pub struct DecoratesEdge {
+    pub decorator: String,
+    pub function: String,
+    /// Raw decorator string from source (e.g. `"functools.wraps"` or
+    /// `"app.route('/users/{id}')"`). Preserved on the edge so callers
+    /// who want the original literal don't have to reparse the
+    /// Function.decorators property.
+    pub decorator_name: String,
+}
+
 /// REFERENCES edges from `Function` to `Constant` — emit one row per
 /// `(function, constant)` pair where the constant's terminal name
 /// appears in the function body's identifier stream.
@@ -550,6 +574,76 @@ pub fn build_pyo3_binds_edges(functions: &[FunctionInfo]) -> Vec<PyO3BindsEdge> 
             py_function: f.qualified_name.clone(),
             rust_function: matches[0].to_string(),
         });
+    }
+    out
+}
+
+/// `Function -[DECORATES]-> Function` — resolve each parsed decorator
+/// string to its target function. Strips call-args (`@app.route('/x')` →
+/// `app.route`) and the namespace prefix (`functools.wraps` → `wraps`)
+/// before consulting a bare-name index built from every project Function.
+///
+/// Unambiguous matches (exactly one qualified-name candidate) emit an
+/// edge. Ambiguous bare names are skipped — duplicating the call-edge
+/// resolver's stance: without import-scope info we'd guess, and a wrong
+/// edge is worse than a missing one for downstream queries that count
+/// `WHERE (dec)-[:DECORATES]->(fn) RETURN dec.name`. Self-decoration is
+/// suppressed (would only happen on malformed input).
+pub fn build_decorates_edges(functions: &[FunctionInfo]) -> Vec<DecoratesEdge> {
+    if functions.is_empty() {
+        return Vec::new();
+    }
+    // bare name → list of qualified_names that share that short name.
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for f in functions {
+        by_name
+            .entry(f.name.as_str())
+            .or_default()
+            .push(f.qualified_name.as_str());
+    }
+
+    let mut out: Vec<DecoratesEdge> = Vec::new();
+    for f in functions {
+        if f.decorators.is_empty() {
+            continue;
+        }
+        let function_qname = f.qualified_name.as_str();
+        // Dedup per (decorator_qname → function) — a function with two
+        // decorators that happen to resolve to the same target only
+        // emits one edge. Carries the *first* raw decorator_name we
+        // saw so the property remains stable.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for raw in &f.decorators {
+            // Strip call args: `app.route('/x', methods=['GET'])` → `app.route`.
+            let head = raw.split('(').next().unwrap_or(raw).trim();
+            if head.is_empty() {
+                continue;
+            }
+            // Take the terminal segment after the last `.` or `::` — that's
+            // the bare function name we look up. `functools.wraps` → `wraps`.
+            let bare = head
+                .rsplit_once("::")
+                .map(|(_, t)| t)
+                .or_else(|| head.rsplit_once('.').map(|(_, t)| t))
+                .unwrap_or(head);
+            let Some(candidates) = by_name.get(bare) else {
+                continue;
+            };
+            if candidates.len() != 1 {
+                continue; // ambiguous bare name — skip rather than guess
+            }
+            let target = candidates[0];
+            if target == function_qname {
+                continue; // self-decoration — defensive
+            }
+            if seen.insert(target) {
+                out.push(DecoratesEdge {
+                    decorator: target.to_string(),
+                    function: function_qname.to_string(),
+                    decorator_name: raw.clone(),
+                });
+            }
+        }
     }
     out
 }
