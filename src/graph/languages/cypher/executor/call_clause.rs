@@ -93,6 +93,7 @@ impl<'a> CypherExecutor<'a> {
             "type_domain_violation" | "type_range_violation" => &["source", "target"],
             "parallel_edges" => &["a", "b", "count"],
             "kg_knn" => &["node", "distance_m"],
+            "affected_tests" => &["test_file", "depth"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -338,6 +339,11 @@ impl<'a> CypherExecutor<'a> {
             "kg_knn" => {
                 super::rule_procedures::execute_kg_knn(self.graph, &params, &clause.yield_items)?
             }
+            "affected_tests" => super::affected_tests::execute_affected_tests(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
             "list_procedures" => {
                 let procedures = [
                     (

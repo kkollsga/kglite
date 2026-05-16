@@ -44,6 +44,67 @@ def small_graph():
 
 
 @pytest.fixture
+def file_imports_graph():
+    """Synthetic code-tree-shaped graph for testing File→File IMPORTS edges
+    and the `affected_tests` Cypher procedure.
+
+    Mimics the schema emitted by `kglite.code_tree.build()` without paying
+    the tree-sitter parse cost — five Files (three source, two tests) and
+    a small import web:
+
+        src/a.py  ─┐
+                   ├─►  src/util.py  ◄──  tests/test_util.py  (is_test=True)
+        src/b.py  ─┘                      tests/test_a.py     (is_test=True, imports src/a.py)
+
+    Both File→File IMPORTS edges (the 0.9.34 addition) and the existing
+    `is_test` File property are populated.
+    """
+    graph = KnowledgeGraph()
+    files = pd.DataFrame(
+        {
+            "path": [
+                "src/a.py",
+                "src/b.py",
+                "src/util.py",
+                "tests/test_util.py",
+                "tests/test_a.py",
+            ],
+            "filename": ["a.py", "b.py", "util.py", "test_util.py", "test_a.py"],
+            "is_test": [False, False, False, True, True],
+        }
+    )
+    graph.add_nodes(files, "File", "path", "filename")
+
+    imports = pd.DataFrame(
+        {
+            "source": [
+                "src/a.py",
+                "src/b.py",
+                "tests/test_util.py",
+                "tests/test_a.py",
+            ],
+            "target": [
+                "src/util.py",
+                "src/util.py",
+                "src/util.py",
+                "src/a.py",
+            ],
+            "import_count": [1, 1, 1, 2],
+        }
+    )
+    graph.add_connections(
+        imports,
+        "IMPORTS",
+        "File",
+        "source",
+        "File",
+        "target",
+        columns=["import_count"],
+    )
+    return graph
+
+
+@pytest.fixture
 def social_graph():
     """Medium graph: 20 Person + 5 Company nodes, KNOWS/WORKS_AT edges.
 

@@ -738,6 +738,23 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_' RETURN p.name AS n ORDER BY size(p.name) DESC, n LIMIT 5",
         None,
     ),
+    # ── affected_tests procedure (0.9.34) ──
+    # Guards against the optimizer rewriting away rows surrounding a CALL
+    # to affected_tests — the procedure itself walks IMPORTS inbound to
+    # find reachable test files. Trigger shape ships from the plan.
+    (
+        "affected_tests_simple",
+        "file_imports_graph",
+        "CALL affected_tests({files: ['src/util.py']}) YIELD test_file, depth "
+        "RETURN test_file, depth ORDER BY test_file",
+        None,
+    ),
+    (
+        "affected_tests_transitive",
+        "file_imports_graph",
+        "CALL affected_tests({files: ['src/a.py']}) YIELD test_file RETURN test_file ORDER BY test_file",
+        None,
+    ),
 ]
 
 

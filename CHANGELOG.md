@@ -16,8 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `import_count` property records the multiplicity. Enables direct
   file-level impact analysis in one Cypher hop —
   `MATCH (changed:File {path: 'src/foo.py'})<-[:IMPORTS*1..]-(impacted:File)`
-  — without joining through Module nodes. Lands as groundwork for an
-  upcoming `affected_tests` Cypher procedure.
+  — without joining through Module nodes.
+
+### Added (Cypher)
+
+- **`CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth`**
+  — given a seed set of changed file paths, BFS over inbound IMPORTS
+  edges and yield reachable File nodes whose `is_test` property is
+  true. Either yield column is optional individually (the common case
+  is `YIELD test_file` to get just a list of paths). Builds directly
+  on the 0.9.34 File → File IMPORTS edges; closes parity with the
+  `codegraph affected` CLI feature from colbymchenry/codegraph but as
+  pure Cypher rather than a separate command.
+
+  ```cypher
+  CALL affected_tests({files: ['src/utils.rs', 'src/api.rs']})
+  YIELD test_file
+  RETURN test_file ORDER BY test_file
+  ```
 
 ## [0.9.33] — 2026-05-14
 
