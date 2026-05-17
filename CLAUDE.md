@@ -132,6 +132,31 @@ Update `CHANGELOG.md` `[Unreleased]` for user-visible changes. Skip for internal
 
 Version source of truth: `Cargo.toml` line 3.
 
+### Avoid double version bumps between pushes
+
+**A version is not "released" until the user has pushed.** Until the
+push happens, every local commit is in flight — including any version
+bump already committed locally. If you start a follow-up plan before
+the operator pushes, **fold its changes into the same pending version
+bump** rather than minting a new one.
+
+Concretely: if you commit `release(0.9.35): ...` locally and the user
+then asks for more changes before pushing, those changes go under the
+existing `[0.9.35]` CHANGELOG block. Amend or extend the release
+commit if necessary; don't add a separate `release(0.9.36): ...`
+commit on top. The 0.9.34 → 0.9.35 → push cycle in this repo was the
+counter-example: two version bumps shipped together because the
+operator hadn't pushed yet — should have been one 0.9.35 release.
+
+Check before starting any version-bump work:
+```bash
+git log origin/main..HEAD --oneline | grep -E "^\w+ release\("
+```
+If that returns a commit, the previous "release" is still local — keep
+the version number it picked and roll new work into the same
+`[Unreleased]` → `[x.y.z]` block. Only mint a new version after a
+clean `git push` to origin.
+
 ### Standard plan procedure (multi-phase work)
 
 When a plan has multiple phases (Step 1 / 2 / 3 / …), follow this rhythm:
