@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.38] — 2026-05-17
+
 ### Added
 
 - **Mode banner in the MCP server's `instructions` block and
