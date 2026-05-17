@@ -491,6 +491,18 @@ pub fn add_connections(
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph, connection_type)?;
 
+    // Invalidate edge-cardinality caches whenever the batch produced
+    // edges. Pre-0.9.35 this path didn't invalidate, so a sequence of
+    // Cypher CREATE → Python add_connections → planner-cost query
+    // could read a stale edge-type-count map; the existing Cypher
+    // executor at write.rs:346 invalidated correctly but the bulk
+    // Python API did not. Fixing here covers both the new
+    // type_connectivity cache (selectivity-aware planning) and the
+    // pre-existing edge_type_counts_cache used by reorder_match_clauses.
+    if stats.connections_created > 0 {
+        graph.invalidate_edge_type_counts_cache();
+    }
+
     // Create and return the operation report
     let mut report = ConnectionOperationReport::new(
         "add_connections".to_string(),

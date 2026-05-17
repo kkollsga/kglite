@@ -5,7 +5,7 @@ use super::super::ast::*;
 use crate::graph::core::pattern_matching::{PatternElement, PropertyMatcher};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) fn optimize_pattern_start_node(query: &mut CypherQuery, graph: &DirGraph) {
     use crate::graph::core::pattern_matching::EdgeDirection;
@@ -230,6 +230,26 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
     }
     let edge_counts = graph.get_edge_type_counts();
 
+    // 0.9.35 (AgensGraph-inspired): when the label-pair connectivity
+    // cache is also populated, use the per-triple `(src_type, edge_type,
+    // tgt_type)` counts instead of the broader edge-type total. Drops
+    // the cost-estimate error on label-asymmetric patterns from "all
+    // edges of type R" to "only edges of type R between the matched
+    // labels" — typically 10–100× tighter on Wikidata-shaped graphs.
+    // Gating on `has_type_connectivity_cache()` mirrors the existing
+    // `has_edge_type_counts_cache()` gate so plan-time stays O(1).
+    let triple_counts: Option<HashMap<(String, String, String), usize>> =
+        if graph.has_type_connectivity_cache() {
+            graph.get_type_connectivity().map(|triples| {
+                triples
+                    .into_iter()
+                    .map(|t| ((t.src, t.conn, t.tgt), t.count))
+                    .collect()
+            })
+        } else {
+            None
+        };
+
     let mut i = 0;
     while i < query.clauses.len() {
         // Find a span of consecutive non-OPTIONAL MATCH clauses with no
@@ -257,7 +277,7 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
                 Clause::Match(m) => m,
                 _ => unreachable!(),
             };
-            match estimate_match_edge_cost(m, &edge_counts) {
+            match estimate_match_edge_cost(m, &edge_counts, triple_counts.as_ref()) {
                 Some(c) => costs.push(c),
                 None => {
                     all_scored = false;
@@ -301,7 +321,8 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
 /// safety rules in [`reorder_match_clauses`].
 fn estimate_match_edge_cost(
     m: &MatchClause,
-    edge_counts: &std::collections::HashMap<String, usize>,
+    edge_counts: &HashMap<String, usize>,
+    triple_counts: Option<&HashMap<(String, String, String), usize>>,
 ) -> Option<usize> {
     let mut total: usize = 0;
     for pattern in &m.patterns {
@@ -319,16 +340,63 @@ fn estimate_match_edge_cost(
         if !is_id_anchored(first) && !is_id_anchored(last) {
             return None;
         }
-        // Sum the total edge count of every typed edge in the pattern.
-        for elem in &pattern.elements {
-            if let PatternElement::Edge(ep) = elem {
-                let ct = ep.connection_type.as_ref()?;
-                let count = edge_counts.get(ct)?;
-                total = total.saturating_add(*count);
+        // Sum the edge count for every typed edge in the pattern.
+        // Prefer the label-pair triple count (src_type, edge, tgt_type)
+        // when both endpoints are labelled AND triple_counts is
+        // populated — this drops the cost estimate from "all R edges"
+        // to "R edges only between (T1, T2)", which on label-skewed
+        // graphs (humans-in-Germany style queries) is the difference
+        // between picking the right driving side and not.
+        let elems = &pattern.elements;
+        for idx in 0..elems.len() {
+            let ep = match &elems[idx] {
+                PatternElement::Edge(ep) => ep,
+                _ => continue,
+            };
+            let ct = ep.connection_type.as_ref()?;
+            let mut count: Option<usize> = None;
+            if let Some(triples) = triple_counts {
+                // Lookup neighbouring node-type labels. Pattern shape
+                // is always (node, edge, node, edge, ...) so the
+                // surrounding nodes are at idx-1 and idx+1. Fall back
+                // to per-edge total when either side is untyped or the
+                // (src, edge, tgt) triple isn't in the cache.
+                let src_label = idx
+                    .checked_sub(1)
+                    .and_then(|i| elems.get(i))
+                    .and_then(node_label);
+                let tgt_label = elems.get(idx + 1).and_then(node_label);
+                if let (Some(sl), Some(tl)) = (src_label, tgt_label) {
+                    let key_fwd = (sl.clone(), ct.clone(), tl.clone());
+                    let key_rev = (tl, ct.clone(), sl);
+                    // Direction-agnostic for `()-[]-()` patterns:
+                    // honour both directions, take the sum.
+                    let fwd = triples.get(&key_fwd).copied().unwrap_or(0);
+                    let rev = triples.get(&key_rev).copied().unwrap_or(0);
+                    if fwd > 0 || rev > 0 {
+                        count = Some(fwd + rev);
+                    }
+                }
             }
+            let resolved = match count {
+                Some(c) => c,
+                None => *edge_counts.get(ct)?,
+            };
+            total = total.saturating_add(resolved);
         }
     }
     Some(total)
+}
+
+/// Extract the node-type label (e.g. `Person`) from a NodePattern
+/// element. Returns `None` for edges, anonymous nodes, or nodes
+/// without a label.
+fn node_label(elem: &PatternElement) -> Option<String> {
+    let np = match elem {
+        PatternElement::Node(np) => np,
+        _ => return None,
+    };
+    np.node_type.clone()
 }
 
 fn is_id_anchored(elem: &PatternElement) -> bool {

@@ -630,6 +630,55 @@ impl DirGraph {
         *self.type_connectivity_cache.write().unwrap() = Some(triples);
     }
 
+    /// Get (or compute) the label-pair edge-count triples — the
+    /// `(src_type, edge_type, tgt_type) → count` cardinality cache
+    /// used by the Cypher planner for selectivity-aware cost estimation.
+    ///
+    /// Lazy: on cold cache, walks every edge once via
+    /// `edge_endpoint_keys()` and groups by `(src.node_type, conn_key,
+    /// tgt.node_type)`. Identical shape to the n-triples loader's
+    /// existing `set_type_connectivity(...)` output, so consumers can
+    /// uniformly treat both as authoritative.
+    ///
+    /// On cache hit (common case after the first query), returns the
+    /// cached `Vec` clone in O(triples) — typically <100 entries on
+    /// real graphs, so essentially free.
+    ///
+    /// Invalidated alongside `edge_type_counts_cache` on every edge
+    /// mutation.
+    pub fn get_or_compute_type_connectivity(&self) -> Vec<ConnectivityTriple> {
+        {
+            let read = self.type_connectivity_cache.read().unwrap();
+            if let Some(ref cached) = *read {
+                return cached.clone();
+            }
+        }
+        // Cold: O(E) walk grouping by (src_type, conn_type, tgt_type).
+        let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
+        for (src_idx, tgt_idx, conn_key) in self.graph.edge_endpoint_keys() {
+            let src_type = match self.graph.node_weight(src_idx) {
+                Some(n) => n.node_type,
+                None => continue,
+            };
+            let tgt_type = match self.graph.node_weight(tgt_idx) {
+                Some(n) => n.node_type,
+                None => continue,
+            };
+            *counts.entry((src_type, conn_key, tgt_type)).or_insert(0) += 1;
+        }
+        let triples: Vec<ConnectivityTriple> = counts
+            .into_iter()
+            .map(|((src, conn, tgt), count)| ConnectivityTriple {
+                src: self.interner.resolve(src).to_string(),
+                conn: self.interner.resolve(conn).to_string(),
+                tgt: self.interner.resolve(tgt).to_string(),
+                count,
+            })
+            .collect();
+        *self.type_connectivity_cache.write().unwrap() = Some(triples.clone());
+        triples
+    }
+
     // ========================================================================
     // Type Metadata Methods (replaces SchemaNode graph nodes)
     // ========================================================================

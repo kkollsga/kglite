@@ -755,6 +755,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL affected_tests({files: ['src/a.py']}) YIELD test_file RETURN test_file ORDER BY test_file",
         None,
     ),
+    # ── reorder_match_clauses w/ label-pair selectivity (0.9.35) ──
+    # Two MATCH clauses where the label-pair cardinalities differ
+    # significantly. With the new selectivity-aware branch the planner
+    # picks the (Person, WORKS_AT, Company) clause first because
+    # WORKS_AT-to-Company is a smaller pair than KNOWS-between-Persons.
+    # Optimizer-on vs optimizer-off must produce identical rows.
+    (
+        "label_pair_reorder_two_match",
+        "social_graph",
+        "MATCH (p:Person {person_id: 1})-[:KNOWS]->(q:Person) "
+        "MATCH (p:Person {person_id: 1})-[:WORKS_AT]->(c:Company) "
+        "RETURN q.name AS q, c.name AS c ORDER BY q, c",
+        None,
+    ),
 ]
 
 

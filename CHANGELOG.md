@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (planner)
+
+- **Label-pair edge-count cardinality cache.** Generalises the
+  pre-existing `type_connectivity_cache` (which had only been populated
+  by the n-triples loader) into a lazy, mutation-invalidated cache that
+  authoritatively records `(src_type, edge_type, tgt_type) → count` for
+  every graph. The Cypher planner's `reorder_match_clauses` pass now
+  uses these triple counts instead of the broader edge-type totals
+  when both endpoints carry a label — typically 10–100× tighter on
+  label-skewed graphs (the AgensGraph-inspired pattern).
+
+  Exposed via `KnowledgeGraph.label_pair_counts()` returning
+  `[(src_type, edge_type, tgt_type, count), ...]`. Computed O(E) on
+  first access; subsequent reads are essentially free
+  (release-mode bench: warm read 185 ns).
+
+### Fixed
+
+- **Python `add_connections` now invalidates the edge-cardinality
+  caches.** Pre-0.9.35 the existing `edge_type_counts_cache` would
+  go stale after bulk inserts via the Python API — only Cypher
+  `CREATE`/`DELETE` triggered invalidation. Sequences like
+  `cypher("CREATE …") → add_connections(…) → planner-cost-driven query`
+  could read stale cardinalities. Fixed alongside the new label-pair
+  cache wiring.
+
 ## [0.9.34] — 2026-05-17
 
 Code-graph expansion release: closes the feature gap with

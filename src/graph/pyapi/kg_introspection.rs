@@ -1522,6 +1522,24 @@ impl KnowledgeGraph {
         ))
     }
 
+    /// Return the label-pair edge-count cardinality cache —
+    /// `[(src_type, edge_type, tgt_type, count), ...]` triples backing
+    /// the planner's selectivity-aware cost model (0.9.35).
+    ///
+    /// First call computes O(E); subsequent calls are O(triples)
+    /// against the cached snapshot. Edge mutations (Cypher CREATE /
+    /// DELETE, Python `add_connections`) invalidate the cache.
+    ///
+    /// Each row is a 4-tuple: `(src_type, edge_type, tgt_type, count)`.
+    fn label_pair_counts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let triples = self.inner.get_or_compute_type_connectivity();
+        let out: Vec<(String, String, String, u64)> = triples
+            .into_iter()
+            .map(|t| (t.src, t.conn, t.tgt, t.count as u64))
+            .collect();
+        Ok(out.into_pyobject(py)?.into_any().unbind())
+    }
+
     /// File a bug report to `reported_bugs.md`.
     ///
     /// Appends a timestamped, version-tagged report to the top of the file
