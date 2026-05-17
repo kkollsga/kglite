@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.35] — 2026-05-17
+
+AgensGraph-inspired planner/lookup improvements. Three commits land:
+
+- **Label-pair edge-count cache (planner selectivity).** Generalises the
+  pre-existing `type_connectivity_cache` into a lazy, mutation-invalidated
+  authority on `(src_type, edge_type, tgt_type) → count`. The planner's
+  `reorder_match_clauses` pass now uses per-triple counts when both
+  endpoints carry a label — typically 10–100× tighter on label-skewed
+  graphs than the old "all R edges" proxy.
+- **`refresh_stats()` Cypher procedure.** Operator-callable cardinality
+  recomputation, mostly useful as a "what does the planner see?"
+  diagnostic.
+- **`nodes(p)` dicts now include every node property.** Lets agents
+  `UNWIND nodes(p) AS n RETURN n.age` without re-MATCHing each node.
+  Wire shape unchanged.
+
+Side fix: `maintain::add_connections` (the Python bulk-mutation path)
+now invalidates the edge-cardinality caches. Pre-0.9.35 only Cypher
+CREATE/DELETE did; bulk inserts left the existing `edge_type_counts_cache`
+stale.
+
+Release-mode bench gate (release_0935 vs release_0934_v2):
+no consistent regressions across the 11 core benches. Min-times stable
+or marginally better on 0.9.35; median noise within prior 0.9.34
+variance. The planner's new selectivity branch shows up in
+`test_bench_planner_two_match_with_skewed_labels` at 7.3 µs median.
+
+**Deferred:** the node-label cache (`Vec<InternedKey>` indexed by
+NodeIndex) flagged in the AgensGraph review. Profiling didn't surface
+`node_type_of()` as a bottleneck against the planner-perf bench, so the
+~150 lines of maintenance + parity-test code didn't penciled out. Will
+revisit if it shows up as a real hot frame in a future profile.
+
 ### Changed (Cypher)
 
 - **`nodes(path)` dicts now include every node property, not just
