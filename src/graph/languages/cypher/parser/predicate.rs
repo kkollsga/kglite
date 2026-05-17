@@ -99,8 +99,24 @@ impl CypherParser {
                         patterns: vec![pattern],
                         where_clause: None,
                     });
+                } else if self.looks_like_property_access() {
+                    // Neo4j-style `exists(n.prop)` for property-existence
+                    // checks. KGLite doesn't support this form — point the
+                    // user at the modern equivalent rather than the pattern
+                    // error, which sends them down the wrong rabbit hole.
+                    return Err(
+                        "exists(n.prop) is Neo4j legacy syntax for property-existence. \
+                         Use `WHERE n.prop IS NOT NULL` instead. \
+                         (For pattern-existence, EXISTS takes a pattern: \
+                         `EXISTS { (n)-[:REL]->() }` or `EXISTS((n)-[:REL]->())`.)"
+                            .to_string(),
+                    );
                 } else {
-                    return Err("EXISTS(...) requires a pattern in parentheses, e.g. EXISTS((n)-[:REL]->())".to_string());
+                    return Err("EXISTS(...) requires a pattern in parentheses, e.g. \
+                         EXISTS((n)-[:REL]->()). For property-existence checks, \
+                         use `WHERE n.prop IS NOT NULL` (Neo4j-style \
+                         `exists(n.prop)` is not supported)."
+                        .to_string());
                 }
             } else {
                 return Err("Expected '{' or '(' after EXISTS".to_string());
@@ -280,6 +296,16 @@ impl CypherParser {
 
         self.expect(&CypherToken::RBracket)?;
         Ok(items)
+    }
+
+    /// True when the next three tokens are `<ident> . <ident>` — i.e. the
+    /// shape of a property access (`n.prop`). Used by `parse_comparison_predicate`
+    /// to recognise the Neo4j-legacy `exists(n.prop)` form and steer the
+    /// user to `IS NOT NULL` instead of the generic pattern-required error.
+    pub(super) fn looks_like_property_access(&self) -> bool {
+        matches!(self.peek(), Some(CypherToken::Identifier(_)))
+            && matches!(self.peek_at(1), Some(CypherToken::Dot))
+            && matches!(self.peek_at(2), Some(CypherToken::Identifier(_)))
     }
 
     /// Quick lookahead to check if ( starts a pattern (node pattern) vs a parenthesized predicate
