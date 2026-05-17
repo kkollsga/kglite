@@ -850,6 +850,146 @@ fn constants_df(consts: &[ConstantInfo], file_to_module: &HashMap<&str, &str>) -
     ])
 }
 
+fn elements_df(elements: &[crate::code_tree::models::ElementInfo]) -> DataFrame {
+    build_df(vec![
+        (
+            "qualified_name",
+            ColumnType::String,
+            str_col(
+                elements
+                    .iter()
+                    .map(|e| Some(e.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
+        (
+            "name",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| Some(e.name.clone())).collect()),
+        ),
+        (
+            "tag",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| Some(e.tag.clone())).collect()),
+        ),
+        (
+            "kind",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| Some(e.kind.clone())).collect()),
+        ),
+        (
+            "html_id",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| e.id.clone()).collect()),
+        ),
+        (
+            "action",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| e.action.clone()).collect()),
+        ),
+        (
+            "method",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| e.method.clone()).collect()),
+        ),
+        (
+            "file_path",
+            ColumnType::String,
+            str_col(elements.iter().map(|e| Some(e.file_path.clone())).collect()),
+        ),
+        (
+            "line_number",
+            ColumnType::Int64,
+            int_col(
+                elements
+                    .iter()
+                    .map(|e| Some(e.line_number as i64))
+                    .collect(),
+            ),
+        ),
+        (
+            "end_line",
+            ColumnType::Int64,
+            int_col(
+                elements
+                    .iter()
+                    .map(|e| e.end_line.map(|v| v as i64))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn selectors_df(selectors: &[crate::code_tree::models::SelectorInfo]) -> DataFrame {
+    build_df(vec![
+        (
+            "qualified_name",
+            ColumnType::String,
+            str_col(
+                selectors
+                    .iter()
+                    .map(|s| Some(s.qualified_name.clone()))
+                    .collect(),
+            ),
+        ),
+        (
+            "name",
+            ColumnType::String,
+            str_col(selectors.iter().map(|s| Some(s.name.clone())).collect()),
+        ),
+        (
+            "kind",
+            ColumnType::String,
+            str_col(selectors.iter().map(|s| Some(s.kind.clone())).collect()),
+        ),
+        (
+            "file_path",
+            ColumnType::String,
+            str_col(
+                selectors
+                    .iter()
+                    .map(|s| Some(s.file_path.clone()))
+                    .collect(),
+            ),
+        ),
+        (
+            "line_number",
+            ColumnType::Int64,
+            int_col(
+                selectors
+                    .iter()
+                    .map(|s| Some(s.line_number as i64))
+                    .collect(),
+            ),
+        ),
+        (
+            "end_line",
+            ColumnType::Int64,
+            int_col(
+                selectors
+                    .iter()
+                    .map(|s| s.end_line.map(|v| v as i64))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn element_contains_edges_df(elements: &[crate::code_tree::models::ElementInfo]) -> DataFrame {
+    let mut parents: Vec<Option<String>> = Vec::new();
+    let mut children: Vec<Option<String>> = Vec::new();
+    for e in elements {
+        if let Some(p) = &e.parent_qname {
+            parents.push(Some(p.clone()));
+            children.push(Some(e.qualified_name.clone()));
+        }
+    }
+    build_df(vec![
+        ("parent", ColumnType::String, str_col(parents)),
+        ("child", ColumnType::String, str_col(children)),
+    ])
+}
+
 // ── Edge DataFrame builders ─────────────────────────────────────────
 
 fn has_submodule_df(modules: &[ModuleRecord]) -> DataFrame {
@@ -1134,6 +1274,22 @@ fn defines_edges(result: &ParseResult) -> Vec<DefinesEdge> {
             source_id: c.file_path.clone(),
             target_type: "Constant".into(),
             target_id: c.qualified_name.clone(),
+        });
+    }
+    for e in &result.elements {
+        out.push(DefinesEdge {
+            source_type: "File".into(),
+            source_id: e.file_path.clone(),
+            target_type: "Element".into(),
+            target_id: e.qualified_name.clone(),
+        });
+    }
+    for s in &result.selectors {
+        out.push(DefinesEdge {
+            source_type: "File".into(),
+            source_id: s.file_path.clone(),
+            target_type: "Selector".into(),
+            target_id: s.qualified_name.clone(),
         });
     }
     out
@@ -1464,6 +1620,34 @@ pub fn load_into_graph(
         )
         .map_err(py_err)?;
     }
+    // Element nodes — HTML structural elements (headings, sections,
+    // forms) emitted by the 0.9.36 HTML parser. The HTML parser
+    // imposes its own emission filter (only nodes with semantic
+    // interest), so we just shovel the prepared list into the graph.
+    if !result.elements.is_empty() {
+        maintain::add_nodes(
+            graph,
+            elements_df(&result.elements),
+            "Element".into(),
+            "qualified_name".into(),
+            Some("name".into()),
+            None,
+        )
+        .map_err(py_err)?;
+    }
+    // Selector nodes — CSS rule_sets emitted by the 0.9.36 CSS parser
+    // (one per rule_set, regardless of selector-list count).
+    if !result.selectors.is_empty() {
+        maintain::add_nodes(
+            graph,
+            selectors_df(&result.selectors),
+            "Selector".into(),
+            "qualified_name".into(),
+            Some("name".into()),
+            None,
+        )
+        .map_err(py_err)?;
+    }
 
     mark(t_nodes, "nodes");
     let t_typeedges = std::time::Instant::now();
@@ -1623,6 +1807,29 @@ pub fn load_into_graph(
             None,
         )
         .map_err(py_err)?;
+    }
+
+    // Element HAS_CHILD Element — outline edges from the HTML parser
+    // (0.9.36). Edge name avoids `CONTAINS`, which is a reserved
+    // Cypher keyword for substring matching (same rule that drove
+    // `HAS_FILE` instead of `CONTAINS` on Module→File).
+    if !result.elements.is_empty() {
+        let contains_df = element_contains_edges_df(&result.elements);
+        if contains_df.row_count() > 0 {
+            maintain::add_connections(
+                graph,
+                contains_df,
+                "HAS_CHILD".into(),
+                "Element".into(),
+                "parent".into(),
+                "Element".into(),
+                "child".into(),
+                None,
+                None,
+                None,
+            )
+            .map_err(py_err)?;
+        }
     }
 
     // File IMPORTS Module (only edges to known modules).

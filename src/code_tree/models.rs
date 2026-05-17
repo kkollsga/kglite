@@ -208,6 +208,59 @@ pub struct ConstantInfo {
     pub line_number: u32,
 }
 
+/// A semantically-interesting HTML / template element — heading
+/// (`h1`–`h6`), element with an `id` attribute, or a `<form>` with an
+/// `action` attribute. The HTML parser (0.9.36) emits one per element
+/// that fits one of those three shapes; everything else stays as parse
+/// noise to keep god-HTML-file graphs navigable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ElementInfo {
+    /// Short display name. For headings, the text content (truncated to
+    /// 100 chars). For sections, the `id` attribute value. For forms,
+    /// the `action` string (or `"form_<n>"` when action is absent).
+    pub name: String,
+    /// Stable qualified name — `"{rel_path}:{tag}:{anchor}"`.
+    pub qualified_name: String,
+    /// HTML tag name (`h1`/`h2`/.../`section`/`main`/`header`/`form`/...).
+    pub tag: String,
+    /// `"heading"` | `"section"` | `"form"`.
+    pub kind: String,
+    /// `id` attribute value, when present.
+    pub id: Option<String>,
+    /// Form `action` attribute.
+    pub action: Option<String>,
+    /// Form `method` attribute (defaults to `"GET"` when absent in HTML
+    /// but we record `None` to preserve "wasn't declared" vs
+    /// "declared empty").
+    pub method: Option<String>,
+    pub file_path: String,
+    pub line_number: u32,
+    pub end_line: Option<u32>,
+    /// Drives `Element -[CONTAINS]-> Element` edges. The qualified_name
+    /// of the nearest emitted ancestor (heading/section/form). `None`
+    /// for top-level elements directly under `<body>`.
+    pub parent_qname: Option<String>,
+}
+
+/// A CSS rule_set selector. The 0.9.36 CSS parser emits one per
+/// `rule_set`, regardless of the rule's selector-list count (a rule
+/// `.foo, .bar, .baz { ... }` emits one node named `.foo, .bar, .baz`,
+/// not three). Custom-property declarations are emitted separately as
+/// `ConstantInfo` rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectorInfo {
+    /// Canonicalised selector-list string (e.g. `".foo, .bar"`).
+    pub name: String,
+    /// Stable qualified name — `"{rel_path}:{line}:{selector}"`.
+    pub qualified_name: String,
+    /// Always `"rule"` in 0.9.36; reserved for future
+    /// `"keyframes"`/`"media"`/etc. extensions.
+    pub kind: String,
+    pub file_path: String,
+    pub line_number: u32,
+    pub end_line: Option<u32>,
+}
+
 /// An impl block (Rust), inheritance (Python/Java/C#), or implements (TS).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TypeRelationship {
@@ -230,6 +283,8 @@ pub struct ParseResult {
     pub type_relationships: Vec<TypeRelationship>,
     pub attributes: Vec<AttributeInfo>,
     pub constants: Vec<ConstantInfo>,
+    pub elements: Vec<ElementInfo>,
+    pub selectors: Vec<SelectorInfo>,
 }
 
 impl ParseResult {
@@ -248,6 +303,8 @@ impl ParseResult {
             .append(&mut other.type_relationships);
         self.attributes.append(&mut other.attributes);
         self.constants.append(&mut other.constants);
+        self.elements.append(&mut other.elements);
+        self.selectors.append(&mut other.selectors);
     }
 }
 

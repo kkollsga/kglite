@@ -6,6 +6,7 @@
 pub mod cpp;
 pub mod csharp;
 pub mod go;
+pub mod html;
 pub mod java;
 pub mod php;
 pub mod python;
@@ -69,6 +70,8 @@ pub const EXTENSION_MAP: &[(&str, &str)] = &[
     ("hxx", "cpp"),
     ("swift", "swift"),
     ("php", "php"),
+    ("html", "html"),
+    ("htm", "html"),
 ];
 
 /// Look up a language identifier for a file path by extension.
@@ -169,6 +172,7 @@ pub fn get_parser(language: &str) -> Option<Box<dyn LanguageParser + Send + Sync
         "cpp" => Some(Box::new(cpp::CppParser::cpp())),
         "swift" => Some(Box::new(swift::SwiftParser::new())),
         "php" => Some(Box::new(php::PhpParser::new())),
+        "html" => Some(Box::new(html::HtmlParser::new())),
         _ => None,
     }
 }
