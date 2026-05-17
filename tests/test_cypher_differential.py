@@ -755,6 +755,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL affected_tests({files: ['src/a.py']}) YIELD test_file RETURN test_file ORDER BY test_file",
         None,
     ),
+    # ── refresh_stats() procedure (0.9.35) ──
+    # Confirms the optimizer doesn't rewrite around a CALL whose output
+    # rows depend on the freshly-computed label-pair triples.
+    (
+        "refresh_stats_basic",
+        "file_imports_graph",
+        "CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count "
+        "RETURN edge_type, count ORDER BY edge_type, count",
+        None,
+    ),
     # ── reorder_match_clauses w/ label-pair selectivity (0.9.35) ──
     # Two MATCH clauses where the label-pair cardinalities differ
     # significantly. With the new selectivity-aware branch the planner

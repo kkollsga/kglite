@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Cypher)
+
+- **`CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count`** —
+  operator-callable recomputation of the label-pair edge-count
+  cardinality cache. Forces a fresh O(E) walk of every edge and yields
+  one row per `(src_type, edge_type, tgt_type)` triple with its current
+  count. Useful for bulk-load workflows that bypass the mutation paths
+  the cache invalidator listens on, and as a "what does the planner
+  think the schema looks like right now?" diagnostic.
+
+  All four YIELD columns are optional individually — the caller may
+  request any subset. Output rows are sorted by
+  `(src_type, edge_type, tgt_type)` for stable diffing between calls.
+
 ### Added (planner)
 
 - **Label-pair edge-count cardinality cache.** Generalises the

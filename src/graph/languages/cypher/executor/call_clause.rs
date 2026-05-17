@@ -94,6 +94,7 @@ impl<'a> CypherExecutor<'a> {
             "parallel_edges" => &["a", "b", "count"],
             "kg_knn" => &["node", "distance_m"],
             "affected_tests" => &["test_file", "depth"],
+            "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -340,6 +341,11 @@ impl<'a> CypherExecutor<'a> {
                 super::rule_procedures::execute_kg_knn(self.graph, &params, &clause.yield_items)?
             }
             "affected_tests" => super::affected_tests::execute_affected_tests(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
+            "refresh_stats" => super::refresh_stats::execute_refresh_stats(
                 self.graph,
                 &params,
                 &clause.yield_items,
