@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.36] — 2026-05-17
+
+Web-stack language expansion: closes the biggest remaining language
+gap by adding PHP, HTML, and CSS — taking KGLite to 13 supported
+languages. HTML's "god-file" workflow (single-page-app HTML holding
+the whole app's outline + inline JS + forms) is first-class.
+
+Plus two docs-only commits that landed on the unpushed branch earlier:
+the "avoid double version bumps" rule and the CLAUDE.md dedupe pass
+(199 → 120 lines). Per the new "One version bump per push" rule, both
+ride this release.
+
+Release-mode bench gate (release_0936 vs release_0935_v3, same
+binary built with --release on commit 4a83328 vs 2ecca3e):
+
+| Bench | 0.9.35 min | 0.9.36 min |
+|---|---|---|
+| label_pair_counts_compute | 82.8 µs | 84.5 µs |
+| planner_two_match_skewed | 6.9 µs | 7.0 µs |
+| cypher_where | 170.8 µs | 205.5 µs |
+| columnar_enable | 220.8 µs | 219.5 µs |
+| add_nodes | 266.0 µs | 259.6 µs |
+| add_connections | 430.2 µs | 429.9 µs |
+| save_v3 | 418.6 µs | 416.8 µs |
+
+Min-times stable across the board within ±5% (well inside noise per
+the pytest-benchmark hygiene rule). The new parsers don't touch any
+existing hot paths; their cost shows up only when a PHP/HTML/CSS file
+is parsed. The new bench `code_tree_build` (god-HTML fixture)
+captures the end-to-end cost of HTML parsing + embedded JS extraction:
+1.16 ms min on the synthetic Flask-shaped package.
+
 ### Added (code_tree — languages)
 
 - **PHP language parser** (`.php`). Full coverage of classes, interfaces,
