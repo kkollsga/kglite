@@ -27,12 +27,25 @@ Release-mode benchmark snapshot on a synthetic Flask-shaped package
 | `code_tree.build()` end-to-end | 600 µs |
 
 Core in-memory benchmarks (`tests/benchmarks/test_bench_core.py`)
-were re-run release-mode against 0.9.33 and show no unambiguous
-regressions in code paths we changed. `add_nodes` / `add_connections`
-/ `save_v3` all measured within noise of baseline; the Cypher core
-medians shifted on some queries but well within 1 StdDev of the
-baseline. Future regressions in any of these surfaces will surface
-via `make bench-compare` against the saved `release_0934` baseline.
+were re-run release-mode against 0.9.33 under tightened conditions
+(`--benchmark-min-rounds=200 --benchmark-warmup=on`, 30-s thermal
+settle between runs) and show **no real regressions**. The original
+perf-gate single-run flagged three benches with apparent regressions
+of +44% to +127%; the tightened runs show those deltas were
+pytest-benchmark variance on M-series macOS — repeating the same
+0.9.34 measurement gave `columnar_enable` medians of 516 µs and
+229 µs minutes apart on the same binary, and `cypher_match` swung
+between 5.6 µs and 11.6 µs across runs of identical code. The
+`min`-time across all measurements stayed flat (cypher_match
+~5.1 µs, columnar_enable ~219 µs), which is the cleaner signal at
+these microsecond scales.
+
+Future regressions in any of these surfaces will surface via
+`make bench-compare` against the saved `release_0934` baseline.
+Bench-hygiene rule lives in `CLAUDE.md`'s Performance Work Protocol:
+release-mode always, min-rounds ≥ 100, thermal settle between
+versions, and trust `min` over `median` for sub-millisecond
+benches.
 
 ### Added (code_tree — Swift)
 

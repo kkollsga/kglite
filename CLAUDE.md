@@ -79,6 +79,12 @@ Before starting any performance-related code changes:
 3. **Measure after** — re-run the same benchmark after changes. Report before/after.
 4. **Disk benchmarks are secondary** — nice to show improvement, but never at the cost of in-memory.
 5. **Always build release-mode for perf measurement.** `maturin develop --release` (or `cargo build --release`); never compare against a debug build. Debug binaries are 10–100× slower with unpredictable per-test variance — any "regression" measured against a debug baseline is meaningless. CI's perf jobs run release; local perf gates must match.
+6. **pytest-benchmark hygiene for microsecond-scale benches.** On M-series macOS the single-run median for a sub-millisecond bench can drift 2× on the same binary across runs (thermal throttling, page-cache state, background processes). A flagged regression is not real until it's reproduced under tightened conditions:
+   - `--benchmark-min-rounds=100` minimum (200 for sub-10-µs benches).
+   - `--benchmark-warmup=on --benchmark-warmup-iterations=20`.
+   - 30-second sleep between baseline and comparison runs so thermals settle.
+   - **Trust `min` over `median`** for sub-millisecond benches. The min represents the best-case throughput when no background work interferes; median pulls upward proportional to system load. Treat `median` deltas as suggestive, `min` deltas as authoritative.
+   - Re-measure twice on the suspect commit before declaring a regression. If the second measurement disagrees with the first, you're looking at variance, not a code change.
 
 ## Key Patterns
 
