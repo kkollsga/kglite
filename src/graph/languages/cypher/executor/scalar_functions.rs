@@ -231,8 +231,17 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "nodes" => {
-                // nodes(p) returns list of node dicts in a path (source + intermediates + target)
-                // Path format is normalized: path.path excludes source, source is in path.source
+                // nodes(p) returns the list of node dicts in a path
+                // (source + intermediates + target). Pre-0.9.35 the dict
+                // only carried `{id, title, type}` — sufficient for
+                // identity but lossy when the agent needed property
+                // values without re-MATCHing each node. 0.9.35 enriches
+                // every dict with every node property the schema
+                // exposes, so `UNWIND nodes(p) AS n RETURN n.name` works
+                // without a follow-up MATCH. Output remains a
+                // KGLite-convention JSON-string list (Value::String of
+                // `[{...}, {...}]`) so the existing list-indexing and
+                // UNWIND paths handle it unchanged.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut entries = Vec::new();
@@ -243,15 +252,33 @@ impl<'a> CypherExecutor<'a> {
                         for node_idx in &node_indices {
                             if let Some(node) = self.graph.graph.node_weight(*node_idx) {
                                 let mut props = Vec::new();
-                                props.push(format!("\"id\": {}", format_value_compact(&node.id())));
+                                props.push(format!("\"id\": {}", format_value_json(&node.id())));
                                 props.push(format!(
-                                    "\"title\": \"{}\"",
-                                    format_value_compact(&node.title()).replace('"', "\\\"")
+                                    "\"title\": {}",
+                                    format_value_json(&node.title())
                                 ));
                                 props.push(format!(
                                     "\"type\": \"{}\"",
                                     node.node_type_str(&self.graph.interner)
                                 ));
+                                // Enrich with every property the node
+                                // carries. Uses property_iter() so the
+                                // serialization is uniform with the
+                                // rest of KGLite's JSON-string list
+                                // surface (collect(), RETURN n, etc.).
+                                for (key, val) in node.property_iter(&self.graph.interner) {
+                                    // Skip id/title aliases — already
+                                    // emitted above with the canonical
+                                    // names.
+                                    if key == "id" || key == "title" || key == "type" {
+                                        continue;
+                                    }
+                                    props.push(format!(
+                                        "\"{}\": {}",
+                                        key.replace('\\', "\\\\").replace('"', "\\\""),
+                                        format_value_json(val),
+                                    ));
+                                }
                                 entries.push(format!("{{{}}}", props.join(", ")));
                             }
                         }

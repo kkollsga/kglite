@@ -755,6 +755,17 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL affected_tests({files: ['src/a.py']}) YIELD test_file RETURN test_file ORDER BY test_file",
         None,
     ),
+    # ── path-decomposition functions w/ property-rich nodes() (0.9.35) ──
+    # Guards against the optimizer rewriting around a variable-length
+    # MATCH that consumes the per-node property dicts from nodes(p).
+    (
+        "path_unwind_nodes_with_property_access",
+        "social_graph",
+        "MATCH p = (a:Person {person_id: 1})-[:KNOWS*1..2]->(b:Person) "
+        "UNWIND nodes(p) AS n "
+        "RETURN n.name AS name ORDER BY name",
+        None,
+    ),
     # ── refresh_stats() procedure (0.9.35) ──
     # Confirms the optimizer doesn't rewrite around a CALL whose output
     # rows depend on the freshly-computed label-pair triples.

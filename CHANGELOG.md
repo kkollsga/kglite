@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (Cypher)
+
+- **`nodes(path)` dicts now include every node property, not just
+  `{id, title, type}`.** Lets agents use `UNWIND nodes(p) AS n RETURN
+  n.age` without re-MATCHing each node to fetch property values.
+  Previous dict keys are unchanged; this is purely additive — code
+  that explicitly checked `set(dict.keys()) == {"id","title","type"}`
+  will see extra keys. Storage and wire shape unchanged (still a
+  JSON-string list under KGLite's `Value::String` convention).
+
 ### Added (Cypher)
 
 - **`CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count`** —
