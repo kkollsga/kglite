@@ -879,6 +879,80 @@ def test_i3_batch_load_hint_marker_in_operator_text_suppresses_auto_inject() -> 
     assert out == operator_text  # auto-inject skipped
 
 
+def test_i4_mode_banner_names_conditional_tools_per_mode() -> None:
+    """The mode banner prepended to `instructions` (and to the bare
+    `graph_overview()` preamble) names exactly which conditional tools
+    are registered in the current mode.
+
+    Closes operator feedback 2026-05-17: with several MCP servers
+    attached, agents had to fingerprint mode by trial-calling
+    `repo_management` / `set_root_dir` to learn which one was
+    registered. The banner makes the answer visible at handshake."""
+    from pathlib import Path
+
+    from kglite.mcp_server.server import _MODE_BANNER_MARKER, _compose_mode_banner
+
+    # graph mode (save_graph off — the default builtin)
+    graph_banner = _compose_mode_banner({"kind": "graph", "path": Path("/tmp/x.kgl")}, None)
+    assert _MODE_BANNER_MARKER in graph_banner
+    assert "graph" in graph_banner
+    assert "save_graph: not registered" in graph_banner
+    assert "repo_management" in graph_banner and "not in this mode" in graph_banner
+
+    # workspace mode — repo_management is the registered conditional tool
+    workspace_banner = _compose_mode_banner({"kind": "workspace", "path": Path("/tmp")}, None)
+    assert "repo_management: registered" in workspace_banner
+    assert "set_root_dir" not in workspace_banner.split("repo_management: registered")[0]
+
+    # local-workspace mode — set_root_dir is the registered conditional tool
+    local_banner = _compose_mode_banner({"kind": "local_workspace", "path": Path("/tmp")}, None)
+    assert "set_root_dir: registered" in local_banner
+    assert "repo_management" in local_banner and "not in this mode" in local_banner
+
+
+def test_i5_mode_banner_signals_save_graph_when_enabled() -> None:
+    """`builtins.save_graph: true` flips the banner's save_graph line
+    from "not registered (read-only)" to "registered. Call to persist
+    ...". Tests the write-mode signal — the second half of the
+    operator request paired with the mode signal."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kglite.mcp_server.server import _compose_mode_banner
+
+    fake_manifest = SimpleNamespace(builtins=SimpleNamespace(save_graph=True))
+    banner = _compose_mode_banner({"kind": "graph", "path": Path("/tmp/x.kgl")}, fake_manifest)
+    assert "save_graph: registered" in banner
+    assert "not registered" not in banner.split("save_graph: registered")[0]
+
+
+def test_i6_mode_banner_covers_remaining_modes() -> None:
+    """Mode-banner payloads exist for `source_root`, `watch`, and `bare`
+    too — not just the three graph-bearing modes. Pinned so a refactor
+    that drops one of them fails CI."""
+    from kglite.mcp_server.server import _MODE_BANNER_MARKER, _compose_mode_banner
+
+    source_root_banner = _compose_mode_banner({"kind": "source_root"}, None)
+    assert _MODE_BANNER_MARKER in source_root_banner
+    assert "source-root" in source_root_banner
+    assert "read_source" in source_root_banner
+    # The whole point of source_root mode: no graph tools registered.
+    assert "cypher_query" in source_root_banner and "not active" in source_root_banner
+
+    watch_banner = _compose_mode_banner({"kind": "watch"}, None)
+    assert _MODE_BANNER_MARKER in watch_banner
+    assert "watch" in watch_banner
+    # Graph IS registered in watch mode (rebuilt from source tree).
+    assert "cypher_query" in watch_banner and "registered" in watch_banner
+    # ...but save_graph is not — the graph is derived state, persisting
+    # would just be overwritten on the next rebuild.
+    assert "save_graph: not registered" in watch_banner
+
+    bare_banner = _compose_mode_banner({"kind": "bare"}, None)
+    assert _MODE_BANNER_MARKER in bare_banner
+    assert "bare" in bare_banner
+
+
 def test_s1_module_property_uniform_across_code_tree_node_types() -> None:
     """code_tree.build() populates a `module` property on Function /
     Class / Constant / Module / File nodes — the same dotted path

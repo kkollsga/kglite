@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mode banner in the MCP server's `instructions` block and
+  `graph_overview()` preamble.** Operators running several MCP servers
+  in parallel previously had no clean way to tell which conditional
+  tools (`repo_management`, `set_root_dir`, `save_graph`) were
+  registered in the current mode — agents were fingerprinting mode by
+  trial calls, burning context and turns. The Python entry
+  (`kglite.mcp_server.server`) now prepends a per-mode banner to both:
+
+  - the `instructions` block returned during MCP `initialize` (read
+    once at handshake), and
+  - the bare `graph_overview()` response preamble (re-read on each
+    call, survives context aging).
+
+  Banner names every conditional tool — both the registered ones AND
+  the unregistered ones — across all six modes (`graph`, `workspace`,
+  `local_workspace`, `source_root`, `watch`, `bare`), and flips the
+  `save_graph` line based on `builtins.save_graph`. Marker
+  `[kglite-mode]` identifies the segment for downstream tooling.
+
 ## [0.9.37] — 2026-05-17
 
 Post-0.9.36 operator-feedback batch. Four independent fixes from the

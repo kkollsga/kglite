@@ -99,6 +99,12 @@ graph.cypher("""
 
 A few attributes worth knowing when you paste `describe()` into a prompt:
 
+- **`kglite_version="…"`** on the root `<graph>` element (0.9.37+).
+  The KGLite version that produced the XML, sourced at compile time
+  from the running binary. Useful when the local `pip install kglite`
+  is on a different version from the MCP-server-side binary — the
+  schema you're reading is from the server's binary, not your local
+  one. Surface this if you see a schema/query mismatch.
 - **`id_alias="…"` / `title_alias="…"`** on a `<type>` element. Set
   when `add_nodes(...)` was called with a `unique_id_field` other
   than `"id"` (e.g. `"npdid"`) or a `node_title_field` other than

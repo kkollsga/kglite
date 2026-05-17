@@ -434,11 +434,44 @@ and serves it over a localhost HTTP server with CORS — agents can
 generate HTML artifacts that `fetch()` the CSV at runtime instead
 of hardcoding thousands of rows into the artifact source.
 
+### Mode banner — tell the agent which conditional tools are registered
+
+Whichever CLI mode the server is in
+(`--graph` / `--workspace` / `--watch` / `--source-root` / bare /
+local-workspace via manifest), the Python entry prepends a per-mode
+**banner** to two surfaces:
+
+- the `instructions` block returned during MCP `initialize` (read
+  once at handshake), and
+- the bare `graph_overview()` response preamble (re-read on every
+  call, survives context aging on long sessions).
+
+The banner names every conditional tool — both the registered ones
+and the unregistered ones — so the agent can see at a glance whether
+`repo_management`, `set_root_dir`, or `save_graph` are available
+without trial-calling each one. Example for workspace mode:
+
+```
+[kglite-mode] workspace (clone-and-activate)
+- repo_management: registered. Start with:
+    repo_management()             — list known repos
+    repo_management('org/repo')   — clone + activate
+- cypher_query / graph_overview: registered (operate on the active repo's graph).
+- save_graph / set_root_dir: not in this mode.
+```
+
+The `[kglite-mode]` marker identifies the segment for downstream
+tooling. Operator-declared `instructions:` / `overview_prefix:` text
+follows the banner unchanged.
+
 ### Mutable graphs
 
 `save_graph` is built in: when the manifest sets `builtins.save_graph: true`
 (single-graph mode), the tool registers automatically and persists
-post-mutation graph state to the source `.kgl` path.
+post-mutation graph state to the source `.kgl` path. The mode banner
+above flips its `save_graph` line from "not registered (read-only)"
+to "registered. Call to persist CREATE / SET / DELETE mutations."
+when this is on.
 
 ### Semantic search (`text_score()`)
 

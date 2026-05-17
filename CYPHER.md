@@ -823,6 +823,13 @@ graph.cypher("""
 """)
 ```
 
+> **Property existence:** the Neo4j-legacy `exists(n.prop)` form for
+> *property*-existence is **not** supported in KGLite. Use the modern
+> `WHERE n.prop IS NOT NULL` / `WHERE n.prop IS NULL` instead — those
+> are property-existence checks; `EXISTS { ... }` and `EXISTS((...))`
+> are *pattern*-existence checks. Writing `exists(n.prop)` returns a
+> parser error that points at the `IS NOT NULL` alternative.
+
 ## shortestPath()
 
 BFS shortest path between two nodes. Supports directed (`->`) and undirected (`-`) syntax:

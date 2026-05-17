@@ -225,7 +225,11 @@ async def _async_main(args: argparse.Namespace) -> None:
     fallback_name = _fallback_name(mode["kind"])
     server_name = args.name or (manifest.name if manifest else None) or fallback_name
     instructions = manifest.instructions if manifest else None
-    instructions = _compose_instructions(instructions)
+    # Banner first (runtime state — which conditional tools are
+    # registered in this mode), batch-load hint + operator text after.
+    # See `_compose_mode_banner` for the per-mode payload.
+    mode_banner = _compose_mode_banner(mode, manifest)
+    instructions = f"{mode_banner}\n\n{_compose_instructions(instructions)}"
 
     async with stdio_server() as (read_stream, write_stream):
         init_opts = server.create_initialization_options(
@@ -259,6 +263,69 @@ where <server-slug> is the substring between `mcp__` and the next
 `__` in this server's tool names (the key you used in your MCP
 client config). One ToolSearch call per server, not per tool.
 """
+
+
+_MODE_BANNER_MARKER = "[kglite-mode]"
+
+
+def _compose_mode_banner(mode: dict[str, Any], manifest: Any) -> str:
+    """Build a per-mode banner naming which conditional tools are
+    registered. Prepended to the `instructions` block on `initialize`
+    and to the bare `graph_overview()` response so the agent can see
+    at a glance whether `repo_management` / `set_root_dir` / `save_graph`
+    are available without probing.
+
+    Operator feedback 2026-05-17: with several MCP servers attached the
+    agent has no clean way to distinguish "tool not registered (wrong
+    mode)" from "tool failed", and ends up fingerprinting mode by trial.
+    """
+    kind = mode["kind"]
+    save_graph_enabled = bool(manifest and manifest.builtins and manifest.builtins.save_graph)
+    if kind == "graph":
+        path = mode.get("path")
+        path_hint = f" ({Path(path).name})" if path else ""
+        save_line = (
+            "- save_graph: registered. Call to persist CREATE / SET / DELETE mutations."
+            if save_graph_enabled
+            else "- save_graph: not registered (graph is read-only)."
+        )
+        return (
+            f"{_MODE_BANNER_MARKER} graph{path_hint}\n"
+            f"- cypher_query / graph_overview / read_code_source: registered.\n"
+            f"{save_line}\n"
+            "- repo_management / set_root_dir: not in this mode."
+        )
+    if kind == "workspace":
+        return (
+            f"{_MODE_BANNER_MARKER} workspace (clone-and-activate)\n"
+            "- repo_management: registered. Start with:\n"
+            "    repo_management()             — list known repos\n"
+            "    repo_management('org/repo')   — clone + activate\n"
+            "- cypher_query / graph_overview: registered (operate on the active repo's graph).\n"
+            "- save_graph / set_root_dir: not in this mode."
+        )
+    if kind == "local_workspace":
+        return (
+            f"{_MODE_BANNER_MARKER} local-workspace (fixed root, lateral swap)\n"
+            "- set_root_dir: registered. Use set_root_dir(path) to swap to "
+            "any subdir under the configured root.\n"
+            "- cypher_query / graph_overview: registered (operate on the active root's graph).\n"
+            "- save_graph / repo_management: not in this mode."
+        )
+    if kind == "source_root":
+        return (
+            f"{_MODE_BANNER_MARKER} source-root (file tools only, no graph)\n"
+            "- read_source / grep / list_source: registered.\n"
+            "- cypher_query / graph_overview / save_graph: not active (no graph)."
+        )
+    if kind == "watch":
+        return (
+            f"{_MODE_BANNER_MARKER} watch (code-tree graph rebuilt on file change)\n"
+            "- cypher_query / graph_overview: registered.\n"
+            "- save_graph: not registered (graph is derived from the source tree)."
+        )
+    # bare
+    return f"{_MODE_BANNER_MARKER} bare\n- Manifest-only / framework-default tools. No graph, no source root."
 
 
 def _compose_instructions(operator_instructions: str | None) -> str:
@@ -531,6 +598,9 @@ def _build_server(
 
     builtins = manifest.builtins if manifest else None
     save_graph_enabled = bool(builtins and builtins.save_graph)
+    # Banner for the bare `graph_overview()` preamble — same payload
+    # as the `initialize` instructions block, computed once at boot.
+    overview_mode_banner = _compose_mode_banner(mode, manifest)
     temp_cleanup_dir: Path | None = None
     if builtins and builtins.temp_cleanup_on_overview:
         if csv_http_cfg is not None:
@@ -868,13 +938,19 @@ def _build_server(
                 preprocessor=preprocessor,
             )
         elif name == "graph_overview":
+            # Echo the mode banner into the bare-call preamble so the
+            # mode/write-mode signal re-surfaces after the handshake
+            # `instructions` text ages out of context. Operator-supplied
+            # `overview_prefix:` text (if any) follows the banner.
+            op_prefix = manifest.overview_prefix if manifest else None
+            composed_prefix = f"{overview_mode_banner}\n\n{op_prefix}" if op_prefix else overview_mode_banner
             body = run_overview(
                 graph_state,
                 args.get("types"),
                 args.get("connections"),
                 args.get("cypher"),
                 temp_cleanup_dir,
-                overview_prefix=manifest.overview_prefix if manifest else None,
+                overview_prefix=composed_prefix,
             )
         elif name == "save_graph":
             body = run_save(graph_state)
