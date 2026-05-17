@@ -1887,6 +1887,33 @@ class KnowledgeGraph:
         """
         ...
 
+    def label_pair_counts(self) -> list[tuple[str, str, str, int]]:
+        """Return the label-pair edge-count cardinality cache.
+
+        Lists every ``(src_type, edge_type, tgt_type)`` triple present in
+        the graph along with its edge count. Backs the Cypher planner's
+        0.9.35 selectivity-aware ``reorder_match_clauses`` pass — picking
+        the more-selective driving side on label-skewed patterns by
+        consulting per-triple counts instead of edge-type totals.
+
+        Computed lazily: first access walks every edge once (O(E));
+        subsequent reads return a cached snapshot in O(triples)
+        (typically <100 entries). Edge mutations — Cypher ``CREATE`` /
+        ``DELETE``, Python ``add_connections`` — invalidate the cache.
+
+        Returns:
+            A list of 4-tuples ``[(src_type, edge_type, tgt_type, count), ...]``.
+            Order is hash-arbitrary; sort the result if a deterministic
+            row order matters.
+
+        Example:
+            ```python
+            for src, edge, tgt, count in graph.label_pair_counts():
+                print(f"{src} -[:{edge}]-> {tgt}: {count}")
+            ```
+        """
+        ...
+
     def explore(
         self,
         query: str,

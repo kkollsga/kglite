@@ -122,7 +122,7 @@ graph.cypher("""
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
 | **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args |
-| **CALL procedures** | Graph algorithms (`pagerank`, `betweenness`, `degree`, `closeness`, `louvain`, `label_propagation`, `connected_components`, `cluster`); structural validators (`orphan_node`, `self_loop`, `cycle_2step`, `missing_required_edge`, `missing_inbound_edge`, `duplicate_title`); `list_procedures` to enumerate. Map-syntax parameters: `CALL pagerank({damping_factor: 0.85})` |
+| **CALL procedures** | Graph algorithms (`pagerank`, `betweenness`, `degree`, `closeness`, `louvain`, `label_propagation`, `connected_components`, `cluster`); structural validators (`orphan_node`, `self_loop`, `cycle_2step`, `missing_required_edge`, `missing_inbound_edge`, `duplicate_title`); code-tree (`affected_tests` for transitive test impact); planner (`refresh_stats` for cardinality cache refresh); `list_procedures` to enumerate. Map-syntax parameters: `CALL pagerank({damping_factor: 0.85})` |
 | **Not supported** | `FOREACH`, variable-length path filters, `SET n:Label` (label mutation), multi-label |
 
 ## Structural-validator CALL procedures

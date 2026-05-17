@@ -11,8 +11,8 @@ ships with the connective tissue for AI agents — an MCP server so
 Claude / Cursor / any MCP-capable LLM can query your graph as a
 tool, a `describe()` method that emits a compact XML schema for
 system prompts, and a `code_tree` parser that turns any source
-directory into a graph of functions, classes, calls, and imports
-across 9 languages.
+directory into a graph of functions, classes, calls, imports,
+decorators, and web-framework routes across 10 languages.
 
 Three storage modes scale from in-memory (millisecond queries on
 small graphs) to mmap-backed on disk (1 B+ edges, Wikidata-scale).
@@ -30,9 +30,13 @@ Wikidata or petroleum-domain graph in one line.
   `sodir.open(path)` handle fetch, parallel build, and caching;
   re-runs reload the cached graph instantly.
 - **Codebase → graph in one line** — `kglite.code_tree.build(".")`
-  parses Python, Rust, TypeScript, Go, Java, C#, C++, and more
-  into `Function` / `Class` / `Module` nodes with `CALLS` /
-  `DEFINES` / `IMPORTS` edges.
+  parses Python, Rust, TypeScript, JavaScript, Go, Java, C#, C, C++,
+  and Swift into `Function` / `Class` / `Module` / `Route` nodes
+  with `CALLS` / `DEFINES` / `IMPORTS` / `DECORATES` / `HANDLES`
+  edges. Web-framework route detection ships for Flask, FastAPI,
+  and Django. `kg.explore(query)` does one-call codebase exploration;
+  `CALL affected_tests({files: [...]})` returns transitively-impacted
+  test files.
 - **Scales without leaving Python** — in-memory for prototyping,
   mmap-backed for notebook-scale, disk-mode CSR for graphs too
   large for RAM. Same API across modes.

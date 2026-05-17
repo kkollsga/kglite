@@ -352,7 +352,9 @@ kglite-mcp-server --graph conference.kgl
 
 Tools registered (visible in any MCP-aware agent):
 
-- `graph_overview`, `cypher_query`, `ping` — bundled
+- `graph_overview`, `cypher_query`, `save_graph`, `ping` — bundled
+- `read_code_source`, `explore` — bundled, code-tree-graph-aware
+  (0.9.31+ / 0.9.34+ respectively)
 - `read_source`, `grep`, `list_source` — from `source_root`
 - `similar_sessions` — inline Cypher
 - `session_detail` — inline Cypher
@@ -371,8 +373,9 @@ need to share state with the kglite-specific dispatch — build a
 *downstream binary* on top of the pure-Rust [`mcp-methods`](https://crates.io/crates/mcp-methods)
 crate. `kglite-mcp-server` itself is exactly that: a small Rust
 crate (see [`crates/kglite-mcp-server`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-mcp-server))
-that registers `cypher_query` / `graph_overview` / `save_graph` on
-top of the framework's source / GitHub / workspace surface.
+that registers `cypher_query` / `graph_overview` / `save_graph` /
+`read_code_source` / `explore` on top of the framework's source /
+GitHub / workspace surface.
 
 The shape (using mcp-methods 0.3.30+ from crates.io):
 

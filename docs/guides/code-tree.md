@@ -68,12 +68,76 @@ graph.toc("src/graph/mod.rs")
 | C# | `.cs` |
 | C | `.c`, `.h` |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` |
+| Swift | `.swift` |
 
 ## Graph Schema
 
-**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`
+**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`
 
-**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module), `USES_TYPE`, `EXPOSES` (Module→item)
+**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+
+### File → File IMPORTS (0.9.34+)
+
+In addition to File → Module IMPORTS, every parsed file emits direct
+File → File IMPORTS edges where the import string resolves against
+another project file. This drives impact-analysis queries:
+
+```python
+# Files reachable from a changed file via the import graph
+graph.cypher("""
+    MATCH (f:File {path: 'src/util.py'})<-[:IMPORTS*1..]-(impacted:File)
+    RETURN impacted.path
+""")
+```
+
+### Routes (0.9.34+)
+
+Decorator-driven URL routing is detected for **Flask**, **FastAPI**, and
+**Django**. Each route is a `Route` node carrying `path`, `method`, and
+`framework` properties, linked to its handler via `HANDLES`:
+
+```python
+graph.cypher("""
+    MATCH (r:Route {framework: 'flask'})-[:HANDLES]->(f:Function)
+    RETURN r.method AS m, r.path AS p, f.qualified_name AS handler
+""")
+```
+
+Django's lowercase `urlpatterns = [path('x/', view), ...]` lists are
+extracted from `urls.py`-shaped files. Method shortcuts
+(`@app.get(...)` etc.) and `methods=[...]` kwargs both expand into
+one Route per HTTP verb. Express, Axum, Rails and others land as
+follow-up PRs — each is one new file under `src/code_tree/builder/routes/`.
+
+### DECORATES (0.9.34+)
+
+Resolved decorator-to-decoratee edges from the raw
+`FunctionInfo.decorators` strings. Strips call-args (`@app.route('/x')`
+→ `app.route`) and the namespace prefix (`functools.wraps` → `wraps`),
+then resolves against the project's function set. Ambiguous bare names
+and unresolved (third-party) decorators are silently dropped — same
+policy as the call-edge resolver.
+
+### Cypher integration
+
+Two new procedures (0.9.34 / 0.9.35) target code-tree workflows:
+
+```cypher
+-- Which test files are affected by changing these source files?
+CALL affected_tests({files: ['src/util.py']}) YIELD test_file, depth
+RETURN test_file ORDER BY depth, test_file
+
+-- Refresh the label-pair cardinality cache (planner selectivity).
+CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count
+RETURN edge_type, sum(count) AS total ORDER BY total DESC
+```
+
+And the high-level `explore()` method composes lexical FTS + 2-hop
+traversal + grouped source slices into one call:
+
+```python
+md = graph.explore("authenticate", max_entities=10, include_source=True)
+```
 
 ## Qualified-name format
 
