@@ -78,6 +78,7 @@ Before starting any performance-related code changes:
 2. **Benchmark on in-memory graphs** — small/medium graphs (legal-scale) must not regress. This is the gate.
 3. **Measure after** — re-run the same benchmark after changes. Report before/after.
 4. **Disk benchmarks are secondary** — nice to show improvement, but never at the cost of in-memory.
+5. **Always build release-mode for perf measurement.** `maturin develop --release` (or `cargo build --release`); never compare against a debug build. Debug binaries are 10–100× slower with unpredictable per-test variance — any "regression" measured against a debug baseline is meaningless. CI's perf jobs run release; local perf gates must match.
 
 ## Key Patterns
 

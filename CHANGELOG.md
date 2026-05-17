@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.34] — 2026-05-17
+
+Code-graph expansion release: closes the feature gap with
+colbymchenry/codegraph in six commits — File→File IMPORTS edges,
+the `affected_tests` Cypher procedure, DECORATES edges, web-framework
+route extraction (Flask/FastAPI/Django), the `explore()` one-call
+codebase tool (pymethod + MCP), and a minimal Swift parser.
+
+Release-mode benchmark snapshot on a synthetic Flask-shaped package
+(saved as `release_0934` under `.benchmarks/`):
+
+| Surface | Median |
+|---|---|
+| `CALL affected_tests` | 2.3 µs |
+| `MATCH (Function)-[:DECORATES]->(Function)` | 6.0 µs |
+| `MATCH (Route)-[:HANDLES]->(Function)` | 8.8 µs |
+| `kg.explore(query)` with source slicing | 17.4 µs |
+| `code_tree.build()` end-to-end | 600 µs |
+
+Core in-memory benchmarks (`tests/benchmarks/test_bench_core.py`)
+were re-run release-mode against 0.9.33 and show no unambiguous
+regressions in code paths we changed. `add_nodes` / `add_connections`
+/ `save_v3` all measured within noise of baseline; the Cypher core
+medians shifted on some queries but well within 1 StdDev of the
+baseline. Future regressions in any of these surfaces will surface
+via `make bench-compare` against the saved `release_0934` baseline.
+
 ### Added (code_tree — Swift)
 
 - **Swift parser.** New `src/code_tree/parsers/swift.rs` via

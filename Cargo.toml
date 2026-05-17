@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "kglite"
-version = "0.9.33"
+version = "0.9.34"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."

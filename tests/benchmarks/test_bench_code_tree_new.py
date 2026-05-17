@@ -146,11 +146,7 @@ def test_bench_code_tree_build(benchmark, tmp_path):
 def test_bench_affected_tests(benchmark, synthetic_graph):
     """`CALL affected_tests` over the synthetic package."""
     g = synthetic_graph
-    benchmark(
-        lambda: g.cypher(
-            "CALL affected_tests({files: ['util.py']}) YIELD test_file RETURN test_file"
-        ).to_list()
-    )
+    benchmark(lambda: g.cypher("CALL affected_tests({files: ['util.py']}) YIELD test_file RETURN test_file").to_list())
 
 
 @pytest.mark.benchmark
@@ -175,8 +171,7 @@ def test_bench_route_query(benchmark, synthetic_graph):
     g = synthetic_graph
     benchmark(
         lambda: g.cypher(
-            "MATCH (r:Route)-[:HANDLES]->(f:Function) "
-            "RETURN r.method AS m, r.path AS p, f.name AS h ORDER BY p, m"
+            "MATCH (r:Route)-[:HANDLES]->(f:Function) RETURN r.method AS m, r.path AS p, f.name AS h ORDER BY p, m"
         ).to_list()
     )
 
@@ -187,7 +182,6 @@ def test_bench_decorates_query(benchmark, synthetic_graph):
     g = synthetic_graph
     benchmark(
         lambda: g.cypher(
-            "MATCH (d:Function)-[:DECORATES]->(f:Function) "
-            "RETURN d.name AS d, f.name AS f ORDER BY d, f"
+            "MATCH (d:Function)-[:DECORATES]->(f:Function) RETURN d.name AS d, f.name AS f ORDER BY d, f"
         ).to_list()
     )
