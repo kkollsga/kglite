@@ -829,7 +829,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("    <method sig=\"begin_read()\">Read-only transaction, O(1) cost (context manager).</method>\n");
     xml.push_str("  </group>\n");
 
-    xml.push_str("  <hint>Use describe(fluent=['traverse','where','spatial',...]) for detailed docs with examples.</hint>\n");
+    xml.push_str("  <hint>Use graph_overview(fluent=['traverse','where','spatial',...]) for detailed docs with examples.</hint>\n");
     xml.push_str("</fluent_api>\n");
 }
 
@@ -1341,6 +1341,6 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <item feature=\"SET n:Label / REMOVE n:Label\" workaround=\"SET n.type = 'NewType' to change node type\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");
-    xml.push_str("  <hint>Use describe(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
+    xml.push_str("  <hint>Use graph_overview(cypher=['MATCH','cluster','spatial',...]) for detailed docs with examples.</hint>\n");
     xml.push_str("</cypher>\n");
 }

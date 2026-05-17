@@ -432,7 +432,7 @@ class TestDescribe:
         root = ET.fromstring(large_schema_graph.describe())
         hint = root.find("hint")
         assert hint is not None
-        assert "describe" in hint.text
+        assert "graph_overview" in hint.text
 
     def test_large_graph_has_types_count(self, large_schema_graph):
         root = ET.fromstring(large_schema_graph.describe())
@@ -1100,9 +1100,9 @@ class TestTypeSearch:
         assert root.find("connections") is None
 
     def test_hint_guides_deeper(self, social_graph):
-        """Output should guide agent to describe(types=[...])."""
+        """Output should guide agent to graph_overview(types=[...])."""
         result = social_graph.describe(type_search="Person")
-        assert "describe(types=" in result
+        assert "graph_overview(types=" in result
 
     def test_capped_at_50(self, extreme_graph):
         """With many matches, should cap at 50."""

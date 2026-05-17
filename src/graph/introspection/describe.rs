@@ -407,7 +407,7 @@ fn write_connections_overview(xml: &mut String, graph: &DirGraph) {
     }
     if capped {
         xml.push_str(&format!(
-            "  <more count=\"{}\" hint=\"describe(connections=['TYPE']) for specific connection details\"/>\n",
+            "  <more count=\"{}\" hint=\"graph_overview(connections=['TYPE']) for specific connection details\"/>\n",
             total_conn - 50
         ));
     }
@@ -644,10 +644,10 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
     }
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation. Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
-    xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
-    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference, describe(fluent=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference, graph_overview(fluent=['topic']) for detailed docs.\"/>\n");
     if graph.graph.edge_count() > 0 {
-        xml.push_str("    <connections hint=\"describe(connections=True) for all connection types, describe(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
+        xml.push_str("    <connections hint=\"graph_overview(connections=True) for all connection types, graph_overview(connections=['TYPE']) for deep-dive with properties and samples.\"/>\n");
     }
     xml.push_str("    <temporal hint=\"valid_at(entity, date, 'from', 'to'), valid_during(entity, start, end, 'from', 'to') — temporal filtering on nodes/edges. NULL = open-ended.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report to reported_bugs.md.\"/>\n");
@@ -1141,7 +1141,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     xml.push_str(&type_strs.join(", "));
     if hidden > 0 {
         xml.push_str(&format!(
-            "\n    <more count=\"{}\" hint=\"describe(type_search='pattern') to find more\"/>",
+            "\n    <more count=\"{}\" hint=\"graph_overview(type_search='pattern') to find more\"/>",
             hidden
         ));
     }
@@ -1153,7 +1153,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     write_exploration_hints(&mut xml, graph, &conn_stats);
 
     xml.push_str(
-        "  <hint>Use describe(types=['TypeName']) for properties, samples. Use describe(connections=['CONN_TYPE']) for edge property stats and samples.</hint>\n",
+        "  <hint>Use graph_overview(types=['TypeName']) for properties, samples. Use graph_overview(connections=['CONN_TYPE']) for edge property stats and samples.</hint>\n",
     );
     xml.push_str("</graph>");
     xml
@@ -1246,7 +1246,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         conn_names.sort();
         conn_names.truncate(30);
         xml.push_str(&format!(
-            "  <connection_summary count=\"{}\" hint=\"counts not yet cached — use describe(connections=True) to populate\">\n",
+            "  <connection_summary count=\"{}\" hint=\"counts not yet cached — use graph_overview(connections=True) to populate\">\n",
             conn_type_count
         ));
         for ct in &conn_names {
@@ -1261,7 +1261,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         xml.push_str("  </connection_summary>\n");
     } else if edge_count > 0 {
         xml.push_str(&format!(
-            "  <connection_summary hint=\"{} edges present, use describe(connections=True) for details\"/>\n",
+            "  <connection_summary hint=\"{} edges present, use graph_overview(connections=True) for details\"/>\n",
             edge_count
         ));
     }
@@ -1270,8 +1270,8 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     xml.push_str("  <extensions>\n");
     xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), cluster (cluster)\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation.\"/>\n");
-    xml.push_str("    <cypher hint=\"Full Cypher with extensions. describe(cypher=True) for reference, describe(cypher=['topic']) for detailed docs.\"/>\n");
-    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. describe(fluent=True) for reference.\"/>\n");
+    xml.push_str("    <cypher hint=\"Full Cypher with extensions. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
+    xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference.\"/>\n");
     xml.push_str("    <bug_report hint=\"bug_report(query, result, expected, description) — file a Cypher bug report.\"/>\n");
     xml.push_str("    <indexing hint=\"Properties annotated indexed='eq' are O(log N) via MATCH (n:T {prop: value}); indexed='eq,prefix' also accelerate WHERE n.prop STARTS WITH 'x'. Prefer anchored queries over unanchored scans; the default Cypher deadline is 3 minutes (override per-call with timeout_ms or globally with set_default_timeout).\"/>\n");
     xml.push_str("  </extensions>\n");
@@ -1282,11 +1282,13 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         type_count
     ));
     xml.push_str(
-        "    describe(type_search='software')   — find types by name + see their connections\n",
+        "    graph_overview(type_search='software')   — find types by name + see their connections\n",
     );
-    xml.push_str("    describe(types=['software'])        — full detail: properties, samples\n");
     xml.push_str(
-        "    describe(connections=['P31'])        — connection detail: per-pair counts, properties, samples</search_hint>\n",
+        "    graph_overview(types=['software'])        — full detail: properties, samples\n",
+    );
+    xml.push_str(
+        "    graph_overview(connections=['P31'])        — connection detail: per-pair counts, properties, samples</search_hint>\n",
     );
     xml.push_str("</graph>");
     xml
@@ -1362,7 +1364,7 @@ fn build_focused_detail(
             let total = graph.type_indices.len();
             if total > 100 {
                 return Err(format!(
-                    "Node type '{}' not found. {} types in graph — use describe(type_search='{}') to search.",
+                    "Node type '{}' not found. {} types in graph — use graph_overview(type_search='{}') to search.",
                     t,
                     total,
                     t.to_lowercase()
@@ -1570,7 +1572,9 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
         xml.push_str("  </connected>\n");
     }
 
-    xml.push_str("  <hint>Use describe(types=['TypeName']) for properties + samples.</hint>\n");
+    xml.push_str(
+        "  <hint>Use graph_overview(types=['TypeName']) for properties + samples.</hint>\n",
+    );
     xml.push_str("</type_search>");
     xml
 }
