@@ -1070,7 +1070,8 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
     let mut xml = String::with_capacity(2048);
 
     xml.push_str(&format!(
-        "<graph nodes=\"{}\" edges=\"{}\">\n",
+        "<graph kglite_version=\"{}\" nodes=\"{}\" edges=\"{}\">\n",
+        env!("CARGO_PKG_VERSION"),
         graph.graph.node_count(),
         graph.graph.edge_count()
     ));
@@ -1170,8 +1171,12 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
     let conn_type_count = graph.connection_type_metadata.len();
 
     xml.push_str(&format!(
-        "<graph nodes=\"{}\" edges=\"{}\" types=\"{}\" connection_types=\"{}\">\n",
-        node_count, edge_count, type_count, conn_type_count
+        "<graph kglite_version=\"{}\" nodes=\"{}\" edges=\"{}\" types=\"{}\" connection_types=\"{}\">\n",
+        env!("CARGO_PKG_VERSION"),
+        node_count,
+        edge_count,
+        type_count,
+        conn_type_count
     ));
 
     xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
@@ -1294,7 +1299,8 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
     let mut xml = String::with_capacity(4096);
 
     xml.push_str(&format!(
-        "<graph nodes=\"{}\" edges=\"{}\">\n",
+        "<graph kglite_version=\"{}\" nodes=\"{}\" edges=\"{}\">\n",
+        env!("CARGO_PKG_VERSION"),
         graph.graph.node_count(),
         graph.graph.edge_count()
     ));
@@ -1380,7 +1386,10 @@ fn build_focused_detail(
         has_embeddings: false,
     };
     let mut xml = String::with_capacity(2048);
-    xml.push_str("<graph>\n");
+    xml.push_str(&format!(
+        "<graph kglite_version=\"{}\">\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     write_read_only_notice(&mut xml, graph);
 
     for t in types {

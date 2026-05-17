@@ -194,15 +194,21 @@ def test_describe_shape_parity(graphs):
     import re
 
     outs = {mode: graphs[mode].describe() for mode in STORAGE_MODES}
+
+    def extract_counts(xml: str) -> tuple[str, str] | None:
+        nodes = re.search(r'\bnodes="(\d+)"', xml)
+        edges = re.search(r'\bedges="(\d+)"', xml)
+        if not (nodes and edges):
+            return None
+        return (nodes.group(1), edges.group(1))
+
     ref = outs["memory"]
-    ref_header = re.search(r'<graph\s+nodes="(\d+)"\s+edges="(\d+)"', ref)
-    assert ref_header, "memory-mode describe() missing <graph nodes=... edges=...> header"
+    ref_header = extract_counts(ref)
+    assert ref_header, "memory-mode describe() missing nodes/edges attributes"
     for mode in ("mapped", "disk"):
-        m = re.search(r'<graph\s+nodes="(\d+)"\s+edges="(\d+)"', outs[mode])
-        assert m, f"{mode} describe() missing <graph> header"
-        assert m.groups() == ref_header.groups(), (
-            f"{mode} describe() header differs: {m.groups()} vs {ref_header.groups()}"
-        )
+        got = extract_counts(outs[mode])
+        assert got, f"{mode} describe() missing nodes/edges attributes"
+        assert got == ref_header, f"{mode} describe() header differs: {got} vs {ref_header}"
 
 
 def test_save_load_round_trip(graphs, tmp_path):

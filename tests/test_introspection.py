@@ -303,6 +303,15 @@ class TestDescribe:
         assert root.attrib["nodes"] == "3"
         assert root.attrib["edges"] == "3"
 
+    def test_root_includes_kglite_version(self, small_graph):
+        """<graph> opening tag advertises kglite_version so MCP callers can spot version-skew."""
+        root = ET.fromstring(small_graph.describe())
+        version = root.attrib.get("kglite_version")
+        assert version is not None and version, (
+            f"<graph> missing kglite_version attribute; got attrs={dict(root.attrib)}"
+        )
+        assert version[0].isdigit(), f"kglite_version {version!r} doesn't look like a version string"
+
     def test_conventions_present(self, small_graph):
         root = ET.fromstring(small_graph.describe())
         conv = root.find("conventions")
