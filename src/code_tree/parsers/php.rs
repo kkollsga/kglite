@@ -730,13 +730,16 @@ impl LanguageParser for PhpParser {
         let file_namespace = extract_file_namespace(root, source_bytes);
         let module_path = file_namespace.unwrap_or(path_default_module);
 
+        let filename = filepath
+            .file_name()
+            .and_then(|o| o.to_str())
+            .unwrap_or("")
+            .to_string();
+        let is_test =
+            crate::code_tree::parsers::shared::is_test_path(&rel_path, &filename, &["Test.php"]);
         let mut file_info = FileInfo {
             path: rel_path.clone(),
-            filename: filepath
-                .file_name()
-                .and_then(|o| o.to_str())
-                .unwrap_or("")
-                .to_string(),
+            filename,
             loc: source.lines().count() as u32,
             module_path: module_path.clone(),
             language: "php".to_string(),
@@ -744,7 +747,7 @@ impl LanguageParser for PhpParser {
             imports: Vec::new(),
             exports: Vec::new(),
             annotations: None,
-            is_test: rel_path.to_lowercase().contains("test"),
+            is_test,
             skip_reason: None,
         };
 

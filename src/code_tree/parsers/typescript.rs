@@ -1045,9 +1045,8 @@ impl LanguageParser for JstsParser {
             ".test.mjs",
             ".spec.mjs",
         ];
-        let is_test = test_suffixes.iter().any(|s| filename.ends_with(s))
-            || rel_path.contains("/__tests__/")
-            || rel_path.starts_with("__tests__/");
+        let is_test =
+            crate::code_tree::parsers::shared::is_test_path(&rel_path, &filename, &test_suffixes);
 
         if let Some(reason) = is_generated_or_minified(&source) {
             let mut r = ParseResult::new();

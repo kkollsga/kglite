@@ -24,6 +24,33 @@ fn has_annotation_keyword(source: &[u8]) -> bool {
     ac.is_match(source)
 }
 
+/// Strict test-file detection shared across language parsers.
+///
+/// Returns true when the file is plausibly a test file. Two signals:
+/// - `filename` ends with one of the language-specific `suffix_patterns`
+///   (e.g. `.test.ts`, `Tests.swift`, `Test.php`).
+/// - Any segment of `rel_path` is a conventional test directory:
+///   `test`, `tests`, `__tests__`, `spec`, `specs`.
+///
+/// Path-segment-aware so we don't false-positive on names like
+/// `latest.html`, `contest.css`, or `protest.swift` — the previous
+/// `rel_path.to_lowercase().contains("test")` check did. Standard Go
+/// (`*_test.go`) and Python (`test_*.py` / `*_test.py`) detection lives
+/// inside their respective parsers because the conventions are specific
+/// enough that this helper isn't a good fit.
+pub fn is_test_path(rel_path: &str, filename: &str, suffix_patterns: &[&str]) -> bool {
+    if suffix_patterns.iter().any(|s| filename.ends_with(s)) {
+        return true;
+    }
+    let normalised = rel_path.replace('\\', "/");
+    for segment in normalised.split('/') {
+        if matches!(segment, "test" | "tests" | "__tests__" | "spec" | "specs") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Extract the UTF-8 text of a tree-sitter node.
 #[inline]
 pub fn node_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
