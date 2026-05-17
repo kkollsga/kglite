@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (code_tree — languages)
+
+- **PHP language parser** (`.php`). Full coverage of classes, interfaces,
+  traits, methods, functions, constants, `use` imports, namespace
+  declarations (backslash separator), and PHP-8 attributes
+  (`#[Route('/x')]`) → DECORATES edges via the 0.9.34 pass. Trait
+  declarations land as ClassInfo `kind="trait"` (matching the Rust-trait
+  encoding). The `resolve_owner` helper in `builder/type_edges.rs`
+  gained `\` to its separator list so HAS_METHOD edges resolve correctly
+  on PHP qnames.
+
+- **HTML language parser** (`.html`/`.htm`). God-HTML-file ready:
+  emits new `Element` nodes for headings (h1-h6), elements with `id`,
+  and `<form action=...>` shapes. Restraint built in — decorative
+  `<div>`/`<span>`/`<p>` elements without `id` stay parse noise.
+  `Element -[HAS_CHILD]-> Element` edges form the document outline.
+  Inline `<script>...</script>` blocks are parsed by the existing JS
+  sub-parser; resulting Functions get full CALLS-edge analysis with
+  qnames scoped to `<file>:script_<n>.` so multi-block helpers don't
+  collide. `<script src="...">` and `<link rel="stylesheet" href="...">`
+  populate FileInfo.imports → File→File IMPORTS edges.
+
+- **CSS language parser** (`.css`). Emits `Selector` nodes (one per
+  `rule_set` regardless of selector-list count — `.foo, .bar, .baz` is
+  ONE node, not three), CSS custom properties (`--my-color: red`) as
+  ConstantInfo with `kind="css_custom_property"`, and `@import url(...)`
+  / `@import "..."` → FileInfo.imports. `@media` / `@supports` / `@layer`
+  / generic at-rules are unwrapped — their nested rule_sets emit normal
+  Selector nodes. Regression guard: CSS files never emit Function or
+  Class nodes.
+
+- **`Element` and `Selector` node types**. Two new graph-schema node
+  types introduced alongside the HTML and CSS parsers. The graph's
+  dynamic schema picks them up automatically; planner caches
+  (`label_pair_counts`, `refresh_stats`) enumerate them like any other
+  type.
+
+Language count: 10 → 13. See `docs/guides/code-tree.md` for the full
+node-type list, the god-HTML-file workflow, and the CSS design-token
+discovery query.
+
 ## [0.9.35] — 2026-05-17
 
 AgensGraph-inspired planner/lookup improvements. Three commits land:

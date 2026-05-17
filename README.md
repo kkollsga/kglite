@@ -12,7 +12,7 @@ Claude / Cursor / any MCP-capable LLM can query your graph as a
 tool, a `describe()` method that emits a compact XML schema for
 system prompts, and a `code_tree` parser that turns any source
 directory into a graph of functions, classes, calls, imports,
-decorators, and web-framework routes across 10 languages.
+decorators, and web-framework routes across 13 languages.
 
 Three storage modes scale from in-memory (millisecond queries on
 small graphs) to mmap-backed on disk (1 B+ edges, Wikidata-scale).
@@ -31,12 +31,16 @@ Wikidata or petroleum-domain graph in one line.
   re-runs reload the cached graph instantly.
 - **Codebase → graph in one line** — `kglite.code_tree.build(".")`
   parses Python, Rust, TypeScript, JavaScript, Go, Java, C#, C, C++,
-  and Swift into `Function` / `Class` / `Module` / `Route` nodes
-  with `CALLS` / `DEFINES` / `IMPORTS` / `DECORATES` / `HANDLES`
-  edges. Web-framework route detection ships for Flask, FastAPI,
-  and Django. `kg.explore(query)` does one-call codebase exploration;
-  `CALL affected_tests({files: [...]})` returns transitively-impacted
-  test files.
+  Swift, PHP, HTML, and CSS into `Function` / `Class` / `Module` /
+  `Route` / `Element` (HTML headings + sections + forms) /
+  `Selector` (CSS rules) nodes with `CALLS` / `DEFINES` / `IMPORTS` /
+  `DECORATES` / `HANDLES` / `HAS_CHILD` edges. Web-framework route
+  detection ships for Flask, FastAPI, and Django. HTML god-file
+  workflows are first-class: inline `<script>` blocks are parsed as
+  JS so their functions get CALLS edges, and the document outline
+  surfaces as Element nodes connected via HAS_CHILD. `kg.explore(query)`
+  does one-call codebase exploration; `CALL affected_tests({files: [...]})`
+  returns transitively-impacted test files.
 - **Scales without leaving Python** — in-memory for prototyping,
   mmap-backed for notebook-scale, disk-mode CSR for graphs too
   large for RAM. Same API across modes.

@@ -69,12 +69,66 @@ graph.toc("src/graph/mod.rs")
 | C | `.c`, `.h` |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` |
 | Swift | `.swift` |
+| PHP | `.php` |
+| HTML | `.html`, `.htm` |
+| CSS | `.css` |
 
 ## Graph Schema
 
-**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`
+**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`, `Element` (HTML), `Selector` (CSS)
 
-**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item, incl. File→Element / File→Selector for HTML/CSS), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `HAS_CHILD` (Element→Element, document outline), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+
+### Web-stack node types (0.9.36+)
+
+PHP fits the existing OOP schema cleanly (classes, interfaces, traits,
+methods, functions, constants, namespaces). HTML and CSS, which aren't
+OOP, get two new node types:
+
+**`Element`** (HTML) — emitted only for elements with semantic interest.
+Restraint is built in to keep god-HTML graphs navigable: every other
+`<div>`/`<span>`/`<p>` stays parse noise. Three kinds:
+
+- `kind="heading"` — `<h1>`–`<h6>`. `name` = the heading text.
+- `kind="section"` — any element with an `id` attribute. `name` = the id.
+- `kind="form"` — `<form>` elements with an `action` attribute.
+  Carries `action` + `method` properties.
+
+`Element -[HAS_CHILD]-> Element` edges form the document outline:
+nested headings under sections, sections inside `<main>`, etc.
+Edge name avoids reserved Cypher keyword `CONTAINS`.
+
+```cypher
+-- Document outline for an HTML page
+MATCH (f:File {path: 'index.html'})-[:DEFINES]->(root:Element)
+WHERE NOT (()-[:HAS_CHILD]->(root))
+RETURN root.tag, root.name
+```
+
+Inline `<script>` blocks are parsed by the JS sub-parser — Functions
+defined inside get full CALLS-edge analysis. Their qualified names are
+scoped to `<file>:script_<n>.` so god-HTML files with multiple inline
+helpers named `helper()` don't collide.
+
+**`Selector`** (CSS) — one node per `rule_set`. Selector-list rules
+`.foo, .bar, .baz` emit ONE node named `.foo, .bar, .baz` (not three),
+keeping real stylesheets bounded by source rather than by selector-list
+combinatorics. CSS custom properties (`--my-color: red`) are emitted
+separately as `ConstantInfo` rows with `kind="css_custom_property"` —
+useful for design-token discovery.
+
+```cypher
+-- Design tokens across all stylesheets
+MATCH (c:Constant {kind: 'css_custom_property'})
+RETURN c.name, c.value_preview ORDER BY c.name
+```
+
+HTML `<script src=...>` / `<link rel="stylesheet" href=...>` and CSS
+`@import` populate `FileInfo.imports`, surfacing as File → File IMPORTS
+edges where the target module path matches. Deferred: `<a href>`
+navigation, `<style>` inline blocks, `@keyframes` / `@font-face` as
+structural nodes, `var(--foo)` reference edges, HTML class-attribute
+↔ CSS class-selector cross-language joins.
 
 ### File → File IMPORTS (0.9.34+)
 
