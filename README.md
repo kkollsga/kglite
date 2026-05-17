@@ -51,6 +51,28 @@ Wikidata or petroleum-domain graph in one line.
   back as DataFrames. End-to-end walkthrough in the
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).
 
+## How it compares
+
+|                                            | KGLite                            | Kuzu                       | NetworkX           | rustworkx          | Neo4j Embedded         |
+|--------------------------------------------|-----------------------------------|----------------------------|--------------------|--------------------|------------------------|
+| **Install**                                | `pip install kglite`              | `pip install kuzu`         | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
+| **Query language**                         | Cypher (subset)                   | Cypher (full)              | Python API         | Python API         | Cypher (full)          |
+| **Storage**                                | in-mem · mmap · disk (1B+ edges)  | in-mem · disk (columnar)   | in-mem             | in-mem             | in-mem · disk (JVM)    |
+| **Bulk-load from pandas**                  | one-liner                         | via Arrow                  | manual             | manual             | via driver             |
+| **Bundled MCP server for LLM agents**      | ✅                                 | —                          | —                  | —                  | —                      |
+| **`describe()` schema for LLM prompts**    | ✅                                 | —                          | —                  | —                  | —                      |
+| **Codebase → graph parser**                | 13 languages, route detection     | —                          | —                  | —                  | —                      |
+| **Bundled public datasets**                | Wikidata, Sodir                   | —                          | toy graphs only    | —                  | —                      |
+| **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
+
+**Pick KGLite** when you want Cypher + Python ergonomics + LLM-agent
+plumbing in one wheel. **Pick Kuzu** for full openCypher coverage and
+analytical OLAP throughput. **Pick NetworkX** when you need its
+enormous graph-algorithm library and your data fits in RAM. **Pick
+rustworkx** when you want NetworkX's API in Rust with no query
+language. **Pick Neo4j Embedded** when you've standardised on
+server-mode Cypher and want the in-process driver for tests.
+
 ## Quick Start
 
 ```bash
@@ -270,6 +292,11 @@ The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
 directory has runnable, self-contained artifacts covering each of the
 use cases above:
 
+- **[`codebase_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)**
+  — clone a famous open-source repo, parse it into a code knowledge
+  graph, run a few Cypher queries, then register a workspace MCP
+  server in Claude Desktop so the agent can `repo_management('org/repo')`
+  any GitHub repo on demand. End-to-end in ~50 lines.
 - **[`open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)**
   — annotated workspace-mode manifest for the
   github-clone-tracker pattern: agent calls

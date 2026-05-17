@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.39] — 2026-05-18
+
+### Fixed
+
+- **`code_tree` route detector: tuple-form `methods=(...)` no longer
+  leaks parens into `Route.method` and `Route.id`.** Flask's own
+  tutorial uses `@app.route('/x', methods=('GET', 'POST'))` (tuple),
+  not the list form. Before the fix, `parse_methods_list` only stripped
+  `[`/`]` brackets, so methods came out as `("GET` / `POST")` and ids
+  as `flask::("GET::/register`. Now accepts list `[...]`, tuple `(...)`,
+  and bare-string forms. Regression covered by
+  `tests/test_code_tree_routes.py::test_flask_route_methods_tuple_form`
+  and Rust unit tests in `src/code_tree/builder/routes/mod.rs`.
+
+### Added
+
+- **`kglite.mcp_server.claude_config`** — standalone Python helpers for
+  managing MCP server entries across Claude clients:
+  `list_mcps` / `get_mcp` / `add_mcp` / `edit_mcp` / `delete_mcp`, plus
+  `default_path(client)`. Supports `client="claude_desktop"` (platform-
+  aware path to `claude_desktop_config.json`), `client="claude_code"`
+  (`~/.claude.json`), `client="vscode"` (`./.vscode/mcp.json` — writes
+  the `servers` key with `type: stdio` instead of `mcpServers`), and
+  arbitrary `path="/custom/config.json"`. Mutations are atomic
+  (write-tmp + `os.replace`) and preserve every other top-level key
+  in the config — important because `claude_desktop_config.json` also
+  stores `preferences`, scheduled-task flags, etc. that must not be
+  clobbered. `dry_run=True` returns the would-be entry without
+  touching disk. `add_mcp` / `edit_mcp` default
+  `resolve_command=True`: bare binary names are resolved to absolute
+  paths via `shutil.which` at write time, so the entry survives Claude
+  Desktop's minimal-PATH subprocess environment (avoids the silent
+  "server doesn't start" mode where the bare name isn't on Claude's
+  launch PATH). Pass `resolve_command=False` for Docker shims or
+  wrapper scripts.
+- **`examples/codebase_to_claude_mcp.ipynb`** — end-to-end notebook:
+  clone a famous open-source repo, parse it into a code knowledge
+  graph, run a few Cypher queries, then register a workspace MCP
+  server in Claude Desktop (via the new `claude_config` helpers) so
+  the agent can `repo_management('org/repo')` any GitHub repo on
+  demand.
+
+### Changed
+
+- **README: new "How it compares" section** positioning KGLite vs Kuzu,
+  NetworkX, rustworkx, and Neo4j Embedded — install, query language,
+  storage, pandas bulk-load, MCP server, `describe()`, code_tree,
+  bundled datasets, and license.
+- **LICENSE: normalised to the canonical MIT template** (3-paragraph
+  grant, straight ASCII quotes). No legal change; the previous text
+  was condensed enough that GitHub's licensee auto-detector misread it
+  as MIT-0. Detection should flip back to `mit` on the next push.
+
 ## [0.9.38] — 2026-05-17
 
 ### Added

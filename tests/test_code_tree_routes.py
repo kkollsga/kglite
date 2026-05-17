@@ -74,6 +74,39 @@ def test_flask_route_decorator(tmp_path):
     } <= {(r["method"], r["path"], r["handler"]) for r in rows}, rows
 
 
+def test_flask_route_methods_tuple_form(tmp_path):
+    """Regression: Flask's own tutorial uses `methods=("GET", "POST")` (tuple),
+    not the list form. Before the parens fix the parser left them in the
+    parsed method strings (`("GET`, `POST")`) which also corrupted Route ids."""
+    pkg = _make_pkg(
+        tmp_path,
+        {
+            "auth.py": """
+            class _Flask:
+                def route(self, *a, **k): return lambda fn: fn
+
+            app = _Flask()
+
+            @app.route('/register', methods=('GET', 'POST'))
+            def register():
+                return 'ok'
+            """,
+        },
+    )
+    g = build(str(pkg))
+    rows = g.cypher(
+        """
+        MATCH (r:Route {framework: 'flask'})-[:HANDLES]->(f:Function)
+        RETURN r.method AS method, r.path AS path, f.name AS handler
+        ORDER BY method
+        """
+    ).to_list()
+    assert {
+        ("GET", "/register", "register"),
+        ("POST", "/register", "register"),
+    } == {(r["method"], r["path"], r["handler"]) for r in rows}, rows
+
+
 def test_flask_method_shortcut_decorators(tmp_path):
     pkg = _make_pkg(
         tmp_path,

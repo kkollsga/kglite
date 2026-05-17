@@ -190,14 +190,16 @@ pub(super) fn keyword_arg<'a>(args: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-/// Parse a Python list-of-strings literal like `"['GET', 'POST']"` into
-/// owned uppercased strings. Single-element forms work either with or
-/// without brackets.
+/// Parse a Python collection-of-strings literal into owned uppercased
+/// strings. Accepts list `['GET', 'POST']`, tuple `('GET', 'POST')`, and
+/// bare-string `'GET'` forms — Flask's own tutorial uses the tuple
+/// shape, so without it the parens leak into the parsed methods.
 pub(super) fn parse_methods_list(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     let inner = trimmed
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
+        .or_else(|| trimmed.strip_prefix('(').and_then(|s| s.strip_suffix(')')))
         .unwrap_or(trimmed);
     let mut out = Vec::new();
     for piece in inner.split(',') {
@@ -213,4 +215,39 @@ pub(super) fn parse_methods_list(raw: &str) -> Vec<String> {
 /// HANDLES edge. Keeps a parsable shape if anyone wants to split it.
 pub(super) fn make_route_id(framework: &str, method: &str, path: &str) -> String {
     format!("{framework}::{method}::{path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_methods_list;
+
+    #[test]
+    fn list_form() {
+        assert_eq!(parse_methods_list("['GET', 'POST']"), vec!["GET", "POST"]);
+        assert_eq!(
+            parse_methods_list(r#"["GET", "POST"]"#),
+            vec!["GET", "POST"]
+        );
+    }
+
+    #[test]
+    fn tuple_form() {
+        // Regression: Flask's own tutorial uses `methods=("GET", "POST")`.
+        // Without paren-stripping the methods came out as `("GET` / `POST")`.
+        assert_eq!(
+            parse_methods_list(r#"("GET", "POST")"#),
+            vec!["GET", "POST"]
+        );
+        assert_eq!(parse_methods_list("('get', 'post')"), vec!["GET", "POST"]);
+    }
+
+    #[test]
+    fn bare_string() {
+        assert_eq!(parse_methods_list("'GET'"), vec!["GET"]);
+    }
+
+    #[test]
+    fn lowercase_uppercased() {
+        assert_eq!(parse_methods_list("['get', 'post']"), vec!["GET", "POST"]);
+    }
 }
