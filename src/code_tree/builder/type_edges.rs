@@ -192,7 +192,12 @@ fn namespace_of(qname: &str) -> String {
 }
 
 fn resolve_owner(qualified_name: &str, name_to_qname: &HashMap<String, String>) -> String {
-    for sep in ["::", "."] {
+    // Separator ordering matters — match the longest specific separator
+    // first so `App\Foo::method` (cross-PHP-namespace static call) finds
+    // `::` before falling through to `\`. `\` (single backslash) is
+    // PHP's namespace separator and was added in 0.9.36 alongside the
+    // PHP parser.
+    for sep in ["::", ".", "\\"] {
         if let Some(idx) = qualified_name.rfind(sep) {
             let owner = &qualified_name[..idx];
             let simple = owner

@@ -11,6 +11,7 @@ fn get_separator(language: &str) -> &'static str {
     match language {
         "rust" | "cpp" => "::",
         "python" | "java" | "csharp" => ".",
+        "php" => "\\",
         _ => "/",
     }
 }
