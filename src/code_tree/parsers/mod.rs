@@ -5,6 +5,7 @@
 
 pub mod cpp;
 pub mod csharp;
+pub mod css;
 pub mod go;
 pub mod html;
 pub mod java;
@@ -72,6 +73,7 @@ pub const EXTENSION_MAP: &[(&str, &str)] = &[
     ("php", "php"),
     ("html", "html"),
     ("htm", "html"),
+    ("css", "css"),
 ];
 
 /// Look up a language identifier for a file path by extension.
@@ -173,6 +175,7 @@ pub fn get_parser(language: &str) -> Option<Box<dyn LanguageParser + Send + Sync
         "swift" => Some(Box::new(swift::SwiftParser::new())),
         "php" => Some(Box::new(php::PhpParser::new())),
         "html" => Some(Box::new(html::HtmlParser::new())),
+        "css" => Some(Box::new(css::CssParser::new())),
         _ => None,
     }
 }
