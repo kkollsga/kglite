@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.37] — 2026-05-17
+
+Post-0.9.36 operator-feedback batch. Four independent fixes from the
+sodir-prospect / legal / open-source MCP session:
+
+### Added
+
+- **`kglite_version` in `graph_overview()` header.** Every `<graph>`
+  opening tag now carries a `kglite_version="…"` attribute sourced at
+  compile time from `Cargo.toml`. Makes client-side ↔ server-side
+  version skew obvious at first inspection (previously a silent failure
+  mode — schema rendered by one version while subsequent queries
+  routed to another). Visible in all four graph-overview shapes:
+  small / medium / large / extreme inventories *and* the focused-detail
+  XML returned by `graph_overview(types=[…])`.
+
+### Changed
+
+- **Agent-facing hints now name the MCP tool, not the Python method.**
+  The XML emitted by `describe()` / `graph_overview()` is overwhelmingly
+  consumed by AI agents via the `graph_overview` MCP tool, but every
+  inline hint pointed at `describe(connections=…)`,
+  `describe(types=…)`, etc. — agents following the hint hit a wall
+  because there is no `describe` MCP tool. Renamed all agent-facing
+  hints from `describe(…)` to `graph_overview(…)` in `describe.rs`
+  and `topics.rs`. The Python method `KnowledgeGraph.describe(…)` is
+  unchanged; the single doc-entry that documents that Python signature
+  also stays as-is.
+
+### Fixed
+
+- **`is_test` no longer false-positives on names like `latest.html`,
+  `contest.css`, `protest.swift`.** The HTML / CSS / Swift / PHP
+  parsers used `rel_path.to_lowercase().contains("test")` — a loose
+  substring check that misclassified every file containing the four
+  letters anywhere in its path. Introduced
+  `parsers::shared::is_test_path(rel_path, filename, suffix_patterns)`
+  which (a) checks language-specific filename suffixes, (b) checks
+  for full path segments equal to `test` / `tests` / `__tests__` /
+  `spec` / `specs`. No substring matches. TypeScript also gained
+  recognition of `test/` and `tests/` directories (previously only
+  `__tests__/` was honoured). Go and Python keep their own narrow
+  detectors (`*_test.go`, `test_*.py` / `*_test.py`) — too specific
+  for the shared helper.
+
+- **`exists(n.prop)` now steers callers to `IS NOT NULL`.** KGLite
+  implements the modern pattern-existence forms
+  (`EXISTS { (n)-[:R]->() }` and `EXISTS((n)-[:R]->())`) but not the
+  Neo4j legacy property-existence form `exists(n.prop)`. The previous
+  error message pointed at the pattern syntax — sending operators down
+  the wrong rabbit hole when they actually wanted
+  `WHERE n.prop IS NOT NULL`. Parser now peeks the three tokens after
+  `exists(`; when they look like `<ident> . <ident>`, the error
+  explicitly labels the legacy syntax, recommends `IS NOT NULL`, and
+  also names the supported pattern-existence alternatives. Other
+  malformed `exists(…)` calls keep an expanded generic message
+  covering both alternatives.
+
 ## [0.9.36] — 2026-05-17
 
 Web-stack language expansion: closes the biggest remaining language
