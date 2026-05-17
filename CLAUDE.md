@@ -1,198 +1,120 @@
 # KGLite — Claude Code Conventions
 
-## Build & Test
+## Build & test
 
 ```bash
 source .venv/bin/activate && unset CONDA_PREFIX
-maturin develop              # build Rust extension into venv
+maturin develop --release    # release build; required for any perf measurement
 make test                    # Rust + Python tests
-make lint                    # fmt --check + clippy (always run before pushing)
+make lint                    # fmt + clippy + ruff format/check + mypy stubtest; run before pushing
 ```
+
+`make lint` covers the full CI gate. If you run pieces by hand, both
+`cargo fmt --check` and `ruff format --check` matter — CI gates on the
+`--check` variants separately from the auto-fix variants.
 
 ## Architecture
 
-- **Rust core** (`src/`): `KnowledgeGraph` with `#[pymethods]` via PyO3, `petgraph` storage.
-- **Cypher engine** (`src/graph/languages/cypher/`): parser → AST → executor. Phase 8 moved this under the `languages/` umbrella; a future `languages/fluent/` is a peer for the Rust-side fluent-chain surface.
-- **Shared query primitives** (`src/graph/core/`): pattern matching, filtering, traversal, iterators — used by Cypher and the fluent API.
+- **Rust core** (`src/`): `KnowledgeGraph` exposed to Python via PyO3, `petgraph` storage.
+- **Cypher engine** (`src/graph/languages/cypher/`): parser → AST → planner → executor.
+- **Shared query primitives** (`src/graph/core/`): pattern matching, filtering, traversal — used by both Cypher and the fluent API.
 - **Python package** (`kglite/`): thin wrapper + `code_tree/` (tree-sitter codebase parsing).
-- **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs — update when changing `#[pymethods]`.
-- **Introspection** (`src/graph/introspection.rs`): `describe()` XML schema for AI agents.
+- **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs.
+- **Introspection** (`src/graph/introspection/`): `describe()` XML schema for agents.
 
-## Storage Modes & Optimization Priority
+## In-memory is the core product
 
-KGLite has three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed columns), and `Disk` (CSR + mmap). **In-memory is the core product.** Disk/mapped are addons for large-graph exploration (e.g., Wikidata).
+Three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed columns), `Disk` (CSR + mmap). The disk modes are addons for large-graph exploration (Wikidata-scale). When optimisation conflicts arise, **in-memory wins** — never regress in-memory perf to protect disk safety. Add disk-specific workarounds gated on storage mode or graph size instead.
 
-**When optimizing, in-memory wins every time.** If an optimization helps both in-memory and disk, great. If there's a conflict (e.g., adding overhead to the hot path to protect against disk-scale explosions), find a disk-specific workaround instead. Never regress in-memory performance for disk safety.
+The Cypher planner/executor is shared across all modes. Changes to `core/pattern_matching.rs` or `languages/cypher/executor.rs` affect everyone — benchmark on small in-memory graphs before merging.
 
-- Small graphs (legal, code, domain): ~100K–500K nodes, all in-memory, full scans are fast (<10 ms). Don't add guardrails that penalize these.
-- Large graphs (Wikidata): 100M+ nodes, disk-backed, full scans are catastrophic. Safeguards needed but must be gated behind storage mode or graph-size thresholds.
-- Cypher query planner/executor is shared across all modes. Any changes to `core/pattern_matching.rs` or `languages/cypher/executor.rs` affect everyone — benchmark on small graphs before merging.
+## Code health
 
-## Code health — incremental compartmentalization
+Each pass through a file should leave it more compartmentalised than you found it.
 
-Each pass through a file should leave it more robust, more compartmentalized,
-and easier to extend than you found it. The codebase should get **better** as
-we work, not just bigger.
+- Factor a function when it grows past ~80 lines or starts handling 3+ unrelated concerns. Prefer small named strategy fns dispatched by the caller over long if/else chains.
+- Fixing a bug — scan for the *class* of bug. The reported symptom is rarely the only one; probe with scratch fixtures before declaring scope.
+- A new feature is a chance to extract a helper that's been wanted elsewhere. Don't over-design, don't pass it up either.
+- Don't add a parameter/branch/flag without checking whether the existing structure should be reshaped to absorb it.
 
-- When a function grows past ~80 lines or starts handling 3+ unrelated
-  concerns, factor it before adding more. Prefer a list of small named
-  strategy fns dispatched by the caller over one long if/else chain — adding
-  a new case becomes one new fn, not a new branch in a god function.
-- When fixing a bug, scan for the *class* of bug — same root cause in nearby
-  code paths. The reported symptom is rarely the only one. Probe with scratch
-  fixtures before declaring scope.
-- A new feature/fix is a chance to extract a helper that's been wanted
-  elsewhere. Don't over-design, but don't pass up the opportunity either.
-- Don't add a parameter, branch, or flag without checking whether the
-  existing structure should be reshaped to absorb it cleanly.
+### Cypher planner passes
 
-### Cypher planner: when adding or changing a pass
+The optimiser pipeline lives at `src/graph/languages/cypher/planner/mod.rs` as `const PASSES: &[(&str, PassFn)]` — single source of truth for order and naming. When adding or changing a pass:
 
-The optimizer pipeline lives at `src/graph/languages/cypher/planner/mod.rs`
-as a `const PASSES: &[(&str, PassFn)]` registry — one source of truth
-for ordering, naming, and what runs in what order. When adding or
-changing a pass:
+1. **Implement** in the appropriate sub-module (`fusion.rs`, `simplification.rs`, …) or a new file for fresh concerns.
+2. **Register** in `PASSES` with a unique stable name (user-facing via `disabled_passes=[...]`).
+3. **Doc-comment** the wrapper fn: precondition, pattern matched, rewrite, why-bail.
+4. **Add a query** to `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` exercising the trigger shape. Passes not in the corpus aren't trusted.
+5. **Bisect divergences** with `scripts/cypher_pass_bisect.py` before assuming a query is wrong.
 
-1. **Implement** the pass in its appropriate sub-module (`fusion.rs`,
-   `simplification.rs`, etc.) or a new file if it's a fresh concern.
-2. **Register** it in `PASSES` with a unique stable name (the name is
-   user-facing via `disabled_passes=[...]`).
-3. **Doc-comment** the wrapper fn with: precondition, pattern matched,
-   rewrite, why-bail. The doc-comments next to the existing wrappers
-   are the format to follow.
-4. **Add at least one query** to
-   `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` that
-   exercises the pass's trigger shape. The differential harness is the
-   regression mechanism — passes not in the corpus aren't trusted.
-5. **Bisect any divergence** the harness reports with
-   `scripts/cypher_pass_bisect.py` before assuming a query is wrong.
+The differential corpus is *the* mechanism preventing silent correctness regressions — every fix to an optimiser bug lands its triggering query into the corpus as part of the fix commit.
 
-The differential corpus is *the* mechanism to prevent silent
-correctness regressions. Every fix to an optimizer bug lands its
-triggering query into the corpus as part of the fix commit.
+## Performance protocol
 
-## Performance Work Protocol
+Before any perf-related change:
 
-Before starting any performance-related code changes:
-1. **Baseline first** — write a benchmark covering all code paths being touched. Run it, record numbers.
-2. **Benchmark on in-memory graphs** — small/medium graphs (legal-scale) must not regress. This is the gate.
-3. **Measure after** — re-run the same benchmark after changes. Report before/after.
-4. **Disk benchmarks are secondary** — nice to show improvement, but never at the cost of in-memory.
-5. **Always build release-mode for perf measurement.** `maturin develop --release` (or `cargo build --release`); never compare against a debug build. Debug binaries are 10–100× slower with unpredictable per-test variance — any "regression" measured against a debug baseline is meaningless. CI's perf jobs run release; local perf gates must match.
-6. **pytest-benchmark hygiene for microsecond-scale benches.** On M-series macOS the single-run median for a sub-millisecond bench can drift 2× on the same binary across runs (thermal throttling, page-cache state, background processes). A flagged regression is not real until it's reproduced under tightened conditions:
-   - `--benchmark-min-rounds=100` minimum (200 for sub-10-µs benches).
+1. **Baseline first** — write/extend a benchmark covering touched code paths. Run it, record numbers.
+2. **Release mode only.** `maturin develop --release`. Never trust debug-build numbers; per-test variance is unbounded.
+3. **Trust `min` over `median`** for sub-millisecond benches. Median pulls upward with system load; min reflects best-case throughput.
+4. **Tighten the harness for noisy benches**:
+   - `--benchmark-min-rounds=100` (200 for sub-10-µs benches).
    - `--benchmark-warmup=on --benchmark-warmup-iterations=20`.
-   - 30-second sleep between baseline and comparison runs so thermals settle.
-   - **Trust `min` over `median`** for sub-millisecond benches. The min represents the best-case throughput when no background work interferes; median pulls upward proportional to system load. Treat `median` deltas as suggestive, `min` deltas as authoritative.
-   - Re-measure twice on the suspect commit before declaring a regression. If the second measurement disagrees with the first, you're looking at variance, not a code change.
+   - 30-second sleep between baseline and comparison runs (thermal settle).
+   - Re-measure twice on the suspect commit. If runs disagree, you're seeing variance, not a regression.
+5. **In-memory is the gate.** Disk-mode benchmarks are nice-to-have but never at the cost of in-memory.
 
-## Key Patterns
+## Key patterns
 
-- PyO3: `&self` for read-only, return `PyResult<Py<PyAny>>`, use `Python::attach()`.
-- Use `.cast::<T>()` not `.downcast::<T>()` (deprecated in pyo3 0.27+).
-- **All `#[pymethods] impl` blocks live under `src/graph/pyapi/`.** Private `impl KnowledgeGraph` helpers stay in `src/graph/mod.rs` (pub(crate) when called from pyapi). The `#[pyclass]` *struct attribute* may stay with the struct definition where the data model lives — this applies to `KnowledgeGraph` itself (in `src/graph/mod.rs`) and `ResultView` (in `src/graph/languages/cypher/result_view.rs` / `pyapi/result_view.rs`). The rule is about where PyO3 *method implementations* live, not struct declarations.
-- Value conversion: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
+- **PyO3**: `&self` for read-only methods; return `PyResult<Py<PyAny>>`; wrap blocking work in `Python::attach()`. Use `.cast::<T>()`, not `.downcast::<T>()` (deprecated in pyo3 0.27+).
+- **`#[pymethods]` location**: all method blocks live under `src/graph/pyapi/`. Private helpers stay in `src/graph/mod.rs` as `pub(crate)`. The `#[pyclass]` *struct attribute* may stay with the struct definition.
+- **Value conversion**: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
+- **Storage traits**: reads on `GraphRead`, mutations on `GraphWrite: GraphRead` (both in `src/graph/storage/mod.rs`). Add new storage ops to the trait first. `GraphRead` is non-object-safe (GATs on iterator methods) — use `&impl GraphRead` everywhere, never `&dyn`. Iterator-returning trait methods declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
+- **Transactions stay on `DirGraph`**, not in the trait surface (`version`, `read_only`, `schema_locked`, validation helpers).
+- **No back-compat shims, no `#[deprecated]`.** Obsoleted code is deleted in the same PR as its replacement.
+- **Parity oracles** at `tests/test_storage_parity.py`, `tests/test_phase{1,2,3}_parity.py` (gated by `pytest -m parity`) must stay green after any backend-touching change.
 
-## Storage-backend work
+## When changing a `#[pymethods]` function — the five-place checklist
 
-- **Reads go on `GraphRead`, mutations on `GraphWrite: GraphRead`.** Add new storage ops to the trait first, not as inherent `GraphBackend` methods. Both traits live in `src/graph/storage/mod.rs`.
-- **Transactions stay on `DirGraph`.** OCC `version`, `read_only`, `schema_locked`, and validation helpers are not trait surface — they're DirGraph-inherent.
-- **No shims / no `#[deprecated]`.** Obsoleted code gets deleted in the same PR as its replacement. Clean break for 0.8.0.
-- **`&impl GraphRead` / `&mut impl GraphWrite` everywhere.** Phase 3 added GATs to every iterator-returning method on `GraphRead`, which makes the trait non-object-safe. `&dyn GraphRead` does not compile; use `&impl GraphRead` (monomorphised) for every consumer. Iterator-returning methods must declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
-- **Parity oracles**: `tests/test_storage_parity.py`, `tests/test_phase1_parity.py`, `tests/test_phase2_parity.py`, `tests/test_phase3_parity.py`. Gated behind `pytest -m parity`. Must stay green after any backend-touching change.
-
-## When Changing a `#[pymethods]` Function
-
-1. `src/graph/pyapi/kg_methods.rs` (or domain file under `pyapi/`) — implementation
-2. `kglite/__init__.pyi` — type stub + docstring
-3. `src/graph/introspection/*.rs` — `describe()` output (if agent-facing)
-4. `crates/kglite-mcp-server/src/tools.rs` — MCP tool wrapper (if agent-facing)
-5. `CHANGELOG.md` — `[Unreleased]` section
+1. `src/graph/pyapi/*.rs` — implementation.
+2. `kglite/__init__.pyi` — type stub + docstring.
+3. `src/graph/introspection/*.rs` — `describe()` output, if agent-facing.
+4. `crates/kglite-mcp-server/src/tools.rs` — MCP tool wrapper, if agent-facing.
+5. `CHANGELOG.md` `[Unreleased]` — user-visible changes only.
 
 ## Documentation
 
 Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on every push to `main`.
 
-- **API reference**: auto-generated from docstrings in `kglite/__init__.pyi`
-- **Cypher reference**: edit `CYPHER.md`
-- **Fluent API reference**: edit `FLUENT.md`
-- **Guide content**: edit `docs/guides/*.md`
-- **README.md**: landing page only — do not duplicate guide content here
+- **API reference**: auto-generated from `kglite/__init__.pyi` docstrings.
+- **Cypher reference**: `CYPHER.md`.
+- **Fluent API reference**: `FLUENT.md`.
+- **Guide content**: `docs/guides/*.md`.
+- **README.md**: landing page only — don't duplicate guide content.
 
-## Commits & Releases
+## Commits & releases
 
-Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`)
+Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
 
-Update `CHANGELOG.md` `[Unreleased]` for user-visible changes. Skip for internal refactors, CI, test-only, formatting.
+**NEVER push — the user pushes manually.** Version source of truth: `Cargo.toml` line 3.
 
-**NEVER push — the user pushes manually.** Before a release:
-1. Confirm version number with user (bump patch +0.0.1)
-2. Update `Cargo.toml` version + promote changelog
-3. Commit, then let the user push
+### One version bump per push
 
-Version source of truth: `Cargo.toml` line 3.
+A version isn't "released" until the user pushes. If a `release(x.y.z): ...` commit is already local, fold any follow-up work into the same `[x.y.z]` CHANGELOG block — amend or extend the release commit, don't add a new `release(x.y.z+1): ...` on top.
 
-### Avoid double version bumps between pushes
+Check before bumping:
 
-**A version is not "released" until the user has pushed.** Until the
-push happens, every local commit is in flight — including any version
-bump already committed locally. If you start a follow-up plan before
-the operator pushes, **fold its changes into the same pending version
-bump** rather than minting a new one.
-
-Concretely: if you commit `release(0.9.35): ...` locally and the user
-then asks for more changes before pushing, those changes go under the
-existing `[0.9.35]` CHANGELOG block. Amend or extend the release
-commit if necessary; don't add a separate `release(0.9.36): ...`
-commit on top. The 0.9.34 → 0.9.35 → push cycle in this repo was the
-counter-example: two version bumps shipped together because the
-operator hadn't pushed yet — should have been one 0.9.35 release.
-
-Check before starting any version-bump work:
 ```bash
 git log origin/main..HEAD --oneline | grep -E "^\w+ release\("
 ```
-If that returns a commit, the previous "release" is still local — keep
-the version number it picked and roll new work into the same
-`[Unreleased]` → `[x.y.z]` block. Only mint a new version after a
-clean `git push` to origin.
 
-### Standard plan procedure (multi-phase work)
+If that returns a commit, keep the version it picked. Only mint a new version after a clean push to origin.
 
-When a plan has multiple phases (Step 1 / 2 / 3 / …), follow this rhythm:
+### Multi-phase plans
 
-1. **Commit after each phase.** Each completed phase is its own commit
-   (`feat: ...`, `refactor: ...`, etc.). Don't bundle Phase 1's code with
-   Phase 2's tests — that defeats bisectability when something regresses.
-2. **Version bump and push happen together, at the very end.** Don't bump
-   `Cargo.toml` after each phase. After all phases land as separate
-   commits, the FINAL commit promotes `[Unreleased]` → `[x.y.z]` in the
-   CHANGELOG and bumps `Cargo.toml`. The user pushes once.
-3. **Each phase must compile + lint + test green before its commit.**
-   `cargo build --lib`, `make lint`, and the relevant test suite all pass
-   before phase commit; if a phase is "scaffolding only" (e.g. adding
-   pyo3 classes that aren't called from Python yet), at minimum the
-   build + lint gate still applies.
-4. **Don't pause for review between phases — keep going to the end.**
-   Once the plan is approved, execute every phase straight through:
-   commit, mark the task done, start the next phase. The final commit
-   is the version bump + push. Don't ask "should I continue?" after a
-   phase — that defeats the point of an approved plan. The only reason
-   to stop mid-plan is a genuine blocker (failing test you can't fix,
-   architectural surprise that invalidates a later step).
-5. **End every multi-phase plan with a performance gate.** Before the
-   final release commit, add (or extend) a benchmark that covers the
-   new functionality and run it. Then re-run an existing in-memory
-   benchmark on the same fixture pre/post — the rule from the
-   "Performance Work Protocol" section applies even when no phase was
-   explicitly perf-focused, because compound changes are how
-   regressions creep in. Record the numbers in the release commit
-   message (or the `[x.y.z]` CHANGELOG block) so future bisects know
-   what was measured. If a regression appears, fix it before the
-   release commit, not in a follow-up.
+When a plan has Steps 1 / 2 / 3 / …:
 
-Rationale: clean per-phase commits make `git bisect` useful when the
-operator (or CI) flags a regression days later. Bundling phases into one
-big commit is the wrong default — the only exception is when phases are
-genuinely indivisible (e.g. a rename that touches both definition and
-all call sites).
+1. **One commit per phase.** Bisectability beats batched commits. Each phase's code + tests in its own `feat:` / `refactor:` / etc.
+2. **Each phase must be green before its commit** — `cargo build --lib`, `make lint`, and the relevant test suite all pass.
+3. **Keep going to the end.** Once a plan is approved, don't pause between phases. The only mid-plan stops are genuine blockers (failing test you can't fix, architectural surprise invalidating a later step).
+4. **End with a perf gate.** Before the final release commit, run new + existing benchmarks per the Performance protocol above. Record numbers in the release commit message or `[x.y.z]` CHANGELOG block. Fix regressions before the release commit, not in a follow-up.
+5. **Final commit is the version bump + CHANGELOG promotion.** No earlier phase touches `Cargo.toml`. User pushes once.
