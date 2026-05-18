@@ -20,37 +20,43 @@ structural validators that compose with Cypher.
 > Desktop. Closes with a screenshot of Claude calling `repo_management`
 > → `graph_overview` → `cypher_query` against the live graph.
 
-## What goes in the graph?
+## Use cases
 
-Pick any of these — the agent-facing surface above is the same.
+KGLite is shape-agnostic — the agent-facing surface is the same
+whether the graph holds your legal precedents, a Wikidata slice,
+your SQL warehouse, a RAG corpus, or a parsed codebase.
 
-- 📂 **Your codebase.** `kglite.code_tree.build(".")` parses Python,
-  Rust, TypeScript, Go, Java, C#, C/C++, Swift, PHP, HTML, CSS into
-  `Function` / `Class` / `Module` / `Route` nodes with
-  `CALLS` / `HANDLES` / `IMPORTS` / `DECORATES` edges. Web-framework
-  route detection ships for Flask, FastAPI, Django.
-  **→ Walk through the full *codebase → Claude Desktop* workflow in
-  [the notebook](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
-  · See the [code analysis guide](https://kglite.readthedocs.io/en/latest/guides/code-tree.html).**
-- 📊 **Your structured data.** Any tabular source — pandas DataFrames,
-  CSVs, SQL query results, Parquet, REST API responses — goes straight
+- 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
+  regulatory rules, medical ontologies, manufacturing BOMs, scientific
+  catalogues — anything with structure becomes a queryable graph an
+  MCP-capable agent can reason over. See the
+  [legal-graph example](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)
+  for a Norwegian-Supreme-Court walk-through (laws + decisions +
+  citation edges + judge metadata).
+- 📊 **Business data → queryable graph.** Any tabular source — SQL,
+  CSV, Parquet, REST API responses, pandas DataFrames — goes straight
   in via `add_nodes(df, ...)` and `add_connections(df, ...)`. Layer a
-  graph on top of your warehouse and the agent reasons over your
-  business data without you writing a server. **→
+  graph on top of your warehouse and the agent reasons over the
+  relationships without you writing a server. **→
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).**
-- 🌐 **A public dataset, in one line.** `wikidata.open(path)` and
+- 🌐 **Public datasets, one line.** `wikidata.open(path)` and
   `sodir.open(path)` handle the *fetch + build + cache* cycle. Run
   Cypher queries on a billion-edge Wikidata graph from a 16 GB
   laptop — mapped/disk storage means you can operate and query
   datasets that won't fit in RAM. **→ See
   [Bundled datasets](#bundled-datasets) below.**
-- 📚 **A legal / regulatory corpus.** Laws + sections + court decisions
-  + citations + judge metadata in one graph. Combine `text_score()`
-  vector similarity over court-decision summaries with Cypher
-  traversal of the citation network — *"find cases semantically
+- 📚 **RAG with structure.** Documents, chunks, entities, and the
+  edges between them in one graph. Combine `text_score()` vector
+  similarity with Cypher traversal — *"find court cases semantically
   similar to my fact pattern, then walk one hop to related
   precedents"* — hybrid retrieval in one query, no second vector DB.
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html).**
+- 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 13
+  languages into Function / Class / Module / Route nodes with
+  web-framework route detection (Flask, FastAPI, Django). See the
+  [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
+  for the full code → Claude Desktop workflow. **→
+  [Code analysis guide](https://kglite.readthedocs.io/en/latest/guides/code-tree.html).**
 
 ## How it compares
 

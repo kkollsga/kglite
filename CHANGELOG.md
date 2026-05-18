@@ -32,9 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **README refocused around the agent-first pitch.** Tagline now reads
   *"Knowledge graph for Python, built for LLM agents."* The four use
   cases (codebase / DataFrames / public datasets / RAG corpus) are
-  reframed as a single `What goes in the graph?` section instead of
-  competing pitches scattered across `Why KGLite?` + `Use Cases` +
-  `Key Features`. Notebook callout promoted to a banner-style H3 and
+  reframed as a single `Use cases` section (five bullets covering
+  domain knowledge for agents, business data, public datasets, RAG,
+  and codebase analysis) instead of competing pitches scattered
+  across `Why KGLite?` + `Use Cases` + `Key Features`. Notebook callout promoted to a banner-style H3 and
   also linked inline under the codebase use case (visible twice in the
   first 30 lines). `Use Cases` consolidated into a tighter `Recipes`
   section (MCP serve, hybrid retrieval, structural validators, graph
