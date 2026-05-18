@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **README: new top-level `Serve it to an agent` section** between
+  Quick Start and Bundled datasets. Three subsections covering the
+  progressive disclosure of MCP capability: one-command (`kglite-mcp-server --graph X.kgl`),
+  YAML manifest customisation (`source_root`, `extensions.embedder`,
+  inline Cypher tools — with a worked example), and bundled skills
+  (`.skills/*.md` files that teach agents how to use the tools, with
+  `applies_when:` predicates so only relevant methodology activates).
+- **README intro tightened** — dropped the long run-on with install
+  instructions baked in; pitch is now four short lines.
+- **README use-case fixes**: "Your pandas DataFrames" widened to
+  *"Your structured data"* (covers SQL / CSV / Parquet / REST → graph);
+  Wikidata claim corrected (the headline is *operate/query a
+  billion-edge graph on a 16 GB laptop*, not "loads in 7 minutes" —
+  build is ~90 min, reload is <10 s); RAG bullet rewritten with a
+  concrete legal-corpus example (laws + court decisions + citations,
+  semantic-similar cases → walk to related precedents) instead of a
+  generic "document corpus."
+
 - **README refocused around the agent-first pitch.** Tagline now reads
   *"Knowledge graph for Python, built for LLM agents."* The four use
   cases (codebase / DataFrames / public datasets / RAG corpus) are

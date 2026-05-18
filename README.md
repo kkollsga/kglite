@@ -5,13 +5,10 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-KGLite is an embedded, Cypher-queryable knowledge graph for Python that
-ships with the connective tissue for AI agents: a bundled MCP server,
-a `describe()` method that emits a system-prompt-shaped schema, and
-structural validators that compose with Cypher. `pip install kglite` +
-`kglite-mcp-server --graph X.kgl` is enough to point Claude / Cursor /
-any MCP-capable agent at any graph you build. Full docs at
-**[kglite.readthedocs.io](https://kglite.readthedocs.io)**.
+KGLite is an embedded, Cypher-queryable knowledge graph for Python,
+built so you can hand it to an LLM agent. It ships with a bundled MCP
+server, a `describe()` method that emits a system-prompt-shaped schema,
+and structural validators that compose with Cypher.
 
 > ### 🚀 See it end-to-end: codebase → Claude in ~50 lines
 >
@@ -33,18 +30,25 @@ Pick any of these — the agent-facing surface above is the same.
   **→ Walk through the full *codebase → Claude Desktop* workflow in
   [the notebook](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   · See the [code analysis guide](https://kglite.readthedocs.io/en/latest/guides/code-tree.html).**
-- 📊 **Your pandas DataFrames.** `add_nodes(df, ...)` and
-  `add_connections(df, ...)` pull DataFrames straight in. Mix in a
-  Cypher query whose RETURN columns become new edges. **→
+- 📊 **Your structured data.** Any tabular source — pandas DataFrames,
+  CSVs, SQL query results, Parquet, REST API responses — goes straight
+  in via `add_nodes(df, ...)` and `add_connections(df, ...)`. Layer a
+  graph on top of your warehouse and the agent reasons over your
+  business data without you writing a server. **→
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).**
 - 🌐 **A public dataset, in one line.** `wikidata.open(path)` and
-  `sodir.open(path)` handle the *fetch + build + cache* cycle.
-  Billion-edge Wikidata loads on a laptop in under 7 minutes. **→ See
+  `sodir.open(path)` handle the *fetch + build + cache* cycle. Run
+  Cypher queries on a billion-edge Wikidata graph from a 16 GB
+  laptop — mapped/disk storage means you can operate and query
+  datasets that won't fit in RAM. **→ See
   [Bundled datasets](#bundled-datasets) below.**
-- 📚 **A document corpus for RAG.** Documents, chunks, and entities
-  live in one graph. Combine `text_score()` vector similarity with
-  Cypher structure for hybrid retrieval — no second vector DB. **→
-  [Semantic Search guide](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html).**
+- 📚 **A legal / regulatory corpus.** Laws + sections + court decisions
+  + citations + judge metadata in one graph. Combine `text_score()`
+  vector similarity over court-decision summaries with Cypher
+  traversal of the citation network — *"find cases semantically
+  similar to my fact pattern, then walk one hop to related
+  precedents"* — hybrid retrieval in one query, no second vector DB.
+  **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html).**
 
 ## How it compares
 
@@ -119,6 +123,58 @@ loaded = kglite.load("my_graph.kgl")
 [Cypher reference](https://kglite.readthedocs.io/en/latest/guides/cypher.html) ·
 [API reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html).**
 
+## Serve it to an agent
+
+Three levels of effort, three levels of capability.
+
+### 1. One command — any `.kgl` becomes an MCP server
+
+```bash
+kglite-mcp-server --graph path/to/graph.kgl
+```
+
+The server exposes `cypher_query`, `graph_overview`, schema
+introspection, structural validators, and source-file tools over MCP
+stdio. Drop it into Claude Desktop / Cursor / any MCP-capable client
+and your graph is queryable. Works on every graph kglite can build —
+your own, Wikidata, Sodir, code-tree.
+
+### 2. Customise with a YAML manifest
+
+Drop `<basename>_mcp.yaml` next to the graph (e.g. `wikidata_mcp.yaml`
+beside `wikidata.kgl`) and the server auto-loads it at boot.
+
+```yaml
+name: Wikidata Explorer
+source_root: /path/to/related/source        # exposes read/grep/list
+extensions:
+  embedder: { kind: fastembed, model: bge-small }   # enables text_score()
+  csv_http_server: true                              # bulk CSV exports
+tools:                                               # inline parameterised Cypher
+  - name: who_invented
+    cypher: |
+      MATCH (i:Q5)-[:P61]->(t {label:$thing})
+      RETURN i.label LIMIT 5
+```
+
+No fork required for most customisation. **→
+[MCP server guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html).**
+
+### 3. Teach the agent with bundled skills
+
+Markdown skill files (`<basename>.skills/*.md`) ship methodology for
+each tool. The agent reads `cypher_query.md` at session start to learn
+your schema conventions, `read_code_source.md` to know when to drill
+into source vs. query the graph, etc. Three layers compose:
+kglite-bundled defaults + your project's `.skills/` overrides +
+operator-declared domain packs. Skills with `applies_when:` predicates
+only activate when the graph contains the relevant node types — so a
+non-code graph never sees `read_code_source` methodology.
+
+Net effect: the agent comes pre-loaded with how to use your graph,
+rather than discovering it through trial-and-error. **→
+[AI Agents guide](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html).**
+
 ## Bundled datasets
 
 Two wrappers turn well-known public sources into queryable graphs
@@ -167,22 +223,6 @@ the canonical schema.
 ## Recipes
 
 Short patterns for the most-common shapes. Each is self-contained.
-
-### Serve the graph over MCP
-
-`kglite-mcp-server` is a Python console-script entry point — no Rust
-toolchain, no PyO3 env vars, no conda env handling.
-
-```bash
-kglite-mcp-server --graph path/to/graph.kgl
-```
-
-Drop a `<basename>_mcp.yaml` next to the graph to extend the tool
-surface — `source_root:` for read/grep/list over your source files,
-inline Cypher templates as named tools, `extensions.embedder` for
-`text_score()`, `extensions.cypher_preprocessor` for query rewriting.
-**→ [MCP server guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html) ·
-[AI Agents guide](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html).**
 
 ### Hybrid semantic + structural retrieval
 
