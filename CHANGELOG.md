@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.41] — 2026-05-18
+
+### Changed
+
+- **`[mcp]` extras removed. MCP server runtime is now a default dep.**
+  `pip install kglite` ships everything needed to run `kglite-mcp-server`
+  out of the box: `mcp`, `pyyaml`, `aiohttp`, `watchdog` (~6 MB
+  combined). No more extras-dance for Claude Desktop / Cursor / any
+  MCP client. The old `[mcp]` name was confusing (it bundled the MCP
+  runtime with the embedder), and after Phase 2's `mcp-methods` wheel
+  drop the remaining runtime footprint was small enough to default-
+  ship. **Breaking**: `pip install 'kglite[mcp]'` no longer resolves;
+  use `pip install kglite`. People who used `[mcp]` for semantic
+  search should now use `[embed]` (see below).
+- **New `[embed]` extra for semantic search.** `pip install 'kglite[embed]'`
+  pulls `fastembed>=0.4` (and ~97 MB of transitives: onnxruntime,
+  tokenizers, pillow, huggingface-hub). Required for `text_score()`
+  semantic Cypher and the `extensions.embedder` manifest extension.
+  Niche use case, hence opt-in. Same ONNX backend as before, same
+  `~/.cache/fastembed/` model cache.
+- Notebook + README install instructions updated to the new flat
+  `pip install kglite` shape. Old `[mcp]` references in
+  `dev-documentation/mediumpost.md` swapped too.
+
+- **`mcp-methods` PyPI wheel no longer a runtime dependency.** Skill
+  loading routes through new `kglite._mcp_internal.SkillRegistry` /
+  `kglite._mcp_internal.Skill` pyo3 wrappers (in `src/mcp_tools.rs`),
+  which delegate to `mcp_methods::server::SkillRegistry::from_manifest`
+  added in the upstream Rust crate at 0.3.38. Drops ~16 MB of upstream
+  wheel + bundled binary from `[mcp]` extras (~93 MB → ~77 MB). No
+  orchestration logic on kglite's side — upstream stays canonical.
+  Behaviour is byte-identical against
+  `tests/test_mcp_server_python_entry.py -k skill` (5 passing) and
+  against `examples/open_source_workspace_mcp.yaml` end-to-end (5
+  framework skills load, `provenance` strings format exactly as the
+  prior pyo3 wheel did: `"project"` / `"bundled"` /
+  `"domain_pack:<path>"`). `kglite/mcp_server/skills_loader.py`
+  swapped the `import mcp_methods` to `from kglite import _mcp_internal`;
+  pyproject.toml dropped `mcp-methods>=0.3.36` from `[mcp]` extras;
+  Cargo.toml pinned `mcp-methods` floor to `0.3.38` for the new
+  `Registry::from_manifest` helper.
+
+- **`examples/codebase_to_claude_mcp.ipynb` polish (no API change):**
+  - Drop the gratuitous `str(ws.root)` — `code_tree.build()` already
+    accepts `os.PathLike`. The notebook now reads `build(ws.root)`.
+  - The `REPO =` comment clarifies storage modes: in-memory (default)
+    handles repos up to millions of LoC; Wikidata-scale graphs need
+    `kglite.KnowledgeGraph(storage="disk", path=…)`.
+  - Requirements line corrected to `pip install kglite` — the notebook
+    itself doesn't pull any `[mcp]`-only deps (verified by import).
+    `pip install 'kglite[mcp]'` is now framed as the env Claude Desktop
+    uses to spawn `kglite-mcp-server`, not a notebook requirement.
+
 ## [0.9.40] — 2026-05-18
 
 ### Added

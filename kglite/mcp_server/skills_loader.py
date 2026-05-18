@@ -213,7 +213,7 @@ def merge_skills(
 
 
 def _framework_skill_to_local(fw_skill: Any) -> Skill:
-    """Convert a `mcp_methods.Skill` (pyo3) into our local dataclass.
+    """Convert a `kglite._mcp_internal.Skill` (pyo3) into our local dataclass.
     Handles the framework's `applies_when` dict shape on the way in."""
     aw_dict = fw_skill.applies_when
     applies_when: AppliesWhen | None = None
@@ -241,17 +241,22 @@ def _framework_skill_to_local(fw_skill: Any) -> Skill:
 
 def load_framework_skills(manifest_path: Path) -> list[Skill]:
     """Load framework defaults + project layer + operator-declared
-    paths via mcp_methods.SkillRegistry.from_manifest. Returns an
-    empty list when the manifest disables skills (`skills: false`
-    or absent) — the framework registry yields no entries in that
-    case."""
+    paths via `kglite._mcp_internal.SkillRegistry.from_manifest`. Returns
+    an empty list when the manifest disables skills (`skills: false` or
+    absent) — the framework registry yields no entries in that case.
+
+    0.9.40+: dropped the dependency on the `mcp_methods` PyPI wheel.
+    `kglite._mcp_internal` is built from `src/mcp_tools.rs` and
+    delegates to `mcp_methods::server::SkillRegistry::from_manifest`
+    (mcp-methods 0.3.38 Rust crate) — same orchestration upstream
+    ships, no kglite-side replica."""
     try:
-        import mcp_methods
+        from kglite import _mcp_internal as mcp_internal
     except ImportError:
-        log.warning("mcp_methods Python wheel not installed; skipping framework skills")
+        log.warning("kglite._mcp_internal not built; skipping framework skills")
         return []
     try:
-        registry = mcp_methods.SkillRegistry.from_manifest(str(manifest_path))
+        registry = mcp_internal.SkillRegistry.from_manifest(str(manifest_path))
     except Exception as e:  # noqa: BLE001
         log.warning("SkillRegistry.from_manifest failed: %s", e)
         return []

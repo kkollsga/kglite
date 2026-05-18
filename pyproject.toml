@@ -33,31 +33,31 @@ classifiers = [
 ]
 dependencies = [
     "pandas>=1.5",
+    # 0.9.41+: MCP server runtime deps (~6 MB total) moved out of the
+    # old `[mcp]` extras into default. `pip install kglite` now gets
+    # a working `kglite-mcp-server` console script with no extras-dance.
+    # Each dep is small and used by the MCP server: `mcp` for stdio
+    # protocol, `pyyaml` for manifest parsing, `aiohttp` for the
+    # optional `extensions.csv_http_server`, `watchdog` for `--watch`
+    # mode. (The 0.9.40 drop of the `mcp-methods` PyPI wheel made
+    # this feasible — the remaining footprint is ~6 MB rather than the
+    # prior ~23 MB.)
+    "mcp>=1.0",
+    "pyyaml>=6.0",
+    "aiohttp>=3.9",
+    "watchdog>=4.0",
 ]
 dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
-# Deps for `kglite-mcp-server` and the manifest-driven server tools.
-# Install with `pip install 'kglite[mcp]'`. 0.9.20+: the server is a
-# Python entry point (no bundled binary) so these are the only runtime
-# deps it pulls. fastembed handles `extensions.embedder` (same ONNX
-# backend as the 0.9.18/0.9.19 Rust fastembed-rs path, same
-# `~/.cache/fastembed/` cache). aiohttp powers `extensions.csv_http_server`.
-mcp = [
-    "mcp>=1.0",
-    "pyyaml>=6.0",
-    "fastembed>=0.4",
-    "aiohttp>=3.9",
-    "watchdog>=4.0",
-    # 0.9.32: mcp-methods Python wheel powers skills' three-layer
-    # composition (project / domain-pack / bundled). Without it
-    # `SkillRegistry.from_manifest` is unavailable and project-layer
-    # `<basename>.skills/` overrides + operator-declared domain packs
-    # silently don't load. The Cargo dep on the same crate covers the
-    # Rust side; this is its Python-side companion.
-    "mcp-methods>=0.3.36",
-]
+# Semantic search via `text_score()` and the manifest-declared
+# `extensions.embedder`. Heavy install (~100 MB) because of
+# fastembed → onnxruntime + tokenizers + pillow + huggingface-hub —
+# kept opt-in for users who don't need embeddings. Same ONNX backend
+# as the 0.9.18/0.9.19 Rust fastembed-rs path, same
+# `~/.cache/fastembed/` model cache.
+embed = ["fastembed>=0.4"]
 
 # `pip install kglite` → `kglite-mcp-server` on PATH. 0.9.20+: the
 # entry point resolves to the Python implementation under

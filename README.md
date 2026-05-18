@@ -193,12 +193,13 @@ prompt = f"You have a knowledge graph:\n{xml}\nAnswer via graph.cypher()."
 # Or serve the whole graph over MCP. `kglite-mcp-server` is shipped
 # inside the wheel as a Python console-script entry point — no Rust
 # toolchain needed, no PyO3 env vars, no conda env handling.
-pip install 'kglite[mcp]'
+# 0.9.41+: the MCP runtime is included by default; no [mcp] extras.
+pip install kglite
 kglite-mcp-server --graph path/to/graph.kgl
 ```
 
 > **Migrating from a 0.9.18 or 0.9.19 install?** No YAML changes
-> needed. `pip install --upgrade 'kglite[mcp]'` and you're done.
+> needed. `pip install --upgrade kglite` and you're done.
 > The 0.9.20 release retired the bundled Rust binary in favour of a
 > Python entry point, which removes the per-Python-version wheel
 > matrix and the install_name_tool / patchelf / mold complexity that

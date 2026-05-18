@@ -38,7 +38,8 @@ use mcp_methods::github::{git_api_internal, github_issues_rust, has_git_token};
 use mcp_methods::server::source::{self, GrepOpts, ListOpts, ReadOpts};
 use mcp_methods::server::{
     find_sibling_manifest, find_workspace_manifest, load_manifest as load_manifest_rust,
-    Manifest as RustManifest, PostActivateHook, Workspace as RustWorkspace,
+    Manifest as RustManifest, PostActivateHook, ResolvedRegistry as RustResolvedRegistry,
+    Skill as RustSkill, SkillRegistry as RustSkillRegistry, Workspace as RustWorkspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -589,6 +590,138 @@ fn load_env_walk(start_path: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Skills (0.9.40+): wraps mcp-methods 0.3.38's Registry + ResolvedRegistry +
+// Skill so kglite can load + iterate skills without pulling the mcp-methods
+// PyPI wheel. Mirrors the surface that
+// `kglite.mcp_server.skills_loader::_framework_skill_to_local` consumes —
+// flat getters on PySkill match what the old `mcp_methods.Skill` exposed.
+// ---------------------------------------------------------------------------
+
+/// A loaded skill from the framework registry. Read-only; constructed via
+/// `SkillRegistry::skills()`. Mirrors the flat shape the prior
+/// `mcp_methods.Skill` pyo3 binding exposed to Python: the `frontmatter`
+/// sub-struct is flattened up to direct getters so the consumer
+/// (`skills_loader._framework_skill_to_local`) doesn't need to change.
+#[pyclass(name = "Skill")]
+pub struct PySkill {
+    inner: RustSkill,
+}
+
+#[pymethods]
+impl PySkill {
+    #[getter]
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    #[getter]
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    #[getter]
+    fn body(&self) -> &str {
+        &self.inner.body
+    }
+
+    /// `"project"` | `"bundled"` | `"domain_pack:<path>"`. Mirrors the
+    /// exact rendering the prior `mcp_methods.Skill.provenance` getter
+    /// emitted (verified against `mcp-methods-py/src/lib.rs::from_core`),
+    /// so the Python merge logic in `skills_loader` sees byte-identical
+    /// strings before vs. after the wheel-dep drop.
+    #[getter]
+    fn provenance(&self) -> String {
+        use mcp_methods::server::SkillProvenance;
+        match &self.inner.provenance {
+            SkillProvenance::Project => "project".to_string(),
+            SkillProvenance::DomainPack(path) => format!("domain_pack:{}", path.display()),
+            SkillProvenance::Bundled => "bundled".to_string(),
+        }
+    }
+
+    #[getter]
+    fn auto_inject_hint(&self) -> bool {
+        self.inner.frontmatter.auto_inject_hint
+    }
+
+    #[getter]
+    fn references_tools(&self) -> Vec<String> {
+        self.inner.frontmatter.references_tools.clone()
+    }
+
+    /// Returns the parsed `applies_when:` block as a dict, or `None` if
+    /// the skill's frontmatter has no `applies_when:`. Dict shape matches
+    /// what `_framework_skill_to_local` reads:
+    /// `{graph_has_node_type: list[str], graph_has_property: {node_type, prop_name},
+    ///   tool_registered: str, extension_enabled: str}` — only populated
+    /// keys are included.
+    #[getter]
+    fn applies_when<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(aw) = self.inner.frontmatter.applies_when.as_ref() else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        if let Some(types) = aw.graph_has_node_type.as_ref() {
+            d.set_item("graph_has_node_type", types.clone())?;
+        }
+        if let Some(prop) = aw.graph_has_property.as_ref() {
+            let inner = PyDict::new(py);
+            inner.set_item("node_type", &prop.node_type)?;
+            inner.set_item("prop_name", &prop.prop_name)?;
+            d.set_item("graph_has_property", inner)?;
+        }
+        if let Some(tool) = aw.tool_registered.as_ref() {
+            d.set_item("tool_registered", tool)?;
+        }
+        if let Some(ext) = aw.extension_enabled.as_ref() {
+            d.set_item("extension_enabled", ext)?;
+        }
+        Ok(Some(d))
+    }
+}
+
+/// Resolved skill registry — output of layering bundled defaults +
+/// project layer + operator paths declared in a manifest. Wraps
+/// `mcp_methods::server::ResolvedRegistry`. Constructed via the static
+/// `from_manifest(...)`, then iterated via `.skills()`.
+///
+/// The `from_manifest` body delegates to `mcp_methods::server::SkillRegistry::from_manifest`
+/// (added in 0.3.38) so kglite carries no orchestration logic —
+/// upstream owns layer-step ordering and stays the single source of
+/// truth.
+#[pyclass(name = "SkillRegistry")]
+pub struct PySkillRegistry {
+    inner: RustResolvedRegistry,
+}
+
+#[pymethods]
+impl PySkillRegistry {
+    /// Load skills from a manifest path. `include_bundled=True` (the
+    /// default) merges the framework's built-in skills first; the
+    /// manifest's `skills:` layer wins on name collision per
+    /// upstream's documented priority order.
+    #[staticmethod]
+    #[pyo3(signature = (manifest_path, *, include_bundled = true))]
+    fn from_manifest(manifest_path: PathBuf, include_bundled: bool) -> PyResult<Self> {
+        let resolved = RustSkillRegistry::from_manifest(&manifest_path, include_bundled)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PySkillRegistry { inner: resolved })
+    }
+
+    /// List of loaded skills in registry-iteration order. The Python
+    /// consumer materialises this eagerly (single boot-time call), so
+    /// returning a Vec is fine — no need for an iterator protocol.
+    fn skills(&self) -> Vec<PySkill> {
+        self.inner
+            .skill_names()
+            .into_iter()
+            .filter_map(|name| self.inner.get(&name).cloned())
+            .map(|skill| PySkill { inner: skill })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
 
@@ -606,6 +739,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyManifest>()?;
     m.add_class::<PyWorkspace>()?;
     m.add_class::<PyWatchHandle>()?;
+    m.add_class::<PySkill>()?;
+    m.add_class::<PySkillRegistry>()?;
     parent.add_submodule(&m)?;
     // Register in sys.modules so `import kglite._mcp_internal` works.
     // pyo3's `add_submodule` only sets the attribute; the import system

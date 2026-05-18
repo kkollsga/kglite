@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "kglite"
-version = "0.9.40"
+version = "0.9.41"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "A high-performance graph database with Python bindings written in Rust."
@@ -78,7 +78,7 @@ petgraph = { version = "0.8.3", features = ["serde-1"] }
 # where we choose to consume framework bumps. Plan to swap back to a
 # pinned rev only if a regression surfaces; plan to widen to `>= 0.4`
 # when that major bump lands and the API surface stabilises.
-mcp-methods = { version = "0.3", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.3.38", default-features = false, features = ["server"] }
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
 # Downloads ONNX model weights on first use (cached at
 # `~/.cache/fastembed/`). Off by default — the Python wheel relies on
