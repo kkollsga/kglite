@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **README refocused around the agent-first pitch.** Tagline now reads
+  *"Knowledge graph for Python, built for LLM agents."* The four use
+  cases (codebase / DataFrames / public datasets / RAG corpus) are
+  reframed as a single `What goes in the graph?` section instead of
+  competing pitches scattered across `Why KGLite?` + `Use Cases` +
+  `Key Features`. Notebook callout promoted to a banner-style H3 and
+  also linked inline under the codebase use case (visible twice in the
+  first 30 lines). `Use Cases` consolidated into a tighter `Recipes`
+  section (MCP serve, hybrid retrieval, structural validators, graph
+  algorithms). Stale 0.9.18 → 0.9.20 migration block removed. Broken
+  `#public-datasets` anchor fixed. 15 inline links to docs guides
+  (`code-tree`, `data-loading`, `semantic-search`, `mcp-servers`,
+  `graph-algorithms`, `traversal-hierarchy`, `recipes`, `datasets`,
+  `blueprints`, `spatial`, `timeseries`, `import-export`, `ai-agents`,
+  `cypher`, `querying`) sprinkled next to the content they describe
+  rather than dumped only at the bottom. Documentation section
+  reorganised into five themed buckets. Net: 408 → 358 lines.
+
 ## [0.9.41] — 2026-05-18
 
 ### Changed
