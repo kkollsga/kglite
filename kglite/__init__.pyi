@@ -2025,6 +2025,17 @@ class KnowledgeGraph:
 
     def __copy__(self) -> "KnowledgeGraph": ...
     def __deepcopy__(self, memo: Any) -> "KnowledgeGraph": ...
+    def __repr__(self) -> str:
+        """``KnowledgeGraph(N nodes, M edges)`` — readable summary used by
+        ``print(graph)`` and the REPL. Counts use thousands separators."""
+        ...
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """``(node_count, edge_count)`` — pandas-style. O(1) via the storage
+        backend; does not materialise per-type breakdowns. Use ``schema()``
+        or ``describe()`` for the full structure."""
+        ...
 
     # ====================================================================
     # Schema Introspection

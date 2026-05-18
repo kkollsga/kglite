@@ -85,6 +85,22 @@ impl ProgressSink for PyProgressSink {
     }
 }
 
+/// Format an integer with comma thousands separators ("1234567" → "1,234,567").
+/// Used by `KnowledgeGraph::__repr__` — keeps large-graph summaries legible
+/// without pulling a dep just for `num-format`.
+fn fmt_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
 fn set_fields(d: &Bound<'_, PyDict>, fields: &[(&str, ProgressValue<'_>)]) -> PyResult<()> {
     for (k, v) in fields {
         match v {
@@ -157,6 +173,29 @@ impl KnowledgeGraph {
 
         // Store type connectivity triples
         self.inner.set_type_connectivity(triples);
+    }
+
+    /// Total counts of nodes and edges in the graph, pandas-style.
+    ///
+    /// Returns ``(node_count, edge_count)``. O(1) via the storage
+    /// backend — does not materialise per-type breakdowns. For full
+    /// per-type structure use ``schema()`` or ``describe()``.
+    #[getter]
+    fn shape(&self) -> (usize, usize) {
+        use crate::graph::storage::GraphRead;
+        (self.inner.graph.node_count(), self.inner.graph.edge_count())
+    }
+
+    /// Human-readable summary used by ``print(graph)`` and the REPL.
+    /// Format: ``KnowledgeGraph(N nodes, M edges)`` with thousands
+    /// separators for legibility on large graphs.
+    fn __repr__(&self) -> String {
+        use crate::graph::storage::GraphRead;
+        format!(
+            "KnowledgeGraph({} nodes, {} edges)",
+            fmt_with_commas(self.inner.graph.node_count()),
+            fmt_with_commas(self.inner.graph.edge_count()),
+        )
     }
 
     /// Return a full schema overview of the graph.

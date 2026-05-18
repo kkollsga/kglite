@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.40] — 2026-05-18
+
+### Added
+
+- **`KnowledgeGraph.shape` property and human-readable `__repr__`.**
+  `g.shape` returns `(node_count, edge_count)` pandas-style — O(1) via
+  the storage backend, no per-type breakdown computed. `repr(g)` and
+  `print(g)` now produce `KnowledgeGraph(1,245 nodes, 2,996 edges)`
+  instead of the default `<builtins.KnowledgeGraph object at 0x…>`.
+  Use `schema()` / `describe()` for full per-type structure when needed.
+
+### Changed
+
+- **`examples/codebase_to_claude_mcp.ipynb` cell 1** now uses
+  `kglite.mcp_server.workspace.Workspace` (the built-in clone +
+  auto-prune system with `stale_after_days`) instead of `subprocess.run`
+  for git clone, and uses `print(graph)` (the new `__repr__`) instead
+  of manual `schema()` lookup. Same workspace dir is reachable from the
+  Claude Desktop MCP server registered in cell 4, so the demo state
+  is continuous.
+- **README:** notebook callout promoted to immediately after the lead
+  paragraph (was buried in the Examples section near the bottom). Same
+  link still exists in Examples for completeness.
+
 ## [0.9.39] — 2026-05-18
 
 ### Fixed

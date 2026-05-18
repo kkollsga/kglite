@@ -19,6 +19,11 @@ small graphs) to mmap-backed on disk (1 B+ edges, Wikidata-scale).
 Bundled dataset wrappers turn `pip install kglite` into a queryable
 Wikidata or petroleum-domain graph in one line.
 
+> **See it end-to-end in 50 lines:** [`examples/codebase_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
+> clones a GitHub repo, parses it into a code knowledge graph, runs a few
+> Cypher queries, then registers a workspace MCP server in Claude Desktop
+> so the agent can `repo_management('org/repo')` any repo on demand.
+
 ## Why KGLite?
 
 - **Built for LLM agents** — `describe()` XML schema, bundled MCP
