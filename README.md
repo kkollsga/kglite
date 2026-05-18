@@ -6,9 +6,11 @@
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
 KGLite is an embedded, Cypher-queryable knowledge graph for Python,
-built so you can hand it to an LLM agent. It ships with a bundled MCP
-server, a `describe()` method that emits a system-prompt-shaped schema,
-and structural validators that compose with Cypher.
+built so you can hand it to an LLM agent. `pip install kglite` and
+point `kglite.code_tree.build(".")` at any source directory — your
+first queryable graph in seconds. It ships with a bundled MCP server,
+a `describe()` method that emits a system-prompt-shaped schema, and
+structural validators that compose with Cypher.
 
 > ### 🚀 See it end-to-end: codebase → Claude in ~50 lines
 >

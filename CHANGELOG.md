@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inline Cypher tools — with a worked example), and bundled skills
   (`.skills/*.md` files that teach agents how to use the tools, with
   `applies_when:` predicates so only relevant methodology activates).
-- **README intro tightened** — dropped the long run-on with install
-  instructions baked in; pitch is now four short lines.
+- **README intro now opens with a concrete "first graph in seconds"
+  hook** — `pip install kglite` + `kglite.code_tree.build(".")`. Sells
+  the embedded, zero-setup pitch before the reader sees any prose
+  about MCP servers or validators.
 - **README use-case fixes**: "Your pandas DataFrames" widened to
   *"Your structured data"* (covers SQL / CSV / Parquet / REST → graph);
   Wikidata claim corrected (the headline is *operate/query a
