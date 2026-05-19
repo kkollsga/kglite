@@ -16,8 +16,9 @@ use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
     extract_companies_and_filings, extract_holdings, extract_insider_transactions,
-    extract_subsidiaries, fetch_company_tickers, fetch_quarterly_master_idx,
-    fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir, YearRange,
+    extract_subsidiaries, extract_xbrl_metrics, fetch_company_tickers, fetch_fsnds_quarterly,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir,
+    YearRange,
 };
 use std::path::PathBuf;
 
@@ -196,6 +197,50 @@ fn extract_holdings_py(
     Ok(d.into())
 }
 
+/// Fetch FSNDS NUM.tsv for one (year, quarter). Bulk path; not rate
+/// limited. Returns `true` if newly downloaded, `false` if cached.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, year, quarter, force_refetch=false))]
+fn fetch_fsnds(
+    workdir: PathBuf,
+    user_agent: &str,
+    year: u16,
+    quarter: u8,
+    force_refetch: bool,
+) -> PyResult<bool> {
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    rt.block_on(async {
+        fetch_fsnds_quarterly(&client, &wd, year, quarter, force_refetch)
+            .await
+            .map_err(map_err)
+    })
+}
+
+/// Extract `processed/metric_fact.csv` from raw FSNDS NUM.tsv files.
+/// Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false, year_range=None))]
+fn extract_xbrl_metrics_py(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    year_range: Option<(u16, u16)>,
+) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let slice = build_slice(None, None, year_range);
+    let report = extract_xbrl_metrics(&wd, &slice, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("metrics_written", report.metrics_written)?;
+    d.set_item("fsnds_files_read", report.fsnds_files_read)?;
+    d.set_item("fsnds_parse_errors", report.fsnds_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Extract `processed/subsidiary.csv` from raw Exhibit 21 HTML files
 /// staged under `raw/filings/`. Idempotent.
 #[pyfunction]
@@ -247,6 +292,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_insider, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_holdings_py, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_subsidiaries_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_xbrl_metrics_py, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

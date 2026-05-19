@@ -69,6 +69,26 @@
         }
       }
     },
+    "MetricFact": {
+      "csv": "processed/metric_fact.csv",
+      "pk": "metric_nid",
+      "title": "tag",
+      "properties": {
+        "tag": "string",
+        "ddate": "string",
+        "qtrs": "int",
+        "uom": "string",
+        "value": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "REPORTED_IN_FILING": {
+            "target": "Filing",
+            "fk": "accession_number"
+          }
+        }
+      }
+    },
     "InstitutionalManager": {
       "csv": "processed/institutional_manager.csv",
       "pk": "manager_cik",

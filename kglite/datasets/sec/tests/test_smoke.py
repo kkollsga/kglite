@@ -373,6 +373,55 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D3 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d3_xbrl_metric_lookup(synth_workdir: Path) -> None:
+    """User story (D3): As an equity analyst, I want to find a
+    company's Revenues figure for FY 2023. I stage a synthetic FSNDS
+    NUM.tsv with Apple's accession+Revenues row, build the graph, and
+    traverse MetricFact -[:REPORTED_IN_FILING]-> Filing -[:FILED_BY]->
+    Company to land on the right number.
+    """
+    fin_dir = synth_workdir / "raw" / "financials"
+    fin_dir.mkdir(parents=True, exist_ok=True)
+    # Use Apple's existing accession from synth_workdir's submissions
+    (fin_dir / "2024_QTR3_num.tsv").write_text(
+        "adsh\ttag\tversion\tcoreg\tddate\tqtrs\tuom\tvalue\tfootnote\n"
+        "0000320193-24-000123\tRevenues\tus-gaap/2024\t\t20240928\t4\tUSD\t383285000000\t\n"
+    )
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,  # don't trigger live FSNDS fetch
+        mode="memory",
+        user_agent="KGLite D3 d3@example.com",
+        verbose=False,
+    )
+
+    # MetricFact node exists with Apple's Revenues
+    res = _rows(g.cypher("MATCH (m:MetricFact {tag: 'Revenues'}) RETURN m.value AS v, m.qtrs AS q"))
+    assert len(res) == 1, f"expected one Revenues MetricFact, got {res}"
+    assert res[0]["v"] == 383285000000.0
+    assert res[0]["q"] == 4  # annual reporting (4 quarters)
+
+    # Traversal: MetricFact -> Filing -> Company
+    res = _rows(
+        g.cypher(
+            "MATCH (m:MetricFact {tag: 'Revenues'})-[:REPORTED_IN_FILING]"
+            "->(f:Filing)-[:FILED_BY]->(c:Company) "
+            "RETURN c.name AS name, m.value AS rev"
+        )
+    )
+    assert len(res) == 1
+    assert "Apple" in res[0]["name"]
+    assert res[0]["rev"] == 383285000000.0
+
+
 # ── D2 user story ────────────────────────────────────────────────────
 
 

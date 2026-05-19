@@ -19,6 +19,7 @@ use crate::layout::Workdir;
 use crate::parsers::exhibit21::extract_subsidiaries as parse_exhibit21;
 use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
+use crate::parsers::fsnds::{parse_fsnds_num, DEFAULT_TAG_WHITELIST};
 use crate::parsers::idx::parse_master_idx;
 use crate::parsers::submissions::{iter_submissions_zip, Submission};
 use crate::slicing::SliceSpec;
@@ -853,6 +854,106 @@ fn is_exhibit21_name(name: &str) -> bool {
         || name.contains("exhibit-21")
 }
 
+// ─── FSNDS XBRL metrics extract ──────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct XbrlExtractReport {
+    pub metrics_written: usize,
+    pub fsnds_files_read: usize,
+    pub fsnds_parse_errors: usize,
+}
+
+const METRIC_FACT_HEADER: &[&str] = &[
+    "metric_nid",
+    "accession_number",
+    "tag",
+    "ddate",
+    "qtrs",
+    "uom",
+    "value",
+];
+
+/// Walk `raw/financials/*_num.tsv` (FSNDS NUM tables) and emit
+/// `processed/metric_fact.csv` with whitelisted XBRL facts.
+///
+/// `metric_nid` is composite `{accession}_{tag}_{qtrs}` so the same
+/// fact reported in multiple quarters doesn't collide. The fact
+/// connects to Filing via `accession_number` fk_edge; CIK is reached
+/// through Filing → FILED_BY → Company.
+pub fn extract_xbrl_metrics(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<XbrlExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let metric_csv = workdir.processed_csv("metric_fact");
+
+    let mut report = XbrlExtractReport::default();
+    if !force && metric_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut writer = csv_writer(&metric_csv)?;
+    writer.write_record(METRIC_FACT_HEADER)?;
+
+    let financials_dir = workdir.raw_financials_dir();
+    if !financials_dir.is_dir() {
+        writer.flush()?;
+        return Ok(report);
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let tsvs = match std::fs::read_dir(&financials_dir) {
+        Ok(d) => d,
+        Err(_) => {
+            writer.flush()?;
+            return Ok(report);
+        }
+    };
+    for entry in tsvs.flatten() {
+        let p = entry.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with("_num.tsv") {
+            continue;
+        }
+        let file = match File::open(&p) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let facts = match parse_fsnds_num(BufReader::new(file), Some(DEFAULT_TAG_WHITELIST)) {
+            Ok(f) => f,
+            Err(_) => {
+                report.fsnds_parse_errors += 1;
+                continue;
+            }
+        };
+        report.fsnds_files_read += 1;
+        for f in facts {
+            // Slice filter on year_range using ddate prefix (YYYYMMDD).
+            if !slice.date_matches(&f.ddate) {
+                continue;
+            }
+            let nid = format!("{}_{}_{}", f.accession, f.tag, f.qtrs);
+            if !seen.insert(nid.clone()) {
+                continue;
+            }
+            writer.write_record([
+                nid.as_str(),
+                f.accession.as_str(),
+                f.tag.as_str(),
+                f.ddate.as_str(),
+                &f.qtrs.to_string(),
+                f.uom.as_str(),
+                &format_float(f.value),
+            ])?;
+            report.metrics_written += 1;
+        }
+    }
+
+    writer.flush()?;
+    Ok(report)
+}
+
 fn normalize_subsidiary_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -1094,6 +1195,31 @@ mod tests {
         let company_csv = std::fs::read_to_string(w.processed_csv("company")).unwrap();
         assert!(company_csv.contains("Apple"));
         assert!(!company_csv.contains("Microsoft"));
+
+        std::fs::remove_dir_all(w.root()).ok();
+    }
+
+    #[test]
+    fn extracts_xbrl_metrics_from_synth_fsnds() {
+        let w = synth_workdir();
+        let dir = w.raw_financials_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2024_QTR3_num.tsv"),
+            "adsh\ttag\tversion\tcoreg\tddate\tqtrs\tuom\tvalue\tfootnote\n\
+             0000320193-24-000123\tRevenues\tus-gaap/2024\t\t20240928\t4\tUSD\t383285000000\t\n\
+             0000320193-24-000123\tNetIncomeLoss\tus-gaap/2024\t\t20240928\t4\tUSD\t96995000000\t\n\
+             0000789019-24-000045\tRevenues\tus-gaap/2024\t\t20240630\t4\tUSD\t245122000000\t\n",
+        )
+        .unwrap();
+
+        let report = extract_xbrl_metrics(&w, &SliceSpec::default(), false).unwrap();
+        assert_eq!(report.fsnds_files_read, 1);
+        assert_eq!(report.metrics_written, 3);
+
+        let csv = std::fs::read_to_string(w.processed_csv("metric_fact")).unwrap();
+        assert!(csv.contains("Revenues"));
+        assert!(csv.contains("383285000000"));
 
         std::fs::remove_dir_all(w.root()).ok();
     }

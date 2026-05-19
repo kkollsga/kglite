@@ -30,12 +30,12 @@ pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{
     extract_companies_and_filings, extract_holdings, extract_insider_transactions,
-    extract_subsidiaries, ExtractReport, HoldingsExtractReport, InsiderExtractReport,
-    SubsidiaryExtractReport,
+    extract_subsidiaries, extract_xbrl_metrics, ExtractReport, HoldingsExtractReport,
+    InsiderExtractReport, SubsidiaryExtractReport, XbrlExtractReport,
 };
 pub use fetch::{
-    fetch_company_tickers, fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk,
-    YearRange,
+    fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
+    fetch_submissions_bulk, YearRange,
 };
 pub use layout::{StorageMode, Workdir};
 pub use parsers::eightk::{extract_8k_items, EightKItem};

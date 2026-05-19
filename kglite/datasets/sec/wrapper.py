@@ -91,6 +91,7 @@ class SEC:
         form_types: Optional[list[str]] = None,
         year_range: Optional[tuple[int, int]] = None,
         include_subsidiaries: bool = True,
+        include_xbrl_metrics: bool = True,
         force_rebuild: bool = False,
         force_refetch: bool = False,
         verbose: bool = True,
@@ -197,6 +198,31 @@ class SEC:
         # phase (not yet wired); the extract is always run since it's a
         # no-op when raw/filings/ has no Exhibit 21 documents.
         _ = include_subsidiaries
+
+        # Step 2e: FSNDS XBRL metrics. Bulk fetch (no rate limit) for
+        # the deep window, then extract whitelisted numeric facts.
+        if include_xbrl_metrics and detailed > 0:
+            if verbose:
+                print("[SEC] fetching FSNDS XBRL")
+            start_y = max(current_year - detailed + 1, 2009)
+            for y in range(start_y, current_year + 1):
+                for q in range(1, 5):
+                    try:
+                        _sec_internal.fetch_fsnds(
+                            str(workdir),
+                            user_agent=user_agent,
+                            year=y,
+                            quarter=q,
+                            force_refetch=force_refetch,
+                        )
+                    except Exception as e:
+                        if verbose:
+                            print(f"[SEC]   FSNDS {y}Q{q} skip: {e}")
+        if verbose:
+            print("[SEC] extracting XBRL metrics")
+        xbrl_report = _sec_internal.extract_xbrl_metrics_py(str(workdir), force=force_rebuild, year_range=year_range)
+        if verbose:
+            print(f"[SEC]   xbrl: {xbrl_report}")
 
         # Step 3: build graph/{mode}/
         if verbose:

@@ -65,6 +65,16 @@ pub fn accession_no_dashes(accession: &str) -> String {
     accession.replace('-', "")
 }
 
+/// FSNDS (Financial Statement and Notes Data Set) quarterly ZIP URL.
+/// SEC publishes one ZIP per quarter under DERA's bulk download path.
+/// Bulk path; not rate-limited by the per-IP 10/s ceiling.
+pub fn fsnds_quarterly_url(year: u16, quarter: u8) -> String {
+    debug_assert!((1..=4).contains(&quarter));
+    format!(
+        "https://www.sec.gov/files/dera/data/financial-statement-and-notes-data-sets/{year}q{quarter}_notes.zip"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
