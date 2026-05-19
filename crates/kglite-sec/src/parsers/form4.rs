@@ -163,7 +163,9 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                 let name = std::str::from_utf8(e.name().as_ref())
                     .map_err(|err| SecError::Decode(format!("Form 4 empty tag: {err}")))?
                     .to_string();
-                if name == "footnoteId" && path.last().map(|s| s.as_str()) == Some("transactionPricePerShare") {
+                if name == "footnoteId"
+                    && path.last().map(|s| s.as_str()) == Some("transactionPricePerShare")
+                {
                     if let Some(id) = attr_id(&e) {
                         // The transaction in progress will land at this
                         // index when its closing tag pushes it.
@@ -229,7 +231,9 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
         // Override threshold: raw price is >10× the high or <0.1× the
         // low. This catches missing-decimal typos (1000× off) while
         // leaving legitimate weighted averages alone.
-        if txn.price_per_share > hi * 10.0 || (txn.price_per_share > 0.0 && txn.price_per_share < lo * 0.1) {
+        if txn.price_per_share > hi * 10.0
+            || (txn.price_per_share > 0.0 && txn.price_per_share < lo * 0.1)
+        {
             txn.price_per_share = mid;
         }
     }
@@ -633,10 +637,7 @@ mod tests {
         // (1031.495 inside the footnote range). Parser should NOT
         // override — the filer's reported value is more precise than
         // the midpoint approximation.
-        let xml = LILLY_TYPO_FORM4.replace(
-            "<value>1031414</value>",
-            "<value>1031.495</value>",
-        );
+        let xml = LILLY_TYPO_FORM4.replace("<value>1031414</value>", "<value>1031.495</value>");
         let f4 = parse_form4(Cursor::new(&xml)).unwrap();
         assert_eq!(f4.transactions.len(), 1);
         // Should be EXACTLY 1031.495, not the midpoint.
