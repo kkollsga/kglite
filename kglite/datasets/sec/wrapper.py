@@ -47,10 +47,16 @@ def _current_year_quarter() -> tuple[int, int]:
 # drive `_dispatch_per_filing_fetches` below.
 _FORM_BUCKETS: dict[str, tuple[str, ...]] = {
     "form4": ("4", "4/A"),
+    # 0.9.46 F6: Form 3 and Form 5 reuse the Form 4 XML schema +
+    # fetcher (`fetch_form4_batch` writes any ownership XML).
+    "form3": ("3", "3/A"),
+    "form5": ("5", "5/A"),
+    "form144": ("144", "144/A"),
     "form13f": ("13F-HR", "13F-HR/A"),
     "form8k": ("8-K", "8-K/A"),
     "sc13d": ("SC 13D", "SC 13D/A", "SCHEDULE 13D", "SCHEDULE 13D/A"),
-    "def14a": ("DEF 14A",),
+    "sc13g": ("SC 13G", "SC 13G/A", "SCHEDULE 13G", "SCHEDULE 13G/A"),
+    "def14a": ("DEF 14A", "DEFA14A", "PRE 14A"),
     "form10k": ("10-K", "10-K/A"),  # source filings for Exhibit 21 attachments
 }
 
@@ -85,7 +91,10 @@ def _dispatch_per_filing_fetches(
     if detailed <= 0:
         return out
 
-    filing_csv = workdir / "processed" / "filing.csv"
+    # 0.9.46 F1: per-filing dispatcher reads filing_index.csv (a thin
+    # build artifact written by the orchestrator's identity pre-pass)
+    # instead of the now-removed filing.csv.
+    filing_csv = workdir / "processed" / "filing_index.csv"
     if not filing_csv.is_file():
         return out
 
@@ -125,11 +134,20 @@ def _dispatch_per_filing_fetches(
                     buckets[bucket_name].append((row_cik, accession, primary))
                     break
 
-    # Form 4: existing batch fetcher.
-    if buckets["form4"]:
+    # Form 4 / Form 3 / Form 5: all share the ownership-document XML
+    # schema and the same fetcher path. Pool them so the same rate-
+    # limited client downloads each per-filing XML once.
+    ownership_batch: list[tuple[int, str, str]] = []
+    ownership_batch.extend(buckets["form4"])
+    ownership_batch.extend(buckets["form3"])
+    ownership_batch.extend(buckets["form5"])
+    if ownership_batch:
         if verbose:
-            print(f"[SEC] fetching Form 4 payloads ({len(buckets['form4'])} filings)")
-        out["form4"] = _sec_internal.fetch_form4_batch(str(workdir), user_agent=user_agent, batch=buckets["form4"])
+            print(
+                f"[SEC] fetching ownership documents ({len(buckets['form4'])} Form 4, "
+                f"{len(buckets['form3'])} Form 3, {len(buckets['form5'])} Form 5)"
+            )
+        out["ownership"] = _sec_internal.fetch_form4_batch(str(workdir), user_agent=user_agent, batch=ownership_batch)
 
     # 13F-HR: takes (cik, accession) — strip the primary_doc.
     if buckets["form13f"]:
@@ -144,17 +162,25 @@ def _dispatch_per_filing_fetches(
             print(f"[SEC] fetching 8-K cover pages ({len(buckets['form8k'])} filings)")
         out["form8k"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form8k"])
 
-    # SC 13D / SC 13D-A: activist stakes. Always on under detailed>0.
-    if buckets["sc13d"]:
+    # SC 13D / SC 13G + amendments: activist + passive stakes.
+    sc13_batch = buckets["sc13d"] + buckets["sc13g"]
+    if sc13_batch:
         if verbose:
-            print(f"[SEC] fetching SC 13D primary docs ({len(buckets['sc13d'])} filings)")
-        out["sc13d"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["sc13d"])
+            print(f"[SEC] fetching SC 13D/G primary docs ({len(sc13_batch)} filings)")
+        out["sc13"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=sc13_batch)
 
-    # DEF 14A: proxy filings (directors). Always on under detailed>0.
+    # DEF 14A + DEFA14A + PRE 14A: proxy filings.
     if buckets["def14a"]:
         if verbose:
             print(f"[SEC] fetching DEF 14A proxies ({len(buckets['def14a'])} filings)")
         out["def14a"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["def14a"])
+
+    # Form 144: planned restricted-securities sales (post-2016 XML,
+    # older HTML — both come down via the generic filing fetcher).
+    if buckets["form144"]:
+        if verbose:
+            print(f"[SEC] fetching Form 144 notices ({len(buckets['form144'])} filings)")
+        out["form144"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form144"])
 
     # Exhibit 21: gated by include_subsidiaries. 10-K filings are the
     # source; the fetcher discovers ex21 attachments via index.json.

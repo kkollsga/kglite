@@ -30,6 +30,7 @@ pub struct CompanyEmitReport {
     pub companies_written: usize,
     pub submission_parse_errors: usize,
     pub distinct_sic_codes: usize,
+    pub filings_indexed: usize,
 }
 
 /// Read every submission entry in `raw/submissions.zip` and emit one
@@ -56,6 +57,26 @@ pub fn emit_from_submissions(
     let mut report = CompanyEmitReport::default();
     let mut sic_index: HashMap<String, String> = HashMap::new();
 
+    // Filing index — lightweight metadata file (one row per filing)
+    // that the Python wrapper's per-filing fetch dispatcher reads.
+    // Not a graph node table; sits next to processed/_sic.csv as a
+    // build artifact. Underscored prefix marks it as internal.
+    let filing_index_path = workdir.processed_csv("filing_index");
+    let mut filing_index = csv::WriterBuilder::new()
+        .quote_style(csv::QuoteStyle::Necessary)
+        .from_path(&filing_index_path)
+        .map_err(|e| SecError::Malformed(format!("filing_index.csv open: {}", e)))?;
+    filing_index
+        .write_record([
+            "accession_number",
+            "cik",
+            "form_type",
+            "filed_date",
+            "report_date",
+            "primary_document",
+        ])
+        .map_err(|e| SecError::Malformed(format!("filing_index.csv header: {}", e)))?;
+
     for entry in iter {
         let (_name, sub) = match entry {
             Ok(v) => v,
@@ -72,8 +93,6 @@ pub fn emit_from_submissions(
             continue;
         }
         let cik = strip_leading_zeros(&sub.company.cik);
-        // Use Identities so subsequent ensure_company() calls from
-        // form extractors are no-ops.
         identities.ensure_company(
             sinks,
             cik.as_str(),
@@ -93,7 +112,35 @@ pub fn emit_from_submissions(
                 .entry(sub.company.sic.clone())
                 .or_insert_with(|| sub.company.sic_description.clone());
         }
+
+        // Emit one filing_index row per filing in the submission.
+        let empty = String::new();
+        for i in 0..sub.filings.accession_number.len() {
+            let accession = &sub.filings.accession_number[i];
+            if accession.is_empty() {
+                continue;
+            }
+            let form = sub.filings.form.get(i).unwrap_or(&empty);
+            let filed = sub.filings.filing_date.get(i).unwrap_or(&empty);
+            if !slice.form_matches(form) || !slice.date_matches(filed) {
+                continue;
+            }
+            let report_date = sub.filings.report_date.get(i).unwrap_or(&empty);
+            let primary = sub.filings.primary_document.get(i).unwrap_or(&empty);
+            filing_index
+                .write_record([
+                    accession.as_str(),
+                    cik.as_str(),
+                    form.as_str(),
+                    filed.as_str(),
+                    report_date.as_str(),
+                    primary.as_str(),
+                ])
+                .map_err(|e| SecError::Malformed(format!("filing_index.csv row: {}", e)))?;
+            report.filings_indexed += 1;
+        }
     }
+    filing_index.flush().map_err(SecError::Io)?;
     report.distinct_sic_codes = sic_index.len();
     Ok((report, sic_index))
 }
