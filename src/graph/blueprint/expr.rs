@@ -720,6 +720,15 @@ fn apply_binary(op: BinaryOp, l: Value, r: Value) -> ExprResult<Value> {
 
 fn apply_arith(op: BinaryOp, l: Value, r: Value) -> ExprResult<Value> {
     use BinaryOp::*;
+    // SQL-style null propagation: any operand null → null result.
+    // Real-world CSV data (e.g. SEC insider grants with no price)
+    // routinely has nulls — erroring would force `coalesce(x, 0)`
+    // wrapping on every arithmetic expression, which is verbose
+    // and obscures intent. Aggregate functions (sum/avg) already
+    // skip nulls, so propagation composes cleanly.
+    if matches!(l, Value::Null) || matches!(r, Value::Null) {
+        return Ok(Value::Null);
+    }
     // String concatenation for Add only.
     if op == Add {
         if let (Value::String(a), Value::String(b)) = (&l, &r) {
@@ -787,6 +796,13 @@ fn apply_arith(op: BinaryOp, l: Value, r: Value) -> ExprResult<Value> {
 
 fn apply_cmp(op: BinaryOp, l: Value, r: Value) -> ExprResult<Value> {
     use BinaryOp::*;
+    // SQL-style: null compared with anything yields null. In a
+    // filter predicate, null is treated as false (so the row is
+    // dropped) — handled by the truthy() conversion at the call
+    // site.
+    if matches!(l, Value::Null) || matches!(r, Value::Null) {
+        return Ok(Value::Null);
+    }
     let ord = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::Float(a), Value::Float(b)) => a

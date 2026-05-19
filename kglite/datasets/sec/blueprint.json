@@ -70,12 +70,14 @@
       "group_by": ["person_nid", "issuer_cik"],
       "into": "Position",
       "agg": {
-        "n_transactions":  "count(*)",
-        "first_tx_date":   "min(transaction_date)",
-        "last_tx_date":    "max(transaction_date)",
-        "current_shares":  "last(shares_owned_after, by=transaction_date)",
-        "total_buy_value": "sum(if(is_buy,  total_value, 0))",
-        "total_sell_value":"sum(if(is_sell, total_value, 0))"
+        "current_shares":   "last(shares_owned_after, by=transaction_date)",
+        "shares_acquired":  "sum(if(acquired_disposed == 'A', shares, 0))",
+        "shares_disposed":  "sum(if(acquired_disposed == 'D', shares, 0))",
+        "n_transactions":   "count(*)",
+        "first_tx_date":    "min(transaction_date)",
+        "last_tx_date":     "max(transaction_date)",
+        "total_buy_value":  "sum(if(is_buy,  total_value, 0))",
+        "total_sell_value": "sum(if(is_sell, total_value, 0))"
       },
       "edges": [
         {"to": "Person",  "fk": "person_nid", "edge": "POSITION_OF"},

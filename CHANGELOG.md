@@ -65,13 +65,27 @@ Python pre-scripts or post-build Cypher passes.
   MetricFact), `chain` (NEXT_FILING per company; NEXT_TX per
   person+issuer), `calendar` (2020-2030 + ON_FILED_DATE and
   ON_TX_DATE links), and `aggregate` (FilingYear summary with
-  FILINGS_BY; Position summary with current_shares=last(...,
-  by=transaction_date), total_buy/sell_value, n_transactions, +
-  POSITION_OF and AT_COMPANY edges). The Position node makes
-  holdings-over-time queries first-class: `MATCH (p:Person)-
-  [:POSITION_OF]-(pos:Position)-[:AT_COMPANY]-(c:Company) RETURN
-  pos.current_shares`, or walk the NEXT_TX chain for the full
-  transaction timeline per person+issuer.
+  FILINGS_BY; **Position** summary with the headline metric
+  `current_shares=last(shares_owned_after, by=transaction_date)`,
+  plus `shares_acquired`, `shares_disposed`, `n_transactions`,
+  `first/last_tx_date`, and the price-based `total_buy_value` /
+  `total_sell_value` aggregates (filed price; users may want to
+  override with authoritative price feeds). POSITION_OF and
+  AT_COMPANY edges connect each Position to its Person + Company).
+  The Position node makes holdings-over-time queries first-class:
+  `MATCH (p:Person)-[:POSITION_OF]-(pos:Position)-[:AT_COMPANY]-
+  (c:Company) RETURN pos.current_shares` gives the current snapshot
+  in one hop; walking the `t.shares_owned_after` column along
+  transactions ordered by `transaction_date` gives the full
+  share-count trend with no Python cumsum needed.
+- **Expression engine — null-propagating arithmetic & comparisons**.
+  `null * 5`, `null + 3`, `null < x` all yield `null` (SQL
+  semantics) instead of erroring. Real-world CSV data routinely
+  has nulls (e.g. SEC insider grants with no `price_per_share`);
+  the previous "error on null operand" behaviour forced
+  `coalesce(x, 0)` wrapping on every arithmetic expression. Sum/
+  avg already skip nulls, so propagation composes cleanly with
+  aggregates.
 
 ### SEC EDGAR value-proposition upgrade (J0–J7)
 
