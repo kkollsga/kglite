@@ -18,11 +18,11 @@ from __future__ import annotations
 import io
 import json
 import os
+from pathlib import Path
 import tempfile
 import time
-import zipfile
-from pathlib import Path
 from typing import Any, cast
+import zipfile
 
 import pytest
 
@@ -336,7 +336,7 @@ def test_uc10_most_prolific_filers() -> None:
 
 def test_zz_print_summary() -> None:
     """Print a benchmark summary table at the end of the module run."""
-    g = _build_graph()  # ensure build cost is captured
+    _build_graph()  # ensure the build has happened and is cached
     info = _CACHED["info"]
     build_s = _CACHED["build_s"]
     print("\n" + "=" * 72)
