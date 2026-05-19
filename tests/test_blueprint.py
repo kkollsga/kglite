@@ -746,3 +746,70 @@ class TestStreamingNodeLoader:
         graph = from_blueprint(tmp_path / "bp.json", save=False)
         count = graph.cypher("MATCH (i:Item) RETURN count(i) AS n")[0]["n"]
         assert count == 50  # half of n filtered through
+
+
+class TestStreamingAutoPk:
+    """0.9.44 F2 — `pk: "auto"` flows through the streaming path with
+    a per-spec counter. Each chunk gets a dense id range; total ids
+    span 1..=N matching the buffered path's behaviour."""
+
+    def test_multi_chunk_auto_pk_is_dense_and_monotonic(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "75")
+        n = 250  # 4 chunks at chunk_size 75: 75 + 75 + 75 + 25
+        items = pd.DataFrame({"name": [f"I{i}" for i in range(n)]})
+        _write_csv(tmp_path / "items.csv", items)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "auto",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        # The synthesised id column is `_Item_id` (per-spec naming).
+        # `i.id` resolves to the spec's pk via aliasing.
+        result = graph.cypher("MATCH (i:Item) RETURN i.id AS id ORDER BY id")
+        ids = [r["id"] for r in result]
+        assert ids == list(range(1, n + 1)), (
+            f"expected dense 1..={n}, got len={len(ids)} first={ids[:5]} last={ids[-5:]}"
+        )
+
+    def test_auto_pk_with_filter_keeps_dense_ids(self, tmp_path, monkeypatch):
+        """Filter is applied per-chunk; auto-pk counter advances only
+        by the post-filter row count. Dense ids over kept rows."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "40")
+        n = 200
+        items = pd.DataFrame(
+            {
+                "name": [f"I{i}" for i in range(n)],
+                "active": ["true" if i % 3 != 0 else "false" for i in range(n)],
+            }
+        )
+        _write_csv(tmp_path / "items.csv", items)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "auto",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "filter": {"active": "true"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        # 2/3 rows survive — ids should be dense 1..=kept_n.
+        expected_kept = sum(1 for i in range(n) if i % 3 != 0)
+        result = graph.cypher("MATCH (i:Item) RETURN i.id AS id ORDER BY id")
+        ids = [r["id"] for r in result]
+        assert ids == list(range(1, expected_kept + 1))

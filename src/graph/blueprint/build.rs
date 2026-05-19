@@ -657,8 +657,12 @@ fn load_node_specs(
 /// - manual specs (no CSV — synthesised from FK targets)
 /// - timeseries specs (need full row set for grouping + dedup-by-pk)
 /// - spatial specs (geometry conversion mutates RawCsv in-place)
-/// - `pk: "auto"` specs (need row-count for synthesised id range —
-///   F2 lifts this restriction via an `AtomicU64` counter)
+///
+/// `pk: "auto"` is streamable via F2's per-spec counter: each chunk
+/// receives a dense id range matching the row order the buffered
+/// path would have assigned. Filter is applied to chunks in
+/// CSV-read order, preserving buffered semantics — filtered chunks
+/// advance the id counter by their post-filter row count.
 fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
     if spec.is_manual {
         return false;
@@ -670,9 +674,6 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
         return false;
     }
     if has_spatial_properties(&spec.spec.properties) {
-        return false;
-    }
-    if spec.spec.pk.as_deref() == Some("auto") {
         return false;
     }
     true
@@ -698,7 +699,12 @@ fn load_streamed_node_spec(
     let chunks = read_csv_chunks(&csv_path, chunk_size)
         .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
 
-    let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let (pk, is_auto_pk) = if raw_pk == "auto" {
+        (format!("_{}_id", spec.node_type), true)
+    } else {
+        (raw_pk, false)
+    };
     let title_field = spec.spec.title.clone().unwrap_or_else(|| pk.clone());
     let title_arg = if title_field != pk {
         Some(title_field.clone())
@@ -718,6 +724,11 @@ fn load_streamed_node_spec(
         }
     }
 
+    // F2: per-spec auto-pk counter. Plain `u64` (not atomic) is
+    // fine because chunks are processed serially within a spec.
+    // First id starts at 1 — matches the buffered path's `1..=n`.
+    let mut auto_pk_counter: u64 = 1;
+
     for chunk_result in chunks {
         let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
         if !spec.spec.filter.is_empty() {
@@ -725,6 +736,19 @@ fn load_streamed_node_spec(
         }
         if raw.row_count() == 0 {
             continue;
+        }
+        if is_auto_pk {
+            // Append the synthesised id column to this chunk before
+            // typed_dataframe sees it. Ids span auto_pk_counter ..
+            // auto_pk_counter + chunk.row_count(); the counter then
+            // advances by the chunk's post-filter row count so the
+            // total assignment matches the buffered path's 1..=N.
+            raw.headers.push(pk.clone());
+            for r in 0..raw.row_count() {
+                raw.rows[r].push(auto_pk_counter.to_string());
+                raw.nulls[r].push(false);
+                auto_pk_counter += 1;
+            }
         }
         let keep = streaming_keep_list(&raw, &pk, &title_field, &skip_set, &parent_fk_skip);
         let df = typed_dataframe(&raw, &keep, &declared)
