@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.43] — Streaming CSV for junction-edge loader (E1–E4)
+
+### Added
+
+- **Streaming junction-edge loader** in `src/graph/blueprint/build.rs`.
+  Previously every junction CSV was eagerly parsed into a `CsvCache`
+  before `load_junction_edges` could process it. For multi-million-
+  row junction tables (e.g. SEC HOLDS at full-universe scale, ~30M
+  rows) that peaked RAM at 5–10 GB during the prep phase.
+
+  The new path streams each junction CSV in chunks of 100K rows
+  (configurable via `KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE`),
+  building a per-chunk `DataFrame` + dispatching to `connect()`
+  before the chunk is dropped. Peak RAM during junction loading is
+  now bounded at ~20 MB per chunk regardless of total file size.
+
+  Trade-off: junction loading is now sequential per-spec instead of
+  parallel across specs. Negligible on small graphs (Sodir); the
+  win is large graphs.
+
+- **`read_csv_chunks(path, chunk_size)`** in
+  `src/graph/blueprint/csv_loader.rs`: streaming chunked CSV reader
+  that yields `RawCsv` chunks of configurable size. Foundation for
+  future node-loader streaming (deferred to a later phase since
+  node CSVs interact with multi-pass operations like dedup_by_pk
+  and timeseries grouping that need more careful migration).
+
+- **`CsvStream`** in `src/graph/blueprint/csv_stream.rs`: low-level
+  per-row streaming iterator. Currently used internally as a design
+  reference; can be picked up by future consumers that need per-row
+  dispatch (e.g. one-shot mutations against a graph).
+
+### Notes for v0.9.44+
+
+- **Node-loader streaming** (deferred E2 work) — `prep_node_spec`
+  still uses the buffered `CsvCache` path. For node CSVs that grow
+  past a few million rows (full-universe SEC `MetricFact` would be
+  ~50M), that's the next memory hotspot. The migration needs to
+  thread an auto-pk counter across chunks and handle timeseries /
+  dedup as multi-pass operations.
+- **FK-edge streaming** — `prep_fk_edges` re-uses the node spec's
+  CSV from cache, so streaming there only helps when paired with
+  node-loader streaming. Bundle with the v0.9.44 node migration.
+
+### Build/test status
+
+- 19/19 `tests/test_blueprint.py` parity tests green.
+- All SEC smoke + use-case-v2 tests green.
+- 5 new chunk-reader unit tests, 6 new CsvStream unit tests.
+- `make lint` green per phase commit.
+
 ## [0.9.42] — SEC EDGAR loader deepening (D1–D10)
 
 ### Added
