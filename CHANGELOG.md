@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.45] — `save_graph` mode-aware dispatch in `kglite-mcp-server`
+
+Correctness fix for an MCP-server-only regression latent since
+0.9.20: the `save_graph` tool errored on in-memory `.kgl` graphs
+because the Rust crate's `run_save` only handled the disk
+branch. Ships with the dispatch extracted into
+`kglite::api::save_graph` (single source of truth shared with
+the Python wrapper) and the CI gap that hid the regression
+closed.
+
 ### Fixed
 
 - **`kglite-mcp-server`'s `save_graph` tool errored on in-memory
