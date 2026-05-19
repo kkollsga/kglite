@@ -221,22 +221,36 @@ pub async fn fetch_13f_info_table(
         .and_then(|i| i.as_array())
         .ok_or_else(|| SecError::Decode("filing index: missing directory.item".into()))?;
 
-    // Heuristic: the info table has type "INFORMATION TABLE"; name
+    // Heuristic 1: the info table has type "INFORMATION TABLE"; name
     // typically contains "infotable", "info_table", or "13f" in the
     // XML filename.
+    // Heuristic 2 (0.9.46 fallback): SEC's index.json sometimes
+    // mislabels all documents as type "text.gif" (observed on
+    // Berkshire 13F-HR filings) and the info-table name is just a
+    // numeric `{id}.xml`. If heuristic 1 finds nothing, pick the
+    // first .xml that isn't `primary_doc.xml` (the cover). 13F
+    // filings essentially always have only two XMLs — cover + info
+    // table — so this is reliable.
     let mut info_filename: Option<String> = None;
+    let mut fallback_filename: Option<String> = None;
     for d in docs {
         let typ = d.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !name.ends_with(".xml") {
+            continue;
+        }
         let matches = typ.eq_ignore_ascii_case("INFORMATION TABLE")
             || name.to_ascii_lowercase().contains("infotable")
             || name.to_ascii_lowercase().contains("info_table");
-        if matches && name.ends_with(".xml") {
+        if matches {
             info_filename = Some(name.to_string());
             break;
         }
+        if name != "primary_doc.xml" && fallback_filename.is_none() {
+            fallback_filename = Some(name.to_string());
+        }
     }
-    let Some(fname) = info_filename else {
+    let Some(fname) = info_filename.or(fallback_filename) else {
         return Err(SecError::Decode(format!(
             "no info-table XML in {accession_dashed}"
         )));
@@ -266,10 +280,24 @@ pub async fn fetch_form4_filing(
     primary_document: &str,
 ) -> Result<bool> {
     let accession_no_dashes = catalog::accession_no_dashes(accession_dashed);
+    // SEC submissions.json's `primaryDocument` for Form 4 typically
+    // points to the rendered version under an `xslF345X*/` subdir
+    // (e.g. `xslF345X06/ownership.xml` — that's the XSL-rendered
+    // HTML). The raw XML payload lives at the FILING ROOT with the
+    // same filename. Strip the directory prefix to fetch the raw XML
+    // the Form 4 parser expects.
+    //
+    // Without this, fetch_form4_filing downloads HTML the parser can't
+    // read — observed in 0.9.46 J7 verification where 40/40 Form 4
+    // files returned `form4_parse_errors: 40`.
+    let xml_filename = primary_document
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(primary_document);
     let url = format!(
         "{}{}",
         catalog::filing_index_url(issuer_cik, &accession_no_dashes),
-        primary_document
+        xml_filename
     );
     let path = workdir
         .raw_filings_dir()
