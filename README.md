@@ -32,27 +32,20 @@ structural validators that compose with Cypher.
 > 2 years of deep payloads — Form 4 insider transactions, 13F
 > institutional holdings, SC 13D activist stakes, DEF 14A board
 > composition, FSNDS XBRL financials, Exhibit 21 subsidiaries, 8-K
-> Item codes. **11 node types, 15 edge types**, queryable with Cypher.
+> Item codes. **11 node types, 15 edge types**, queryable with Cypher:
 >
 > ```cypher
-> -- Apple's board, with tenure
-> MATCH (c:Company {cik:320193})<-[:SERVES_ON_BOARD]-(d:Director)
-> RETURN d.name, d.since_year ORDER BY d.since_year
->
-> -- Who's the most insider-active CIK this year?
-> MATCH (c:Company)-[:HAS_INSIDER]->(p)<-[:OF_PERSON]-(t:Transaction)
-> WHERE t.transaction_code = 'S'
-> RETURN c.name, count(t) AS sells ORDER BY sells DESC LIMIT 10
->
-> -- 13D activist purpose mentions "board"
-> MATCH (s:Stake)-[:REPORTED_IN_FILING]->(f)-[:FILED_BY]->(c:Company)
-> WHERE s.purpose_text CONTAINS 'board'
-> RETURN c.name, s.percent_owned, s.purpose_text
+> -- Who's selling Apple stock as an insider, and at what price?
+> MATCH (c:Company {cik: 320193})-[:HAS_INSIDER]->(p:Person)
+>       <-[:OF_PERSON]-(t:Transaction {transaction_code: 'S'})
+> RETURN p.display_name, t.transaction_date, t.shares, t.price_per_share
+> ORDER BY t.transaction_date DESC LIMIT 10
 > ```
 >
-> Public-domain data (US Govt work) — redistribute the built `.kgl`
-> however you like. Scope with `cik_list=[...]` for an S&P-500-sized
-> graph in ~10 minutes, or full universe in ~5 hours. **→
+> Three node types, two edge types, one query — the kind of question
+> that's painful against raw SEC XML and trivial against a graph.
+> Public-domain data (US Govt work). Scope with `cik_list=[...]` for
+> an S&P-500-sized graph in ~10 minutes. **→
 > [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
 ## Use cases
