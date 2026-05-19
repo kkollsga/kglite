@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 5 new chunk-reader unit tests, 6 new CsvStream unit tests.
 - `make lint` green per phase commit.
 
+### Documentation
+
+- **README — SEC EDGAR loader promoted to a top-of-page use case.**
+  Three placements: a new 🏦 callout right after the codebase →
+  Claude callout, a 🏦 bullet at the top of the Use cases list,
+  and an SEC EDGAR entry as the first item under Bundled datasets.
+  New "Why Cypher?" section between Use cases and How it compares —
+  one concrete example (insider sells at a specific CIK) plus a
+  hint at how the same pattern shape composes into harder questions
+  (swap `:HAS_INSIDER` → `:HOLDS`, add `:SERVES_ON_BOARD`).
+- Comparison table updated to list SEC EDGAR alongside Wikidata and
+  Sodir under "Bundled public datasets".
+
 ## [0.9.42] — SEC EDGAR loader deepening (D1–D10)
 
 ### Added
