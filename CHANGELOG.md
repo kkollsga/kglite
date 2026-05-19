@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`crates/kglite-sec/` skeleton** — pure-Rust SEC EDGAR loader,
+  Phase 1 of the planned `kglite.datasets.sec.SEC.open(path, *, years,
+  detailed, mode, ...)` Python API. Ships the streaming
+  `parse_master_idx` parser + `FilingEntry` type for quarterly/daily
+  index files. No PyO3 yet; that lands when the Python wrapper does.
+
 ### Changed
 
 - **README: new top-level `Serve it to an agent` section** between

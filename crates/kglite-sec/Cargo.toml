@@ -1,0 +1,14 @@
+[package]
+name = "kglite-sec"
+version = "0.0.1"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+license = "MIT"
+description = "Pure-Rust SEC EDGAR loader for kglite knowledge graphs. Streams quarterly index files, bulk submissions, Form 4 / 13F / FSNDS, plus per-filing Exhibit 21 and 8-K parsers into preprocessed CSVs ready for kglite blueprint ingestion."
+
+[lib]
+name = "kglite_sec"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"

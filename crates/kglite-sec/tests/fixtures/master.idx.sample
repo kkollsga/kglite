@@ -1,0 +1,13 @@
+Description:           Master Index of EDGAR Dump Files
+Last Data Received:    Friday, January 12, 2024
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+
+ CIK|Company Name|Form Type|Date Filed|Filename
+--------------------------------------------------------------------------------
+320193|APPLE INC|10-K|2024-11-01|edgar/data/320193/0000320193-24-000123-index.htm
+320193|APPLE INC|10-Q|2024-08-02|edgar/data/320193/0000320193-24-000089-index.htm
+789019|MICROSOFT CORP|8-K|2024-07-30|edgar/data/789019/0000789019-24-000045-index.htm
+1318605|TESLA, INC.|10-K/A|2024-04-29|edgar/data/1318605/0001318605-24-000019-index.htm
+1067983|BERKSHIRE HATHAWAY INC|13F-HR|2024-08-14|edgar/data/1067983/0001067983-24-000007-index.htm
+909832|COSTCO WHOLESALE CORP /NEW|4|2024-10-15|edgar/data/909832/0000909832-24-000556-index.htm

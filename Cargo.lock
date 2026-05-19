@@ -1743,6 +1743,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kglite-sec"
+version = "0.0.1"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
