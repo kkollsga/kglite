@@ -153,6 +153,12 @@
         "name": "string"
       },
       "connections": {
+        "fk_edges": {
+          "IS_COMPANY": {
+            "target": "Company",
+            "fk": "manager_cik"
+          }
+        },
         "junction_edges": {
           "HOLDS": {
             "csv": "processed/holds.csv",
