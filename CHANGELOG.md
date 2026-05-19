@@ -7,8 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.42] — SEC EDGAR loader deepening (D1–D10)
+
 ### Added
 
+- **D10 — Use-case tests v2** —
+  `kglite/datasets/sec/tests/test_usecases_v2.py` runs 10 SQL-style
+  queries (UC11–UC20) against a fully-deepened synth graph,
+  exercising Subsidiary / MetricFact / Event / Stake / Director on
+  top of the v1 Company/Filing/Person/Transaction/Holds. Records
+  min/avg query timing and prints a summary table.
+- **D9 — DEF 14A board parser** — new `parsers/def14a.rs` (11 unit
+  tests) extracts directors via heuristic HTML scanning of
+  "DIRECTORS AND EXECUTIVE OFFICERS" sections. Requires age or
+  "since YYYY" marker to register a name. Expected 50–70% accuracy.
+  `extract_directors` walks raw/filings/ for def14a/proxy filenames.
+  Blueprint adds Director + SERVES_ON_BOARD edge to Company.
+- **D8 — SC 13D activist-stake parser** — new `parsers/sc13d.rs` (8
+  unit tests) extracts Item 4 purpose text + Item 5 percent owned
+  from 13D HTML via Item-anchor scanning + percent regex.
+  `extract_13d_stakes` emits Stake nodes linked to Filing.
+- **D7 — Storage mode auto-escalation** —
+  `_predict_graph_size_gb` + `_pick_storage_mode` together pick
+  memory / mapped / disk based on years × detailed × CIK-fraction
+  × per-deepening cost. SEC.open() default `mode=None` is now auto.
+- **D6 — Form 4 + 13F batch fetchers** — `fetch_form4_batch` and
+  `fetch_13f_batch` pyo3 functions take a list of (cik, accession,
+  ...) and process the whole batch with ONE shared SecClient so the
+  10 req/s governor token bucket applies across the entire batch.
+- **D5 — 13F info-table fetcher** — `fetch_13f_info_table` hits the
+  filing's index.json, discovers the info-table XML filename
+  (type='INFORMATION TABLE'), and downloads it into raw/filings/.
+- **D4 — 8-K Item codes** — `extract_8k_events` walks raw/filings/
+  HTM for `Item N.NN` patterns via the existing parsers::eightk
+  parser. Blueprint adds `Event` sub-node + `OF_FILING` fk_edge.
+  `include_8k_events` flag in wrapper.
+- **D3 — FSNDS XBRL** — `fetch_fsnds_quarterly` downloads quarterly
+  ZIPs and extracts NUM.tsv (bulk path, no rate limit).
+  `extract_xbrl_metrics` filters via the existing
+  DEFAULT_TAG_WHITELIST and emits `processed/metric_fact.csv`.
+  Blueprint adds `MetricFact` + `REPORTED_IN_FILING` fk_edge.
+  CIK is reached via Filing -> FILED_BY -> Company traversal.
 - **D2 — Exhibit 21 subsidiaries deepening** —
   `extract_subsidiaries(workdir, slice, force)` walks
   `raw/filings/{cik}/{accession}/*ex21*.htm` (and `exhibit21`,
