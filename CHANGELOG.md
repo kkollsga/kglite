@@ -7,54 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (F1 + F2)
+## [0.9.44] — Streaming node + FK-edge loaders (F1–F4)
+
+Completes the streaming-CSV refactor started in 0.9.43. The
+junction-edge loader was the warm-up (E1–E4); 0.9.44 brings the
+same per-chunk dispatch to node specs and their FK edges, so
+peak RAM during `from_blueprint` is now bounded by chunk size
+rather than total CSV size for the dominant SEC + Wikidata
+shapes.
+
+### Added
 
 - **Streaming node-loader for simple specs** in
   `src/graph/blueprint/build.rs` (F1). Specs that are CSV-backed
-  and *not* manual / timeseries / spatial now flow through a
+  and *not* manual / timeseries / spatial flow through a
   per-chunk `read_csv_chunks → typed_dataframe → add_nodes` loop.
   `add_nodes` is upsert-by-id so successive chunks accumulate
-  cleanly into the same node type.
-
-  RAM during the parallel-prep phase no longer holds a per-spec
-  `clone_raw()` working copy for streamed specs. For Sodir / small
-  blueprints the cost is unchanged; for SEC `Filing` (~388K rows
-  at 1-year scope, ~5M+ at full-universe) the prep-phase peak
-  drops by one full-CSV copy per spec. Buffered path still owns
-  timeseries / spatial / manual specs (FK-edge streaming is F3).
-
-  Chunk size configurable via `KGLITE_BLUEPRINT_NODE_CHUNK_SIZE`
-  (default 100K rows).
+  cleanly into the same node type. Buffered path still owns
+  timeseries / spatial / manual specs (they need random access
+  to the full row set for grouping, in-place geometry conversion,
+  or FK-target discovery).
 
 - **Auto-pk threading across chunks** (F2). `pk: "auto"` specs
-  flow through the streaming path with a per-spec counter that
-  advances by each chunk's post-filter row count. Synthesised ids
-  remain dense `1..=N` matching the buffered path's behaviour.
-  Sub-nodes with `pk:"auto"` + parent FK (the dominant SEC + Sodir
-  shape) now stream end-to-end on the node side; their FK edges
-  still buffer (lifts in F3).
+  stream via a per-spec `u64` counter that advances by each
+  chunk's post-filter row count. Synthesised ids remain dense
+  `1..=N` matching the buffered path's behaviour. Sub-nodes with
+  `pk:"auto"` + parent FK (the dominant SEC + Sodir shape) now
+  stream end-to-end on both the node and FK sides (F3).
 
 - **FK-edge streaming for streaming-eligible specs** (F3). FK
-  edges from non-timeseries / non-spatial / non-manual specs now
-  flow through a per-chunk dispatch built on the same
+  edges from streamed parents emit one `connect()` call per
+  (chunk, declared edge) pair, built on the same
   `build_fk_columns` + `build_edge_df` + `connect()` primitives
-  as the buffered path. Each chunk emits one `connect()` call per
-  declared FK edge.
+  as the buffered path. The cache pre-parse step
+  (`parse_in_parallel`) skips streamed specs — their CSVs are
+  read on demand by the streaming loaders.
 
-  With F3 the cache pre-parse step (`parse_in_parallel`) skips
-  streamable specs entirely — their CSVs are read on demand by
-  the streaming node + FK loaders via `read_csv_chunks`. The
-  cache now holds only the CSVs for timeseries / spatial /
-  manual specs, dropping peak memory during the FK phase from
-  ~2× CSV size (cache + per-spec `clone_raw`) to ~chunk_size for
-  the streamed specs. For SEC `Filing` (one of the heaviest
-  blueprints at full-universe scope) this is the main RAM win.
+- **Adaptive streaming via a file-size gate** (F4). Per-spec
+  CSV size is checked at build start: files at or above
+  `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB` (default 100 MB)
+  flow through the streaming path; smaller files stay on the
+  buffered path. The default threshold keeps Sodir / SEC-1yr
+  blueprints on the fast path (zero regression vs 0.9.43) while
+  triggering streaming for the SEC full-universe / Wikidata-scale
+  cases where the RAM bound matters.
 
-  Risk caveat: per-chunk type inference in `build_edge_df` could
-  disagree across chunks if a column has heterogeneous content
-  (e.g. mostly ints + one string row). Real-world FK columns are
-  consistently typed; if this surfaces we'll move FK types to
-  explicit declarations.
+### Tuning knobs
+
+- `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB` — file-size gate
+  (default 100 MB). Set to `0` to force streaming on all
+  eligible specs; set higher to keep more on the buffered path.
+- `KGLITE_BLUEPRINT_NODE_CHUNK_SIZE` — rows per chunk for node
+  + FK streaming (default 250K). ~110 MB peak per chunk at
+  typical row widths; reduce for RAM-tight hosts.
+- `KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE` — junction-edge
+  streaming chunk size (default 100K, unchanged from 0.9.43).
+
+### Performance
+
+Synthetic 500K-row Employee + 1000-row Company + WORKS_AT FK
+(13 MB employees.csv), 5 cold rounds, `min` (per CLAUDE.md
+perf protocol):
+
+| Path | Time | vs 0.9.43 |
+|---|---:|---:|
+| 0.9.43 buffered (baseline) | 0.373 s | — |
+| 0.9.44 default (file < 100 MB → buffered) | 0.370 s | -0.8% |
+| 0.9.44 forced streaming (threshold=0) | 0.431 s | +15.5% |
+
+Synthetic 5M-row Employee + 5K-row Company + WORKS_AT FK
+(145 MB employees.csv), 3 cold rounds, `min`:
+
+| Path | Time |
+|---|---:|
+| 0.9.44 default (file ≥ 100 MB → stream) | 9.91 s |
+| 0.9.44 forced buffered (threshold=999) | 7.10 s |
+
+The streaming path carries ~40% wall-time overhead on
+in-RAM-fits-anyway sizes — the cost of per-chunk dispatch and
+loss of off-thread parallel prep. This is the explicit tradeoff
+the size gate manages: streaming earns its keep when buffering
+would push the process toward OOM (multi-GB CSVs).
+
+### Notes for v0.9.45+
+
+- **Streaming for timeseries / spatial specs**. Both currently
+  require multi-pass access (timeseries: grouping by pk; spatial:
+  in-place geometry conversion). A two-pass streaming design is
+  feasible but more invasive — deferred until a real Wikidata-scale
+  timeseries graph asks for it.
+- **Per-chunk type-inference stability**. `build_edge_df` infers
+  FK column types per-chunk; chunks with all-int rows + one chunk
+  with a string row would disagree. Real-world FK columns are
+  consistently typed; if this surfaces in production, move FK
+  types to explicit blueprint declarations.
 
 ## [0.9.43] — Streaming CSV for junction-edge loader (E1–E4)
 

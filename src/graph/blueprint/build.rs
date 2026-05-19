@@ -85,7 +85,7 @@ pub fn build(
     let csv_cache: CsvCache = CsvCache::default();
     let mut buffered_csv_paths: Vec<String> = Vec::new();
     for s in core_specs.iter().chain(sub_specs.iter()) {
-        if is_streamable_node_spec(s) {
+        if should_stream_spec(s, &root) {
             continue;
         }
         if let Some(p) = s.spec.csv.as_deref() {
@@ -581,10 +581,12 @@ fn load_node_specs(
     // F1: split specs by streaming eligibility. Streamable specs run
     // through a per-chunk `read_csv_chunks → typed_dataframe → add_nodes`
     // loop that bounds peak RAM by chunk size. Buffered specs (timeseries,
-    // spatial, pk:"auto", manual) keep the parallel-prep path because
-    // they need random access to the full row set during prep.
+    // spatial, manual, *and* anything below the size threshold) keep
+    // the parallel-prep path. The size threshold (F4) prevents a ~20%
+    // dispatch-overhead regression on small/medium CSVs where the
+    // streaming RAM win is moot.
     let (buffered, streamable): (Vec<&FlatSpec>, Vec<&FlatSpec>) =
-        specs.iter().partition(|s| !is_streamable_node_spec(s));
+        specs.iter().partition(|s| !should_stream_spec(s, root));
 
     // Buffered path: parallel prep + serial dispatch (existing behaviour).
     let t_par = std::time::Instant::now();
@@ -661,7 +663,9 @@ fn load_node_specs(
     Ok(())
 }
 
-/// True iff this spec can be loaded via `load_streamed_node_spec`.
+/// True iff this spec's row shape is compatible with the
+/// streaming loader. Independent of file size — the size gate is
+/// applied separately via `should_stream_spec`.
 ///
 /// Returns false for:
 /// - manual specs (no CSV — synthesised from FK targets)
@@ -687,6 +691,45 @@ fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
         return false;
     }
     true
+}
+
+/// True iff this spec should actually flow through the streaming
+/// loader on the current build. Combines the semantic eligibility
+/// check (`is_streamable_node_spec`) with a file-size gate so
+/// small/medium CSVs stay on the (faster) buffered path.
+///
+/// The streaming dispatch carries ~20% overhead per spec vs the
+/// buffered parallel-prep on a single 500K-row CSV — fine on
+/// 50M-row CSVs where the streaming RAM bound is the point, but
+/// not worth paying on Sodir-scale (few KB) or SEC-1yr-scope
+/// (~50MB per heavy spec) graphs. Threshold default: 100 MB.
+/// Tunable via `KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB`.
+///
+/// On unreadable / missing metadata, returns the semantic check —
+/// the streaming path's own `read_csv_chunks` will surface a
+/// clearer error than `metadata()` would.
+fn should_stream_spec(spec: &FlatSpec, root: &Path) -> bool {
+    if !is_streamable_node_spec(spec) {
+        return false;
+    }
+    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+        return false;
+    };
+    let path = root.join(csv_rel);
+    match std::fs::metadata(&path) {
+        Ok(m) => m.len() >= streaming_threshold_bytes(),
+        // If we can't stat the file, fall back to the buffered path
+        // — its existing error reporting handles missing files.
+        Err(_) => false,
+    }
+}
+
+fn streaming_threshold_bytes() -> u64 {
+    let mb = std::env::var("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(100);
+    mb.saturating_mul(1024 * 1024)
 }
 
 /// Streaming node-spec loader: reads the CSV in chunks via
@@ -781,14 +824,22 @@ fn load_streamed_node_spec(
     Ok(())
 }
 
-/// Default streaming chunk size for node CSVs. ~100K rows × ~20 cols
-/// × ~24B avg string ≈ 50 MB peak per chunk — well under any
-/// reasonable RAM budget. Configurable via env var for perf experiments.
+/// Default streaming chunk size for node CSVs. ~250K rows × ~15
+/// cols × ~30B avg string ≈ 110 MB peak per chunk — bounds RAM
+/// for large CSVs without paying the multi-chunk dispatch
+/// overhead on common medium files (1-spec, ≤250K rows fits in
+/// one chunk so the streaming path matches the buffered path
+/// in `add_nodes` / `connect()` call count).
+///
+/// Configurable via env var for perf experiments / RAM-tight
+/// hosts. The junction-edge loader keeps its own 100K default
+/// because junction CSVs typically span far more rows and have
+/// tighter per-row memory than node CSVs.
 fn node_chunk_size() -> usize {
     std::env::var("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(100_000)
+        .unwrap_or(250_000)
 }
 
 /// Build the keep-list for the streaming node loader. Mirrors the
@@ -1033,7 +1084,7 @@ fn load_fk_edges(
     let (streamable, buffered): (Vec<&FlatSpec>, Vec<&FlatSpec>) = specs
         .iter()
         .copied()
-        .partition(|s| is_streamable_node_spec(s));
+        .partition(|s| should_stream_spec(s, root));
 
     // Buffered path: parallel prep + serial connect (existing behaviour).
     let t_par = std::time::Instant::now();

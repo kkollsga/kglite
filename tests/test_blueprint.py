@@ -640,6 +640,7 @@ class TestStreamingNodeLoader:
         # Set a small chunk size so a modest CSV spans multiple chunks
         # — exercises the per-chunk add_nodes accumulation path.
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "100")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
 
         n = 350  # 4 chunks: 100 + 100 + 100 + 50
         persons = pd.DataFrame(
@@ -678,6 +679,7 @@ class TestStreamingNodeLoader:
         """FK edges from a streamed-parent spec still resolve. F1 keeps
         the parent CSV in CsvCache; F3 will switch FK edges to streaming."""
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "50")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n = 120
         persons = pd.DataFrame(
             {
@@ -720,6 +722,7 @@ class TestStreamingNodeLoader:
     def test_streamed_with_filter(self, tmp_path, monkeypatch):
         """Filter applied per-chunk drops the right rows."""
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "30")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n = 100
         items = pd.DataFrame(
             {
@@ -755,6 +758,7 @@ class TestStreamingAutoPk:
 
     def test_multi_chunk_auto_pk_is_dense_and_monotonic(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "75")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n = 250  # 4 chunks at chunk_size 75: 75 + 75 + 75 + 25
         items = pd.DataFrame({"name": [f"I{i}" for i in range(n)]})
         _write_csv(tmp_path / "items.csv", items)
@@ -785,6 +789,7 @@ class TestStreamingAutoPk:
         """Filter is applied per-chunk; auto-pk counter advances only
         by the post-filter row count. Dense ids over kept rows."""
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "40")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n = 200
         items = pd.DataFrame(
             {
@@ -823,6 +828,7 @@ class TestStreamingFkEdges:
 
     def test_multi_chunk_fk_edges(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "50")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n_companies = 20
         n_employees = 500
         companies = pd.DataFrame(
@@ -884,6 +890,7 @@ class TestStreamingFkEdges:
         loader (assigns 1..=N) and the FK loader (also assigns 1..=N
         from independent counter). Edge count = sub-row count."""
         monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "60")
+        monkeypatch.setenv("KGLITE_BLUEPRINT_STREAMING_THRESHOLD_MB", "0")
         n_fields = 5
         n_reserves = 200
         fields = pd.DataFrame(
