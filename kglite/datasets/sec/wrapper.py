@@ -41,6 +41,132 @@ def _current_year_quarter() -> tuple[int, int]:
     return today.year, ((today.month - 1) // 3) + 1
 
 
+# Form type strings observed in filing.csv. SEC's master.idx and
+# submissions.zip use slightly different spellings (e.g.
+# 'SCHEDULE 13D' vs 'SC 13D'); we accept both. Per-source buckets
+# drive `_dispatch_per_filing_fetches` below.
+_FORM_BUCKETS: dict[str, tuple[str, ...]] = {
+    "form4": ("4", "4/A"),
+    "form13f": ("13F-HR", "13F-HR/A"),
+    "form8k": ("8-K", "8-K/A"),
+    "sc13d": ("SC 13D", "SC 13D/A", "SCHEDULE 13D", "SCHEDULE 13D/A"),
+    "def14a": ("DEF 14A",),
+    "form10k": ("10-K", "10-K/A"),  # source filings for Exhibit 21 attachments
+}
+
+
+def _dispatch_per_filing_fetches(
+    workdir: Path,
+    user_agent: str,
+    cik_list: Optional[list[int]],
+    year_range: Optional[tuple[int, int]],
+    current_year: int,
+    detailed: int,
+    include_subsidiaries: bool,
+    include_8k_events: bool,
+    verbose: bool,
+) -> dict[str, tuple[int, int]]:
+    """Read processed/filing.csv, group by form type, and call the
+    per-filing batch fetchers (Form 4, 13F, 8-K, SC 13D, DEF 14A,
+    Exhibit 21) so raw/filings/ gets populated for the extract step.
+
+    Filings are filtered by:
+    - cik_list (if set)
+    - the *detailed window*: filings with filed_date.year in
+      [current_year - detailed + 1, current_year] (unless an
+      explicit year_range overrides).
+
+    Returns a per-bucket {bucket: (downloaded, skipped)} dict for
+    verbose logging.
+    """
+    import csv
+
+    out: dict[str, tuple[int, int]] = {}
+    if detailed <= 0:
+        return out
+
+    filing_csv = workdir / "processed" / "filing.csv"
+    if not filing_csv.is_file():
+        return out
+
+    if year_range is not None:
+        lo, hi = year_range
+    else:
+        hi = current_year
+        lo = max(current_year - detailed + 1, 1993)
+    cik_set: Optional[set[int]] = set(cik_list) if cik_list else None
+
+    buckets: dict[str, list[tuple[int, str, str]]] = {k: [] for k in _FORM_BUCKETS}
+    with filing_csv.open() as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                row_cik = int(row["cik"])
+            except (KeyError, ValueError):
+                continue
+            if cik_set is not None and row_cik not in cik_set:
+                continue
+            filed_date = row.get("filed_date", "")
+            if len(filed_date) < 4:
+                continue
+            try:
+                year = int(filed_date[:4])
+            except ValueError:
+                continue
+            if year < lo or year > hi:
+                continue
+            form_type = row.get("form_type", "")
+            primary = row.get("primary_document", "")
+            accession = row.get("accession_number", "")
+            if not accession:
+                continue
+            for bucket_name, form_types in _FORM_BUCKETS.items():
+                if form_type in form_types:
+                    buckets[bucket_name].append((row_cik, accession, primary))
+                    break
+
+    # Form 4: existing batch fetcher.
+    if buckets["form4"]:
+        if verbose:
+            print(f"[SEC] fetching Form 4 payloads ({len(buckets['form4'])} filings)")
+        out["form4"] = _sec_internal.fetch_form4_batch(str(workdir), user_agent=user_agent, batch=buckets["form4"])
+
+    # 13F-HR: takes (cik, accession) — strip the primary_doc.
+    if buckets["form13f"]:
+        if verbose:
+            print(f"[SEC] fetching 13F info tables ({len(buckets['form13f'])} filings)")
+        f13f_batch = [(cik, acc) for (cik, acc, _) in buckets["form13f"]]
+        out["form13f"] = _sec_internal.fetch_13f_batch(str(workdir), user_agent=user_agent, batch=f13f_batch)
+
+    # 8-K: only when caller wants events.
+    if include_8k_events and buckets["form8k"]:
+        if verbose:
+            print(f"[SEC] fetching 8-K cover pages ({len(buckets['form8k'])} filings)")
+        out["form8k"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form8k"])
+
+    # SC 13D / SC 13D-A: activist stakes. Always on under detailed>0.
+    if buckets["sc13d"]:
+        if verbose:
+            print(f"[SEC] fetching SC 13D primary docs ({len(buckets['sc13d'])} filings)")
+        out["sc13d"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["sc13d"])
+
+    # DEF 14A: proxy filings (directors). Always on under detailed>0.
+    if buckets["def14a"]:
+        if verbose:
+            print(f"[SEC] fetching DEF 14A proxies ({len(buckets['def14a'])} filings)")
+        out["def14a"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["def14a"])
+
+    # Exhibit 21: gated by include_subsidiaries. 10-K filings are the
+    # source; the fetcher discovers ex21 attachments via index.json.
+    if include_subsidiaries and buckets["form10k"]:
+        if verbose:
+            print(f"[SEC] fetching Exhibit 21 attachments ({len(buckets['form10k'])} 10-Ks)")
+        ex21_batch = [(cik, acc) for (cik, acc, _) in buckets["form10k"]]
+        out["exhibit21"] = _sec_internal.fetch_exhibit21_batch(str(workdir), user_agent=user_agent, batch=ex21_batch)
+
+    return out
+
+
 def _predict_graph_size_gb(
     years: int,
     detailed: int,
@@ -306,6 +432,27 @@ class SEC:
         if verbose:
             print(f"[SEC]   extract: {extract_report}")
 
+        # Step 2a: per-filing payload fetch. Populates raw/filings/
+        # with Form 4 XMLs, 13F info tables, 8-K cover pages, SC 13D
+        # primary docs, DEF 14A proxies, and Exhibit 21 attachments
+        # so the extract calls below have something to read.
+        # 0.9.46 — pre-J2 this entire step was missing and detailed=N
+        # produced zero rows for every payload source.
+        if detailed > 0:
+            fetch_dispatch = _dispatch_per_filing_fetches(
+                workdir,
+                user_agent=user_agent,
+                cik_list=cik_list,
+                year_range=year_range,
+                current_year=current_year,
+                detailed=detailed,
+                include_subsidiaries=include_subsidiaries,
+                include_8k_events=include_8k_events,
+                verbose=verbose,
+            )
+            if verbose and fetch_dispatch:
+                print(f"[SEC]   per-filing fetch: {fetch_dispatch}")
+
         # Step 2b: insider transactions (Form 4 XMLs from raw/filings/).
         # Slice applies: only Form 4s for issuer CIKs in cik_list pass.
         if verbose:
@@ -328,10 +475,9 @@ class SEC:
         sub_report = _sec_internal.extract_subsidiaries_py(str(workdir), force=force_rebuild, cik_list=cik_list)
         if verbose:
             print(f"[SEC]   subsidiaries: {sub_report}")
-        # `include_subsidiaries=False` would gate the per-filing fetch
-        # phase (not yet wired); the extract is always run since it's a
-        # no-op when raw/filings/ has no Exhibit 21 documents.
-        _ = include_subsidiaries
+        # `include_subsidiaries` now gates the Exhibit 21 fetch in
+        # Step 2a above; the extract here is a no-op if the fetch
+        # didn't run.
 
         # Step 2e: FSNDS XBRL metrics. Bulk fetch (no rate limit) for
         # the deep window, then extract whitelisted numeric facts.
@@ -365,7 +511,9 @@ class SEC:
         events_report = _sec_internal.extract_8k_events_py(str(workdir), force=force_rebuild, cik_list=cik_list)
         if verbose:
             print(f"[SEC]   events: {events_report}")
-        _ = include_8k_events  # reserved for the per-filing fetcher gate
+        # `include_8k_events` now gates the 8-K cover-page fetch in
+        # Step 2a above; the extract here is a no-op if the fetch
+        # didn't run.
 
         # Step 2g: SC 13D activist stakes (D8).
         if verbose:

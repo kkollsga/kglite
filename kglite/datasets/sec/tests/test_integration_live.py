@@ -141,3 +141,64 @@ def test_live_sec_build_and_query() -> None:
     import shutil
 
     shutil.rmtree(workdir, ignore_errors=True)
+
+
+@pytest.mark.skipif(
+    not _integration_enabled(),
+    reason="set KGLITE_SEC_INTEGRATION=1 to enable (hits live SEC)",
+)
+def test_live_sec_detailed_payloads_land() -> None:
+    """0.9.46 J2: per-filing fetcher dispatch is wired. With
+    ``detailed=1`` and a 3-CIK scope, every detailed-payload extract
+    must produce non-zero rows. Before J2, all six returned zero
+    because the wrapper never assembled the (cik, accession,
+    primary_doc) batches to feed the Rust fetchers."""
+    from kglite.datasets.sec import SEC
+
+    workdir = Path(tempfile.mkdtemp(prefix="kglite_sec_detailed_"))
+    print(f"\n[live-detailed] workdir: {workdir}")
+    try:
+        # AAPL + BRK-B + TSLA, one year detailed. AAPL has Form 4 +
+        # DEF 14A + 10-K; BRK-B has 13F-HR + Form 4; TSLA has
+        # frequent Form 4 + occasional 8-K. Coverage hits all sources.
+        g = SEC.open(
+            workdir,
+            cik_list=["AAPL", "BRK-B", "TSLA"],
+            years=1,
+            detailed=1,
+            mode="memory",
+            user_agent=_user_agent(),
+            verbose=True,
+        )
+
+        info = g.graph_info()
+        print(f"[live-detailed] graph: {info['node_count']:,} nodes, {info['edge_count']:,} edges")
+
+        # Form 4 transactions (issuer-attributed):
+        n_tx = _rows(g.cypher("MATCH (t:Transaction) RETURN count(t) AS n"))[0]["n"]
+        assert n_tx > 0, f"expected Form 4 transactions; got {n_tx}"
+
+        # 13F holdings (BRK-B is the prolific filer):
+        n_holds = _rows(g.cypher("MATCH ()-[h:HOLDS]->() RETURN count(h) AS n"))[0]["n"]
+        assert n_holds > 0, f"expected 13F holdings; got {n_holds}"
+
+        # 8-K events:
+        n_events = _rows(g.cypher("MATCH (e:Event) RETURN count(e) AS n"))[0]["n"]
+        assert n_events > 0, f"expected 8-K events; got {n_events}"
+
+        # DEF 14A directors:
+        n_directors = _rows(g.cypher("MATCH (d:Director) RETURN count(d) AS n"))[0]["n"]
+        assert n_directors > 0, f"expected DEF 14A directors; got {n_directors}"
+
+        # Subsidiaries from 10-K Exhibit 21:
+        n_subs = _rows(g.cypher("MATCH (s:Subsidiary) RETURN count(s) AS n"))[0]["n"]
+        assert n_subs > 0, f"expected Exhibit 21 subsidiaries; got {n_subs}"
+
+        print(
+            f"[live-detailed] transactions={n_tx} holdings={n_holds} events={n_events} "
+            f"directors={n_directors} subsidiaries={n_subs}"
+        )
+    finally:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
