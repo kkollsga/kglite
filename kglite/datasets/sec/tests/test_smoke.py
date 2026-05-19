@@ -373,6 +373,39 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D9 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d9_board_director_extraction(synth_workdir: Path) -> None:
+    """User story (D9): As a corporate-governance analyst, I want to
+    find all directors on a company's board. I stage a synthetic DEF
+    14A with two directors; the build creates Director nodes linked
+    via SERVES_ON_BOARD to the company."""
+    dir_ = synth_workdir / "raw" / "filings" / "320193" / "000032019324007777"
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / "aapl-def14a.htm").write_text(
+        "<html><body><h2>DIRECTORS AND EXECUTIVE OFFICERS</h2>"
+        "<p>Tim Cook, age 64, Director since 2011</p>"
+        "<p>Arthur D Levinson, age 74, Director since 2000</p>"
+        "</body></html>"
+    )
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D9 d9@example.com",
+        verbose=False,
+    )
+
+    res = _rows(g.cypher("MATCH (c:Company {cik: 320193})<-[:SERVES_ON_BOARD]-(d:Director) RETURN count(d) AS n"))
+    assert res[0]["n"] >= 2, f"expected 2+ Apple directors, got {res}"
+
+
 # ── D8 user story ────────────────────────────────────────────────────
 
 

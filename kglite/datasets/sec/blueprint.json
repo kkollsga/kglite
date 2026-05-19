@@ -86,6 +86,24 @@
         }
       }
     },
+    "Director": {
+      "csv": "processed/director.csv",
+      "pk": "director_nid",
+      "title": "name",
+      "properties": {
+        "name": "string",
+        "age": "int",
+        "since_year": "int"
+      },
+      "connections": {
+        "fk_edges": {
+          "SERVES_ON_BOARD": {
+            "target": "Company",
+            "fk": "company_cik"
+          }
+        }
+      }
+    },
     "Stake": {
       "csv": "processed/stake.csv",
       "pk": "stake_nid",

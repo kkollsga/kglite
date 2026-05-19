@@ -4,6 +4,7 @@
 //! No I/O, no async, no network. This means every parser is trivially
 //! testable against a fixture file and reusable from any orchestrator.
 
+pub mod def14a;
 pub mod eightk;
 pub mod exhibit21;
 pub mod f13f;

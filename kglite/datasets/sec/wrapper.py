@@ -298,6 +298,14 @@ class SEC:
         if verbose:
             print(f"[SEC]   stakes: {stake_report}")
 
+        # Step 2h: DEF 14A directors (D9). Heuristic parser; expect
+        # 50-70% accuracy on real filings.
+        if verbose:
+            print("[SEC] extracting DEF 14A directors")
+        directors_report = _sec_internal.extract_directors_py(str(workdir), force=force_rebuild, cik_list=cik_list)
+        if verbose:
+            print(f"[SEC]   directors: {directors_report}")
+
         # Step 3: build graph/{mode}/
         if verbose:
             print(f"[SEC] building graph/{mode}/")

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, SecError};
 use crate::fetch::YearRange;
 use crate::layout::Workdir;
+use crate::parsers::def14a::extract_directors as parse_def14a_directors;
 use crate::parsers::eightk::extract_8k_items;
 use crate::parsers::exhibit21::extract_subsidiaries as parse_exhibit21;
 use crate::parsers::f13f::parse_13f_info_table;
@@ -954,6 +955,127 @@ pub fn extract_xbrl_metrics(
 
     writer.flush()?;
     Ok(report)
+}
+
+// ─── DEF 14A directors extract ───────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct DirectorsExtractReport {
+    pub directors_written: usize,
+    pub def14a_files_read: usize,
+    pub def14a_parse_errors: usize,
+}
+
+const DIRECTOR_HEADER: &[&str] = &["director_nid", "company_cik", "name", "age", "since_year"];
+
+/// Walk `raw/filings/{cik}/{accession}/` for DEF 14A HTML and extract
+/// directors via the heuristic parser. Emits
+/// `processed/director.csv`. director_nid is composite
+/// `{company_cik}_{name_normalized}` so the same person at different
+/// companies generates separate rows.
+pub fn extract_directors(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<DirectorsExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let director_csv = workdir.processed_csv("director");
+
+    let mut report = DirectorsExtractReport::default();
+    if !force && director_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut writer = csv_writer(&director_csv)?;
+    writer.write_record(DIRECTOR_HEADER)?;
+
+    let filings_root = workdir.raw_filings_dir();
+    if !filings_root.is_dir() {
+        writer.flush()?;
+        return Ok(report);
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for path in walk_def14a_files(&filings_root)? {
+        let Some(cik_str) = cik_from_filing_path(&path) else {
+            continue;
+        };
+        let cik_int: u64 = cik_str.parse().unwrap_or(0);
+        if !slice.cik_matches(cik_int) {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => {
+                report.def14a_parse_errors += 1;
+                continue;
+            }
+        };
+        let directors = parse_def14a_directors(&text);
+        if directors.is_empty() {
+            continue;
+        }
+        report.def14a_files_read += 1;
+        for d in directors {
+            let nid = format!("{}_{}", cik_str, normalize_subsidiary_name(&d.name));
+            if !seen.insert(nid.clone()) {
+                continue;
+            }
+            writer.write_record([
+                nid.as_str(),
+                cik_str.as_str(),
+                d.name.as_str(),
+                &d.age.map(|a| a.to_string()).unwrap_or_default(),
+                &d.since_year.map(|y| y.to_string()).unwrap_or_default(),
+            ])?;
+            report.directors_written += 1;
+        }
+    }
+
+    writer.flush()?;
+    Ok(report)
+}
+
+fn walk_def14a_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let Ok(cik_dirs) = std::fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for cik_entry in cik_dirs.flatten() {
+        let cp = cik_entry.path();
+        if !cp.is_dir() {
+            continue;
+        }
+        let Ok(acc_dirs) = std::fs::read_dir(&cp) else {
+            continue;
+        };
+        for ad in acc_dirs.flatten() {
+            let ap = ad.path();
+            if !ap.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&ap) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if (name.ends_with(".htm") || name.ends_with(".html"))
+                    && (name.contains("def14a")
+                        || name.contains("def-14a")
+                        || name.contains("proxy"))
+                {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ─── SC 13D activist-stake extract ───────────────────────────────────
