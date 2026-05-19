@@ -106,6 +106,13 @@ jobs:
         # real tool-surface baseline gate.
         run: pip install -e .[mcp]
 
+      - name: Build kglite-mcp-server binary
+        # 0.9.45+: needed by tests/test_mcp_server_smoke.py, which is
+        # `pytest.mark.skipif(not BINARY.exists())`. Without this step
+        # the smoke test silently skips in CI — it's how the Rust
+        # save_graph dispatch regression (0.9.20→0.9.44) went undetected.
+        run: cargo build --release -p kglite-mcp-server
+
       - name: Run Python tests
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
 

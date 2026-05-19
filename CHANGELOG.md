@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite-mcp-server`'s `save_graph` tool errored on in-memory
+  `.kgl` graphs** with `"save_disk requires disk mode"`. The Rust
+  crate's `run_save` at `crates/kglite-mcp-server/src/tools.rs:599`
+  called `dir.save_disk(path)` unconditionally; `save_disk` is the
+  disk-mode-only path. The Python `KnowledgeGraph.save()` at
+  `src/graph/pyapi/kg_core.rs:505` has always dispatched correctly
+  via `is_disk()`, but the Rust crate never got the equivalent.
+  Latent since the 0.9.20 architecture change (May 11) — undetected
+  because `tests/test_mcp_server_smoke.py` is
+  `pytest.mark.skipif(not BINARY.exists())` and CI didn't build
+  the binary.
+
+  Fix: new `kglite::api::save_graph(graph, path)` in
+  `src/graph/io/file.rs` performs the same dispatch as the Python
+  wrapper (disk → `save_disk`; in-memory → `prepare_save` →
+  `enable_columnar` → `write_graph_v3`). The MCP crate now calls
+  it, removing the duplicated dispatch surface.
+
+### Added
+
+- **CI builds the `kglite-mcp-server` binary** before the pytest
+  step, so `tests/test_mcp_server_smoke.py` runs in CI instead of
+  silently skipping. This is what would have caught the
+  `save_graph` regression at 0.9.20.
+- **Disk-mode `save_graph` round-trip test**
+  (`test_c8b_save_graph_persists_disk_mode` in
+  `tests/test_mcp_server_python_entry.py`) locks in the
+  disk-branch of the dispatch — the complement to the existing
+  in-memory `test_c8`.
+- **`kglite::api::save_graph`** and `kglite::api::save_inmemory`
+  (via `kglite::graph::io::file`) for non-pyo3 Rust consumers.
+
+### Changed
+
+- `tests/test_mcp_server_smoke.py` opts into `save_graph` via the
+  manifest (`builtins.save_graph: true`) — catching up with the
+  opt-in design `ff5cc91` introduced for the canonical
+  `tests/test_mcp_server_python_entry.py` fixtures.
+
 ## [0.9.44] — Streaming node + FK-edge loaders (F1–F4)
 
 Completes the streaming-CSV refactor started in 0.9.43. The

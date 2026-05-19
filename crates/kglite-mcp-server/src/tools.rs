@@ -601,14 +601,16 @@ fn run_save(graph: &ActiveGraph) -> String {
         return "save_graph requires --graph mode (no source path bound).".to_string();
     };
     let path_str = path.to_string_lossy().into_owned();
-    // save_disk needs &mut DirGraph; we hold an Arc<DirGraph>. Clone the
-    // Arc and unwrap to get exclusive access (cheap when the Arc is
-    // already unique, otherwise we do a deep clone of the storage —
-    // acceptable for save since it's an explicit operator action).
+    // `kglite::api::save_graph` dispatches on storage mode (mirrors
+    // `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`):
+    //   - disk-backed → `save_disk(path)` (the folder IS the graph)
+    //   - in-memory  → `prepare_save` → `enable_columnar` → `write_graph_v3`
+    // The pre-0.9.45 inline `save_disk` call errored "save_disk requires
+    // disk mode" for in-memory `.kgl` graphs — see CHANGELOG [0.9.45].
     let mut dir_arc = graph.kg.dir().clone();
-    let dir = std::sync::Arc::make_mut(&mut dir_arc);
-    match dir.save_disk(&path_str) {
+    match kglite::api::save_graph(&mut dir_arc, &path_str) {
         Ok(()) => {
+            let dir = std::sync::Arc::make_mut(&mut dir_arc);
             let overview = compute_schema(dir);
             format!(
                 "Saved {path_str} ({} nodes, {} edges).",

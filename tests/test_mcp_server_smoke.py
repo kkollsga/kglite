@@ -85,6 +85,17 @@ def _build_fixture_graph(path: Path) -> None:
     g.save(str(path))
 
 
+def _write_savegraph_manifest(path: Path) -> Path:
+    """Drop a minimal manifest with `builtins.save_graph: true` so the
+    server registers the save_graph tool. Matches the canonical
+    opt-in pattern in `test_mcp_server_python_entry.py` (`ff5cc91`
+    made save_graph opt-in to avoid exposing a destructive operation
+    on every server boot)."""
+    manifest = path / "smoke_mcp.yaml"
+    manifest.write_text("name: smoke\nbuiltins:\n  save_graph: true\n")
+    return manifest
+
+
 # ── JSON-RPC stdio client ─────────────────────────────────────────────────
 
 
@@ -239,8 +250,12 @@ class TestGraphMode:
     """`--graph X.kgl` registers kglite tools + auto-binds the .kgl's parent
     directory as a source root, so source tools are also live."""
 
-    def test_lists_expected_tools(self, graph_fixture: Path):
-        client = _spawn(["--graph", str(graph_fixture)])
+    def test_lists_expected_tools(self, graph_fixture: Path, tmp_path: Path):
+        # save_graph is opt-in via `builtins.save_graph: true` since
+        # `ff5cc91` (May 17, 2026). Without the manifest the server
+        # registers everything except save_graph.
+        manifest = _write_savegraph_manifest(tmp_path)
+        client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
         try:
             tools = client.list_tools()
             names = {t["name"] for t in tools}
@@ -329,7 +344,12 @@ class TestGraphMode:
         _build_fixture_graph(src)
         mtime_before = src.stat().st_mtime
 
-        client = _spawn(["--graph", str(src)])
+        # save_graph is opt-in — see _write_savegraph_manifest. This
+        # is the in-memory `.kgl` round-trip; the disk-mode variant
+        # is in `test_mcp_server_python_entry.py`. Both are needed to
+        # cover the dispatch in `kglite::api::save_graph`.
+        manifest = _write_savegraph_manifest(tmp_path)
+        client = _spawn(["--graph", str(src), "--mcp-config", str(manifest)])
         try:
             time.sleep(0.05)  # so save mtime is detectably newer
             r = client.call_tool("save_graph")

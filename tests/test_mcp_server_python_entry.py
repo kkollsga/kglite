@@ -1328,6 +1328,61 @@ def test_c8_save_graph_persists_to_disk(mutable_graph_path: Path) -> None:
     assert "1" in body, f"mutation didn't persist across save/reload: {body!r}"
 
 
+def test_c8b_save_graph_persists_disk_mode(tmp_path: Path) -> None:
+    """save_graph on a disk-backed graph (directory, not .kgl file)
+    exercises the `save_disk` branch of `kglite::api::save_graph`'s
+    dispatch — the complement to c8's in-memory branch. Both are
+    needed to lock in the dispatch fix landed in 0.9.45 (the pre-fix
+    `run_save` only handled the disk branch and errored on in-memory
+    `.kgl` graphs).
+
+    Mutation goes through `SET` (one of the Cypher operations that
+    works on disk-mode graphs — see B9) since `CREATE` is refused
+    on disk (B8)."""
+    import pandas as pd
+
+    import kglite
+
+    disk_dir = tmp_path / "disk_graph"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.add_nodes(
+        pd.DataFrame([{"id": "m1", "title": "before"}]),
+        "Marker",
+        "id",
+        "title",
+    )
+    g.save(str(disk_dir))
+    del g  # release the mmap before booting the server
+
+    manifest = tmp_path / "disk_mcp.yaml"
+    manifest.write_text("name: disk\nbuiltins:\n  save_graph: true\n")
+
+    # Mutate via SET, then save.
+    client = _client(["--graph", str(disk_dir), "--mcp-config", str(manifest)])
+    try:
+        client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (m:Marker {id: 'm1'}) SET m.title = 'after'"},
+        )
+        save_body = client.call_tool("save_graph", {})
+    finally:
+        client.close()
+    assert "ERROR" not in save_body and "error" not in save_body.lower()[:30], (
+        f"save_graph on disk-backed graph errored: {save_body!r}"
+    )
+
+    # Reload from disk and verify the mutation persisted.
+    client = _client(["--graph", str(disk_dir), "--mcp-config", str(manifest)])
+    try:
+        body = client.call_tool(
+            "cypher_query",
+            {"query": "MATCH (m:Marker {id: 'm1'}) RETURN m.title AS title"},
+        )
+    finally:
+        client.close()
+    assert "after" in body, f"disk mutation didn't persist across save/reload: {body!r}"
+
+
 # ---------------------------------------------------------------------------
 # Category D — Embedder & semantic search (3 tests)
 # ---------------------------------------------------------------------------

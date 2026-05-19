@@ -1080,6 +1080,39 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// In-memory save composing `prepare_save` + `enable_columnar` +
+/// `write_graph_v3`. Public so non-pyo3 consumers (e.g.
+/// `kglite-mcp-server`) can save in-memory graphs without
+/// duplicating the dispatch logic from
+/// `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`.
+///
+/// Callers under the GIL should release it around `write_graph_v3`
+/// for parallelism with other Python threads — see `kg_core.rs::save`
+/// for the canonical split. Rust-only callers (no GIL) just call
+/// this directly.
+pub fn save_inmemory(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
+    prepare_save(graph);
+    {
+        let dir = Arc::make_mut(graph);
+        dir.enable_columnar();
+    }
+    write_graph_v3(graph, path)
+}
+
+/// Mode-aware save: dispatches to `DirGraph::save_disk` for
+/// disk-backed graphs, `save_inmemory` otherwise. Mirrors the
+/// dispatch in `KnowledgeGraph::save` at
+/// `src/graph/pyapi/kg_core.rs`; both consumers (the pyo3 wrapper
+/// and the `kglite-mcp-server` binary) call this so dispatch
+/// behaviour can't drift between paths.
+pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
+    if graph.graph.is_disk() {
+        let dir = Arc::make_mut(graph);
+        return dir.save_disk(path);
+    }
+    save_inmemory(graph, path).map_err(|e| e.to_string())
+}
+
 // ─── Load ────────────────────────────────────────────────────────────────────
 
 /// Minimum file size to use mmap for the initial file read.
