@@ -8,7 +8,7 @@ use std::path::Path;
 
 use super::super::expr::{self, Bindings, Value};
 use super::super::schema::Blueprint;
-use super::{csv_cell_to_value, resolve_csv_path};
+use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
 
 struct RowBindings<'a> {
     headers: &'a [String],
@@ -31,10 +31,8 @@ pub fn run_filter(
     where_expr: &str,
     into: Option<&str>,
 ) -> Result<(), String> {
-    let spec = blueprint
-        .nodes
-        .get(from)
-        .ok_or_else(|| format!("source type '{}' not declared in blueprint.nodes", from))?;
+    let spec = resolve_source_spec(blueprint, from)
+        .ok_or_else(|| format!("source type '{}' not declared in blueprint", from))?;
     let csv_rel = spec.csv.clone().ok_or_else(|| {
         format!(
             "source type '{}' has no csv: declared (filter on synthesised types is deferred)",
@@ -131,8 +129,10 @@ pub fn run_filter(
         blueprint.nodes.insert(new_type.to_string(), new_spec);
     } else {
         // Mode (b): destructive — rewire the source NodeSpec to the
-        // filtered file. Non-matching rows are dropped.
-        let spec_mut = blueprint.nodes.get_mut(from).unwrap();
+        // filtered file. Non-matching rows are dropped. Sub-nodes
+        // are mutated in their parent's `sub_nodes` map.
+        let spec_mut = resolve_source_spec_mut(blueprint, from)
+            .expect("source spec disappeared between resolve and mutate");
         spec_mut.csv = Some(computed_rel);
     }
 

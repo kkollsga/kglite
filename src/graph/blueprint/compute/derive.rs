@@ -13,7 +13,10 @@ use std::path::Path;
 
 use super::super::expr::{self, Bindings, Value};
 use super::super::schema::Blueprint;
-use super::{csv_cell_to_value, infer_value_type, resolve_csv_path, value_to_csv_cell};
+use super::{
+    csv_cell_to_value, infer_value_type, resolve_csv_path, resolve_source_spec,
+    resolve_source_spec_mut, value_to_csv_cell,
+};
 
 /// Per-row Bindings impl backed by a header-indexed Vec of Values.
 /// Cheap to construct per row; the Vec allocation is reused across
@@ -38,11 +41,10 @@ pub fn run_derive(
     from: &str,
     set: &IndexMap<String, String>,
 ) -> Result<(), String> {
-    // 1. Resolve source NodeSpec + CSV path
-    let spec = blueprint
-        .nodes
-        .get(from)
-        .ok_or_else(|| format!("source type '{}' not declared in blueprint.nodes", from))?;
+    // 1. Resolve source NodeSpec + CSV path. `from` may name a
+    //    top-level type or a sub-node — both are valid targets.
+    let spec = resolve_source_spec(blueprint, from)
+        .ok_or_else(|| format!("source type '{}' not declared in blueprint", from))?;
     let csv_rel = spec.csv.clone().ok_or_else(|| {
         format!(
             "source type '{}' has no csv: declared (compute on synthesised types is deferred)",
@@ -167,7 +169,8 @@ pub fn run_derive(
     // 4. Rewire the blueprint's NodeSpec to consume the augmented
     //    CSV + register the new property types.
     let computed_rel = format!("computed/{}_derived.csv", sanitize_filename(from));
-    let spec_mut = blueprint.nodes.get_mut(from).unwrap();
+    let spec_mut = resolve_source_spec_mut(blueprint, from)
+        .expect("source spec disappeared between resolve and mutate");
     spec_mut.csv = Some(computed_rel);
     for (prop, _) in &compiled {
         let ty = inferred_types.get(prop).copied().unwrap_or("string");
@@ -325,6 +328,47 @@ mod tests {
         let out = fs::read_to_string(tmp.path().join("computed/T_derived.csv")).unwrap();
         assert!(out.contains("1.5"));
         assert!(out.contains("0.75"));
+    }
+
+    #[test]
+    fn derive_resolves_sub_node_source() {
+        // SEC's Transaction is declared as a sub-node of Person — make
+        // sure derive targets `from: "Transaction"` even though it lives
+        // at nodes.Person.sub_nodes.Transaction.
+        let tmp = tempfile::tempdir().unwrap();
+        write_csv(
+            &tmp.path().join("tx.csv"),
+            "tx_id,person_nid,shares,price\n1,P1,100,10.0\n2,P1,50,20.0\n",
+        );
+        let mut bp = Blueprint::default();
+        let mut parent = crate::graph::blueprint::schema::NodeSpec::default();
+        parent.csv = Some("persons.csv".to_string());
+        parent.pk = Some("person_nid".to_string());
+        let mut sub = crate::graph::blueprint::schema::NodeSpec::default();
+        sub.csv = Some("tx.csv".to_string());
+        sub.pk = Some("tx_id".to_string());
+        sub.properties
+            .insert("shares".to_string(), "int".to_string());
+        sub.properties
+            .insert("price".to_string(), "float".to_string());
+        parent.sub_nodes.insert("Transaction".to_string(), sub);
+        bp.nodes.insert("Person".to_string(), parent);
+
+        let mut set = IndexMap::new();
+        set.insert("total_value".to_string(), "shares * price".to_string());
+        run_derive(&mut bp, tmp.path(), "Transaction", &set).unwrap();
+
+        let out = fs::read_to_string(tmp.path().join("computed/Transaction_derived.csv")).unwrap();
+        assert!(out.contains("total_value"));
+        assert!(out.contains("1000.0"));
+
+        // Sub-node rewired in place, not promoted to top-level.
+        let sub = &bp.nodes["Person"].sub_nodes["Transaction"];
+        assert_eq!(sub.csv.as_deref(), Some("computed/Transaction_derived.csv"));
+        assert_eq!(
+            sub.properties.get("total_value"),
+            Some(&"float".to_string())
+        );
     }
 
     #[test]

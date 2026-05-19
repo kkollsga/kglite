@@ -20,7 +20,7 @@ use std::path::Path;
 use indexmap::IndexMap;
 
 use super::super::schema::{Blueprint, JunctionEdge};
-use super::{csv_cell_to_value, resolve_csv_path};
+use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
 
 pub fn run_chain(
     blueprint: &mut Blueprint,
@@ -30,9 +30,7 @@ pub fn run_chain(
     order_by: &str,
     edge_name: &str,
 ) -> Result<(), String> {
-    let spec = blueprint
-        .nodes
-        .get(from)
+    let spec = resolve_source_spec(blueprint, from)
         .ok_or_else(|| format!("chain: source type '{}' not declared", from))?;
     let pk_col = spec
         .pk
@@ -157,7 +155,8 @@ pub fn run_chain(
     // Register the junction edge so the standard Phase 5 loader
     // picks up the new CSV.
     let computed_rel = format!("computed/chain_{}.csv", sanitize_filename(edge_name));
-    let spec_mut = blueprint.nodes.get_mut(from).unwrap();
+    let spec_mut = resolve_source_spec_mut(blueprint, from)
+        .expect("source spec disappeared between resolve and mutate");
     spec_mut.connections.junction_edges.insert(
         edge_name.to_string(),
         JunctionEdge {

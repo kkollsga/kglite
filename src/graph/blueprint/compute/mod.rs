@@ -111,6 +111,46 @@ fn op_name(op: &ComputeOp) -> &'static str {
     }
 }
 
+/// Resolve a source-type name to its NodeSpec. Looks in
+/// `blueprint.nodes` first, then walks each parent's `sub_nodes` —
+/// so compute primitives can target sub-node types (e.g. SEC's
+/// `Transaction`, which lives at
+/// `nodes.Person.sub_nodes.Transaction`).
+pub(crate) fn resolve_source_spec<'a>(
+    blueprint: &'a super::schema::Blueprint,
+    name: &str,
+) -> Option<&'a super::schema::NodeSpec> {
+    if let Some(s) = blueprint.nodes.get(name) {
+        return Some(s);
+    }
+    for parent in blueprint.nodes.values() {
+        if let Some(s) = parent.sub_nodes.get(name) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Mutable counterpart of `resolve_source_spec`. Returns the
+/// NodeSpec at its declared location so callers can rewire `csv:`
+/// or extend `properties:` / `connections:` in place — sub-node
+/// mutations stay on the parent's `sub_nodes` map, top-level
+/// mutations on `blueprint.nodes`.
+pub(crate) fn resolve_source_spec_mut<'a>(
+    blueprint: &'a mut super::schema::Blueprint,
+    name: &str,
+) -> Option<&'a mut super::schema::NodeSpec> {
+    if blueprint.nodes.contains_key(name) {
+        return blueprint.nodes.get_mut(name);
+    }
+    for parent in blueprint.nodes.values_mut() {
+        if parent.sub_nodes.contains_key(name) {
+            return parent.sub_nodes.get_mut(name);
+        }
+    }
+    None
+}
+
 /// Resolve the on-disk path for a NodeSpec's CSV, relative to the
 /// blueprint root.
 pub(crate) fn resolve_csv_path(input_root: &Path, csv: &str) -> std::path::PathBuf {

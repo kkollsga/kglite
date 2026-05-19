@@ -32,7 +32,9 @@ use indexmap::IndexMap;
 
 use super::super::expr::{self, Bindings, Expr, Value};
 use super::super::schema::{AggregateEdge, Blueprint, JunctionEdge, NodeSpec};
-use super::{csv_cell_to_value, infer_value_type, resolve_csv_path, value_to_csv_cell};
+use super::{
+    csv_cell_to_value, infer_value_type, resolve_csv_path, resolve_source_spec, value_to_csv_cell,
+};
 
 struct RowBindings<'a> {
     headers: &'a [String],
@@ -93,9 +95,7 @@ pub fn run_aggregate(
     agg: &IndexMap<String, String>,
     edges: &[AggregateEdge],
 ) -> Result<(), String> {
-    let spec = blueprint
-        .nodes
-        .get(from)
+    let spec = resolve_source_spec(blueprint, from)
         .ok_or_else(|| format!("aggregate: source type '{}' not declared", from))?;
     let csv_rel = spec.csv.clone().ok_or_else(|| {
         format!(

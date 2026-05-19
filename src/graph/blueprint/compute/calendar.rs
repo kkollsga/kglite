@@ -14,7 +14,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use indexmap::IndexMap;
 
 use super::super::schema::{Blueprint, CalendarLink, JunctionEdge, NodeSpec};
-use super::{csv_cell_to_value, resolve_csv_path};
+use super::{csv_cell_to_value, resolve_csv_path, resolve_source_spec, resolve_source_spec_mut};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_calendar(
@@ -316,9 +316,7 @@ fn write_link(
     date_type: &str,
     link: &CalendarLink,
 ) -> Result<(), String> {
-    let src_spec = blueprint
-        .nodes
-        .get(&link.from)
+    let src_spec = resolve_source_spec(blueprint, &link.from)
         .ok_or_else(|| format!("calendar link: unknown source type '{}'", link.from))?;
     let src_pk = src_spec
         .pk
@@ -400,7 +398,8 @@ fn write_link(
         sanitize(&link.from),
         sanitize(&link.edge)
     );
-    let src_mut = blueprint.nodes.get_mut(&link.from).unwrap();
+    let src_mut = resolve_source_spec_mut(blueprint, &link.from)
+        .expect("calendar link source spec disappeared between resolve and mutate");
     src_mut.connections.junction_edges.insert(
         link.edge.clone(),
         JunctionEdge {

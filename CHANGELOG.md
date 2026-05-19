@@ -7,40 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — Blueprint compute pipeline (K1–K6)
+## [0.9.46] — SEC EDGAR value-prop upgrade + blueprint compute pipeline
+
+Two big additions land in this release. The first (J0–J7) overhauls
+the SEC loader so the detailed-payload extracts actually work and
+the resulting graph rewards SQL-person traversal patterns. The
+second (K1–K7) introduces a top-level `compute:` block in blueprints
+— a small ETL pipeline that runs as a CSV-shaping pre-phase, so
+loaders can do unit conversions, conditional flags, temporal chains,
+calendar joins, and summary nodes declaratively instead of via
+Python pre-scripts or post-build Cypher passes.
+
+### Blueprint compute pipeline (K1–K7)
 
 - **`compute:` block in blueprints** — top-level ordered list of named
   primitives that runs as a CSV-shaping pre-phase before the existing
-  5-phase loader. No new in-memory mutation path; each primitive
-  writes its outputs to `computed/*.csv` and the blueprint's
-  declarative loader consumes them as if they were ordinary inputs.
-- **Expression language** — Pratt parser + tree-walking evaluator:
-  arithmetic, comparison, logical, membership, function calls,
-  list literals. Built-in functions: math (`abs/round/ceil/floor/
-  sqrt/log/exp/pow/min/max`), string (`concat/lower/upper/contains/
-  starts_with/ends_with/len`), conditional (`if/coalesce`), type
-  conversion (`int/float/string`), date components (`year/month/
-  day/quarter`). Hand-rolled, no expression-crate dependency.
+  5-phase loader. Each primitive writes its outputs to
+  `computed/*.csv` and the declarative loader consumes them as if
+  they were ordinary inputs.
+- **Expression language** — hand-rolled Pratt parser + tree-walking
+  evaluator: arithmetic, comparison, logical, membership, function
+  calls, list literals. Built-in functions: math (`abs/round/ceil/
+  floor/sqrt/log/exp/pow/min/max`), string (`concat/lower/upper/
+  contains/starts_with/ends_with/len`), conditional (`if/coalesce`),
+  type conversion (`int/float/string`), date components (`year/
+  month/day/quarter`). No expression-crate dependency.
 - **Five compute primitives**:
-  - `derive` — row-level expressions on an existing node type;
-    new property columns appended or overwriting existing ones.
+  - `derive` — row-level expressions on an existing node type; new
+    property columns appended or overwriting existing ones.
   - `filter` — `where` predicate; produces a new derived type
     (`into:`) or rewrites the source destructively.
   - `chain` — group + sort + emit consecutive-pair junction edges
     with `step_index` property.
   - `calendar` — synthesises `Date` nodes for `[start, end]` plus
     `NEXT_DAY` chain edges and `ON_DATE`-style link edges to source
-    types' date columns. Optional Month/Quarter/Year hierarchies.
-  - `aggregate` — group-by + per-group aggregate expressions (`sum
-    /avg/min/max/count/count_distinct/first(...,by=)/last(...,by=)`),
-    emitting one summary node per group plus optional FK edges to
-    the group-key targets.
+    types' date columns.
+  - `aggregate` — group-by + per-group aggregate expressions
+    (`sum/avg/min/max/count/count_distinct/first(...,by=)/
+    last(...,by=)`), emitting one summary node per group plus
+    optional FK edges to the group-key targets.
 - **Validation up-front** at blueprint load: dangling type/column
   references, malformed expressions, aggregate-only functions
   outside `aggregate.agg`, calendar date ordering — all caught
   before any CSV is touched.
+- **Performance**: aggregate uses `HashMap<String, ...>` with a
+  reused String buffer for the group key (one allocation per *new*
+  group, not per row). 100K rows / 1K groups / 6 aggregates runs in
+  68.7 ms end-to-end (full blueprint load including Phase 1-5).
+- **SEC blueprint showcase**: the dataset's packaged blueprint
+  ships with a `compute:` block exercising all five primitives —
+  `derive` (filing_year, form-type flags on Filing), `filter`
+  (AnnualRevenue from MetricFact), `chain` (NEXT_FILING per
+  company), `calendar` (2020-2030 + ON_FILED_DATE link to Filing),
+  and `aggregate` (FilingYear summary with FILINGS_BY edges).
 
-## [0.9.46] — SEC EDGAR value-proposition upgrade (J0–J7)
+### SEC EDGAR value-proposition upgrade (J0–J7)
 
 The shipped SEC loader through 0.9.45 produced a Filing-index
 graph but the detailed-payload extracts (Form 4, 13F, 8-K, SC
