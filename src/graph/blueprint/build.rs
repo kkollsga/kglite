@@ -69,18 +69,17 @@ pub fn build(
         );
     }
 
-    // Phase 0: pre-parse all distinct CSV paths in parallel so later serial
-    // phases can hit the cache without blocking on disk I/O. We walk the
-    // core + sub specs for their `csv` field and the junction edges for their
-    // edge CSVs.
+    // Phase 0: pre-parse node + sub-node CSV paths in parallel so later
+    // phases hit the cache without blocking on disk I/O.
+    //
+    // E3 note: junction-edge CSVs are NOT pre-parsed any more. They're
+    // streamed via `read_csv_chunks` inside `load_junction_edges`. Pre-
+    // caching them would defeat the streaming memory bound.
     let csv_cache: CsvCache = CsvCache::default();
     let mut all_csv_paths: Vec<String> = Vec::new();
     for s in core_specs.iter().chain(sub_specs.iter()) {
         if let Some(p) = s.spec.csv.as_deref() {
             all_csv_paths.push(p.to_string());
-        }
-        for (_, j) in &s.spec.connections.junction_edges {
-            all_csv_paths.push(j.csv.clone());
         }
     }
     all_csv_paths.sort();
