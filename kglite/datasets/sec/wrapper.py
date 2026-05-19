@@ -416,28 +416,10 @@ class SEC:
         if verbose:
             print(f"[SEC]   fetch: {fetch_report}")
 
-        # Step 2: extract processed/ — slice grammar applied here.
-        if verbose:
-            scope = _format_slice_summary(cik_list, form_types, year_range)
-            print(f"[SEC] extracting processed/ CSVs ({scope})")
-        extract_report = _sec_internal.extract_processed(
-            str(workdir),
-            years=max(years_int, 1),
-            current_year=current_year,
-            force=force_rebuild,
-            cik_list=cik_list,
-            form_types=form_types,
-            year_range=year_range,
-        )
-        if verbose:
-            print(f"[SEC]   extract: {extract_report}")
-
-        # Step 2a: per-filing payload fetch. Populates raw/filings/
+        # Step 2: per-filing payload fetch. Populates raw/filings/
         # with Form 4 XMLs, 13F info tables, 8-K cover pages, SC 13D
         # primary docs, DEF 14A proxies, and Exhibit 21 attachments
-        # so the extract calls below have something to read.
-        # 0.9.46 — pre-J2 this entire step was missing and detailed=N
-        # produced zero rows for every payload source.
+        # so the orchestrator below has something to read.
         if detailed > 0:
             fetch_dispatch = _dispatch_per_filing_fetches(
                 workdir,
@@ -453,34 +435,8 @@ class SEC:
             if verbose and fetch_dispatch:
                 print(f"[SEC]   per-filing fetch: {fetch_dispatch}")
 
-        # Step 2b: insider transactions (Form 4 XMLs from raw/filings/).
-        # Slice applies: only Form 4s for issuer CIKs in cik_list pass.
-        if verbose:
-            print("[SEC] extracting insider transactions (Form 4)")
-        insider_report = _sec_internal.extract_insider(str(workdir), force=force_rebuild, cik_list=cik_list)
-        if verbose:
-            print(f"[SEC]   insider: {insider_report}")
-
-        # Step 2c: 13F institutional holdings. Slice applies on
-        # manager CIK.
-        if verbose:
-            print("[SEC] extracting 13F holdings")
-        holdings_report = _sec_internal.extract_holdings_py(str(workdir), force=force_rebuild, cik_list=cik_list)
-        if verbose:
-            print(f"[SEC]   holdings: {holdings_report}")
-
-        # Step 2d: Exhibit 21 subsidiaries. Slice applies on parent CIK.
-        if verbose:
-            print("[SEC] extracting Exhibit 21 subsidiaries")
-        sub_report = _sec_internal.extract_subsidiaries_py(str(workdir), force=force_rebuild, cik_list=cik_list)
-        if verbose:
-            print(f"[SEC]   subsidiaries: {sub_report}")
-        # `include_subsidiaries` now gates the Exhibit 21 fetch in
-        # Step 2a above; the extract here is a no-op if the fetch
-        # didn't run.
-
-        # Step 2e: FSNDS XBRL metrics. Bulk fetch (no rate limit) for
-        # the deep window, then extract whitelisted numeric facts.
+        # Step 2a: FSNDS XBRL feed (deferred until per-filing R-file
+        # parser lands in Phase F17 — kept for now as the bulk source).
         if include_xbrl_metrics and detailed > 0:
             if verbose:
                 print("[SEC] fetching FSNDS XBRL")
@@ -498,39 +454,27 @@ class SEC:
                     except Exception as e:
                         if verbose:
                             print(f"[SEC]   FSNDS {y}Q{q} skip: {e}")
-        if verbose:
-            print("[SEC] extracting XBRL metrics")
-        xbrl_report = _sec_internal.extract_xbrl_metrics_py(str(workdir), force=force_rebuild, year_range=year_range)
-        if verbose:
-            print(f"[SEC]   xbrl: {xbrl_report}")
 
-        # Step 2f: 8-K Item codes. Walks raw/filings/ HTM for Item N.NN
-        # patterns; non-8-K HTML produces zero rows.
+        # Step 3: single feature-extraction call. The Rust orchestrator
+        # dispatches every form-specific extractor, populates identity
+        # tables, and emits the info-row CSVs in processed/.
         if verbose:
-            print("[SEC] extracting 8-K Item codes")
-        events_report = _sec_internal.extract_8k_events_py(str(workdir), force=force_rebuild, cik_list=cik_list)
+            scope = _format_slice_summary(cik_list, form_types, year_range)
+            print(f"[SEC] extracting processed/ feature CSVs ({scope})")
+        extract_report = _sec_internal.extract_all_py(
+            str(workdir),
+            force=force_rebuild,
+            cik_list=cik_list,
+            form_types=form_types,
+            year_range=year_range,
+        )
         if verbose:
-            print(f"[SEC]   events: {events_report}")
-        # `include_8k_events` now gates the 8-K cover-page fetch in
-        # Step 2a above; the extract here is a no-op if the fetch
-        # didn't run.
+            total = extract_report.get("total_rows", 0)
+            comps = extract_report.get("companies", 0)
+            people = extract_report.get("people", 0)
+            print(f"[SEC]   extract: {total:,} info-rows, {comps:,} companies, {people:,} people")
 
-        # Step 2g: SC 13D activist stakes (D8).
-        if verbose:
-            print("[SEC] extracting SC 13D stakes")
-        stake_report = _sec_internal.extract_13d_stakes_py(str(workdir), force=force_rebuild, cik_list=cik_list)
-        if verbose:
-            print(f"[SEC]   stakes: {stake_report}")
-
-        # Step 2h: DEF 14A directors (D9). Heuristic parser; expect
-        # 50-70% accuracy on real filings.
-        if verbose:
-            print("[SEC] extracting DEF 14A directors")
-        directors_report = _sec_internal.extract_directors_py(str(workdir), force=force_rebuild, cik_list=cik_list)
-        if verbose:
-            print(f"[SEC]   directors: {directors_report}")
-
-        # Step 3: build graph/{mode}/
+        # Step 4: build graph/{mode}/
         if verbose:
             print(f"[SEC] building graph/{mode}/")
         g = _build_graph(workdir, mode, verbose=verbose)

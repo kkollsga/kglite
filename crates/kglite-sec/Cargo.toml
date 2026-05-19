@@ -35,6 +35,10 @@ csv = "1"
 # builds a DOM, so memory cost is bounded regardless of filing size.
 quick-xml = "0.36"
 
+# ISO-8601 timestamps for provenance.source_extracted_at. Same minor
+# as the main crate so the workspace resolves one version.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"

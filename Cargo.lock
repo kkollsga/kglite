@@ -1855,6 +1855,7 @@ dependencies = [
 name = "kglite-sec"
 version = "0.0.1"
 dependencies = [
+ "chrono",
  "csv",
  "governor",
  "quick-xml",

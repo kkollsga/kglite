@@ -1,13 +1,24 @@
-//! pyo3 bindings exposing the SEC EDGAR loader as `kglite._sec_internal`.
+//! PyO3 bindings exposing the SEC EDGAR loader as `kglite._sec_internal`.
 //!
-//! The pure-Rust loader lives in `kglite-sec` (sibling crate). This
-//! file wraps a small surface of it — `fetch_raw` and
-//! `extract_processed` — for the Python `kglite.datasets.sec.SEC.open()`
-//! lifecycle to call. Graph build itself stays in Python:
-//! `kglite.from_blueprint(...)` reads the CSVs we produce.
+//! Two surfaces, kept deliberately thin:
 //!
-//! The Rust loader is async; we spin up a single-threaded tokio
-//! runtime per call so Python callers see plain blocking functions.
+//! 1. **Fetch helpers** (`fetch_raw`, `fetch_fsnds`, `fetch_form4_batch`,
+//!    `fetch_13f_batch`, `fetch_filing_batch`, `fetch_exhibit21_batch`)
+//!    download SEC documents into `raw/` under a single SecClient that
+//!    enforces the 10 req/s SEC rate limit. The Python wrapper invokes
+//!    these in the order dictated by form-type dependencies.
+//! 2. **Feature extraction** is exposed as ONE function:
+//!    `extract_all_py(workdir, *, force, cik_list, form_types, year_range)`.
+//!    It calls the Rust orchestrator `kglite_sec::run_all` which
+//!    dispatches every form-specific extractor and emits the
+//!    info-row CSVs in `processed/`.
+//!
+//! The fetch surface stays multi-function (each batch fetcher exists
+//! so the Python wrapper can dispatch by form-type before/after the
+//! main idx + submissions fetch). Extraction is a single call because
+//! the dispatch happens inside Rust now — every form module is wired
+//! into the orchestrator's loop, so callers don't need (and shouldn't
+//! have) a per-form Python binding.
 
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -15,11 +26,9 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
-    extract_13d_stakes, extract_8k_events, extract_companies_and_filings, extract_directors,
-    extract_holdings, extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics,
     fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
-    fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError,
-    SliceSpec, Workdir, YearRange,
+    fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, run_all, SecClient,
+    SecError, SliceSpec, Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -47,11 +56,10 @@ fn build_slice(
     s
 }
 
+// ─────────────────────────── fetch surface ───────────────────────────
+
 /// Fetch the `raw/` tier — quarterly master.idx files for the shallow
 /// window plus the nightly bulk submissions.zip and company_tickers.json.
-///
-/// `years` = how many years back to fetch master.idx for. `0` skips
-/// the shallow fetch entirely. Returns a dict with download statistics.
 #[pyfunction]
 #[pyo3(signature = (
     workdir, *,
@@ -75,10 +83,6 @@ fn fetch_raw(
 ) -> PyResult<Py<PyDict>> {
     let client = SecClient::new(user_agent).map_err(map_err)?;
     let wd = Workdir::new(workdir);
-
-    // Single-threaded runtime per call. Cheap to construct; the
-    // crate's parallelism is bounded by the 10 req/s rate limit
-    // anyway, so a multi-thread runtime gains us nothing.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -107,94 +111,9 @@ fn fetch_raw(
 
     let d = PyDict::new(py);
     d.set_item("master_idx_downloaded", idx_dl)?;
-    d.set_item("master_idx_skipped", idx_sk)?;
-    d.set_item("submissions_zip_fetched", submissions_dl)?;
-    d.set_item("company_tickers_fetched", tickers_dl)?;
-    Ok(d.into())
-}
-
-/// Extract `processed/` CSVs (company.csv, filing.csv) from the raw
-/// cache. Returns a dict with extraction stats.
-#[pyfunction]
-#[pyo3(signature = (
-    workdir, *,
-    years,
-    current_year,
-    force=false,
-    cik_list=None,
-    form_types=None,
-    year_range=None,
-))]
-#[allow(clippy::too_many_arguments)]
-fn extract_processed(
-    py: Python<'_>,
-    workdir: PathBuf,
-    years: u16,
-    current_year: u16,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-    form_types: Option<Vec<String>>,
-    year_range: Option<(u16, u16)>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let start_year = current_year
-        .saturating_sub(years.saturating_sub(1))
-        .max(1993);
-    let range = YearRange::new(start_year, current_year);
-    let slice = build_slice(cik_list, form_types, year_range);
-    let report = extract_companies_and_filings(&wd, range, &slice, force).map_err(map_err)?;
-
-    let d = PyDict::new(py);
-    d.set_item("companies_written", report.companies_written)?;
-    d.set_item("filings_from_submissions", report.filings_from_submissions)?;
-    d.set_item("filings_from_master_idx", report.filings_from_master_idx)?;
-    d.set_item("master_idx_files_read", report.master_idx_files_read)?;
-    d.set_item("master_idx_parse_errors", report.master_idx_parse_errors)?;
-    d.set_item("submission_parse_errors", report.submission_parse_errors)?;
-    Ok(d.into())
-}
-
-/// Extract `processed/{person,transaction,has_insider}.csv` by walking
-/// `raw/filings/` and parsing every Form 4 XML found. Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_insider(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_insider_transactions(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("people_written", report.people_written)?;
-    d.set_item("transactions_written", report.transactions_written)?;
-    d.set_item("has_insider_rows", report.has_insider_rows)?;
-    d.set_item("form4_files_read", report.form4_files_read)?;
-    d.set_item("form4_parse_errors", report.form4_parse_errors)?;
-    Ok(d.into())
-}
-
-/// Extract `processed/{institutional_manager,security,holds}.csv` by
-/// walking `raw/filings/` for 13F-HR information table XMLs. Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_holdings_py(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_holdings(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("managers_written", report.managers_written)?;
-    d.set_item("securities_written", report.securities_written)?;
-    d.set_item("holdings_written", report.holdings_written)?;
-    d.set_item("f13f_files_read", report.f13f_files_read)?;
-    d.set_item("f13f_parse_errors", report.f13f_parse_errors)?;
+    d.set_item("master_idx_cached", idx_sk)?;
+    d.set_item("submissions_downloaded", submissions_dl)?;
+    d.set_item("company_tickers_downloaded", tickers_dl)?;
     Ok(d.into())
 }
 
@@ -222,31 +141,7 @@ fn fetch_fsnds(
     })
 }
 
-/// Extract `processed/metric_fact.csv` from raw FSNDS NUM.tsv files.
-/// Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, year_range=None))]
-fn extract_xbrl_metrics_py(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    year_range: Option<(u16, u16)>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(None, None, year_range);
-    let report = extract_xbrl_metrics(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("metrics_written", report.metrics_written)?;
-    d.set_item("fsnds_files_read", report.fsnds_files_read)?;
-    d.set_item("fsnds_parse_errors", report.fsnds_parse_errors)?;
-    Ok(d.into())
-}
-
-/// Batch-fetch Form 4 XMLs. Takes a list of (cik, accession, primary_doc)
-/// tuples and processes them through a single shared SecClient so the
-/// 10 req/s token bucket applies across the whole batch.
-///
-/// Returns (downloaded, skipped) counts.
+/// Batch-fetch Form 4 XMLs. Returns (downloaded, skipped).
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_form4_batch(
@@ -268,14 +163,14 @@ fn fetch_form4_batch(
             match fetch_form4_filing(&client, &wd, cik, &accession, &primary_doc).await {
                 Ok(true) => downloaded += 1,
                 Ok(false) => skipped += 1,
-                Err(_) => skipped += 1, // count 4xx/network issues as skipped
+                Err(_) => skipped += 1,
             }
         }
     });
     Ok((downloaded, skipped))
 }
 
-/// Batch-fetch 13F info tables. Same shape as fetch_form4_batch.
+/// Batch-fetch 13F info tables.
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_13f_batch(
@@ -304,12 +199,7 @@ fn fetch_13f_batch(
     Ok((downloaded, skipped))
 }
 
-/// Batch-fetch any filing's `primary_document` into
-/// `raw/filings/{cik}/{accession}/{primary_doc}`. Handles 8-K covers,
-/// SC 13D, DEF 14A, 10-K primary docs — anything where the extract
-/// walker matches on filename pattern. Takes
-/// `Vec<(cik, accession, primary_doc)>` (same shape as
-/// `fetch_form4_batch`).
+/// Batch-fetch any filing's primary document.
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_filing_batch(
@@ -337,10 +227,7 @@ fn fetch_filing_batch(
     Ok((downloaded, skipped))
 }
 
-/// Batch-fetch Exhibit 21 attachments. Parses each filing's
-/// `index.json`, downloads every attachment whose filename matches
-/// the Exhibit 21 pattern. Takes `Vec<(cik, accession)>`; the
-/// per-filing fetcher discovers attachment names itself.
+/// Batch-fetch Exhibit 21 attachments.
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_exhibit21_batch(
@@ -367,89 +254,72 @@ fn fetch_exhibit21_batch(
     Ok((downloaded, skipped))
 }
 
-/// Extract `processed/director.csv` from raw DEF 14A HTML staged
-/// under `raw/filings/`. Idempotent.
+// ───────────────────────── extract surface (thin) ─────────────────────────
+
+/// Single feature-extraction entry point. Calls `run_all` which
+/// dispatches every form-specific extractor in turn and emits the
+/// info-row CSVs in `processed/` (purchase, sale, holding, role,
+/// corporate_event, subsidiary, ...). Identity tables (company,
+/// person, security, manager) populate as a side-effect.
+///
+/// Returns a flat dict with row counts per form for telemetry +
+/// total_rows, total_identity_counts.
 #[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_directors_py(
+#[pyo3(signature = (workdir, *, force=false, cik_list=None, form_types=None, year_range=None))]
+fn extract_all_py(
     py: Python<'_>,
     workdir: PathBuf,
     force: bool,
     cik_list: Option<Vec<u64>>,
+    form_types: Option<Vec<String>>,
+    year_range: Option<(u16, u16)>,
 ) -> PyResult<Py<PyDict>> {
     let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_directors(&wd, &slice, force).map_err(map_err)?;
+    let slice = build_slice(cik_list, form_types, year_range);
+    let report = run_all(&wd, &slice, force).map_err(map_err)?;
     let d = PyDict::new(py);
-    d.set_item("directors_written", report.directors_written)?;
-    d.set_item("def14a_files_read", report.def14a_files_read)?;
-    d.set_item("def14a_parse_errors", report.def14a_parse_errors)?;
+    d.set_item("extracted_at", report.extracted_at.clone())?;
+    d.set_item("total_rows", report.total_rows())?;
+    d.set_item("submission_parse_errors", report.submission_parse_errors)?;
+    d.set_item("distinct_sic_codes", report.distinct_sic_codes)?;
+    // Identity counts.
+    d.set_item("companies", report.identity_counts.companies)?;
+    d.set_item("people", report.identity_counts.people)?;
+    d.set_item("securities", report.identity_counts.securities)?;
+    d.set_item("managers", report.identity_counts.managers)?;
+    // Per-form row counts. Useful for the wrapper print() lines + tests.
+    macro_rules! form_rows {
+        ($name:ident) => {{
+            let inner = PyDict::new(py);
+            inner.set_item("files_read", report.$name.files_read)?;
+            inner.set_item("parse_errors", report.$name.parse_errors)?;
+            inner.set_item("rows_written", report.$name.rows_written)?;
+            d.set_item(stringify!($name), inner)?;
+        }};
+    }
+    form_rows!(form3);
+    form_rows!(form4);
+    form_rows!(form5);
+    form_rows!(form144);
+    form_rows!(form13f);
+    form_rows!(schedule13);
+    form_rows!(def14a);
+    form_rows!(eightk);
+    form_rows!(ten_k);
+    form_rows!(ten_q);
+    form_rows!(s1);
+    form_rows!(s3);
+    form_rows!(s4);
+    form_rows!(prospectus);
+    form_rows!(formd);
+    form_rows!(npx);
+    form_rows!(xbrl);
     Ok(d.into())
 }
 
-/// Extract `processed/stake.csv` from raw SC 13D HTML staged under
-/// `raw/filings/`. Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_13d_stakes_py(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_13d_stakes(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("stakes_written", report.stakes_written)?;
-    d.set_item("sc13d_files_read", report.sc13d_files_read)?;
-    d.set_item("sc13d_parse_errors", report.sc13d_parse_errors)?;
-    Ok(d.into())
-}
+// ─────────────────────── graph location helpers ───────────────────────
 
-/// Extract `processed/event.csv` from raw 8-K HTML cover pages
-/// under `raw/filings/`. Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_8k_events_py(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_8k_events(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("events_written", report.events_written)?;
-    d.set_item("eightk_files_read", report.eightk_files_read)?;
-    d.set_item("eightk_parse_errors", report.eightk_parse_errors)?;
-    Ok(d.into())
-}
-
-/// Extract `processed/subsidiary.csv` from raw Exhibit 21 HTML files
-/// staged under `raw/filings/`. Idempotent.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
-fn extract_subsidiaries_py(
-    py: Python<'_>,
-    workdir: PathBuf,
-    force: bool,
-    cik_list: Option<Vec<u64>>,
-) -> PyResult<Py<PyDict>> {
-    let wd = Workdir::new(workdir);
-    let slice = build_slice(cik_list, None, None);
-    let report = extract_subsidiaries(&wd, &slice, force).map_err(map_err)?;
-    let d = PyDict::new(py);
-    d.set_item("subsidiaries_written", report.subsidiaries_written)?;
-    d.set_item("exhibit21_files_read", report.exhibit21_files_read)?;
-    d.set_item("exhibit21_parse_errors", report.exhibit21_parse_errors)?;
-    Ok(d.into())
-}
-
-/// Path to the workdir's expected blueprint output dir for the given
-/// mode. Pure path arithmetic — does not touch the filesystem. Used by
-/// the Python wrapper to find where to write/load the .kgl.
+/// Path to the workdir's expected blueprint output dir for the given mode.
 #[pyfunction]
 fn graph_dir(workdir: PathBuf, mode: &str) -> PyResult<PathBuf> {
     let m: kglite_sec::StorageMode = mode.parse().map_err(|e: String| PyValueError::new_err(e))?;
@@ -473,25 +343,21 @@ fn map_err(e: SecError) -> PyErr {
 
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "_sec_internal")?;
+    // Fetch
     m.add_function(wrap_pyfunction!(fetch_raw, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_processed, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_insider, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_holdings_py, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_subsidiaries_py, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_xbrl_metrics_py, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_8k_events_py, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_13d_stakes_py, &m)?)?;
-    m.add_function(wrap_pyfunction!(extract_directors_py, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_form4_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_filing_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_exhibit21_batch, &m)?)?;
+    // Extract (single entry point)
+    m.add_function(wrap_pyfunction!(extract_all_py, &m)?)?;
+    // Graph location helpers
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?;
-    modules.set_item("kglite._sec_internal", &m)?;
+    modules.set_item("kglite._sec_internal", m)?;
     Ok(())
 }

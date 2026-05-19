@@ -22,6 +22,15 @@ import pytest
 from kglite import _sec_internal, from_blueprint
 from kglite.datasets.sec.wrapper import _blueprint_with_root, _load_blueprint
 
+# 0.9.46 F1: the SEC processor was rewritten around info-row CSVs
+# (purchase / sale / holding / role / corporate_event / ...) and the
+# blueprint redesign for the new layout lands in F20. Use-case
+# integration tests reference the pre-rewrite node types
+# (Transaction, Filing, Director, Stake, …) and the deleted per-form
+# PyO3 bindings; they'll be rewritten as each form parser is wired
+# back up in F2-F18.
+pytestmark = pytest.mark.skip(reason="pending F2-F20: rewritten against new info-row schema once parsers wire up")
+
 
 def _rows(view: Any) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], view.to_list())
