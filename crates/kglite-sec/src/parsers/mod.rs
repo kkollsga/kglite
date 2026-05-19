@@ -5,3 +5,4 @@
 //! testable against a fixture file and reusable from any orchestrator.
 
 pub mod idx;
+pub mod submissions;

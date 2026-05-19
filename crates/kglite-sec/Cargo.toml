@@ -11,4 +11,22 @@ name = "kglite_sec"
 path = "src/lib.rs"
 
 [dependencies]
+# Error plumbing
 thiserror = "1"
+
+# Async HTTP + runtime (used by client/fetch; parsers stay sync)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+
+# Token bucket rate limiter — SEC's 10 req/s ceiling
+governor = "0.7"
+
+# Bulk archive readers
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# JSON / serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
