@@ -16,8 +16,8 @@ use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
     extract_companies_and_filings, extract_holdings, extract_insider_transactions,
-    fetch_company_tickers, fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError,
-    SliceSpec, Workdir, YearRange,
+    extract_subsidiaries, fetch_company_tickers, fetch_quarterly_master_idx,
+    fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -196,6 +196,26 @@ fn extract_holdings_py(
     Ok(d.into())
 }
 
+/// Extract `processed/subsidiary.csv` from raw Exhibit 21 HTML files
+/// staged under `raw/filings/`. Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
+fn extract_subsidiaries_py(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    cik_list: Option<Vec<u64>>,
+) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let slice = build_slice(cik_list, None, None);
+    let report = extract_subsidiaries(&wd, &slice, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("subsidiaries_written", report.subsidiaries_written)?;
+    d.set_item("exhibit21_files_read", report.exhibit21_files_read)?;
+    d.set_item("exhibit21_parse_errors", report.exhibit21_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Path to the workdir's expected blueprint output dir for the given
 /// mode. Pure path arithmetic — does not touch the filesystem. Used by
 /// the Python wrapper to find where to write/load the .kgl.
@@ -226,6 +246,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_processed, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_insider, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_holdings_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_subsidiaries_py, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

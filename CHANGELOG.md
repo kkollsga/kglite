@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **D2 — Exhibit 21 subsidiaries deepening** —
+  `extract_subsidiaries(workdir, slice, force)` walks
+  `raw/filings/{cik}/{accession}/*ex21*.htm` (and `exhibit21`,
+  `ex-21` variants), parses via the existing `parsers::exhibit21`,
+  and emits `processed/subsidiary.csv` with composite
+  `subsidiary_nid = "{parent_cik}_{name_normalized}"` for dedup
+  across years. Blueprint adds `Subsidiary` node + `OF_COMPANY`
+  fk_edge. Python wrapper gains `include_subsidiaries` flag.
+  User-story test: M&A analyst stages Exhibit 21 HTML → 3
+  subsidiaries land + Apple → OF_COMPANY → Subsidiary edges work.
 - **D1 — Slice grammar wired end-to-end** —
   `kglite_sec::SliceSpec { cik_list, form_types, year_range }` is now
   applied uniformly across `extract_companies_and_filings`,

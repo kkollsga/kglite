@@ -90,6 +90,7 @@ class SEC:
         cik_list: Optional[list[int]] = None,
         form_types: Optional[list[str]] = None,
         year_range: Optional[tuple[int, int]] = None,
+        include_subsidiaries: bool = True,
         force_rebuild: bool = False,
         force_refetch: bool = False,
         verbose: bool = True,
@@ -185,6 +186,17 @@ class SEC:
         holdings_report = _sec_internal.extract_holdings_py(str(workdir), force=force_rebuild, cik_list=cik_list)
         if verbose:
             print(f"[SEC]   holdings: {holdings_report}")
+
+        # Step 2d: Exhibit 21 subsidiaries. Slice applies on parent CIK.
+        if verbose:
+            print("[SEC] extracting Exhibit 21 subsidiaries")
+        sub_report = _sec_internal.extract_subsidiaries_py(str(workdir), force=force_rebuild, cik_list=cik_list)
+        if verbose:
+            print(f"[SEC]   subsidiaries: {sub_report}")
+        # `include_subsidiaries=False` would gate the per-filing fetch
+        # phase (not yet wired); the extract is always run since it's a
+        # no-op when raw/filings/ has no Exhibit 21 documents.
+        _ = include_subsidiaries
 
         # Step 3: build graph/{mode}/
         if verbose:

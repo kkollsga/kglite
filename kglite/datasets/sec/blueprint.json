@@ -52,6 +52,23 @@
         }
       }
     },
+    "Subsidiary": {
+      "csv": "processed/subsidiary.csv",
+      "pk": "subsidiary_nid",
+      "title": "name",
+      "properties": {
+        "name": "string",
+        "jurisdiction": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_COMPANY": {
+            "target": "Company",
+            "fk": "parent_cik"
+          }
+        }
+      }
+    },
     "InstitutionalManager": {
       "csv": "processed/institutional_manager.csv",
       "pk": "manager_cik",

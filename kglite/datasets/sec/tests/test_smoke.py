@@ -373,6 +373,52 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D2 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d2_subsidiary_tree(synth_workdir: Path) -> None:
+    """User story (D2): As an M&A analyst, I want to see a company's
+    subsidiary tree. I stage an Exhibit 21 HTML under
+    raw/filings/{cik}/{accession}/ and the graph gets Subsidiary
+    nodes linked via OF_COMPANY to the parent.
+    """
+    ex_dir = synth_workdir / "raw" / "filings" / "320193" / "000032019324000123"
+    ex_dir.mkdir(parents=True, exist_ok=True)
+    (ex_dir / "aapl-ex21-20240928.htm").write_text(
+        "<html><body>\n"
+        "LIST OF SUBSIDIARIES OF APPLE INC.\n\n"
+        "Apple Operations International       Ireland\n"
+        "Braeburn Capital, Inc.               Nevada\n"
+        "Apple Sales International            Ireland\n"
+        "</body></html>"
+    )
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D2 d2@example.com",
+        verbose=False,
+    )
+
+    # All 3 subsidiaries land as Subsidiary nodes.
+    res = _rows(g.cypher("MATCH (s:Subsidiary) RETURN count(s) AS n"))
+    assert res[0]["n"] >= 3, f"expected >=3 subsidiaries, got {res[0]['n']}"
+
+    # Apple is the parent via OF_COMPANY.
+    res = _rows(g.cypher("MATCH (c:Company {cik: 320193})<-[:OF_COMPANY]-(s:Subsidiary) RETURN count(s) AS n"))
+    assert res[0]["n"] >= 3, f"Apple should have >=3 subsidiaries via OF_COMPANY, got {res}"
+
+    # Braeburn's jurisdiction was captured.
+    res = _rows(g.cypher("MATCH (s:Subsidiary) WHERE s.name CONTAINS 'Braeburn' RETURN s.jurisdiction AS j"))
+    assert len(res) >= 1
+    assert res[0]["j"] == "Nevada"
+
+
 # ── D1 user story ────────────────────────────────────────────────────
 
 

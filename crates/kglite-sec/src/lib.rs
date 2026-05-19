@@ -29,8 +29,9 @@ pub mod slicing;
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{
-    extract_companies_and_filings, extract_holdings, extract_insider_transactions, ExtractReport,
-    HoldingsExtractReport, InsiderExtractReport,
+    extract_companies_and_filings, extract_holdings, extract_insider_transactions,
+    extract_subsidiaries, ExtractReport, HoldingsExtractReport, InsiderExtractReport,
+    SubsidiaryExtractReport,
 };
 pub use fetch::{
     fetch_company_tickers, fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk,
@@ -38,7 +39,7 @@ pub use fetch::{
 };
 pub use layout::{StorageMode, Workdir};
 pub use parsers::eightk::{extract_8k_items, EightKItem};
-pub use parsers::exhibit21::{extract_subsidiaries, Subsidiary};
+pub use parsers::exhibit21::{extract_subsidiaries as parse_exhibit21_subsidiaries, Subsidiary};
 pub use parsers::f13f::{parse_13f_info_table, Holding};
 pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
 pub use parsers::fsnds::{parse_fsnds_num, XbrlFact, DEFAULT_TAG_WHITELIST};

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, SecError};
 use crate::fetch::YearRange;
 use crate::layout::Workdir;
+use crate::parsers::exhibit21::extract_subsidiaries as parse_exhibit21;
 use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
 use crate::parsers::idx::parse_master_idx;
@@ -723,6 +724,149 @@ fn cik_from_filing_path(path: &Path) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+// ─── Exhibit 21 subsidiaries extract ─────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct SubsidiaryExtractReport {
+    pub subsidiaries_written: usize,
+    pub exhibit21_files_read: usize,
+    pub exhibit21_parse_errors: usize,
+}
+
+const SUBSIDIARY_HEADER: &[&str] = &["subsidiary_nid", "parent_cik", "name", "jurisdiction"];
+
+/// Walk `raw/filings/{cik}/{accession}/` for Exhibit 21 documents
+/// (filenames containing `ex21`, `exhibit21`, or `ex-21`) and emit
+/// `processed/subsidiary.csv` with deduped Subsidiary nodes.
+///
+/// `subsidiary_nid` is composite: `{parent_cik}_{name_normalized}`.
+/// Storing as a non-numeric string ensures kglite auto-types it as
+/// String (vs CIK-like integer auto-typing in `Company.cik`).
+pub fn extract_subsidiaries(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<SubsidiaryExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let subsidiary_csv = workdir.processed_csv("subsidiary");
+
+    let mut report = SubsidiaryExtractReport::default();
+    if !force && subsidiary_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut writer = csv_writer(&subsidiary_csv)?;
+    writer.write_record(SUBSIDIARY_HEADER)?;
+
+    let filings_root = workdir.raw_filings_dir();
+    if !filings_root.is_dir() {
+        writer.flush()?;
+        return Ok(report);
+    }
+
+    let mut seen_subs: HashSet<String> = HashSet::new();
+
+    for html_path in walk_exhibit21_files(&filings_root)? {
+        let Some(parent_cik) = cik_from_filing_path(&html_path) else {
+            continue;
+        };
+        let parent_cik_int: u64 = parent_cik.parse().unwrap_or(0);
+        if !slice.cik_matches(parent_cik_int) {
+            continue;
+        }
+
+        let text = match std::fs::read_to_string(&html_path) {
+            Ok(t) => t,
+            Err(_) => {
+                report.exhibit21_parse_errors += 1;
+                continue;
+            }
+        };
+        report.exhibit21_files_read += 1;
+
+        for sub in parse_exhibit21(&text) {
+            if sub.name.is_empty() {
+                continue;
+            }
+            let nid = format!("{}_{}", parent_cik, normalize_subsidiary_name(&sub.name));
+            if !seen_subs.insert(nid.clone()) {
+                continue;
+            }
+            writer.write_record([
+                nid.as_str(),
+                parent_cik.as_str(),
+                sub.name.as_str(),
+                sub.jurisdiction.as_str(),
+            ])?;
+            report.subsidiaries_written += 1;
+        }
+    }
+
+    writer.flush()?;
+    Ok(report)
+}
+
+fn walk_exhibit21_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let Ok(cik_dirs) = std::fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for cik_entry in cik_dirs.flatten() {
+        let cik_path = cik_entry.path();
+        if !cik_path.is_dir() {
+            continue;
+        }
+        let Ok(acc_dirs) = std::fs::read_dir(&cik_path) else {
+            continue;
+        };
+        for acc_entry in acc_dirs.flatten() {
+            let acc_path = acc_entry.path();
+            if !acc_path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&acc_path) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if is_exhibit21_name(&name) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn is_exhibit21_name(name: &str) -> bool {
+    if !(name.ends_with(".htm") || name.ends_with(".html") || name.ends_with(".txt")) {
+        return false;
+    }
+    name.contains("ex21")
+        || name.contains("exhibit21")
+        || name.contains("ex-21")
+        || name.contains("exhibit-21")
+}
+
+fn normalize_subsidiary_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,6 +1094,36 @@ mod tests {
         let company_csv = std::fs::read_to_string(w.processed_csv("company")).unwrap();
         assert!(company_csv.contains("Apple"));
         assert!(!company_csv.contains("Microsoft"));
+
+        std::fs::remove_dir_all(w.root()).ok();
+    }
+
+    #[test]
+    fn extracts_subsidiaries_from_synth_exhibit21() {
+        let w = synth_workdir();
+        let ex_dir = w
+            .raw_filings_dir()
+            .join("320193")
+            .join("000032019324000123");
+        std::fs::create_dir_all(&ex_dir).unwrap();
+        std::fs::write(
+            ex_dir.join("aapl-ex21-20240928.htm"),
+            "<html><body>\n\
+             LIST OF SUBSIDIARIES OF APPLE INC.\n\n\
+             Apple Operations International  Ireland\n\
+             Braeburn Capital, Inc.          Nevada\n\
+             </body></html>",
+        )
+        .unwrap();
+
+        let report = extract_subsidiaries(&w, &SliceSpec::default(), false).unwrap();
+        assert_eq!(report.exhibit21_files_read, 1);
+        assert!(report.subsidiaries_written >= 2);
+
+        let csv = std::fs::read_to_string(w.processed_csv("subsidiary")).unwrap();
+        assert!(csv.contains("Apple Operations International"));
+        assert!(csv.contains("Braeburn"));
+        assert!(csv.contains("320193_")); // composite nid prefix
 
         std::fs::remove_dir_all(w.root()).ok();
     }
