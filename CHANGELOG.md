@@ -64,20 +64,28 @@ Python pre-scripts or post-build Cypher passes.
   is_buy, is_sell on Transaction), `filter` (AnnualRevenue from
   MetricFact), `chain` (NEXT_FILING per company; NEXT_TX per
   person+issuer), `calendar` (2020-2030 + ON_FILED_DATE and
-  ON_TX_DATE links), and `aggregate` (FilingYear summary with
-  FILINGS_BY; **Position** summary with the headline metric
-  `current_shares=last(shares_owned_after, by=transaction_date)`,
-  plus `shares_acquired`, `shares_disposed`, `n_transactions`,
-  `first/last_tx_date`, and the price-based `total_buy_value` /
-  `total_sell_value` aggregates (filed price; users may want to
-  override with authoritative price feeds). POSITION_OF and
-  AT_COMPANY edges connect each Position to its Person + Company).
-  The Position node makes holdings-over-time queries first-class:
-  `MATCH (p:Person)-[:POSITION_OF]-(pos:Position)-[:AT_COMPANY]-
-  (c:Company) RETURN pos.current_shares` gives the current snapshot
-  in one hop; walking the `t.shares_owned_after` column along
-  transactions ordered by `transaction_date` gives the full
-  share-count trend with no Python cumsum needed.
+  ON_TX_DATE links), and `aggregate` — chained in two stages for
+  insider positions:
+  - **`PositionLedger`** (per ledger, group_by `[person_nid,
+    issuer_cik, security_title, direct_indirect]`) captures the
+    fact that Form 4's `shares_owned_after` is a per-(security,
+    direct/indirect) balance, not a global one. Has
+    `current_shares=last(shares_owned_after, by=transaction_date)`
+    plus shares_acquired/disposed, first/last_tx_date,
+    n_transactions, and filed-price total_buy/sell_value. Edges
+    LEDGER_OF_PERSON / LEDGER_AT_COMPANY.
+  - **`Position`** rolls PositionLedger up to one row per
+    (person, issuer) by summing across ledgers — current_shares,
+    shares_acquired, shares_disposed, n_transactions, n_ledgers,
+    total_buy/sell_value — and taking min/max of first/last_tx_date.
+    POSITION_OF / AT_COMPANY edges. `MATCH (p:Person)-[:POSITION_OF]
+    -(pos:Position)-[:AT_COMPANY]-(c:Company) RETURN
+    pos.current_shares` returns the true total in one hop.
+  - **`FilingYear`** (per (cik, year)) summarises filing activity
+    with FILINGS_BY edge to Company.
+  Chained aggregates demonstrate the compute pipeline composing —
+  Stage A's `into` becomes Stage B's `from` automatically via the
+  sub-node resolver.
 - **Expression engine — null-propagating arithmetic & comparisons**.
   `null * 5`, `null + 3`, `null < x` all yield `null` (SQL
   semantics) instead of erroring. Real-world CSV data routinely

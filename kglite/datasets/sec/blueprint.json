@@ -67,8 +67,8 @@
     {
       "op": "aggregate",
       "from": "Transaction",
-      "group_by": ["person_nid", "issuer_cik"],
-      "into": "Position",
+      "group_by": ["person_nid", "issuer_cik", "security_title", "direct_indirect"],
+      "into": "PositionLedger",
       "agg": {
         "current_shares":   "last(shares_owned_after, by=transaction_date)",
         "shares_acquired":  "sum(if(acquired_disposed == 'A', shares, 0))",
@@ -78,6 +78,27 @@
         "last_tx_date":     "max(transaction_date)",
         "total_buy_value":  "sum(if(is_buy,  total_value, 0))",
         "total_sell_value": "sum(if(is_sell, total_value, 0))"
+      },
+      "edges": [
+        {"to": "Person",  "fk": "person_nid", "edge": "LEDGER_OF_PERSON"},
+        {"to": "Company", "fk": "issuer_cik", "edge": "LEDGER_AT_COMPANY"}
+      ]
+    },
+    {
+      "op": "aggregate",
+      "from": "PositionLedger",
+      "group_by": ["person_nid", "issuer_cik"],
+      "into": "Position",
+      "agg": {
+        "current_shares":   "sum(current_shares)",
+        "shares_acquired":  "sum(shares_acquired)",
+        "shares_disposed":  "sum(shares_disposed)",
+        "n_transactions":   "sum(n_transactions)",
+        "n_ledgers":        "count(*)",
+        "first_tx_date":    "min(first_tx_date)",
+        "last_tx_date":     "max(last_tx_date)",
+        "total_buy_value":  "sum(total_buy_value)",
+        "total_sell_value": "sum(total_sell_value)"
       },
       "edges": [
         {"to": "Person",  "fk": "person_nid", "edge": "POSITION_OF"},
