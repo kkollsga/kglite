@@ -17,8 +17,9 @@ use pyo3::wrap_pyfunction;
 use kglite_sec::{
     extract_13d_stakes, extract_8k_events, extract_companies_and_filings, extract_directors,
     extract_holdings, extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics,
-    fetch_company_tickers, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
-    fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir, YearRange,
+    fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
+    fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError,
+    SliceSpec, Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -303,6 +304,69 @@ fn fetch_13f_batch(
     Ok((downloaded, skipped))
 }
 
+/// Batch-fetch any filing's `primary_document` into
+/// `raw/filings/{cik}/{accession}/{primary_doc}`. Handles 8-K covers,
+/// SC 13D, DEF 14A, 10-K primary docs — anything where the extract
+/// walker matches on filename pattern. Takes
+/// `Vec<(cik, accession, primary_doc)>` (same shape as
+/// `fetch_form4_batch`).
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, batch))]
+fn fetch_filing_batch(
+    workdir: PathBuf,
+    user_agent: &str,
+    batch: Vec<(u64, String, String)>,
+) -> PyResult<(usize, usize)> {
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    rt.block_on(async {
+        for (cik, accession, primary_doc) in batch {
+            match fetch_filing_primary_doc(&client, &wd, cik, &accession, &primary_doc).await {
+                Ok(true) => downloaded += 1,
+                Ok(false) => skipped += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+    });
+    Ok((downloaded, skipped))
+}
+
+/// Batch-fetch Exhibit 21 attachments. Parses each filing's
+/// `index.json`, downloads every attachment whose filename matches
+/// the Exhibit 21 pattern. Takes `Vec<(cik, accession)>`; the
+/// per-filing fetcher discovers attachment names itself.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, batch))]
+fn fetch_exhibit21_batch(
+    workdir: PathBuf,
+    user_agent: &str,
+    batch: Vec<(u64, String)>,
+) -> PyResult<(usize, usize)> {
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    rt.block_on(async {
+        for (cik, accession) in batch {
+            match fetch_exhibit21_attachment(&client, &wd, cik, &accession).await {
+                Ok(n) if n > 0 => downloaded += n,
+                _ => skipped += 1,
+            }
+        }
+    });
+    Ok((downloaded, skipped))
+}
+
 /// Extract `processed/director.csv` from raw DEF 14A HTML staged
 /// under `raw/filings/`. Idempotent.
 #[pyfunction]
@@ -421,6 +485,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_directors_py, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_form4_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_filing_batch, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_exhibit21_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

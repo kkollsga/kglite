@@ -37,3 +37,4 @@ quick-xml = "0.36"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

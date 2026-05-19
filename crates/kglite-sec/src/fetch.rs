@@ -281,6 +281,114 @@ pub async fn fetch_form4_filing(
         .await
 }
 
+/// Fetch any filing's `primary_document` into
+/// `raw/filings/{cik}/{accession_no_dashes}/{primary_document}`.
+///
+/// Generic fetcher used by 8-K cover pages, SC 13D / SC 13D-A, DEF 14A
+/// proxies, and Exhibit-21-bearing 10-K primary docs. The save name is
+/// the original SEC document filename — the extract walkers
+/// (`walk_html_files`, `walk_sc13d_files`, `walk_def14a_files`) match
+/// on filename patterns and the original name is what they expect.
+///
+/// 0.9.46 — this is the missing piece that lets `detailed=N` actually
+/// produce non-zero rows for 8-K / SC 13D / DEF 14A.
+pub async fn fetch_filing_primary_doc(
+    client: &SecClient,
+    workdir: &Workdir,
+    issuer_cik: u64,
+    accession_dashed: &str,
+    primary_document: &str,
+) -> Result<bool> {
+    if primary_document.is_empty() {
+        return Ok(false);
+    }
+    let accession_no_dashes = catalog::accession_no_dashes(accession_dashed);
+    let url = format!(
+        "{}{}",
+        catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+        primary_document
+    );
+    let path = workdir
+        .raw_filings_dir()
+        .join(issuer_cik.to_string())
+        .join(&accession_no_dashes)
+        .join(primary_document);
+    client
+        .fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
+        .await
+}
+
+/// Fetch every Exhibit 21 attachment of a single 10-K / 10-K/A filing.
+///
+/// Exhibit 21 isn't the primary document — it's a separate attachment
+/// inside the filing directory. Discovery shape mirrors
+/// `fetch_13f_info_table`: parse the filing's `index.json`, identify
+/// documents whose filename matches `is_exhibit21_name`, fetch each
+/// into the same `raw/filings/{cik}/{accession_no_dashes}/` directory.
+///
+/// Returns the number of Exhibit 21 files downloaded (0 if none in
+/// the filing's `index.json`).
+pub async fn fetch_exhibit21_attachment(
+    client: &SecClient,
+    workdir: &Workdir,
+    issuer_cik: u64,
+    accession_dashed: &str,
+) -> Result<usize> {
+    let accession_no_dashes = catalog::accession_no_dashes(accession_dashed);
+    let index_url = format!(
+        "{}{}",
+        catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+        "index.json"
+    );
+    let bytes = client.fetch_bytes(&index_url).await?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| SecError::Decode(format!("filing index.json: {e}")))?;
+    let docs = v
+        .get("directory")
+        .and_then(|d| d.get("item"))
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| SecError::Decode("filing index: missing directory.item".into()))?;
+
+    let mut downloaded = 0;
+    for d in docs {
+        let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !is_exhibit21_attachment_name(name) {
+            continue;
+        }
+        let url = format!(
+            "{}{}",
+            catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+            name
+        );
+        let dest = workdir
+            .raw_filings_dir()
+            .join(issuer_cik.to_string())
+            .join(&accession_no_dashes)
+            .join(name);
+        match client
+            .fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing)
+            .await
+        {
+            Ok(true) => downloaded += 1,
+            // OnlyIfMissing returning false = already on disk; not an error.
+            Ok(false) => downloaded += 1,
+            Err(_) => continue,
+        }
+    }
+    Ok(downloaded)
+}
+
+/// Mirrors `extract.rs::is_exhibit21_name` (extract walker pattern).
+/// Kept in sync with the walker so what we fetch is what the walker
+/// finds.
+fn is_exhibit21_attachment_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if !(n.ends_with(".htm") || n.ends_with(".html") || n.ends_with(".txt")) {
+        return false;
+    }
+    n.contains("ex21") || n.contains("exhibit21") || n.contains("ex-21") || n.contains("exhibit-21")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +419,44 @@ mod tests {
     fn rate_limit_cost_is_quarters_div_ten() {
         let r = YearRange::new(2020, 2024); // 5 years × 4 = 20 quarters
         assert!((rate_limit_cost_seconds(r) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn is_exhibit21_attachment_name_matches_known_patterns() {
+        // Real filenames seen in SEC 10-K filings.
+        assert!(is_exhibit21_attachment_name("ex21.htm"));
+        assert!(is_exhibit21_attachment_name("aapl-20240928-ex21.htm"));
+        assert!(is_exhibit21_attachment_name("exhibit-21.htm"));
+        assert!(is_exhibit21_attachment_name("Exhibit21.HTML"));
+        assert!(is_exhibit21_attachment_name("aapl_ex21.txt"));
+        // Negative — wrong extension or no match.
+        assert!(!is_exhibit21_attachment_name("ex21.pdf"));
+        assert!(!is_exhibit21_attachment_name("ex22.htm"));
+        assert!(!is_exhibit21_attachment_name("aapl-10k.htm"));
+        assert!(!is_exhibit21_attachment_name(""));
+    }
+
+    #[test]
+    fn fetch_filing_primary_doc_skips_empty_filename() {
+        // Empty primary_document (missing from filing.csv) must be a
+        // safe no-op — the wrapper still passes the tuple but we don't
+        // want a 404 on an empty URL.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = Workdir::new(tmp.path().to_path_buf());
+        let client = SecClient::new("test agent test@example.com").unwrap();
+        let result = rt.block_on(fetch_filing_primary_doc(
+            &client,
+            &wd,
+            320193,
+            "0001-23-456",
+            "",
+        ));
+        // No request should be issued; result is "skipped".
+        assert!(matches!(result, Ok(false)));
     }
 }
 

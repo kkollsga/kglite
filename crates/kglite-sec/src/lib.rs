@@ -35,7 +35,8 @@ pub use extract::{
     InsiderExtractReport, StakeExtractReport, SubsidiaryExtractReport, XbrlExtractReport,
 };
 pub use fetch::{
-    fetch_13f_info_table, fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly,
+    fetch_13f_info_table, fetch_company_tickers, fetch_exhibit21_attachment,
+    fetch_filing_primary_doc, fetch_form4_filing, fetch_fsnds_quarterly,
     fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };
 pub use layout::{StorageMode, Workdir};
