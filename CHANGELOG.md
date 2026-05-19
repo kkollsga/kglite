@@ -9,11 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`crates/kglite-sec/` skeleton** — pure-Rust SEC EDGAR loader,
-  Phase 1 of the planned `kglite.datasets.sec.SEC.open(path, *, years,
-  detailed, mode, ...)` Python API. Ships the streaming
-  `parse_master_idx` parser + `FilingEntry` type for quarterly/daily
-  index files. No PyO3 yet; that lands when the Python wrapper does.
+- **`kglite.datasets.sec.SEC.open(path, *, years, detailed, mode,
+  user_agent, ...)`** — first end-to-end SEC EDGAR loader (phase 3 of
+  the planned loader work). Builds a knowledge graph with Company +
+  Filing nodes connected by `FILED_BY` edges from a three-tier
+  workdir cache (`raw/`, `processed/`, `graph/{mode}/`). Modes
+  `memory` and `mapped` work; `disk` lands in a later phase.
+  Coexisting per-mode subdirs mean opening with one mode never
+  touches another's graph. Default behaviour reuses a cached graph
+  on reopen without rebuilding.
+- **`crates/kglite-sec/` extended** — `SecClient` (10 req/s token
+  bucket, mandatory User-Agent, retry-with-backoff), `fetch.rs`
+  orchestrator for quarterly master.idx + bulk submissions.zip +
+  company_tickers.json, `parsers::submissions` streaming parser for
+  the bulk submissions ZIP, `extract.rs` orchestrator that emits
+  `processed/company.csv` + `processed/filing.csv` with dedup across
+  sources.
+- **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
+  `kglite._sec_internal` submodule. Single-threaded tokio runtime per
+  call; Python callers see plain blocking functions.
 
 ### Changed
 

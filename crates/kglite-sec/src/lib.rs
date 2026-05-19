@@ -20,12 +20,14 @@
 pub mod catalog;
 pub mod client;
 pub mod error;
+pub mod extract;
 pub mod fetch;
 pub mod layout;
 pub mod parsers;
 
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
+pub use extract::{extract_companies_and_filings, ExtractReport};
 pub use fetch::{
     fetch_company_tickers, fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };

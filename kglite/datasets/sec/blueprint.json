@@ -1,0 +1,39 @@
+{
+  "nodes": {
+    "Company": {
+      "csv": "processed/company.csv",
+      "pk": "cik",
+      "title": "name",
+      "properties": {
+        "name": "string",
+        "sic": "string",
+        "sic_description": "string",
+        "state_of_incorporation": "string",
+        "fiscal_year_end": "string",
+        "tickers": "string",
+        "exchanges": "string",
+        "entity_type": "string",
+        "former_names": "string"
+      }
+    },
+    "Filing": {
+      "csv": "processed/filing.csv",
+      "pk": "accession_number",
+      "title": "primary_document",
+      "properties": {
+        "form_type": "string",
+        "filed_date": "date",
+        "report_date": "string",
+        "primary_document": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "FILED_BY": {
+            "target": "Company",
+            "fk": "cik"
+          }
+        }
+      }
+    }
+  }
+}
