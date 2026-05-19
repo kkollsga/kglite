@@ -331,6 +331,16 @@ const TRANSACTION_HEADER: &[&str] = &[
     "shares_owned_after",
     "direct_indirect",
     "is_derivative",
+    // 0.9.46: provenance fields. Every info node carries enough to
+    // resolve back to the originating SEC filing without a separate
+    // Filing graph node. source_url is a relative path under
+    // sec.gov/Archives/edgar/data/{cik}/{accession_no_dashes}/{doc}.
+    // source_lot is the within-filing transaction index (0-based) —
+    // matches the suffix already encoded in transaction_nid.
+    "source_form",
+    "source_document",
+    "source_url",
+    "source_lot",
 ];
 // 0.9.46 J4: HAS_INSIDER replaced by three typed edges. Each
 // fires when its respective Form 4 reportingOwnerRelationship flag
@@ -444,6 +454,13 @@ pub fn extract_insider_transactions(
         }
 
         let accession = accession_from_xml_path(&xml_path).unwrap_or_default();
+        // Provenance: derive once per filing.
+        let source_document = xml_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let source_url = build_archives_url(&f4.reporter_cik, &accession, &source_document);
 
         if seen_persons.insert(f4.reporter_cik.clone()) {
             person_w.write_record([
@@ -497,6 +514,10 @@ pub fn extract_insider_transactions(
                 &format_float(t.shares_owned_after),
                 t.direct_indirect.as_str(),
                 bool_str(t.is_derivative),
+                "4",
+                source_document.as_str(),
+                source_url.as_str(),
+                &i.to_string(),
             ])?;
             report.transactions_written += 1;
         }
@@ -568,6 +589,16 @@ fn insert_accession_dashes(no_dashes: &str) -> String {
     } else {
         no_dashes.to_string()
     }
+}
+
+/// Build the SEC Archives relative URL for a filing's primary document.
+/// Format: `/Archives/edgar/data/{cik}/{accession_no_dashes}/{document}`.
+/// `cik` is the filer's CIK with leading zeros stripped (SEC's URL form).
+/// `accession` may be supplied with or without dashes.
+fn build_archives_url(cik: &str, accession: &str, document: &str) -> String {
+    let cik_unpadded = cik.trim_start_matches('0');
+    let acc_no_dashes: String = accession.chars().filter(|c| *c != '-').collect();
+    format!("/Archives/edgar/data/{cik_unpadded}/{acc_no_dashes}/{document}")
 }
 
 fn bool_str(b: bool) -> &'static str {
@@ -1711,8 +1742,13 @@ mod tests {
         let txn_csv = std::fs::read_to_string(w.processed_csv("transaction")).unwrap();
         assert!(txn_csv.contains("225.5"));
         assert!(txn_csv.contains("Common Stock"));
-        let has_csv = std::fs::read_to_string(w.processed_csv("has_insider")).unwrap();
-        assert!(has_csv.contains("CEO"));
+        // J4 split HAS_INSIDER into typed edges; Cook is an officer.
+        let officer_csv = std::fs::read_to_string(w.processed_csv("is_officer_of")).unwrap();
+        assert!(officer_csv.contains("CEO"));
+        // 0.9.46 M1: provenance columns present on every transaction.
+        assert!(txn_csv.contains("source_form"));
+        assert!(txn_csv.contains("source_url"));
+        assert!(txn_csv.contains("/Archives/edgar/data/"));
 
         std::fs::remove_dir_all(w.root()).ok();
     }

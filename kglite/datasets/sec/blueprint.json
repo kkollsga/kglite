@@ -334,7 +334,11 @@
             "acquired_disposed": "string",
             "shares_owned_after": "float",
             "direct_indirect": "string",
-            "is_derivative": "int"
+            "is_derivative": "int",
+            "source_form": "string",
+            "source_document": "string",
+            "source_url": "string",
+            "source_lot": "int"
           },
           "connections": {
             "fk_edges": {
