@@ -209,7 +209,14 @@ def _build_graph(workdir: Path, mode: str, verbose: bool) -> KnowledgeGraph:
             g.save(str(graph_dir / "sec.kgl"))
             return g
         if mode == "disk":
-            raise NotImplementedError("mode='disk' lands in phase 8; use 'memory' or 'mapped' for now")
+            g = from_blueprint(
+                str(compiled),
+                verbose=False,
+                save=True,
+                storage="disk",
+                path=str(graph_dir),
+            )
+            return g
         raise ValueError(f"unknown mode: {mode!r}")
     finally:
         compiled.unlink(missing_ok=True)

@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 8 — disk mode + docs** — `SEC.open(mode="disk")` now works
+  via `from_blueprint(storage="disk", path=graph/disk/)`. Disk graphs
+  are loaded on subsequent opens via the cache reuse path. Adds
+  `docs/guides/sec.md` covering the workdir layout, schema, storage
+  modes, sizing, and caveats (CIK-as-int, CUSIP edge cases, per-filing
+  fetch rate limits).
 - **Phase 7 — per-filing detail parsers** — `parsers/eightk.rs`
   extracts standardized Item codes from 8-K cover pages (1.01 = entry
   into material agreement, 5.02 = officer departure, etc.) via
