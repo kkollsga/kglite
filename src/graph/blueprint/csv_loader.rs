@@ -42,6 +42,10 @@ impl RawCsv {
 /// (which needs all rows for grouping) and without manual node
 /// declarations. Buffered `read_csv_raw` remains the path for
 /// timeseries / dedupe-required specs.
+///
+/// The `dead_code` allow is removed in E3 when build.rs starts
+/// consuming this; until then the function only has test coverage.
+#[allow(dead_code)]
 pub fn read_csv_chunks(
     path: &Path,
     chunk_size: usize,
