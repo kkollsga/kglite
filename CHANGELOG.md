@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 7 — per-filing detail parsers** — `parsers/eightk.rs`
+  extracts standardized Item codes from 8-K cover pages (1.01 = entry
+  into material agreement, 5.02 = officer departure, etc.) via
+  regex-light scanning of stripped HTML. `parsers/exhibit21.rs`
+  extracts subsidiary lists from 10-K Exhibit 21 documents using a
+  permissive line-by-line heuristic (Exhibit 21 has no SEC-mandated
+  schema). Both parser-only; schema wiring deferred to Phase 8.
 - **Phase 6 — FSNDS XBRL parser** — `parsers/fsnds.rs` streaming
   reader for the quarterly Financial Statement and Notes Data Set
   `num.tsv` (tab-separated XBRL numeric facts). Whitelist-based
