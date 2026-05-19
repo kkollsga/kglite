@@ -115,6 +115,74 @@ def _resolve_years(years: Union[int, str, None], current_year: int) -> int:
     return years
 
 
+def _resolve_cik_list(
+    cik_list: Optional[list[Union[int, str]]],
+    workdir: Path,
+    user_agent: str,
+    verbose: bool,
+) -> Optional[list[int]]:
+    """Resolve string ticker entries in ``cik_list`` to integer CIKs
+    via the SEC's ``company_tickers.json``. Int entries pass through
+    unchanged. Lookup is case-insensitive. Mixed lists work
+    (``[320193, "TSLA"]``).
+
+    Raises ``ValueError`` for unknown tickers — clearer than a silent
+    empty-graph result downstream.
+    """
+    if not cik_list:
+        return None if cik_list is None else []
+    # Fast path: caller passed only int CIKs.
+    if all(isinstance(c, int) for c in cik_list):
+        return list(cik_list)  # type: ignore[arg-type]
+
+    tickers_path = workdir / "raw" / "company_tickers.json"
+    if not tickers_path.exists():
+        # First-build ticker resolution: fetch the ~1 MB map ad-hoc
+        # so we have it before fetch_raw runs. The Rust loader will
+        # see the file already on disk and skip the duplicate fetch.
+        if verbose:
+            print("[SEC] fetching company_tickers.json for ticker resolution...")
+        import urllib.request
+
+        tickers_path.parent.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers={"User-Agent": user_agent},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tickers_path.write_bytes(resp.read())
+
+    raw_map = json.loads(tickers_path.read_text())
+    # company_tickers.json shape:
+    #   {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
+    ticker_to_cik: dict[str, int] = {}
+    for entry in raw_map.values():
+        t = str(entry.get("ticker", "")).upper()
+        cik = entry.get("cik_str")
+        if t and isinstance(cik, int):
+            ticker_to_cik[t] = cik
+
+    resolved: list[int] = []
+    unknown: list[str] = []
+    for c in cik_list:
+        if isinstance(c, int):
+            resolved.append(c)
+        elif isinstance(c, str):
+            cik = ticker_to_cik.get(c.upper())
+            if cik is None:
+                unknown.append(c)
+            else:
+                resolved.append(cik)
+        else:
+            raise ValueError(f"cik_list entries must be int CIK or str ticker; got {c!r}")
+    if unknown:
+        raise ValueError(
+            f"Unknown ticker(s) in cik_list: {unknown!r}. "
+            "Check the SEC company_tickers.json map or pass int CIK(s) directly."
+        )
+    return resolved
+
+
 class SEC:
     """SEC EDGAR knowledge graph loader.
 
@@ -131,7 +199,7 @@ class SEC:
         detailed: int = 2,
         mode: Optional[str] = None,
         user_agent: str,
-        cik_list: Optional[list[int]] = None,
+        cik_list: Optional[list[Union[int, str]]] = None,
         form_types: Optional[list[str]] = None,
         year_range: Optional[tuple[int, int]] = None,
         include_subsidiaries: bool = True,
@@ -159,6 +227,11 @@ class SEC:
             user_agent: REQUIRED. SEC fair-access policy mandates a
                 descriptive header identifying the requester (name +
                 email). Missing or generic UA → 403.
+            cik_list: Optional scope filter. Accepts int CIKs, string
+                tickers (case-insensitive), or a mix:
+                ``[320193, "TSLA", "BRK-B"]``. Tickers resolve via
+                SEC's ``company_tickers.json`` (fetched on first
+                build, cached in ``raw/``).
             force_rebuild: Rebuild the graph for ``mode`` even if it
                 already exists. Keeps ``raw/`` and ``processed/``.
             force_refetch: Re-download ``raw/`` from SEC. Rare;
@@ -172,6 +245,12 @@ class SEC:
             raise ValueError(
                 "user_agent is required — SEC fair-access policy. Pass e.g. 'Acme Research contact@acme.com'."
             )
+        workdir = Path(path).expanduser().resolve()
+        workdir.mkdir(parents=True, exist_ok=True)
+        # Resolve string tickers in cik_list to int CIKs before any
+        # downstream code sees the slice. Idempotent: int-only lists
+        # pass through unchanged.
+        cik_list = _resolve_cik_list(cik_list, workdir, user_agent, verbose)
         current_year, current_quarter = _current_year_quarter()
         years_int_predict = _resolve_years(years, current_year)
         if mode is None:
@@ -188,9 +267,6 @@ class SEC:
                 print(f"[SEC] mode='{mode}' auto-picked (predicted ~{predicted_gb:.1f} GB)")
         if mode not in _STORAGE_MODES:
             raise ValueError(f"mode must be one of {_STORAGE_MODES!r}; got {mode!r}")
-
-        workdir = Path(path).expanduser().resolve()
-        workdir.mkdir(parents=True, exist_ok=True)
 
         # Step 0: if graph exists for this mode, just load it.
         if not force_rebuild and _sec_internal.graph_exists(str(workdir), mode):
