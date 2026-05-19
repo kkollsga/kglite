@@ -241,6 +241,68 @@ fn extract_xbrl_metrics_py(
     Ok(d.into())
 }
 
+/// Batch-fetch Form 4 XMLs. Takes a list of (cik, accession, primary_doc)
+/// tuples and processes them through a single shared SecClient so the
+/// 10 req/s token bucket applies across the whole batch.
+///
+/// Returns (downloaded, skipped) counts.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, batch))]
+fn fetch_form4_batch(
+    workdir: PathBuf,
+    user_agent: &str,
+    batch: Vec<(u64, String, String)>,
+) -> PyResult<(usize, usize)> {
+    use kglite_sec::fetch_form4_filing;
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    rt.block_on(async {
+        for (cik, accession, primary_doc) in batch {
+            match fetch_form4_filing(&client, &wd, cik, &accession, &primary_doc).await {
+                Ok(true) => downloaded += 1,
+                Ok(false) => skipped += 1,
+                Err(_) => skipped += 1, // count 4xx/network issues as skipped
+            }
+        }
+    });
+    Ok((downloaded, skipped))
+}
+
+/// Batch-fetch 13F info tables. Same shape as fetch_form4_batch.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, batch))]
+fn fetch_13f_batch(
+    workdir: PathBuf,
+    user_agent: &str,
+    batch: Vec<(u64, String)>,
+) -> PyResult<(usize, usize)> {
+    use kglite_sec::fetch_13f_info_table;
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    rt.block_on(async {
+        for (cik, accession) in batch {
+            match fetch_13f_info_table(&client, &wd, cik, &accession).await {
+                Ok(true) => downloaded += 1,
+                Ok(false) => skipped += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+    });
+    Ok((downloaded, skipped))
+}
+
 /// Extract `processed/event.csv` from raw 8-K HTML cover pages
 /// under `raw/filings/`. Idempotent.
 #[pyfunction]
@@ -315,6 +377,8 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_xbrl_metrics_py, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_8k_events_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_form4_batch, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;
