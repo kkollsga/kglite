@@ -38,14 +38,24 @@ pub struct Holding {
     pub name_of_issuer: String,
     pub title_of_class: String,
     pub cusip: String,
+    /// Bloomberg Open Symbology FIGI identifier (added to the 13F-HR
+    /// schema in 2022Q3). Older filings have it empty.
+    pub figi: String,
     /// Position value (USD thousands pre-2023Q4, USD from 2023Q4).
     pub value: f64,
     /// Share count (or principal amount for bonds).
     pub shares: f64,
     /// "SH" (shares) or "PRN" (principal amount).
     pub shares_type: String,
+    /// "PUT" / "CALL" / "" — set when the holding is an options
+    /// position rather than the underlying.
+    pub put_call: String,
     /// "SOLE" / "DFND" / "OTR".
     pub investment_discretion: String,
+    /// Comma-joined list of other-manager numbers when the position
+    /// is co-managed (e.g. one fund's holdings include shares another
+    /// fund discretionary-manages).
+    pub other_managers: String,
     pub voting_sole: f64,
     pub voting_shared: f64,
     pub voting_none: f64,
@@ -118,15 +128,31 @@ fn apply(h: &mut Holding, leaf: &str, path: &[String], text: &str) {
         "nameOfIssuer" => h.name_of_issuer = text.to_string(),
         "titleOfClass" => h.title_of_class = text.to_string(),
         "cusip" => h.cusip = text.trim().to_string(),
+        "figi" => h.figi = text.trim().to_string(),
         "value" => h.value = parse_float(text),
         "sshPrnamt" => h.shares = parse_float(text),
         "sshPrnamtType" => h.shares_type = text.to_string(),
+        "putCall" => h.put_call = text.trim().to_string(),
         "investmentDiscretion" => h.investment_discretion = text.to_string(),
         "Sole" if in_voting_authority(path) => h.voting_sole = parse_float(text),
         "Shared" if in_voting_authority(path) => h.voting_shared = parse_float(text),
         "None" if in_voting_authority(path) => h.voting_none = parse_float(text),
+        // The otherManagers/otherManager block contains numeric
+        // references back to the filer's other-managers index.
+        // Accumulate as a comma-joined string so downstream consumers
+        // can split or look up.
+        "otherManager" if in_other_managers(path) => {
+            if !h.other_managers.is_empty() {
+                h.other_managers.push(',');
+            }
+            h.other_managers.push_str(text.trim());
+        }
         _ => {}
     }
+}
+
+fn in_other_managers(path: &[String]) -> bool {
+    path.iter().any(|p| p == "otherManagers")
 }
 
 fn in_voting_authority(path: &[String]) -> bool {
