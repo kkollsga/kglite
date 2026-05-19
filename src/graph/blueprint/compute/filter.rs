@@ -168,7 +168,13 @@ impl super::super::schema::NodeSpec {
             properties: self.properties.clone(),
             skipped: self.skipped.clone(),
             filter: self.filter.clone(),
-            connections: super::super::schema::Connections::default(),
+            // Copy connections from source. The filtered subset has
+            // the same FK columns as the source, so OF_PERSON /
+            // INVOLVES_ISSUER / etc. resolve correctly against the
+            // new node type's rows. Junction edges declared on the
+            // source (e.g. chain-emitted NEXT_TX) are also copied —
+            // typically harmless and occasionally useful.
+            connections: self.connections.clone(),
             sub_nodes: indexmap::IndexMap::new(),
             timeseries: None,
         }

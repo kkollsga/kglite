@@ -58,6 +58,24 @@
       }
     },
     {
+      "op": "filter",
+      "from": "Transaction",
+      "where": "is_buy",
+      "into": "Purchase"
+    },
+    {
+      "op": "filter",
+      "from": "Transaction",
+      "where": "is_sell",
+      "into": "Sale"
+    },
+    {
+      "op": "filter",
+      "from": "Transaction",
+      "where": "shares_owned_after != null",
+      "into": "Holding"
+    },
+    {
       "op": "chain",
       "from": "Transaction",
       "group_by": ["person_nid", "issuer_cik"],

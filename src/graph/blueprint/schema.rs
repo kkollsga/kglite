@@ -76,7 +76,7 @@ pub struct NodeSpec {
     pub timeseries: Option<TimeseriesSpec>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct Connections {
     #[serde(default)]
     pub fk_edges: IndexMap<String, FkEdge>,
@@ -84,13 +84,13 @@ pub struct Connections {
     pub junction_edges: IndexMap<String, JunctionEdge>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FkEdge {
     pub target: String,
     pub fk: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct JunctionEdge {
     pub csv: String,
     pub source_fk: String,
