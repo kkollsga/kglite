@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, SecError};
 use crate::fetch::YearRange;
 use crate::layout::Workdir;
+use crate::parsers::eightk::extract_8k_items;
 use crate::parsers::exhibit21::extract_subsidiaries as parse_exhibit21;
 use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
@@ -954,6 +955,117 @@ pub fn extract_xbrl_metrics(
     Ok(report)
 }
 
+// ─── 8-K Item codes extract ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct EightKExtractReport {
+    pub events_written: usize,
+    pub eightk_files_read: usize,
+    pub eightk_parse_errors: usize,
+}
+
+const EVENT_HEADER: &[&str] = &["event_nid", "accession_number", "item_code", "description"];
+
+/// Walk `raw/filings/{cik}/{accession}/` for any HTML doc and try
+/// `extract_8k_items` on it; non-8-K filings simply produce zero rows.
+/// Emits `processed/event.csv` deduped by (accession, item_code).
+pub fn extract_8k_events(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<EightKExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let event_csv = workdir.processed_csv("event");
+
+    let mut report = EightKExtractReport::default();
+    if !force && event_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut writer = csv_writer(&event_csv)?;
+    writer.write_record(EVENT_HEADER)?;
+
+    let filings_root = workdir.raw_filings_dir();
+    if !filings_root.is_dir() {
+        writer.flush()?;
+        return Ok(report);
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for html_path in walk_html_files(&filings_root)? {
+        let Some(cik_str) = cik_from_filing_path(&html_path) else {
+            continue;
+        };
+        let cik_int: u64 = cik_str.parse().unwrap_or(0);
+        if !slice.cik_matches(cik_int) {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&html_path) {
+            Ok(t) => t,
+            Err(_) => {
+                report.eightk_parse_errors += 1;
+                continue;
+            }
+        };
+        let items = extract_8k_items(&text);
+        if items.is_empty() {
+            continue;
+        }
+        report.eightk_files_read += 1;
+        let accession = accession_from_xml_path(&html_path).unwrap_or_default();
+        for item in items {
+            let nid = format!("{}_{}", accession, item.item_code);
+            if !seen.insert(nid.clone()) {
+                continue;
+            }
+            writer.write_record([
+                nid.as_str(),
+                accession.as_str(),
+                item.item_code.as_str(),
+                item.description.as_str(),
+            ])?;
+            report.events_written += 1;
+        }
+    }
+
+    writer.flush()?;
+    Ok(report)
+}
+
+fn walk_html_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let Ok(cik_dirs) = std::fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for cik_entry in cik_dirs.flatten() {
+        let cik_path = cik_entry.path();
+        if !cik_path.is_dir() {
+            continue;
+        }
+        let Ok(acc_dirs) = std::fs::read_dir(&cik_path) else {
+            continue;
+        };
+        for acc_entry in acc_dirs.flatten() {
+            let acc_path = acc_entry.path();
+            if !acc_path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&acc_path) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "htm" || ext == "html" {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn normalize_subsidiary_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -1195,6 +1307,32 @@ mod tests {
         let company_csv = std::fs::read_to_string(w.processed_csv("company")).unwrap();
         assert!(company_csv.contains("Apple"));
         assert!(!company_csv.contains("Microsoft"));
+
+        std::fs::remove_dir_all(w.root()).ok();
+    }
+
+    #[test]
+    fn extracts_8k_events_from_synth_filings() {
+        let w = synth_workdir();
+        let dir = w
+            .raw_filings_dir()
+            .join("320193")
+            .join("000032019324000456");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("aapl-8k.htm"),
+            "<html><body><p>Item 5.02 Departure of Officers.</p>\
+             <p>Item 9.01 Financial Statements and Exhibits.</p></body></html>",
+        )
+        .unwrap();
+
+        let report = extract_8k_events(&w, &SliceSpec::default(), false).unwrap();
+        assert_eq!(report.eightk_files_read, 1);
+        assert_eq!(report.events_written, 2);
+
+        let csv = std::fs::read_to_string(w.processed_csv("event")).unwrap();
+        assert!(csv.contains("5.02"));
+        assert!(csv.contains("9.01"));
 
         std::fs::remove_dir_all(w.root()).ok();
     }

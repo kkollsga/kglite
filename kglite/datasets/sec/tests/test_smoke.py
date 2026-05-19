@@ -373,6 +373,41 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D4 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d4_8k_officer_departure_events(synth_workdir: Path) -> None:
+    """User story (D4): As an event-driven trader, I want to find all
+    companies that had officer departures (8-K Item 5.02) in my
+    watchlist. I stage a synthetic 8-K cover page; the build creates
+    an Event node tied to the Filing.
+    """
+    dir_ = synth_workdir / "raw" / "filings" / "320193" / "000032019324000888"
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / "aapl-8k-event.htm").write_text(
+        "<html><body>"
+        "<p>Item 5.02 Departure of Directors or Certain Officers.</p>"
+        "<p>Item 9.01 Financial Statements and Exhibits.</p>"
+        "</body></html>"
+    )
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D4 d4@example.com",
+        verbose=False,
+    )
+
+    res = _rows(g.cypher("MATCH (e:Event {item_code: '5.02'}) RETURN e.description AS desc, e.item_code AS code"))
+    assert len(res) >= 1
+    assert "Departure" in res[0]["desc"] or res[0]["code"] == "5.02"
+
+
 # ── D3 user story ────────────────────────────────────────────────────
 
 

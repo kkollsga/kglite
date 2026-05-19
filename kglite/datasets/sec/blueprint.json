@@ -69,6 +69,23 @@
         }
       }
     },
+    "Event": {
+      "csv": "processed/event.csv",
+      "pk": "event_nid",
+      "title": "item_code",
+      "properties": {
+        "item_code": "string",
+        "description": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_FILING": {
+            "target": "Filing",
+            "fk": "accession_number"
+          }
+        }
+      }
+    },
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_nid",

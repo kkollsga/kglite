@@ -92,6 +92,7 @@ class SEC:
         year_range: Optional[tuple[int, int]] = None,
         include_subsidiaries: bool = True,
         include_xbrl_metrics: bool = True,
+        include_8k_events: bool = True,
         force_rebuild: bool = False,
         force_refetch: bool = False,
         verbose: bool = True,
@@ -223,6 +224,15 @@ class SEC:
         xbrl_report = _sec_internal.extract_xbrl_metrics_py(str(workdir), force=force_rebuild, year_range=year_range)
         if verbose:
             print(f"[SEC]   xbrl: {xbrl_report}")
+
+        # Step 2f: 8-K Item codes. Walks raw/filings/ HTM for Item N.NN
+        # patterns; non-8-K HTML produces zero rows.
+        if verbose:
+            print("[SEC] extracting 8-K Item codes")
+        events_report = _sec_internal.extract_8k_events_py(str(workdir), force=force_rebuild, cik_list=cik_list)
+        if verbose:
+            print(f"[SEC]   events: {events_report}")
+        _ = include_8k_events  # reserved for the per-filing fetcher gate
 
         # Step 3: build graph/{mode}/
         if verbose:

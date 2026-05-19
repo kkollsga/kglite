@@ -15,10 +15,10 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
-    extract_companies_and_filings, extract_holdings, extract_insider_transactions,
-    extract_subsidiaries, extract_xbrl_metrics, fetch_company_tickers, fetch_fsnds_quarterly,
-    fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir,
-    YearRange,
+    extract_8k_events, extract_companies_and_filings, extract_holdings,
+    extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics,
+    fetch_company_tickers, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
+    fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -241,6 +241,26 @@ fn extract_xbrl_metrics_py(
     Ok(d.into())
 }
 
+/// Extract `processed/event.csv` from raw 8-K HTML cover pages
+/// under `raw/filings/`. Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
+fn extract_8k_events_py(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    cik_list: Option<Vec<u64>>,
+) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let slice = build_slice(cik_list, None, None);
+    let report = extract_8k_events(&wd, &slice, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("events_written", report.events_written)?;
+    d.set_item("eightk_files_read", report.eightk_files_read)?;
+    d.set_item("eightk_parse_errors", report.eightk_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Extract `processed/subsidiary.csv` from raw Exhibit 21 HTML files
 /// staged under `raw/filings/`. Idempotent.
 #[pyfunction]
@@ -294,6 +314,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_subsidiaries_py, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_xbrl_metrics_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_8k_events_py, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

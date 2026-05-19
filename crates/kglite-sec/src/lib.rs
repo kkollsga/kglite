@@ -29,9 +29,10 @@ pub mod slicing;
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{
-    extract_companies_and_filings, extract_holdings, extract_insider_transactions,
-    extract_subsidiaries, extract_xbrl_metrics, ExtractReport, HoldingsExtractReport,
-    InsiderExtractReport, SubsidiaryExtractReport, XbrlExtractReport,
+    extract_8k_events, extract_companies_and_filings, extract_holdings,
+    extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics, EightKExtractReport,
+    ExtractReport, HoldingsExtractReport, InsiderExtractReport, SubsidiaryExtractReport,
+    XbrlExtractReport,
 };
 pub use fetch::{
     fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
