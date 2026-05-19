@@ -20,12 +20,57 @@ structural validators that compose with Cypher.
 > Desktop. Closes with a screenshot of Claude calling `repo_management`
 > → `graph_overview` → `cypher_query` against the live graph.
 
+> ### 🏦 Or: every US public company, queryable in one call
+>
+> ```python
+> from kglite.datasets.sec import SEC
+> g = SEC.open("./sec", years=10, detailed=2,
+>              user_agent="Your Name your@email.com")
+> ```
+>
+> Pulls SEC EDGAR's full filing index (~14M filings since 1993) plus
+> 2 years of deep payloads — Form 4 insider transactions, 13F
+> institutional holdings, SC 13D activist stakes, DEF 14A board
+> composition, FSNDS XBRL financials, Exhibit 21 subsidiaries, 8-K
+> Item codes. **11 node types, 15 edge types**, queryable with Cypher.
+>
+> ```cypher
+> -- Apple's board, with tenure
+> MATCH (c:Company {cik:320193})<-[:SERVES_ON_BOARD]-(d:Director)
+> RETURN d.name, d.since_year ORDER BY d.since_year
+>
+> -- Who's the most insider-active CIK this year?
+> MATCH (c:Company)-[:HAS_INSIDER]->(p)<-[:OF_PERSON]-(t:Transaction)
+> WHERE t.transaction_code = 'S'
+> RETURN c.name, count(t) AS sells ORDER BY sells DESC LIMIT 10
+>
+> -- 13D activist purpose mentions "board"
+> MATCH (s:Stake)-[:REPORTED_IN_FILING]->(f)-[:FILED_BY]->(c:Company)
+> WHERE s.purpose_text CONTAINS 'board'
+> RETURN c.name, s.percent_owned, s.purpose_text
+> ```
+>
+> Public-domain data (US Govt work) — redistribute the built `.kgl`
+> however you like. Scope with `cik_list=[...]` for an S&P-500-sized
+> graph in ~10 minutes, or full universe in ~5 hours. **→
+> [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+
 ## Use cases
 
 KGLite is shape-agnostic — the agent-facing surface is the same
 whether the graph holds your legal precedents, a Wikidata slice,
 your SQL warehouse, a RAG corpus, or a parsed codebase.
 
+- 🏦 **SEC EDGAR in one call.** `SEC.open(path, years=10, detailed=2,
+  user_agent="...")` builds a US-public-company knowledge graph from
+  the SEC's free data: companies, filings, insider transactions
+  (Form 4), institutional holdings (13F), XBRL financial metrics,
+  activist stakes (SC 13D), board composition (DEF 14A), subsidiary
+  trees (Exhibit 21), 8-K material events. 11 node types, 15 edge
+  types, three-tier `raw` / `processed` / `graph` cache that never
+  re-fetches. Scope with `cik_list=[...]` for an S&P-500 graph in
+  ~10 minutes. **→
+  [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
   regulatory rules, medical ontologies, manufacturing BOMs, scientific
   catalogues — anything with structure becomes a queryable graph an
@@ -69,7 +114,7 @@ your SQL warehouse, a RAG corpus, or a parsed codebase.
 | **Bundled MCP server for LLM agents**      | ✅                                 | —                          | —                  | —                  | —                      |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                          | —                  | —                  | —                      |
 | **Codebase → graph parser**                | 13 languages, route detection     | —                          | —                  | —                  | —                      |
-| **Bundled public datasets**                | Wikidata, Sodir                   | —                          | toy graphs only    | —                  | —                      |
+| **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                          | toy graphs only    | —                  | —                      |
 | **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want Cypher + Python ergonomics + LLM-agent
@@ -185,13 +230,50 @@ rather than discovering it through trial-and-error. **→
 
 ## Bundled datasets
 
-Two wrappers turn well-known public sources into queryable graphs
+Three wrappers turn well-known public sources into queryable graphs
 without writing a loader. Each handles the *fetch + build + cache*
 cycle, returns a `KnowledgeGraph` you can `cypher()` against, and
 respects a per-dataset cooldown so re-running just reloads the cached
 graph in seconds. KGLite is independent of the upstream
 organisations — see each module docstring for non-affiliation notes.
 **→ [Datasets guide](https://kglite.readthedocs.io/en/latest/guides/datasets.html).**
+
+### SEC EDGAR
+
+US-public-company knowledge graph from the SEC's free public data —
+all 14M historical filings + per-filing payload parsing for Form 4
+(insider transactions), 13F-HR (institutional holdings), SC 13D
+(activist stakes), DEF 14A (board composition), FSNDS NUM.tsv (XBRL
+financial metrics), 10-K Exhibit 21 (subsidiaries), 8-K cover pages
+(material event Item codes):
+
+```python
+from kglite.datasets.sec import SEC
+
+# Default config: 10yr filing index + 2yr deep payload at mode="mapped"
+g = SEC.open("/data/sec", user_agent="Your Name your@email.com")
+
+# Watchlist scope — 500 CIKs build in ~10 minutes
+g = SEC.open("/data/sec", cik_list=[320193, 789019, ...],
+             user_agent="Your Name your@email.com")
+
+# Full universe — auto-escalates to mode="disk" at predicted >16 GB
+g = SEC.open("/data/sec", years="all", detailed=5,
+             user_agent="Your Name your@email.com")
+```
+
+11 node types (Company, Filing, Person, Transaction, Institutional-
+Manager, Security, Subsidiary, MetricFact, Event, Stake, Director),
+15 edge types. Three-tier `raw` / `processed` / `graph/{mode}` cache
+— `raw` is immutable, `processed` regenerates only when its `raw`
+source changes, `graph/{mode}/` reuses on reopen unless
+`force_rebuild=True`. SEC's 10 req/s fair-access policy is enforced
+by an internal token-bucket rate limiter; the `user_agent` arg is
+mandatory (SEC returns 403 without it).
+
+Source data is public domain (US Govt work) — redistribute the built
+`.kgl` however you like. **→
+[SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
 ### Wikidata
 
