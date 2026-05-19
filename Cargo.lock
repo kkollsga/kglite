@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.9.45"
+version = "0.9.46"
 dependencies = [
  "aho-corasick",
  "anyhow",

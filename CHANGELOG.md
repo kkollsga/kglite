@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.46] — SEC EDGAR value-proposition upgrade (J0–J7)
+
+The shipped SEC loader through 0.9.45 produced a Filing-index
+graph but the detailed-payload extracts (Form 4, 13F, 8-K, SC
+13D, DEF 14A, Exhibit 21) silently returned zero rows because
+the per-filing fetcher loop was never wired. This release closes
+that gap AND reshapes the schema so a SQL person looking at the
+graph sees an immediate win — same-person multi-role queries,
+typed insider edges, sector-cohort traversal via the new
+SicCode node, fund-as-issuer bridge.
+
+### Added (foundation — J0–J2)
+
+- **Ticker support in `SEC.open(cik_list=...)`** (J0). Accepts
+  string tickers (case-insensitive), int CIKs, or a mix:
+  `cik_list=["AAPL", "BRK-B", 1318605]`. Resolves via the SEC
+  `company_tickers.json` map (~1 MB, cached after first fetch).
+- **Generic per-filing fetcher** (J1):
+  `kglite_sec::fetch_filing_primary_doc` for 8-K / SC 13D / DEF
+  14A primary docs; `kglite_sec::fetch_exhibit21_attachment` for
+  10-K Exhibit 21 discovery via `index.json`. Exposed to Python
+  as `_sec_internal.fetch_filing_batch` and
+  `_sec_internal.fetch_exhibit21_batch`.
+- **Wrapper batch dispatch** (J2):
+  `_dispatch_per_filing_fetches` reads `processed/filing.csv`
+  after extract_processed, groups by form type, calls the
+  fetchers. `include_subsidiaries` and `include_8k_events` are
+  no longer parsed-but-ignored — they gate the fetch.
+- **Fetcher bug fixes** (J7-prep):
+  - Form 4 was downloading XSL-rendered HTML instead of XML
+    because `primaryDocument` points inside `xslF345X*/`; we now
+    strip the directory and fetch the raw XML at the filing
+    root. Without this, every Form 4 file errored at parse time.
+  - 13F-HR `index.json` sometimes labels every document as
+    `type: "text.gif"` (observed on Berkshire); the info-table
+    discovery now falls back to "any non-primary_doc XML" when
+    the type-label heuristic finds nothing.
+
+### Changed (graph value — J3–J6)
+
+These are breaking schema changes. Existing graphs cached under
+`graph/{mode}/` won't load — call `SEC.open(...,
+force_rebuild=True)` to re-derive.
+
+- **Person unification — drops the `Director` node type** (J3).
+  Form 4 reporters and DEF 14A directors now project onto a
+  single `:Person` node with role edges back to Company. Exact
+  token-sorted name match merges aligned references
+  ("COOK TIMOTHY D" ↔ "Timothy D. Cook"); unmatched DEF 14A
+  directors get a synthetic negative-i63 person_nid so the
+  column stays Int64-typed (mixing string and int nids would
+  downgrade the column to String and break FK lookups).
+  `age` and `since_year` move from Director properties to
+  edge properties on `SERVES_ON_BOARD` (per-filing facts, not
+  per-Person facts).
+- **Typed insider edges replace boolean-flag `HAS_INSIDER`** (J4):
+  `Company -[:IS_DIRECTOR_OF]-> Person`,
+  `Company -[:IS_OFFICER_OF]-> Person` (with `officer_title`),
+  `Company -[:IS_BENEFICIAL_OWNER_OF]-> Person` (10%-owner +
+  the rare `is_other` catch-all). Pattern matching becomes
+  idiomatic instead of property-filtered, and the planner can
+  use edge-type indexing.
+- **Industry as a graph node** (J5):
+  `processed/sic.csv` aggregates distinct
+  (sic_code, sic_description) pairs. New `:SicCode` node + new
+  `Company -[:IN_INDUSTRY]-> SicCode` fk edge. Sector cohort
+  queries lose the `GROUP BY sic` ceremony.
+- **Manager ↔ Company link** (J6): new
+  `InstitutionalManager -[:IS_COMPANY]-> Company` fk edge.
+  When a 13F filer's manager_cik matches a Company.cik
+  (Berkshire, BlackRock, Vanguard), the same legal entity now
+  materialises as one bridged node group across all three role
+  views (issuer, 13F filer, board member).
+
+### Schema migration
+
+Existing graphs cached under
+`<workdir>/graph/{mode}/` from 0.9.45 or earlier won't load
+post-J3+J4. Re-derive:
+
+```python
+g = SEC.open(workdir, ..., force_rebuild=True)
+```
+
+`raw/` and `processed/` tiers are unaffected (well, processed/
+regenerates from raw/ as usual); only the built graph file
+needs rebuilding.
+
+### Showcase notebook
+
+[`examples/sec_to_claude_mcp.ipynb`](examples/sec_to_claude_mcp.ipynb)
+demonstrates the schema with 7 queries that have no clean SQL
+equivalent — multi-role insider unification, board interlocks,
+sector-cohort sells, fund-as-issuer, 8-K → Form 4 proximity,
+voting-power concentration, subsidiary depth. Ends by
+registering the graph as a Claude Desktop MCP server (the
+agent-first framing).
+
 ## [0.9.45] — `save_graph` mode-aware dispatch in `kglite-mcp-server`
 
 Correctness fix for an MCP-server-only regression latent since
