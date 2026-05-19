@@ -34,6 +34,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape) now stream end-to-end on the node side; their FK edges
   still buffer (lifts in F3).
 
+- **FK-edge streaming for streaming-eligible specs** (F3). FK
+  edges from non-timeseries / non-spatial / non-manual specs now
+  flow through a per-chunk dispatch built on the same
+  `build_fk_columns` + `build_edge_df` + `connect()` primitives
+  as the buffered path. Each chunk emits one `connect()` call per
+  declared FK edge.
+
+  With F3 the cache pre-parse step (`parse_in_parallel`) skips
+  streamable specs entirely — their CSVs are read on demand by
+  the streaming node + FK loaders via `read_csv_chunks`. The
+  cache now holds only the CSVs for timeseries / spatial /
+  manual specs, dropping peak memory during the FK phase from
+  ~2× CSV size (cache + per-spec `clone_raw`) to ~chunk_size for
+  the streamed specs. For SEC `Filing` (one of the heaviest
+  blueprints at full-universe scope) this is the main RAM win.
+
+  Risk caveat: per-chunk type inference in `build_edge_df` could
+  disagree across chunks if a column has heterogeneous content
+  (e.g. mostly ints + one string row). Real-world FK columns are
+  consistently typed; if this surfaces we'll move FK types to
+  explicit declarations.
+
 ## [0.9.43] — Streaming CSV for junction-edge loader (E1–E4)
 
 ### Added

@@ -813,3 +813,128 @@ class TestStreamingAutoPk:
         result = graph.cypher("MATCH (i:Item) RETURN i.id AS id ORDER BY id")
         ids = [r["id"] for r in result]
         assert ids == list(range(1, expected_kept + 1))
+
+
+class TestStreamingFkEdges:
+    """0.9.44 F3 — FK edges from streaming-eligible specs are
+    built per-chunk, with `connect()` called once per (chunk, edge)
+    pair. The streamed-parent CsvCache is bypassed, so peak RAM
+    during the FK phase is bounded by chunk size."""
+
+    def test_multi_chunk_fk_edges(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "50")
+        n_companies = 20
+        n_employees = 500
+        companies = pd.DataFrame(
+            {
+                "company_id": list(range(n_companies)),
+                "name": [f"C{i}" for i in range(n_companies)],
+            }
+        )
+        employees = pd.DataFrame(
+            {
+                "employee_id": list(range(n_employees)),
+                "name": [f"E{i}" for i in range(n_employees)],
+                "company_id": [i % n_companies for i in range(n_employees)],
+            }
+        )
+        _write_csv(tmp_path / "companies.csv", companies)
+        _write_csv(tmp_path / "employees.csv", employees)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Company": {
+                    "csv": "companies.csv",
+                    "pk": "company_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                },
+                "Employee": {
+                    "csv": "employees.csv",
+                    "pk": "employee_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "fk_edges": {
+                            "WORKS_AT": {
+                                "target": "Company",
+                                "fk": "company_id",
+                            }
+                        }
+                    },
+                },
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        edge_count = graph.cypher("MATCH (e:Employee)-[r:WORKS_AT]->(c:Company) RETURN count(r) AS n")[0]["n"]
+        assert edge_count == n_employees
+        # Each company gets n_employees/n_companies employees.
+        per_company = graph.cypher("MATCH (e:Employee)-[:WORKS_AT]->(c:Company {company_id: 0}) RETURN count(e) AS n")[
+            0
+        ]["n"]
+        assert per_company == n_employees // n_companies
+
+    def test_streamed_auto_pk_subnode_fk_edges(self, tmp_path, monkeypatch):
+        """Sub-node with `pk:"auto"` + parent_fk emits OF_PARENT
+        edges via streaming. Source ids must align between the node
+        loader (assigns 1..=N) and the FK loader (also assigns 1..=N
+        from independent counter). Edge count = sub-row count."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "60")
+        n_fields = 5
+        n_reserves = 200
+        fields = pd.DataFrame(
+            {
+                "field_id": list(range(n_fields)),
+                "name": [f"F{i}" for i in range(n_fields)],
+            }
+        )
+        reserves = pd.DataFrame(
+            {
+                "field_id": [i % n_fields for i in range(n_reserves)],
+                "year": [2000 + (i // n_fields) for i in range(n_reserves)],
+                "oil": [100.0 + i for i in range(n_reserves)],
+            }
+        )
+        _write_csv(tmp_path / "fields.csv", fields)
+        _write_csv(tmp_path / "reserves.csv", reserves)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Field": {
+                    "csv": "fields.csv",
+                    "pk": "field_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "sub_nodes": {
+                        "Reserve": {
+                            "csv": "reserves.csv",
+                            "pk": "auto",
+                            "title": "year",
+                            "parent_fk": "field_id",
+                            "properties": {"oil": "float"},
+                            "skipped": [],
+                            "connections": {
+                                "fk_edges": {
+                                    "OF_FIELD": {
+                                        "target": "Field",
+                                        "fk": "field_id",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        n_nodes = graph.cypher("MATCH (r:Reserve) RETURN count(r) AS n")[0]["n"]
+        assert n_nodes == n_reserves
+        n_edges = graph.cypher("MATCH (r:Reserve)-[:OF_FIELD]->(f:Field) RETURN count(r) AS n")[0]["n"]
+        assert n_edges == n_reserves

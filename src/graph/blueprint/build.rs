@@ -75,22 +75,32 @@ pub fn build(
     // E3 note: junction-edge CSVs are NOT pre-parsed any more. They're
     // streamed via `read_csv_chunks` inside `load_junction_edges`. Pre-
     // caching them would defeat the streaming memory bound.
+    //
+    // F3 note: streamable node specs are excluded from pre-parsing.
+    // Their CSVs are read on demand by `load_streamed_node_spec` and
+    // `load_streamed_fk_edges` via `read_csv_chunks`. Pre-caching
+    // them would hold a full `RawCsv` in memory for the whole build,
+    // re-introducing the RAM ceiling the streaming path is designed
+    // to avoid.
     let csv_cache: CsvCache = CsvCache::default();
-    let mut all_csv_paths: Vec<String> = Vec::new();
+    let mut buffered_csv_paths: Vec<String> = Vec::new();
     for s in core_specs.iter().chain(sub_specs.iter()) {
+        if is_streamable_node_spec(s) {
+            continue;
+        }
         if let Some(p) = s.spec.csv.as_deref() {
-            all_csv_paths.push(p.to_string());
+            buffered_csv_paths.push(p.to_string());
         }
     }
-    all_csv_paths.sort();
-    all_csv_paths.dedup();
+    buffered_csv_paths.sort();
+    buffered_csv_paths.dedup();
     let t_preparse = std::time::Instant::now();
-    parse_in_parallel(&all_csv_paths, &root, &csv_cache);
+    parse_in_parallel(&buffered_csv_paths, &root, &csv_cache);
     if profile {
         eprintln!(
-            "  parse_in_parallel: {} ms ({} distinct files)",
+            "  parse_in_parallel: {} ms ({} distinct files, streamed specs excluded)",
             t_preparse.elapsed().as_millis(),
-            all_csv_paths.len()
+            buffered_csv_paths.len()
         );
     }
 
@@ -1016,10 +1026,18 @@ fn load_fk_edges(
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-    // Parallel prep: per-spec CSV clone + filter + pk handling + per-edge
-    // DataFrame construction. Mutation is serial below.
+    // F3: same predicate as node streaming — keeps the design coherent
+    // and lets a spec's nodes + FK edges either both stream or both
+    // buffer. Mixing streaming + buffering for a single spec would
+    // re-introduce the cache requirement we're trying to drop.
+    let (streamable, buffered): (Vec<&FlatSpec>, Vec<&FlatSpec>) = specs
+        .iter()
+        .copied()
+        .partition(|s| is_streamable_node_spec(s));
+
+    // Buffered path: parallel prep + serial connect (existing behaviour).
     let t_par = std::time::Instant::now();
-    let prepped: Vec<Option<PreppedFkEdges>> = specs
+    let prepped: Vec<Option<PreppedFkEdges>> = buffered
         .par_iter()
         .map(|spec| prep_fk_edges(spec, root, cache))
         .collect();
@@ -1052,13 +1070,164 @@ fn load_fk_edges(
         }
     }
 
+    // Streaming path: per-spec, per-chunk dispatch via the same
+    // `build_fk_columns` + `build_edge_df` + `connect` chain the
+    // buffered path uses — just applied to one chunk at a time so
+    // peak RAM is bounded by chunk size.
+    let t_stream = std::time::Instant::now();
+    for spec in &streamable {
+        if let Err(e) = load_streamed_fk_edges(graph, spec, root, report) {
+            report.errors.push(e);
+        }
+    }
+    let t_stream_ms = t_stream.elapsed().as_millis();
+
     if profile {
         eprintln!(
-            "    fk parallel prep: {} ms | serial connect: {} ms | serial total: {} ms",
+            "    fk parallel prep: {} ms | serial connect: {} ms | streaming ({} specs): {} ms | serial total: {} ms",
             t_par_ms,
             t_connect.as_millis(),
+            streamable.len(),
+            t_stream_ms,
             t_serial.elapsed().as_millis(),
         );
+    }
+    Ok(())
+}
+
+/// Streaming FK-edge loader for streamable specs. Mirrors
+/// `load_streamed_node_spec` row-handling — read CSV chunks, apply
+/// filter, synthesise auto-pk per chunk via a per-spec counter — but
+/// the per-chunk output is one `connect()` call per declared FK edge
+/// (built via `build_fk_columns` + `build_edge_df`, same primitives
+/// the buffered path uses).
+///
+/// The auto-pk counter advances in lock-step with
+/// `load_streamed_node_spec`'s counter so source ids match across
+/// the node + FK phases (both apply the same filter to the same CSV
+/// in the same chunk order).
+fn load_streamed_fk_edges(
+    graph: &mut DirGraph,
+    spec: &FlatSpec,
+    root: &Path,
+    report: &mut BuildReport,
+) -> Result<(), String> {
+    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+        return Ok(());
+    };
+
+    // Build the full fk_edges map (declared edges + implicit
+    // OF_PARENT for sub-nodes with `parent` + `parent_fk`).
+    let mut fk_edges: IndexMap<String, super::schema::FkEdge> = spec
+        .spec
+        .connections
+        .fk_edges
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                super::schema::FkEdge {
+                    target: v.target.clone(),
+                    fk: v.fk.clone(),
+                },
+            )
+        })
+        .collect();
+    if let (Some(parent_type), Some(parent_fk)) = (&spec.spec.parent, &spec.spec.parent_fk) {
+        let edge_type = format!("OF_{}", parent_type.to_uppercase());
+        fk_edges.entry(edge_type).or_insert(super::schema::FkEdge {
+            target: parent_type.clone(),
+            fk: parent_fk.clone(),
+        });
+    }
+    if fk_edges.is_empty() {
+        return Ok(());
+    }
+
+    let csv_path = root.join(csv_rel);
+    let chunk_size = node_chunk_size();
+    let chunks = read_csv_chunks(&csv_path, chunk_size)
+        .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+
+    let raw_pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let (pk, is_auto_pk) = if raw_pk == "auto" {
+        (format!("_{}_id", spec.node_type), true)
+    } else {
+        (raw_pk, false)
+    };
+    let mut auto_pk_counter: u64 = 1;
+
+    // Track per-edge missing-column errors so we report each at most
+    // once instead of once per chunk.
+    let mut reported_missing_fk: HashSet<String> = HashSet::new();
+    let mut reported_missing_pk: HashSet<String> = HashSet::new();
+
+    for chunk_result in chunks {
+        let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+        if !spec.spec.filter.is_empty() {
+            apply_filter(&mut raw, &spec.spec.filter);
+        }
+        if raw.row_count() == 0 {
+            continue;
+        }
+        if is_auto_pk {
+            raw.headers.push(pk.clone());
+            for r in 0..raw.row_count() {
+                raw.rows[r].push(auto_pk_counter.to_string());
+                raw.nulls[r].push(false);
+                auto_pk_counter += 1;
+            }
+        }
+
+        let Some(pk_idx) = raw.col_index(&pk) else {
+            for edge_type in fk_edges.keys() {
+                if reported_missing_pk.insert(edge_type.clone()) {
+                    report.errors.push(format!(
+                        "[{}] pk column '{}' not found for edge {}",
+                        spec.node_type, pk, edge_type
+                    ));
+                }
+            }
+            continue;
+        };
+
+        for (edge_type, edge) in &fk_edges {
+            let Some(fk_idx) = raw.col_index(&edge.fk) else {
+                if reported_missing_fk.insert(edge_type.clone()) {
+                    report.errors.push(format!(
+                        "[{}] FK column '{}' not found for edge {}",
+                        spec.node_type, edge.fk, edge_type
+                    ));
+                }
+                continue;
+            };
+            let (target_col, src_vals, tgt_vals) =
+                build_fk_columns(&raw, &pk, &edge.fk, pk_idx, fk_idx);
+            if src_vals.is_empty() {
+                continue;
+            }
+            let df = match build_edge_df(&pk, &target_col, src_vals, tgt_vals) {
+                Ok(df) => df,
+                Err(e) => {
+                    report.errors.push(format!(
+                        "[{}] failed to build edge DataFrame for {}: {}",
+                        spec.node_type, edge_type, e
+                    ));
+                    continue;
+                }
+            };
+            let count = connect(
+                graph,
+                df,
+                edge_type,
+                &spec.node_type,
+                &pk,
+                &edge.target,
+                &target_col,
+                report,
+            )?;
+            *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
+        }
     }
     Ok(())
 }
