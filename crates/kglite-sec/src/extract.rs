@@ -20,6 +20,7 @@ use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
 use crate::parsers::idx::parse_master_idx;
 use crate::parsers::submissions::{iter_submissions_zip, Submission};
+use crate::slicing::SliceSpec;
 
 /// Result of an extract run. Useful for reporting / manifests.
 #[derive(Debug, Clone, Default)]
@@ -52,6 +53,7 @@ impl ExtractReport {
 pub fn extract_companies_and_filings(
     workdir: &Workdir,
     shallow_range: YearRange,
+    slice: &SliceSpec,
     force: bool,
 ) -> Result<ExtractReport> {
     workdir.ensure_dirs(None)?;
@@ -95,12 +97,28 @@ pub fn extract_companies_and_filings(
             // Stub CIKs without identity — skip.
             continue;
         }
+        // Slice filter on Company.cik. We parse the integer form once.
+        let cik_int: u64 = sub.company.cik.parse().unwrap_or(0);
+        if !slice.cik_matches(cik_int) {
+            continue;
+        }
         write_company_row(&mut company_writer, &sub)?;
         report.companies_written += 1;
 
         for fi in 0..sub.filings.accession_number.len() {
             let accession = &sub.filings.accession_number[fi];
             if accession.is_empty() {
+                continue;
+            }
+            // Slice filters on form + date (CIK already accepted above).
+            let form = sub.filings.form.get(fi).map(String::as_str).unwrap_or("");
+            let filed = sub
+                .filings
+                .filing_date
+                .get(fi)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !slice.form_matches(form) || !slice.date_matches(filed) {
                 continue;
             }
             if !seen_accessions.insert(accession.clone()) {
@@ -130,6 +148,9 @@ pub fn extract_companies_and_filings(
                     continue;
                 }
             };
+            if !slice.matches(entry.cik, &entry.form_type, &entry.date_filed) {
+                continue;
+            }
             let Some(accession) = entry.accession_number().map(|s| s.to_string()) else {
                 continue;
             };
@@ -312,6 +333,7 @@ const HAS_INSIDER_HEADER: &[&str] = &[
 /// early with empty report.
 pub fn extract_insider_transactions(
     workdir: &Workdir,
+    slice: &SliceSpec,
     force: bool,
 ) -> Result<InsiderExtractReport> {
     workdir.ensure_dirs(None)?;
@@ -361,6 +383,15 @@ pub fn extract_insider_transactions(
         report.form4_files_read += 1;
 
         if f4.reporter_cik.is_empty() || f4.issuer_cik.is_empty() {
+            continue;
+        }
+
+        // Slice filter: insider transactions belong to the issuer
+        // company, so filter by issuer CIK. Reporter CIKs (the
+        // insiders) are individuals and aren't typically in the
+        // user's watchlist.
+        let issuer_cik_int: u64 = f4.issuer_cik.parse().unwrap_or(0);
+        if !slice.cik_matches(issuer_cik_int) {
             continue;
         }
 
@@ -538,7 +569,11 @@ const HOLDS_HEADER: &[&str] = &[
 /// segment's directory; if we can't derive it, the row gets an empty
 /// quarter and the caller decides whether to backfill via the
 /// submissions index.
-pub fn extract_holdings(workdir: &Workdir, force: bool) -> Result<HoldingsExtractReport> {
+pub fn extract_holdings(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<HoldingsExtractReport> {
     workdir.ensure_dirs(None)?;
     let manager_csv = workdir.processed_csv("institutional_manager");
     let security_csv = workdir.processed_csv("security");
@@ -572,6 +607,14 @@ pub fn extract_holdings(workdir: &Workdir, force: bool) -> Result<HoldingsExtrac
             Some(c) => c,
             None => continue,
         };
+        // Slice filter on manager CIK — 13F managers are the
+        // institutional investors users want to scope by (e.g.
+        // "show me BlackRock's holdings" → filter manager_cik to
+        // BlackRock's CIK 1364742).
+        let manager_cik_int: u64 = manager_cik.parse().unwrap_or(0);
+        if !slice.cik_matches(manager_cik_int) {
+            continue;
+        }
         let accession = accession_from_xml_path(&xml_path).unwrap_or_default();
         let file = match File::open(&xml_path) {
             Ok(f) => f,
@@ -761,7 +804,13 @@ mod tests {
              1000045|NICHOLAS FINANCIAL INC|10-Q|2020-12-15|edgar/data/1000045/0001654954-20-001234-index.htm\n",
         );
 
-        let report = extract_companies_and_filings(&w, YearRange::new(2020, 2020), false).unwrap();
+        let report = extract_companies_and_filings(
+            &w,
+            YearRange::new(2020, 2020),
+            &SliceSpec::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(report.companies_written, 2);
         assert_eq!(report.filings_from_submissions, 1);
         assert_eq!(report.filings_from_master_idx, 1);
@@ -782,10 +831,17 @@ mod tests {
     fn idempotent_when_csvs_exist() {
         let w = synth_workdir();
         write_synth_submissions_zip(&w);
-        extract_companies_and_filings(&w, YearRange::new(2020, 2020), false).unwrap();
+        extract_companies_and_filings(&w, YearRange::new(2020, 2020), &SliceSpec::default(), false)
+            .unwrap();
 
         // Second call with force=false should return empty report
-        let report = extract_companies_and_filings(&w, YearRange::new(2020, 2020), false).unwrap();
+        let report = extract_companies_and_filings(
+            &w,
+            YearRange::new(2020, 2020),
+            &SliceSpec::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(report.companies_written, 0);
         assert_eq!(report.total_filings(), 0);
 
@@ -844,7 +900,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = extract_insider_transactions(&w, false).unwrap();
+        let report = extract_insider_transactions(&w, &SliceSpec::default(), false).unwrap();
         assert_eq!(report.form4_files_read, 1);
         assert_eq!(report.people_written, 1);
         assert_eq!(report.transactions_written, 1);
@@ -857,6 +913,67 @@ mod tests {
         assert!(txn_csv.contains("Common Stock"));
         let has_csv = std::fs::read_to_string(w.processed_csv("has_insider")).unwrap();
         assert!(has_csv.contains("CEO"));
+
+        std::fs::remove_dir_all(w.root()).ok();
+    }
+
+    #[test]
+    fn slice_cik_list_filters_companies_and_filings() {
+        // User story: investor passes cik_list=[320193] (Apple).
+        // Expect only Apple's Company + Filing rows to land in
+        // processed CSVs, even though the submissions.zip has
+        // Microsoft and the master.idx has Nicholas Financial.
+        let w = synth_workdir();
+        write_synth_submissions_zip(&w);
+        write_synth_master_idx(
+            &w,
+            2020,
+            4,
+            "header\n----\n\
+             1000045|NICHOLAS FINANCIAL INC|10-Q|2020-12-15|edgar/data/1000045/0001654954-20-001234.txt\n\
+             320193|APPLE INC|10-K|2020-11-01|edgar/data/320193/0000320193-20-000099.txt\n",
+        );
+
+        let slice = SliceSpec::default().with_cik_list([320193u64]);
+        let report =
+            extract_companies_and_filings(&w, YearRange::new(2020, 2020), &slice, false).unwrap();
+        assert_eq!(report.companies_written, 1, "only Apple's Company row");
+        assert!(
+            report.filings_from_submissions >= 1,
+            "Apple has 1 filing in submissions"
+        );
+        assert_eq!(
+            report.filings_from_master_idx, 1,
+            "Apple's master.idx row passes; Nicholas Financial's does not"
+        );
+
+        let company_csv = std::fs::read_to_string(w.processed_csv("company")).unwrap();
+        assert!(company_csv.contains("Apple"));
+        assert!(!company_csv.contains("Microsoft"));
+
+        std::fs::remove_dir_all(w.root()).ok();
+    }
+
+    #[test]
+    fn slice_form_types_filters_filings() {
+        // User story: investor wants only 10-K filings. The
+        // submissions has Apple's 10-K; master.idx adds an 8-K which
+        // should be filtered out.
+        let w = synth_workdir();
+        write_synth_submissions_zip(&w);
+        write_synth_master_idx(
+            &w,
+            2020,
+            4,
+            "header\n----\n\
+             1000045|NICHOLAS FINANCIAL INC|8-K|2020-12-15|edgar/data/1000045/0001654954-20-001234.txt\n",
+        );
+
+        let slice = SliceSpec::default().with_form_types(["10-K".to_string()]);
+        let report =
+            extract_companies_and_filings(&w, YearRange::new(2020, 2020), &slice, false).unwrap();
+        // 8-K from master.idx is filtered out.
+        assert_eq!(report.filings_from_master_idx, 0);
 
         std::fs::remove_dir_all(w.root()).ok();
     }
@@ -876,7 +993,13 @@ mod tests {
              320193|APPLE INC|10-K|2024-11-01|edgar/data/320193/0000320193-24-000123-index.htm\n",
         );
 
-        let report = extract_companies_and_filings(&w, YearRange::new(2024, 2024), false).unwrap();
+        let report = extract_companies_and_filings(
+            &w,
+            YearRange::new(2024, 2024),
+            &SliceSpec::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(report.filings_from_submissions, 1);
         assert_eq!(report.filings_from_master_idx, 0, "duplicate skipped");
 

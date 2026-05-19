@@ -17,9 +17,33 @@ use pyo3::wrap_pyfunction;
 use kglite_sec::{
     extract_companies_and_filings, extract_holdings, extract_insider_transactions,
     fetch_company_tickers, fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError,
-    Workdir, YearRange,
+    SliceSpec, Workdir, YearRange,
 };
 use std::path::PathBuf;
+
+/// Build a SliceSpec from optional Python args. Empty / None args
+/// produce an unrestricted slice.
+fn build_slice(
+    cik_list: Option<Vec<u64>>,
+    form_types: Option<Vec<String>>,
+    year_range: Option<(u16, u16)>,
+) -> SliceSpec {
+    let mut s = SliceSpec::default();
+    if let Some(ciks) = cik_list {
+        if !ciks.is_empty() {
+            s = s.with_cik_list(ciks);
+        }
+    }
+    if let Some(forms) = form_types {
+        if !forms.is_empty() {
+            s = s.with_form_types(forms);
+        }
+    }
+    if let Some((lo, hi)) = year_range {
+        s = s.with_year_range(lo, hi);
+    }
+    s
+}
 
 /// Fetch the `raw/` tier — quarterly master.idx files for the shallow
 /// window plus the nightly bulk submissions.zip and company_tickers.json.
@@ -95,20 +119,28 @@ fn fetch_raw(
     years,
     current_year,
     force=false,
+    cik_list=None,
+    form_types=None,
+    year_range=None,
 ))]
+#[allow(clippy::too_many_arguments)]
 fn extract_processed(
     py: Python<'_>,
     workdir: PathBuf,
     years: u16,
     current_year: u16,
     force: bool,
+    cik_list: Option<Vec<u64>>,
+    form_types: Option<Vec<String>>,
+    year_range: Option<(u16, u16)>,
 ) -> PyResult<Py<PyDict>> {
     let wd = Workdir::new(workdir);
     let start_year = current_year
         .saturating_sub(years.saturating_sub(1))
         .max(1993);
     let range = YearRange::new(start_year, current_year);
-    let report = extract_companies_and_filings(&wd, range, force).map_err(map_err)?;
+    let slice = build_slice(cik_list, form_types, year_range);
+    let report = extract_companies_and_filings(&wd, range, &slice, force).map_err(map_err)?;
 
     let d = PyDict::new(py);
     d.set_item("companies_written", report.companies_written)?;
@@ -123,10 +155,16 @@ fn extract_processed(
 /// Extract `processed/{person,transaction,has_insider}.csv` by walking
 /// `raw/filings/` and parsing every Form 4 XML found. Idempotent.
 #[pyfunction]
-#[pyo3(signature = (workdir, *, force=false))]
-fn extract_insider(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py<PyDict>> {
+#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
+fn extract_insider(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    cik_list: Option<Vec<u64>>,
+) -> PyResult<Py<PyDict>> {
     let wd = Workdir::new(workdir);
-    let report = extract_insider_transactions(&wd, force).map_err(map_err)?;
+    let slice = build_slice(cik_list, None, None);
+    let report = extract_insider_transactions(&wd, &slice, force).map_err(map_err)?;
     let d = PyDict::new(py);
     d.set_item("people_written", report.people_written)?;
     d.set_item("transactions_written", report.transactions_written)?;
@@ -139,10 +177,16 @@ fn extract_insider(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py
 /// Extract `processed/{institutional_manager,security,holds}.csv` by
 /// walking `raw/filings/` for 13F-HR information table XMLs. Idempotent.
 #[pyfunction]
-#[pyo3(signature = (workdir, *, force=false))]
-fn extract_holdings_py(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py<PyDict>> {
+#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
+fn extract_holdings_py(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    cik_list: Option<Vec<u64>>,
+) -> PyResult<Py<PyDict>> {
     let wd = Workdir::new(workdir);
-    let report = extract_holdings(&wd, force).map_err(map_err)?;
+    let slice = build_slice(cik_list, None, None);
+    let report = extract_holdings(&wd, &slice, force).map_err(map_err)?;
     let d = PyDict::new(py);
     d.set_item("managers_written", report.managers_written)?;
     d.set_item("securities_written", report.securities_written)?;

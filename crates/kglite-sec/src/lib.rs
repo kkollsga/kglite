@@ -24,6 +24,7 @@ pub mod extract;
 pub mod fetch;
 pub mod layout;
 pub mod parsers;
+pub mod slicing;
 
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
@@ -45,3 +46,4 @@ pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
 pub use parsers::submissions::{
     iter_submissions_zip, parse_submission_json, CompanyRecord, RecentFilings, Submission,
 };
+pub use slicing::SliceSpec;

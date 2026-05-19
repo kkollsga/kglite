@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **D1 — Slice grammar wired end-to-end** —
+  `kglite_sec::SliceSpec { cik_list, form_types, year_range }` is now
+  applied uniformly across `extract_companies_and_filings`,
+  `extract_insider_transactions`, and `extract_holdings`. The
+  `SEC.open()` Python wrapper exposes `cik_list`, `form_types`, and
+  `year_range` kwargs that turn a 5-hour full-universe build into a
+  ~5-minute S&P-500-scoped build. User-story test in `test_smoke.py`
+  validates that `cik_list=[789019]` produces a Microsoft-only graph
+  regardless of submissions.zip size.
 - **`kglite.datasets.sec.SEC.open(path, *, years, detailed, mode,
   user_agent, ...)`** — first end-to-end SEC EDGAR loader (phase 3 of
   the planned loader work). Builds a knowledge graph with Company +

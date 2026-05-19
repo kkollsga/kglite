@@ -371,3 +371,68 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     )
     info2 = g2.graph_info()
     assert info2["node_count"] == info["node_count"]
+
+
+# ── D1 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d1_cik_list_watchlist_scoping(synth_workdir: Path) -> None:
+    """User story (D1): As an investor with a watchlist, I pass
+    cik_list=[my_CIKs] to SEC.open() and get a graph scoped to those
+    companies only. The submissions.zip has 2 CIKs (Apple, Microsoft);
+    I only want Microsoft.
+
+    This validates that the slice grammar is enforced end-to-end:
+    Rust extract.rs honors the CIK whitelist before any CSV row is
+    written, regardless of how many CIKs the raw/ tier holds.
+    """
+    # Pre-populate company_tickers.json so SEC.open doesn't fetch.
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,  # skip master.idx fetch — submissions-only build
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D1 d1@example.com",
+        cik_list=[789019],  # Microsoft only
+        verbose=False,
+    )
+
+    # Only Microsoft's Company node should exist.
+    res = _rows(g.cypher("MATCH (c:Company) RETURN c.cik AS cik, c.name AS name"))
+    assert len(res) == 1, f"expected 1 Company (Microsoft only), got {res}"
+    assert res[0]["cik"] == 789019
+    assert "Microsoft" in res[0]["name"]
+
+    # No filings for Apple (CIK 320193) should be present, even though
+    # the submissions.zip has them.
+    res = _rows(g.cypher("MATCH (f:Filing {cik: 320193}) RETURN count(f) AS n"))
+    assert res[0]["n"] == 0, "Apple filings should be filtered out"
+
+
+def test_uc_d1_form_types_filter(synth_workdir: Path) -> None:
+    """User story (D1): As an analyst tracking earnings, I pass
+    form_types=['10-K', '10-Q'] and get only earnings filings in the
+    graph. Forms outside the whitelist (the synth fixture has 10-K,
+    10-Q, 8-K) are filtered out at extract time.
+    """
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D1 d1@example.com",
+        form_types=["10-K", "10-Q"],
+        verbose=False,
+    )
+    # Microsoft's 8-K should be excluded; Apple's 10-K + 10-Q kept.
+    res = _rows(g.cypher("MATCH (f:Filing) RETURN f.form_type AS form, count(f) AS n"))
+    forms = {r["form"] for r in res}
+    assert "8-K" not in forms, f"8-K should be filtered out; got {forms}"
+    assert forms.issubset({"10-K", "10-Q"}), f"unexpected forms: {forms}"

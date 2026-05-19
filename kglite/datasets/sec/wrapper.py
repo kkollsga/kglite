@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 import json
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 # Rust binding submodule produced by maturin from `src/sec.rs`. The
 # kglite.datasets.sec subpackage is excluded from mypy stubtest
@@ -39,6 +39,21 @@ _FIRST_EDGAR_YEAR = 1993
 def _current_year_quarter() -> tuple[int, int]:
     today = date.today()
     return today.year, ((today.month - 1) // 3) + 1
+
+
+def _format_slice_summary(
+    cik_list: Optional[list[int]],
+    form_types: Optional[list[str]],
+    year_range: Optional[tuple[int, int]],
+) -> str:
+    parts: list[str] = []
+    if cik_list:
+        parts.append(f"cik_list={len(cik_list)} CIKs")
+    if form_types:
+        parts.append(f"form_types={form_types}")
+    if year_range:
+        parts.append(f"year_range={year_range[0]}-{year_range[1]}")
+    return ", ".join(parts) if parts else "unrestricted"
 
 
 def _resolve_years(years: Union[int, str, None], current_year: int) -> int:
@@ -72,6 +87,9 @@ class SEC:
         detailed: int = 2,
         mode: str = "mapped",
         user_agent: str,
+        cik_list: Optional[list[int]] = None,
+        form_types: Optional[list[str]] = None,
+        year_range: Optional[tuple[int, int]] = None,
         force_rebuild: bool = False,
         force_refetch: bool = False,
         verbose: bool = True,
@@ -136,33 +154,35 @@ class SEC:
         if verbose:
             print(f"[SEC]   fetch: {fetch_report}")
 
-        # Step 2: extract processed/
+        # Step 2: extract processed/ — slice grammar applied here.
         if verbose:
-            print("[SEC] extracting processed/ CSVs")
+            scope = _format_slice_summary(cik_list, form_types, year_range)
+            print(f"[SEC] extracting processed/ CSVs ({scope})")
         extract_report = _sec_internal.extract_processed(
             str(workdir),
             years=max(years_int, 1),
             current_year=current_year,
             force=force_rebuild,
+            cik_list=cik_list,
+            form_types=form_types,
+            year_range=year_range,
         )
         if verbose:
             print(f"[SEC]   extract: {extract_report}")
 
         # Step 2b: insider transactions (Form 4 XMLs from raw/filings/).
-        # Always run — emits header-only CSVs when raw/filings/ is empty,
-        # which the blueprint then loads as zero Person/Transaction nodes.
-        # Form 4 fetcher wiring lands in a later phase; for now this
-        # consumes anything caller has pre-staged.
+        # Slice applies: only Form 4s for issuer CIKs in cik_list pass.
         if verbose:
             print("[SEC] extracting insider transactions (Form 4)")
-        insider_report = _sec_internal.extract_insider(str(workdir), force=force_rebuild)
+        insider_report = _sec_internal.extract_insider(str(workdir), force=force_rebuild, cik_list=cik_list)
         if verbose:
             print(f"[SEC]   insider: {insider_report}")
 
-        # Step 2c: 13F institutional holdings.
+        # Step 2c: 13F institutional holdings. Slice applies on
+        # manager CIK.
         if verbose:
             print("[SEC] extracting 13F holdings")
-        holdings_report = _sec_internal.extract_holdings_py(str(workdir), force=force_rebuild)
+        holdings_report = _sec_internal.extract_holdings_py(str(workdir), force=force_rebuild, cik_list=cik_list)
         if verbose:
             print(f"[SEC]   holdings: {holdings_report}")
 
