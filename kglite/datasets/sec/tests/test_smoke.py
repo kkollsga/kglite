@@ -158,7 +158,9 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
         for col in ("source_form", "source_accession", "source_url", "source_extracted_at"):
             assert col in header, f"{name} header missing provenance col {col!r}"
 
-    # Form-level row counts default to zero for F1 placeholders.
+    # Per-form report shape: every supported form has a nested dict
+    # with files_read / parse_errors / rows_written. The synth fixture
+    # has no raw/filings/ payload, so wired extractors see zero files.
     for form_key in (
         "form3",
         "form4",
@@ -179,7 +181,13 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
         "xbrl",
     ):
         assert form_key in report, f"report missing per-form counts for {form_key}"
-        assert report[form_key]["rows_written"] == 0, f"{form_key} should be placeholder in F1"
+        sub = report[form_key]
+        for k in ("files_read", "parse_errors", "rows_written"):
+            assert k in sub, f"{form_key} report missing {k}"
+            assert isinstance(sub[k], int)
+        # Synth fixture has no raw filings, so every extractor reads
+        # zero files regardless of placeholder vs wired.
+        assert sub["files_read"] == 0, f"{form_key} read files from empty synth fixture"
 
     # Identity counts present in report.
     assert isinstance(report["extracted_at"], str) and "T" in report["extracted_at"]
