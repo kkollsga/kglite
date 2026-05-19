@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import io
 import json
-import time
-import zipfile
 from pathlib import Path
+import time
 from typing import Any, cast
+import zipfile
 
 import pytest
 
