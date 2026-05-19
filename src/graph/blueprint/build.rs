@@ -568,10 +568,17 @@ fn load_node_specs(
     use rayon::prelude::*;
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
 
-    // Parallel prep: every spec's CSV + filter + geometry + typed_dataframe
-    // runs off-thread. Mutation into the graph happens later, serially.
+    // F1: split specs by streaming eligibility. Streamable specs run
+    // through a per-chunk `read_csv_chunks → typed_dataframe → add_nodes`
+    // loop that bounds peak RAM by chunk size. Buffered specs (timeseries,
+    // spatial, pk:"auto", manual) keep the parallel-prep path because
+    // they need random access to the full row set during prep.
+    let (buffered, streamable): (Vec<&FlatSpec>, Vec<&FlatSpec>) =
+        specs.iter().partition(|s| !is_streamable_node_spec(s));
+
+    // Buffered path: parallel prep + serial dispatch (existing behaviour).
     let t_par = std::time::Instant::now();
-    let prepped: Vec<Result<Option<PreppedNode>, String>> = specs
+    let prepped: Vec<Result<Option<PreppedNode>, String>> = buffered
         .par_iter()
         .map(|spec| prep_node_spec(spec, root, cache))
         .collect();
@@ -580,7 +587,7 @@ fn load_node_specs(
     let t_serial = std::time::Instant::now();
     let mut t_add = std::time::Duration::ZERO;
     let mut t_ts = std::time::Duration::ZERO;
-    for (spec, result) in specs.iter().zip(prepped) {
+    for (spec, result) in buffered.iter().zip(prepped) {
         let node = match result {
             Ok(Some(n)) => n,
             Ok(None) => continue,
@@ -619,16 +626,164 @@ fn load_node_specs(
         }
     }
 
+    // Streaming path: serial per-spec dispatch, per-chunk add_nodes.
+    // Per-spec errors land in `report.errors` (parity with the buffered
+    // path) — missing CSVs / type mismatches must not abort the build.
+    let t_stream = std::time::Instant::now();
+    for spec in &streamable {
+        if let Err(e) = load_streamed_node_spec(graph, spec, root, report) {
+            report.errors.push(e);
+        }
+    }
+    let t_stream_ms = t_stream.elapsed().as_millis();
+
     if profile {
         eprintln!(
-            "    parallel prep (CSV/filter/geometry/typed_df): {} ms | serial add_nodes: {} ms | timeseries: {} ms | serial total: {} ms",
+            "    parallel prep: {} ms | serial add_nodes: {} ms | timeseries: {} ms | streaming ({} specs): {} ms | serial total: {} ms",
             t_par_ms,
             t_add.as_millis(),
             t_ts.as_millis(),
+            streamable.len(),
+            t_stream_ms,
             t_serial.elapsed().as_millis(),
         );
     }
     Ok(())
+}
+
+/// True iff this spec can be loaded via `load_streamed_node_spec`.
+///
+/// Returns false for:
+/// - manual specs (no CSV — synthesised from FK targets)
+/// - timeseries specs (need full row set for grouping + dedup-by-pk)
+/// - spatial specs (geometry conversion mutates RawCsv in-place)
+/// - `pk: "auto"` specs (need row-count for synthesised id range —
+///   F2 lifts this restriction via an `AtomicU64` counter)
+fn is_streamable_node_spec(spec: &FlatSpec) -> bool {
+    if spec.is_manual {
+        return false;
+    }
+    if spec.spec.csv.is_none() {
+        return false;
+    }
+    if spec.spec.timeseries.is_some() {
+        return false;
+    }
+    if has_spatial_properties(&spec.spec.properties) {
+        return false;
+    }
+    if spec.spec.pk.as_deref() == Some("auto") {
+        return false;
+    }
+    true
+}
+
+/// Streaming node-spec loader: reads the CSV in chunks via
+/// `read_csv_chunks`, applies `filter` + `typed_dataframe` per chunk,
+/// then dispatches via `maintain::add_nodes`. `add_nodes` is
+/// upsert-by-id (`nodes_created`/`nodes_updated`), so successive
+/// chunks accumulate cleanly into the same node type without
+/// resurrecting the per-spec working clone the buffered path needs.
+fn load_streamed_node_spec(
+    graph: &mut DirGraph,
+    spec: &FlatSpec,
+    root: &Path,
+    report: &mut BuildReport,
+) -> Result<(), String> {
+    let Some(csv_rel) = spec.spec.csv.as_deref() else {
+        return Ok(());
+    };
+    let csv_path = root.join(csv_rel);
+    let chunk_size = node_chunk_size();
+    let chunks = read_csv_chunks(&csv_path, chunk_size)
+        .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+
+    let pk = spec.spec.pk.clone().unwrap_or_else(|| "id".to_string());
+    let title_field = spec.spec.title.clone().unwrap_or_else(|| pk.clone());
+    let title_arg = if title_field != pk {
+        Some(title_field.clone())
+    } else {
+        None
+    };
+
+    let skip_set: HashSet<&String> = spec.spec.skipped.iter().collect();
+    let parent_fk_skip: HashSet<String> = match &spec.spec.parent_fk {
+        Some(pfk) if !spec.spec.properties.contains_key(pfk) => HashSet::from_iter([pfk.clone()]),
+        _ => HashSet::new(),
+    };
+    let mut declared: HashMap<String, String> = HashMap::new();
+    for (col, ty) in &spec.spec.properties {
+        if map_blueprint_type(ty).is_some() {
+            declared.insert(col.clone(), ty.clone());
+        }
+    }
+
+    for chunk_result in chunks {
+        let mut raw = chunk_result.map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+        if !spec.spec.filter.is_empty() {
+            apply_filter(&mut raw, &spec.spec.filter);
+        }
+        if raw.row_count() == 0 {
+            continue;
+        }
+        let keep = streaming_keep_list(&raw, &pk, &title_field, &skip_set, &parent_fk_skip);
+        let df = typed_dataframe(&raw, &keep, &declared)
+            .map_err(|e| format!("[{}] {}", spec.node_type, e))?;
+        let rep = maintain::add_nodes(
+            graph,
+            df,
+            spec.node_type.clone(),
+            pk.clone(),
+            title_arg.clone(),
+            None,
+        )
+        .map_err(|e| format!("add_nodes '{}': {}", spec.node_type, e))?;
+        let count = rep.nodes_created + rep.nodes_updated;
+        *report
+            .nodes_by_type
+            .entry(spec.node_type.clone())
+            .or_insert(0) += count;
+    }
+    Ok(())
+}
+
+/// Default streaming chunk size for node CSVs. ~100K rows × ~20 cols
+/// × ~24B avg string ≈ 50 MB peak per chunk — well under any
+/// reasonable RAM budget. Configurable via env var for perf experiments.
+fn node_chunk_size() -> usize {
+    std::env::var("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000)
+}
+
+/// Build the keep-list for the streaming node loader. Mirrors the
+/// buffered keep-list in `prep_node_spec` minus the timeseries-only
+/// exclusion (streaming specs never have timeseries).
+fn streaming_keep_list(
+    raw: &RawCsv,
+    pk: &str,
+    title_field: &str,
+    skip_set: &HashSet<&String>,
+    parent_fk_skip: &HashSet<String>,
+) -> Vec<String> {
+    let geometry_passthrough: HashSet<&str> = HashSet::from_iter(["_geometry"]);
+    let keep: Vec<String> = raw
+        .headers
+        .iter()
+        .filter(|h| {
+            !skip_set.contains(h)
+                && !geometry_passthrough.contains(h.as_str())
+                && !parent_fk_skip.contains(h.as_str())
+                || h.as_str() == pk
+                || h.as_str() == title_field
+        })
+        .cloned()
+        .collect();
+    let mut seen = HashSet::new();
+    keep.into_iter()
+        .filter(|h| seen.insert(h.clone()))
+        .collect()
 }
 
 fn apply_timeseries(

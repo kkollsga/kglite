@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (F1)
+
+- **Streaming node-loader for simple specs** in
+  `src/graph/blueprint/build.rs`. Specs that are CSV-backed and
+  *not* manual / timeseries / spatial / `pk:"auto"` now flow
+  through a per-chunk `read_csv_chunks → typed_dataframe →
+  add_nodes` loop. `add_nodes` is upsert-by-id so successive
+  chunks accumulate cleanly into the same node type.
+
+  RAM during the parallel-prep phase no longer holds a per-spec
+  `clone_raw()` working copy for streamed specs. For Sodir / small
+  blueprints the cost is unchanged; for SEC `Filing` (~388K rows
+  at 1-year scope, ~5M+ at full-universe) the prep-phase peak
+  drops by one full-CSV copy per spec. Buffered path still owns
+  timeseries / spatial / `pk:"auto"` / manual specs (lifting the
+  auto-pk restriction is F2, FK-edge streaming is F3).
+
+  Chunk size configurable via `KGLITE_BLUEPRINT_NODE_CHUNK_SIZE`
+  (default 100K rows).
+
 ## [0.9.43] — Streaming CSV for junction-edge loader (E1–E4)
 
 ### Added

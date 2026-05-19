@@ -627,3 +627,122 @@ class TestJunctionEdgeProperties:
         assert result[0]["r.score"] == 5
         assert result[0]["p.name"] == "Alice"
         assert result[0]["m.title"] == "Film A"
+
+
+class TestStreamingNodeLoader:
+    """0.9.44 F1 — streaming node-loader parity. The buffered path
+    materialised the full CSV before dispatching to add_nodes; the
+    streaming path chunks the CSV and calls add_nodes per chunk. Both
+    must produce identical graphs for streaming-eligible specs
+    (no timeseries, no spatial, pk != 'auto')."""
+
+    def test_multi_chunk_node_load(self, tmp_path, monkeypatch):
+        # Set a small chunk size so a modest CSV spans multiple chunks
+        # — exercises the per-chunk add_nodes accumulation path.
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "100")
+
+        n = 350  # 4 chunks: 100 + 100 + 100 + 50
+        persons = pd.DataFrame(
+            {
+                "person_id": list(range(n)),
+                "name": [f"P{i}" for i in range(n)],
+                "age": [20 + (i % 60) for i in range(n)],
+            }
+        )
+        _write_csv(tmp_path / "persons.csv", persons)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {"age": "int"},
+                    "skipped": [],
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        count = graph.cypher("MATCH (p:Person) RETURN count(p) AS n")[0]["n"]
+        assert count == n
+        # Spot-check a row from each chunk boundary.
+        for i in [0, 99, 100, 199, 200, 299, 300, 349]:
+            node = graph.node("Person", i)
+            assert node is not None, f"missing pk={i}"
+            assert node["title"] == f"P{i}"
+            assert node["age"] == 20 + (i % 60)
+
+    def test_streamed_node_with_fk_edges(self, tmp_path, monkeypatch):
+        """FK edges from a streamed-parent spec still resolve. F1 keeps
+        the parent CSV in CsvCache; F3 will switch FK edges to streaming."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "50")
+        n = 120
+        persons = pd.DataFrame(
+            {
+                "person_id": list(range(n)),
+                "name": [f"P{i}" for i in range(n)],
+                "manager_id": [(i // 10) * 10 for i in range(n)],
+            }
+        )
+        _write_csv(tmp_path / "persons.csv", persons)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "person_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "connections": {
+                        "fk_edges": {
+                            "MANAGED_BY": {
+                                "target": "Person",
+                                "fk": "manager_id",
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+
+        n_nodes = graph.cypher("MATCH (p:Person) RETURN count(p) AS n")[0]["n"]
+        assert n_nodes == n
+        n_edges = graph.cypher("MATCH (a:Person)-[r:MANAGED_BY]->(b:Person) RETURN count(r) AS n")[0]["n"]
+        # Each person points at a manager (their own id // 10 * 10).
+        # Persons 0, 10, 20, ... are self-managed (still creates an edge).
+        assert n_edges == n
+
+    def test_streamed_with_filter(self, tmp_path, monkeypatch):
+        """Filter applied per-chunk drops the right rows."""
+        monkeypatch.setenv("KGLITE_BLUEPRINT_NODE_CHUNK_SIZE", "30")
+        n = 100
+        items = pd.DataFrame(
+            {
+                "item_id": list(range(n)),
+                "active": ["true" if i % 2 == 0 else "false" for i in range(n)],
+                "name": [f"I{i}" for i in range(n)],
+            }
+        )
+        _write_csv(tmp_path / "items.csv", items)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "item_id",
+                    "title": "name",
+                    "properties": {},
+                    "skipped": [],
+                    "filter": {"active": "true"},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        graph = from_blueprint(tmp_path / "bp.json", save=False)
+        count = graph.cypher("MATCH (i:Item) RETURN count(i) AS n")[0]["n"]
+        assert count == 50  # half of n filtered through
