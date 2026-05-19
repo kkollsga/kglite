@@ -62,10 +62,17 @@ use std::io::BufRead;
 
 use crate::error::{Result, SecError};
 
-/// One insider's relationship to the issuer + their non-derivative
-/// + derivative transactions on a single filing.
+/// Parsed ownershipDocument — used for Form 3 (initial), Form 4
+/// (changes), Form 5 (annual reconciliation), and their /A
+/// amendments. All four share the XSD; `document_type` distinguishes
+/// them so the caller can dispatch.
+///
+/// (The struct name `Form4` is historical — when it was Form 4 only
+/// it was apt; preserved here for stability of dependents.)
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Form4 {
+    /// "3" | "4" | "4/A" | "5" | "5/A" — from `<documentType>`.
+    pub document_type: String,
     pub period_of_report: String,
     pub issuer_cik: String,
     pub issuer_name: String,
@@ -78,6 +85,26 @@ pub struct Form4 {
     pub is_other: bool,
     pub officer_title: String,
     pub transactions: Vec<InsiderTransaction>,
+    /// Standing holdings — populated when the filing reports lots
+    /// held without a transaction (always for Form 3; sometimes for
+    /// Form 4/5 when listing carry-forward positions).
+    pub holdings: Vec<InsiderHolding>,
+}
+
+/// A standing holding (no transaction) from a Form 3, or from a
+/// `<nonDerivativeHolding>` / `<derivativeHolding>` block in any
+/// ownership-document filing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InsiderHolding {
+    pub security_title: String,
+    /// `<postTransactionAmounts><sharesOwnedFollowingTransaction>` —
+    /// the lot's balance as of the filing date.
+    pub shares: f64,
+    /// "D" (direct) or "I" (indirect).
+    pub direct_indirect: String,
+    /// True for `<derivativeHolding>` (option / warrant / SAR), false
+    /// for `<nonDerivativeHolding>` (common / restricted).
+    pub is_derivative: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -113,6 +140,10 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
     // Working transaction being filled in; pushed onto out.transactions
     // when </nonDerivativeTransaction> or </derivativeTransaction> closes.
     let mut current_txn: Option<InsiderTransaction> = None;
+    // Working holding (Form 3 / standing-position blocks in 4/5).
+    // Pushed onto out.holdings when </nonDerivativeHolding> or
+    // </derivativeHolding> closes.
+    let mut current_holding: Option<InsiderHolding> = None;
 
     // Footnote machinery (SEC Rule 16a-3(g)(1) weighted-average price
     // disclosures). Each footnote has an id + text body; transactions
@@ -144,6 +175,18 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                     }
                     "derivativeTransaction" => {
                         current_txn = Some(InsiderTransaction {
+                            is_derivative: true,
+                            ..Default::default()
+                        });
+                    }
+                    "nonDerivativeHolding" => {
+                        current_holding = Some(InsiderHolding {
+                            is_derivative: false,
+                            ..Default::default()
+                        });
+                    }
+                    "derivativeHolding" => {
+                        current_holding = Some(InsiderHolding {
                             is_derivative: true,
                             ..Default::default()
                         });
@@ -189,10 +232,22 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                         footnotes.insert(id, current_text.clone());
                     }
                 }
-                handle_end(&name, &path, &current_text, &mut out, &mut current_txn);
+                handle_end(
+                    &name,
+                    &path,
+                    &current_text,
+                    &mut out,
+                    &mut current_txn,
+                    &mut current_holding,
+                );
                 if name == "nonDerivativeTransaction" || name == "derivativeTransaction" {
                     if let Some(txn) = current_txn.take() {
                         out.transactions.push(txn);
+                    }
+                }
+                if name == "nonDerivativeHolding" || name == "derivativeHolding" {
+                    if let Some(h) = current_holding.take() {
+                        out.holdings.push(h);
                     }
                 }
                 path.pop();
@@ -321,6 +376,7 @@ fn handle_end(
     text: &str,
     out: &mut Form4,
     txn: &mut Option<InsiderTransaction>,
+    holding: &mut Option<InsiderHolding>,
 ) {
     if text.is_empty() {
         return;
@@ -335,6 +391,7 @@ fn handle_end(
 
     // Issuer / reporter / relationship fields go on the top level.
     match field {
+        "documentType" => out.document_type = text.trim().to_string(),
         "periodOfReport" => out.period_of_report = text.to_string(),
         "issuerCik" => out.issuer_cik = strip_leading_zeros(text),
         "issuerName" => out.issuer_name = text.to_string(),
@@ -360,6 +417,17 @@ fn handle_end(
             "transactionAcquiredDisposedCode" => t.acquired_disposed = text.to_string(),
             "sharesOwnedFollowingTransaction" => t.shares_owned_after = parse_float(text),
             "directOrIndirectOwnership" => t.direct_indirect = text.to_string(),
+            _ => {}
+        }
+    }
+
+    // Holding-scoped fields — Form 3 standing positions (also Form 4/5
+    // sometimes report carry-forwards).
+    if let Some(h) = holding.as_mut() {
+        match field {
+            "securityTitle" => h.security_title = text.to_string(),
+            "sharesOwnedFollowingTransaction" => h.shares = parse_float(text),
+            "directOrIndirectOwnership" => h.direct_indirect = text.to_string(),
             _ => {}
         }
     }

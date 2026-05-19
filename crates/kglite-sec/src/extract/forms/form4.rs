@@ -67,19 +67,15 @@ pub fn extract(
                 continue;
             }
         };
-        // Slice filter on issuer CIK — insider transactions belong to
-        // the issuer's universe.
+        // Form 4 / 4/A only — Form 3 and Form 5 use the same XSD and
+        // share the parser; they dispatch from their own modules.
+        if !matches!(f4.document_type.as_str(), "4" | "4/A") {
+            continue;
+        }
         let issuer_cik_int: u64 = f4.issuer_cik.parse().unwrap_or(0);
         if !slice.cik_matches(issuer_cik_int) {
             continue;
         }
-        // Skip non-Form-4 XMLs that happen to live in raw/filings/.
-        // The Form 3 / Form 5 walkers will pick those up via their
-        // own dispatch when F6 lands. For now, F4 accepts any XML that
-        // parses cleanly with reporter + issuer CIKs set, which covers
-        // the Form 4 corpus (Form 3/5 also parse but emit
-        // initial/late-reported rows the user can later split if
-        // distinguishing matters).
         if f4.reporter_cik.is_empty() || f4.issuer_cik.is_empty() {
             continue;
         }
@@ -95,8 +91,13 @@ pub fn extract(
             .unwrap_or("")
             .to_string();
 
-        let prov_base =
-            Provenance::for_filing("4", &accession, &reporter_cik, &document, extracted_at);
+        let prov_base = Provenance::for_filing(
+            &f4.document_type,
+            &accession,
+            &reporter_cik,
+            &document,
+            extracted_at,
+        );
 
         // Identity — Person row for the reporter.
         identities.ensure_person(sinks, &reporter_cik, &f4.reporter_name, &reporter_cik)?;
