@@ -51,6 +51,13 @@ pub fn run_derive(
     })?;
     let csv_path = resolve_csv_path(input_root, &csv_rel);
 
+    // Missing source CSV → no-op. Mirrors the rest of the loader's
+    // "missing CSV = zero rows" semantics so partial datasets still
+    // build.
+    if !csv_path.exists() {
+        return Ok(());
+    }
+
     // 2. Compile expressions (parse once, eval per row).
     let mut compiled: Vec<(String, expr::Expr)> = Vec::with_capacity(set.len());
     for (prop, src) in set {

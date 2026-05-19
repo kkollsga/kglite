@@ -1,4 +1,53 @@
 {
+  "compute": [
+    {
+      "op": "derive",
+      "from": "Filing",
+      "set": {
+        "filing_year": "year(filed_date)",
+        "is_form_4": "form_type == '4'",
+        "is_annual": "form_type == '10-K'",
+        "is_quarterly": "form_type == '10-Q'"
+      }
+    },
+    {
+      "op": "filter",
+      "from": "MetricFact",
+      "where": "tag == 'Revenues' && qtrs == 4",
+      "into": "AnnualRevenue"
+    },
+    {
+      "op": "chain",
+      "from": "Filing",
+      "group_by": ["cik"],
+      "order_by": "filed_date",
+      "edge": "NEXT_FILING"
+    },
+    {
+      "op": "calendar",
+      "start": "2020-01-01",
+      "end": "2030-12-31",
+      "next_edge": "NEXT_DAY",
+      "links": [
+        {"from": "Filing", "date_col": "filed_date", "edge": "ON_FILED_DATE"}
+      ]
+    },
+    {
+      "op": "aggregate",
+      "from": "Filing",
+      "group_by": ["cik", "filing_year"],
+      "into": "FilingYear",
+      "agg": {
+        "n_filings": "count(*)",
+        "n_form_4": "sum(if(is_form_4, 1, 0))",
+        "n_annual": "sum(if(is_annual, 1, 0))",
+        "n_quarterly": "sum(if(is_quarterly, 1, 0))"
+      },
+      "edges": [
+        {"to": "Company", "fk": "cik", "edge": "FILINGS_BY"}
+      ]
+    }
+  ],
   "nodes": {
     "SicCode": {
       "csv": "processed/sic.csv",

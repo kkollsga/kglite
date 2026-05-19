@@ -43,6 +43,12 @@ pub fn run_filter(
     })?;
     let csv_path = resolve_csv_path(input_root, &csv_rel);
 
+    // Missing source CSV → no-op (mirrors loader semantics for
+    // partial datasets).
+    if !csv_path.exists() {
+        return Ok(());
+    }
+
     let predicate =
         expr::parse(where_expr).map_err(|e| format!("filter 'where' expression: {}", e))?;
 

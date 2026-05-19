@@ -330,6 +330,12 @@ fn write_link(
         .ok_or_else(|| format!("calendar link: source '{}' has no csv", link.from))?;
     let src_csv_path = resolve_csv_path(input_root, &src_csv);
 
+    // Missing source CSV → skip this link silently (loader-consistent
+    // behaviour for partial datasets).
+    if !src_csv_path.exists() {
+        return Ok(());
+    }
+
     let date_type_param = src_spec.properties.get(&link.date_col).cloned();
 
     let mut reader = csv::ReaderBuilder::new()

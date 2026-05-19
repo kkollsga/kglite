@@ -47,6 +47,12 @@ pub fn run_chain(
     })?;
     let csv_path = resolve_csv_path(input_root, &csv_rel);
 
+    // Missing source CSV → no-op (loader-consistent behaviour for
+    // partial datasets).
+    if !csv_path.exists() {
+        return Ok(());
+    }
+
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_path(&csv_path)

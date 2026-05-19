@@ -106,6 +106,14 @@ pub fn run_aggregate(
     })?;
     let csv_path = resolve_csv_path(input_root, &csv_rel);
 
+    // Mirror the rest of the blueprint loader: a missing source CSV
+    // is not an error — the type simply contributes zero rows. The
+    // compute primitive degrades to a no-op so partial datasets
+    // (e.g. SEC without XBRL extracts) build cleanly.
+    if !csv_path.exists() {
+        return Ok(());
+    }
+
     // 1. Parse + classify each agg expression.
     let mut classified: Vec<(String, AggKind)> = Vec::with_capacity(agg.len());
     for (prop, src) in agg {
