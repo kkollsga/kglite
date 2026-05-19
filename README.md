@@ -32,18 +32,7 @@ structural validators that compose with Cypher.
 > 2 years of deep payloads — Form 4 insider transactions, 13F
 > institutional holdings, SC 13D activist stakes, DEF 14A board
 > composition, FSNDS XBRL financials, Exhibit 21 subsidiaries, 8-K
-> Item codes. **11 node types, 15 edge types**, queryable with Cypher:
->
-> ```cypher
-> -- Who's selling Apple stock as an insider, and at what price?
-> MATCH (c:Company {cik: 320193})-[:HAS_INSIDER]->(p:Person)
->       <-[:OF_PERSON]-(t:Transaction {transaction_code: 'S'})
-> RETURN p.display_name, t.transaction_date, t.shares, t.price_per_share
-> ORDER BY t.transaction_date DESC LIMIT 10
-> ```
->
-> Three node types, two edge types, one query — the kind of question
-> that's painful against raw SEC XML and trivial against a graph.
+> Item codes. **11 node types, 15 edge types**, queryable with Cypher.
 > Public-domain data (US Govt work). Scope with `cik_list=[...]` for
 > an S&P-500-sized graph in ~10 minutes. **→
 > [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
@@ -95,6 +84,29 @@ your SQL warehouse, a RAG corpus, or a parsed codebase.
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
   [Code analysis guide](https://kglite.readthedocs.io/en/latest/guides/code-tree.html).**
+
+## Why Cypher?
+
+A question every investor asks: *which insiders are selling, and at
+what price?* Against raw SEC XML you parse 1000s of Form 4 documents,
+join on issuer CIK, filter by transaction code. Against a graph it's
+one query:
+
+```cypher
+-- Insider sells at Apple (CIK 320193), most recent first
+MATCH (c:Company {cik: 320193})-[:HAS_INSIDER]->(p:Person)
+      <-[:OF_PERSON]-(t:Transaction {transaction_code: 'S'})
+RETURN p.display_name, t.transaction_date, t.shares, t.price_per_share
+ORDER BY t.transaction_date DESC LIMIT 10
+```
+
+Three node types (`Company`, `Person`, `Transaction`), two edge
+types (`HAS_INSIDER`, `OF_PERSON`), pattern-matched and joined in
+one expression. The same shape composes into harder questions —
+swap `:HAS_INSIDER` for `:HOLDS` and you're walking institutional
+positions; add `:SERVES_ON_BOARD` and you're checking who's an
+insider AND a director. Cypher pays off most when the data has
+real structure and your questions traverse it.
 
 ## How it compares
 
