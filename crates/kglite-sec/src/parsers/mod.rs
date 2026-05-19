@@ -6,5 +6,6 @@
 
 pub mod f13f;
 pub mod form4;
+pub mod fsnds;
 pub mod idx;
 pub mod submissions;

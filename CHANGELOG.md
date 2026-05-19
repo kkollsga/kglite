@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 6 — FSNDS XBRL parser** — `parsers/fsnds.rs` streaming
+  reader for the quarterly Financial Statement and Notes Data Set
+  `num.tsv` (tab-separated XBRL numeric facts). Whitelist-based
+  filtering with a `DEFAULT_TAG_WHITELIST` covering 20 high-value
+  us-gaap tags (Revenues, NetIncomeLoss, Assets, etc.). Schema
+  wiring deferred to Phase 8 polish so this phase is parser-only.
 - **Phase 5 — 13F institutional holdings** — `parsers/f13f.rs`
   streaming XML parser for Form 13F-HR information tables;
   `extract_holdings` orchestrator walks `raw/filings/{cik}/{accession}/*.xml`

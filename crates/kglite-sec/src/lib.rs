@@ -38,6 +38,7 @@ pub use fetch::{
 pub use layout::{StorageMode, Workdir};
 pub use parsers::f13f::{parse_13f_info_table, Holding};
 pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
+pub use parsers::fsnds::{parse_fsnds_num, XbrlFact, DEFAULT_TAG_WHITELIST};
 pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
 pub use parsers::submissions::{
     iter_submissions_zip, parse_submission_json, CompanyRecord, RecentFilings, Submission,
