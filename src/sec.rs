@@ -15,8 +15,9 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
-    extract_companies_and_filings, extract_insider_transactions, fetch_company_tickers,
-    fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError, Workdir, YearRange,
+    extract_companies_and_filings, extract_holdings, extract_insider_transactions,
+    fetch_company_tickers, fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError,
+    Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -135,6 +136,22 @@ fn extract_insider(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py
     Ok(d.into())
 }
 
+/// Extract `processed/{institutional_manager,security,holds}.csv` by
+/// walking `raw/filings/` for 13F-HR information table XMLs. Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false))]
+fn extract_holdings_py(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let report = extract_holdings(&wd, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("managers_written", report.managers_written)?;
+    d.set_item("securities_written", report.securities_written)?;
+    d.set_item("holdings_written", report.holdings_written)?;
+    d.set_item("f13f_files_read", report.f13f_files_read)?;
+    d.set_item("f13f_parse_errors", report.f13f_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Path to the workdir's expected blueprint output dir for the given
 /// mode. Pure path arithmetic — does not touch the filesystem. Used by
 /// the Python wrapper to find where to write/load the .kgl.
@@ -164,6 +181,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_raw, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_processed, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_insider, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_holdings_py, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

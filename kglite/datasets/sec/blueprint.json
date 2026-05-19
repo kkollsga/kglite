@@ -52,6 +52,44 @@
         }
       }
     },
+    "InstitutionalManager": {
+      "csv": "processed/institutional_manager.csv",
+      "pk": "manager_cik",
+      "title": "name",
+      "properties": {
+        "name": "string"
+      },
+      "connections": {
+        "junction_edges": {
+          "HOLDS": {
+            "csv": "processed/holds.csv",
+            "source_fk": "manager_cik",
+            "target": "Security",
+            "target_fk": "cusip",
+            "properties": [
+              "value",
+              "shares",
+              "shares_type",
+              "investment_discretion",
+              "voting_sole",
+              "voting_shared",
+              "voting_none",
+              "quarter",
+              "accession_number"
+            ]
+          }
+        }
+      }
+    },
+    "Security": {
+      "csv": "processed/security.csv",
+      "pk": "cusip",
+      "title": "name",
+      "properties": {
+        "name": "string",
+        "title_of_class": "string"
+      }
+    },
     "Person": {
       "csv": "processed/person.csv",
       "pk": "person_nid",

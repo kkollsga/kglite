@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 5 — 13F institutional holdings** — `parsers/f13f.rs`
+  streaming XML parser for Form 13F-HR information tables;
+  `extract_holdings` orchestrator walks `raw/filings/{cik}/{accession}/*.xml`
+  and emits `processed/{institutional_manager,security,holds}.csv`.
+  Schema gains `InstitutionalManager` + `Security` node types and the
+  `HOLDS` junction edge with shares / value / voting authority
+  properties. PyO3 surface gains `extract_holdings_py`.
 - **Phase 4 — Form 4 insider transactions** — `parsers/form4.rs`
   streaming XML parser for Form 4 / 4/A (XSD schemaVersion X0508);
   `extract_insider_transactions` walks `raw/filings/{cik}/{accession}/*.xml`

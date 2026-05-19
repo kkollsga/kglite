@@ -121,12 +121,20 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
     assert insider["form4_files_read"] == 0
     assert insider["people_written"] == 0
 
+    # Same for 13F holdings.
+    holdings = _sec_internal.extract_holdings_py(str(synth_workdir), force=False)
+    assert holdings["f13f_files_read"] == 0
+    assert holdings["holdings_written"] == 0
+
     # Verify processed/ CSVs exist
     assert (synth_workdir / "processed" / "company.csv").is_file()
     assert (synth_workdir / "processed" / "filing.csv").is_file()
     assert (synth_workdir / "processed" / "person.csv").is_file()
     assert (synth_workdir / "processed" / "transaction.csv").is_file()
     assert (synth_workdir / "processed" / "has_insider.csv").is_file()
+    assert (synth_workdir / "processed" / "institutional_manager.csv").is_file()
+    assert (synth_workdir / "processed" / "security.csv").is_file()
+    assert (synth_workdir / "processed" / "holds.csv").is_file()
 
     # Build the graph from the blueprint
     bp = _blueprint_with_root(_load_blueprint(), synth_workdir)
@@ -260,6 +268,68 @@ def test_insider_extract_builds_person_and_transaction_nodes(
     res = _rows(g.cypher("MATCH (t:Transaction)-[:INVOLVES_ISSUER]->(c:Company) RETURN c.name AS issuer"))
     assert len(res) == 1
     assert res[0]["issuer"] == "Apple Inc."
+
+
+def test_holdings_extract_builds_manager_security_holds(
+    synth_workdir: Path,
+) -> None:
+    """Stage a 13F-HR info table under raw/filings/ and verify the
+    build produces InstitutionalManager + Security + HOLDS edges."""
+    f13f_dir = synth_workdir / "raw" / "filings" / "1067983" / "000106798324000007"
+    f13f_dir.mkdir(parents=True, exist_ok=True)
+    (f13f_dir / "13f-infotable.xml").write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
+    <infoTable>
+        <nameOfIssuer>APPLE INC</nameOfIssuer>
+        <titleOfClass>COM</titleOfClass>
+        <cusip>037833100</cusip>
+        <value>1234567</value>
+        <shrsOrPrnAmt>
+            <sshPrnamt>5500000</sshPrnamt>
+            <sshPrnamtType>SH</sshPrnamtType>
+        </shrsOrPrnAmt>
+        <investmentDiscretion>SOLE</investmentDiscretion>
+        <votingAuthority>
+            <Sole>5500000</Sole>
+            <Shared>0</Shared>
+            <None>0</None>
+        </votingAuthority>
+    </infoTable>
+</informationTable>"""
+    )
+    # Direct extract path — bypasses fetch (would hit live SEC).
+    _sec_internal.extract_processed(str(synth_workdir), years=5, current_year=2024, force=False)
+    _sec_internal.extract_insider(str(synth_workdir), force=False)
+    _sec_internal.extract_holdings_py(str(synth_workdir), force=False)
+
+    bp = _blueprint_with_root(_load_blueprint(), synth_workdir)
+    compiled = synth_workdir / "_test_bp.json"
+    compiled.write_text(json.dumps(bp))
+    g = from_blueprint(str(compiled), verbose=False, save=False)
+    compiled.unlink()
+
+    res = _rows(g.cypher("MATCH (m:InstitutionalManager) RETURN m.manager_cik AS cik"))
+    assert len(res) == 1
+    assert res[0]["cik"] == 1067983
+
+    # CUSIP "037833100" auto-types to int 37833100 because it's all
+    # digits. CUSIPs with letters (e.g. 'L8859E101') would round-trip
+    # as strings instead. Phase 8 polish considers forcing a string
+    # column type to make queries consistent.
+    res = _rows(g.cypher("MATCH (s:Security {cusip: 37833100}) RETURN s.name AS n"))
+    assert len(res) == 1
+    assert res[0]["n"] == "APPLE INC"
+
+    res = _rows(
+        g.cypher(
+            "MATCH (m:InstitutionalManager)-[h:HOLDS]->(s:Security) RETURN s.cusip AS c, h.shares AS sh, h.value AS v"
+        )
+    )
+    assert len(res) == 1
+    assert res[0]["c"] == 37833100
+    assert res[0]["sh"] == 5500000.0
+    assert res[0]["v"] == 1234567.0
 
 
 def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(

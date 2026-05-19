@@ -159,6 +159,13 @@ class SEC:
         if verbose:
             print(f"[SEC]   insider: {insider_report}")
 
+        # Step 2c: 13F institutional holdings.
+        if verbose:
+            print("[SEC] extracting 13F holdings")
+        holdings_report = _sec_internal.extract_holdings_py(str(workdir), force=force_rebuild)
+        if verbose:
+            print(f"[SEC]   holdings: {holdings_report}")
+
         # Step 3: build graph/{mode}/
         if verbose:
             print(f"[SEC] building graph/{mode}/")

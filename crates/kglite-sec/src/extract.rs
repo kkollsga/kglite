@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, SecError};
 use crate::fetch::YearRange;
 use crate::layout::Workdir;
+use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
 use crate::parsers::idx::parse_master_idx;
 use crate::parsers::submissions::{iter_submissions_zip, Submission};
@@ -491,6 +492,192 @@ fn format_float(f: f64) -> String {
     } else {
         format!("{}", f)
     }
+}
+
+// ─── 13F holdings extract ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct HoldingsExtractReport {
+    pub managers_written: usize,
+    pub securities_written: usize,
+    pub holdings_written: usize,
+    pub f13f_files_read: usize,
+    pub f13f_parse_errors: usize,
+}
+
+const MANAGER_HEADER: &[&str] = &["manager_cik", "name"];
+const SECURITY_HEADER: &[&str] = &["cusip", "name", "title_of_class"];
+const HOLDS_HEADER: &[&str] = &[
+    "manager_cik",
+    "cusip",
+    "value",
+    "shares",
+    "shares_type",
+    "investment_discretion",
+    "voting_sole",
+    "voting_shared",
+    "voting_none",
+    "quarter",
+    "accession_number",
+];
+
+/// Walk `raw/filings/` for 13F-HR information table XML files. Expected
+/// layout matches Form 4:
+///
+/// ```text
+/// raw/filings/{manager_cik}/{accession_no_dashes}/13f.xml
+/// ```
+///
+/// Writes:
+/// - `processed/institutional_manager.csv` (one row per unique
+///   manager CIK seen)
+/// - `processed/security.csv` (one row per unique CUSIP)
+/// - `processed/holds.csv` (one row per (manager, security, quarter))
+///
+/// Quarter is derived from the parent accession-no-dashes path
+/// segment's directory; if we can't derive it, the row gets an empty
+/// quarter and the caller decides whether to backfill via the
+/// submissions index.
+pub fn extract_holdings(workdir: &Workdir, force: bool) -> Result<HoldingsExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let manager_csv = workdir.processed_csv("institutional_manager");
+    let security_csv = workdir.processed_csv("security");
+    let holds_csv = workdir.processed_csv("holds");
+
+    let mut report = HoldingsExtractReport::default();
+    if !force && manager_csv.is_file() && security_csv.is_file() && holds_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut manager_w = csv_writer(&manager_csv)?;
+    manager_w.write_record(MANAGER_HEADER)?;
+    let mut security_w = csv_writer(&security_csv)?;
+    security_w.write_record(SECURITY_HEADER)?;
+    let mut holds_w = csv_writer(&holds_csv)?;
+    holds_w.write_record(HOLDS_HEADER)?;
+
+    let filings_root = workdir.raw_filings_dir();
+    if !filings_root.is_dir() {
+        manager_w.flush()?;
+        security_w.flush()?;
+        holds_w.flush()?;
+        return Ok(report);
+    }
+
+    let mut seen_managers: HashSet<String> = HashSet::new();
+    let mut seen_securities: HashSet<String> = HashSet::new();
+
+    for xml_path in walk_13f_xml(&filings_root)? {
+        let manager_cik = match cik_from_filing_path(&xml_path) {
+            Some(c) => c,
+            None => continue,
+        };
+        let accession = accession_from_xml_path(&xml_path).unwrap_or_default();
+        let file = match File::open(&xml_path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let holdings = match parse_13f_info_table(BufReader::new(file)) {
+            Ok(h) => h,
+            Err(_) => {
+                report.f13f_parse_errors += 1;
+                continue;
+            }
+        };
+        if holdings.is_empty() {
+            continue;
+        }
+        report.f13f_files_read += 1;
+
+        if seen_managers.insert(manager_cik.clone()) {
+            // Name will be filled in later if/when we cross-reference
+            // submissions for this CIK. For Phase 5 we leave it empty;
+            // the blueprint FK will still match Company.cik for filers
+            // that are both companies and 13F managers (e.g. BlackRock).
+            manager_w.write_record([manager_cik.as_str(), ""])?;
+            report.managers_written += 1;
+        }
+
+        for h in holdings {
+            if h.cusip.is_empty() {
+                continue;
+            }
+            if seen_securities.insert(h.cusip.clone()) {
+                security_w.write_record([
+                    h.cusip.as_str(),
+                    h.name_of_issuer.as_str(),
+                    h.title_of_class.as_str(),
+                ])?;
+                report.securities_written += 1;
+            }
+            holds_w.write_record([
+                manager_cik.as_str(),
+                h.cusip.as_str(),
+                &format_float(h.value),
+                &format_float(h.shares),
+                h.shares_type.as_str(),
+                h.investment_discretion.as_str(),
+                &format_float(h.voting_sole),
+                &format_float(h.voting_shared),
+                &format_float(h.voting_none),
+                "",
+                accession.as_str(),
+            ])?;
+            report.holdings_written += 1;
+        }
+    }
+
+    manager_w.flush()?;
+    security_w.flush()?;
+    holds_w.flush()?;
+    Ok(report)
+}
+
+fn walk_13f_xml(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let Ok(cik_dirs) = std::fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for cik_entry in cik_dirs.flatten() {
+        let cik_path = cik_entry.path();
+        if !cik_path.is_dir() {
+            continue;
+        }
+        let Ok(acc_dirs) = std::fs::read_dir(&cik_path) else {
+            continue;
+        };
+        for acc_entry in acc_dirs.flatten() {
+            let acc_path = acc_entry.path();
+            if !acc_path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&acc_path) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                // Only XML files named like 13f.xml or *_infotable.xml.
+                if !name.ends_with(".xml") {
+                    continue;
+                }
+                if !name.contains("13f") && !name.contains("13F") && !name.contains("infotable") {
+                    continue;
+                }
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn cik_from_filing_path(path: &Path) -> Option<String> {
+    // path = .../filings/{cik}/{accession_no_dashes}/file.xml
+    path.parent()?
+        .parent()?
+        .file_name()?
+        .to_str()
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]

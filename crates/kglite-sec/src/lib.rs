@@ -28,14 +28,15 @@ pub mod parsers;
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{
-    extract_companies_and_filings, extract_insider_transactions, ExtractReport,
-    InsiderExtractReport,
+    extract_companies_and_filings, extract_holdings, extract_insider_transactions, ExtractReport,
+    HoldingsExtractReport, InsiderExtractReport,
 };
 pub use fetch::{
     fetch_company_tickers, fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk,
     YearRange,
 };
 pub use layout::{StorageMode, Workdir};
+pub use parsers::f13f::{parse_13f_info_table, Holding};
 pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
 pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
 pub use parsers::submissions::{
