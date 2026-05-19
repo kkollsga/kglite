@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Blueprint compute pipeline (K1–K6)
+
+- **`compute:` block in blueprints** — top-level ordered list of named
+  primitives that runs as a CSV-shaping pre-phase before the existing
+  5-phase loader. No new in-memory mutation path; each primitive
+  writes its outputs to `computed/*.csv` and the blueprint's
+  declarative loader consumes them as if they were ordinary inputs.
+- **Expression language** — Pratt parser + tree-walking evaluator:
+  arithmetic, comparison, logical, membership, function calls,
+  list literals. Built-in functions: math (`abs/round/ceil/floor/
+  sqrt/log/exp/pow/min/max`), string (`concat/lower/upper/contains/
+  starts_with/ends_with/len`), conditional (`if/coalesce`), type
+  conversion (`int/float/string`), date components (`year/month/
+  day/quarter`). Hand-rolled, no expression-crate dependency.
+- **Five compute primitives**:
+  - `derive` — row-level expressions on an existing node type;
+    new property columns appended or overwriting existing ones.
+  - `filter` — `where` predicate; produces a new derived type
+    (`into:`) or rewrites the source destructively.
+  - `chain` — group + sort + emit consecutive-pair junction edges
+    with `step_index` property.
+  - `calendar` — synthesises `Date` nodes for `[start, end]` plus
+    `NEXT_DAY` chain edges and `ON_DATE`-style link edges to source
+    types' date columns. Optional Month/Quarter/Year hierarchies.
+  - `aggregate` — group-by + per-group aggregate expressions (`sum
+    /avg/min/max/count/count_distinct/first(...,by=)/last(...,by=)`),
+    emitting one summary node per group plus optional FK edges to
+    the group-key targets.
+- **Validation up-front** at blueprint load: dangling type/column
+  references, malformed expressions, aggregate-only functions
+  outside `aggregate.agg`, calendar date ordering — all caught
+  before any CSV is touched.
+
 ## [0.9.46] — SEC EDGAR value-proposition upgrade (J0–J7)
 
 The shipped SEC loader through 0.9.45 produced a Filing-index

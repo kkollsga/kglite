@@ -21,6 +21,7 @@ use std::path::Path;
 
 use super::schema::{Blueprint, ComputeOp};
 
+pub mod aggregate;
 pub mod calendar;
 pub mod chain;
 pub mod derive;
@@ -90,7 +91,13 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             in_year_edge.as_deref(),
             links,
         ),
-        ComputeOp::Aggregate { .. } => Err("aggregate: not yet implemented (K6)".to_string()),
+        ComputeOp::Aggregate {
+            from,
+            group_by,
+            into,
+            agg,
+            edges,
+        } => aggregate::run_aggregate(blueprint, input_root, from, group_by, into, agg, edges),
     }
 }
 
