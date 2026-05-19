@@ -64,8 +64,9 @@ pub fn extract_companies_and_filings(
     workdir.ensure_dirs(None)?;
     let company_csv = workdir.processed_csv("company");
     let filing_csv = workdir.processed_csv("filing");
+    let sic_csv = workdir.processed_csv("sic");
 
-    if !force && company_csv.is_file() && filing_csv.is_file() {
+    if !force && company_csv.is_file() && filing_csv.is_file() && sic_csv.is_file() {
         return Ok(ExtractReport::default());
     }
 
@@ -79,6 +80,9 @@ pub fn extract_companies_and_filings(
 
     let mut report = ExtractReport::default();
     let mut seen_accessions: HashSet<String> = HashSet::new();
+    // J5: distinct (sic, sic_description) pairs across all companies.
+    // sic.csv lets the blueprint promote IN_INDUSTRY to a fk edge.
+    let mut sic_index: HashMap<String, String> = HashMap::new();
 
     // ── pass 1: submissions.zip → company.csv + most of filing.csv ───
     let mut company_writer = csv_writer(&company_csv)?;
@@ -109,6 +113,12 @@ pub fn extract_companies_and_filings(
         }
         write_company_row(&mut company_writer, &sub)?;
         report.companies_written += 1;
+        // Track this CIK's SIC for the sic.csv emit.
+        if !sub.company.sic.is_empty() {
+            sic_index
+                .entry(sub.company.sic.clone())
+                .or_insert_with(|| sub.company.sic_description.clone());
+        }
 
         for fi in 0..sub.filings.accession_number.len() {
             let accession = &sub.filings.accession_number[fi];
@@ -134,6 +144,18 @@ pub fn extract_companies_and_filings(
         }
     }
     company_writer.flush()?;
+
+    // J5: emit sic.csv from the accumulated distinct SIC codes.
+    {
+        let mut sic_writer = csv_writer(&sic_csv)?;
+        sic_writer.write_record(["sic", "description"])?;
+        let mut entries: Vec<(&String, &String)> = sic_index.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (sic, desc) in entries {
+            sic_writer.write_record([sic.as_str(), desc.as_str()])?;
+        }
+        sic_writer.flush()?;
+    }
 
     // ── pass 2: master.idx files → filing.csv (only new accessions) ──
     for (year, quarter) in shallow_range.quarters() {

@@ -1,5 +1,13 @@
 {
   "nodes": {
+    "SicCode": {
+      "csv": "processed/sic.csv",
+      "pk": "sic",
+      "title": "description",
+      "properties": {
+        "description": "string"
+      }
+    },
     "Company": {
       "csv": "processed/company.csv",
       "pk": "cik",
@@ -16,6 +24,12 @@
         "former_names": "string"
       },
       "connections": {
+        "fk_edges": {
+          "IN_INDUSTRY": {
+            "target": "SicCode",
+            "fk": "sic"
+          }
+        },
         "junction_edges": {
           "IS_DIRECTOR_OF": {
             "csv": "processed/is_director_of.csv",
