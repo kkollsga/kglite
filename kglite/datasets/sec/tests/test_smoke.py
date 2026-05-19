@@ -373,6 +373,35 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D7 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d7_auto_mode_picks_memory_for_tiny_slice() -> None:
+    """User story (D7): As a user with a tiny scope (1 company, no
+    deep window), I don't want to think about storage mode. The auto
+    picker should choose 'memory' for me."""
+    from kglite.datasets.sec.wrapper import (
+        _pick_storage_mode,
+        _predict_graph_size_gb,
+    )
+
+    # Tiny: 1 CIK, years=2, no deep
+    gb = _predict_graph_size_gb(2, 0, [320193], True, True, True)
+    assert gb < 4.0
+    assert _pick_storage_mode(gb) == "memory"
+
+    # Medium: S&P 500, years=5, detailed=2
+    gb = _predict_graph_size_gb(5, 2, list(range(500)), True, True, True)
+    # ~5*0.1*500/6000 = 0.04 + 2*(0.6+4+1)*500/6000 ≈ 1 GB
+    assert _pick_storage_mode(gb) == "memory"  # tiny actually fits memory
+
+    # Heavy: full universe + deep + XBRL → disk
+    gb = _predict_graph_size_gb(10, 5, None, True, True, True)
+    # 10*0.1 + 5*5.6 = 29 GB → disk
+    assert gb > 16.0
+    assert _pick_storage_mode(gb) == "disk"
+
+
 # ── D4 user story ────────────────────────────────────────────────────
 
 

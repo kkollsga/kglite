@@ -41,6 +41,50 @@ def _current_year_quarter() -> tuple[int, int]:
     return today.year, ((today.month - 1) // 3) + 1
 
 
+def _predict_graph_size_gb(
+    years: int,
+    detailed: int,
+    cik_list: Optional[list[int]],
+    include_subsidiaries: bool,
+    include_xbrl_metrics: bool,
+    include_8k_events: bool,
+) -> float:
+    """Estimate graph resident size for the chosen scope. Drives the
+    `mode="auto"` storage-mode picker.
+
+    Formulas calibrated from the loader's measured node-count
+    behaviour (see docs/guides/sec.md "Sizing" section):
+
+    - Filing index: ~0.1 GB per year of master.idx ingest, scaled by
+      CIK fraction (S&P 500 ≈ 500/6000 = 8% of full universe).
+    - Per-year-of-detailed-window:
+      Form 4 + 13F + Exhibit 21 baseline ≈ 0.6 GB.
+      XBRL: +4 GB if include_xbrl_metrics.
+      8-K events: +1 GB if include_8k_events.
+    """
+    full_universe = 6000
+    cik_fraction = 1.0 if not cik_list else min(len(cik_list) / full_universe, 1.0)
+    g = 0.1 * years * cik_fraction
+    if detailed > 0:
+        g += 0.6 * detailed * cik_fraction
+        if include_xbrl_metrics:
+            g += 4.0 * detailed * cik_fraction
+        if include_8k_events:
+            g += 1.0 * detailed * cik_fraction
+        if include_subsidiaries:
+            g += 0.05 * detailed * cik_fraction
+    return g
+
+
+def _pick_storage_mode(predicted_gb: float) -> str:
+    """memory < 4 GB; mapped 4-16 GB; disk above."""
+    if predicted_gb < 4.0:
+        return "memory"
+    if predicted_gb < 16.0:
+        return "mapped"
+    return "disk"
+
+
 def _format_slice_summary(
     cik_list: Optional[list[int]],
     form_types: Optional[list[str]],
@@ -85,7 +129,7 @@ class SEC:
         *,
         years: Union[int, str] = 10,
         detailed: int = 2,
-        mode: str = "mapped",
+        mode: Optional[str] = None,
         user_agent: str,
         cik_list: Optional[list[int]] = None,
         form_types: Optional[list[str]] = None,
@@ -128,6 +172,20 @@ class SEC:
             raise ValueError(
                 "user_agent is required — SEC fair-access policy. Pass e.g. 'Acme Research contact@acme.com'."
             )
+        current_year, current_quarter = _current_year_quarter()
+        years_int_predict = _resolve_years(years, current_year)
+        if mode is None:
+            predicted_gb = _predict_graph_size_gb(
+                years_int_predict,
+                detailed,
+                cik_list,
+                include_subsidiaries,
+                include_xbrl_metrics,
+                include_8k_events,
+            )
+            mode = _pick_storage_mode(predicted_gb)
+            if verbose:
+                print(f"[SEC] mode='{mode}' auto-picked (predicted ~{predicted_gb:.1f} GB)")
         if mode not in _STORAGE_MODES:
             raise ValueError(f"mode must be one of {_STORAGE_MODES!r}; got {mode!r}")
 
@@ -140,8 +198,7 @@ class SEC:
                 print(f"[SEC] loading cached graph: {workdir}/graph/{mode}/")
             return _load_graph(workdir, mode)
 
-        current_year, current_quarter = _current_year_quarter()
-        years_int = _resolve_years(years, current_year)
+        years_int = years_int_predict
 
         # Step 1: fetch raw/
         if verbose:
