@@ -228,14 +228,12 @@ pub async fn fetch_13f_info_table(
     for d in docs {
         let typ = d.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if typ.eq_ignore_ascii_case("INFORMATION TABLE")
+        let matches = typ.eq_ignore_ascii_case("INFORMATION TABLE")
             || name.to_ascii_lowercase().contains("infotable")
-            || name.to_ascii_lowercase().contains("info_table")
-        {
-            if name.ends_with(".xml") {
-                info_filename = Some(name.to_string());
-                break;
-            }
+            || name.to_ascii_lowercase().contains("info_table");
+        if matches && name.ends_with(".xml") {
+            info_filename = Some(name.to_string());
+            break;
         }
     }
     let Some(fname) = info_filename else {
