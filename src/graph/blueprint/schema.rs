@@ -18,6 +18,12 @@ pub struct Blueprint {
     /// order would produce different edge counts than the Python loader.
     #[serde(default)]
     pub nodes: IndexMap<String, NodeSpec>,
+    /// Optional ordered pipeline of post-load compute primitives.
+    /// 0.9.47+: each `ComputeOp` runs after the 5 existing load phases.
+    /// Vec order = execution order; later ops can reference types
+    /// produced by earlier ops.
+    #[serde(default)]
+    pub compute: Vec<ComputeOp>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -112,6 +118,99 @@ pub struct TimeseriesSpec {
     pub resolution: Option<String>,
     #[serde(default)]
     pub units: IndexMap<String, String>,
+}
+
+// ─── compute pipeline (0.9.47) ────────────────────────────────────────────
+
+/// One operation in the blueprint's `compute:` pipeline. Each variant
+/// is a named primitive with a fixed shape — no free-form DSL, no
+/// user-defined functions, no graph traversal in expressions.
+/// Cypher handles the post-build dynamic side; this layer handles
+/// declarative graph shaping.
+///
+/// K2 ships the type + serde parsing + validation; per-variant
+/// fields become "read" as K3-K6 wire each primitive's executor.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum ComputeOp {
+    /// Add or overwrite properties on an existing node type via
+    /// row-level expressions. Schema gains the new properties.
+    Derive {
+        from: String,
+        set: IndexMap<String, String>,
+    },
+    /// Copy nodes matching a predicate from one type to another (or
+    /// drop non-matching rows in place if `into` is omitted). The
+    /// predicate is a row-level boolean expression.
+    Filter {
+        from: String,
+        #[serde(rename = "where")]
+        where_expr: String,
+        #[serde(default)]
+        into: Option<String>,
+    },
+    /// Synthesise a doubly-linked-list edge between consecutive nodes
+    /// of a type, grouped by composite key and ordered by a property.
+    /// Used for temporal walks (NEXT_TX per insider, NEXT_QUARTER
+    /// per fund/security HOLDS series).
+    Chain {
+        from: String,
+        group_by: Vec<String>,
+        order_by: String,
+        edge: String,
+    },
+    /// Synthesise `:Date` nodes for the closed range `[start, end]`
+    /// plus chain + hierarchy edges, then link source-type date
+    /// columns to the matching Date node.
+    Calendar {
+        #[serde(rename = "type", default = "default_calendar_type")]
+        node_type: String,
+        start: String,
+        end: String,
+        #[serde(default = "default_next_day_edge")]
+        next_edge: String,
+        #[serde(default)]
+        in_month_edge: Option<String>,
+        #[serde(default)]
+        in_quarter_edge: Option<String>,
+        #[serde(default)]
+        in_year_edge: Option<String>,
+        #[serde(default)]
+        links: Vec<CalendarLink>,
+    },
+    /// Group source nodes by a composite key, evaluate per-group
+    /// aggregate expressions, emit one summary node per group plus
+    /// optional FK edges to the group-key target types.
+    Aggregate {
+        from: String,
+        group_by: Vec<String>,
+        into: String,
+        agg: IndexMap<String, String>,
+        #[serde(default)]
+        edges: Vec<AggregateEdge>,
+    },
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CalendarLink {
+    pub from: String,
+    pub date_col: String,
+    pub edge: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AggregateEdge {
+    pub to: String,
+    pub fk: String,
+    pub edge: String,
+}
+
+fn default_calendar_type() -> String {
+    "Date".to_string()
+}
+fn default_next_day_edge() -> String {
+    "NEXT_DAY".to_string()
 }
 
 /// Load a blueprint from a file path.

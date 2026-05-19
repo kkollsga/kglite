@@ -36,6 +36,12 @@ pub fn build(
     blueprint: Blueprint,
     blueprint_dir: &Path,
 ) -> Result<BuildReport, String> {
+    // 0.9.47 K2: validate the compute pipeline before any phase
+    // touches data. Catches bad expressions / dangling type refs /
+    // misplaced aggregate functions at load time, not midway through
+    // the build.
+    super::validation::validate_compute(&blueprint)?;
+
     let root = blueprint
         .settings
         .input_root

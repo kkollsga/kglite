@@ -9,6 +9,7 @@ pub mod filter;
 pub mod geometry;
 pub mod schema;
 pub mod timeseries;
+pub mod validation;
 
 pub use build::build;
 pub use schema::load_blueprint_file;
