@@ -35,8 +35,8 @@ pub use extract::{
     XbrlExtractReport,
 };
 pub use fetch::{
-    fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
-    fetch_submissions_bulk, YearRange,
+    fetch_13f_info_table, fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };
 pub use layout::{StorageMode, Workdir};
 pub use parsers::eightk::{extract_8k_items, EightKItem};

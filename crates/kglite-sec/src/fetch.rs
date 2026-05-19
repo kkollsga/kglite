@@ -185,6 +185,75 @@ pub async fn fetch_fsnds_quarterly(
     Ok(true)
 }
 
+/// Fetch a 13F-HR information-table XML for one filing. The 13F-HR
+/// filing index has multiple documents; the info table is the one
+/// whose type is `INFORMATION TABLE`. We discover its filename via
+/// the filing's `index.json` then download the XML into
+/// `raw/filings/{cik}/{accession_no_dashes}/13f-infotable.xml`.
+pub async fn fetch_13f_info_table(
+    client: &SecClient,
+    workdir: &Workdir,
+    issuer_cik: u64,
+    accession_dashed: &str,
+) -> Result<bool> {
+    let accession_no_dashes = catalog::accession_no_dashes(accession_dashed);
+    let dest = workdir
+        .raw_filings_dir()
+        .join(issuer_cik.to_string())
+        .join(&accession_no_dashes)
+        .join("13f-infotable.xml");
+    if dest.is_file() {
+        return Ok(false);
+    }
+
+    // Fetch the filing index.json to discover the info-table filename.
+    let index_url = format!(
+        "{}{}",
+        catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+        "index.json"
+    );
+    let bytes = client.fetch_bytes(&index_url).await?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| SecError::Decode(format!("filing index.json: {e}")))?;
+    let docs = v
+        .get("directory")
+        .and_then(|d| d.get("item"))
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| SecError::Decode("filing index: missing directory.item".into()))?;
+
+    // Heuristic: the info table has type "INFORMATION TABLE"; name
+    // typically contains "infotable", "info_table", or "13f" in the
+    // XML filename.
+    let mut info_filename: Option<String> = None;
+    for d in docs {
+        let typ = d.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let name = d.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if typ.eq_ignore_ascii_case("INFORMATION TABLE")
+            || name.to_ascii_lowercase().contains("infotable")
+            || name.to_ascii_lowercase().contains("info_table")
+        {
+            if name.ends_with(".xml") {
+                info_filename = Some(name.to_string());
+                break;
+            }
+        }
+    }
+    let Some(fname) = info_filename else {
+        return Err(SecError::Decode(format!(
+            "no info-table XML in {accession_dashed}"
+        )));
+    };
+
+    let url = format!(
+        "{}{}",
+        catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+        fname
+    );
+    client
+        .fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing)
+        .await
+}
+
 /// Fetch a single Form 4 / 4/A XML payload by accession number into
 /// `raw/filings/{cik}/{accession_no_dashes}/form4.xml`.
 ///
