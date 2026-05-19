@@ -18,8 +18,44 @@ pub struct Sc13dFiling {
     /// Item 4 narrative text (truncated to ~1000 chars to keep the
     /// graph property side-table compact).
     pub purpose_text: String,
-    /// Item 5 percent owned. `0.0` if not extractable.
+    /// Item 5 highest-percent-owned extracted by the simple regex.
+    /// `0.0` if not extractable. Per-filer percents live on
+    /// `reporting_persons` below.
     pub percent_owned: f64,
+    /// One entry per reporting person (joint filers produce multiple
+    /// entries). Each captures the SC 13D cover page's numbered
+    /// fields (1-14) for that filer.
+    pub reporting_persons: Vec<ReportingPerson>,
+}
+
+/// One filer's cover-page block on an SC 13D. The numbered fields
+/// (1-14) on each cover page give a structured per-filer record.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReportingPerson {
+    /// Item (1) — Name of reporting person.
+    pub name: String,
+    /// Item (4) — Source of funds (WC = working capital, AF =
+    /// affiliate funds, BK = bank, OO = other, …). Empty when not
+    /// extracted.
+    pub source_of_funds: String,
+    /// Item (6) — Citizenship or place of organisation.
+    pub citizenship: String,
+    /// Item (7) — Sole voting power.
+    pub sole_voting_power: u64,
+    /// Item (8) — Shared voting power.
+    pub shared_voting_power: u64,
+    /// Item (9) — Sole dispositive power.
+    pub sole_dispositive_power: u64,
+    /// Item (10) — Shared dispositive power.
+    pub shared_dispositive_power: u64,
+    /// Item (11) — Aggregate amount beneficially owned.
+    pub aggregate_amount: u64,
+    /// Item (13) — Percent of class represented by the aggregate.
+    pub percent_of_class: f64,
+    /// Item (14) — Type of reporting person (IN = individual,
+    /// CO = corporation, BD = broker-dealer, IA = investment
+    /// adviser, PN = partnership, etc.).
+    pub type_of_reporting_person: String,
 }
 
 /// Parse a single SC 13D HTML document into a structured record.
@@ -27,10 +63,142 @@ pub fn parse_sc13d(html: &str) -> Sc13dFiling {
     let stripped = strip_html(html);
     let purpose_text = extract_item_text(&stripped, "4").unwrap_or_default();
     let percent_owned = extract_percent_owned(&stripped);
+    let reporting_persons = extract_reporting_persons(&stripped);
     Sc13dFiling {
         purpose_text: truncate(&purpose_text, 1000),
         percent_owned,
+        reporting_persons,
     }
+}
+
+/// Pull one `ReportingPerson` block per filer. The cover page is a
+/// 14-numbered-field table; we split by the "(1) NAME" anchor and
+/// extract each numbered token's value from the block that follows.
+fn extract_reporting_persons(text: &str) -> Vec<ReportingPerson> {
+    let upper = text.to_ascii_uppercase();
+    let mut out = Vec::new();
+    let mut search_start = 0;
+    // Common anchor variants for item (1).
+    let anchors: &[&str] = &[
+        "(1) NAMES OF REPORTING PERSON",
+        "(1) NAME OF REPORTING PERSON",
+        "1. NAMES OF REPORTING PERSONS",
+        "1. NAME OF REPORTING PERSON",
+        "NAMES OF REPORTING PERSONS",
+    ];
+    while search_start < text.len() {
+        let upper_slice = &upper[search_start..];
+        let next = anchors
+            .iter()
+            .filter_map(|a| upper_slice.find(a).map(|i| (i + search_start, *a)))
+            .min_by_key(|(i, _)| *i);
+        let Some((found, anchor)) = next else { break };
+        let block_start = found + anchor.len();
+        // Block ends at the next "(1)" anchor or 6000 chars later
+        // (whichever comes first).
+        let next_anchor_offset = anchors
+            .iter()
+            .filter_map(|a| upper[block_start..].find(a))
+            .min()
+            .unwrap_or(6000);
+        let block_end = (block_start + next_anchor_offset).min(text.len());
+        let block = &text[block_start..block_end];
+        if let Some(rp) = parse_reporting_person_block(block) {
+            out.push(rp);
+        }
+        search_start = block_end;
+    }
+    out
+}
+
+/// Parse one `(1)` … `(14)` block into a `ReportingPerson`.
+fn parse_reporting_person_block(block: &str) -> Option<ReportingPerson> {
+    let mut rp = ReportingPerson::default();
+    // Name = text up to the first "(2)" or "(3)" or numbered-marker.
+    let name_end = block
+        .find("(2)")
+        .or_else(|| block.find("(3)"))
+        .or_else(|| block.find("(4)"))
+        .unwrap_or(block.len().min(200));
+    rp.name = block[..name_end]
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphabetic())
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if rp.name.is_empty() || rp.name.len() < 3 {
+        return None;
+    }
+
+    rp.source_of_funds = extract_short_field(block, "(4)");
+    rp.citizenship = extract_short_field(block, "(6)");
+    rp.sole_voting_power = extract_int_field(block, "(7)");
+    rp.shared_voting_power = extract_int_field(block, "(8)");
+    rp.sole_dispositive_power = extract_int_field(block, "(9)");
+    rp.shared_dispositive_power = extract_int_field(block, "(10)");
+    rp.aggregate_amount = extract_int_field(block, "(11)");
+    rp.percent_of_class = extract_percent_field(block, "(13)");
+    rp.type_of_reporting_person = extract_short_field(block, "(14)");
+
+    Some(rp)
+}
+
+/// Find the value following `marker`, trimmed to one line.
+fn extract_short_field(block: &str, marker: &str) -> String {
+    let Some(start) = block.find(marker) else {
+        return String::new();
+    };
+    let after = &block[start + marker.len()..];
+    after
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim()
+        .chars()
+        .take(120)
+        .collect()
+}
+
+fn extract_int_field(block: &str, marker: &str) -> u64 {
+    let Some(start) = block.find(marker) else {
+        return 0;
+    };
+    let after = &block[start + marker.len()..];
+    // First sequence of digits / commas in the next ~80 chars.
+    let mut acc = String::new();
+    for c in after.chars().take(120) {
+        if c.is_ascii_digit() {
+            acc.push(c);
+        } else if c == ',' && !acc.is_empty() {
+            continue;
+        } else if !acc.is_empty() {
+            break;
+        }
+    }
+    acc.parse::<u64>().unwrap_or(0)
+}
+
+fn extract_percent_field(block: &str, marker: &str) -> f64 {
+    let Some(start) = block.find(marker) else {
+        return 0.0;
+    };
+    let after = &block[start + marker.len()..];
+    // First number followed by % sign within next 80 chars.
+    let mut buf = String::new();
+    for c in after.chars().take(120) {
+        if c.is_ascii_digit() || c == '.' {
+            buf.push(c);
+        } else if c == '%' && !buf.is_empty() {
+            return buf.parse::<f64>().unwrap_or(0.0);
+        } else if !buf.is_empty() {
+            buf.clear();
+        }
+    }
+    0.0
 }
 
 fn extract_item_text(text: &str, item_num: &str) -> Option<String> {
