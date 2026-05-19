@@ -373,6 +373,43 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
     assert info2["node_count"] == info["node_count"]
 
 
+# ── D8 user story ────────────────────────────────────────────────────
+
+
+def test_uc_d8_activist_purpose_extraction(synth_workdir: Path) -> None:
+    """User story (D8): As a fund manager tracking activist
+    campaigns, I want to find which 13D filings mention 'board' in
+    their stated purpose. I stage a synthetic 13D HTML; the build
+    extracts Stake.purpose_text + percent_owned and links to the
+    Filing via REPORTED_IN_FILING."""
+    dir_ = synth_workdir / "raw" / "filings" / "320193" / "000032019324009999"
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / "sc13d-aapl.htm").write_text(
+        "<html><body>"
+        "<p>Item 4. Purpose of Transaction. The Reporting Persons may "
+        "seek changes to the board composition.</p>"
+        "<p>Item 5. The Reporting Persons own 6.5% of the outstanding "
+        "common stock.</p>"
+        "</body></html>"
+    )
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=0,
+        detailed=0,
+        mode="memory",
+        user_agent="KGLite D8 d8@example.com",
+        verbose=False,
+    )
+
+    res = _rows(g.cypher("MATCH (s:Stake) WHERE s.purpose_text CONTAINS 'board' RETURN s.percent_owned AS pct"))
+    assert len(res) >= 1
+    assert res[0]["pct"] == 6.5
+
+
 # ── D7 user story ────────────────────────────────────────────────────
 
 

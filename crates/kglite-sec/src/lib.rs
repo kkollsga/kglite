@@ -29,10 +29,10 @@ pub mod slicing;
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{
-    extract_8k_events, extract_companies_and_filings, extract_holdings,
+    extract_13d_stakes, extract_8k_events, extract_companies_and_filings, extract_holdings,
     extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics, EightKExtractReport,
-    ExtractReport, HoldingsExtractReport, InsiderExtractReport, SubsidiaryExtractReport,
-    XbrlExtractReport,
+    ExtractReport, HoldingsExtractReport, InsiderExtractReport, StakeExtractReport,
+    SubsidiaryExtractReport, XbrlExtractReport,
 };
 pub use fetch::{
     fetch_13f_info_table, fetch_company_tickers, fetch_form4_filing, fetch_fsnds_quarterly,
@@ -45,6 +45,7 @@ pub use parsers::f13f::{parse_13f_info_table, Holding};
 pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
 pub use parsers::fsnds::{parse_fsnds_num, XbrlFact, DEFAULT_TAG_WHITELIST};
 pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
+pub use parsers::sc13d::{parse_sc13d, Sc13dFiling};
 pub use parsers::submissions::{
     iter_submissions_zip, parse_submission_json, CompanyRecord, RecentFilings, Submission,
 };

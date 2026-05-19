@@ -86,6 +86,23 @@
         }
       }
     },
+    "Stake": {
+      "csv": "processed/stake.csv",
+      "pk": "stake_nid",
+      "title": "stake_nid",
+      "properties": {
+        "percent_owned": "float",
+        "purpose_text": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "REPORTED_IN_FILING": {
+            "target": "Filing",
+            "fk": "accession_number"
+          }
+        }
+      }
+    },
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_nid",

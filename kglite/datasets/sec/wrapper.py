@@ -291,6 +291,13 @@ class SEC:
             print(f"[SEC]   events: {events_report}")
         _ = include_8k_events  # reserved for the per-filing fetcher gate
 
+        # Step 2g: SC 13D activist stakes (D8).
+        if verbose:
+            print("[SEC] extracting SC 13D stakes")
+        stake_report = _sec_internal.extract_13d_stakes_py(str(workdir), force=force_rebuild, cik_list=cik_list)
+        if verbose:
+            print(f"[SEC]   stakes: {stake_report}")
+
         # Step 3: build graph/{mode}/
         if verbose:
             print(f"[SEC] building graph/{mode}/")

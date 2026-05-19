@@ -15,7 +15,7 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
-    extract_8k_events, extract_companies_and_filings, extract_holdings,
+    extract_13d_stakes, extract_8k_events, extract_companies_and_filings, extract_holdings,
     extract_insider_transactions, extract_subsidiaries, extract_xbrl_metrics,
     fetch_company_tickers, fetch_fsnds_quarterly, fetch_quarterly_master_idx,
     fetch_submissions_bulk, SecClient, SecError, SliceSpec, Workdir, YearRange,
@@ -303,6 +303,26 @@ fn fetch_13f_batch(
     Ok((downloaded, skipped))
 }
 
+/// Extract `processed/stake.csv` from raw SC 13D HTML staged under
+/// `raw/filings/`. Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false, cik_list=None))]
+fn extract_13d_stakes_py(
+    py: Python<'_>,
+    workdir: PathBuf,
+    force: bool,
+    cik_list: Option<Vec<u64>>,
+) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let slice = build_slice(cik_list, None, None);
+    let report = extract_13d_stakes(&wd, &slice, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("stakes_written", report.stakes_written)?;
+    d.set_item("sc13d_files_read", report.sc13d_files_read)?;
+    d.set_item("sc13d_parse_errors", report.sc13d_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Extract `processed/event.csv` from raw 8-K HTML cover pages
 /// under `raw/filings/`. Idempotent.
 #[pyfunction]
@@ -377,6 +397,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_xbrl_metrics_py, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_8k_events_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_13d_stakes_py, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_form4_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;

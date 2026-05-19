@@ -22,6 +22,7 @@ use crate::parsers::f13f::parse_13f_info_table;
 use crate::parsers::form4::parse_form4;
 use crate::parsers::fsnds::{parse_fsnds_num, DEFAULT_TAG_WHITELIST};
 use crate::parsers::idx::parse_master_idx;
+use crate::parsers::sc13d::parse_sc13d;
 use crate::parsers::submissions::{iter_submissions_zip, Submission};
 use crate::slicing::SliceSpec;
 
@@ -953,6 +954,123 @@ pub fn extract_xbrl_metrics(
 
     writer.flush()?;
     Ok(report)
+}
+
+// ─── SC 13D activist-stake extract ───────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct StakeExtractReport {
+    pub stakes_written: usize,
+    pub sc13d_files_read: usize,
+    pub sc13d_parse_errors: usize,
+}
+
+const STAKE_HEADER: &[&str] = &[
+    "stake_nid",
+    "accession_number",
+    "percent_owned",
+    "purpose_text",
+];
+
+/// Walk `raw/filings/{cik}/{accession}/` for SC 13D HTML cover pages
+/// (filenames containing `sc13d` or `schedule13d`) and emit
+/// `processed/stake.csv` with one row per filing.
+pub fn extract_13d_stakes(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    force: bool,
+) -> Result<StakeExtractReport> {
+    workdir.ensure_dirs(None)?;
+    let stake_csv = workdir.processed_csv("stake");
+
+    let mut report = StakeExtractReport::default();
+    if !force && stake_csv.is_file() {
+        return Ok(report);
+    }
+
+    let mut writer = csv_writer(&stake_csv)?;
+    writer.write_record(STAKE_HEADER)?;
+
+    let filings_root = workdir.raw_filings_dir();
+    if !filings_root.is_dir() {
+        writer.flush()?;
+        return Ok(report);
+    }
+
+    for path in walk_sc13d_files(&filings_root)? {
+        let Some(cik_str) = cik_from_filing_path(&path) else {
+            continue;
+        };
+        let cik_int: u64 = cik_str.parse().unwrap_or(0);
+        if !slice.cik_matches(cik_int) {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => {
+                report.sc13d_parse_errors += 1;
+                continue;
+            }
+        };
+        let f = parse_sc13d(&text);
+        if f.purpose_text.is_empty() && f.percent_owned == 0.0 {
+            continue;
+        }
+        report.sc13d_files_read += 1;
+        let accession = accession_from_xml_path(&path).unwrap_or_default();
+        let nid = format!("{}_stake", accession);
+        writer.write_record([
+            nid.as_str(),
+            accession.as_str(),
+            &format_float(f.percent_owned),
+            f.purpose_text.as_str(),
+        ])?;
+        report.stakes_written += 1;
+    }
+
+    writer.flush()?;
+    Ok(report)
+}
+
+fn walk_sc13d_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let Ok(cik_dirs) = std::fs::read_dir(root) else {
+        return Ok(out);
+    };
+    for cik_entry in cik_dirs.flatten() {
+        let cp = cik_entry.path();
+        if !cp.is_dir() {
+            continue;
+        }
+        let Ok(acc_dirs) = std::fs::read_dir(&cp) else {
+            continue;
+        };
+        for ad in acc_dirs.flatten() {
+            let ap = ad.path();
+            if !ap.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&ap) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if (name.ends_with(".htm") || name.ends_with(".html"))
+                    && (name.contains("sc13d")
+                        || name.contains("schedule13d")
+                        || name.contains("13d"))
+                {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ─── 8-K Item codes extract ──────────────────────────────────────────
