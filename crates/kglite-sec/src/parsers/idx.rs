@@ -33,11 +33,16 @@ pub struct FilingEntry {
 
 impl FilingEntry {
     /// Derive the accession number from the file path.
-    /// Returns `None` if the path doesn't follow the expected
-    /// `edgar/data/{cik}/{accession}-index.htm` shape.
+    ///
+    /// Real SEC master.idx uses `edgar/data/{cik}/{accession}.txt`
+    /// (the .txt complete-submission file). Some historical or test
+    /// fixtures use the `-index.htm` form instead. Both are accepted.
+    /// Returns `None` if neither suffix matches.
     pub fn accession_number(&self) -> Option<&str> {
         let filename = self.file_path.rsplit('/').next()?;
-        filename.strip_suffix("-index.htm")
+        filename
+            .strip_suffix(".txt")
+            .or_else(|| filename.strip_suffix("-index.htm"))
     }
 }
 
@@ -149,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn accession_number_extracted() {
+    fn accession_number_extracted_index_htm() {
         let e = FilingEntry {
             cik: 320193,
             company_name: "APPLE INC".into(),
@@ -161,13 +166,27 @@ mod tests {
     }
 
     #[test]
+    fn accession_number_extracted_txt() {
+        // Real SEC master.idx format: `.txt` complete-submission file
+        let e = FilingEntry {
+            cik: 1000045,
+            company_name: "NICHOLAS FINANCIAL INC".into(),
+            form_type: "10-Q".into(),
+            date_filed: "2024-02-13".into(),
+            file_path: "edgar/data/1000045/0000950170-24-014566.txt".into(),
+        };
+        assert_eq!(e.accession_number(), Some("0000950170-24-014566"));
+    }
+
+    #[test]
     fn accession_number_none_for_unexpected_shape() {
+        // No recognized suffix → None.
         let e = FilingEntry {
             cik: 1,
             company_name: "X".into(),
             form_type: "10-K".into(),
             date_filed: "2024-01-01".into(),
-            file_path: "edgar/data/1/something-else.txt".into(),
+            file_path: "edgar/data/1/something-else.pdf".into(),
         };
         assert_eq!(e.accession_number(), None);
     }

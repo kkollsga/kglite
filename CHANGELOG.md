@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 9 — live SEC integration test** —
+  `kglite/datasets/sec/tests/test_integration_live.py` does an
+  end-to-end build against live SEC (env-gated via
+  `KGLITE_SEC_INTEGRATION=1`). Builds a 1-year graph in ~4.5s on a
+  dev box: ~388K Filing nodes from live master.idx fetches, with
+  the top-5 form types matching real 2024 SEC volumes (Form 4 80K,
+  424B2 46K, 8-K 26K, 13F-HR 18K, NPORT-P 17K). Validates the cached
+  graph reopen path too. Fixed an accession-number extraction bug
+  uncovered by the test — real SEC master.idx file paths end in
+  `.txt` not `-index.htm`; the parser now accepts either.
 - **Phase 8 — disk mode + docs** — `SEC.open(mode="disk")` now works
   via `from_blueprint(storage="disk", path=graph/disk/)`. Disk graphs
   are loaded on subsequent opens via the cache reuse path. Adds
