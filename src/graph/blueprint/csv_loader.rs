@@ -43,9 +43,8 @@ impl RawCsv {
 /// declarations. Buffered `read_csv_raw` remains the path for
 /// timeseries / dedupe-required specs.
 ///
-/// The `dead_code` allow is removed in E3 when build.rs starts
-/// consuming this; until then the function only has test coverage.
-#[allow(dead_code)]
+/// Consumed by `build.rs::load_junction_edges` (E3+) for streaming
+/// junction-edge dispatch.
 pub fn read_csv_chunks(
     path: &Path,
     chunk_size: usize,

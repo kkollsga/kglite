@@ -10,7 +10,9 @@
 //!   5. Junction edges — many-to-many CSVs with two FK columns + optional
 //!      property columns.
 
-use super::csv_loader::{map_blueprint_type, read_csv_raw, typed_dataframe, RawCsv};
+use super::csv_loader::{
+    map_blueprint_type, read_csv_chunks, read_csv_raw, typed_dataframe, RawCsv,
+};
 use super::filter::apply_filter;
 use super::geometry::{convert_geojson, has_spatial_properties, spatial_targets};
 use super::schema::{Blueprint, NodeSpec};
@@ -1011,114 +1013,114 @@ fn connect(
     }
 }
 
-// ─── Phase 5: junction edges ──────────────────────────────────────────────
+// ─── Phase 5: junction edges (streaming, E3+) ─────────────────────────────
+//
+// The pre-E3 `prep_junction_edges` (cached buffered prep) was removed
+// in favour of `load_junction_edges`' inline streaming loop above. The
+// streaming path bounds peak RAM at chunk_size × cols × avg_string_len
+// regardless of the junction CSV's total size — critical for the
+// 10M+ row junction tables (e.g. SEC HOLDS at full-universe scale).
 
-struct PreppedJunction {
-    source_type: String,
-    edge_type: String,
-    source_fk: String,
-    target_type: String,
-    target_fk: String,
-    df: Result<DataFrame, String>,
-}
-
-fn prep_junction_edges(spec: &FlatSpec, root: &Path, cache: &CsvCache) -> Vec<PreppedJunction> {
-    let mut out = Vec::new();
-    for (edge_type, junc) in &spec.spec.connections.junction_edges {
-        // Use the shared cache so repeated junction CSVs only parse once.
-        let raw_rc = match cache.get(root, &junc.csv) {
-            Ok(r) => r,
-            Err(e) => {
-                out.push(PreppedJunction {
-                    source_type: spec.node_type.clone(),
-                    edge_type: edge_type.clone(),
-                    source_fk: junc.source_fk.clone(),
-                    target_type: junc.target.clone(),
-                    target_fk: junc.target_fk.clone(),
-                    df: Err(format!("junction {}: {}", edge_type, e)),
-                });
-                continue;
-            }
-        };
-        let raw: &RawCsv = raw_rc.as_ref();
-
-        let mut keep: Vec<String> = vec![junc.source_fk.clone(), junc.target_fk.clone()];
-        for p in &junc.properties {
-            if raw.col_index(p).is_some() && !keep.contains(p) {
-                keep.push(p.clone());
-            }
-        }
-        let mut declared: HashMap<String, String> = HashMap::new();
-        for (col, ty) in &junc.property_types {
-            if map_blueprint_type(ty).is_some() {
-                declared.insert(col.clone(), ty.clone());
-            }
-        }
-
-        out.push(PreppedJunction {
-            source_type: spec.node_type.clone(),
-            edge_type: edge_type.clone(),
-            source_fk: junc.source_fk.clone(),
-            target_type: junc.target.clone(),
-            target_fk: junc.target_fk.clone(),
-            df: typed_dataframe(raw, &keep, &declared),
-        });
-    }
-    out
+/// Junction-edge chunk size. ~100K rows × ~10 columns × ~20B avg
+/// string ≈ 20 MB peak per chunk, well under any reasonable RAM
+/// budget for the build host. Configurable via env var for
+/// performance experiments.
+fn junction_chunk_size() -> usize {
+    std::env::var("KGLITE_BLUEPRINT_JUNCTION_CHUNK_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000)
 }
 
 fn load_junction_edges(
     graph: &mut DirGraph,
     specs: &[&FlatSpec],
     root: &Path,
-    cache: &CsvCache,
+    _cache: &CsvCache,
     report: &mut BuildReport,
 ) -> Result<(), String> {
-    use rayon::prelude::*;
+    let chunk_size = junction_chunk_size();
+    let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
+    let t_total = std::time::Instant::now();
 
-    // Pre-ensure every junction CSV is in the cache so the parallel prep
-    // below doesn't race on disk. This also makes the cache the single
-    // source of truth (vs. previous implementation that re-read files).
-    let mut paths: Vec<String> = Vec::new();
-    for s in specs {
-        for (_, j) in &s.spec.connections.junction_edges {
-            paths.push(j.csv.clone());
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    parse_in_parallel(&paths, root, cache);
+    // E3: stream junction CSVs in chunks. For each (spec, junction edge):
+    //   open chunked iterator → per chunk: typed_dataframe + connect()
+    //   The OS page cache handles any repeat reads (none here — each
+    //   junction CSV is only read once).
+    // The legacy CsvCache + parse_in_parallel path is no longer used
+    // for junctions; node specs still rely on the cache.
+    for spec in specs {
+        for (edge_type, junc) in &spec.spec.connections.junction_edges {
+            let csv_path = root.join(&junc.csv);
 
-    // Parallel prep; serial consumer preserves blueprint insertion order.
-    let prepped: Vec<Vec<PreppedJunction>> = specs
-        .par_iter()
-        .map(|spec| prep_junction_edges(spec, root, cache))
-        .collect();
+            // Build the keep-columns list once per junction; we'll
+            // apply it to every chunk.
+            let mut keep: Vec<String> = vec![junc.source_fk.clone(), junc.target_fk.clone()];
+            for p in &junc.properties {
+                if !keep.contains(p) {
+                    keep.push(p.clone());
+                }
+            }
+            let mut declared: HashMap<String, String> = HashMap::new();
+            for (col, ty) in &junc.property_types {
+                if map_blueprint_type(ty).is_some() {
+                    declared.insert(col.clone(), ty.clone());
+                }
+            }
 
-    for group in prepped {
-        for pj in group {
-            let df = match pj.df {
-                Ok(df) => df,
+            let chunks = match read_csv_chunks(&csv_path, chunk_size) {
+                Ok(it) => it,
                 Err(e) => {
-                    report.errors.push(format!("[{}] {}", pj.source_type, e));
+                    report.errors.push(format!("junction {}: {}", edge_type, e));
                     continue;
                 }
             };
-            let count = connect(
-                graph,
-                df,
-                &pj.edge_type,
-                &pj.source_type,
-                &pj.source_fk,
-                &pj.target_type,
-                &pj.target_fk,
-                report,
-            )?;
-            *report
-                .edges_by_type
-                .entry(pj.edge_type.clone())
-                .or_insert(0) += count;
+
+            for chunk_result in chunks {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        report.errors.push(format!("junction {}: {}", edge_type, e));
+                        continue;
+                    }
+                };
+                // Only keep columns present in the chunk's headers.
+                let chunk_keep: Vec<String> = keep
+                    .iter()
+                    .filter(|p| chunk.col_index(p).is_some())
+                    .cloned()
+                    .collect();
+                if chunk_keep.is_empty() {
+                    continue;
+                }
+                let df = match typed_dataframe(&chunk, &chunk_keep, &declared) {
+                    Ok(df) => df,
+                    Err(e) => {
+                        report.errors.push(format!("junction {}: {}", edge_type, e));
+                        continue;
+                    }
+                };
+                let count = connect(
+                    graph,
+                    df,
+                    edge_type,
+                    &spec.node_type,
+                    &junc.source_fk,
+                    &junc.target,
+                    &junc.target_fk,
+                    report,
+                )?;
+                *report.edges_by_type.entry(edge_type.clone()).or_insert(0) += count;
+            }
         }
+    }
+
+    if profile {
+        eprintln!(
+            "    streaming junction edges total: {} ms (chunk_size={})",
+            t_total.elapsed().as_millis(),
+            chunk_size,
+        );
     }
     Ok(())
 }
