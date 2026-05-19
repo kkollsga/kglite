@@ -33,7 +33,7 @@ pub struct BuildReport {
 
 pub fn build(
     graph: &mut DirGraph,
-    blueprint: Blueprint,
+    mut blueprint: Blueprint,
     blueprint_dir: &Path,
 ) -> Result<BuildReport, String> {
     // 0.9.47 K2: validate the compute pipeline before any phase
@@ -54,6 +54,14 @@ pub fn build(
             }
         })
         .unwrap_or_else(|| blueprint_dir.to_path_buf());
+
+    // 0.9.47 K3+: run compute primitives as a CSV-shaping pre-phase.
+    // Each op reads its source CSV, applies the primitive, writes
+    // output to `<root>/computed/*.csv`, and mutates the blueprint
+    // to point subsequent phases at the new files. The 5-phase load
+    // below consumes the augmented blueprint as if compute didn't
+    // exist.
+    super::compute::apply_compute(&mut blueprint, &root)?;
 
     let mut report = BuildReport {
         nodes_by_type: BTreeMap::new(),

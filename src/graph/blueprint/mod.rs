@@ -2,6 +2,7 @@
 //! user-facing spec. PyO3 entry is in `src/graph/pyapi/blueprint.rs`.
 
 pub mod build;
+pub mod compute;
 pub mod csv_loader;
 pub mod csv_stream;
 pub mod expr;
