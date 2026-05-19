@@ -21,6 +21,7 @@ use std::path::Path;
 
 use super::schema::{Blueprint, ComputeOp};
 
+pub mod calendar;
 pub mod chain;
 pub mod derive;
 pub mod filter;
@@ -68,7 +69,27 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             order_by,
             edge,
         } => chain::run_chain(blueprint, input_root, from, group_by, order_by, edge),
-        ComputeOp::Calendar { .. } => Err("calendar: not yet implemented (K5)".to_string()),
+        ComputeOp::Calendar {
+            node_type,
+            start,
+            end,
+            next_edge,
+            in_month_edge,
+            in_quarter_edge,
+            in_year_edge,
+            links,
+        } => calendar::run_calendar(
+            blueprint,
+            input_root,
+            node_type,
+            start,
+            end,
+            next_edge,
+            in_month_edge.as_deref(),
+            in_quarter_edge.as_deref(),
+            in_year_edge.as_deref(),
+            links,
+        ),
         ComputeOp::Aggregate { .. } => Err("aggregate: not yet implemented (K6)".to_string()),
     }
 }
