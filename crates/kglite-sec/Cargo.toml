@@ -31,5 +31,9 @@ serde_json = "1"
 # CSV writer (output of extract step → blueprint input)
 csv = "1"
 
+# Streaming XML parser for Form 4 / 13F filings. Event-based — never
+# builds a DOM, so memory cost is bounded regardless of filing size.
+quick-xml = "0.36"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

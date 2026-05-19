@@ -148,6 +148,17 @@ class SEC:
         if verbose:
             print(f"[SEC]   extract: {extract_report}")
 
+        # Step 2b: insider transactions (Form 4 XMLs from raw/filings/).
+        # Always run — emits header-only CSVs when raw/filings/ is empty,
+        # which the blueprint then loads as zero Person/Transaction nodes.
+        # Form 4 fetcher wiring lands in a later phase; for now this
+        # consumes anything caller has pre-staged.
+        if verbose:
+            print("[SEC] extracting insider transactions (Form 4)")
+        insider_report = _sec_internal.extract_insider(str(workdir), force=force_rebuild)
+        if verbose:
+            print(f"[SEC]   insider: {insider_report}")
+
         # Step 3: build graph/{mode}/
         if verbose:
             print(f"[SEC] building graph/{mode}/")

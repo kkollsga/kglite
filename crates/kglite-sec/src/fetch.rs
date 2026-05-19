@@ -142,6 +142,35 @@ pub fn rate_limit_cost_seconds(range: YearRange) -> f64 {
     range.quarters().count() as f64 / RATE_LIMIT_PER_SEC as f64
 }
 
+/// Fetch a single Form 4 / 4/A XML payload by accession number into
+/// `raw/filings/{cik}/{accession_no_dashes}/form4.xml`.
+///
+/// SEC EDGAR has no bulk Form 4 dataset; each filing must be fetched
+/// individually. Caller drives the loop and respects the 10/s rate
+/// limit via the shared SecClient token bucket.
+pub async fn fetch_form4_filing(
+    client: &SecClient,
+    workdir: &Workdir,
+    issuer_cik: u64,
+    accession_dashed: &str,
+    primary_document: &str,
+) -> Result<bool> {
+    let accession_no_dashes = catalog::accession_no_dashes(accession_dashed);
+    let url = format!(
+        "{}{}",
+        catalog::filing_index_url(issuer_cik, &accession_no_dashes),
+        primary_document
+    );
+    let path = workdir
+        .raw_filings_dir()
+        .join(issuer_cik.to_string())
+        .join(&accession_no_dashes)
+        .join("form4.xml");
+    client
+        .fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

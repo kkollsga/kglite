@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PyO3 wrappers in `src/sec.rs`** — exposes the Rust loader as the
   `kglite._sec_internal` submodule. Single-threaded tokio runtime per
   call; Python callers see plain blocking functions.
+- **Phase 4 — Form 4 insider transactions** — `parsers/form4.rs`
+  streaming XML parser for Form 4 / 4/A (XSD schemaVersion X0508);
+  `extract_insider_transactions` walks `raw/filings/{cik}/{accession}/*.xml`
+  and emits `processed/{person,transaction,has_insider}.csv`. Schema
+  extended with `Person` node + `Transaction` sub-node + `HAS_INSIDER`
+  junction edge (Company → Person, with director/officer/10%-owner
+  flags) + `OF_PERSON` / `INVOLVES_ISSUER` / `REPORTED_IN_FILING`
+  fk_edges. `fetch_form4_filing` per-accession fetcher for the
+  rate-limited Form 4 ingest path. PyO3 surface gains `extract_insider`.
 
 ### Changed
 

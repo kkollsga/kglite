@@ -15,8 +15,8 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
-    extract_companies_and_filings, fetch_company_tickers, fetch_quarterly_master_idx,
-    fetch_submissions_bulk, SecClient, SecError, Workdir, YearRange,
+    extract_companies_and_filings, extract_insider_transactions, fetch_company_tickers,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, SecClient, SecError, Workdir, YearRange,
 };
 use std::path::PathBuf;
 
@@ -119,6 +119,22 @@ fn extract_processed(
     Ok(d.into())
 }
 
+/// Extract `processed/{person,transaction,has_insider}.csv` by walking
+/// `raw/filings/` and parsing every Form 4 XML found. Idempotent.
+#[pyfunction]
+#[pyo3(signature = (workdir, *, force=false))]
+fn extract_insider(py: Python<'_>, workdir: PathBuf, force: bool) -> PyResult<Py<PyDict>> {
+    let wd = Workdir::new(workdir);
+    let report = extract_insider_transactions(&wd, force).map_err(map_err)?;
+    let d = PyDict::new(py);
+    d.set_item("people_written", report.people_written)?;
+    d.set_item("transactions_written", report.transactions_written)?;
+    d.set_item("has_insider_rows", report.has_insider_rows)?;
+    d.set_item("form4_files_read", report.form4_files_read)?;
+    d.set_item("form4_parse_errors", report.form4_parse_errors)?;
+    Ok(d.into())
+}
+
 /// Path to the workdir's expected blueprint output dir for the given
 /// mode. Pure path arithmetic — does not touch the filesystem. Used by
 /// the Python wrapper to find where to write/load the .kgl.
@@ -147,6 +163,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "_sec_internal")?;
     m.add_function(wrap_pyfunction!(fetch_raw, &m)?)?;
     m.add_function(wrap_pyfunction!(extract_processed, &m)?)?;
+    m.add_function(wrap_pyfunction!(extract_insider, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
     parent.add_submodule(&m)?;

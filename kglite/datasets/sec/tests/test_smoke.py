@@ -115,9 +115,18 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
     assert report["filings_from_submissions"] == 3  # Apple x2, MSFT x1
     assert report["filings_from_master_idx"] == 1  # the Nicholas Financial
 
+    # Extract insider transactions — emits header-only CSVs when
+    # raw/filings/ is empty, which is the right "no Form 4 data" state.
+    insider = _sec_internal.extract_insider(str(synth_workdir), force=False)
+    assert insider["form4_files_read"] == 0
+    assert insider["people_written"] == 0
+
     # Verify processed/ CSVs exist
     assert (synth_workdir / "processed" / "company.csv").is_file()
     assert (synth_workdir / "processed" / "filing.csv").is_file()
+    assert (synth_workdir / "processed" / "person.csv").is_file()
+    assert (synth_workdir / "processed" / "transaction.csv").is_file()
+    assert (synth_workdir / "processed" / "has_insider.csv").is_file()
 
     # Build the graph from the blueprint
     bp = _blueprint_with_root(_load_blueprint(), synth_workdir)
@@ -158,6 +167,99 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
     )
     assert len(res) == 1
     assert res[0]["acc"] == "0000320193-24-000123"
+
+
+def test_insider_extract_builds_person_and_transaction_nodes(
+    synth_workdir: Path,
+) -> None:
+    """Stage a Form 4 XML under raw/filings/ and verify the build
+    produces Person + Transaction sub-nodes + HAS_INSIDER + INVOLVES_ISSUER."""
+    # Stage a Form 4 XML in the expected layout
+    form4_dir = synth_workdir / "raw" / "filings" / "320193" / "000121415624000005"
+    form4_dir.mkdir(parents=True, exist_ok=True)
+    (form4_dir / "form4.xml").write_text(
+        """<?xml version="1.0"?>
+<ownershipDocument>
+    <periodOfReport>2024-10-29</periodOfReport>
+    <issuer>
+        <issuerCik>0000320193</issuerCik>
+        <issuerName>Apple Inc.</issuerName>
+        <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0001214156</rptOwnerCik>
+            <rptOwnerName>COOK TIMOTHY D</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isOfficer>1</isOfficer>
+            <officerTitle>CEO</officerTitle>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle><value>Common Stock</value></securityTitle>
+            <transactionDate><value>2024-10-15</value></transactionDate>
+            <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+            <transactionAmounts>
+                <transactionShares><value>100000</value></transactionShares>
+                <transactionPricePerShare><value>225.50</value></transactionPricePerShare>
+                <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction><value>3000000</value></sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+            <ownershipNature>
+                <directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>
+            </ownershipNature>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+</ownershipDocument>"""
+    )
+    # And pre-populate company_tickers.json so SEC.open() doesn't try to fetch.
+    (synth_workdir / "raw" / "company_tickers.json").write_text("{}")
+
+    from kglite.datasets.sec import SEC
+
+    g = SEC.open(
+        synth_workdir,
+        years=5,
+        detailed=2,
+        mode="memory",
+        user_agent="KGLite Smoke Test test@example.com",
+        verbose=False,
+    )
+
+    res = _rows(g.cypher("MATCH (p:Person) RETURN p.display_name AS name"))
+    assert len(res) == 1
+    assert res[0]["name"] == "COOK TIMOTHY D"
+
+    res = _rows(
+        g.cypher(
+            "MATCH (p:Person)<-[:OF_PERSON]-(t:Transaction) "
+            "WHERE t.transaction_code = 'S' "
+            "RETURN t.shares AS sh, t.price_per_share AS px"
+        )
+    )
+    assert len(res) == 1
+    assert res[0]["sh"] == 100000.0
+    assert res[0]["px"] == 225.50
+
+    # HAS_INSIDER junction edge: Apple → Cook with officer flags
+    res = _rows(
+        g.cypher(
+            "MATCH (c:Company {cik: 320193})-[h:HAS_INSIDER]->(p:Person) "
+            "RETURN p.display_name AS name, h.officer_title AS title"
+        )
+    )
+    assert len(res) == 1
+    assert res[0]["name"] == "COOK TIMOTHY D"
+    assert res[0]["title"] == "CEO"
+
+    # Transaction → Company (issuer) via INVOLVES_ISSUER
+    res = _rows(g.cypher("MATCH (t:Transaction)-[:INVOLVES_ISSUER]->(c:Company) RETURN c.name AS issuer"))
+    assert len(res) == 1
+    assert res[0]["issuer"] == "Apple Inc."
 
 
 def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(

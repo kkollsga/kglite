@@ -14,6 +14,23 @@
         "exchanges": "string",
         "entity_type": "string",
         "former_names": "string"
+      },
+      "connections": {
+        "junction_edges": {
+          "HAS_INSIDER": {
+            "csv": "processed/has_insider.csv",
+            "source_fk": "issuer_cik",
+            "target": "Person",
+            "target_fk": "person_nid",
+            "properties": [
+              "is_director",
+              "is_officer",
+              "is_ten_percent_owner",
+              "is_other",
+              "officer_title"
+            ]
+          }
+        }
       }
     },
     "Filing": {
@@ -31,6 +48,49 @@
           "FILED_BY": {
             "target": "Company",
             "fk": "cik"
+          }
+        }
+      }
+    },
+    "Person": {
+      "csv": "processed/person.csv",
+      "pk": "person_nid",
+      "title": "display_name",
+      "properties": {
+        "display_name": "string"
+      },
+      "sub_nodes": {
+        "Transaction": {
+          "csv": "processed/transaction.csv",
+          "pk": "transaction_nid",
+          "title": "transaction_code",
+          "parent_fk": "person_nid",
+          "properties": {
+            "security_title": "string",
+            "transaction_date": "date",
+            "transaction_code": "string",
+            "shares": "float",
+            "price_per_share": "float",
+            "acquired_disposed": "string",
+            "shares_owned_after": "float",
+            "direct_indirect": "string",
+            "is_derivative": "int"
+          },
+          "connections": {
+            "fk_edges": {
+              "OF_PERSON": {
+                "target": "Person",
+                "fk": "person_nid"
+              },
+              "INVOLVES_ISSUER": {
+                "target": "Company",
+                "fk": "issuer_cik"
+              },
+              "REPORTED_IN_FILING": {
+                "target": "Filing",
+                "fk": "accession_number"
+              }
+            }
           }
         }
       }
