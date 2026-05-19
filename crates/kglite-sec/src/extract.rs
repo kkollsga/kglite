@@ -8,7 +8,7 @@
 //! Phase 3 produces two CSVs: `company.csv` and `filing.csv`. Later
 //! phases add `person.csv`, `transaction.csv`, `holds.csv`, etc.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -966,36 +966,148 @@ pub struct DirectorsExtractReport {
     pub def14a_parse_errors: usize,
 }
 
-const DIRECTOR_HEADER: &[&str] = &["director_nid", "company_cik", "name", "age", "since_year"];
+const SERVES_ON_BOARD_HEADER: &[&str] = &[
+    "person_nid",
+    "company_cik",
+    "age",
+    "since_year",
+    "accession_number",
+];
 
-/// Walk `raw/filings/{cik}/{accession}/` for DEF 14A HTML and extract
-/// directors via the heuristic parser. Emits
-/// `processed/director.csv`. director_nid is composite
-/// `{company_cik}_{name_normalized}` so the same person at different
-/// companies generates separate rows.
+/// Deterministic negative-int person_nid for a DEF 14A director that
+/// didn't match any Form 4 reporter. Form 4 reporters use their
+/// (positive) CIK as person_nid; reserving the negative space here
+/// guarantees `person.csv`'s `person_nid` column infers as Int64
+/// even with mixed-source rows. Without this, the column would
+/// mix int and string values, downgrade to String at type inference
+/// time, and break FK lookups from `has_insider.csv` (whose
+/// person_nid column auto-infers as Int64 from the bare CIKs).
+fn synthesise_director_person_nid(normalized_name: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    normalized_name.hash(&mut hasher);
+    // Truncate to i63 range so negation stays valid, then negate.
+    let h = (hasher.finish() & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+    (-h).to_string()
+}
+
+/// Token-sorted, suffix-stripped lowercased person-name normalization.
+/// Designed to match Form 4 "COOK TIMOTHY D" with DEF 14A
+/// "Timothy D. Cook" — common-name + middle-initial alignment without
+/// fuzzy matching. False negatives (missed merges) are expected;
+/// false positives (collapsing different people) are NOT — this is
+/// why we strip only the obvious generational suffixes ("Jr",
+/// "Sr", etc.) and keep middle initials in.
+pub(crate) fn normalize_person_name(name: &str) -> String {
+    const SUFFIXES: &[&str] = &["jr", "sr", "ii", "iii", "iv", "v"];
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let mut tokens: Vec<&str> = cleaned
+        .split_whitespace()
+        .filter(|t| !SUFFIXES.contains(t))
+        .collect();
+    tokens.sort_unstable();
+    tokens.join(" ")
+}
+
+/// Reads `processed/person.csv` into a `normalized_name → person_nid`
+/// lookup. Used by `extract_directors` to merge DEF 14A directors
+/// with existing Form 4 reporters where the names align. Returns an
+/// empty map if person.csv doesn't exist yet (e.g. extract_insider
+/// hasn't run).
+fn build_person_name_index(person_csv: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(content) = std::fs::read_to_string(person_csv) else {
+        return map;
+    };
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(content.as_bytes());
+    for result in reader.records() {
+        let Ok(rec) = result else { continue };
+        // Header order: person_nid, display_name, cik
+        let Some(nid) = rec.get(0) else { continue };
+        let Some(name) = rec.get(1) else { continue };
+        let normalized = normalize_person_name(name);
+        if normalized.is_empty() {
+            continue;
+        }
+        // First-write wins (Form 4 reporters land before DEF 14A names).
+        map.entry(normalized).or_insert_with(|| nid.to_string());
+    }
+    map
+}
+
+/// Walk `raw/filings/{cik}/{accession}/` for DEF 14A HTML and emit
+/// `processed/serves_on_board.csv` rows linking Person to Company.
+/// Directors that don't match an existing Person (Form 4 reporter)
+/// are appended to `processed/person.csv` with a synthetic nid.
+///
+/// 0.9.46 J3 — replaces the prior `Director` node type. The Person
+/// node now subsumes both Form 4 insiders and DEF 14A directors,
+/// enabling cross-issuer interlock queries via a single MATCH on
+/// `(p:Person)`. `age` and `since_year` move to the
+/// `SERVES_ON_BOARD` edge (per-filing time-of-filing facts, not
+/// per-Person facts — a director's age changes every year).
 pub fn extract_directors(
     workdir: &Workdir,
     slice: &SliceSpec,
     force: bool,
 ) -> Result<DirectorsExtractReport> {
     workdir.ensure_dirs(None)?;
-    let director_csv = workdir.processed_csv("director");
+    let person_csv = workdir.processed_csv("person");
+    let serves_csv = workdir.processed_csv("serves_on_board");
 
     let mut report = DirectorsExtractReport::default();
-    if !force && director_csv.is_file() {
+    if !force && serves_csv.is_file() {
         return Ok(report);
     }
 
-    let mut writer = csv_writer(&director_csv)?;
-    writer.write_record(DIRECTOR_HEADER)?;
+    // Index existing Form 4 reporters by normalized name so we can
+    // reuse their person_nid when a DEF 14A director matches.
+    let mut person_index = build_person_name_index(&person_csv);
+
+    // serves_on_board.csv — one row per (person, company, accession).
+    let mut serves_w = csv_writer(&serves_csv)?;
+    serves_w.write_record(SERVES_ON_BOARD_HEADER)?;
+
+    // person.csv: append-only mode for DEF 14A-only directors.
+    // We open it with a *plain* writer (no header), since
+    // extract_insider already wrote the header.
+    let person_writer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&person_csv)?;
+    let mut person_appender = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(person_writer);
+    // If person.csv didn't exist before extract_directors runs (e.g.
+    // when extract_insider is skipped), write the header now.
+    if person_index.is_empty() && std::fs::metadata(&person_csv).map(|m| m.len()).unwrap_or(0) == 0
+    {
+        person_appender.write_record(PERSON_HEADER)?;
+    }
 
     let filings_root = workdir.raw_filings_dir();
     if !filings_root.is_dir() {
-        writer.flush()?;
+        serves_w.flush()?;
+        person_appender.flush()?;
         return Ok(report);
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
+    // De-dup within this run by (person_nid, company_cik) so the same
+    // director listed in multiple DEF 14A filings for the same
+    // company emits one edge.
+    let mut seen_edge: HashSet<(String, String)> = HashSet::new();
 
     for path in walk_def14a_files(&filings_root)? {
         let Some(cik_str) = cik_from_filing_path(&path) else {
@@ -1005,6 +1117,12 @@ pub fn extract_directors(
         if !slice.cik_matches(cik_int) {
             continue;
         }
+        let accession = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(_) => {
@@ -1018,22 +1136,49 @@ pub fn extract_directors(
         }
         report.def14a_files_read += 1;
         for d in directors {
-            let nid = format!("{}_{}", cik_str, normalize_subsidiary_name(&d.name));
-            if !seen.insert(nid.clone()) {
+            let normalized = normalize_person_name(&d.name);
+            if normalized.is_empty() {
                 continue;
             }
-            writer.write_record([
-                nid.as_str(),
+            // Match-or-create the Person.
+            let person_nid = match person_index.get(&normalized) {
+                Some(nid) => nid.clone(),
+                None => {
+                    // Synthesise a DEF 14A-derived nid as a negative
+                    // int (hashed from the normalized name). Form 4
+                    // reporter person_nids are positive CIK ints; the
+                    // negative-int space is reserved for DEF 14A
+                    // directors so person.csv's person_nid column
+                    // auto-infers as Int64 (no string/int type mix
+                    // that would break FK lookups on has_insider).
+                    let synth = synthesise_director_person_nid(&normalized);
+                    // Append a new Person row.
+                    person_appender.write_record([
+                        synth.as_str(),
+                        d.name.as_str(),
+                        "", // No CIK for DEF 14A-only directors.
+                    ])?;
+                    person_index.insert(normalized.clone(), synth.clone());
+                    synth
+                }
+            };
+            let edge_key = (person_nid.clone(), cik_str.clone());
+            if !seen_edge.insert(edge_key) {
+                continue;
+            }
+            serves_w.write_record([
+                person_nid.as_str(),
                 cik_str.as_str(),
-                d.name.as_str(),
                 &d.age.map(|a| a.to_string()).unwrap_or_default(),
                 &d.since_year.map(|y| y.to_string()).unwrap_or_default(),
+                accession.as_str(),
             ])?;
             report.directors_written += 1;
         }
     }
 
-    writer.flush()?;
+    serves_w.flush()?;
+    person_appender.flush()?;
     Ok(report)
 }
 

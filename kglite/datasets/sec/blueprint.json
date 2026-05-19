@@ -86,24 +86,6 @@
         }
       }
     },
-    "Director": {
-      "csv": "processed/director.csv",
-      "pk": "director_nid",
-      "title": "name",
-      "properties": {
-        "name": "string",
-        "age": "int",
-        "since_year": "int"
-      },
-      "connections": {
-        "fk_edges": {
-          "SERVES_ON_BOARD": {
-            "target": "Company",
-            "fk": "company_cik"
-          }
-        }
-      }
-    },
     "Stake": {
       "csv": "processed/stake.csv",
       "pk": "stake_nid",
@@ -185,6 +167,22 @@
       "title": "display_name",
       "properties": {
         "display_name": "string"
+      },
+      "connections": {
+        "junction_edges": {
+          "SERVES_ON_BOARD": {
+            "csv": "processed/serves_on_board.csv",
+            "source_fk": "person_nid",
+            "target": "Company",
+            "target_fk": "company_cik",
+            "properties": ["age", "since_year", "accession_number"],
+            "property_types": {
+              "age": "int",
+              "since_year": "int",
+              "accession_number": "string"
+            }
+          }
+        }
       },
       "sub_nodes": {
         "Transaction": {

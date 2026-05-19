@@ -255,10 +255,11 @@ def test_uc15_activist_targets(deep_graph: Any) -> None:
 
 
 def test_uc16_board_directors_count(deep_graph: Any) -> None:
-    """UC16: Board composition — how many directors per company."""
+    """UC16: Board composition — how many board members per company.
+    0.9.46 J3: SERVES_ON_BOARD now targets Person (not Director)."""
     t = _time(
         lambda: _rows(
-            deep_graph.cypher("MATCH (c:Company {cik: 320193})<-[:SERVES_ON_BOARD]-(d:Director) RETURN count(d) AS n")
+            deep_graph.cypher("MATCH (c:Company {cik: 320193})<-[:SERVES_ON_BOARD]-(p:Person) RETURN count(p) AS n")
         )
     )
     assert t["result"][0]["n"] >= 2

@@ -379,8 +379,10 @@ def test_full_SEC_open_pipeline_skips_fetch_with_existing_raw(
 def test_uc_d9_board_director_extraction(synth_workdir: Path) -> None:
     """User story (D9): As a corporate-governance analyst, I want to
     find all directors on a company's board. I stage a synthetic DEF
-    14A with two directors; the build creates Director nodes linked
-    via SERVES_ON_BOARD to the company."""
+    14A with two directors; the build adds Person nodes linked to
+    the company via SERVES_ON_BOARD (no separate Director type;
+    Person subsumes both Form 4 insiders and DEF 14A directors —
+    0.9.46 J3)."""
     dir_ = synth_workdir / "raw" / "filings" / "320193" / "000032019324007777"
     dir_.mkdir(parents=True, exist_ok=True)
     (dir_ / "aapl-def14a.htm").write_text(
@@ -402,8 +404,8 @@ def test_uc_d9_board_director_extraction(synth_workdir: Path) -> None:
         verbose=False,
     )
 
-    res = _rows(g.cypher("MATCH (c:Company {cik: 320193})<-[:SERVES_ON_BOARD]-(d:Director) RETURN count(d) AS n"))
-    assert res[0]["n"] >= 2, f"expected 2+ Apple directors, got {res}"
+    res = _rows(g.cypher("MATCH (c:Company {cik: 320193})<-[:SERVES_ON_BOARD]-(p:Person) RETURN count(p) AS n"))
+    assert res[0]["n"] >= 2, f"expected 2+ Apple board members on Person, got {res}"
 
 
 # ── D8 user story ────────────────────────────────────────────────────
