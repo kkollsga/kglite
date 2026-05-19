@@ -54,12 +54,24 @@ Python pre-scripts or post-build Cypher passes.
   reused String buffer for the group key (one allocation per *new*
   group, not per row). 100K rows / 1K groups / 6 aggregates runs in
   68.7 ms end-to-end (full blueprint load including Phase 1-5).
+- **Sub-node resolution** — compute primitives target both top-level
+  types and sub-nodes (e.g. SEC's `Transaction` at
+  `nodes.Person.sub_nodes.Transaction`). The resolver walks
+  `blueprint.nodes` first, then each parent's `sub_nodes`.
 - **SEC blueprint showcase**: the dataset's packaged blueprint
   ships with a `compute:` block exercising all five primitives —
-  `derive` (filing_year, form-type flags on Filing), `filter`
-  (AnnualRevenue from MetricFact), `chain` (NEXT_FILING per
-  company), `calendar` (2020-2030 + ON_FILED_DATE link to Filing),
-  and `aggregate` (FilingYear summary with FILINGS_BY edges).
+  `derive` (filing_year, form-type flags on Filing; total_value,
+  is_buy, is_sell on Transaction), `filter` (AnnualRevenue from
+  MetricFact), `chain` (NEXT_FILING per company; NEXT_TX per
+  person+issuer), `calendar` (2020-2030 + ON_FILED_DATE and
+  ON_TX_DATE links), and `aggregate` (FilingYear summary with
+  FILINGS_BY; Position summary with current_shares=last(...,
+  by=transaction_date), total_buy/sell_value, n_transactions, +
+  POSITION_OF and AT_COMPANY edges). The Position node makes
+  holdings-over-time queries first-class: `MATCH (p:Person)-
+  [:POSITION_OF]-(pos:Position)-[:AT_COMPANY]-(c:Company) RETURN
+  pos.current_shares`, or walk the NEXT_TX chain for the full
+  transaction timeline per person+issuer.
 
 ### SEC EDGAR value-proposition upgrade (J0–J7)
 

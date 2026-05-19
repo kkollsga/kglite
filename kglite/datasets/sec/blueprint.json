@@ -29,7 +29,8 @@
       "end": "2030-12-31",
       "next_edge": "NEXT_DAY",
       "links": [
-        {"from": "Filing", "date_col": "filed_date", "edge": "ON_FILED_DATE"}
+        {"from": "Filing",      "date_col": "filed_date",        "edge": "ON_FILED_DATE"},
+        {"from": "Transaction", "date_col": "transaction_date",  "edge": "ON_TX_DATE"}
       ]
     },
     {
@@ -45,6 +46,40 @@
       },
       "edges": [
         {"to": "Company", "fk": "cik", "edge": "FILINGS_BY"}
+      ]
+    },
+    {
+      "op": "derive",
+      "from": "Transaction",
+      "set": {
+        "total_value": "shares * price_per_share",
+        "is_buy":      "transaction_code in ['P', 'A']",
+        "is_sell":     "transaction_code in ['S', 'D']"
+      }
+    },
+    {
+      "op": "chain",
+      "from": "Transaction",
+      "group_by": ["person_nid", "issuer_cik"],
+      "order_by": "transaction_date",
+      "edge": "NEXT_TX"
+    },
+    {
+      "op": "aggregate",
+      "from": "Transaction",
+      "group_by": ["person_nid", "issuer_cik"],
+      "into": "Position",
+      "agg": {
+        "n_transactions":  "count(*)",
+        "first_tx_date":   "min(transaction_date)",
+        "last_tx_date":    "max(transaction_date)",
+        "current_shares":  "last(shares_owned_after, by=transaction_date)",
+        "total_buy_value": "sum(if(is_buy,  total_value, 0))",
+        "total_sell_value":"sum(if(is_sell, total_value, 0))"
+      },
+      "edges": [
+        {"to": "Person",  "fk": "person_nid", "edge": "POSITION_OF"},
+        {"to": "Company", "fk": "issuer_cik", "edge": "AT_COMPANY"}
       ]
     }
   ],
