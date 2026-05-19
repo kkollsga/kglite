@@ -310,15 +310,19 @@ const TRANSACTION_HEADER: &[&str] = &[
     "direct_indirect",
     "is_derivative",
 ];
-const HAS_INSIDER_HEADER: &[&str] = &[
+// 0.9.46 J4: HAS_INSIDER replaced by three typed edges. Each
+// fires when its respective Form 4 reportingOwnerRelationship flag
+// is true. `is_other` (a rare catch-all) is folded into
+// is_beneficial_owner_of as the most natural bucket — losing the
+// distinction is preferable to a fourth low-signal edge type.
+const IS_DIRECTOR_OF_HEADER: &[&str] = &["issuer_cik", "person_nid", "accession_number"];
+const IS_OFFICER_OF_HEADER: &[&str] = &[
     "issuer_cik",
     "person_nid",
-    "is_director",
-    "is_officer",
-    "is_ten_percent_owner",
-    "is_other",
     "officer_title",
+    "accession_number",
 ];
+const IS_BENEFICIAL_OWNER_OF_HEADER: &[&str] = &["issuer_cik", "person_nid", "accession_number"];
 
 /// Walk `raw/filings/` for Form 4 XML files and emit
 /// `processed/{person,transaction,has_insider}.csv`.
@@ -345,10 +349,18 @@ pub fn extract_insider_transactions(
     let filings_root = workdir.raw_filings_dir();
     let person_csv = workdir.processed_csv("person");
     let transaction_csv = workdir.processed_csv("transaction");
-    let has_insider_csv = workdir.processed_csv("has_insider");
+    let is_director_of_csv = workdir.processed_csv("is_director_of");
+    let is_officer_of_csv = workdir.processed_csv("is_officer_of");
+    let is_beneficial_owner_of_csv = workdir.processed_csv("is_beneficial_owner_of");
 
     let mut report = InsiderExtractReport::default();
-    if !force && person_csv.is_file() && transaction_csv.is_file() && has_insider_csv.is_file() {
+    if !force
+        && person_csv.is_file()
+        && transaction_csv.is_file()
+        && is_director_of_csv.is_file()
+        && is_officer_of_csv.is_file()
+        && is_beneficial_owner_of_csv.is_file()
+    {
         return Ok(report);
     }
 
@@ -359,19 +371,28 @@ pub fn extract_insider_transactions(
     person_w.write_record(PERSON_HEADER)?;
     let mut txn_w = csv_writer(&transaction_csv)?;
     txn_w.write_record(TRANSACTION_HEADER)?;
-    let mut has_w = csv_writer(&has_insider_csv)?;
-    has_w.write_record(HAS_INSIDER_HEADER)?;
+    let mut director_of_w = csv_writer(&is_director_of_csv)?;
+    director_of_w.write_record(IS_DIRECTOR_OF_HEADER)?;
+    let mut officer_of_w = csv_writer(&is_officer_of_csv)?;
+    officer_of_w.write_record(IS_OFFICER_OF_HEADER)?;
+    let mut owner_of_w = csv_writer(&is_beneficial_owner_of_csv)?;
+    owner_of_w.write_record(IS_BENEFICIAL_OWNER_OF_HEADER)?;
 
     if !filings_root.is_dir() {
         // No raw filings yet — emit empty CSVs and return.
         person_w.flush()?;
         txn_w.flush()?;
-        has_w.flush()?;
+        director_of_w.flush()?;
+        officer_of_w.flush()?;
+        owner_of_w.flush()?;
         return Ok(report);
     }
 
     let mut seen_persons: HashSet<String> = HashSet::new();
-    let mut seen_has_insider: HashSet<(String, String)> = HashSet::new();
+    // Per-edge dedup: same (issuer, person) at most once per role.
+    let mut seen_director: HashSet<(String, String)> = HashSet::new();
+    let mut seen_officer: HashSet<(String, String)> = HashSet::new();
+    let mut seen_owner: HashSet<(String, String)> = HashSet::new();
 
     for xml_path in walk_form4_xml(&filings_root)? {
         let file = match File::open(&xml_path) {
@@ -412,15 +433,28 @@ pub fn extract_insider_transactions(
         }
 
         let pair = (f4.issuer_cik.clone(), f4.reporter_cik.clone());
-        if seen_has_insider.insert(pair.clone()) {
-            has_w.write_record([
+        if f4.is_director && seen_director.insert(pair.clone()) {
+            director_of_w.write_record([
                 f4.issuer_cik.as_str(),
                 f4.reporter_cik.as_str(),
-                bool_str(f4.is_director),
-                bool_str(f4.is_officer),
-                bool_str(f4.is_ten_percent_owner),
-                bool_str(f4.is_other),
+                accession.as_str(),
+            ])?;
+            report.has_insider_rows += 1;
+        }
+        if f4.is_officer && seen_officer.insert(pair.clone()) {
+            officer_of_w.write_record([
+                f4.issuer_cik.as_str(),
+                f4.reporter_cik.as_str(),
                 f4.officer_title.as_str(),
+                accession.as_str(),
+            ])?;
+            report.has_insider_rows += 1;
+        }
+        if (f4.is_ten_percent_owner || f4.is_other) && seen_owner.insert(pair) {
+            owner_of_w.write_record([
+                f4.issuer_cik.as_str(),
+                f4.reporter_cik.as_str(),
+                accession.as_str(),
             ])?;
             report.has_insider_rows += 1;
         }
@@ -448,7 +482,9 @@ pub fn extract_insider_transactions(
 
     person_w.flush()?;
     txn_w.flush()?;
-    has_w.flush()?;
+    director_of_w.flush()?;
+    officer_of_w.flush()?;
+    owner_of_w.flush()?;
     Ok(report)
 }
 

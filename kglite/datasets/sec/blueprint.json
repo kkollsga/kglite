@@ -17,18 +17,26 @@
       },
       "connections": {
         "junction_edges": {
-          "HAS_INSIDER": {
-            "csv": "processed/has_insider.csv",
+          "IS_DIRECTOR_OF": {
+            "csv": "processed/is_director_of.csv",
             "source_fk": "issuer_cik",
             "target": "Person",
             "target_fk": "person_nid",
-            "properties": [
-              "is_director",
-              "is_officer",
-              "is_ten_percent_owner",
-              "is_other",
-              "officer_title"
-            ]
+            "properties": ["accession_number"]
+          },
+          "IS_OFFICER_OF": {
+            "csv": "processed/is_officer_of.csv",
+            "source_fk": "issuer_cik",
+            "target": "Person",
+            "target_fk": "person_nid",
+            "properties": ["officer_title", "accession_number"]
+          },
+          "IS_BENEFICIAL_OWNER_OF": {
+            "csv": "processed/is_beneficial_owner_of.csv",
+            "source_fk": "issuer_cik",
+            "target": "Person",
+            "target_fk": "person_nid",
+            "properties": ["accession_number"]
           }
         }
       }

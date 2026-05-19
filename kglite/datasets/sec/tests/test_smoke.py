@@ -131,7 +131,10 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
     assert (synth_workdir / "processed" / "filing.csv").is_file()
     assert (synth_workdir / "processed" / "person.csv").is_file()
     assert (synth_workdir / "processed" / "transaction.csv").is_file()
-    assert (synth_workdir / "processed" / "has_insider.csv").is_file()
+    # J4: HAS_INSIDER replaced by 3 typed edge CSVs.
+    assert (synth_workdir / "processed" / "is_director_of.csv").is_file()
+    assert (synth_workdir / "processed" / "is_officer_of.csv").is_file()
+    assert (synth_workdir / "processed" / "is_beneficial_owner_of.csv").is_file()
     assert (synth_workdir / "processed" / "institutional_manager.csv").is_file()
     assert (synth_workdir / "processed" / "security.csv").is_file()
     assert (synth_workdir / "processed" / "holds.csv").is_file()
@@ -253,10 +256,10 @@ def test_insider_extract_builds_person_and_transaction_nodes(
     assert res[0]["sh"] == 100000.0
     assert res[0]["px"] == 225.50
 
-    # HAS_INSIDER junction edge: Apple → Cook with officer flags
+    # J4: typed insider edges (Apple → Cook via IS_OFFICER_OF, with title).
     res = _rows(
         g.cypher(
-            "MATCH (c:Company {cik: 320193})-[h:HAS_INSIDER]->(p:Person) "
+            "MATCH (c:Company {cik: 320193})-[h:IS_OFFICER_OF]->(p:Person) "
             "RETURN p.display_name AS name, h.officer_title AS title"
         )
     )

@@ -307,7 +307,7 @@ def test_uc20_cross_signal_apple(deep_graph: Any) -> None:
         lambda: _rows(
             deep_graph.cypher(
                 "MATCH (c:Company {cik: 320193}) "
-                "OPTIONAL MATCH (c)-[:HAS_INSIDER]->(p:Person) "
+                "OPTIONAL MATCH (c)-[:IS_OFFICER_OF|IS_DIRECTOR_OF|IS_BENEFICIAL_OWNER_OF]->(p:Person) "
                 "OPTIONAL MATCH (c)<-[:FILED_BY]-(f:Filing)<-[:REPORTED_IN_FILING]-(m:MetricFact) "
                 "OPTIONAL MATCH (c)<-[:OF_COMPANY]-(s:Subsidiary) "
                 "RETURN c.name AS name, count(DISTINCT p) AS insiders, "
