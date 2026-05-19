@@ -57,6 +57,7 @@
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::collections::HashMap;
 use std::io::BufRead;
 
 use crate::error::{Result, SecError};
@@ -113,6 +114,18 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
     // when </nonDerivativeTransaction> or </derivativeTransaction> closes.
     let mut current_txn: Option<InsiderTransaction> = None;
 
+    // Footnote machinery (SEC Rule 16a-3(g)(1) weighted-average price
+    // disclosures). Each footnote has an id + text body; transactions
+    // can reference footnotes from `<transactionPricePerShare>` via a
+    // sibling `<footnoteId id="Fn"/>`. Footnote text frequently
+    // appears AFTER the transactions it references, so we collect both
+    // and post-process at end-of-document.
+    let mut footnotes: HashMap<String, String> = HashMap::new();
+    let mut current_footnote_id: Option<String> = None;
+    // (transaction_index, footnote_id) recorded as footnoteId tags are
+    // encountered inside transactionPricePerShare blocks.
+    let mut pending_price_fixes: Vec<(usize, String)> = Vec::new();
+
     let mut buf = Vec::new();
     loop {
         match xml.read_event_into(&mut buf) {
@@ -135,7 +148,28 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                             ..Default::default()
                         });
                     }
+                    "footnote" => {
+                        if let Some(id) = attr_id(&e) {
+                            current_footnote_id = Some(id);
+                        }
+                    }
                     _ => {}
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                // Self-closing tags. Only `<footnoteId id="Fn"/>`
+                // matters here — it references a footnote whose text
+                // appears elsewhere in the document.
+                let name = std::str::from_utf8(e.name().as_ref())
+                    .map_err(|err| SecError::Decode(format!("Form 4 empty tag: {err}")))?
+                    .to_string();
+                if name == "footnoteId" && path.last().map(|s| s.as_str()) == Some("transactionPricePerShare") {
+                    if let Some(id) = attr_id(&e) {
+                        // The transaction in progress will land at this
+                        // index when its closing tag pushes it.
+                        let predicted_idx = out.transactions.len();
+                        pending_price_fixes.push((predicted_idx, id));
+                    }
                 }
             }
             Ok(Event::Text(t)) => {
@@ -148,6 +182,11 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                 let name = std::str::from_utf8(e.name().as_ref())
                     .map_err(|err| SecError::Decode(format!("Form 4 end tag: {err}")))?
                     .to_string();
+                if name == "footnote" {
+                    if let Some(id) = current_footnote_id.take() {
+                        footnotes.insert(id, current_text.clone());
+                    }
+                }
                 handle_end(&name, &path, &current_text, &mut out, &mut current_txn);
                 if name == "nonDerivativeTransaction" || name == "derivativeTransaction" {
                     if let Some(txn) = current_txn.take() {
@@ -165,7 +204,105 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
         }
         buf.clear();
     }
+
+    // Post-process: for transactions with a footnoted price, parse the
+    // footnote's "ranging from $X to $Y" disclosure. If the raw
+    // `<value>` is wildly inconsistent with the disclosed range (the
+    // Lilly Endowment typo case — missing-decimal values 1000× too
+    // high), override with the range midpoint. If the raw value lies
+    // inside or near the range, keep it (filer's weighted-average is
+    // more precise than the midpoint).
+    for (idx, fnid) in pending_price_fixes {
+        let Some(txn) = out.transactions.get_mut(idx) else {
+            continue;
+        };
+        let Some(text) = footnotes.get(&fnid) else {
+            continue;
+        };
+        let Some((lo, hi)) = parse_price_range(text) else {
+            continue;
+        };
+        if lo <= 0.0 || hi < lo {
+            continue;
+        }
+        let mid = (lo + hi) / 2.0;
+        // Override threshold: raw price is >10× the high or <0.1× the
+        // low. This catches missing-decimal typos (1000× off) while
+        // leaving legitimate weighted averages alone.
+        if txn.price_per_share > hi * 10.0 || (txn.price_per_share > 0.0 && txn.price_per_share < lo * 0.1) {
+            txn.price_per_share = mid;
+        }
+    }
+
     Ok(out)
+}
+
+/// Extract the `id` attribute value from a start/empty tag, decoded
+/// from UTF-8. Returns None on missing attribute or decode error.
+fn attr_id(e: &quick_xml::events::BytesStart) -> Option<String> {
+    let attr = e.try_get_attribute("id").ok().flatten()?;
+    std::str::from_utf8(&attr.value).ok().map(String::from)
+}
+
+/// Parse SEC's canonical weighted-average price-range disclosure
+/// from a Form 4 footnote text:
+///
+/// > "These shares were sold in multiple transactions at prices
+/// > ranging from $878.00 to $878.95, inclusive."
+///
+/// Returns `(lo, hi)` when both endpoints parse. Handles
+/// thousand-separator commas inside numbers (e.g. `$1,031.00`).
+fn parse_price_range(text: &str) -> Option<(f64, f64)> {
+    const FROM: &str = "from $";
+    const TO: &str = " to $";
+    let i = text.find(FROM)?;
+    let after_from = &text[i + FROM.len()..];
+    let j = after_from.find(TO)?;
+    let lo_raw = scan_number(after_from);
+    if lo_raw.is_empty() {
+        return None;
+    }
+    let after_to = &after_from[j + TO.len()..];
+    let hi_raw = scan_number(after_to);
+    if hi_raw.is_empty() {
+        return None;
+    }
+    let lo: f64 = lo_raw.replace(',', "").parse().ok()?;
+    let hi: f64 = hi_raw.replace(',', "").parse().ok()?;
+    Some((lo, hi))
+}
+
+/// Consume a number-like prefix from `s` (digits, decimal point,
+/// thousand-separator commas). A comma is treated as a thousands
+/// separator only when followed by three digits — otherwise it
+/// terminates the number (e.g. "$1,031.99, inclusive" parses as
+/// "1,031.99").
+fn scan_number(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut end = 0;
+    let mut seen_dot = false;
+    while end < bytes.len() {
+        let c = bytes[end];
+        if c.is_ascii_digit() {
+            end += 1;
+        } else if c == b'.' && !seen_dot {
+            seen_dot = true;
+            end += 1;
+        } else if c == b',' {
+            let is_thousands = end + 3 < bytes.len()
+                && bytes[end + 1].is_ascii_digit()
+                && bytes[end + 2].is_ascii_digit()
+                && bytes[end + 3].is_ascii_digit();
+            if is_thousands {
+                end += 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    &s[..end]
 }
 
 /// Apply the text content of `<tag>` to the right output field based
@@ -398,5 +535,111 @@ mod tests {
         // EOF cleanly). It does reject malformed tags like missing `>`.
         let r = parse_form4(Cursor::new("<ownershipDocument <bad"));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_price_range_extracts_endpoints_with_commas() {
+        let text = "The price reported in Column 4 is a weighted average price. \
+                    These shares were sold in multiple transactions at prices \
+                    ranging from $1,031.00 to $1,031.99, inclusive.";
+        let (lo, hi) = parse_price_range(text).expect("range parses");
+        assert!((lo - 1031.0).abs() < 1e-9);
+        assert!((hi - 1031.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_price_range_extracts_simple_endpoints() {
+        let text = "ranging from $878.00 to $878.95, inclusive.";
+        let (lo, hi) = parse_price_range(text).expect("range parses");
+        assert!((lo - 878.0).abs() < 1e-9);
+        assert!((hi - 878.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_price_range_returns_none_for_unrelated_text() {
+        assert!(parse_price_range("no price range here").is_none());
+        assert!(parse_price_range("$5 is just one price").is_none());
+    }
+
+    /// Real-world shape from a Lilly Endowment Form 4 filing
+    /// (accession 0000316011-25-000073, 2025-11-14). The
+    /// `<transactionPricePerShare><value>` field has a missing
+    /// decimal point — 1031414 instead of 1031.414. Footnote F2
+    /// states the correct range. The parser must use the footnote
+    /// midpoint to override the obviously-bogus raw value.
+    const LILLY_TYPO_FORM4: &str = r#"<?xml version="1.0"?>
+<ownershipDocument>
+    <documentType>4</documentType>
+    <periodOfReport>2025-11-14</periodOfReport>
+    <issuer>
+        <issuerCik>0000059478</issuerCik>
+        <issuerName>ELI LILLY &amp; Co</issuerName>
+        <issuerTradingSymbol>LLY</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0000316011</rptOwnerCik>
+            <rptOwnerName>LILLY ENDOWMENT INC</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isTenPercentOwner>1</isTenPercentOwner>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle><value>Common Stock</value></securityTitle>
+            <transactionDate><value>2025-11-14</value></transactionDate>
+            <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+            <transactionAmounts>
+                <transactionShares><value>55908</value></transactionShares>
+                <transactionPricePerShare>
+                    <value>1031414</value>
+                    <footnoteId id="F2"/>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction><value>92900593</value></sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+    <footnotes>
+        <footnote id="F1">Other footnote.</footnote>
+        <footnote id="F2">The price reported in Column 4 is a weighted average price. These shares were sold in multiple transactions at prices ranging from $1,031.00 to $1,031.99, inclusive.</footnote>
+    </footnotes>
+</ownershipDocument>"#;
+
+    #[test]
+    fn footnote_override_fixes_missing_decimal_typo() {
+        let f4 = parse_form4(Cursor::new(LILLY_TYPO_FORM4)).unwrap();
+        assert_eq!(f4.transactions.len(), 1);
+        let t = &f4.transactions[0];
+        // Raw <value> was 1031414 (missing decimal); footnote midpoint
+        // is (1031.00 + 1031.99) / 2 = 1031.495. Parser should have
+        // overridden the bogus value.
+        assert!(
+            (t.price_per_share - 1031.495).abs() < 0.01,
+            "expected ~1031.495 from footnote midpoint, got {}",
+            t.price_per_share
+        );
+        // Other fields untouched.
+        assert_eq!(t.shares, 55908.0);
+        assert_eq!(t.shares_owned_after, 92900593.0);
+    }
+
+    #[test]
+    fn footnote_keeps_reasonable_raw_price() {
+        // Same XML shape but raw value is the correct weighted average
+        // (1031.495 inside the footnote range). Parser should NOT
+        // override — the filer's reported value is more precise than
+        // the midpoint approximation.
+        let xml = LILLY_TYPO_FORM4.replace(
+            "<value>1031414</value>",
+            "<value>1031.495</value>",
+        );
+        let f4 = parse_form4(Cursor::new(&xml)).unwrap();
+        assert_eq!(f4.transactions.len(), 1);
+        // Should be EXACTLY 1031.495, not the midpoint.
+        assert!((f4.transactions[0].price_per_share - 1031.495).abs() < 1e-9);
     }
 }
