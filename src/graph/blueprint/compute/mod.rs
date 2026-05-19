@@ -21,6 +21,7 @@ use std::path::Path;
 
 use super::schema::{Blueprint, ComputeOp};
 
+pub mod chain;
 pub mod derive;
 pub mod filter;
 
@@ -61,7 +62,12 @@ fn dispatch(op: &ComputeOp, blueprint: &mut Blueprint, input_root: &Path) -> Res
             where_expr,
             into,
         } => filter::run_filter(blueprint, input_root, from, where_expr, into.as_deref()),
-        ComputeOp::Chain { .. } => Err("chain: not yet implemented (K4)".to_string()),
+        ComputeOp::Chain {
+            from,
+            group_by,
+            order_by,
+            edge,
+        } => chain::run_chain(blueprint, input_root, from, group_by, order_by, edge),
         ComputeOp::Calendar { .. } => Err("calendar: not yet implemented (K5)".to_string()),
         ComputeOp::Aggregate { .. } => Err("aggregate: not yet implemented (K6)".to_string()),
     }
