@@ -22,10 +22,13 @@
 //! ```
 
 pub mod catalog;
+pub mod client;
 pub mod error;
+pub mod fetch;
 pub mod geojson_wkt;
 pub mod layout;
 
 pub use catalog::{is_known, kind_of, resolve, DataKind};
+pub use client::ArcGISClient;
 pub use error::{Result, SodirError};
 pub use layout::{StorageMode, Workdir};
