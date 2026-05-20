@@ -20,21 +20,23 @@ structural validators that compose with Cypher.
 > Desktop. Closes with a screenshot of Claude calling `repo_management`
 > → `graph_overview` → `cypher_query` against the live graph.
 
-> ### 🏦 Or: every US public company, queryable in one call
+> ### 🏦 Or: SEC filings as a knowledge graph, in one call
 >
 > ```python
 > from kglite.datasets.sec import SEC
-> g = SEC.open("./sec", years=10, detailed=2,
->              user_agent="Your Name your@email.com")
+> g = SEC.fetch("./sec", "13F-HR", "TSLA", years=2,
+>               user_agent="Your Name your@email.com")
 > ```
 >
-> Pulls SEC EDGAR's full filing index (~14M filings since 1993) plus
-> 2 years of deep payloads — Form 4 insider transactions, 13F
+> `SEC.fetch` names the forms, the companies, and a span — then
+> downloads from SEC EDGAR (with a progress bar) and hands back a
+> Cypher-queryable graph: Form 4 insider transactions, 13F
 > institutional holdings, SC 13D activist stakes, DEF 14A board
-> composition, XBRL financials, Exhibit 21 subsidiaries, 8-K
-> Item codes. **11 node types, 15 edge types**, queryable with Cypher.
-> Public-domain data (US Govt work). Scope with `companies=[...]` for
-> an S&P-500-sized graph in ~10 minutes. **→
+> composition, 8-K material events. Every fact is a typed node, and
+> the same person is one `:Person` across every form. `SEC.open` is
+> the full-control entry point — XBRL financials, Exhibit 21
+> subsidiaries, the full ~14M-filing index since 1993. Public-domain
+> data (US Govt work). **→
 > [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
 ## Use cases
@@ -43,15 +45,15 @@ KGLite is shape-agnostic — the agent-facing surface is the same
 whether the graph holds your legal precedents, a Wikidata slice,
 your SQL warehouse, a RAG corpus, or a parsed codebase.
 
-- 🏦 **SEC EDGAR in one call.** `SEC.open(path, years=10, detailed=2,
-  user_agent="...")` builds a US-public-company knowledge graph from
-  the SEC's free data: companies, filings, insider transactions
-  (Form 4), institutional holdings (13F), XBRL financial metrics,
-  activist stakes (SC 13D), board composition (DEF 14A), subsidiary
-  trees (Exhibit 21), 8-K material events. 11 node types, 15 edge
-  types, three-tier `raw` / `processed` / `graph` cache that never
-  re-fetches. Scope with `companies=[...]` for an S&P-500 graph in
-  ~10 minutes. **→
+- 🏦 **SEC EDGAR in one call.** `SEC.fetch(path, "13F-HR", "TSLA",
+  years=2, user_agent="...")` builds a US-public-company knowledge
+  graph from the SEC's free data: companies, filings, insider
+  transactions (Form 4), institutional holdings (13F), activist
+  stakes (SC 13D), board composition (DEF 14A), 8-K material events
+  — with XBRL financials and Exhibit 21 subsidiary trees a flag away
+  via `SEC.open`. Facts are typed nodes; the same person is one
+  `:Person` across every form. Three-tier `raw` / `processed` /
+  `graph` cache that never re-fetches. **→
   [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
   regulatory rules, medical ontologies, manufacturing BOMs, scientific
@@ -255,21 +257,26 @@ all 14M historical filings + per-filing payload parsing for Form 4
 ```python
 from kglite.datasets.sec import SEC
 
-# Default config: 10yr filing index + 2yr deep payload at mode="mapped"
-g = SEC.open("/data/sec", user_agent="Your Name your@email.com")
+# SEC.fetch — name the forms, the companies, a span; get a graph back.
+g = SEC.fetch("/data/sec", ["4", "8-K", "DEF 14A"], ["AAPL", "TSLA"],
+              years=2, user_agent="Your Name your@email.com")
 
-# Watchlist scope — 500 CIKs build in ~10 minutes
-g = SEC.open("/data/sec", companies=[320193, 789019, ...],
+# SEC.open — full control: separate filing-index vs. payload spans,
+# storage mode, and the include_* flags (XBRL financials, Exhibit 21
+# subsidiaries).
+g = SEC.open("/data/sec", years=10, detailed=2,
              user_agent="Your Name your@email.com")
 
-# Full universe — auto-escalates to mode="disk" at predicted >16 GB
+# Full universe — drop `companies`; auto-escalates to mode="disk".
 g = SEC.open("/data/sec", years="all", detailed=5,
              user_agent="Your Name your@email.com")
 ```
 
-11 node types (Company, Filing, Person, Transaction, Institutional-
-Manager, Security, Subsidiary, MetricFact, Event, Stake, Director),
-15 edge types. Three-tier `raw` / `processed` / `graph/{mode}` cache
+Two dozen-plus typed node types — Company, Person, Filing,
+InsiderTransaction, Holding, InstitutionalHolding, CorporateEvent,
+Compensation, Role, MetricFact, Subsidiary and more — wired by typed
+edges, every fact node tracing back to its source filing. Three-tier
+`raw` / `processed` / `graph/{mode}` cache
 — `raw` is immutable, `processed` regenerates only when its `raw`
 source changes, `graph/{mode}/` reuses on reopen unless
 `force_rebuild=True`. SEC's 10 req/s fair-access policy is enforced
