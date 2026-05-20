@@ -346,6 +346,24 @@ graph across 17 node types and 19 edge types, no junction edges.
   making every still-empty sink an intentional, documented
   placeholder rather than an unexplained gap.
 
+### `SEC.open` — lean-core default fetch scope
+
+- `form_types` now scopes the **per-filing fetch**, not just the
+  extract step. Previously a sliced call (`form_types=["4"]`) still
+  downloaded every form bucket — 13F info tables, DEF 14A proxies, 8-K
+  cover pages, Exhibit 21 attachments, XBRL company-facts — and only
+  filtered them out at extract time.
+- When `form_types` is unset, the per-filing fetch defaults to a lean
+  core set — insider ownership (Forms 3/4/5) + 8-K cover pages. The
+  heavy payloads are now opt-in: name the form in `form_types`
+  (`["13F-HR"]`, `["DEF 14A"]`, `["SC 13D"]`, `["144"]`, `["10-K"]`
+  for Exhibit 21), or set the matching `include_*` flag.
+- **Default change:** `include_subsidiaries` and `include_xbrl_metrics`
+  now default to `False` (were `True`) — Exhibit 21 and XBRL
+  company-facts are the most expensive fetches (2 requests per 10-K;
+  5-50 MB JSON per company) and are opt-in under the lean default.
+  `include_8k_events` stays `True` — 8-K is part of the lean core.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

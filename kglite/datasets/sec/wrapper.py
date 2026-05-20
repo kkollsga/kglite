@@ -60,11 +60,40 @@ _FORM_BUCKETS: dict[str, tuple[str, ...]] = {
     "form10k": ("10-K", "10-K/A"),  # source filings for Exhibit 21 attachments
 }
 
+# The lean default per-filing fetch scope: insider ownership + 8-K
+# cover pages. Heavy payloads — 13F info tables, SC 13D/G, DEF 14A,
+# Form 144, Exhibit 21, XBRL company-facts — are opt-in: name the form
+# in `form_types`, or set the matching `include_*` flag.
+_LEAN_FETCH_BUCKETS: tuple[str, ...] = ("form3", "form4", "form5", "form8k")
+
+
+def _resolve_fetch_buckets(form_types: Optional[list[str]], verbose: bool) -> set[str]:
+    """Map requested SEC form strings to per-filing fetch buckets.
+
+    ``form_types=None`` selects the lean default scope
+    (``_LEAN_FETCH_BUCKETS``). An explicit list is mapped form-by-form;
+    strings with no per-filing fetcher are reported and dropped.
+    """
+    if form_types is None:
+        return set(_LEAN_FETCH_BUCKETS)
+    active: set[str] = set()
+    unmatched: list[str] = []
+    for ft in form_types:
+        bucket = next((b for b, forms in _FORM_BUCKETS.items() if ft in forms), None)
+        if bucket is None:
+            unmatched.append(ft)
+        else:
+            active.add(bucket)
+    if unmatched and verbose:
+        print(f"[SEC] note: form_types {unmatched!r} have no per-filing fetcher — not downloaded.")
+    return active
+
 
 def _dispatch_per_filing_fetches(
     workdir: Path,
     user_agent: str,
     cik_list: Optional[list[int]],
+    form_types: Optional[list[str]],
     year_range: Optional[tuple[int, int]],
     current_year: int,
     detailed: int,
@@ -79,6 +108,8 @@ def _dispatch_per_filing_fetches(
 
     Filings are filtered by:
     - cik_list (if set)
+    - form_types: which form buckets to fetch — None selects the lean
+      default scope (insider ownership + 8-K)
     - the *detailed window*: filings with filed_date.year in
       [current_year - detailed + 1, current_year] (unless an
       explicit year_range overrides).
@@ -130,62 +161,69 @@ def _dispatch_per_filing_fetches(
             accession = row.get("accession_number", "")
             if not accession:
                 continue
-            for bucket_name, form_types in _FORM_BUCKETS.items():
-                if form_type in form_types:
+            for bucket_name, bucket_forms in _FORM_BUCKETS.items():
+                if form_type in bucket_forms:
                     buckets[bucket_name].append((row_cik, accession, primary))
                     break
 
+    # Resolve the per-filing fetch scope. `form_types=None` → the lean
+    # default (insider ownership + 8-K); an explicit list maps to its
+    # fetch buckets and only those are downloaded.
+    active = _resolve_fetch_buckets(form_types, verbose)
+
     # Form 4 / Form 3 / Form 5: all share the ownership-document XML
-    # schema and the same fetcher path. Pool them so the same rate-
-    # limited client downloads each per-filing XML once.
+    # schema and the same fetcher path. Pool the in-scope ones so the
+    # same rate-limited client downloads each per-filing XML once.
     ownership_batch: list[tuple[int, str, str]] = []
-    ownership_batch.extend(buckets["form4"])
-    ownership_batch.extend(buckets["form3"])
-    ownership_batch.extend(buckets["form5"])
+    n_own = {"form4": 0, "form3": 0, "form5": 0}
+    for b in ("form4", "form3", "form5"):
+        if b in active:
+            ownership_batch.extend(buckets[b])
+            n_own[b] = len(buckets[b])
     if ownership_batch:
         if verbose:
             print(
-                f"[SEC] fetching ownership documents ({len(buckets['form4'])} Form 4, "
-                f"{len(buckets['form3'])} Form 3, {len(buckets['form5'])} Form 5)"
+                f"[SEC] fetching ownership documents ({n_own['form4']} Form 4, "
+                f"{n_own['form3']} Form 3, {n_own['form5']} Form 5)"
             )
         out["ownership"] = _sec_internal.fetch_form4_batch(str(workdir), user_agent=user_agent, batch=ownership_batch)
 
     # 13F-HR: takes (cik, accession) — strip the primary_doc.
-    if buckets["form13f"]:
+    if "form13f" in active and buckets["form13f"]:
         if verbose:
             print(f"[SEC] fetching 13F info tables ({len(buckets['form13f'])} filings)")
         f13f_batch = [(cik, acc) for (cik, acc, _) in buckets["form13f"]]
         out["form13f"] = _sec_internal.fetch_13f_batch(str(workdir), user_agent=user_agent, batch=f13f_batch)
 
-    # 8-K: only when caller wants events.
-    if include_8k_events and buckets["form8k"]:
+    # 8-K: part of the lean core, still suppressible via the flag.
+    if include_8k_events and "form8k" in active and buckets["form8k"]:
         if verbose:
             print(f"[SEC] fetching 8-K cover pages ({len(buckets['form8k'])} filings)")
         out["form8k"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form8k"])
 
     # SC 13D / SC 13G + amendments: activist + passive stakes.
-    sc13_batch = buckets["sc13d"] + buckets["sc13g"]
+    sc13_batch = (buckets["sc13d"] if "sc13d" in active else []) + (buckets["sc13g"] if "sc13g" in active else [])
     if sc13_batch:
         if verbose:
             print(f"[SEC] fetching SC 13D/G primary docs ({len(sc13_batch)} filings)")
         out["sc13"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=sc13_batch)
 
     # DEF 14A + DEFA14A + PRE 14A: proxy filings.
-    if buckets["def14a"]:
+    if "def14a" in active and buckets["def14a"]:
         if verbose:
             print(f"[SEC] fetching DEF 14A proxies ({len(buckets['def14a'])} filings)")
         out["def14a"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["def14a"])
 
     # Form 144: planned restricted-securities sales (post-2016 XML,
     # older HTML — both come down via the generic filing fetcher).
-    if buckets["form144"]:
+    if "form144" in active and buckets["form144"]:
         if verbose:
             print(f"[SEC] fetching Form 144 notices ({len(buckets['form144'])} filings)")
         out["form144"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form144"])
 
     # Exhibit 21: gated by include_subsidiaries. 10-K filings are the
     # source; the fetcher discovers ex21 attachments via index.json.
-    if include_subsidiaries and buckets["form10k"]:
+    if (include_subsidiaries or "form10k" in active) and buckets["form10k"]:
         if verbose:
             print(f"[SEC] fetching Exhibit 21 attachments ({len(buckets['form10k'])} 10-Ks)")
         ex21_batch = [(cik, acc) for (cik, acc, _) in buckets["form10k"]]
@@ -330,8 +368,8 @@ class SEC:
         cik_list: Optional[list[Union[int, str]]] = None,
         form_types: Optional[list[str]] = None,
         year_range: Optional[tuple[int, int]] = None,
-        include_subsidiaries: bool = True,
-        include_xbrl_metrics: bool = True,
+        include_subsidiaries: bool = False,
+        include_xbrl_metrics: bool = False,
         include_8k_events: bool = True,
         force_rebuild: bool = False,
         force_refetch: bool = False,
@@ -360,6 +398,24 @@ class SEC:
                 ``[320193, "TSLA", "BRK-B"]``. Tickers resolve via
                 SEC's ``company_tickers.json`` (fetched on first
                 build, cached in ``raw/``).
+            form_types: Which SEC form types to fetch *and* extract.
+                Default ``None`` fetches the lean core set — insider
+                ownership (Forms 3/4/5) + 8-K cover pages. Heavier
+                payloads are opt-in: name the form here (e.g.
+                ``["13F-HR"]``, ``["DEF 14A"]``, ``["SC 13D"]``,
+                ``["144"]``, or ``["10-K"]`` for Exhibit 21), or set
+                the matching ``include_*`` flag.
+            year_range: Optional ``(start, end)`` year filter for the
+                per-filing fetch + extract, overriding the ``detailed``
+                window.
+            include_subsidiaries: Fetch Exhibit 21 attachments from
+                10-K filings (→ Subsidiary nodes). Default ``False`` —
+                opt-in; equivalent to adding ``"10-K"`` to ``form_types``.
+            include_xbrl_metrics: Fetch XBRL company-facts JSON
+                (→ MetricFact nodes). Default ``False`` — opt-in; the
+                company-facts documents are large (5-50 MB each).
+            include_8k_events: Fetch 8-K cover pages (→ CorporateEvent
+                nodes). Default ``True`` — part of the lean core set.
             force_rebuild: Rebuild the graph for ``mode`` even if it
                 already exists. Keeps ``raw/`` and ``processed/``.
             force_refetch: Re-download ``raw/`` from SEC. Rare;
@@ -427,6 +483,7 @@ class SEC:
                 workdir,
                 user_agent=user_agent,
                 cik_list=cik_list,
+                form_types=form_types,
                 year_range=year_range,
                 current_year=current_year,
                 detailed=detailed,
