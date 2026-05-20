@@ -26,9 +26,13 @@ pub mod client;
 pub mod error;
 pub mod fetch;
 pub mod geojson_wkt;
+pub mod index;
 pub mod layout;
+pub mod preprocess;
 
 pub use catalog::{is_known, kind_of, resolve, DataKind};
 pub use client::ArcGISClient;
 pub use error::{Result, SodirError};
+pub use index::{Action, DatasetEntry, SodirIndex};
 pub use layout::{StorageMode, Workdir};
+pub use preprocess::{apply as apply_preprocess, PreprocessReport};
