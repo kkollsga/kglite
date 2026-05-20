@@ -15,6 +15,7 @@ mod datatypes;
 mod graph;
 mod mcp_tools;
 mod sec;
+mod sodir;
 use graph::io::file::load_file;
 use graph::pyapi::blueprint::from_blueprint_rust;
 use graph::pyapi::result_view::{ResultIter, ResultView};
@@ -100,5 +101,6 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     code_tree::pyapi::register(py, m)?;
     mcp_tools::register(py, m)?;
     sec::register(py, m)?;
+    sodir::register(py, m)?;
     Ok(())
 }

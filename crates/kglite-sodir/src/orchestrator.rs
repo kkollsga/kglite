@@ -106,7 +106,7 @@ pub async fn refresh_csvs(
     // Largest datasets first — the long pole (wellbore, seismic_*)
     // should not be tail-of-queue. Fresh runs have row_count 0
     // everywhere → stable alpha order.
-    work.sort_by(|a, b| size_hint(index, &b.0).cmp(&size_hint(index, &a.0)));
+    work.sort_by_key(|item| std::cmp::Reverse(size_hint(index, &item.0)));
 
     // ── Pass 2: execute concurrently ──
     if !work.is_empty() {

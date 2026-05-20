@@ -151,6 +151,9 @@ indexmap = { version = "2", features = ["serde"] }
 # SEC EDGAR loader — pure-Rust crate, no pyo3 inside it. Wrapped by
 # src/sec.rs which exposes the SEC.open() surface to Python.
 kglite-sec = { path = "crates/kglite-sec" }
+# Sodir FactMaps loader — pure-Rust crate, no pyo3 inside it. Wrapped
+# by src/sodir.rs which exposes the sodir.open() surface to Python.
+kglite-sodir = { path = "crates/kglite-sodir" }
 # Async runtime needed by the SEC client. The rest of kglite is sync;
 # we instantiate a single-threaded runtime inside src/sec.rs for the
 # duration of each fetch/extract call so Python callers see a normal

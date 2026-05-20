@@ -1794,6 +1794,7 @@ dependencies = [
  "geojson",
  "indexmap",
  "kglite-sec",
+ "kglite-sodir",
  "libc",
  "mcp-methods",
  "memchr",
