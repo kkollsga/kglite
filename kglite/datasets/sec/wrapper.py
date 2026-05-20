@@ -92,7 +92,7 @@ def _resolve_fetch_buckets(form_types: Optional[list[str]], verbose: bool) -> se
 def _dispatch_per_filing_fetches(
     workdir: Path,
     user_agent: str,
-    cik_list: Optional[list[int]],
+    companies: Optional[list[int]],
     form_types: Optional[list[str]],
     year_range: Optional[tuple[int, int]],
     current_year: int,
@@ -107,7 +107,7 @@ def _dispatch_per_filing_fetches(
     Exhibit 21) so raw/filings/ gets populated for the extract step.
 
     Filings are filtered by:
-    - cik_list (if set)
+    - companies (if set)
     - form_types: which form buckets to fetch — None selects the lean
       default scope (insider ownership + 8-K)
     - the *detailed window*: filings with filed_date.year in
@@ -135,7 +135,7 @@ def _dispatch_per_filing_fetches(
     else:
         hi = current_year
         lo = max(current_year - detailed + 1, 1993)
-    cik_set: Optional[set[int]] = set(cik_list) if cik_list else None
+    cik_set: Optional[set[int]] = set(companies) if companies else None
 
     buckets: dict[str, list[tuple[int, str, str]]] = {k: [] for k in _FORM_BUCKETS}
     with filing_csv.open() as f:
@@ -252,13 +252,13 @@ def _dispatch_per_filing_fetches(
 
 
 def _format_slice_summary(
-    cik_list: Optional[list[int]],
+    companies: Optional[list[int]],
     form_types: Optional[list[str]],
     year_range: Optional[tuple[int, int]],
 ) -> str:
     parts: list[str] = []
-    if cik_list:
-        parts.append(f"cik_list={len(cik_list)} CIKs")
+    if companies:
+        parts.append(f"companies={len(companies)}")
     if form_types:
         parts.append(f"form_types={form_types}")
     if year_range:
@@ -281,13 +281,13 @@ def _resolve_years(years: Union[int, str, None], current_year: int) -> int:
     return years
 
 
-def _resolve_cik_list(
-    cik_list: Optional[list[Union[int, str]]],
+def _resolve_companies(
+    companies: Optional[list[Union[int, str]]],
     workdir: Path,
     user_agent: str,
     verbose: bool,
 ) -> Optional[list[int]]:
-    """Resolve string ticker entries in ``cik_list`` to integer CIKs
+    """Resolve string ticker entries in ``companies`` to integer CIKs
     via the SEC's ``company_tickers.json``. Int entries pass through
     unchanged. Lookup is case-insensitive. Mixed lists work
     (``[320193, "TSLA"]``).
@@ -295,11 +295,11 @@ def _resolve_cik_list(
     Raises ``ValueError`` for unknown tickers — clearer than a silent
     empty-graph result downstream.
     """
-    if not cik_list:
-        return None if cik_list is None else []
+    if not companies:
+        return None if companies is None else []
     # Fast path: caller passed only int CIKs.
-    if all(isinstance(c, int) for c in cik_list):
-        return list(cik_list)  # type: ignore[arg-type]
+    if all(isinstance(c, int) for c in companies):
+        return list(companies)  # type: ignore[arg-type]
 
     tickers_path = workdir / "raw" / "company_tickers.json"
     if not tickers_path.exists():
@@ -330,7 +330,7 @@ def _resolve_cik_list(
 
     resolved: list[int] = []
     unknown: list[str] = []
-    for c in cik_list:
+    for c in companies:
         if isinstance(c, int):
             resolved.append(c)
         elif isinstance(c, str):
@@ -340,10 +340,10 @@ def _resolve_cik_list(
             else:
                 resolved.append(cik)
         else:
-            raise ValueError(f"cik_list entries must be int CIK or str ticker; got {c!r}")
+            raise ValueError(f"companies entries must be int CIK or str ticker; got {c!r}")
     if unknown:
         raise ValueError(
-            f"Unknown ticker(s) in cik_list: {unknown!r}. "
+            f"Unknown ticker(s) in companies: {unknown!r}. "
             "Check the SEC company_tickers.json map or pass int CIK(s) directly."
         )
     return resolved
@@ -365,7 +365,7 @@ class SEC:
         detailed: int = 2,
         mode: Optional[str] = None,
         user_agent: str,
-        cik_list: Optional[list[Union[int, str]]] = None,
+        companies: Optional[list[Union[int, str]]] = None,
         form_types: Optional[list[str]] = None,
         year_range: Optional[tuple[int, int]] = None,
         include_subsidiaries: bool = False,
@@ -393,7 +393,7 @@ class SEC:
             user_agent: REQUIRED. SEC fair-access policy mandates a
                 descriptive header identifying the requester (name +
                 email). Missing or generic UA → 403.
-            cik_list: Optional scope filter. Accepts int CIKs, string
+            companies: Optional scope filter. Accepts int CIKs, string
                 tickers (case-insensitive), or a mix:
                 ``[320193, "TSLA", "BRK-B"]``. Tickers resolve via
                 SEC's ``company_tickers.json`` (fetched on first
@@ -431,17 +431,17 @@ class SEC:
             )
         workdir = Path(path).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
-        # Resolve string tickers in cik_list to int CIKs before any
+        # Resolve string tickers in companies to int CIKs before any
         # downstream code sees the slice. Idempotent: int-only lists
         # pass through unchanged.
-        cik_list = _resolve_cik_list(cik_list, workdir, user_agent, verbose)
+        companies = _resolve_companies(companies, workdir, user_agent, verbose)
         current_year, current_quarter = _current_year_quarter()
         years_int_predict = _resolve_years(years, current_year)
         if mode is None:
             predicted_gb = _sec_internal.predict_graph_size_gb(
                 years_int_predict,
                 detailed,
-                cik_count=len(cik_list) if cik_list else None,
+                cik_count=len(companies) if companies else None,
                 include_subsidiaries=include_subsidiaries,
                 include_xbrl_metrics=include_xbrl_metrics,
                 include_8k_events=include_8k_events,
@@ -482,7 +482,7 @@ class SEC:
             fetch_dispatch = _dispatch_per_filing_fetches(
                 workdir,
                 user_agent=user_agent,
-                cik_list=cik_list,
+                companies=companies,
                 form_types=form_types,
                 year_range=year_range,
                 current_year=current_year,
@@ -519,12 +519,12 @@ class SEC:
         # dispatches every form-specific extractor, populates identity
         # tables, and emits the info-row CSVs in processed/.
         if verbose:
-            scope = _format_slice_summary(cik_list, form_types, year_range)
+            scope = _format_slice_summary(companies, form_types, year_range)
             print(f"[SEC] extracting processed/ feature CSVs ({scope})")
         extract_report = _sec_internal.extract_all_py(
             str(workdir),
             force=force_rebuild,
-            cik_list=cik_list,
+            cik_list=companies,
             form_types=form_types,
             year_range=year_range,
         )

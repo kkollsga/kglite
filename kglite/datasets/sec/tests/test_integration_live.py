@@ -163,7 +163,7 @@ def test_live_sec_detailed_payloads_land() -> None:
         # frequent Form 4 + occasional 8-K. Coverage hits all sources.
         g = SEC.open(
             workdir,
-            cik_list=["AAPL", "BRK-B", "TSLA"],
+            companies=["AAPL", "BRK-B", "TSLA"],
             years=1,
             detailed=1,
             mode="memory",

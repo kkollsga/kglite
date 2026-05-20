@@ -33,7 +33,7 @@ structural validators that compose with Cypher.
 > institutional holdings, SC 13D activist stakes, DEF 14A board
 > composition, FSNDS XBRL financials, Exhibit 21 subsidiaries, 8-K
 > Item codes. **11 node types, 15 edge types**, queryable with Cypher.
-> Public-domain data (US Govt work). Scope with `cik_list=[...]` for
+> Public-domain data (US Govt work). Scope with `companies=[...]` for
 > an S&P-500-sized graph in ~10 minutes. **→
 > [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
@@ -50,7 +50,7 @@ your SQL warehouse, a RAG corpus, or a parsed codebase.
   activist stakes (SC 13D), board composition (DEF 14A), subsidiary
   trees (Exhibit 21), 8-K material events. 11 node types, 15 edge
   types, three-tier `raw` / `processed` / `graph` cache that never
-  re-fetches. Scope with `cik_list=[...]` for an S&P-500 graph in
+  re-fetches. Scope with `companies=[...]` for an S&P-500 graph in
   ~10 minutes. **→
   [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
@@ -259,7 +259,7 @@ from kglite.datasets.sec import SEC
 g = SEC.open("/data/sec", user_agent="Your Name your@email.com")
 
 # Watchlist scope — 500 CIKs build in ~10 minutes
-g = SEC.open("/data/sec", cik_list=[320193, 789019, ...],
+g = SEC.open("/data/sec", companies=[320193, 789019, ...],
              user_agent="Your Name your@email.com")
 
 # Full universe — auto-escalates to mode="disk" at predicted >16 GB
