@@ -164,6 +164,22 @@ pub fn is_ex99_name(name: &str) -> bool {
     lc.contains("ex99") || lc.contains("ex-99") || lc.contains("ex_99") || lc.contains("exhibit99")
 }
 
+/// Predicate for S-1 registration-statement primary documents.
+/// Names vary (`forms-1.htm`, `dNNNds1.htm`, `tmNN-1_s1.htm`).
+pub fn is_s1_name(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    if !(lc.ends_with(".htm") || lc.ends_with(".html")) {
+        return false;
+    }
+    lc.contains("s-1") || lc.contains("ds1") || lc.contains("_s1") || lc.contains("forms1")
+}
+
+/// Predicate for 424B prospectus documents (`*424b5.htm`, …).
+pub fn is_424b_name(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    (lc.ends_with(".htm") || lc.ends_with(".html")) && lc.contains("424b")
+}
+
 /// Predicate for SC 13D / SC 13G primary documents.
 pub fn is_sc13_name(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();

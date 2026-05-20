@@ -22,16 +22,25 @@ use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::sinks::Sinks;
+use super::super::util::is_424b_name;
 use super::FormReport;
 
-/// TODO(F15): new parser for 424B cover-page + pricing tables +
-/// fee-table EX-FILING FEE exhibits.
+/// Extract offering records from 424B prospectuses. Reuses the shared
+/// S-1 offering routine with the 424B file predicate.
 pub fn extract(
-    _workdir: &Workdir,
-    _slice: &SliceSpec,
-    _sinks: &mut Sinks,
-    _identities: &mut Identities,
-    _extracted_at: &str,
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    sinks: &mut Sinks,
+    identities: &mut Identities,
+    extracted_at: &str,
 ) -> Result<FormReport> {
-    Ok(FormReport::default())
+    super::s1::extract_offering_filings(
+        workdir,
+        slice,
+        sinks,
+        identities,
+        extracted_at,
+        is_424b_name,
+        "424B",
+    )
 }

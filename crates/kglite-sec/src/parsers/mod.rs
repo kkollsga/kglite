@@ -14,6 +14,7 @@ pub mod formd;
 pub mod fsnds;
 pub mod html_text;
 pub mod idx;
+pub mod offering;
 pub mod officer_change;
 pub mod ownership_table;
 pub mod proxy_governance;

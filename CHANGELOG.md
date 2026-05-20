@@ -306,6 +306,20 @@ graph across 17 node types and 19 edge types, no junction edges.
   parser fixtures — the benchmark corpus carries no Exhibit 99
   attachments, so end-to-end coverage awaits an exhibit fetch.
 
+### S-1 / 424B securities offerings (F15)
+
+- **`offering.csv` / `selling_stockholder.csv` / `underwriter.csv` /
+  `use_of_proceeds.csv` + their nodes** — a new parser reads a
+  registration statement (S-1) or prospectus (424B): the offering
+  summary (type, shares, price, gross/net proceeds), the
+  selling-stockholder table (per-seller share breakdown), the
+  underwriting syndicate, and the use-of-proceeds narrative. The
+  previously stubbed `forms::s1` and `forms::prospectus` extractors
+  share one walk/parse/emit routine. Verified by parser fixtures —
+  the benchmark corpus carries no S-1 / 424B documents, so the four
+  nodes load cleanly with zero rows pending a registration-statement
+  fetch.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

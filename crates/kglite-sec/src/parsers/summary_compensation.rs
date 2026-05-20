@@ -89,7 +89,8 @@ fn find_table_segment(html: &str) -> Option<&str> {
 
 /// Split an HTML fragment into table rows of trimmed cell strings.
 /// Rows are `</tr>`-delimited, cells `</td>` / `</th>`-delimited.
-fn table_rows(segment: &str) -> Vec<Vec<String>> {
+/// Shared with the F15 selling-stockholder table parser.
+pub(crate) fn table_rows(segment: &str) -> Vec<Vec<String>> {
     let lower = segment.to_ascii_lowercase();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut row_start = 0;

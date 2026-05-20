@@ -332,6 +332,83 @@
       }
     },
 
+    "Offering": {
+      "csv": "processed/offering.csv",
+      "pk": "offering_nid",
+      "title": "offering_type",
+      "properties": {
+        "offering_type": "string",
+        "shares_offered": "float",
+        "price_per_share": "float",
+        "gross_proceeds": "float",
+        "net_proceeds": "float",
+        "currency": "string",
+        "is_overallotment_exercised": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "SellingStockholder": {
+      "csv": "processed/selling_stockholder.csv",
+      "pk": "ss_nid",
+      "title": "holder_name",
+      "properties": {
+        "holder_name": "string",
+        "shares_before": "float",
+        "shares_offered": "float",
+        "shares_after": "float",
+        "pct_before": "float",
+        "pct_after": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_PERSON": { "target": "Person", "fk": "person_nid" },
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "Underwriter": {
+      "csv": "processed/underwriter.csv",
+      "pk": "underwriter_nid",
+      "title": "underwriter_name",
+      "properties": {
+        "underwriter_name": "string",
+        "role": "string",
+        "shares_underwritten": "float",
+        "discount_per_share": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "UseOfProceeds": {
+      "csv": "processed/use_of_proceeds.csv",
+      "pk": "uop_nid",
+      "title": "category",
+      "properties": {
+        "category": "string",
+        "amount_usd": "float",
+        "narrative": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_fact_nid",
