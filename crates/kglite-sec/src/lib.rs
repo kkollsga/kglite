@@ -24,6 +24,7 @@ pub mod extract;
 pub mod fetch;
 pub mod layout;
 pub mod parsers;
+pub mod planning;
 pub mod slicing;
 
 pub use client::{FetchMode, SecClient};
@@ -45,4 +46,5 @@ pub use parsers::sc13d::{parse_sc13d, Sc13dFiling};
 pub use parsers::submissions::{
     iter_submissions_zip, parse_submission_json, CompanyRecord, RecentFilings, Submission,
 };
+pub use planning::{pick_storage_mode, predict_graph_size_gb};
 pub use slicing::SliceSpec;

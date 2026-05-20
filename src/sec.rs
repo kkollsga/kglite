@@ -30,7 +30,12 @@ use kglite_sec::{
     fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, run_all, SecClient,
     SecError, SliceSpec, Workdir, YearRange,
 };
-use std::path::PathBuf;
+
+// Workdir args cross the PyO3 boundary as `String`, not `PathBuf` —
+// PyO3's `PathBuf` extraction routes through CPython's filesystem
+// codec, which crashed on macOS once pyarrow's native libraries were
+// loaded. `Workdir::new` takes `impl Into<PathBuf>`, so a `String`
+// slots in with no body changes.
 
 /// Build a SliceSpec from optional Python args. Empty / None args
 /// produce an unrestricted slice.
@@ -73,7 +78,7 @@ fn build_slice(
 #[allow(clippy::too_many_arguments)]
 fn fetch_raw(
     py: Python<'_>,
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     years: u16,
     current_year: u16,
@@ -122,7 +127,7 @@ fn fetch_raw(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, year, quarter, force_refetch=false))]
 fn fetch_fsnds(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     year: u16,
     quarter: u8,
@@ -145,7 +150,7 @@ fn fetch_fsnds(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_form4_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String, String)>,
 ) -> PyResult<(usize, usize)> {
@@ -174,7 +179,7 @@ fn fetch_form4_batch(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_13f_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String)>,
 ) -> PyResult<(usize, usize)> {
@@ -203,7 +208,7 @@ fn fetch_13f_batch(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_filing_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String, String)>,
 ) -> PyResult<(usize, usize)> {
@@ -234,7 +239,7 @@ fn fetch_filing_batch(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false))]
 fn fetch_company_submissions_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     ciks: Vec<u64>,
     force_refetch: bool,
@@ -266,7 +271,7 @@ fn fetch_company_submissions_batch(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false))]
 fn fetch_company_facts_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     ciks: Vec<u64>,
     force_refetch: bool,
@@ -296,7 +301,7 @@ fn fetch_company_facts_batch(
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
 fn fetch_exhibit21_batch(
-    workdir: PathBuf,
+    workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String)>,
 ) -> PyResult<(usize, usize)> {
@@ -333,7 +338,7 @@ fn fetch_exhibit21_batch(
 #[pyo3(signature = (workdir, *, force=false, cik_list=None, form_types=None, year_range=None))]
 fn extract_all_py(
     py: Python<'_>,
-    workdir: PathBuf,
+    workdir: String,
     force: bool,
     cik_list: Option<Vec<u64>>,
     form_types: Option<Vec<String>>,
@@ -386,18 +391,55 @@ fn extract_all_py(
     Ok(d.into())
 }
 
+// ─────────────────────── storage-mode planning ───────────────────────
+
+/// Estimate the built graph's resident size in GB for the given scope.
+#[pyfunction]
+#[pyo3(signature = (
+    years, detailed, cik_count=None,
+    include_subsidiaries=true, include_xbrl_metrics=true, include_8k_events=true,
+))]
+fn predict_graph_size_gb(
+    years: u32,
+    detailed: u32,
+    cik_count: Option<usize>,
+    include_subsidiaries: bool,
+    include_xbrl_metrics: bool,
+    include_8k_events: bool,
+) -> f64 {
+    kglite_sec::predict_graph_size_gb(
+        years,
+        detailed,
+        cik_count,
+        include_subsidiaries,
+        include_xbrl_metrics,
+        include_8k_events,
+    )
+}
+
+/// Pick a storage backend for an estimated graph size.
+#[pyfunction]
+fn pick_storage_mode(predicted_gb: f64) -> &'static str {
+    kglite_sec::pick_storage_mode(predicted_gb)
+}
+
 // ─────────────────────── graph location helpers ───────────────────────
 
-/// Path to the workdir's expected blueprint output dir for the given mode.
+/// Path to the workdir's expected blueprint output dir for the given
+/// mode. Returns the path as a `String` (see the module note on
+/// `PathBuf` PyO3 args).
 #[pyfunction]
-fn graph_dir(workdir: PathBuf, mode: &str) -> PyResult<PathBuf> {
+fn graph_dir(workdir: String, mode: &str) -> PyResult<String> {
     let m: kglite_sec::StorageMode = mode.parse().map_err(|e: String| PyValueError::new_err(e))?;
-    Ok(Workdir::new(workdir).graph_dir(m))
+    Ok(Workdir::new(workdir)
+        .graph_dir(m)
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// True if a built graph for `mode` already exists in `workdir/graph/{mode}/`.
 #[pyfunction]
-fn graph_exists(workdir: PathBuf, mode: &str) -> PyResult<bool> {
+fn graph_exists(workdir: String, mode: &str) -> PyResult<bool> {
     let m: kglite_sec::StorageMode = mode.parse().map_err(|e: String| PyValueError::new_err(e))?;
     Ok(Workdir::new(workdir).graph_exists(m))
 }
@@ -423,6 +465,9 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_company_submissions_batch, &m)?)?;
     // Extract (single entry point)
     m.add_function(wrap_pyfunction!(extract_all_py, &m)?)?;
+    // Storage-mode planning
+    m.add_function(wrap_pyfunction!(predict_graph_size_gb, &m)?)?;
+    m.add_function(wrap_pyfunction!(pick_storage_mode, &m)?)?;
     // Graph location helpers
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
