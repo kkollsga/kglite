@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.46] — SEC EDGAR value-prop upgrade + blueprint compute pipeline
+## [0.9.47] — SEC EDGAR value-prop upgrade + blueprint compute pipeline
 
 Two big additions land in this release. The first (J0–J7) overhauls
 the SEC loader so the detailed-payload extracts actually work and
@@ -371,7 +371,9 @@ graph across 17 node types and 19 edge types, no junction edges.
   focused slice: name a form, a company, and a span (`SEC.fetch(path,
   "13F-HR", "TSLA", years=2, user_agent=UA)`). `forms`/`companies`
   accept a single value or a list; `years` drives both the filing
-  index and the per-filing payload depth. `SEC.open` remains the
+  index and the per-filing payload depth. A `force_rebuild` flag
+  rebuilds when re-running with a changed scope (the graph cache is
+  keyed by workdir, not by scope). `SEC.open` remains the
   full-control entry point.
 - `SEC.open`'s `cik_list` parameter is renamed to `companies` — it has
   always accepted int CIKs, string tickers, and mixed lists, and the

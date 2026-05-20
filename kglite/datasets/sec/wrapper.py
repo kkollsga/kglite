@@ -586,6 +586,7 @@ class SEC:
         user_agent: str,
         mode: Optional[str] = None,
         progress: object | None = None,
+        force_rebuild: bool = False,
         verbose: bool = True,
     ) -> KnowledgeGraph:
         """Fetch + build a knowledge graph for a focused SEC slice.
@@ -609,13 +610,18 @@ class SEC:
             user_agent: REQUIRED — see :meth:`open`.
             mode: Storage mode; ``None`` auto-picks (see :meth:`open`).
             progress: Optional progress callback (see :meth:`open`).
+            force_rebuild: Rebuild even if a graph is already cached
+                for this workdir. The graph cache is keyed by workdir,
+                not by scope — pass ``True`` when re-running with a
+                changed ``forms`` / ``companies`` / ``years`` so the
+                new slice actually takes effect.
             verbose: Print build progress.
 
         Returns:
             ``KnowledgeGraph`` ready for queries.
 
         For the full knob set — separate index/detail spans, the
-        ``include_*`` flags, ``force_rebuild`` — use :meth:`open`.
+        ``include_*`` flags — use :meth:`open`.
         """
         form_types = [forms] if isinstance(forms, str) else forms
         company_list: Optional[list[Union[int, str]]]
@@ -634,6 +640,7 @@ class SEC:
             companies=company_list,
             form_types=form_types,
             progress=progress,
+            force_rebuild=force_rebuild,
             verbose=verbose,
         )
 
