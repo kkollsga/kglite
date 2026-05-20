@@ -364,8 +364,15 @@ graph across 17 node types and 19 edge types, no junction edges.
   5-50 MB JSON per company) and are opt-in under the lean default.
   `include_8k_events` stays `True` — 8-K is part of the lean core.
 
-### SEC loader — `companies` argument + fetch progress bars
+### SEC loader — `SEC.fetch` shortcut, `companies` argument, progress bars
 
+- New `SEC.fetch(path, forms, companies, *, years=2, user_agent=...)`
+  — an ergonomic shortcut that fetches *and* builds a graph for a
+  focused slice: name a form, a company, and a span (`SEC.fetch(path,
+  "13F-HR", "TSLA", years=2, user_agent=UA)`). `forms`/`companies`
+  accept a single value or a list; `years` drives both the filing
+  index and the per-filing payload depth. `SEC.open` remains the
+  full-control entry point.
 - `SEC.open`'s `cik_list` parameter is renamed to `companies` — it has
   always accepted int CIKs, string tickers, and mixed lists, and the
   new name reflects that. No back-compat alias; update call sites

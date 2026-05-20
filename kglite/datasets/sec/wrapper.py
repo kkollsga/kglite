@@ -387,9 +387,11 @@ def _resolve_companies(
 class SEC:
     """SEC EDGAR knowledge graph loader.
 
-    Use :meth:`open` to fetch + extract + build a graph in one call.
-    Re-runs with the same args + workdir return the cached graph
-    without re-fetching.
+    :meth:`fetch` is the ergonomic shortcut — name a form, a company,
+    and a span. :meth:`open` is the full-control entry point (separate
+    index/detail spans, storage mode, the ``include_*`` flags). Both
+    fetch + extract + build in one call; re-runs with the same args +
+    workdir return the cached graph without re-fetching.
     """
 
     @staticmethod
@@ -573,6 +575,67 @@ class SEC:
             info = g.graph_info()
             print(f"[SEC] done: {info.get('node_count', 0):,} nodes, {info.get('edge_count', 0):,} edges")
         return g
+
+    @staticmethod
+    def fetch(
+        path: Union[str, Path],
+        forms: Union[str, list[str], None] = None,
+        companies: Union[int, str, list[Union[int, str]], None] = None,
+        *,
+        years: int = 2,
+        user_agent: str,
+        mode: Optional[str] = None,
+        progress: object | None = None,
+        verbose: bool = True,
+    ) -> KnowledgeGraph:
+        """Fetch + build a knowledge graph for a focused SEC slice.
+
+        Ergonomic shortcut over :meth:`open` — name a form, a company,
+        and a span; get a graph back::
+
+            g = SEC.fetch(path, "13F-HR", "TSLA", years=2,
+                          user_agent="Name email@dom")
+
+        Args:
+            path: Workdir root (see :meth:`open`).
+            forms: SEC form type(s) to fetch and extract — a single
+                string (``"13F-HR"``) or a list
+                (``["8-K", "DEF 14A"]``). ``None`` uses the lean
+                default (Forms 3/4/5 + 8-K cover pages).
+            companies: Company scope — a single int CIK or string
+                ticker, or a list/mix. ``None`` is unrestricted.
+            years: Span, in years, applied to BOTH the filing index
+                and the per-filing payload depth. Default 2.
+            user_agent: REQUIRED — see :meth:`open`.
+            mode: Storage mode; ``None`` auto-picks (see :meth:`open`).
+            progress: Optional progress callback (see :meth:`open`).
+            verbose: Print build progress.
+
+        Returns:
+            ``KnowledgeGraph`` ready for queries.
+
+        For the full knob set — separate index/detail spans, the
+        ``include_*`` flags, ``force_rebuild`` — use :meth:`open`.
+        """
+        form_types = [forms] if isinstance(forms, str) else forms
+        company_list: Optional[list[Union[int, str]]]
+        if companies is None:
+            company_list = None
+        elif isinstance(companies, (int, str)):
+            company_list = [companies]
+        else:
+            company_list = list(companies)
+        return SEC.open(
+            path,
+            years=years,
+            detailed=years,
+            mode=mode,
+            user_agent=user_agent,
+            companies=company_list,
+            form_types=form_types,
+            progress=progress,
+            verbose=verbose,
+        )
 
 
 def _load_graph(workdir: Path, mode: str) -> KnowledgeGraph:
