@@ -219,27 +219,32 @@ agent-first framing).
 
 The dataset blueprint (`kglite/datasets/sec/blueprint.json`) is rebuilt
 from scratch against the info-row CSV layout the F-phase extractors now
-emit. The design principle is **events become nodes, states become
-edges** — chosen so the queries where a graph beats SQL stay short:
+emit. It is **fully node-centric** — every reported fact is a node that
+carries its own data; edges are thin foreign-key connectors with no
+properties:
 
-- **Nodes** — entity hubs (`Company`, `Person`, `Security`,
-  `InstitutionalManager`, `SicCode`) and event objects (`Filing`,
-  `InsiderTransaction`, `CorporateEvent`, `MetricFact`, `Subsidiary`).
-- **State edges** carry their attributes directly: `HAS_ROLE` and
-  `BENEFICIALLY_OWNS` (`Person→Company`), `HOLDS`
-  (`InstitutionalManager→Security`) — so interlocking-directorate and
-  portfolio-overlap queries are a single 2-hop pattern.
-- **Event edges** wire each event node to its participants plus a
-  `REPORTED_IN→Filing` provenance edge.
+- **Entity-hub nodes** — `Company`, `Person`, `Security`,
+  `InstitutionalManager`, `SicCode`.
+- **Fact nodes** — `Filing`, `InsiderTransaction`, `Holding`,
+  `InstitutionalHolding`, `Role`, `CorporateEvent`, `MetricFact`,
+  `Subsidiary`. Each row of an info-row CSV is one node; its attributes
+  (role title, share counts, holding value, transaction price, …) live
+  as node properties, not on edges.
+- **Thin edges** — every connection is a foreign-key edge: a fact node
+  links to its participant entities plus a `REPORTED_IN` edge to the
+  `Filing` it came from, so provenance is always a traversal.
 - **Compute layer** — a `Day`/`Month`/`Quarter` calendar with
-  `FILED_ON`/`TRADED_ON`/`OCCURRED_ON` links, `NEXT_FILING` and
-  `NEXT_TX` temporal chains, and an `InsiderActivity` per-(person,
-  company) rollup.
+  `FILED_ON`/`TRADED_ON`/`HELD_ON`/`OCCURRED_ON` links, `NEXT_FILING`
+  and `NEXT_TX` temporal chains, and an `InsiderActivity` per-(person,
+  company) rollup node.
 - **Unified `insider_transaction.csv`** — the ownership extractor now
   emits one transaction table with a `direction` ("purchase"/"sale")
   column instead of separate `purchase.csv` + `sale.csv`, so an
   insider's whole trading history is one node type (`NEXT_TX` chains,
   net-position rollups).
+
+Verified against a 100-filing corpus: a 31,615-node / 60,398-edge
+graph across 17 node types and 19 edge types, no junction edges.
 
 ### Sodir loader ported to Rust — `pandas` dropped
 

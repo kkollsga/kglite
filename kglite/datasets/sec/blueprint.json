@@ -38,29 +38,6 @@
       "properties": {
         "display_name": "string",
         "cik": "string"
-      },
-      "connections": {
-        "junction_edges": {
-          "HAS_ROLE": {
-            "csv": "processed/role.csv",
-            "source_fk": "person_nid",
-            "target": "Company",
-            "target_fk": "issuer_cik",
-            "properties": ["role_type", "officer_title", "since_date", "source_form", "source_accession"]
-          },
-          "BENEFICIALLY_OWNS": {
-            "csv": "processed/holding.csv",
-            "source_fk": "person_nid",
-            "target": "Company",
-            "target_fk": "issuer_cik",
-            "properties": ["security_title", "as_of_date", "shares", "percent_of_class", "direct_indirect", "is_derivative", "source_form", "source_accession"],
-            "property_types": {
-              "shares": "float",
-              "percent_of_class": "float",
-              "is_derivative": "int"
-            }
-          }
-        }
       }
     },
 
@@ -80,24 +57,6 @@
       "title": "name",
       "properties": {
         "name": "string"
-      },
-      "connections": {
-        "junction_edges": {
-          "HOLDS": {
-            "csv": "processed/institutional_holding.csv",
-            "source_fk": "manager_cik",
-            "target": "Security",
-            "target_fk": "cusip",
-            "properties": ["name_of_issuer", "title_of_class", "value", "shares", "put_call", "investment_discretion", "voting_sole", "voting_shared", "voting_none", "quarter", "source_accession"],
-            "property_types": {
-              "value": "float",
-              "shares": "float",
-              "voting_sole": "float",
-              "voting_shared": "float",
-              "voting_none": "float"
-            }
-          }
-        }
       }
     },
 
@@ -138,6 +97,73 @@
         "fk_edges": {
           "BY_INSIDER": { "target": "Person", "fk": "person_nid" },
           "IN_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "Holding": {
+      "csv": "processed/holding.csv",
+      "pk": "holding_nid",
+      "title": "security_title",
+      "properties": {
+        "security_title": "string",
+        "as_of_date": "string",
+        "shares": "float",
+        "percent_of_class": "float",
+        "direct_indirect": "string",
+        "is_derivative": "int"
+      },
+      "connections": {
+        "fk_edges": {
+          "OWNED_BY": { "target": "Person", "fk": "person_nid" },
+          "IN_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "InstitutionalHolding": {
+      "csv": "processed/institutional_holding.csv",
+      "pk": "institutional_holding_nid",
+      "title": "name_of_issuer",
+      "properties": {
+        "name_of_issuer": "string",
+        "title_of_class": "string",
+        "figi": "string",
+        "value": "float",
+        "shares": "float",
+        "shares_type": "string",
+        "put_call": "string",
+        "investment_discretion": "string",
+        "voting_sole": "float",
+        "voting_shared": "float",
+        "voting_none": "float",
+        "other_managers": "string",
+        "quarter": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "OWNED_BY": { "target": "InstitutionalManager", "fk": "manager_cik" },
+          "OF_SECURITY": { "target": "Security", "fk": "cusip" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "Role": {
+      "csv": "processed/role.csv",
+      "pk": "role_nid",
+      "title": "role_type",
+      "properties": {
+        "role_type": "string",
+        "officer_title": "string",
+        "since_date": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_PERSON": { "target": "Person", "fk": "person_nid" },
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
           "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
         }
       }
@@ -219,6 +245,7 @@
       "links": [
         { "from": "Filing", "date_col": "filed_date", "edge": "FILED_ON" },
         { "from": "InsiderTransaction", "date_col": "transaction_date", "edge": "TRADED_ON" },
+        { "from": "Holding", "date_col": "as_of_date", "edge": "HELD_ON" },
         { "from": "CorporateEvent", "date_col": "event_date", "edge": "OCCURRED_ON" }
       ]
     },
