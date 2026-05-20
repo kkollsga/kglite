@@ -269,6 +269,12 @@ fn parse_row(line: &str) -> Option<BeneficialOwner> {
     if name == name.to_ascii_uppercase() && name.split_whitespace().count() <= 2 {
         return None;
     }
+    // Reject footnote sentences, table captions and address lines that
+    // happen to carry a trailing number the row scan mistook for a
+    // share count.
+    if !is_plausible_holder_name(&name) {
+        return None;
+    }
 
     let holder_type = classify_holder(&name);
     Some(BeneficialOwner {
@@ -296,6 +302,50 @@ fn clean_numeric(s: &str) -> String {
         }
     }
     out
+}
+
+/// True if a candidate string reads like a real beneficial-holder
+/// name (person or entity) rather than a footnote sentence, a table
+/// caption, or an address line. The row scan keys on a trailing
+/// integer, so any prose line carrying a number leaks through without
+/// this gate.
+fn is_plausible_holder_name(name: &str) -> bool {
+    // Footnote sentences and captions run far longer than any holder
+    // name — the group-total line ("All directors and executive
+    // officers as a group") is the longest legitimate case at ~50.
+    if name.len() > 70 {
+        return false;
+    }
+    let lc = name.to_ascii_lowercase();
+    // Sentence-fragment / boilerplate giveaways. A holder name never
+    // contains these phrases.
+    const NOISE: &[&str] = &[
+        "based solely",
+        "respect to",
+        "the table",
+        "number of shares",
+        "beneficially owned",
+        "common stock",
+        "schedule 13",
+        "footnote",
+        "following table",
+        "as of december",
+        "pursuant to",
+        "shares of",
+    ];
+    if NOISE.iter().any(|n| lc.contains(n)) {
+        return false;
+    }
+    // A `Words, ST` shape is a city/state address (`Malvern, PA`),
+    // not a holder — a real surname-first name never ends in a bare
+    // two-letter uppercase token.
+    if let Some((_, tail)) = name.rsplit_once(',') {
+        let t = tail.trim();
+        if t.len() == 2 && t.chars().all(|c| c.is_ascii_uppercase()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Classify a holder name into the canonical holder_type bucket.
@@ -408,5 +458,29 @@ mod tests {
         assert_eq!(clean_numeric("$1,234,567"), "1234567");
         assert_eq!(clean_numeric("3.45%"), "3.45");
         assert_eq!(clean_numeric("not-a-number"), "");
+    }
+
+    #[test]
+    fn plausible_holder_name_accepts_real_names() {
+        assert!(is_plausible_holder_name("Arthur D. Levinson"));
+        assert!(is_plausible_holder_name("The Vanguard Group, Inc."));
+        assert!(is_plausible_holder_name(
+            "All directors and executive officers as a group"
+        ));
+    }
+
+    #[test]
+    fn plausible_holder_name_rejects_footnote_and_address_noise() {
+        // Footnote sentence carrying a trailing share count.
+        assert!(!is_plausible_holder_name(
+            "Based solely on the Schedule 13G/A reporting ownership as of December 31"
+        ));
+        // Table caption.
+        assert!(!is_plausible_holder_name(
+            "The table below reports the number of shares of common stock"
+        ));
+        // City / state address line.
+        assert!(!is_plausible_holder_name("Malvern, PA"));
+        assert!(!is_plausible_holder_name("New York, NY"));
     }
 }
