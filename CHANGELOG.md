@@ -246,14 +246,21 @@ properties:
 Verified against a 100-filing corpus: a 31,615-node / 60,398-edge
 graph across 17 node types and 19 edge types, no junction edges.
 
-### DEF 14A executive compensation (F8)
+### DEF 14A compensation + governance (F8, F9)
 
-- **`compensation.csv` + `Compensation` node** — the DEF 14A
+- **`compensation.csv` + `Compensation` node** (F8) — the DEF 14A
   extractor now parses the proxy statement's Summary Compensation
   Table (Item 402): one node per named-executive-officer / fiscal
   year, with salary / bonus / stock + option awards / non-equity
   incentive / pension change / other / total, edged to `Person`,
   `Company`, and the `Filing` it came from.
+- **`proposal.csv` / `ceo_pay_ratio.csv` / `audit_fees.csv` + their
+  nodes** (F9) — the DEF 14A pass also extracts ballot proposals
+  (number, description, board recommendation, company vs shareholder),
+  the Item 402(u) CEO pay-ratio disclosure, and the Item 9(e)
+  independent-auditor fee table. Heuristic scans — they drop rather
+  than guess: pay-ratio values in the 1900-2100 range (mis-read
+  dates) and sub-$50k "audit fees" (footnote noise) are rejected.
 - **person id scheme unified** — Form 3/4/5/144 person ids are now
   `cik-{N}` (non-numeric), so they no longer collide-type with the
   name-keyed proxy/10-K person ids and break FK edges into `Person`.

@@ -13,6 +13,7 @@ pub mod formd;
 pub mod fsnds;
 pub mod idx;
 pub mod ownership_table;
+pub mod proxy_governance;
 pub mod sc13d;
 pub mod submissions;
 pub mod summary_compensation;

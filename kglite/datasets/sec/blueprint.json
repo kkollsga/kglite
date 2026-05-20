@@ -195,6 +195,63 @@
       }
     },
 
+    "Proposal": {
+      "csv": "processed/proposal.csv",
+      "pk": "proposal_nid",
+      "title": "description",
+      "properties": {
+        "meeting_date": "string",
+        "proposal_number": "string",
+        "description": "string",
+        "board_recommendation": "string",
+        "proposal_type": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "CeoPayRatio": {
+      "csv": "processed/ceo_pay_ratio.csv",
+      "pk": "ceo_pay_ratio_nid",
+      "title": "fiscal_year",
+      "properties": {
+        "fiscal_year": "string",
+        "ceo_total_comp": "float",
+        "median_employee_comp": "float",
+        "ratio": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "AuditFees": {
+      "csv": "processed/audit_fees.csv",
+      "pk": "audit_fees_nid",
+      "title": "auditor_name",
+      "properties": {
+        "fiscal_year": "string",
+        "auditor_name": "string",
+        "audit_fees": "float",
+        "audit_related_fees": "float",
+        "tax_fees": "float",
+        "other_fees": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "CorporateEvent": {
       "csv": "processed/corporate_event.csv",
       "pk": "event_nid",

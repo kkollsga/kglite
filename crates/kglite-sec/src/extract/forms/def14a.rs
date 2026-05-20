@@ -15,10 +15,11 @@
 //!   (the proxy table also tells us who's a current director / exec).
 //! - `compensation.csv` — one row per Summary Compensation Table
 //!   entry: each named executive's salary / awards / total (F8).
+//! - `proposal.csv` / `ceo_pay_ratio.csv` / `audit_fees.csv` —
+//!   ballot proposals, the Item 402(u) pay-ratio disclosure, and the
+//!   independent-auditor fee table (F9).
 //! - `person.csv` (where the holder is an individual; institutional
 //!   holders go to `institutional_manager.csv` as a side identity).
-//!
-//! Future depth: F9 adds proposals + CEO pay ratio + audit fees.
 
 use std::fs::read_to_string;
 use std::path::Path;
@@ -26,6 +27,9 @@ use std::path::Path;
 use crate::error::Result;
 use crate::layout::Workdir;
 use crate::parsers::ownership_table::{extract_beneficial_ownership, BeneficialOwner};
+use crate::parsers::proxy_governance::{
+    extract_audit_fees, extract_pay_ratio, extract_proposals, AuditFees, CeoPayRatio, Proposal,
+};
 use crate::parsers::summary_compensation::{extract_summary_compensation, CompensationRow};
 use crate::slicing::SliceSpec;
 
@@ -37,6 +41,17 @@ use super::super::util::{
     strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
+
+/// Everything parsed from one DEF 14A filing — handed from the
+/// parallel parse stage to the sequential emit stage.
+struct Def14aRecords {
+    owners: Vec<BeneficialOwner>,
+    comp: Vec<CompensationRow>,
+    proposals: Vec<Proposal>,
+    pay_ratio: Option<CeoPayRatio>,
+    audit_fees: Option<AuditFees>,
+    issuer_cik_raw: String,
+}
 
 pub fn extract(
     workdir: &Workdir,
@@ -63,7 +78,15 @@ pub fn extract(
             };
             let owners = extract_beneficial_ownership(&html);
             let comp = extract_summary_compensation(&html);
-            if owners.is_empty() && comp.is_empty() {
+            let proposals = extract_proposals(&html);
+            let pay_ratio = extract_pay_ratio(&html);
+            let audit_fees = extract_audit_fees(&html);
+            if owners.is_empty()
+                && comp.is_empty()
+                && proposals.is_empty()
+                && pay_ratio.is_none()
+                && audit_fees.is_none()
+            {
                 return FileParse::Skipped;
             }
             let issuer_cik_raw = match cik_from_filing_path(path) {
@@ -74,33 +97,26 @@ pub fn extract(
             if !slice.cik_matches(issuer_cik_int) {
                 return FileParse::Skipped;
             }
-            FileParse::Parsed((owners, comp, issuer_cik_raw))
+            FileParse::Parsed(Def14aRecords {
+                owners,
+                comp,
+                proposals,
+                pay_ratio,
+                audit_fees,
+                issuer_cik_raw,
+            })
         },
-        |path, (owners, comp, issuer_cik_raw)| {
-            emit_def14a(
-                &owners,
-                &comp,
-                &issuer_cik_raw,
-                path,
-                sinks,
-                identities,
-                extracted_at,
-                &mut report,
-            )
-        },
+        |path, rec| emit_def14a(&rec, path, sinks, identities, extracted_at, &mut report),
     )?;
     report.files_read = files_read;
     report.parse_errors = parse_errors;
     Ok(report)
 }
 
-/// Emit holding + role + compensation rows for one parsed DEF 14A.
-/// Runs single-threaded.
-#[allow(clippy::too_many_arguments)]
+/// Emit holding + role + compensation + governance rows for one
+/// parsed DEF 14A. Runs single-threaded.
 fn emit_def14a(
-    owners: &[BeneficialOwner],
-    comp: &[CompensationRow],
-    issuer_cik_raw: &str,
+    rec: &Def14aRecords,
     path: &Path,
     sinks: &mut Sinks,
     identities: &mut Identities,
@@ -108,7 +124,9 @@ fn emit_def14a(
     report: &mut FormReport,
 ) -> Result<()> {
     {
-        let issuer_cik = strip_leading_zeros(issuer_cik_raw);
+        let owners = &rec.owners;
+        let comp = &rec.comp;
+        let issuer_cik = strip_leading_zeros(&rec.issuer_cik_raw);
         let accession = accession_from_path(path).unwrap_or_default();
         let document = path
             .file_name()
@@ -198,6 +216,63 @@ fn emit_def14a(
                     money_cell(c.pension_change).as_str(),
                     money_cell(c.other_compensation).as_str(),
                     money_cell(c.total).as_str(),
+                ],
+                &prov_base,
+            )?;
+            report.rows_written += 1;
+        }
+
+        // Ballot proposals (F9).
+        for (i, p) in rec.proposals.iter().enumerate() {
+            let nid = format!("{}-prop-{}", accession, i);
+            write_info_row(
+                &mut sinks.proposal,
+                &[
+                    nid.as_str(),
+                    issuer_cik.as_str(),
+                    "", // meeting_date — not parsed from the proposal section
+                    p.number.as_str(),
+                    p.description.as_str(),
+                    p.board_recommendation.as_str(),
+                    p.proposal_type.as_str(),
+                ],
+                &prov_base,
+            )?;
+            report.rows_written += 1;
+        }
+
+        // CEO pay-ratio disclosure (F9) — at most one per filing.
+        if let Some(pr) = &rec.pay_ratio {
+            let nid = format!("{}-payratio", accession);
+            write_info_row(
+                &mut sinks.ceo_pay_ratio,
+                &[
+                    nid.as_str(),
+                    issuer_cik.as_str(),
+                    pr.fiscal_year.as_str(),
+                    money_cell(pr.ceo_total_comp).as_str(),
+                    money_cell(pr.median_employee_comp).as_str(),
+                    money_cell(pr.ratio).as_str(),
+                ],
+                &prov_base,
+            )?;
+            report.rows_written += 1;
+        }
+
+        // Independent-auditor fee table (F9) — at most one per filing.
+        if let Some(af) = &rec.audit_fees {
+            let nid = format!("{}-auditfees", accession);
+            write_info_row(
+                &mut sinks.audit_fees,
+                &[
+                    nid.as_str(),
+                    issuer_cik.as_str(),
+                    af.fiscal_year.as_str(),
+                    af.auditor_name.as_str(),
+                    money_cell(af.audit_fees).as_str(),
+                    money_cell(af.audit_related_fees).as_str(),
+                    money_cell(af.tax_fees).as_str(),
+                    money_cell(af.other_fees).as_str(),
                 ],
                 &prov_base,
             )?;
