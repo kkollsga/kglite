@@ -15,4 +15,5 @@ pub mod idx;
 pub mod ownership_table;
 pub mod sc13d;
 pub mod submissions;
+pub mod summary_compensation;
 pub mod xbrl_facts;

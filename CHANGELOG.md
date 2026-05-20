@@ -246,6 +246,21 @@ properties:
 Verified against a 100-filing corpus: a 31,615-node / 60,398-edge
 graph across 17 node types and 19 edge types, no junction edges.
 
+### DEF 14A executive compensation (F8)
+
+- **`compensation.csv` + `Compensation` node** — the DEF 14A
+  extractor now parses the proxy statement's Summary Compensation
+  Table (Item 402): one node per named-executive-officer / fiscal
+  year, with salary / bonus / stock + option awards / non-equity
+  incentive / pension change / other / total, edged to `Person`,
+  `Company`, and the `Filing` it came from.
+- **person id scheme unified** — Form 3/4/5/144 person ids are now
+  `cik-{N}` (non-numeric), so they no longer collide-type with the
+  name-keyed proxy/10-K person ids and break FK edges into `Person`.
+- **ownership-table parser hardened** — footnote sentences, table
+  captions and city/state address lines no longer leak through as
+  beneficial-holder rows.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

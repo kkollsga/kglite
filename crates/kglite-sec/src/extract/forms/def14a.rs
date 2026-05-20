@@ -6,18 +6,19 @@
 //! director, and ≥ 5% holder. Cross-validates Form 4 cumulative
 //! totals — when they diverge significantly, there's a data gap.
 //!
-//! ## Emits (F7)
+//! ## Emits
 //!
-//! - `holding.csv` — one row per beneficial-owner table entry.
+//! - `holding.csv` — one row per beneficial-owner table entry (F7).
 //!   `source_form = "DEF 14A"`, `source_page` + `source_paragraph`
 //!   populated from the parser's location tracking.
 //! - `role.csv` — one row per `director_officer` ownership-table row
 //!   (the proxy table also tells us who's a current director / exec).
+//! - `compensation.csv` — one row per Summary Compensation Table
+//!   entry: each named executive's salary / awards / total (F8).
 //! - `person.csv` (where the holder is an individual; institutional
 //!   holders go to `institutional_manager.csv` as a side identity).
 //!
-//! Future depth: F8 adds executive-compensation extraction, F9 adds
-//! proposals + CEO pay ratio + audit fees.
+//! Future depth: F9 adds proposals + CEO pay ratio + audit fees.
 
 use std::fs::read_to_string;
 use std::path::Path;
@@ -25,14 +26,15 @@ use std::path::Path;
 use crate::error::Result;
 use crate::layout::Workdir;
 use crate::parsers::ownership_table::{extract_beneficial_ownership, BeneficialOwner};
+use crate::parsers::summary_compensation::{extract_summary_compensation, CompensationRow};
 use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, is_def14a_name, par_parse_emit, strip_leading_zeros,
-    walk_filings, FileParse, PARSE_CHUNK,
+    accession_from_path, cik_from_filing_path, format_float, is_def14a_name, par_parse_emit,
+    strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -60,7 +62,8 @@ pub fn extract(
                 Err(_) => return FileParse::Failed,
             };
             let owners = extract_beneficial_ownership(&html);
-            if owners.is_empty() {
+            let comp = extract_summary_compensation(&html);
+            if owners.is_empty() && comp.is_empty() {
                 return FileParse::Skipped;
             }
             let issuer_cik_raw = match cik_from_filing_path(path) {
@@ -71,11 +74,12 @@ pub fn extract(
             if !slice.cik_matches(issuer_cik_int) {
                 return FileParse::Skipped;
             }
-            FileParse::Parsed((owners, issuer_cik_raw))
+            FileParse::Parsed((owners, comp, issuer_cik_raw))
         },
-        |path, (owners, issuer_cik_raw)| {
+        |path, (owners, comp, issuer_cik_raw)| {
             emit_def14a(
                 &owners,
+                &comp,
                 &issuer_cik_raw,
                 path,
                 sinks,
@@ -90,10 +94,12 @@ pub fn extract(
     Ok(report)
 }
 
-/// Emit holding + role rows for one parsed DEF 14A ownership table.
+/// Emit holding + role + compensation rows for one parsed DEF 14A.
 /// Runs single-threaded.
+#[allow(clippy::too_many_arguments)]
 fn emit_def14a(
     owners: &[BeneficialOwner],
+    comp: &[CompensationRow],
     issuer_cik_raw: &str,
     path: &Path,
     sinks: &mut Sinks,
@@ -167,9 +173,45 @@ fn emit_def14a(
                 report.rows_written += 1;
             }
         }
+
+        // Executive compensation rows (F8) — Summary Compensation
+        // Table. person_nid is generated from the normalised name;
+        // proxy comp tables carry no CIK for individuals.
+        for (i, c) in comp.iter().enumerate() {
+            let person_nid = format!("p-{}", normalise_name(&c.person_name));
+            identities.ensure_person(sinks, &person_nid, &c.person_name, "")?;
+            let nid = format!("{}-comp-{}", accession, i);
+            write_info_row(
+                &mut sinks.compensation,
+                &[
+                    nid.as_str(),
+                    c.person_name.as_str(),
+                    person_nid.as_str(),
+                    issuer_cik.as_str(),
+                    c.fiscal_year.as_str(),
+                    c.position_title.as_str(),
+                    money_cell(c.salary).as_str(),
+                    money_cell(c.bonus).as_str(),
+                    money_cell(c.stock_awards).as_str(),
+                    money_cell(c.option_awards).as_str(),
+                    money_cell(c.non_equity_incentive).as_str(),
+                    money_cell(c.pension_change).as_str(),
+                    money_cell(c.other_compensation).as_str(),
+                    money_cell(c.total).as_str(),
+                ],
+                &prov_base,
+            )?;
+            report.rows_written += 1;
+        }
     }
 
     Ok(())
+}
+
+/// Render an optional money value for a CSV cell — `None` and `0.0`
+/// both collapse to empty, matching the `format_float` convention.
+fn money_cell(v: Option<f64>) -> String {
+    v.map(format_float).unwrap_or_default()
 }
 
 /// Lowercase, hyphenate, strip non-alphanumerics. Same name across

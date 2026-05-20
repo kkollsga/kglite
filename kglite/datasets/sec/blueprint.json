@@ -169,6 +169,32 @@
       }
     },
 
+    "Compensation": {
+      "csv": "processed/compensation.csv",
+      "pk": "compensation_nid",
+      "title": "person_name",
+      "properties": {
+        "person_name": "string",
+        "fiscal_year": "string",
+        "position_title": "string",
+        "salary": "float",
+        "bonus": "float",
+        "stock_awards": "float",
+        "option_awards": "float",
+        "non_equity_incentive": "float",
+        "pension_change": "float",
+        "other_compensation": "float",
+        "total": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_PERSON": { "target": "Person", "fk": "person_nid" },
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "CorporateEvent": {
       "csv": "processed/corporate_event.csv",
       "pk": "event_nid",
