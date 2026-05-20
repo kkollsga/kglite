@@ -182,6 +182,9 @@ pub const RELATED_PARTY_TRANSACTION_HEADER: &[&str] = &[
     "description",
 ];
 
+/// PLACEHOLDER (deferred) — the engaged independent registered public
+/// accounting firm (10-K Item 14 / DEF 14A). Header documented; no
+/// extractor wired yet.
 pub const AUDITOR_HEADER: &[&str] = &[
     "auditor_record_nid",
     "issuer_cik",
@@ -212,6 +215,8 @@ pub const OFFICER_CHANGE_HEADER: &[&str] = &[
     "reason_summary",
 ];
 
+/// PLACEHOLDER (deferred) — completed acquisition / disposition of
+/// assets (8-K Item 2.01). Header documented; no extractor wired yet.
 pub const MA_EVENT_HEADER: &[&str] = &[
     "ma_event_nid",
     "issuer_cik",
@@ -223,6 +228,8 @@ pub const MA_EVENT_HEADER: &[&str] = &[
     "deal_value_usd",
 ];
 
+/// PLACEHOLDER (deferred) — shareholder-meeting vote results (8-K
+/// Item 5.07). Header documented; no extractor wired yet.
 pub const VOTE_RESULT_HEADER: &[&str] = &[
     "vote_result_nid",
     "issuer_cik",
@@ -236,6 +243,8 @@ pub const VOTE_RESULT_HEADER: &[&str] = &[
     "outcome", // 'passed' | 'failed' | 'withdrawn'
 ];
 
+/// PLACEHOLDER (deferred) — change in the registrant's certifying
+/// accountant (8-K Item 4.01). Header documented; no extractor wired yet.
 pub const AUDITOR_CHANGE_HEADER: &[&str] = &[
     "auditor_change_nid",
     "issuer_cik",
@@ -245,6 +254,8 @@ pub const AUDITOR_CHANGE_HEADER: &[&str] = &[
     "reason_summary",
 ];
 
+/// PLACEHOLDER (deferred) — non-reliance on previously issued
+/// financials (8-K Item 4.02). Header documented; no extractor wired yet.
 pub const RESTATEMENT_HEADER: &[&str] = &[
     "restatement_nid",
     "issuer_cik",
@@ -299,6 +310,8 @@ pub const COMPENSATION_HEADER: &[&str] = &[
     "total",
 ];
 
+/// PLACEHOLDER (deferred) — the DEF 14A Item 402(v) pay-versus-
+/// performance table. Header documented; no extractor wired yet.
 pub const PAY_VS_PERFORMANCE_HEADER: &[&str] = &[
     "pvp_nid",
     "issuer_cik",
@@ -333,6 +346,8 @@ pub const AUDIT_FEES_HEADER: &[&str] = &[
     "other_fees",
 ];
 
+/// PLACEHOLDER (deferred) — a fund's annual proxy-voting record
+/// (Form N-PX). Header documented; no extractor wired yet.
 pub const FUND_VOTE_HEADER: &[&str] = &[
     "fund_vote_nid",
     "manager_cik",
@@ -394,6 +409,8 @@ pub const USE_OF_PROCEEDS_HEADER: &[&str] = &[
     "narrative",
 ];
 
+/// PLACEHOLDER (deferred) — merger / business-combination terms
+/// (Form S-4). Header documented; no extractor wired yet.
 pub const MERGER_HEADER: &[&str] = &[
     "merger_nid",
     "target_cik",

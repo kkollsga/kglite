@@ -334,6 +334,18 @@ graph across 17 node types and 19 edge types, no junction edges.
   carries no SC 13D/G documents, so both nodes load with zero rows
   pending a Schedule 13 fetch.
 
+### Deferred-placeholder sinks documented (F19)
+
+- The eight CSV sinks with no extractor yet — `auditor`,
+  `auditor_change` (8-K Item 4.01), `restatement` (8-K Item 4.02),
+  `ma_event` (8-K Item 2.01), `vote_result` (8-K Item 5.07),
+  `pay_vs_performance` (DEF 14A Item 402(v)), `fund_vote` (Form N-PX)
+  and `merger` (Form S-4) — now each carry a `PLACEHOLDER (deferred)`
+  doc comment naming the form/item that will populate them. The
+  headers were already written; this closes the F-phase program by
+  making every still-empty sink an intentional, documented
+  placeholder rather than an unexplained gap.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate
