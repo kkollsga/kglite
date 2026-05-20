@@ -18,6 +18,8 @@
 //! - `proposal.csv` / `ceo_pay_ratio.csv` / `audit_fees.csv` —
 //!   ballot proposals, the Item 402(u) pay-ratio disclosure, and the
 //!   independent-auditor fee table (F9).
+//! - `related_party_transaction.csv` — the proxy's "Related Person
+//!   Transactions" section (F12); 10-Ks delegate Item 13 here.
 //! - `person.csv` (where the holder is an individual; institutional
 //!   holders go to `institutional_manager.csv` as a side identity).
 
@@ -30,6 +32,7 @@ use crate::parsers::ownership_table::{extract_beneficial_ownership, BeneficialOw
 use crate::parsers::proxy_governance::{
     extract_audit_fees, extract_pay_ratio, extract_proposals, AuditFees, CeoPayRatio, Proposal,
 };
+use crate::parsers::related_party::{extract_related_party, RelatedPartyTransaction};
 use crate::parsers::summary_compensation::{extract_summary_compensation, CompensationRow};
 use crate::slicing::SliceSpec;
 
@@ -50,6 +53,7 @@ struct Def14aRecords {
     proposals: Vec<Proposal>,
     pay_ratio: Option<CeoPayRatio>,
     audit_fees: Option<AuditFees>,
+    related_party: Vec<RelatedPartyTransaction>,
     issuer_cik_raw: String,
 }
 
@@ -81,11 +85,13 @@ pub fn extract(
             let proposals = extract_proposals(&html);
             let pay_ratio = extract_pay_ratio(&html);
             let audit_fees = extract_audit_fees(&html);
+            let related_party = extract_related_party(&html);
             if owners.is_empty()
                 && comp.is_empty()
                 && proposals.is_empty()
                 && pay_ratio.is_none()
                 && audit_fees.is_none()
+                && related_party.is_empty()
             {
                 return FileParse::Skipped;
             }
@@ -103,6 +109,7 @@ pub fn extract(
                 proposals,
                 pay_ratio,
                 audit_fees,
+                related_party,
                 issuer_cik_raw,
             })
         },
@@ -273,6 +280,27 @@ fn emit_def14a(
                     money_cell(af.audit_related_fees).as_str(),
                     money_cell(af.tax_fees).as_str(),
                     money_cell(af.other_fees).as_str(),
+                ],
+                &prov_base,
+            )?;
+            report.rows_written += 1;
+        }
+
+        // Related-party transactions (F12) — the proxy's "Related
+        // Person Transactions" section is where 10-K Item 13 detail
+        // actually lives.
+        for (i, t) in rec.related_party.iter().enumerate() {
+            let nid = format!("{}-rpt-{}", accession, i);
+            write_info_row(
+                &mut sinks.related_party_transaction,
+                &[
+                    nid.as_str(),
+                    issuer_cik.as_str(),
+                    t.counterparty_name.as_str(),
+                    t.relationship.as_str(),
+                    t.year.as_str(),
+                    money_cell(t.amount_usd).as_str(),
+                    t.description.as_str(),
                 ],
                 &prov_base,
             )?;

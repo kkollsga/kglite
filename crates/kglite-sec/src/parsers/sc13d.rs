@@ -58,6 +58,8 @@ pub struct ReportingPerson {
     pub type_of_reporting_person: String,
 }
 
+use super::html_text::extract_item_text;
+
 /// Parse a single SC 13D HTML document into a structured record.
 pub fn parse_sc13d(html: &str) -> Sc13dFiling {
     let stripped = strip_html(html);
@@ -199,30 +201,6 @@ fn extract_percent_field(block: &str, marker: &str) -> f64 {
         }
     }
     0.0
-}
-
-fn extract_item_text(text: &str, item_num: &str) -> Option<String> {
-    // Find "Item {N}" — case-insensitive, with optional period.
-    let upper = text.to_ascii_uppercase();
-    let needle = format!("ITEM {}", item_num);
-    let start = upper.find(&needle)?;
-    // Capture until the next "Item " marker or EOF.
-    let after = &text[start + needle.len()..];
-    let upper_after = after.to_ascii_uppercase();
-    let end = upper_after
-        .find("ITEM ")
-        .or(upper_after.find("\nSIGNATURE"))
-        .unwrap_or(after.len().min(2000));
-    let body = &after[..end.min(after.len())];
-    // Drop the leading period / colon / heading prefix.
-    let trimmed = body
-        .trim_start_matches(|c: char| !c.is_alphanumeric())
-        .trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 fn extract_percent_owned(text: &str) -> f64 {

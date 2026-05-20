@@ -252,6 +252,25 @@
       }
     },
 
+    "RelatedPartyTransaction": {
+      "csv": "processed/related_party_transaction.csv",
+      "pk": "rpt_nid",
+      "title": "description",
+      "properties": {
+        "counterparty_name": "string",
+        "relationship": "string",
+        "year": "string",
+        "amount_usd": "float",
+        "description": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "CorporateEvent": {
       "csv": "processed/corporate_event.csv",
       "pk": "event_nid",

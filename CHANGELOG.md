@@ -268,6 +268,19 @@ graph across 17 node types and 19 edge types, no junction edges.
   captions and city/state address lines no longer leak through as
   beneficial-holder rows.
 
+### Related-party transactions (F12)
+
+- **`related_party_transaction.csv` + `RelatedPartyTransaction`
+  node** — a new parser reads the related-party section: 10-K Item 13,
+  but since most 10-Ks delegate that item to the proxy, it also
+  locates a DEF 14A's "Related Person Transactions" heading (where the
+  detail actually lives). Conservative — only sentences carrying an
+  explicit dollar amount become rows, with the amount, a year, and a
+  relationship hint (director / officer / family member / affiliate).
+- **shared `parsers/html_text.rs`** — the `extract_item_text`
+  Item-section scanner is lifted out of the SC 13D parser into a
+  shared module so the 10-K / DEF 14A section extractors reuse it.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

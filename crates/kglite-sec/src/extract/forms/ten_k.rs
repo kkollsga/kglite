@@ -5,13 +5,13 @@
 //! Compensation, 12 Security Ownership, 13 Related-Party
 //! Transactions, 14 Auditor, 15 Exhibits (incl. Exhibit 21).
 //!
-//! ## Emits (F5 — Exhibit 21 wired)
+//! ## Emits
 //!
-//! - `subsidiary.csv` — one row per subsidiary disclosed in Exhibit 21.
-//!
-//! Future depth (F11/F12): Item 12 beneficial-ownership table
-//! (same parser as DEF 14A) → `holding.csv` with `source_form="10-K"`,
-//! Item 13 related-party transactions → `related_party_transaction.csv`.
+//! - `subsidiary.csv` — one row per subsidiary disclosed in Exhibit 21 (F5).
+//! - `holding.csv` — Item 12 beneficial-ownership table, reusing the
+//!   DEF 14A parser, with `source_form="10-K"` (F11).
+//! - `related_party_transaction.csv` — Item 13 related-party
+//!   transactions (F12).
 
 use std::fs::read_to_string;
 use std::path::Path;
@@ -20,13 +20,14 @@ use crate::error::Result;
 use crate::layout::Workdir;
 use crate::parsers::exhibit21::{extract_subsidiaries as parse_exhibit21, Subsidiary};
 use crate::parsers::ownership_table::{extract_beneficial_ownership, BeneficialOwner};
+use crate::parsers::related_party::{extract_related_party, RelatedPartyTransaction};
 use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, is_exhibit21_name, par_parse_emit,
+    accession_from_path, cik_from_filing_path, format_float, is_exhibit21_name, par_parse_emit,
     strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
@@ -48,6 +49,9 @@ pub fn extract(
     // 10-K primary documents are full-document HTML; the ownership-
     // table parser's heading-finder picks out the Item 12 section.
     extract_item12_ownership(workdir, slice, sinks, identities, extracted_at, &mut report)?;
+
+    // Item 13 — related-party transactions.
+    extract_item13_related_party(workdir, slice, sinks, extracted_at, &mut report)?;
 
     let paths = walk_filings(&root, is_exhibit21_name)?;
 
@@ -143,13 +147,7 @@ fn extract_item12_ownership(
     report: &mut FormReport,
 ) -> Result<()> {
     let root = workdir.raw_filings_dir();
-    // 10-K primary docs typically have names containing "10-k" or
-    // "10k" or "10kform"; reuse a permissive predicate.
-    let paths = walk_filings(&root, |name| {
-        let lc = name.to_ascii_lowercase();
-        (lc.ends_with(".htm") || lc.ends_with(".html"))
-            && (lc.contains("10-k") || lc.contains("10k") || lc.contains("10kform"))
-    })?;
+    let paths = walk_filings(&root, is_ten_k_primary)?;
 
     // Full-document HTML scan is the heavy part — parallelise it.
     // files_read / parse_errors stay on the Exhibit 21 pass; Item 12
@@ -235,6 +233,94 @@ fn emit_item12(
                 percent_cell.as_str(),
                 "",
                 "0",
+            ],
+            &prov,
+        )?;
+        report.rows_written += 1;
+    }
+    Ok(())
+}
+
+/// True for a 10-K primary-document filename — the full-document
+/// HTML the Item 12 and Item 13 section scans run over.
+fn is_ten_k_primary(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    (lc.ends_with(".htm") || lc.ends_with(".html"))
+        && (lc.contains("10-k") || lc.contains("10k") || lc.contains("10kform"))
+}
+
+/// Walk 10-K primary documents and extract Item 13 related-party
+/// transactions. Most 10-Ks delegate Item 13 to the proxy statement,
+/// so this is low-yield by design.
+fn extract_item13_related_party(
+    workdir: &Workdir,
+    slice: &SliceSpec,
+    sinks: &mut Sinks,
+    extracted_at: &str,
+    report: &mut FormReport,
+) -> Result<()> {
+    let root = workdir.raw_filings_dir();
+    let paths = walk_filings(&root, is_ten_k_primary)?;
+    par_parse_emit(
+        &paths,
+        PARSE_CHUNK,
+        |path| {
+            let html = match read_to_string(path) {
+                Ok(v) => v,
+                Err(_) => return FileParse::Failed,
+            };
+            let txns = extract_related_party(&html);
+            if txns.is_empty() {
+                return FileParse::Skipped;
+            }
+            let issuer_cik_raw = match cik_from_filing_path(path) {
+                Some(v) => v,
+                None => return FileParse::Skipped,
+            };
+            let issuer_cik_int: u64 = issuer_cik_raw.parse().unwrap_or(0);
+            if !slice.cik_matches(issuer_cik_int) {
+                return FileParse::Skipped;
+            }
+            FileParse::Parsed((txns, issuer_cik_raw))
+        },
+        |path, (txns, issuer_cik_raw)| {
+            emit_item13(&txns, &issuer_cik_raw, path, sinks, extracted_at, report)
+        },
+    )?;
+    Ok(())
+}
+
+/// Emit Item 13 `related_party_transaction` rows for one 10-K. Runs
+/// single-threaded.
+fn emit_item13(
+    txns: &[RelatedPartyTransaction],
+    issuer_cik_raw: &str,
+    path: &Path,
+    sinks: &mut Sinks,
+    extracted_at: &str,
+    report: &mut FormReport,
+) -> Result<()> {
+    let issuer_cik = strip_leading_zeros(issuer_cik_raw);
+    let accession = accession_from_path(path).unwrap_or_default();
+    let document = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let prov = Provenance::for_filing("10-K", &accession, &issuer_cik, &document, extracted_at);
+    for (i, t) in txns.iter().enumerate() {
+        let nid = format!("{}-rpt-{}", accession, i);
+        let amount = t.amount_usd.map(format_float).unwrap_or_default();
+        write_info_row(
+            &mut sinks.related_party_transaction,
+            &[
+                nid.as_str(),
+                issuer_cik.as_str(),
+                t.counterparty_name.as_str(),
+                t.relationship.as_str(),
+                t.year.as_str(),
+                amount.as_str(),
+                t.description.as_str(),
             ],
             &prov,
         )?;
