@@ -207,6 +207,13 @@ agent-first framing).
   longer pulls `sodir`/`wikidata` → pandas → pyarrow into the process.
   Loading pyarrow after the kglite native extension triggered a
   dynamic-linker crash; keeping it off the SEC import path resolves it.
+- **Identity pre-pass scoped to the corpus** — extraction without an
+  explicit `cik_list` no longer scans the full ~900K-company
+  `submissions.zip`. The CIKs to load are derived from the filings
+  already on disk (`raw/filings/`, `raw/financials/`), so the identity
+  pre-pass uses the direct-lookup fast path instead of an
+  EDGAR-wide scan — ~20 s → tens of ms on a 100-filing corpus, where it
+  had been 99.8% of total extraction wall time.
 
 ### Sodir loader ported to Rust — `pandas` dropped
 
