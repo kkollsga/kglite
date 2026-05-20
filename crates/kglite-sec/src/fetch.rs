@@ -208,49 +208,6 @@ pub async fn fetch_company_submission(
     }
 }
 
-/// Fetch the FSNDS (Financial Statement and Notes Data Set) ZIP for
-/// a given (year, quarter), extract `num.tsv` from it into
-/// `raw/financials/{year}_QTR{quarter}_num.tsv`. The full ZIP also
-/// contains sub.tsv, txt.tsv, etc., but D3 only needs the numeric
-/// XBRL facts.
-///
-/// Returns `true` if the file was newly downloaded, `false` if the
-/// extracted num.tsv already existed.
-pub async fn fetch_fsnds_quarterly(
-    client: &SecClient,
-    workdir: &Workdir,
-    year: u16,
-    quarter: u8,
-    force_refetch: bool,
-) -> Result<bool> {
-    use std::io::Read as _;
-    workdir.ensure_dirs(None)?;
-    let dir = workdir.raw_financials_dir();
-    let num_tsv = dir.join(format!("{year}_QTR{quarter}_num.tsv"));
-    if !force_refetch && num_tsv.is_file() {
-        return Ok(false);
-    }
-
-    let url = catalog::fsnds_quarterly_url(year, quarter);
-    let zip_path = dir.join(format!("{year}_QTR{quarter}_notes.zip"));
-    client
-        .fetch_to_file(&url, &zip_path, FetchMode::OnlyIfMissing)
-        .await?;
-
-    // Extract just num.tsv from the ZIP.
-    let f = std::fs::File::open(&zip_path)?;
-    let mut zip = zip::ZipArchive::new(f)?;
-    let mut num_file = match zip.by_name("num.tsv") {
-        Ok(f) => f,
-        Err(_) => return Err(SecError::Decode(format!("num.tsv missing in {url}"))),
-    };
-    let mut buf = String::new();
-    num_file.read_to_string(&mut buf)?;
-    drop(num_file);
-    std::fs::write(&num_tsv, buf)?;
-    Ok(true)
-}
-
 /// Fetch a 13F-HR information-table XML for one filing. The 13F-HR
 /// filing index has multiple documents; the info table is the one
 /// whose type is `INFORMATION TABLE`. We discover its filename via

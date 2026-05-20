@@ -2,7 +2,7 @@
 //!
 //! Two surfaces, kept deliberately thin:
 //!
-//! 1. **Fetch helpers** (`fetch_raw`, `fetch_fsnds`, `fetch_form4_batch`,
+//! 1. **Fetch helpers** (`fetch_raw`, `fetch_form4_batch`,
 //!    `fetch_13f_batch`, `fetch_filing_batch`, `fetch_exhibit21_batch`)
 //!    download SEC documents into `raw/` under a single SecClient that
 //!    enforces the 10 req/s SEC rate limit. The Python wrapper invokes
@@ -27,8 +27,8 @@ use pyo3::wrap_pyfunction;
 
 use kglite_sec::{
     fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
-    fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, run_all, SecClient,
-    SecError, SliceSpec, Workdir, YearRange,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, run_all, SecClient, SecError, SliceSpec,
+    Workdir, YearRange,
 };
 
 // Workdir args cross the PyO3 boundary as `String`, not `PathBuf` —
@@ -211,30 +211,6 @@ fn fetch_raw(
     d.set_item("submissions_downloaded", submissions_dl)?;
     d.set_item("company_tickers_downloaded", tickers_dl)?;
     Ok(d.into())
-}
-
-/// Fetch FSNDS NUM.tsv for one (year, quarter). Bulk path; not rate
-/// limited. Returns `true` if newly downloaded, `false` if cached.
-#[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, year, quarter, force_refetch=false))]
-fn fetch_fsnds(
-    workdir: String,
-    user_agent: &str,
-    year: u16,
-    quarter: u8,
-    force_refetch: bool,
-) -> PyResult<bool> {
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    rt.block_on(async {
-        fetch_fsnds_quarterly(&client, &wd, year, quarter, force_refetch)
-            .await
-            .map_err(map_err)
-    })
 }
 
 /// Batch-fetch Form 3/4/5 ownership XMLs. Returns (downloaded, skipped).
@@ -565,7 +541,6 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "_sec_internal")?;
     // Fetch
     m.add_function(wrap_pyfunction!(fetch_raw, &m)?)?;
-    m.add_function(wrap_pyfunction!(fetch_fsnds, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_form4_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_filing_batch, &m)?)?;

@@ -33,14 +33,13 @@ pub use extract::{run_all, ExtractReport, Provenance, Sinks};
 pub use fetch::{
     fetch_13f_info_table, fetch_company_facts, fetch_company_submission, fetch_company_tickers,
     fetch_exhibit21_attachment, fetch_filing_primary_doc, fetch_form4_filing,
-    fetch_fsnds_quarterly, fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };
 pub use layout::{StorageMode, Workdir};
 pub use parsers::eightk::{extract_8k_items, EightKItem};
 pub use parsers::exhibit21::{extract_subsidiaries as parse_exhibit21_subsidiaries, Subsidiary};
 pub use parsers::f13f::{parse_13f_info_table, Holding};
 pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
-pub use parsers::fsnds::{parse_fsnds_num, XbrlFact, DEFAULT_TAG_WHITELIST};
 pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
 pub use parsers::sc13d::{parse_sc13d, Sc13dFiling};
 pub use parsers::submissions::{

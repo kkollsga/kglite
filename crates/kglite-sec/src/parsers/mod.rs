@@ -11,7 +11,6 @@ pub mod f13f;
 pub mod form144;
 pub mod form4;
 pub mod formd;
-pub mod fsnds;
 pub mod html_text;
 pub mod idx;
 pub mod offering;
