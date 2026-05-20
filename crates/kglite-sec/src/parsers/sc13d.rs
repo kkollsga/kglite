@@ -26,6 +26,9 @@ pub struct Sc13dFiling {
     /// entries). Each captures the SC 13D cover page's numbered
     /// fields (1-14) for that filer.
     pub reporting_persons: Vec<ReportingPerson>,
+    /// Amendment number from the cover page's "(Amendment No. N)" —
+    /// `Some` when this filing is an amendment, `None` for an original.
+    pub amendment_no: Option<u32>,
 }
 
 /// One filer's cover-page block on an SC 13D. The numbered fields
@@ -70,7 +73,21 @@ pub fn parse_sc13d(html: &str) -> Sc13dFiling {
         purpose_text: truncate(&purpose_text, 1000),
         percent_owned,
         reporting_persons,
+        amendment_no: extract_amendment_no(&stripped),
     }
+}
+
+/// Read the amendment number from a "(Amendment No. N)" cover-page
+/// marker. `None` when the filing is an original.
+fn extract_amendment_no(text: &str) -> Option<u32> {
+    let lc = text.to_ascii_lowercase();
+    let idx = lc.find("amendment no")?;
+    let digits: String = text[idx + "amendment no".len()..]
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Pull one `ReportingPerson` block per filer. The cover page is a
@@ -333,5 +350,13 @@ beneficially own 7.5% of the Issuer's outstanding common stock.</p>
         let html = "<html><body>iTeM 4. lowercase test purpose</body></html>";
         let f = parse_sc13d(html);
         assert!(f.purpose_text.contains("lowercase test"));
+    }
+
+    #[test]
+    fn detects_amendment_number() {
+        let amended = "<html><body>SCHEDULE 13D (Amendment No. 3) Item 4. Purpose.</body></html>";
+        assert_eq!(parse_sc13d(amended).amendment_no, Some(3));
+        let original = "<html><body>SCHEDULE 13D Item 4. Purpose.</body></html>";
+        assert_eq!(parse_sc13d(original).amendment_no, None);
     }
 }

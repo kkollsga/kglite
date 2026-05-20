@@ -17,8 +17,13 @@
 //!   of funds, purpose text.
 //! - `holding.csv` — one row per reporting person's aggregate amount
 //!   (`source_form="SC 13D"` or `"SC 13G"`).
+//! - `holder_group.csv` — joint-filer group links: multiple reporting
+//!   persons on one filing are a § 13(d) group (F18).
 //! - `person.csv` (individual filers) or `institutional_manager.csv`
 //!   (entity filers).
+//!
+//! Amendments are detected from the cover page's "(Amendment No. N)"
+//! marker — `is_amendment` is set accordingly (F18).
 
 use std::fs::read_to_string;
 use std::path::Path;
@@ -128,6 +133,15 @@ fn emit_sc13(
             extracted_at,
         );
 
+        // is_amendment — set from the cover page's "(Amendment No. N)".
+        let amendment_cell = if parsed.amendment_no.is_some() {
+            "1"
+        } else {
+            "0"
+        };
+        // Collect filer nids to link joint filers as a § 13(d) group.
+        let mut filer_nids: Vec<String> = Vec::new();
+
         for (i, rp) in parsed.reporting_persons.iter().enumerate() {
             // Filer identity: name-normalised nid (SC 13D rarely
             // includes the filer's CIK in the cover page).
@@ -146,6 +160,7 @@ fn emit_sc13(
                 .filter(|c| *c != '\0')
                 .collect();
             let filer_nid = format!("rp-{}", normalised.trim_matches('-'));
+            filer_nids.push(filer_nid.clone());
             // Classify: individuals → person, entities → manager.
             let is_entity = matches!(
                 rp.type_of_reporting_person.as_str(),
@@ -184,9 +199,9 @@ fn emit_sc13(
                     rp.citizenship.as_str(),
                     parsed.purpose_text.as_str(),
                     rp.source_of_funds.as_str(),
-                    "",  // member_of_group — not yet extracted
-                    "0", // is_amendment — TODO infer from filename suffix
-                    "",  // original_filing_accession
+                    "", // member_of_group — see holder_group.csv
+                    amendment_cell,
+                    "", // original_filing_accession — needs a cross-filing lookup
                 ],
                 &prov,
             )?;
@@ -208,6 +223,23 @@ fn emit_sc13(
                     "0",
                 ],
                 &prov,
+            )?;
+            report.rows_written += 1;
+        }
+
+        // Joint-filer group links (F18) — multiple reporting persons
+        // on one SC 13D/G are a § 13(d) group; link each to the first.
+        for (j, other) in filer_nids.iter().enumerate().skip(1) {
+            let group_nid = format!("{}-grp-{}", accession, j);
+            write_info_row(
+                &mut sinks.holder_group,
+                &[
+                    group_nid.as_str(),
+                    filer_nids[0].as_str(),
+                    other.as_str(),
+                    issuer_cik.as_str(),
+                ],
+                &prov_base,
             )?;
             report.rows_written += 1;
         }

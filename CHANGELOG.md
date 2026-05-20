@@ -320,6 +320,20 @@ graph across 17 node types and 19 edge types, no junction edges.
   nodes load cleanly with zero rows pending a registration-statement
   fetch.
 
+### SC 13D/G amendment + group refinements (F18)
+
+- **Amendment detection** — the SC 13D/G parser reads the cover
+  page's "(Amendment No. N)" marker, so `activist_filing.is_amendment`
+  is now set from the filing itself instead of hardcoded `0`.
+- **`holder_group.csv` + `HolderGroup` node** — when one SC 13D/G
+  carries multiple reporting persons they are a § 13(d) group;
+  `schedule13` now links each joint filer to the first.
+- **`ActivistFiling` node** — `activist_filing.csv` (long the
+  SC 13D/G output) finally enters the blueprint, edged to `Company`
+  and `Filing`. Verified by parser fixtures — the benchmark corpus
+  carries no SC 13D/G documents, so both nodes load with zero rows
+  pending a Schedule 13 fetch.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

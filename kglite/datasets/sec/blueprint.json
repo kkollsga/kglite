@@ -409,6 +409,54 @@
       }
     },
 
+    "ActivistFiling": {
+      "csv": "processed/activist_filing.csv",
+      "pk": "activist_filing_nid",
+      "title": "filer_name",
+      "properties": {
+        "filer_nid": "string",
+        "filer_type": "string",
+        "filer_name": "string",
+        "security_cusip": "string",
+        "security_class": "string",
+        "aggregate_amount": "float",
+        "percent_of_class": "float",
+        "sole_voting_power": "float",
+        "shared_voting_power": "float",
+        "sole_dispositive_power": "float",
+        "shared_dispositive_power": "float",
+        "type_of_reporting_person": "string",
+        "citizenship": "string",
+        "purpose_text": "string",
+        "source_of_funds": "string",
+        "member_of_group": "string",
+        "is_amendment": "string",
+        "original_filing_accession": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "HolderGroup": {
+      "csv": "processed/holder_group.csv",
+      "pk": "group_link_nid",
+      "title": "group_link_nid",
+      "properties": {
+        "filer_a_nid": "string",
+        "filer_b_nid": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_fact_nid",
