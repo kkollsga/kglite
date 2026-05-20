@@ -31,7 +31,7 @@ structural validators that compose with Cypher.
 > Pulls SEC EDGAR's full filing index (~14M filings since 1993) plus
 > 2 years of deep payloads — Form 4 insider transactions, 13F
 > institutional holdings, SC 13D activist stakes, DEF 14A board
-> composition, FSNDS XBRL financials, Exhibit 21 subsidiaries, 8-K
+> composition, XBRL financials, Exhibit 21 subsidiaries, 8-K
 > Item codes. **11 node types, 15 edge types**, queryable with Cypher.
 > Public-domain data (US Govt work). Scope with `companies=[...]` for
 > an S&P-500-sized graph in ~10 minutes. **→
@@ -248,8 +248,8 @@ organisations — see each module docstring for non-affiliation notes.
 US-public-company knowledge graph from the SEC's free public data —
 all 14M historical filings + per-filing payload parsing for Form 4
 (insider transactions), 13F-HR (institutional holdings), SC 13D
-(activist stakes), DEF 14A (board composition), FSNDS NUM.tsv (XBRL
-financial metrics), 10-K Exhibit 21 (subsidiaries), 8-K cover pages
+(activist stakes), DEF 14A (board composition), XBRL company facts
+(financial metrics), 10-K Exhibit 21 (subsidiaries), 8-K cover pages
 (material event Item codes):
 
 ```python

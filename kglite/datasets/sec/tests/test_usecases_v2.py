@@ -175,13 +175,6 @@ def _stage_synth_workdir(tmp_path: Path) -> Path:
         "<p>Item 5. The Reporting Persons own 6.5% of the outstanding common.</p>"
         "</body></html>"
     )
-    # FSNDS NUM for Apple
-    (raw / "financials" / "2024_QTR3_num.tsv").write_text(
-        "adsh\ttag\tversion\tcoreg\tddate\tqtrs\tuom\tvalue\tfootnote\n"
-        "0000320193-24-000123\tRevenues\tus-gaap/2024\t\t20240928\t4\tUSD\t383285000000\t\n"
-        "0000320193-24-000123\tNetIncomeLoss\tus-gaap/2024\t\t20240928\t4\tUSD\t96995000000\t\n"
-        "0000789019-24-000045\tRevenues\tus-gaap/2024\t\t20240630\t4\tUSD\t245122000000\t\n"
-    )
     return tmp_path
 
 

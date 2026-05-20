@@ -418,9 +418,8 @@ class SEC:
                 ``graph/{mode}/``. Created if absent.
             years: Years of historical Filing index to ingest. Default
                 10. ``"all"`` for 1993→present. ``0`` to skip shallow.
-            detailed: Years of full-payload ingest (Form 4, 13F, FSNDS,
-                Exhibit 21, 8-K). Default 2. Phase 3 does not yet
-                consume this — payload parsers land in phases 4-7.
+            detailed: Years of full-payload ingest (Form 4, 13F, 8-K,
+                Exhibit 21, XBRL company facts). Default 2.
             mode: ``"memory"`` | ``"mapped"`` | ``"disk"``. Each mode's
                 built graph lives in its own ``graph/{mode}/`` subdir
                 and is reused on subsequent calls. Default ``"mapped"``.
@@ -546,26 +545,6 @@ class SEC:
             )
             if verbose and fetch_dispatch:
                 print(f"[SEC]   per-filing fetch: {fetch_dispatch}")
-
-        # Step 2a: FSNDS XBRL feed (deferred until per-filing R-file
-        # parser lands in Phase F17 — kept for now as the bulk source).
-        if include_xbrl_metrics and detailed > 0:
-            if verbose:
-                print("[SEC] fetching FSNDS XBRL")
-            start_y = max(current_year - detailed + 1, 2009)
-            for y in range(start_y, current_year + 1):
-                for q in range(1, 5):
-                    try:
-                        _sec_internal.fetch_fsnds(
-                            str(workdir),
-                            user_agent=user_agent,
-                            year=y,
-                            quarter=q,
-                            force_refetch=force_refetch,
-                        )
-                    except Exception as e:
-                        if verbose:
-                            print(f"[SEC]   FSNDS {y}Q{q} skip: {e}")
 
         # Step 3: single feature-extraction call. The Rust orchestrator
         # dispatches every form-specific extractor, populates identity

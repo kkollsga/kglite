@@ -378,6 +378,15 @@ graph across 17 node types and 19 edge types, no junction edges.
   back to the previous `[SEC]` prints otherwise. `tqdm` stays an
   optional dependency. Ctrl+C during a fetch now aborts cleanly.
 
+### SEC loader — dead FSNDS bulk-feed fetch removed
+
+- `SEC.open` no longer downloads the legacy FSNDS (Financial Statement
+  and Notes Data Set) quarterly bulk ZIPs. F17 replaced that feed with
+  per-company XBRL company-facts JSON, and nothing read the FSNDS
+  `num.tsv` files anymore — the fetch was pure dead weight. XBRL
+  financial metrics are unaffected; they still come from the
+  company-facts fetch gated by `include_xbrl_metrics`.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

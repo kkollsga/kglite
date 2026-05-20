@@ -32,7 +32,7 @@ sec_workdir/
     submissions/             #   bulk submissions.zip + extracts
     insider/                 #   Form 4 JSONL (when fetched)
     form13f/                 #   13F-HR XML/TSV (when fetched)
-    financials/              #   FSNDS num.tsv (when fetched)
+    financials/              #   XBRL company-facts JSON (when fetched)
     filings/                 #   per-filing payloads (Exhibit 21, 8-K)
     company_tickers.json
   processed/                 # parsed CSVs (shared across modes)
