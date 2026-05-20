@@ -176,6 +176,38 @@ pub async fn fetch_company_facts(
     }
 }
 
+/// Fetch one company's submission JSON from
+/// `data.sec.gov/submissions/CIK{cik}.json` into
+/// `raw/submissions/CIK{cik:010}.json`.
+///
+/// For sliced runs (`cik_list`), fetching the handful of per-company
+/// submission JSONs avoids downloading the ~1 GB bulk submissions.zip
+/// AND skips the 528K-entry central-directory parse at extract time.
+/// `extract::identity::companies` prefers these individual files over
+/// the bulk zip when present.
+///
+/// Returns `true` if newly downloaded, `false` if cached.
+pub async fn fetch_company_submission(
+    client: &SecClient,
+    workdir: &Workdir,
+    cik: u64,
+    force_refetch: bool,
+) -> Result<bool> {
+    workdir.ensure_dirs(None)?;
+    let path = workdir
+        .raw_submissions_dir()
+        .join(format!("CIK{cik:010}.json"));
+    if !force_refetch && path.is_file() {
+        return Ok(false);
+    }
+    let url = catalog::submissions_cik_url(cik);
+    match client.fetch_to_file(&url, &path, FetchMode::Always).await {
+        Ok(v) => Ok(v),
+        Err(SecError::BadStatus { status: 404, .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Fetch the FSNDS (Financial Statement and Notes Data Set) ZIP for
 /// a given (year, quarter), extract `num.tsv` from it into
 /// `raw/financials/{year}_QTR{quarter}_num.tsv`. The full ZIP also

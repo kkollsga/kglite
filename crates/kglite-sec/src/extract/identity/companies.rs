@@ -83,13 +83,44 @@ pub fn emit_from_submissions(
     // entries. On a 50-company slice this is the difference between
     // ~34 s and ~50 ms.
     if let Some(cik_set) = &slice.cik_list {
-        let zip_file = File::open(&zip_path).map_err(SecError::Io)?;
-        let mut zip = open_submissions_zip(BufReader::new(zip_file))?;
         let mut ciks: Vec<u64> = cik_set.iter().copied().collect();
         ciks.sort_unstable(); // deterministic output order
+
+        // Per-company `raw/submissions/CIK{cik}.json` files, when the
+        // fetcher has populated them, let us skip the bulk zip
+        // entirely — no 528K-entry central-directory parse. We only
+        // open the bulk zip lazily if some CIK has no individual file.
+        let subs_dir = workdir.raw_submissions_dir();
+        let mut bulk_zip: Option<_> = None;
         for cik in ciks {
-            match read_submission_by_cik(&mut zip, cik) {
-                Ok(Some(sub)) => emit_one_submission(
+            let individual = subs_dir.join(format!("CIK{cik:010}.json"));
+            let sub = if individual.is_file() {
+                match std::fs::read_to_string(&individual) {
+                    Ok(json) => match crate::parsers::submissions::parse_submission_json(&json) {
+                        Ok(s) => Some(s),
+                        Err(_) => {
+                            report.submission_parse_errors += 1;
+                            None
+                        }
+                    },
+                    Err(_) => None,
+                }
+            } else {
+                // Fall back to the bulk zip (opened once, lazily).
+                if bulk_zip.is_none() {
+                    let zip_file = File::open(&zip_path).map_err(SecError::Io)?;
+                    bulk_zip = Some(open_submissions_zip(BufReader::new(zip_file))?);
+                }
+                match read_submission_by_cik(bulk_zip.as_mut().unwrap(), cik) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        report.submission_parse_errors += 1;
+                        None
+                    }
+                }
+            };
+            if let Some(sub) = sub {
+                emit_one_submission(
                     &sub,
                     slice,
                     sinks,
@@ -97,9 +128,7 @@ pub fn emit_from_submissions(
                     &mut filing_index,
                     &mut sic_index,
                     &mut report,
-                )?,
-                Ok(None) => {} // CIK not in the archive — fine.
-                Err(_) => report.submission_parse_errors += 1,
+                )?;
             }
         }
     } else {
