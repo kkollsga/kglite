@@ -1,58 +1,57 @@
-"""Helpers for fetching and building KGLite disk graphs from the
-Wikimedia Foundation's official `latest-truthy` RDF dumps published at
+"""Helpers for fetching and building KGLite graphs from the Wikimedia
+Foundation's official `latest-truthy` RDF dumps published at
 https://dumps.wikimedia.org/wikidatawiki/entities/.
 
 KGLite is an independent project — not affiliated with the Wikimedia
-Foundation or Wikidata. The dump format and licensing are defined by
-upstream; this module only handles the cache + build lifecycle on the
-client side.
+Foundation or Wikidata.
+
+A thin Python surface over the pure-Rust ``kglite-wikidata`` crate
+(exposed as ``kglite._wikidata_internal``): the resumable download and
+the staleness / cooldown cache live in Rust. Python keeps the
+process-local graph cache, the disk-mode rebuild decision, and the
+``load_ntriples`` graph build.
 
 Public API:
     open(workdir, ...)    -> KnowledgeGraph   # full lifecycle
     fetch_truthy(workdir) -> Path             # dump-only path
+    cache_clear()         -> int              # drop the process cache
 
 Layout managed under `workdir`:
 
     workdir/
         latest-truthy.nt.bz2          # cached dump
         latest-truthy.nt.bz2.part     # in-progress download (resumable)
-        graph/                        # disk graph dir built from the dump
+        graph[_<N>m]/                 # disk graph built from the dump
             wikidata_source.json      # build-time dump metadata
             disk_graph_meta.json
-            ...
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 import json
-import os
 from pathlib import Path
-import subprocess
-import time
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+
+# Rust binding submodule produced by maturin from `src/wikidata.rs`.
+# kglite.datasets.wikidata is excluded from mypy stubtest
+# (mypy_stubtest.ini) so the bare import works without a stub.
+from kglite import _wikidata_internal
 
 from .. import KnowledgeGraph, load
 
-WIKIDATA_FILE = "latest-truthy.nt.bz2"
-WIKIDATA_URL = f"https://dumps.wikimedia.org/wikidatawiki/entities/{WIKIDATA_FILE}"
 SOURCE_META_FILENAME = "wikidata_source.json"
 GRAPH_SUBDIR = "graph"
 
 # Process-local cache of loaded disk graphs — keyed by (canonical
-# workdir path, entity_limit_millions). Re-running `open(workdir)` in
-# the same process (typical Jupyter "rerun-cell" workflow) returns the
-# already-loaded instance instead of allocating a fresh ~400 MB
-# in-memory state for every call. Invalidated when disk_graph_meta.json
-# mtime advances (rebuild happened) or `force_rebuild=True` is passed.
-# Memory-mode opens skip this cache — they're meant to be reproducible
-# rebuilds.
+# graph-dir path, entity_limit_millions). Re-running `open(workdir)` in
+# the same process (the Jupyter "rerun-cell" workflow) returns the
+# already-loaded instance instead of re-allocating the ~400 MB state.
+# Invalidated when disk_graph_meta.json mtime advances or
+# `force_rebuild=True` is passed. Memory-mode opens skip this cache.
 _PROCESS_CACHE: dict[tuple[str, int | None], tuple[KnowledgeGraph, float]] = {}
 
 
-def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows stdlib `tarfile.open`/`gzip.open` precedent)
+def open(  # noqa: A001  (intentional `open` shadow, module-scoped)
     workdir: str | Path,
     *,
     storage: str = "disk",
@@ -66,47 +65,23 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
     """Return a KGLite graph backed by the Wikidata `latest-truthy`
     dump, fetching and building if needed.
 
-    Two storage backends:
+    - ``storage="disk"`` *(default)* persists the build to
+      ``workdir/graph[_<N>m]/`` so later calls cache-hit; the remote
+      dump is re-checked once ``cooldown_days`` elapse.
+    - ``storage="memory"`` rebuilds in-memory each call from the
+      cached dump (still cooldown-managed for refetch).
 
-    - ``storage="disk"`` *(default)* — persists the build to
-      ``workdir/graph[_<N>m]/`` so subsequent calls cache-hit.
-      Decision tree:
-
-      1. Graph exists and within ``cooldown_days`` → load + return.
-         No network.
-      2. Graph exists, cooldown elapsed, remote `Last-Modified` ≤
-         embedded build timestamp → load + return.
-      3. Graph exists, cooldown elapsed, remote newer → refetch
-         dump (resumable) + rebuild.
-      4. No graph → fetch + build.
-
-    - ``storage="memory"`` — pure in-memory build, ideal for fast
-      perf benchmarks. Reuses the cached dump at
-      ``workdir/latest-truthy.nt.bz2`` (still subject to
-      ``cooldown_days`` for refetch decisions) but never writes
-      graph artifacts. Each call rebuilds from the dump.
-
-    :param workdir: directory holding the cached dump (and, for
-        ``storage="disk"``, the built graph). Created if missing.
-    :param storage: ``"disk"`` (default, persistent + cached) or
-        ``"memory"`` (in-memory, always rebuilds).
-    :param cooldown_days: minimum age before re-checking the remote
-        dump.
+    :param workdir: directory holding the cached dump (and, for disk
+        mode, the built graph). Created if missing.
+    :param cooldown_days: minimum age before re-checking the remote dump.
     :param languages: language filter passed to ``load_ntriples``.
     :param entity_limit_millions: build a sized slice (e.g. ``100`` →
-        first 100M entities) for fast performance checks. For disk
-        mode, slices are stored under ``workdir/graph_{N}m/`` and
-        coexist with the full ``workdir/graph/``. The shared dump at
-        ``workdir/latest-truthy.nt.bz2`` is reused across all sizes
-        and across both storage modes.
-    :param verbose: forwarded to ``curl`` and ``load_ntriples``.
+        first 100M entities); disk slices live under ``graph_{N}m/``.
     :param progress: optional callable receiving structured progress
-        events from ``load_ntriples`` (see ``kglite.progress`` for the
-        event schema and a tqdm-backed reporter). Ignored on cache hits.
-    :param force_rebuild: if True, rebuild from the dump even when a
-        cached graph exists at ``workdir/graph[_<N>m]/``. The dump
-        itself is still served from cache when fresh — pass
-        ``cooldown_days=0`` if you also want the dump re-checked.
+        events from ``load_ntriples`` (see ``kglite.progress``).
+    :param force_rebuild: rebuild from the dump even when a cached
+        graph exists. The dump itself is still served from cache when
+        fresh — pass ``cooldown_days=0`` to also re-check the dump.
     """
     if storage not in ("disk", "memory"):
         raise ValueError(f"storage must be 'disk' or 'memory', got {storage!r}")
@@ -114,25 +89,18 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
     workdir.mkdir(parents=True, exist_ok=True)
 
     if storage == "memory":
-        # No persistence, no cache check — always rebuild from the
-        # cached dump (which is itself cooldown-managed).
         dump_path, _ = _ensure_dump(workdir, cooldown_days, verbose)
         return _build_memory_graph(dump_path, languages, entity_limit_millions, verbose, progress)
 
     graph_dir = workdir / _graph_subdir(entity_limit_millions)
     graph_meta = graph_dir / "disk_graph_meta.json"
     source_meta = graph_dir / SOURCE_META_FILENAME
-
-    # Process-cache hit: return the same KnowledgeGraph instance we
-    # handed back on a prior call this process, as long as the
-    # underlying disk artifacts haven't been rebuilt (mtime check)
-    # and the caller didn't pass `force_rebuild`. Saves the
-    # ~400 MB in-memory reload on Jupyter cell re-runs.
     cache_key = (str(graph_dir.resolve()), entity_limit_millions)
+
+    # Process-cache hit — same instance handed back this process.
     if not force_rebuild and graph_meta.exists():
-        meta_mtime = graph_meta.stat().st_mtime
         cached = _PROCESS_CACHE.get(cache_key)
-        if cached is not None and cached[1] == meta_mtime:
+        if cached is not None and cached[1] == graph_meta.stat().st_mtime:
             if verbose:
                 print(f"  Wikidata graph at {graph_dir} already loaded in this process. Reusing.")
             return cached[0]
@@ -151,52 +119,29 @@ def open(  # noqa: A001  (intentional `open` shadow — module-scoped, follows s
                 print(
                     f"  Wikidata graph at {graph_dir} is {graph_age:.1f}d old (< {cooldown_days}d cooldown). Loading."
                 )
-            g = load(str(graph_dir))
-            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
-            return g
+            return _load_cached(graph_dir, graph_meta, cache_key)
 
-        # Cooldown elapsed — check whether the remote dump is newer than
-        # the one this graph was built from.
+        # Cooldown elapsed — is the remote dump newer than this build?
         embedded_mtime = _read_source_mtime(source_meta)
-        remote_mtime, _ = _remote_metadata(WIKIDATA_URL, verbose=verbose)
+        remote_mtime = _remote_last_modified()
         if remote_mtime is None:
             if verbose:
                 print(f"  Remote unreachable. Loading existing graph (built from {embedded_mtime}).")
-            g = load(str(graph_dir))
-            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
-            return g
+            return _load_cached(graph_dir, graph_meta, cache_key)
         if embedded_mtime is None or remote_mtime > embedded_mtime:
             if verbose:
-                print(f"  Remote dump is newer than the cached graph (built from {embedded_mtime}). Rebuilding.")
-            # Fall through to rebuild path
+                print(f"  Remote dump newer than the cached graph ({embedded_mtime}). Rebuilding.")
+            # fall through to rebuild
         else:
             if verbose:
                 print("  Remote dump unchanged since last build. Loading existing graph.")
-            g = load(str(graph_dir))
-            _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
-            return g
+            return _load_cached(graph_dir, graph_meta, cache_key)
 
     dump_path, dump_mtime = _ensure_dump(workdir, cooldown_days, verbose)
     g = _build_graph(workdir, dump_path, dump_mtime, languages, entity_limit_millions, verbose, progress)
     if graph_meta.exists():
         _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
     return g
-
-
-def cache_clear() -> int:
-    """Drop every graph held by the process-local `wikidata.open` cache.
-
-    Use when you want a genuinely fresh load — typically in tests
-    that need isolation, or after manually editing on-disk artifacts
-    in ways `disk_graph_meta.json` mtime doesn't reflect.
-
-    Returns the number of cached graphs that were released. Note
-    Python may keep the underlying `KnowledgeGraph` alive until its
-    other references (notebook variables, closures) drop too.
-    """
-    n = len(_PROCESS_CACHE)
-    _PROCESS_CACHE.clear()
-    return n
 
 
 def fetch_truthy(
@@ -206,78 +151,50 @@ def fetch_truthy(
     verbose: bool = True,
 ) -> Path:
     """Ensure ``workdir/latest-truthy.nt.bz2`` exists and return its
-    path. Downloads (or resumes) when missing or stale per
-    ``cooldown_days``. Useful when you want the dump only — for
-    example, running ``load_ntriples`` with custom filters."""
+    path. Downloads (or resumes) when missing or stale."""
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     dump_path, _ = _ensure_dump(workdir, cooldown_days, verbose)
     return dump_path
 
 
-# ── Internals ──────────────────────────────────────────────────────────
+def cache_clear() -> int:
+    """Drop every graph held by the process-local `wikidata.open`
+    cache. Returns the number of cached graphs released."""
+    n = len(_PROCESS_CACHE)
+    _PROCESS_CACHE.clear()
+    return n
+
+
+# ── helpers ────────────────────────────────────────────────────────────
 
 
 def _ensure_dump(workdir: Path, cooldown_days: int, verbose: bool) -> tuple[Path, datetime | None]:
-    """Resolve the local dump file, downloading or resuming as needed.
-    Returns (path, remote_last_modified_at_fetch_time)."""
-    local_path = workdir / WIKIDATA_FILE
-    part_path = local_path.with_suffix(local_path.suffix + ".part")
+    """Resolve the local dump via the Rust cache, returning
+    ``(path, mtime_to_record)``."""
+    path_str, mtime_iso = _wikidata_internal.ensure_dump(str(workdir), cooldown_days=cooldown_days, verbose=verbose)
+    mtime = datetime.fromisoformat(mtime_iso) if mtime_iso else None
+    return Path(path_str), mtime
 
-    remote_mtime, remote_size = _remote_metadata(WIKIDATA_URL, verbose=verbose)
 
-    local_mtime = _file_mtime_utc(local_path)
-    if local_mtime is not None:
-        age = _age_days(local_mtime)
-        if verbose:
-            print(f"  Local dump: {_fmt_size(local_path.stat().st_size)}, age {age:.1f}d")
-        if remote_mtime is None:
-            if verbose:
-                print("  Remote unreachable — using local copy.")
-            return local_path, None
-        if remote_mtime <= local_mtime:
-            if verbose:
-                print("  Local dump matches latest remote.")
-            return local_path, remote_mtime
-        if age < cooldown_days:
-            if verbose:
-                print(f"  Newer dump available, but local is within cooldown ({age:.1f}d < {cooldown_days}d).")
-            return local_path, local_mtime
-        if verbose:
-            print("  Newer dump available + cooldown elapsed. Refreshing.")
-        local_path.unlink()
-        if part_path.exists():
-            part_path.unlink()
+def _remote_last_modified() -> datetime | None:
+    iso = _wikidata_internal.remote_last_modified()
+    return datetime.fromisoformat(iso) if iso else None
 
-    part_mtime = _file_mtime_utc(part_path)
-    if part_mtime is not None:
-        age = _age_days(part_mtime)
-        if age >= cooldown_days:
-            if verbose:
-                print(f"  Stale partial download ({age:.1f}d ≥ {cooldown_days}d). Discarding.")
-            part_path.unlink()
-        else:
-            if verbose:
-                print(f"  Partial download present ({age:.1f}d). Resuming.")
-            try:
-                _curl_download(WIKIDATA_URL, part_path, remote_size, resume=True, verbose=verbose)
-            except RuntimeError as e:
-                if verbose:
-                    print(f"  Resume failed: {e}. Restarting from scratch.")
-                part_path.unlink()
-                _curl_download(WIKIDATA_URL, part_path, remote_size, resume=False, verbose=verbose)
-            os.rename(part_path, local_path)
-            return local_path, remote_mtime
 
-    _curl_download(WIKIDATA_URL, part_path, remote_size, resume=False, verbose=verbose)
-    os.rename(part_path, local_path)
-    return local_path, remote_mtime
+def _load_cached(
+    graph_dir: Path,
+    graph_meta: Path,
+    cache_key: tuple[str, int | None],
+) -> KnowledgeGraph:
+    g = load(str(graph_dir))
+    _PROCESS_CACHE[cache_key] = (g, graph_meta.stat().st_mtime)
+    return g
 
 
 def _graph_subdir(entity_limit_millions: int | None) -> str:
-    """Directory name under workdir for a given size slice. ``None`` →
-    ``graph`` (full); ``100`` → ``graph_100m`` so different slices
-    coexist for fast perf comparisons."""
+    """Directory name under workdir for a size slice — ``graph`` (full)
+    or ``graph_<N>m`` so slices coexist."""
     if entity_limit_millions is None:
         return GRAPH_SUBDIR
     if entity_limit_millions <= 0:
@@ -303,23 +220,11 @@ def _build_graph(
     graph_dir.mkdir(parents=True)
 
     g = KnowledgeGraph(storage="disk", path=str(graph_dir))
-    # When the caller wired a progress sink (tqdm), suppress the loader's
-    # `[Phase X]` stderr lines — they fight tqdm for the same terminal.
-    # The wrapper's own `if verbose: print(...)` status messages are
-    # unaffected.
-    loader_verbose = verbose and progress is None
-    load_kwargs: dict = {"languages": list(languages), "verbose": loader_verbose}
-    if entity_limit_millions is not None:
-        load_kwargs["max_entities"] = entity_limit_millions * 1_000_000
-    if progress is not None:
-        load_kwargs["progress"] = progress
-    g.load_ntriples(str(dump_path), **load_kwargs)
-    # `load_ntriples` writes per-segment artifacts under `seg_000/`;
-    # `save()` consolidates those into top-level `disk_graph_meta.json`
-    # so `kglite.load(graph_dir)` works and our cache-hit check fires
-    # on subsequent calls. Disk mode only — memory mode skips this.
+    g.load_ntriples(str(dump_path), **_load_kwargs(languages, entity_limit_millions, verbose, progress))
+    # `save()` consolidates the per-segment artifacts into a top-level
+    # `disk_graph_meta.json` so `kglite.load(graph_dir)` and the
+    # cache-hit check work on later calls.
     g.save(str(graph_dir))
-
     _write_source_meta(graph_dir / SOURCE_META_FILENAME, dump_path, dump_mtime, entity_limit_millions)
     return g
 
@@ -332,16 +237,25 @@ def _build_memory_graph(
     progress: object | None = None,
 ) -> KnowledgeGraph:
     """Memory-mode build: in-memory `KnowledgeGraph`, no persistence."""
-    g = KnowledgeGraph()  # default = in-memory backend
-    # See `_build_graph` for the verbose↔progress interaction.
-    loader_verbose = verbose and progress is None
-    load_kwargs: dict = {"languages": list(languages), "verbose": loader_verbose}
-    if entity_limit_millions is not None:
-        load_kwargs["max_entities"] = entity_limit_millions * 1_000_000
-    if progress is not None:
-        load_kwargs["progress"] = progress
-    g.load_ntriples(str(dump_path), **load_kwargs)
+    g = KnowledgeGraph()
+    g.load_ntriples(str(dump_path), **_load_kwargs(languages, entity_limit_millions, verbose, progress))
     return g
+
+
+def _load_kwargs(
+    languages: tuple[str, ...],
+    entity_limit_millions: int | None,
+    verbose: bool,
+    progress: object | None,
+) -> dict:
+    # When a progress sink (tqdm) is wired, suppress the loader's own
+    # `[Phase X]` stderr lines — they fight tqdm for the terminal.
+    kwargs: dict = {"languages": list(languages), "verbose": verbose and progress is None}
+    if entity_limit_millions is not None:
+        kwargs["max_entities"] = entity_limit_millions * 1_000_000
+    if progress is not None:
+        kwargs["progress"] = progress
+    return kwargs
 
 
 def _write_source_meta(
@@ -367,26 +281,9 @@ def _read_source_mtime(path: Path) -> datetime | None:
     try:
         data = json.loads(path.read_text())
         iso = data.get("remote_last_modified_iso") or data.get("source_mtime_iso")
-        if iso is None:
-            return None
-        return datetime.fromisoformat(iso)
+        return datetime.fromisoformat(iso) if iso else None
     except (json.JSONDecodeError, ValueError, OSError):
         return None
-
-
-def _remote_metadata(url: str, *, verbose: bool) -> tuple[datetime | None, int | None]:
-    try:
-        with urlopen(Request(url, method="HEAD"), timeout=15) as resp:
-            lm = resp.headers.get("Last-Modified")
-            cl = resp.headers.get("Content-Length")
-            return (
-                parsedate_to_datetime(lm) if lm else None,
-                int(cl) if cl else None,
-            )
-    except (URLError, OSError) as e:
-        if verbose:
-            print(f"  Could not reach remote: {e}")
-        return None, None
 
 
 def _file_mtime_utc(path: Path) -> datetime | None:
@@ -399,129 +296,3 @@ def _age_days(when: datetime | None) -> float:
     if when is None:
         return float("inf")
     return (datetime.now(timezone.utc) - when).total_seconds() / 86400
-
-
-def _fmt_size(b: int | None) -> str:
-    if b is None:
-        return "—"
-    if b < 1024**2:
-        return f"{b / 1024:.1f} KB"
-    if b < 1024**3:
-        return f"{b / (1024**2):.1f} MB"
-    if b < 1024**4:
-        return f"{b / (1024**3):.2f} GB"
-    return f"{b / (1024**4):.2f} TB"
-
-
-def _fmt_dur(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    s = int(seconds)
-    h, rem = divmod(s, 3600)
-    m, s = divmod(rem, 60)
-    if h:
-        return f"{h}h{m:02d}m"
-    return f"{m}m{s:02d}s"
-
-
-def _curl_download(
-    url: str,
-    dest: Path,
-    total_bytes: int | None,
-    *,
-    resume: bool,
-    verbose: bool,
-) -> None:
-    """Run curl with optional resume. Renders a tqdm progress bar when
-    available, otherwise falls back to one-line-per-minute prints.
-    Raises RuntimeError on failure."""
-    cmd = ["curl", "--fail", "--location", "--silent", "--show-error", "--retry", "3", "--retry-delay", "5"]
-    start_bytes = dest.stat().st_size if (resume and dest.exists()) else 0
-    if start_bytes > 0:
-        cmd += ["-C", "-"]
-    cmd += ["-o", str(dest), url]
-
-    try:
-        proc = subprocess.Popen(cmd)
-    except FileNotFoundError as e:
-        raise RuntimeError(f"`curl` not available — install curl or set up PATH ({e})") from e
-
-    started = time.time()
-    bar = _make_progress_bar(total_bytes, start_bytes, dest.name) if verbose else None
-
-    if verbose and bar is None:
-        # tqdm not installed — emit a single header so the user knows
-        # what's happening before the per-minute lines start.
-        if start_bytes > 0:
-            remaining = (total_bytes - start_bytes) if total_bytes else None
-            print(f"  Resuming download from {_fmt_size(start_bytes)} ({_fmt_size(remaining)} remaining).")
-        else:
-            print(f"  Downloading {_fmt_size(total_bytes)}.")
-
-    last_t = started
-    last_b = start_bytes
-    interval = 1.0 if bar is not None else 60.0
-    try:
-        while True:
-            try:
-                rc = proc.wait(timeout=interval)
-                break
-            except subprocess.TimeoutExpired:
-                if not verbose:
-                    continue
-                cur_b = dest.stat().st_size if dest.exists() else start_bytes
-                if bar is not None:
-                    bar.update(cur_b - last_b)
-                    last_b = cur_b
-                else:
-                    now = time.time()
-                    rate = (cur_b - last_b) / max(0.001, now - last_t)
-                    elapsed = now - started
-                    pct = (cur_b * 100 / total_bytes) if total_bytes else 0
-                    eta = ((total_bytes - cur_b) / rate) if (rate > 0 and total_bytes) else None
-                    print(
-                        f"  [download {_fmt_dur(elapsed)}] "
-                        f"{_fmt_size(cur_b)}/{_fmt_size(total_bytes)} "
-                        f"({pct:.1f}%)  {_fmt_size(int(rate))}/s  "
-                        f"ETA {_fmt_dur(eta) if eta is not None else '—'}",
-                        flush=True,
-                    )
-                    last_t = now
-                    last_b = cur_b
-        if bar is not None:
-            # Snap the bar to the final byte count (covers the gap
-            # between the last poll and process exit).
-            final_b = dest.stat().st_size if dest.exists() else last_b
-            bar.update(max(0, final_b - last_b))
-    finally:
-        if bar is not None:
-            bar.close()
-
-    if rc != 0:
-        raise RuntimeError(f"curl exited {rc}")
-    if verbose and bar is None:
-        # Without tqdm, print a final summary line. tqdm prints its
-        # own on close.
-        elapsed = time.time() - started
-        final_b = dest.stat().st_size
-        avg_rate = (final_b - start_bytes) / max(0.001, elapsed)
-        print(f"  Download complete: {_fmt_size(final_b)} in {_fmt_dur(elapsed)} (avg {_fmt_size(int(avg_rate))}/s).")
-
-
-def _make_progress_bar(total_bytes: int | None, start_bytes: int, filename: str):
-    """Return a `tqdm` progress bar when the package is installed,
-    else `None`. Optional dep — we don't take a hard requirement."""
-    try:
-        from tqdm import tqdm
-    except ImportError:
-        return None
-    return tqdm(
-        total=total_bytes,
-        initial=start_bytes,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        desc=filename,
-        miniters=1,
-        smoothing=0.3,
-    )

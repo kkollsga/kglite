@@ -219,6 +219,11 @@ agent-first framing).
   Sodir Python modules; with those gone, `pandas` (and transitively
   `numpy`/`pyarrow`) is removed from `pyproject.toml`. `kglite.datasets.
   sodir.open()` / `fetch_all()` keep their signatures.
+- The Wikidata dump loader's download orchestration also moved to a
+  pure-Rust crate (`kglite-wikidata`) — the resumable download and the
+  staleness/cooldown cache no longer shell out to a `curl` subprocess.
+  `kglite.datasets.wikidata.open()` keeps its signature; the N-Triples
+  graph build is unchanged.
 
 ## [0.9.45] — `save_graph` mode-aware dispatch in `kglite-mcp-server`
 
