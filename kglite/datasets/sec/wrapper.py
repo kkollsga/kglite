@@ -70,6 +70,7 @@ def _dispatch_per_filing_fetches(
     detailed: int,
     include_subsidiaries: bool,
     include_8k_events: bool,
+    include_xbrl: bool,
     verbose: bool,
 ) -> dict[str, tuple[int, int]]:
     """Read processed/filing.csv, group by form type, and call the
@@ -189,6 +190,21 @@ def _dispatch_per_filing_fetches(
             print(f"[SEC] fetching Exhibit 21 attachments ({len(buckets['form10k'])} 10-Ks)")
         ex21_batch = [(cik, acc) for (cik, acc, _) in buckets["form10k"]]
         out["exhibit21"] = _sec_internal.fetch_exhibit21_batch(str(workdir), user_agent=user_agent, batch=ex21_batch)
+
+    # XBRL company facts: one JSON per distinct issuer CIK with every
+    # tagged financial fact (the metric_fact.csv source). Collect the
+    # distinct CIKs across all buckets so we fetch each company once.
+    if include_xbrl:
+        all_ciks: set[int] = set()
+        for bucket in buckets.values():
+            for cik, _, _ in bucket:
+                all_ciks.add(cik)
+        if all_ciks:
+            if verbose:
+                print(f"[SEC] fetching XBRL company facts ({len(all_ciks)} companies)")
+            out["company_facts"] = _sec_internal.fetch_company_facts_batch(
+                str(workdir), user_agent=user_agent, ciks=sorted(all_ciks)
+            )
 
     return out
 
@@ -456,6 +472,7 @@ class SEC:
                 detailed=detailed,
                 include_subsidiaries=include_subsidiaries,
                 include_8k_events=include_8k_events,
+                include_xbrl=include_xbrl_metrics,
                 verbose=verbose,
             )
             if verbose and fetch_dispatch:

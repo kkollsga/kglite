@@ -227,6 +227,38 @@ fn fetch_filing_batch(
     Ok((downloaded, skipped))
 }
 
+/// Batch-fetch XBRL company-facts JSON. Takes a list of CIKs; the
+/// company-facts API returns every tagged financial fact a company
+/// has reported in one JSON document. Returns (downloaded, skipped).
+#[pyfunction]
+#[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false))]
+fn fetch_company_facts_batch(
+    workdir: PathBuf,
+    user_agent: &str,
+    ciks: Vec<u64>,
+    force_refetch: bool,
+) -> PyResult<(usize, usize)> {
+    use kglite_sec::fetch_company_facts;
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    rt.block_on(async {
+        for cik in ciks {
+            match fetch_company_facts(&client, &wd, cik, force_refetch).await {
+                Ok(true) => downloaded += 1,
+                Ok(false) => skipped += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+    });
+    Ok((downloaded, skipped))
+}
+
 /// Batch-fetch Exhibit 21 attachments.
 #[pyfunction]
 #[pyo3(signature = (workdir, *, user_agent, batch))]
@@ -350,6 +382,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_13f_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_filing_batch, &m)?)?;
     m.add_function(wrap_pyfunction!(fetch_exhibit21_batch, &m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_company_facts_batch, &m)?)?;
     // Extract (single entry point)
     m.add_function(wrap_pyfunction!(extract_all_py, &m)?)?;
     // Graph location helpers

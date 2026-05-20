@@ -142,6 +142,40 @@ pub fn rate_limit_cost_seconds(range: YearRange) -> f64 {
     range.quarters().count() as f64 / RATE_LIMIT_PER_SEC as f64
 }
 
+/// Fetch one company's XBRL company-facts JSON from
+/// `data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` into
+/// `raw/financials/companyfacts_CIK{cik}.json`.
+///
+/// The company-facts API returns every tagged XBRL fact the company
+/// has ever reported (across all 10-K / 10-Q / 8-K filings) in one
+/// JSON document — the cleanest per-company source of financials.
+/// This replaces the discontinued FSNDS bulk-feed approach.
+///
+/// Returns `true` if newly downloaded, `false` if cached. A 404
+/// (company has no XBRL facts — common for funds / foreign issuers)
+/// is swallowed as `Ok(false)` rather than erroring.
+pub async fn fetch_company_facts(
+    client: &SecClient,
+    workdir: &Workdir,
+    cik: u64,
+    force_refetch: bool,
+) -> Result<bool> {
+    workdir.ensure_dirs(None)?;
+    let path = workdir
+        .raw_financials_dir()
+        .join(format!("companyfacts_CIK{cik:010}.json"));
+    if !force_refetch && path.is_file() {
+        return Ok(false);
+    }
+    let url = catalog::companyfacts_url(cik);
+    match client.fetch_to_file(&url, &path, FetchMode::Always).await {
+        Ok(v) => Ok(v),
+        // Companies with no XBRL facts return 404 — not an error.
+        Err(SecError::BadStatus { status: 404, .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Fetch the FSNDS (Financial Statement and Notes Data Set) ZIP for
 /// a given (year, quarter), extract `num.tsv` from it into
 /// `raw/financials/{year}_QTR{quarter}_num.tsv`. The full ZIP also

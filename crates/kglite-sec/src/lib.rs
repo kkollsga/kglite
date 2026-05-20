@@ -30,7 +30,7 @@ pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{run_all, ExtractReport, Provenance, Sinks};
 pub use fetch::{
-    fetch_13f_info_table, fetch_company_tickers, fetch_exhibit21_attachment,
+    fetch_13f_info_table, fetch_company_facts, fetch_company_tickers, fetch_exhibit21_attachment,
     fetch_filing_primary_doc, fetch_form4_filing, fetch_fsnds_quarterly,
     fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };
