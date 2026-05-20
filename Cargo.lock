@@ -1870,6 +1870,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kglite-sodir"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "csv",
+ "governor",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
