@@ -8,8 +8,8 @@
 //!
 //! ## Emits
 //!
-//! Same set of CSVs as Form 4 (`purchase`, `sale`, `holding`, `role`,
-//! `person`), with `source_form = "5"` / `"5/A"`.
+//! Same set of CSVs as Form 4 (`insider_transaction`, `holding`,
+//! `role`, `person`), with `source_form = "5"` / `"5/A"`.
 
 //! Dispatch (walk + parse) lives in `forms::ownership`. This module
 //! only emits rows for an already-parsed Form 5 document.
@@ -96,11 +96,12 @@ pub(crate) fn emit_form5(
                 String::new()
             };
             let is_derivative_cell = if t.is_derivative { "1" } else { "0" };
-            let make_row = |kind: &str| -> [String; 13] {
+            let make_row = |direction: &str| -> [String; 14] {
                 [
-                    format!("{}-{}", nid_base, kind),
+                    format!("{}-{}", nid_base, direction),
                     reporter_cik.clone(),
                     issuer_cik.clone(),
+                    direction.to_string(),
                     t.security_title.clone(),
                     t.transaction_date.clone(),
                     t.transaction_code.clone(),
@@ -115,11 +116,11 @@ pub(crate) fn emit_form5(
             };
             match t.acquired_disposed.as_str() {
                 "A" => {
-                    write_info_row(&mut sinks.purchase, &make_row("p"), &prov)?;
+                    write_info_row(&mut sinks.insider_transaction, &make_row("purchase"), &prov)?;
                     report.rows_written += 1;
                 }
                 "D" => {
-                    write_info_row(&mut sinks.sale, &make_row("s"), &prov)?;
+                    write_info_row(&mut sinks.insider_transaction, &make_row("sale"), &prov)?;
                     report.rows_written += 1;
                 }
                 _ => {}

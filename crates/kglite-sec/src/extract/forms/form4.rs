@@ -7,8 +7,8 @@
 //!
 //! ## Emits
 //!
-//! - `purchase.csv` — every lot with `acquired_disposed == "A"`.
-//! - `sale.csv` — every lot with `acquired_disposed == "D"`.
+//! - `insider_transaction.csv` — every lot, `direction` "purchase"
+//!   (`acquired_disposed == "A"`) or "sale" (`== "D"`).
 //! - `holding.csv` — every lot's `shares_owned_after` becomes a
 //!   snapshot row (`as_of_date = transaction_date`).
 //! - `role.csv` — one row per non-zero relationship flag
@@ -112,13 +112,14 @@ pub(crate) fn emit_form4(
         };
         let is_derivative_cell = if t.is_derivative { "1" } else { "0" };
 
-        // Row shape used by both purchase + sale (identical schema).
-        // nid prefix distinguishes them in lookups.
-        let make_row = |kind: &str| -> [String; 13] {
+        // One unified insider_transaction row; `direction` ("purchase"
+        // / "sale") tags it and disambiguates the nid.
+        let make_row = |direction: &str| -> [String; 14] {
             [
-                format!("{}-{}", nid_base, kind),
+                format!("{}-{}", nid_base, direction),
                 reporter_cik.clone(),
                 issuer_cik.clone(),
+                direction.to_string(),
                 t.security_title.clone(),
                 t.transaction_date.clone(),
                 t.transaction_code.clone(),
@@ -134,11 +135,11 @@ pub(crate) fn emit_form4(
 
         match t.acquired_disposed.as_str() {
             "A" => {
-                write_info_row(&mut sinks.purchase, &make_row("p"), &prov)?;
+                write_info_row(&mut sinks.insider_transaction, &make_row("purchase"), &prov)?;
                 report.rows_written += 1;
             }
             "D" => {
-                write_info_row(&mut sinks.sale, &make_row("s"), &prov)?;
+                write_info_row(&mut sinks.insider_transaction, &make_row("sale"), &prov)?;
                 report.rows_written += 1;
             }
             _ => {

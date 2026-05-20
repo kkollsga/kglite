@@ -9,8 +9,9 @@
 //!
 //! - `planned_sale.csv` — one row per `securitiesToBeSoldInfo` block
 //!   (the proposed sale).
-//! - `sale.csv` — historical-sales rows with `source_form="144"`
-//!   (Rule 144's 3-month volume context).
+//! - `insider_transaction.csv` — historical-sales rows
+//!   (`direction="sale"`, `source_form="144"`) — Rule 144's 3-month
+//!   volume context.
 //! - `person.csv` — filer identity.
 //! - `holding.csv` — implicit baseline (aggregate_market_value /
 //!   approximate share count) — deferred to a later refinement.
@@ -78,19 +79,21 @@ pub(crate) fn emit_form144(
             report.rows_written += 1;
         }
 
-        // Historical-sale rows → sale.csv (with source_form="144").
+        // Historical-sale rows → insider_transaction.csv
+        // (direction="sale", source_form="144").
         for (i, h) in parsed.historical_sales.iter().enumerate() {
             let prov = prov_base.clone().with_lot(parsed.planned_sales.len() + i);
             let nid = format!("{}-hist-{}", accession, i);
-            // The schema mirrors purchase/sale: same 13 columns.
+            // The schema mirrors insider_transaction's 14 columns.
             // Many fields are empty since Form 144 history doesn't
             // carry direct/indirect, derivative flag, etc.
             write_info_row(
-                &mut sinks.sale,
+                &mut sinks.insider_transaction,
                 &[
                     nid.as_str(),
                     filer_cik.as_str(),
                     issuer_cik.as_str(),
+                    "sale", // direction
                     h.security_class.as_str(),
                     h.sale_date.as_str(),
                     "S", // historical sales reported on Form 144 are open-market sales

@@ -46,30 +46,16 @@ pub const MANAGER_HEADER: &[&str] = &["manager_cik", "name"];
 // Form 3, 4, 4/A, 5, 5/A, 144 → these tables. Plus DEF 14A ownership
 // table (10-K Item 12 likewise) and SC 13D/G total-ownership snapshot.
 
-/// One row per insider transaction with code in {P, A} or any M/G
-/// where the lot was acquired. Disposals go to `sale.csv`.
-pub const PURCHASE_HEADER: &[&str] = &[
-    "purchase_nid",
+/// One row per insider transaction lot — Form 3/4/5 changes plus
+/// Form 144 sale history. `direction` is "purchase" (lot acquired,
+/// `acquired_disposed == "A"`) or "sale" (lot disposed, `== "D"`).
+/// A single table so an insider's whole trading history is one node
+/// type — NEXT_TX chains and net-position rollups need that.
+pub const INSIDER_TRANSACTION_HEADER: &[&str] = &[
+    "transaction_nid",
     "person_nid",
     "issuer_cik",
-    "security_title",
-    "transaction_date",
-    "transaction_code",
-    "shares",
-    "price_per_share",
-    "total_value",
-    "direct_indirect",
-    "is_derivative",
-    "equity_swap",
-    "footnote_text",
-];
-
-/// One row per insider transaction with code in {S, D, F, X} or any
-/// M/G where the lot was disposed. Acquisitions go to `purchase.csv`.
-pub const SALE_HEADER: &[&str] = &[
-    "sale_nid",
-    "person_nid",
-    "issuer_cik",
+    "direction",
     "security_title",
     "transaction_date",
     "transaction_code",
@@ -452,8 +438,7 @@ pub struct Sinks {
     pub security: Writer<File>,
     pub manager: Writer<File>,
     // ownership info rows
-    pub purchase: Writer<File>,
-    pub sale: Writer<File>,
+    pub insider_transaction: Writer<File>,
     pub holding: Writer<File>,
     pub role: Writer<File>,
     pub planned_sale: Writer<File>,
@@ -502,8 +487,7 @@ impl Sinks {
             person: csv_writer(workdir, "person")?,
             security: csv_writer(workdir, "security")?,
             manager: csv_writer(workdir, "institutional_manager")?,
-            purchase: csv_writer(workdir, "purchase")?,
-            sale: csv_writer(workdir, "sale")?,
+            insider_transaction: csv_writer(workdir, "insider_transaction")?,
             holding: csv_writer(workdir, "holding")?,
             role: csv_writer(workdir, "role")?,
             planned_sale: csv_writer(workdir, "planned_sale")?,
@@ -541,8 +525,7 @@ impl Sinks {
         write_header(&mut sinks.manager, MANAGER_HEADER)?;
 
         // Info-row tables — type header + provenance footer.
-        write_info_header(&mut sinks.purchase, PURCHASE_HEADER)?;
-        write_info_header(&mut sinks.sale, SALE_HEADER)?;
+        write_info_header(&mut sinks.insider_transaction, INSIDER_TRANSACTION_HEADER)?;
         write_info_header(&mut sinks.holding, HOLDING_HEADER)?;
         write_info_header(&mut sinks.role, ROLE_HEADER)?;
         write_info_header(&mut sinks.planned_sale, PLANNED_SALE_HEADER)?;
@@ -594,8 +577,7 @@ impl Sinks {
         flush_one!(self.person);
         flush_one!(self.security);
         flush_one!(self.manager);
-        flush_one!(self.purchase);
-        flush_one!(self.sale);
+        flush_one!(self.insider_transaction);
         flush_one!(self.holding);
         flush_one!(self.role);
         flush_one!(self.planned_sale);

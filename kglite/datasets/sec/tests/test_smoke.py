@@ -118,8 +118,7 @@ def test_extract_then_build_end_to_end(synth_workdir: Path) -> None:
 
     # Every info-row CSV exists with header (F1 stubs return 0 rows).
     expected_info_csvs = [
-        "purchase.csv",
-        "sale.csv",
+        "insider_transaction.csv",
         "holding.csv",
         "role.csv",
         "planned_sale.csv",
