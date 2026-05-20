@@ -225,6 +225,35 @@ pub fn iter_submissions_zip<R: Read + std::io::Seek>(
     Ok(SubmissionsZipIter { zip, index: 0 })
 }
 
+/// Open the bulk submissions ZIP for random-access lookup by CIK.
+///
+/// When the caller has a `cik_list` slice, looking up the handful of
+/// `CIK{cik}.json` entries by name is O(slice) — vastly faster than
+/// `iter_submissions_zip`'s O(528K) full scan. The bulk submissions
+/// archive has one entry per company named `CIK{cik:010}.json`.
+pub fn open_submissions_zip<R: Read + std::io::Seek>(archive: R) -> Result<zip::ZipArchive<R>> {
+    Ok(zip::ZipArchive::new(archive)?)
+}
+
+/// Look up a single company's submission by CIK via direct ZIP
+/// entry-name access. Returns `Ok(None)` when the company isn't in
+/// the archive (rather than erroring) — common for CIKs that exist
+/// in master.idx but have no submissions JSON.
+pub fn read_submission_by_cik<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    cik: u64,
+) -> Result<Option<Submission>> {
+    let name = format!("CIK{cik:010}.json");
+    let mut entry = match zip.by_name(&name) {
+        Ok(e) => e,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(SecError::Zip(e)),
+    };
+    let mut buf = String::new();
+    entry.read_to_string(&mut buf).map_err(SecError::Io)?;
+    parse_submission_json(&buf).map(Some)
+}
+
 struct SubmissionsZipIter<R: Read + std::io::Seek> {
     zip: zip::ZipArchive<R>,
     index: usize,

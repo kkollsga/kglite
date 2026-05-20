@@ -39,6 +39,11 @@ use super::sinks::Sinks;
 pub struct ExtractReport {
     pub extracted_at: String,
     pub identity_counts: IdentityCounts,
+    /// Wall-clock ms for the identity pre-pass (submissions.zip read
+    /// + company.csv + filing_index.csv emit). Bottleneck-detection.
+    pub identity_ms: u128,
+    /// Total wall-clock ms for run_all.
+    pub total_ms: u128,
     pub form3: FormReport,
     pub form4: FormReport,
     pub form5: FormReport,
@@ -85,7 +90,14 @@ impl ExtractReport {
 
 /// Single entry point. Pure Rust — no Python, no async. PyO3 layer
 /// in `src/sec.rs` calls this in `tokio::task::spawn_blocking`.
+///
+/// Every phase is wall-clock timed; the durations land on the
+/// `ExtractReport` (`identity_ms`, each form's `duration_ms`,
+/// `total_ms`) so callers can spot bottlenecks without a profiler.
 pub fn run_all(workdir: &Workdir, slice: &SliceSpec, force: bool) -> Result<ExtractReport> {
+    use std::time::Instant;
+    let run_start = Instant::now();
+
     workdir.ensure_dirs(None)?;
 
     let extracted_at = provenance::now_iso();
@@ -105,46 +117,52 @@ pub fn run_all(workdir: &Workdir, slice: &SliceSpec, force: bool) -> Result<Extr
     let mut identities = Identities::new();
 
     // ── identity pre-pass: company.csv from submissions.zip ──
+    let identity_start = Instant::now();
     let (company_report, sic_index) =
         companies::emit_from_submissions(workdir, slice, &mut sinks, &mut identities)?;
     report.submission_parse_errors = company_report.submission_parse_errors;
     report.distinct_sic_codes = company_report.distinct_sic_codes;
     companies::emit_sic_index(workdir, &sic_index)?;
+    report.identity_ms = identity_start.elapsed().as_millis();
 
     // ── per-form dispatch ──
-    // (Many of these are placeholder stubs returning Ok(default) in
-    // Phase F1; they get wired in Phases F2-F18.)
-    report.form3 =
-        forms::form3::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.form4 =
-        forms::form4::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.form5 =
-        forms::form5::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.form144 =
-        forms::form144::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.form13f =
-        forms::form13f::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.schedule13 =
-        forms::schedule13::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.def14a =
-        forms::def14a::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.eightk =
-        forms::eightk::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.ten_k =
-        forms::ten_k::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.ten_q =
-        forms::ten_q::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.s1 = forms::s1::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.s3 = forms::s3::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.s4 = forms::s4::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.prospectus =
-        forms::prospectus::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.formd =
-        forms::formd::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.npx = forms::npx::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
-    report.xbrl = forms::xbrl::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
+    // Each call is wall-clock timed; the duration lands on the
+    // FormReport so callers can see where extraction time goes.
+    macro_rules! run_form {
+        ($field:ident, $module:ident) => {{
+            let t = Instant::now();
+            let mut r = forms::$module::extract(
+                workdir,
+                slice,
+                &mut sinks,
+                &mut identities,
+                &extracted_at,
+            )?;
+            r.duration_ms = t.elapsed().as_millis();
+            report.$field = r;
+        }};
+    }
+
+    run_form!(form3, form3);
+    run_form!(form4, form4);
+    run_form!(form5, form5);
+    run_form!(form144, form144);
+    run_form!(form13f, form13f);
+    run_form!(schedule13, schedule13);
+    run_form!(def14a, def14a);
+    run_form!(eightk, eightk);
+    run_form!(ten_k, ten_k);
+    run_form!(ten_q, ten_q);
+    run_form!(s1, s1);
+    run_form!(s3, s3);
+    run_form!(s4, s4);
+    run_form!(prospectus, prospectus);
+    run_form!(formd, formd);
+    run_form!(npx, npx);
+    run_form!(xbrl, xbrl);
 
     sinks.flush_all()?;
     report.identity_counts = identities.counts();
+    report.total_ms = run_start.elapsed().as_millis();
     Ok(report)
 }

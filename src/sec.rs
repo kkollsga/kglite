@@ -314,6 +314,9 @@ fn extract_all_py(
     d.set_item("total_rows", report.total_rows())?;
     d.set_item("submission_parse_errors", report.submission_parse_errors)?;
     d.set_item("distinct_sic_codes", report.distinct_sic_codes)?;
+    // Bottleneck-detection timings (milliseconds).
+    d.set_item("total_ms", report.total_ms)?;
+    d.set_item("identity_ms", report.identity_ms)?;
     // Identity counts.
     d.set_item("companies", report.identity_counts.companies)?;
     d.set_item("people", report.identity_counts.people)?;
@@ -326,6 +329,7 @@ fn extract_all_py(
             inner.set_item("files_read", report.$name.files_read)?;
             inner.set_item("parse_errors", report.$name.parse_errors)?;
             inner.set_item("rows_written", report.$name.rows_written)?;
+            inner.set_item("duration_ms", report.$name.duration_ms)?;
             d.set_item(stringify!($name), inner)?;
         }};
     }

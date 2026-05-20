@@ -49,6 +49,9 @@ pub struct FormReport {
     pub parse_errors: usize,
     /// Total info-rows emitted across every CSV this form populates.
     pub rows_written: usize,
+    /// Wall-clock time the extractor spent, milliseconds. Set by the
+    /// orchestrator (it owns the timer). Bottleneck-detection aid.
+    pub duration_ms: u128,
 }
 
 impl FormReport {
@@ -56,5 +59,6 @@ impl FormReport {
         self.files_read += other.files_read;
         self.parse_errors += other.parse_errors;
         self.rows_written += other.rows_written;
+        self.duration_ms += other.duration_ms;
     }
 }

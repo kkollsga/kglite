@@ -17,7 +17,9 @@ use std::io::BufReader;
 
 use crate::error::{Result, SecError};
 use crate::layout::Workdir;
-use crate::parsers::submissions::iter_submissions_zip;
+use crate::parsers::submissions::{
+    iter_submissions_zip, open_submissions_zip, read_submission_by_cik,
+};
 use crate::slicing::SliceSpec;
 
 use super::super::sinks::Sinks;
@@ -51,16 +53,11 @@ pub fn emit_from_submissions(
         )));
     }
 
-    let zip_file = File::open(&zip_path).map_err(SecError::Io)?;
-    let iter = iter_submissions_zip(BufReader::new(zip_file))?;
-
     let mut report = CompanyEmitReport::default();
     let mut sic_index: HashMap<String, String> = HashMap::new();
 
     // Filing index — lightweight metadata file (one row per filing)
     // that the Python wrapper's per-filing fetch dispatcher reads.
-    // Not a graph node table; sits next to processed/_sic.csv as a
-    // build artifact. Underscored prefix marks it as internal.
     let filing_index_path = workdir.processed_csv("filing_index");
     let mut filing_index = csv::WriterBuilder::new()
         .quote_style(csv::QuoteStyle::Necessary)
@@ -77,72 +74,123 @@ pub fn emit_from_submissions(
         ])
         .map_err(|e| SecError::Malformed(format!("filing_index.csv header: {}", e)))?;
 
-    for entry in iter {
-        let (_name, sub) = match entry {
-            Ok(v) => v,
-            Err(_) => {
-                report.submission_parse_errors += 1;
-                continue;
+    // ── Fast path: sliced cik_list → direct ZIP entry lookup ──
+    //
+    // The bulk submissions archive has one entry per company
+    // (`CIK{cik:010}.json`). When the caller passes `cik_list`, we
+    // want only those companies — looking each one up by name is
+    // O(slice) instead of decompressing + JSON-parsing all ~530K
+    // entries. On a 50-company slice this is the difference between
+    // ~34 s and ~50 ms.
+    if let Some(cik_set) = &slice.cik_list {
+        let zip_file = File::open(&zip_path).map_err(SecError::Io)?;
+        let mut zip = open_submissions_zip(BufReader::new(zip_file))?;
+        let mut ciks: Vec<u64> = cik_set.iter().copied().collect();
+        ciks.sort_unstable(); // deterministic output order
+        for cik in ciks {
+            match read_submission_by_cik(&mut zip, cik) {
+                Ok(Some(sub)) => emit_one_submission(
+                    &sub,
+                    slice,
+                    sinks,
+                    identities,
+                    &mut filing_index,
+                    &mut sic_index,
+                    &mut report,
+                )?,
+                Ok(None) => {} // CIK not in the archive — fine.
+                Err(_) => report.submission_parse_errors += 1,
             }
-        };
-        if sub.company.cik.is_empty() || sub.company.name.is_empty() {
-            continue;
         }
-        let cik_int: u64 = sub.company.cik.parse().unwrap_or(0);
-        if !slice.cik_matches(cik_int) {
-            continue;
-        }
-        let cik = strip_leading_zeros(&sub.company.cik);
-        identities.ensure_company(
-            sinks,
-            cik.as_str(),
-            sub.company.name.as_str(),
-            sub.company.sic.as_str(),
-            sub.company.sic_description.as_str(),
-            sub.company.state_of_incorporation.as_str(),
-            sub.company.fiscal_year_end.as_str(),
-            &sub.company.tickers.join("; "),
-            &sub.company.exchanges.join("; "),
-            sub.company.entity_type.as_str(),
-            sub.company.former_names.as_str(),
-        )?;
-        report.companies_written += 1;
-        if !sub.company.sic.is_empty() {
-            sic_index
-                .entry(sub.company.sic.clone())
-                .or_insert_with(|| sub.company.sic_description.clone());
-        }
-
-        // Emit one filing_index row per filing in the submission.
-        let empty = String::new();
-        for i in 0..sub.filings.accession_number.len() {
-            let accession = &sub.filings.accession_number[i];
-            if accession.is_empty() {
-                continue;
+    } else {
+        // ── Bulk path: no slice → iterate every company. ──
+        let zip_file = File::open(&zip_path).map_err(SecError::Io)?;
+        for entry in iter_submissions_zip(BufReader::new(zip_file))? {
+            match entry {
+                Ok((_name, sub)) => emit_one_submission(
+                    &sub,
+                    slice,
+                    sinks,
+                    identities,
+                    &mut filing_index,
+                    &mut sic_index,
+                    &mut report,
+                )?,
+                Err(_) => report.submission_parse_errors += 1,
             }
-            let form = sub.filings.form.get(i).unwrap_or(&empty);
-            let filed = sub.filings.filing_date.get(i).unwrap_or(&empty);
-            if !slice.form_matches(form) || !slice.date_matches(filed) {
-                continue;
-            }
-            let report_date = sub.filings.report_date.get(i).unwrap_or(&empty);
-            let primary = sub.filings.primary_document.get(i).unwrap_or(&empty);
-            filing_index
-                .write_record([
-                    accession.as_str(),
-                    cik.as_str(),
-                    form.as_str(),
-                    filed.as_str(),
-                    report_date.as_str(),
-                    primary.as_str(),
-                ])
-                .map_err(|e| SecError::Malformed(format!("filing_index.csv row: {}", e)))?;
-            report.filings_indexed += 1;
         }
     }
+
     filing_index.flush().map_err(SecError::Io)?;
     report.distinct_sic_codes = sic_index.len();
     Ok((report, sic_index))
+}
+
+/// Emit one company's identity row + its filing_index rows.
+#[allow(clippy::too_many_arguments)]
+fn emit_one_submission(
+    sub: &crate::parsers::submissions::Submission,
+    slice: &SliceSpec,
+    sinks: &mut Sinks,
+    identities: &mut Identities,
+    filing_index: &mut csv::Writer<File>,
+    sic_index: &mut HashMap<String, String>,
+    report: &mut CompanyEmitReport,
+) -> Result<()> {
+    if sub.company.cik.is_empty() || sub.company.name.is_empty() {
+        return Ok(());
+    }
+    let cik_int: u64 = sub.company.cik.parse().unwrap_or(0);
+    if !slice.cik_matches(cik_int) {
+        return Ok(());
+    }
+    let cik = strip_leading_zeros(&sub.company.cik);
+    identities.ensure_company(
+        sinks,
+        cik.as_str(),
+        sub.company.name.as_str(),
+        sub.company.sic.as_str(),
+        sub.company.sic_description.as_str(),
+        sub.company.state_of_incorporation.as_str(),
+        sub.company.fiscal_year_end.as_str(),
+        &sub.company.tickers.join("; "),
+        &sub.company.exchanges.join("; "),
+        sub.company.entity_type.as_str(),
+        sub.company.former_names.as_str(),
+    )?;
+    report.companies_written += 1;
+    if !sub.company.sic.is_empty() {
+        sic_index
+            .entry(sub.company.sic.clone())
+            .or_insert_with(|| sub.company.sic_description.clone());
+    }
+
+    let empty = String::new();
+    for i in 0..sub.filings.accession_number.len() {
+        let accession = &sub.filings.accession_number[i];
+        if accession.is_empty() {
+            continue;
+        }
+        let form = sub.filings.form.get(i).unwrap_or(&empty);
+        let filed = sub.filings.filing_date.get(i).unwrap_or(&empty);
+        if !slice.form_matches(form) || !slice.date_matches(filed) {
+            continue;
+        }
+        let report_date = sub.filings.report_date.get(i).unwrap_or(&empty);
+        let primary = sub.filings.primary_document.get(i).unwrap_or(&empty);
+        filing_index
+            .write_record([
+                accession.as_str(),
+                cik.as_str(),
+                form.as_str(),
+                filed.as_str(),
+                report_date.as_str(),
+                primary.as_str(),
+            ])
+            .map_err(|e| SecError::Malformed(format!("filing_index.csv row: {}", e)))?;
+        report.filings_indexed += 1;
+    }
+    Ok(())
 }
 
 /// Write the SIC index (collected during `emit_from_submissions`)
