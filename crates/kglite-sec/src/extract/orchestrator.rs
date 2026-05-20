@@ -143,10 +143,24 @@ pub fn run_all(workdir: &Workdir, slice: &SliceSpec, force: bool) -> Result<Extr
         }};
     }
 
-    run_form!(form3, form3);
-    run_form!(form4, form4);
-    run_form!(form5, form5);
-    run_form!(form144, form144);
+    // Unified ownership-XML pass — Form 3/4/5, Form 144 and Form D all
+    // arrive as `.xml` under raw/filings/; one walk reads each file
+    // once and dispatches by detected form type, instead of five
+    // extractors each re-walking and re-parsing the whole XML set.
+    {
+        let t = Instant::now();
+        let own =
+            forms::ownership::extract(workdir, slice, &mut sinks, &mut identities, &extracted_at)?;
+        report.form3 = own.form3;
+        report.form4 = own.form4;
+        report.form5 = own.form5;
+        report.form144 = own.form144;
+        report.formd = own.formd;
+        // One pass produced all five reports; record the wall-clock on
+        // form4 (the dominant form) — the rest share the same pass.
+        report.form4.duration_ms = t.elapsed().as_millis();
+    }
+
     run_form!(form13f, form13f);
     run_form!(schedule13, schedule13);
     run_form!(def14a, def14a);
@@ -157,7 +171,6 @@ pub fn run_all(workdir: &Workdir, slice: &SliceSpec, force: bool) -> Result<Extr
     run_form!(s3, s3);
     run_form!(s4, s4);
     run_form!(prospectus, prospectus);
-    run_form!(formd, formd);
     run_form!(npx, npx);
     run_form!(xbrl, xbrl);
 

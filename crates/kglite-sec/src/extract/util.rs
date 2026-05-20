@@ -7,7 +7,71 @@
 
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::error::Result;
+
+// ─────────────────────── parallel parse helper ───────────────────────
+
+/// Outcome of parsing one raw filing in the parallel stage.
+pub enum FileParse<R> {
+    /// Parsed successfully — hand to the emit stage.
+    Parsed(R),
+    /// Not this form (or empty) — silently ignore, not an error.
+    Skipped,
+    /// Failed to parse — counted toward `parse_errors`.
+    Failed,
+}
+
+/// Parse a batch of raw filings in parallel, then emit their rows
+/// single-threaded.
+///
+/// Each raw filing is independent, so `parse_one` runs across all
+/// rayon worker threads — the CPU-bound XML/HTML parse is the part
+/// that parallelises. `emit` then runs on the calling thread, so the
+/// CSV `Sinks` and the identity dedup sets need no locking.
+///
+/// Memory is bounded: files are processed `chunk_size` at a time, so
+/// at most `chunk_size` parsed records are resident at once. Returns
+/// `(files_emitted, parse_errors)`.
+///
+/// `par_iter().map().collect::<Vec<_>>()` preserves input order, so
+/// the emitted rows are deterministic regardless of thread scheduling.
+pub fn par_parse_emit<R, P, E>(
+    paths: &[PathBuf],
+    chunk_size: usize,
+    parse_one: P,
+    mut emit: E,
+) -> Result<(usize, usize)>
+where
+    R: Send,
+    P: Fn(&Path) -> FileParse<R> + Sync + Send,
+    E: FnMut(&Path, R) -> Result<()>,
+{
+    let mut emitted = 0usize;
+    let mut errors = 0usize;
+    for chunk in paths.chunks(chunk_size.max(1)) {
+        // Parallel CPU-bound parse — order-preserving collect.
+        let parsed: Vec<FileParse<R>> = chunk.par_iter().map(|p| parse_one(p)).collect();
+        // Sequential emit — sinks/identity touched only here.
+        for (path, outcome) in chunk.iter().zip(parsed) {
+            match outcome {
+                FileParse::Parsed(r) => {
+                    emit(path, r)?;
+                    emitted += 1;
+                }
+                FileParse::Skipped => {}
+                FileParse::Failed => errors += 1,
+            }
+        }
+    }
+    Ok((emitted, errors))
+}
+
+/// Default chunk size for `par_parse_emit` — bounds resident parsed
+/// records. 256 keeps memory modest even for 13F filings (each can
+/// carry 10K+ holdings).
+pub const PARSE_CHUNK: usize = 256;
 
 // ─────────────────────────── path helpers ───────────────────────────
 

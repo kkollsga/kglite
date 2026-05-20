@@ -12,70 +12,32 @@
 //!   summary (rare).
 //! - `company.csv` — identity via Identities::ensure_company (the
 //!   companies pre-pass usually picks Form D issuers up already).
+//!
+//! Dispatch (walk + parse) lives in `forms::ownership`; this module
+//! only emits rows for an already-parsed Form D document.
 
-use std::fs::File;
-use std::io::BufReader;
+use std::path::Path;
 
 use crate::error::Result;
-use crate::layout::Workdir;
-use crate::parsers::formd::parse_formd;
-use crate::slicing::SliceSpec;
+use crate::parsers::formd::FormD;
 
-use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{
-    accession_from_path, format_float, is_ownership_xml, strip_leading_zeros, walk_filings,
-};
+use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
 use super::FormReport;
 
-pub fn extract(
-    workdir: &Workdir,
-    slice: &SliceSpec,
+/// Emit offering + use-of-proceeds rows for one parsed Form D. Runs
+/// single-threaded.
+pub(crate) fn emit_formd(
+    parsed: &FormD,
+    path: &Path,
     sinks: &mut Sinks,
-    _identities: &mut Identities,
     extracted_at: &str,
-) -> Result<FormReport> {
-    let mut report = FormReport::default();
-    let root = workdir.raw_filings_dir();
-    if !root.is_dir() {
-        return Ok(report);
-    }
-
-    for path in walk_filings(&root, is_ownership_xml)? {
-        let file = match File::open(&path) {
-            Ok(f) => f,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        let parsed = match parse_formd(BufReader::new(file)) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        // Form D-only check: must have offering economics.
-        if parsed.total_offering_amount == 0.0
-            && parsed.total_amount_sold == 0.0
-            && parsed.total_investors == 0
-        {
-            continue;
-        }
-        if parsed.issuer_cik.is_empty() {
-            continue;
-        }
-        let issuer_cik_int: u64 = parsed.issuer_cik.parse().unwrap_or(0);
-        if !slice.cik_matches(issuer_cik_int) {
-            continue;
-        }
-
-        report.files_read += 1;
-
+    report: &mut FormReport,
+) -> Result<()> {
+    {
         let issuer_cik = strip_leading_zeros(&parsed.issuer_cik);
-        let accession = accession_from_path(&path).unwrap_or_default();
+        let accession = accession_from_path(path).unwrap_or_default();
         let document = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -127,5 +89,5 @@ pub fn extract(
         }
     }
 
-    Ok(report)
+    Ok(())
 }

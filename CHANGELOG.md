@@ -193,6 +193,21 @@ voting-power concentration, subsidiary depth. Ends by
 registering the graph as a Claude Desktop MCP server (the
 agent-first framing).
 
+### Extraction performance + segfault fix
+
+- **Parallel feature extraction** — each raw filing parses independently,
+  so the form extractors now parse a chunk of files across all cores and
+  emit rows single-threaded (lock-free CSV sinks). Combined with a unified
+  ownership-XML pass — Form 3/4/5/144/D are walked and read once and
+  dispatched by detected form type instead of five redundant re-parses —
+  and larger (512 KB) CSV write buffers, SEC feature extraction is ~3.6×
+  faster (14.8 s → 4.1 s on a 6,750-filing cache).
+- **Fixed a `SEC.open()` segfault on macOS** — `kglite.datasets`
+  submodules now import lazily (PEP 562), so `kglite.datasets.sec` no
+  longer pulls `sodir`/`wikidata` → pandas → pyarrow into the process.
+  Loading pyarrow after the kglite native extension triggered a
+  dynamic-linker crash; keeping it off the SEC import path resolves it.
+
 ## [0.9.45] — `save_graph` mode-aware dispatch in `kglite-mcp-server`
 
 Correctness fix for an MCP-server-only regression latent since

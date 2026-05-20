@@ -21,17 +21,19 @@
 //!   (entity filers).
 
 use std::fs::read_to_string;
+use std::path::Path;
 
 use crate::error::Result;
 use crate::layout::Workdir;
-use crate::parsers::sc13d::parse_sc13d;
+use crate::parsers::sc13d::{parse_sc13d, Sc13dFiling};
 use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, is_sc13_name, strip_leading_zeros, walk_filings,
+    accession_from_path, cik_from_filing_path, is_sc13_name, par_parse_emit, strip_leading_zeros,
+    walk_filings, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -48,33 +50,63 @@ pub fn extract(
         return Ok(report);
     }
 
-    for path in walk_filings(&root, is_sc13_name)? {
-        let html = match read_to_string(&path) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
+    let paths = walk_filings(&root, is_sc13_name)?;
+
+    let (files_read, parse_errors) = par_parse_emit(
+        &paths,
+        PARSE_CHUNK,
+        |path| {
+            let html = match read_to_string(path) {
+                Ok(v) => v,
+                Err(_) => return FileParse::Failed,
+            };
+            let parsed = parse_sc13d(&html);
+            // No structured cover-page block found — skip rather than
+            // emitting empty/null activist_filing rows.
+            if parsed.reporting_persons.is_empty() {
+                return FileParse::Skipped;
             }
-        };
-        let parsed = parse_sc13d(&html);
-        if parsed.reporting_persons.is_empty() {
-            // No structured cover-page block found — skip rather
-            // than emitting empty/null activist_filing rows.
-            continue;
-        }
-        let issuer_cik_raw = match cik_from_filing_path(&path) {
-            Some(v) => v,
-            None => continue,
-        };
-        let issuer_cik_int: u64 = issuer_cik_raw.parse().unwrap_or(0);
-        if !slice.cik_matches(issuer_cik_int) {
-            continue;
-        }
+            let issuer_cik_raw = match cik_from_filing_path(path) {
+                Some(v) => v,
+                None => return FileParse::Skipped,
+            };
+            let issuer_cik_int: u64 = issuer_cik_raw.parse().unwrap_or(0);
+            if !slice.cik_matches(issuer_cik_int) {
+                return FileParse::Skipped;
+            }
+            FileParse::Parsed((parsed, issuer_cik_raw))
+        },
+        |path, (parsed, issuer_cik_raw)| {
+            emit_sc13(
+                &parsed,
+                &issuer_cik_raw,
+                path,
+                sinks,
+                identities,
+                extracted_at,
+                &mut report,
+            )
+        },
+    )?;
+    report.files_read = files_read;
+    report.parse_errors = parse_errors;
+    Ok(report)
+}
 
-        report.files_read += 1;
-
-        let issuer_cik = strip_leading_zeros(&issuer_cik_raw);
-        let accession = accession_from_path(&path).unwrap_or_default();
+/// Emit activist_filing + holding rows for one parsed SC 13D/G. Runs
+/// single-threaded.
+fn emit_sc13(
+    parsed: &Sc13dFiling,
+    issuer_cik_raw: &str,
+    path: &Path,
+    sinks: &mut Sinks,
+    identities: &mut Identities,
+    extracted_at: &str,
+    report: &mut FormReport,
+) -> Result<()> {
+    {
+        let issuer_cik = strip_leading_zeros(issuer_cik_raw);
+        let accession = accession_from_path(path).unwrap_or_default();
         let document = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -181,5 +213,5 @@ pub fn extract(
         }
     }
 
-    Ok(report)
+    Ok(())
 }

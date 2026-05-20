@@ -11,113 +11,81 @@
 //! Same set of CSVs as Form 4 (`purchase`, `sale`, `holding`, `role`,
 //! `person`), with `source_form = "5"` / `"5/A"`.
 
-use std::fs::File;
-use std::io::BufReader;
+//! Dispatch (walk + parse) lives in `forms::ownership`. This module
+//! only emits rows for an already-parsed Form 5 document.
+
+use std::path::Path;
 
 use crate::error::Result;
-use crate::layout::Workdir;
-use crate::parsers::form4::parse_form4;
-use crate::slicing::SliceSpec;
+use crate::parsers::form4::Form4;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{
-    accession_from_path, format_float, is_ownership_xml, strip_leading_zeros, walk_filings,
-};
+use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
 use super::FormReport;
 
-pub fn extract(
-    workdir: &Workdir,
-    slice: &SliceSpec,
+/// Emit role + transaction + holding rows for one parsed Form 5. Runs
+/// single-threaded.
+pub(crate) fn emit_form5(
+    f: &Form4,
+    path: &Path,
     sinks: &mut Sinks,
     identities: &mut Identities,
     extracted_at: &str,
-) -> Result<FormReport> {
-    let mut report = FormReport::default();
-    let root = workdir.raw_filings_dir();
-    if !root.is_dir() {
-        return Ok(report);
+    report: &mut FormReport,
+) -> Result<()> {
+    let issuer_cik = strip_leading_zeros(&f.issuer_cik);
+    let reporter_cik = strip_leading_zeros(&f.reporter_cik);
+    let accession = accession_from_path(path).unwrap_or_default();
+    let document = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let prov_base = Provenance::for_filing(
+        &f.document_type,
+        &accession,
+        &reporter_cik,
+        &document,
+        extracted_at,
+    );
+
+    identities.ensure_person(sinks, &reporter_cik, &f.reporter_name, &reporter_cik)?;
+
+    // Role rows.
+    let mut emit_role = |role_type: &str, title: &str| -> Result<()> {
+        let role_nid = format!("{}-{}-{}", reporter_cik, issuer_cik, role_type);
+        write_info_row(
+            &mut sinks.role,
+            &[
+                role_nid.as_str(),
+                reporter_cik.as_str(),
+                issuer_cik.as_str(),
+                role_type,
+                title,
+                "",
+            ],
+            &prov_base,
+        )?;
+        report.rows_written += 1;
+        Ok(())
+    };
+    if f.is_director {
+        emit_role("director", "")?;
+    }
+    if f.is_officer {
+        emit_role("officer", &f.officer_title)?;
+    }
+    if f.is_ten_percent_owner {
+        emit_role("ten_pct_owner", "")?;
+    }
+    if f.is_other {
+        emit_role("other", "")?;
     }
 
-    for path in walk_filings(&root, is_ownership_xml)? {
-        let file = match File::open(&path) {
-            Ok(f) => f,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        let f = match parse_form4(BufReader::new(file)) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        if !matches!(f.document_type.as_str(), "5" | "5/A") {
-            continue;
-        }
-        let issuer_cik_int: u64 = f.issuer_cik.parse().unwrap_or(0);
-        if !slice.cik_matches(issuer_cik_int) {
-            continue;
-        }
-        if f.reporter_cik.is_empty() || f.issuer_cik.is_empty() {
-            continue;
-        }
-
-        report.files_read += 1;
-
-        let issuer_cik = strip_leading_zeros(&f.issuer_cik);
-        let reporter_cik = strip_leading_zeros(&f.reporter_cik);
-        let accession = accession_from_path(&path).unwrap_or_default();
-        let document = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        let prov_base = Provenance::for_filing(
-            &f.document_type,
-            &accession,
-            &reporter_cik,
-            &document,
-            extracted_at,
-        );
-
-        identities.ensure_person(sinks, &reporter_cik, &f.reporter_name, &reporter_cik)?;
-
-        // Role rows.
-        let mut emit_role = |role_type: &str, title: &str| -> Result<()> {
-            let role_nid = format!("{}-{}-{}", reporter_cik, issuer_cik, role_type);
-            write_info_row(
-                &mut sinks.role,
-                &[
-                    role_nid.as_str(),
-                    reporter_cik.as_str(),
-                    issuer_cik.as_str(),
-                    role_type,
-                    title,
-                    "",
-                ],
-                &prov_base,
-            )?;
-            report.rows_written += 1;
-            Ok(())
-        };
-        if f.is_director {
-            emit_role("director", "")?;
-        }
-        if f.is_officer {
-            emit_role("officer", &f.officer_title)?;
-        }
-        if f.is_ten_percent_owner {
-            emit_role("ten_pct_owner", "")?;
-        }
-        if f.is_other {
-            emit_role("other", "")?;
-        }
-
+    {
         // Transactions: same emit logic as Form 4.
         for (i, t) in f.transactions.iter().enumerate() {
             let prov = prov_base.clone().with_lot(i);
@@ -191,5 +159,5 @@ pub fn extract(
         }
     }
 
-    Ok(report)
+    Ok(())
 }

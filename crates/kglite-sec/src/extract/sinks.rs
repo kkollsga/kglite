@@ -630,10 +630,21 @@ impl Sinks {
 
 // ─────────────────────────────── helpers ───────────────────────────────
 
+/// CSV write-buffer size. `csv::Writer` accumulates serialised rows in
+/// an in-memory buffer and flushes to the OS in one `write` once the
+/// buffer fills — the same build-a-chunk / offload-on-threshold
+/// strategy the disk-graph builder uses. The default is 8 KiB, which
+/// for the hot tables (`holding`, `institutional_holding` — hundreds
+/// of MB) means tens of thousands of syscalls. 512 KiB cuts that
+/// ~64×. 34 writers × 512 KiB = 17 MiB — a fixed ceiling, independent
+/// of graph size, so it respects the bounded-memory rule.
+const CSV_BUFFER_CAPACITY: usize = 512 * 1024;
+
 fn csv_writer(workdir: &Workdir, name: &str) -> Result<Writer<File>> {
     let path = workdir.processed_csv(name);
     WriterBuilder::new()
         .quote_style(QuoteStyle::Necessary)
+        .buffer_capacity(CSV_BUFFER_CAPACITY)
         .from_path(&path)
         .map_err(|e| SecError::Malformed(format!("open {}: {}", path.display(), e)))
 }

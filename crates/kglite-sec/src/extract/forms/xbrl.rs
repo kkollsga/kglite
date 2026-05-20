@@ -17,16 +17,17 @@
 //!   uom, value, dimensional_context.
 
 use std::fs::read_to_string;
+use std::path::PathBuf;
 
 use crate::error::Result;
 use crate::layout::Workdir;
-use crate::parsers::xbrl_facts::{parse_company_facts, DEFAULT_FINANCIAL_TAGS};
+use crate::parsers::xbrl_facts::{parse_company_facts, XbrlFact, DEFAULT_FINANCIAL_TAGS};
 use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::strip_leading_zeros;
+use super::super::util::{par_parse_emit, strip_leading_zeros, FileParse, PARSE_CHUNK};
 use super::FormReport;
 
 pub fn extract(
@@ -46,40 +47,55 @@ pub fn extract(
         Ok(e) => e,
         Err(_) => return Ok(report),
     };
+    let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // companyfacts_CIK0000320193.json
-        let Some(cik_part) = name
-            .strip_prefix("companyfacts_CIK")
-            .and_then(|s| s.strip_suffix(".json"))
-        else {
-            continue;
-        };
-        let cik_int: u64 = cik_part.parse().unwrap_or(0);
-        if !slice.cik_matches(cik_int) {
-            continue;
-        }
-        let json = match read_to_string(&path) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
+    // company-facts JSON files are large; parse them in parallel.
+    let (files_read, parse_errors) = par_parse_emit(
+        &paths,
+        PARSE_CHUNK,
+        |path| {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // companyfacts_CIK0000320193.json
+            let Some(cik_part) = name
+                .strip_prefix("companyfacts_CIK")
+                .and_then(|s| s.strip_suffix(".json"))
+            else {
+                return FileParse::Skipped;
+            };
+            let cik_int: u64 = cik_part.parse().unwrap_or(0);
+            if !slice.cik_matches(cik_int) {
+                return FileParse::Skipped;
             }
-        };
-        let facts = match parse_company_facts(&json, DEFAULT_FINANCIAL_TAGS) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
+            let json = match read_to_string(path) {
+                Ok(v) => v,
+                Err(_) => return FileParse::Failed,
+            };
+            let facts = match parse_company_facts(&json, DEFAULT_FINANCIAL_TAGS) {
+                Ok(v) => v,
+                Err(_) => return FileParse::Failed,
+            };
+            if facts.is_empty() {
+                return FileParse::Skipped;
             }
-        };
-        if facts.is_empty() {
-            continue;
-        }
+            FileParse::Parsed((facts, cik_part.to_string()))
+        },
+        |_path, (facts, cik_part)| emit_xbrl(&facts, &cik_part, sinks, extracted_at, &mut report),
+    )?;
+    report.files_read = files_read;
+    report.parse_errors = parse_errors;
+    Ok(report)
+}
 
-        report.files_read += 1;
+/// Emit `metric_fact` rows for one parsed company-facts JSON. Runs
+/// single-threaded.
+fn emit_xbrl(
+    facts: &[XbrlFact],
+    cik_part: &str,
+    sinks: &mut Sinks,
+    extracted_at: &str,
+    report: &mut FormReport,
+) -> Result<()> {
+    {
         let issuer_cik = strip_leading_zeros(cik_part);
 
         for (i, f) in facts.iter().enumerate() {
@@ -132,7 +148,7 @@ pub fn extract(
         }
     }
 
-    Ok(report)
+    Ok(())
 }
 
 /// Render an XBRL value: integer form when whole (financial values

@@ -39,6 +39,11 @@ quick-xml = "0.36"
 # as the main crate so the workspace resolves one version.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
+# Data-parallel filing parsing. Each raw filing is independent, so the
+# extract layer parses a chunk of files across all cores and then
+# writes the rows single-threaded (the CSV sinks need no locking).
+rayon = "1.10"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"

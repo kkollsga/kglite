@@ -1859,6 +1859,7 @@ dependencies = [
  "csv",
  "governor",
  "quick-xml",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",

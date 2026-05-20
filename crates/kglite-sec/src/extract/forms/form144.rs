@@ -14,70 +14,35 @@
 //! - `person.csv` — filer identity.
 //! - `holding.csv` — implicit baseline (aggregate_market_value /
 //!   approximate share count) — deferred to a later refinement.
+//!
+//! Dispatch (walk + parse) lives in `forms::ownership`; this module
+//! only emits rows for an already-parsed Form 144 document.
 
-use std::fs::File;
-use std::io::BufReader;
+use std::path::Path;
 
 use crate::error::Result;
-use crate::layout::Workdir;
-use crate::parsers::form144::parse_form144;
-use crate::slicing::SliceSpec;
+use crate::parsers::form144::Form144;
 
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{
-    accession_from_path, format_float, is_ownership_xml, strip_leading_zeros, walk_filings,
-};
+use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
 use super::FormReport;
 
-pub fn extract(
-    workdir: &Workdir,
-    slice: &SliceSpec,
+/// Emit planned-sale + historical-sale rows for one parsed Form 144.
+/// Runs single-threaded.
+pub(crate) fn emit_form144(
+    parsed: &Form144,
+    path: &Path,
     sinks: &mut Sinks,
     identities: &mut Identities,
     extracted_at: &str,
-) -> Result<FormReport> {
-    let mut report = FormReport::default();
-    let root = workdir.raw_filings_dir();
-    if !root.is_dir() {
-        return Ok(report);
-    }
-
-    for path in walk_filings(&root, is_ownership_xml)? {
-        let file = match File::open(&path) {
-            Ok(f) => f,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        let parsed = match parse_form144(BufReader::new(file)) {
-            Ok(v) => v,
-            Err(_) => {
-                report.parse_errors += 1;
-                continue;
-            }
-        };
-        // Form 144 is identified by having issuer + filer info and at
-        // least one planned sale OR historical sale. Other ownership
-        // XMLs (3/4/5) won't have planned_sales populated.
-        if parsed.planned_sales.is_empty() && parsed.historical_sales.is_empty() {
-            continue;
-        }
-        let issuer_cik_int: u64 = parsed.issuer_cik.parse().unwrap_or(0);
-        if !slice.cik_matches(issuer_cik_int) {
-            continue;
-        }
-        if parsed.filer_cik.is_empty() || parsed.issuer_cik.is_empty() {
-            continue;
-        }
-
-        report.files_read += 1;
-
+    report: &mut FormReport,
+) -> Result<()> {
+    {
         let issuer_cik = strip_leading_zeros(&parsed.issuer_cik);
         let filer_cik = strip_leading_zeros(&parsed.filer_cik);
-        let accession = accession_from_path(&path).unwrap_or_default();
+        let accession = accession_from_path(path).unwrap_or_default();
         let document = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -143,5 +108,5 @@ pub fn extract(
         }
     }
 
-    Ok(report)
+    Ok(())
 }
