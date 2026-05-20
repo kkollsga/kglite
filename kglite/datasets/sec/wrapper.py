@@ -101,6 +101,7 @@ def _dispatch_per_filing_fetches(
     include_8k_events: bool,
     include_xbrl: bool,
     verbose: bool,
+    progress: object | None,
 ) -> dict[str, tuple[int, int]]:
     """Read processed/filing.csv, group by form type, and call the
     per-filing batch fetchers (Form 4, 13F, 8-K, SC 13D, DEF 14A,
@@ -181,53 +182,87 @@ def _dispatch_per_filing_fetches(
             ownership_batch.extend(buckets[b])
             n_own[b] = len(buckets[b])
     if ownership_batch:
-        if verbose:
+        if verbose and progress is None:
             print(
                 f"[SEC] fetching ownership documents ({n_own['form4']} Form 4, "
                 f"{n_own['form3']} Form 3, {n_own['form5']} Form 5)"
             )
-        out["ownership"] = _sec_internal.fetch_form4_batch(str(workdir), user_agent=user_agent, batch=ownership_batch)
+        out["ownership"] = _sec_internal.fetch_form4_batch(
+            str(workdir), user_agent=user_agent, batch=ownership_batch, progress=progress
+        )
 
     # 13F-HR: takes (cik, accession) — strip the primary_doc.
     if "form13f" in active and buckets["form13f"]:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching 13F info tables ({len(buckets['form13f'])} filings)")
         f13f_batch = [(cik, acc) for (cik, acc, _) in buckets["form13f"]]
-        out["form13f"] = _sec_internal.fetch_13f_batch(str(workdir), user_agent=user_agent, batch=f13f_batch)
+        out["form13f"] = _sec_internal.fetch_13f_batch(
+            str(workdir), user_agent=user_agent, batch=f13f_batch, progress=progress
+        )
 
     # 8-K: part of the lean core, still suppressible via the flag.
     if include_8k_events and "form8k" in active and buckets["form8k"]:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching 8-K cover pages ({len(buckets['form8k'])} filings)")
-        out["form8k"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form8k"])
+        out["form8k"] = _sec_internal.fetch_filing_batch(
+            str(workdir),
+            user_agent=user_agent,
+            batch=buckets["form8k"],
+            phase="form8k",
+            label="8-K cover pages",
+            progress=progress,
+        )
 
     # SC 13D / SC 13G + amendments: activist + passive stakes.
     sc13_batch = (buckets["sc13d"] if "sc13d" in active else []) + (buckets["sc13g"] if "sc13g" in active else [])
     if sc13_batch:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching SC 13D/G primary docs ({len(sc13_batch)} filings)")
-        out["sc13"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=sc13_batch)
+        out["sc13"] = _sec_internal.fetch_filing_batch(
+            str(workdir),
+            user_agent=user_agent,
+            batch=sc13_batch,
+            phase="sc13",
+            label="SC 13D/G primary docs",
+            progress=progress,
+        )
 
     # DEF 14A + DEFA14A + PRE 14A: proxy filings.
     if "def14a" in active and buckets["def14a"]:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching DEF 14A proxies ({len(buckets['def14a'])} filings)")
-        out["def14a"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["def14a"])
+        out["def14a"] = _sec_internal.fetch_filing_batch(
+            str(workdir),
+            user_agent=user_agent,
+            batch=buckets["def14a"],
+            phase="def14a",
+            label="DEF 14A proxies",
+            progress=progress,
+        )
 
     # Form 144: planned restricted-securities sales (post-2016 XML,
     # older HTML — both come down via the generic filing fetcher).
     if "form144" in active and buckets["form144"]:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching Form 144 notices ({len(buckets['form144'])} filings)")
-        out["form144"] = _sec_internal.fetch_filing_batch(str(workdir), user_agent=user_agent, batch=buckets["form144"])
+        out["form144"] = _sec_internal.fetch_filing_batch(
+            str(workdir),
+            user_agent=user_agent,
+            batch=buckets["form144"],
+            phase="form144",
+            label="Form 144 notices",
+            progress=progress,
+        )
 
     # Exhibit 21: gated by include_subsidiaries. 10-K filings are the
     # source; the fetcher discovers ex21 attachments via index.json.
     if (include_subsidiaries or "form10k" in active) and buckets["form10k"]:
-        if verbose:
+        if verbose and progress is None:
             print(f"[SEC] fetching Exhibit 21 attachments ({len(buckets['form10k'])} 10-Ks)")
         ex21_batch = [(cik, acc) for (cik, acc, _) in buckets["form10k"]]
-        out["exhibit21"] = _sec_internal.fetch_exhibit21_batch(str(workdir), user_agent=user_agent, batch=ex21_batch)
+        out["exhibit21"] = _sec_internal.fetch_exhibit21_batch(
+            str(workdir), user_agent=user_agent, batch=ex21_batch, progress=progress
+        )
 
     # XBRL company facts: one JSON per distinct issuer CIK with every
     # tagged financial fact (the metric_fact.csv source). Collect the
@@ -238,10 +273,10 @@ def _dispatch_per_filing_fetches(
             for cik, _, _ in bucket:
                 all_ciks.add(cik)
         if all_ciks:
-            if verbose:
+            if verbose and progress is None:
                 print(f"[SEC] fetching XBRL company facts ({len(all_ciks)} companies)")
             out["company_facts"] = _sec_internal.fetch_company_facts_batch(
-                str(workdir), user_agent=user_agent, ciks=sorted(all_ciks)
+                str(workdir), user_agent=user_agent, ciks=sorted(all_ciks), progress=progress
             )
 
     return out
@@ -374,6 +409,7 @@ class SEC:
         force_rebuild: bool = False,
         force_refetch: bool = False,
         verbose: bool = True,
+        progress: object | None = None,
     ) -> KnowledgeGraph:
         """Build (or load if cached) a knowledge graph from SEC EDGAR.
 
@@ -421,6 +457,11 @@ class SEC:
             force_refetch: Re-download ``raw/`` from SEC. Rare;
                 normally raw/ is immutable cache.
             verbose: Print build progress.
+            progress: Optional callable receiving structured progress
+                events from the per-filing fetch (see
+                ``kglite.progress``). Default ``None`` auto-selects a
+                tqdm progress bar on ``verbose`` runs when ``tqdm`` is
+                installed, falling back to plain ``[SEC]`` prints.
 
         Returns:
             ``KnowledgeGraph`` ready for queries.
@@ -474,6 +515,16 @@ class SEC:
         if verbose:
             print(f"[SEC]   fetch: {fetch_report}")
 
+        # Default the per-filing fetch to a tqdm progress bar on
+        # verbose runs — silent (plain `[SEC]` prints) if tqdm is absent.
+        if progress is None and verbose:
+            try:
+                from ...progress import TqdmBuildProgress
+
+                progress = TqdmBuildProgress(memory=False)
+            except ImportError:
+                progress = None
+
         # Step 2: per-filing payload fetch. Populates raw/filings/
         # with Form 4 XMLs, 13F info tables, 8-K cover pages, SC 13D
         # primary docs, DEF 14A proxies, and Exhibit 21 attachments
@@ -491,6 +542,7 @@ class SEC:
                 include_8k_events=include_8k_events,
                 include_xbrl=include_xbrl_metrics,
                 verbose=verbose,
+                progress=progress,
             )
             if verbose and fetch_dispatch:
                 print(f"[SEC]   per-filing fetch: {fetch_dispatch}")

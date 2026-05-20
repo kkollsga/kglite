@@ -364,12 +364,19 @@ graph across 17 node types and 19 edge types, no junction edges.
   5-50 MB JSON per company) and are opt-in under the lean default.
   `include_8k_events` stays `True` — 8-K is part of the lean core.
 
-### SEC loader — `companies` scope argument
+### SEC loader — `companies` argument + fetch progress bars
 
 - `SEC.open`'s `cik_list` parameter is renamed to `companies` — it has
   always accepted int CIKs, string tickers, and mixed lists, and the
   new name reflects that. No back-compat alias; update call sites
   (`SEC.open(..., companies=[...])`).
+- New `progress` parameter on `SEC.open` — a callable receiving
+  structured progress events from the per-filing fetch. The
+  rate-limited download of Form 4 / 13F / 8-K / DEF 14A / Exhibit 21
+  documents now drives a tqdm progress bar (one per fetch phase),
+  auto-enabled on `verbose` runs when `tqdm` is installed and falling
+  back to the previous `[SEC]` prints otherwise. `tqdm` stays an
+  optional dependency. Ctrl+C during a fetch now aborts cleanly.
 
 ### Sodir loader ported to Rust — `pandas` dropped
 

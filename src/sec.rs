@@ -63,6 +63,97 @@ fn build_slice(
 
 // ─────────────────────────── fetch surface ───────────────────────────
 
+/// A per-item fetch future, yielding that item's
+/// `(downloaded, skipped)` delta. Boxed + `'static` (the closures own
+/// cloned `SecClient` / `Workdir` handles) so `run_batch` can stay a
+/// plain generic without lifetime gymnastics.
+type FetchDeltaFut = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize)>>>;
+
+/// Fire one `kglite.progress`-schema event into the optional Python
+/// `progress` callback (`{"kind","phase","label","total","current",
+/// "unit","elapsed_s"}`). A pending SIGINT surfaces as `Err` so Ctrl+C
+/// aborts a long fetch; callback errors are swallowed — a broken
+/// progress UI must not kill the download.
+fn fire_event(
+    py: Python<'_>,
+    progress: Option<&Py<PyAny>>,
+    build: impl FnOnce(&Bound<'_, PyDict>) -> PyResult<()>,
+) -> PyResult<()> {
+    py.check_signals()?;
+    if let Some(cb) = progress {
+        let d = PyDict::new(py);
+        build(&d)?;
+        let _ = cb.call1(py, (d,));
+    }
+    Ok(())
+}
+
+/// Drive a sequential per-filing fetch loop under one `SecClient` +
+/// tokio runtime, emitting `start` / `update` / `complete` progress
+/// events. `fetch_one` runs one item and reports its
+/// `(downloaded, skipped)` delta. Shared by every `fetch_*_batch`
+/// binding so the rate-limited loop + progress plumbing live once.
+#[allow(clippy::too_many_arguments)]
+fn run_batch<T, F>(
+    py: Python<'_>,
+    user_agent: &str,
+    workdir: String,
+    batch: Vec<T>,
+    phase: &str,
+    label: &str,
+    unit: &str,
+    progress: Option<&Py<PyAny>>,
+    fetch_one: F,
+) -> PyResult<(usize, usize)>
+where
+    F: Fn(SecClient, Workdir, T) -> FetchDeltaFut,
+{
+    let client = SecClient::new(user_agent).map_err(map_err)?;
+    let wd = Workdir::new(workdir);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
+
+    let total = batch.len();
+    let started = std::time::Instant::now();
+    fire_event(py, progress, |d| {
+        d.set_item("kind", "start")?;
+        d.set_item("phase", phase)?;
+        d.set_item("label", label)?;
+        d.set_item("unit", unit)?;
+        d.set_item("total", total)?;
+        Ok(())
+    })?;
+
+    let mut downloaded = 0usize;
+    let mut skipped = 0usize;
+    let loop_result: PyResult<()> = rt.block_on(async {
+        for (i, item) in batch.into_iter().enumerate() {
+            let (dl, sk) = fetch_one(client.clone(), wd.clone(), item).await;
+            downloaded += dl;
+            skipped += sk;
+            let current = i + 1;
+            fire_event(py, progress, |ev| {
+                ev.set_item("kind", "update")?;
+                ev.set_item("phase", phase)?;
+                ev.set_item("current", current)?;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    });
+    loop_result?;
+
+    let _ = fire_event(py, progress, |d| {
+        d.set_item("kind", "complete")?;
+        d.set_item("phase", phase)?;
+        d.set_item("elapsed_s", started.elapsed().as_secs_f64())?;
+        Ok(())
+    });
+    Ok((downloaded, skipped))
+}
+
 /// Fetch the `raw/` tier — quarterly master.idx files for the shallow
 /// window plus the nightly bulk submissions.zip and company_tickers.json.
 #[pyfunction]
@@ -146,90 +237,100 @@ fn fetch_fsnds(
     })
 }
 
-/// Batch-fetch Form 4 XMLs. Returns (downloaded, skipped).
+/// Batch-fetch Form 3/4/5 ownership XMLs. Returns (downloaded, skipped).
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, batch))]
+#[pyo3(signature = (workdir, *, user_agent, batch, progress=None))]
 fn fetch_form4_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String, String)>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
     use kglite_sec::fetch_form4_filing;
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for (cik, accession, primary_doc) in batch {
-            match fetch_form4_filing(&client, &wd, cik, &accession, &primary_doc).await {
-                Ok(true) => downloaded += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        batch,
+        "ownership",
+        "Form 3/4/5 ownership",
+        "filing",
+        progress.as_ref(),
+        |client, wd, (cik, accession, primary_doc)| {
+            Box::pin(async move {
+                match fetch_form4_filing(&client, &wd, cik, &accession, &primary_doc).await {
+                    Ok(true) => (1, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
-/// Batch-fetch 13F info tables.
+/// Batch-fetch 13F info tables. Returns (downloaded, skipped).
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, batch))]
+#[pyo3(signature = (workdir, *, user_agent, batch, progress=None))]
 fn fetch_13f_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String)>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
     use kglite_sec::fetch_13f_info_table;
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for (cik, accession) in batch {
-            match fetch_13f_info_table(&client, &wd, cik, &accession).await {
-                Ok(true) => downloaded += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        batch,
+        "form13f",
+        "13F info tables",
+        "filing",
+        progress.as_ref(),
+        |client, wd, (cik, accession)| {
+            Box::pin(async move {
+                match fetch_13f_info_table(&client, &wd, cik, &accession).await {
+                    Ok(true) => (1, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
-/// Batch-fetch any filing's primary document.
+/// Batch-fetch any filing's primary document. `phase`/`label` name
+/// the progress bar — the same fetcher backs 8-K, SC 13D/G, DEF 14A
+/// and Form 144. Returns (downloaded, skipped).
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, batch))]
+#[pyo3(signature = (workdir, *, user_agent, batch, phase="filings", label="Filings", progress=None))]
 fn fetch_filing_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String, String)>,
+    phase: &str,
+    label: &str,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for (cik, accession, primary_doc) in batch {
-            match fetch_filing_primary_doc(&client, &wd, cik, &accession, &primary_doc).await {
-                Ok(true) => downloaded += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        batch,
+        phase,
+        label,
+        "filing",
+        progress.as_ref(),
+        |client, wd, (cik, accession, primary_doc)| {
+            Box::pin(async move {
+                match fetch_filing_primary_doc(&client, &wd, cik, &accession, &primary_doc).await {
+                    Ok(true) => (1, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
 /// Batch-fetch per-company submission JSON. For sliced runs this
@@ -237,91 +338,99 @@ fn fetch_filing_batch(
 /// central-directory parse at extract time. Returns (downloaded,
 /// skipped).
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false))]
+#[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false, progress=None))]
 fn fetch_company_submissions_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     ciks: Vec<u64>,
     force_refetch: bool,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
     use kglite_sec::fetch_company_submission;
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for cik in ciks {
-            match fetch_company_submission(&client, &wd, cik, force_refetch).await {
-                Ok(true) => downloaded += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        ciks,
+        "submissions",
+        "Company submissions",
+        "company",
+        progress.as_ref(),
+        move |client, wd, cik| {
+            Box::pin(async move {
+                match fetch_company_submission(&client, &wd, cik, force_refetch).await {
+                    Ok(true) => (1, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
 /// Batch-fetch XBRL company-facts JSON. Takes a list of CIKs; the
 /// company-facts API returns every tagged financial fact a company
 /// has reported in one JSON document. Returns (downloaded, skipped).
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false))]
+#[pyo3(signature = (workdir, *, user_agent, ciks, force_refetch=false, progress=None))]
 fn fetch_company_facts_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     ciks: Vec<u64>,
     force_refetch: bool,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
     use kglite_sec::fetch_company_facts;
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for cik in ciks {
-            match fetch_company_facts(&client, &wd, cik, force_refetch).await {
-                Ok(true) => downloaded += 1,
-                Ok(false) => skipped += 1,
-                Err(_) => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        ciks,
+        "company_facts",
+        "XBRL company facts",
+        "company",
+        progress.as_ref(),
+        move |client, wd, cik| {
+            Box::pin(async move {
+                match fetch_company_facts(&client, &wd, cik, force_refetch).await {
+                    Ok(true) => (1, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
-/// Batch-fetch Exhibit 21 attachments.
+/// Batch-fetch Exhibit 21 attachments. Returns (downloaded, skipped) —
+/// `downloaded` counts attachment files, not 10-K filings.
 #[pyfunction]
-#[pyo3(signature = (workdir, *, user_agent, batch))]
+#[pyo3(signature = (workdir, *, user_agent, batch, progress=None))]
 fn fetch_exhibit21_batch(
+    py: Python<'_>,
     workdir: String,
     user_agent: &str,
     batch: Vec<(u64, String)>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    let client = SecClient::new(user_agent).map_err(map_err)?;
-    let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let mut downloaded = 0;
-    let mut skipped = 0;
-    rt.block_on(async {
-        for (cik, accession) in batch {
-            match fetch_exhibit21_attachment(&client, &wd, cik, &accession).await {
-                Ok(n) if n > 0 => downloaded += n,
-                _ => skipped += 1,
-            }
-        }
-    });
-    Ok((downloaded, skipped))
+    run_batch(
+        py,
+        user_agent,
+        workdir,
+        batch,
+        "exhibit21",
+        "Exhibit 21",
+        "filing",
+        progress.as_ref(),
+        |client, wd, (cik, accession)| {
+            Box::pin(async move {
+                match fetch_exhibit21_attachment(&client, &wd, cik, &accession).await {
+                    Ok(n) if n > 0 => (n, 0),
+                    _ => (0, 1),
+                }
+            })
+        },
+    )
 }
 
 // ───────────────────────── extract surface (thin) ─────────────────────────
