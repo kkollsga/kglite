@@ -1795,6 +1795,7 @@ dependencies = [
  "indexmap",
  "kglite-sec",
  "kglite-sodir",
+ "kglite-wikidata",
  "libc",
  "mcp-methods",
  "memchr",
@@ -1880,6 +1881,17 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "kglite-wikidata"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "reqwest",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

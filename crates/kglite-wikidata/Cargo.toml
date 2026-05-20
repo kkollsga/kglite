@@ -1,0 +1,26 @@
+[package]
+name = "kglite-wikidata"
+version = "0.0.1"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+license = "MIT"
+description = "Pure-Rust fetcher for the Wikimedia `latest-truthy` RDF dump — resumable download + staleness cache. The N-Triples graph build lives in the main kglite crate."
+
+[lib]
+name = "kglite_wikidata"
+path = "src/lib.rs"
+
+[dependencies]
+# Error plumbing
+thiserror = "1"
+
+# Async HTTP + runtime — resumable ranged download of the dump
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# HTTP-date parsing + ISO timestamps for staleness comparisons
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

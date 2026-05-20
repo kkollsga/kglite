@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/kglite-mcp-server", "crates/kglite-sec", "crates/kglite-sodir"]
+members = [".", "crates/kglite-mcp-server", "crates/kglite-sec", "crates/kglite-sodir", "crates/kglite-wikidata"]
 resolver = "2"
 
 [package]
@@ -154,6 +154,9 @@ kglite-sec = { path = "crates/kglite-sec" }
 # Sodir FactMaps loader — pure-Rust crate, no pyo3 inside it. Wrapped
 # by src/sodir.rs which exposes the sodir.open() surface to Python.
 kglite-sodir = { path = "crates/kglite-sodir" }
+# Wikidata dump fetcher — pure-Rust crate, no pyo3 inside it. Wrapped
+# by src/wikidata.rs; the N-Triples graph build stays in this crate.
+kglite-wikidata = { path = "crates/kglite-wikidata" }
 # Async runtime needed by the SEC client. The rest of kglite is sync;
 # we instantiate a single-threaded runtime inside src/sec.rs for the
 # duration of each fetch/extract call so Python callers see a normal
