@@ -35,7 +35,9 @@ use crate::parsers::form4::Form4;
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
+use super::super::util::{
+    accession_from_path, format_float, person_nid_from_cik, strip_leading_zeros,
+};
 use super::FormReport;
 
 /// Emit all rows for one parsed Form 4. Runs single-threaded on the
@@ -51,6 +53,7 @@ pub(crate) fn emit_form4(
 ) -> Result<()> {
     let issuer_cik = strip_leading_zeros(&f4.issuer_cik);
     let reporter_cik = strip_leading_zeros(&f4.reporter_cik);
+    let person_nid = person_nid_from_cik(&reporter_cik);
     let accession = accession_from_path(path).unwrap_or_default();
     let document = path
         .file_name()
@@ -67,7 +70,7 @@ pub(crate) fn emit_form4(
     );
 
     // Identity — Person row for the reporter.
-    identities.ensure_person(sinks, &reporter_cik, &f4.reporter_name, &reporter_cik)?;
+    identities.ensure_person(sinks, &person_nid, &f4.reporter_name, &reporter_cik)?;
 
     // Role rows for each non-zero relationship flag.
     let mut emit_role = |role_type: &str, title: &str| -> Result<()> {
@@ -76,7 +79,7 @@ pub(crate) fn emit_form4(
             &mut sinks.role,
             &[
                 role_nid.as_str(),
-                reporter_cik.as_str(),
+                person_nid.as_str(),
                 issuer_cik.as_str(),
                 role_type,
                 title,
@@ -117,7 +120,7 @@ pub(crate) fn emit_form4(
         let make_row = |direction: &str| -> [String; 14] {
             [
                 format!("{}-{}", nid_base, direction),
-                reporter_cik.clone(),
+                person_nid.clone(),
                 issuer_cik.clone(),
                 direction.to_string(),
                 t.security_title.clone(),
@@ -153,7 +156,7 @@ pub(crate) fn emit_form4(
         // 0 shares"), so we write the row regardless.
         let holding_row = [
             format!("{}-h", nid_base),
-            reporter_cik.clone(),
+            person_nid.clone(),
             issuer_cik.clone(),
             t.security_title.clone(),
             t.transaction_date.clone(),

@@ -251,6 +251,16 @@ pub fn strip_leading_zeros(s: &str) -> String {
     }
 }
 
+/// Canonical `Person` node id for a CIK-identified filer (Form 3/4/5,
+/// Form 144). Person ids MUST be non-numeric: proxy- and 10-K-derived
+/// persons are keyed by normalised name (`p-…`), so a bare numeric CIK
+/// would make the `person.csv` primary-key column mixed-type and break
+/// every integer-keyed FK edge into `Person`. The `cik-` prefix keeps
+/// the whole id space uniformly string-typed.
+pub fn person_nid_from_cik(cik: &str) -> String {
+    format!("cik-{cik}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

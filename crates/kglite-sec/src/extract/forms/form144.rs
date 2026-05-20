@@ -27,7 +27,9 @@ use crate::parsers::form144::Form144;
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
+use super::super::util::{
+    accession_from_path, format_float, person_nid_from_cik, strip_leading_zeros,
+};
 use super::FormReport;
 
 /// Emit planned-sale + historical-sale rows for one parsed Form 144.
@@ -43,6 +45,7 @@ pub(crate) fn emit_form144(
     {
         let issuer_cik = strip_leading_zeros(&parsed.issuer_cik);
         let filer_cik = strip_leading_zeros(&parsed.filer_cik);
+        let person_nid = person_nid_from_cik(&filer_cik);
         let accession = accession_from_path(path).unwrap_or_default();
         let document = path
             .file_name()
@@ -53,7 +56,7 @@ pub(crate) fn emit_form144(
         let prov_base =
             Provenance::for_filing("144", &accession, &filer_cik, &document, extracted_at);
 
-        identities.ensure_person(sinks, &filer_cik, &parsed.filer_name, &filer_cik)?;
+        identities.ensure_person(sinks, &person_nid, &parsed.filer_name, &filer_cik)?;
 
         // Planned-sale rows.
         for (i, p) in parsed.planned_sales.iter().enumerate() {
@@ -63,7 +66,7 @@ pub(crate) fn emit_form144(
                 &mut sinks.planned_sale,
                 &[
                     nid.as_str(),
-                    filer_cik.as_str(),
+                    person_nid.as_str(),
                     issuer_cik.as_str(),
                     p.security_class.as_str(),
                     &format_float(p.shares),
@@ -91,7 +94,7 @@ pub(crate) fn emit_form144(
                 &mut sinks.insider_transaction,
                 &[
                     nid.as_str(),
-                    filer_cik.as_str(),
+                    person_nid.as_str(),
                     issuer_cik.as_str(),
                     "sale", // direction
                     h.security_class.as_str(),

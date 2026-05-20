@@ -28,7 +28,9 @@ use crate::parsers::form4::Form4;
 use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
-use super::super::util::{accession_from_path, format_float, strip_leading_zeros};
+use super::super::util::{
+    accession_from_path, format_float, person_nid_from_cik, strip_leading_zeros,
+};
 use super::FormReport;
 
 /// Emit role + initial-holding rows for one parsed Form 3. Runs
@@ -43,6 +45,7 @@ pub(crate) fn emit_form3(
 ) -> Result<()> {
     let issuer_cik = strip_leading_zeros(&f.issuer_cik);
     let reporter_cik = strip_leading_zeros(&f.reporter_cik);
+    let person_nid = person_nid_from_cik(&reporter_cik);
     let accession = accession_from_path(path).unwrap_or_default();
     let document = path
         .file_name()
@@ -58,7 +61,7 @@ pub(crate) fn emit_form3(
         extracted_at,
     );
 
-    identities.ensure_person(sinks, &reporter_cik, &f.reporter_name, &reporter_cik)?;
+    identities.ensure_person(sinks, &person_nid, &f.reporter_name, &reporter_cik)?;
 
     // Initial-role rows.
     let mut emit_role = |role_type: &str, title: &str| -> Result<()> {
@@ -67,7 +70,7 @@ pub(crate) fn emit_form3(
             &mut sinks.role,
             &[
                 role_nid.as_str(),
-                reporter_cik.as_str(),
+                person_nid.as_str(),
                 issuer_cik.as_str(),
                 role_type,
                 title,
@@ -101,7 +104,7 @@ pub(crate) fn emit_form3(
             &mut sinks.holding,
             &[
                 nid.as_str(),
-                reporter_cik.as_str(),
+                person_nid.as_str(),
                 issuer_cik.as_str(),
                 h.security_title.as_str(),
                 f.period_of_report.as_str(),
