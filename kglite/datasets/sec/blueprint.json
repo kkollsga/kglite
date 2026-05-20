@@ -308,6 +308,30 @@
       }
     },
 
+    "EarningsRelease": {
+      "csv": "processed/earnings_release.csv",
+      "pk": "earnings_release_nid",
+      "title": "fiscal_period",
+      "properties": {
+        "period_end_date": "string",
+        "fiscal_period": "string",
+        "revenue": "float",
+        "net_income": "float",
+        "eps_basic": "float",
+        "eps_diluted": "float",
+        "guidance_revenue_low": "float",
+        "guidance_revenue_high": "float",
+        "guidance_eps_low": "float",
+        "guidance_eps_high": "float"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_fact_nid",

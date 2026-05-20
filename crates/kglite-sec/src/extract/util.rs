@@ -153,6 +153,17 @@ pub fn is_8k_name(name: &str) -> bool {
     lc.contains("8-k") || lc.contains("8k") || lc.contains("eightk")
 }
 
+/// Predicate for Exhibit 99 attachments — earnings press releases,
+/// quarterly update letters. Names vary widely (`ex99.htm`,
+/// `ex-99_1.htm`, `dNNdex991.htm`, `tsla-ex991.htm`).
+pub fn is_ex99_name(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    if !(lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")) {
+        return false;
+    }
+    lc.contains("ex99") || lc.contains("ex-99") || lc.contains("ex_99") || lc.contains("exhibit99")
+}
+
 /// Predicate for SC 13D / SC 13G primary documents.
 pub fn is_sc13_name(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();

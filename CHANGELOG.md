@@ -292,6 +292,20 @@ graph across 17 node types and 19 edge types, no junction edges.
   effective date. The lowest-precision extractor in the set — a
   person without a recoverable name or a change verb is skipped.
 
+### 8-K earnings releases (F14)
+
+- **`earnings_release.csv` + `EarningsRelease` node** — a new parser
+  reads an earnings press release (8-K Item 2.02 body or its
+  Exhibit 99 attachment) and pulls the headline figures: revenue,
+  net income, and basic / diluted per-share earnings (parenthesised
+  losses read negative, million/billion multipliers honoured). It
+  self-gates on the earnings vocabulary — any non-earnings document
+  yields nothing. Wired into `forms/eightk.rs`, scanning both 8-K
+  covers and `ex-99` attachments; the blueprint gains an
+  `EarningsRelease` node edged to `Company` and `Filing`. Verified by
+  parser fixtures — the benchmark corpus carries no Exhibit 99
+  attachments, so end-to-end coverage awaits an exhibit fetch.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate
