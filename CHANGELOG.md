@@ -208,6 +208,18 @@ agent-first framing).
   Loading pyarrow after the kglite native extension triggered a
   dynamic-linker crash; keeping it off the SEC import path resolves it.
 
+### Sodir loader ported to Rust — `pandas` dropped
+
+- The Sodir FactMaps dataset loader is now a pure-Rust crate
+  (`kglite-sodir`) behind a thin Python wrapper, matching the SEC
+  loader's architecture: ArcGIS REST fetch + GeoJSON→CSV, the
+  two-tier cooldown index, the FK preprocessing, and the blueprint
+  deep-merge all moved out of Python.
+- **`pandas` is no longer a dependency.** It was used only by the old
+  Sodir Python modules; with those gone, `pandas` (and transitively
+  `numpy`/`pyarrow`) is removed from `pyproject.toml`. `kglite.datasets.
+  sodir.open()` / `fetch_all()` keep their signatures.
+
 ## [0.9.45] — `save_graph` mode-aware dispatch in `kglite-mcp-server`
 
 Correctness fix for an MCP-server-only regression latent since

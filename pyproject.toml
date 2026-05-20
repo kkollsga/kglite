@@ -32,7 +32,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "pandas>=1.5",
     # 0.9.41+: MCP server runtime deps (~6 MB total) moved out of the
     # old `[mcp]` extras into default. `pip install kglite` now gets
     # a working `kglite-mcp-server` console script with no extras-dance.
