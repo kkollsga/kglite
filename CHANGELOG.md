@@ -215,6 +215,32 @@ agent-first framing).
   EDGAR-wide scan — ~20 s → tens of ms on a 100-filing corpus, where it
   had been 99.8% of total extraction wall time.
 
+### SEC graph schema rebuilt for the info-row layout (F20)
+
+The dataset blueprint (`kglite/datasets/sec/blueprint.json`) is rebuilt
+from scratch against the info-row CSV layout the F-phase extractors now
+emit. The design principle is **events become nodes, states become
+edges** — chosen so the queries where a graph beats SQL stay short:
+
+- **Nodes** — entity hubs (`Company`, `Person`, `Security`,
+  `InstitutionalManager`, `SicCode`) and event objects (`Filing`,
+  `InsiderTransaction`, `CorporateEvent`, `MetricFact`, `Subsidiary`).
+- **State edges** carry their attributes directly: `HAS_ROLE` and
+  `BENEFICIALLY_OWNS` (`Person→Company`), `HOLDS`
+  (`InstitutionalManager→Security`) — so interlocking-directorate and
+  portfolio-overlap queries are a single 2-hop pattern.
+- **Event edges** wire each event node to its participants plus a
+  `REPORTED_IN→Filing` provenance edge.
+- **Compute layer** — a `Day`/`Month`/`Quarter` calendar with
+  `FILED_ON`/`TRADED_ON`/`OCCURRED_ON` links, `NEXT_FILING` and
+  `NEXT_TX` temporal chains, and an `InsiderActivity` per-(person,
+  company) rollup.
+- **Unified `insider_transaction.csv`** — the ownership extractor now
+  emits one transaction table with a `direction` ("purchase"/"sale")
+  column instead of separate `purchase.csv` + `sale.csv`, so an
+  insider's whole trading history is one node type (`NEXT_TX` chains,
+  net-position rollups).
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

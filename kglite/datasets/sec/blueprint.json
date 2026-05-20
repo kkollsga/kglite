@@ -1,138 +1,5 @@
 {
-  "compute": [
-    {
-      "op": "derive",
-      "from": "Filing",
-      "set": {
-        "filing_year": "year(filed_date)",
-        "is_form_4": "form_type == '4'",
-        "is_annual": "form_type == '10-K'",
-        "is_quarterly": "form_type == '10-Q'"
-      }
-    },
-    {
-      "op": "filter",
-      "from": "MetricFact",
-      "where": "tag == 'Revenues' && qtrs == 4",
-      "into": "AnnualRevenue"
-    },
-    {
-      "op": "chain",
-      "from": "Filing",
-      "group_by": ["cik"],
-      "order_by": "filed_date",
-      "edge": "NEXT_FILING"
-    },
-    {
-      "op": "calendar",
-      "start": "2020-01-01",
-      "end": "2030-12-31",
-      "next_edge": "NEXT_DAY",
-      "links": [
-        {"from": "Filing",      "date_col": "filed_date",        "edge": "ON_FILED_DATE"},
-        {"from": "Transaction", "date_col": "transaction_date",  "edge": "ON_TX_DATE"}
-      ]
-    },
-    {
-      "op": "aggregate",
-      "from": "Filing",
-      "group_by": ["cik", "filing_year"],
-      "into": "FilingYear",
-      "agg": {
-        "n_filings": "count(*)",
-        "n_form_4": "sum(if(is_form_4, 1, 0))",
-        "n_annual": "sum(if(is_annual, 1, 0))",
-        "n_quarterly": "sum(if(is_quarterly, 1, 0))"
-      },
-      "edges": [
-        {"to": "Company", "fk": "cik", "edge": "FILINGS_BY"}
-      ]
-    },
-    {
-      "op": "derive",
-      "from": "Transaction",
-      "set": {
-        "total_value": "shares * price_per_share",
-        "is_buy":      "transaction_code in ['P', 'A']",
-        "is_sell":     "transaction_code in ['S', 'D']"
-      }
-    },
-    {
-      "op": "filter",
-      "from": "Transaction",
-      "where": "is_buy",
-      "into": "Purchase"
-    },
-    {
-      "op": "filter",
-      "from": "Transaction",
-      "where": "is_sell",
-      "into": "Sale"
-    },
-    {
-      "op": "filter",
-      "from": "Transaction",
-      "where": "shares_owned_after != null",
-      "into": "Holding"
-    },
-    {
-      "op": "chain",
-      "from": "Transaction",
-      "group_by": ["person_nid", "issuer_cik"],
-      "order_by": "transaction_date",
-      "edge": "NEXT_TX"
-    },
-    {
-      "op": "aggregate",
-      "from": "Transaction",
-      "group_by": ["person_nid", "issuer_cik", "security_title", "direct_indirect"],
-      "into": "PositionLedger",
-      "agg": {
-        "current_shares":   "last(shares_owned_after, by=transaction_date)",
-        "shares_acquired":  "sum(if(acquired_disposed == 'A', shares, 0))",
-        "shares_disposed":  "sum(if(acquired_disposed == 'D', shares, 0))",
-        "n_transactions":   "count(*)",
-        "first_tx_date":    "min(transaction_date)",
-        "last_tx_date":     "max(transaction_date)",
-        "total_buy_value":  "sum(if(is_buy,  total_value, 0))",
-        "total_sell_value": "sum(if(is_sell, total_value, 0))"
-      },
-      "edges": [
-        {"to": "Person",  "fk": "person_nid", "edge": "LEDGER_OF_PERSON"},
-        {"to": "Company", "fk": "issuer_cik", "edge": "LEDGER_AT_COMPANY"}
-      ]
-    },
-    {
-      "op": "aggregate",
-      "from": "PositionLedger",
-      "group_by": ["person_nid", "issuer_cik"],
-      "into": "Position",
-      "agg": {
-        "current_shares":   "sum(current_shares)",
-        "shares_acquired":  "sum(shares_acquired)",
-        "shares_disposed":  "sum(shares_disposed)",
-        "n_transactions":   "sum(n_transactions)",
-        "n_ledgers":        "count(*)",
-        "first_tx_date":    "min(first_tx_date)",
-        "last_tx_date":     "max(last_tx_date)",
-        "total_buy_value":  "sum(total_buy_value)",
-        "total_sell_value": "sum(total_sell_value)"
-      },
-      "edges": [
-        {"to": "Person",  "fk": "person_nid", "edge": "POSITION_OF"},
-        {"to": "Company", "fk": "issuer_cik", "edge": "AT_COMPANY"}
-      ]
-    }
-  ],
   "nodes": {
-    "SicCode": {
-      "csv": "processed/sic.csv",
-      "pk": "sic",
-      "title": "description",
-      "properties": {
-        "description": "string"
-      }
-    },
     "Company": {
       "csv": "processed/company.csv",
       "pk": "cik",
@@ -150,55 +17,169 @@
       },
       "connections": {
         "fk_edges": {
-          "IN_INDUSTRY": {
-            "target": "SicCode",
-            "fk": "sic"
-          }
-        },
+          "IN_INDUSTRY": { "target": "SicCode", "fk": "sic" }
+        }
+      }
+    },
+
+    "SicCode": {
+      "csv": "processed/sic.csv",
+      "pk": "sic",
+      "title": "description",
+      "properties": {
+        "description": "string"
+      }
+    },
+
+    "Person": {
+      "csv": "processed/person.csv",
+      "pk": "person_nid",
+      "title": "display_name",
+      "properties": {
+        "display_name": "string",
+        "cik": "string"
+      },
+      "connections": {
         "junction_edges": {
-          "IS_DIRECTOR_OF": {
-            "csv": "processed/is_director_of.csv",
-            "source_fk": "issuer_cik",
-            "target": "Person",
-            "target_fk": "person_nid",
-            "properties": ["accession_number"]
+          "HAS_ROLE": {
+            "csv": "processed/role.csv",
+            "source_fk": "person_nid",
+            "target": "Company",
+            "target_fk": "issuer_cik",
+            "properties": ["role_type", "officer_title", "since_date", "source_form", "source_accession"]
           },
-          "IS_OFFICER_OF": {
-            "csv": "processed/is_officer_of.csv",
-            "source_fk": "issuer_cik",
-            "target": "Person",
-            "target_fk": "person_nid",
-            "properties": ["officer_title", "accession_number"]
-          },
-          "IS_BENEFICIAL_OWNER_OF": {
-            "csv": "processed/is_beneficial_owner_of.csv",
-            "source_fk": "issuer_cik",
-            "target": "Person",
-            "target_fk": "person_nid",
-            "properties": ["accession_number"]
+          "BENEFICIALLY_OWNS": {
+            "csv": "processed/holding.csv",
+            "source_fk": "person_nid",
+            "target": "Company",
+            "target_fk": "issuer_cik",
+            "properties": ["security_title", "as_of_date", "shares", "percent_of_class", "direct_indirect", "is_derivative", "source_form", "source_accession"],
+            "property_types": {
+              "shares": "float",
+              "percent_of_class": "float",
+              "is_derivative": "int"
+            }
           }
         }
       }
     },
+
+    "Security": {
+      "csv": "processed/security.csv",
+      "pk": "cusip",
+      "title": "name",
+      "properties": {
+        "name": "string",
+        "title_of_class": "string"
+      }
+    },
+
+    "InstitutionalManager": {
+      "csv": "processed/institutional_manager.csv",
+      "pk": "manager_cik",
+      "title": "name",
+      "properties": {
+        "name": "string"
+      },
+      "connections": {
+        "junction_edges": {
+          "HOLDS": {
+            "csv": "processed/institutional_holding.csv",
+            "source_fk": "manager_cik",
+            "target": "Security",
+            "target_fk": "cusip",
+            "properties": ["name_of_issuer", "title_of_class", "value", "shares", "put_call", "investment_discretion", "voting_sole", "voting_shared", "voting_none", "quarter", "source_accession"],
+            "property_types": {
+              "value": "float",
+              "shares": "float",
+              "voting_sole": "float",
+              "voting_shared": "float",
+              "voting_none": "float"
+            }
+          }
+        }
+      }
+    },
+
     "Filing": {
-      "csv": "processed/filing.csv",
+      "csv": "processed/filing_index.csv",
       "pk": "accession_number",
       "title": "primary_document",
       "properties": {
+        "cik": "string",
         "form_type": "string",
-        "filed_date": "date",
+        "filed_date": "string",
         "report_date": "string",
         "primary_document": "string"
       },
       "connections": {
         "fk_edges": {
-          "FILED_BY": {
-            "target": "Company",
-            "fk": "cik"
-          }
+          "FILED_BY": { "target": "Company", "fk": "cik" }
         }
       }
     },
+
+    "InsiderTransaction": {
+      "csv": "processed/insider_transaction.csv",
+      "pk": "transaction_nid",
+      "title": "security_title",
+      "properties": {
+        "direction": "string",
+        "security_title": "string",
+        "transaction_date": "string",
+        "transaction_code": "string",
+        "shares": "float",
+        "price_per_share": "float",
+        "total_value": "float",
+        "direct_indirect": "string",
+        "is_derivative": "int"
+      },
+      "connections": {
+        "fk_edges": {
+          "BY_INSIDER": { "target": "Person", "fk": "person_nid" },
+          "IN_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "CorporateEvent": {
+      "csv": "processed/corporate_event.csv",
+      "pk": "event_nid",
+      "title": "description",
+      "properties": {
+        "item_code": "string",
+        "description": "string",
+        "event_date": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
+    "MetricFact": {
+      "csv": "processed/metric_fact.csv",
+      "pk": "metric_fact_nid",
+      "title": "tag",
+      "properties": {
+        "tag": "string",
+        "ddate": "string",
+        "qtrs": "int",
+        "uom": "string",
+        "value": "float",
+        "dimensional_context": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "FOR_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "Subsidiary": {
       "csv": "processed/subsidiary.csv",
       "pk": "subsidiary_nid",
@@ -209,173 +190,72 @@
       },
       "connections": {
         "fk_edges": {
-          "OF_COMPANY": {
-            "target": "Company",
-            "fk": "parent_cik"
-          }
-        }
-      }
-    },
-    "Event": {
-      "csv": "processed/event.csv",
-      "pk": "event_nid",
-      "title": "item_code",
-      "properties": {
-        "item_code": "string",
-        "description": "string"
-      },
-      "connections": {
-        "fk_edges": {
-          "OF_FILING": {
-            "target": "Filing",
-            "fk": "accession_number"
-          }
-        }
-      }
-    },
-    "Stake": {
-      "csv": "processed/stake.csv",
-      "pk": "stake_nid",
-      "title": "stake_nid",
-      "properties": {
-        "percent_owned": "float",
-        "purpose_text": "string"
-      },
-      "connections": {
-        "fk_edges": {
-          "REPORTED_IN_FILING": {
-            "target": "Filing",
-            "fk": "accession_number"
-          }
-        }
-      }
-    },
-    "MetricFact": {
-      "csv": "processed/metric_fact.csv",
-      "pk": "metric_nid",
-      "title": "tag",
-      "properties": {
-        "tag": "string",
-        "ddate": "string",
-        "qtrs": "int",
-        "uom": "string",
-        "value": "float"
-      },
-      "connections": {
-        "fk_edges": {
-          "REPORTED_IN_FILING": {
-            "target": "Filing",
-            "fk": "accession_number"
-          }
-        }
-      }
-    },
-    "InstitutionalManager": {
-      "csv": "processed/institutional_manager.csv",
-      "pk": "manager_cik",
-      "title": "name",
-      "properties": {
-        "name": "string"
-      },
-      "connections": {
-        "fk_edges": {
-          "IS_COMPANY": {
-            "target": "Company",
-            "fk": "manager_cik"
-          }
-        },
-        "junction_edges": {
-          "HOLDS": {
-            "csv": "processed/holds.csv",
-            "source_fk": "manager_cik",
-            "target": "Security",
-            "target_fk": "cusip",
-            "properties": [
-              "value",
-              "shares",
-              "shares_type",
-              "investment_discretion",
-              "voting_sole",
-              "voting_shared",
-              "voting_none",
-              "quarter",
-              "accession_number"
-            ]
-          }
-        }
-      }
-    },
-    "Security": {
-      "csv": "processed/security.csv",
-      "pk": "cusip",
-      "title": "name",
-      "properties": {
-        "name": "string",
-        "title_of_class": "string"
-      }
-    },
-    "Person": {
-      "csv": "processed/person.csv",
-      "pk": "person_nid",
-      "title": "display_name",
-      "properties": {
-        "display_name": "string"
-      },
-      "connections": {
-        "junction_edges": {
-          "SERVES_ON_BOARD": {
-            "csv": "processed/serves_on_board.csv",
-            "source_fk": "person_nid",
-            "target": "Company",
-            "target_fk": "company_cik",
-            "properties": ["age", "since_year", "accession_number"],
-            "property_types": {
-              "age": "int",
-              "since_year": "int",
-              "accession_number": "string"
-            }
-          }
-        }
-      },
-      "sub_nodes": {
-        "Transaction": {
-          "csv": "processed/transaction.csv",
-          "pk": "transaction_nid",
-          "title": "transaction_code",
-          "parent_fk": "person_nid",
-          "properties": {
-            "security_title": "string",
-            "transaction_date": "date",
-            "transaction_code": "string",
-            "shares": "float",
-            "price_per_share": "float",
-            "acquired_disposed": "string",
-            "shares_owned_after": "float",
-            "direct_indirect": "string",
-            "is_derivative": "int",
-            "source_form": "string",
-            "source_document": "string",
-            "source_url": "string",
-            "source_lot": "int"
-          },
-          "connections": {
-            "fk_edges": {
-              "OF_PERSON": {
-                "target": "Person",
-                "fk": "person_nid"
-              },
-              "INVOLVES_ISSUER": {
-                "target": "Company",
-                "fk": "issuer_cik"
-              },
-              "REPORTED_IN_FILING": {
-                "target": "Filing",
-                "fk": "accession_number"
-              }
-            }
-          }
+          "SUBSIDIARY_OF": { "target": "Company", "fk": "parent_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
         }
       }
     }
-  }
+  },
+
+  "compute": [
+    {
+      "op": "derive",
+      "from": "Filing",
+      "set": {
+        "filing_year": "year(filed_date)",
+        "is_annual": "form_type == '10-K'",
+        "is_quarterly": "form_type == '10-Q'",
+        "is_8k": "form_type == '8-K'"
+      }
+    },
+    {
+      "op": "calendar",
+      "type": "Day",
+      "start": "1994-01-01",
+      "end": "2031-12-31",
+      "next_edge": "NEXT_DAY",
+      "in_month_edge": "IN_MONTH",
+      "in_quarter_edge": "IN_QUARTER",
+      "links": [
+        { "from": "Filing", "date_col": "filed_date", "edge": "FILED_ON" },
+        { "from": "InsiderTransaction", "date_col": "transaction_date", "edge": "TRADED_ON" },
+        { "from": "CorporateEvent", "date_col": "event_date", "edge": "OCCURRED_ON" }
+      ]
+    },
+    {
+      "op": "chain",
+      "from": "Filing",
+      "group_by": ["cik"],
+      "order_by": "filed_date",
+      "edge": "NEXT_FILING"
+    },
+    {
+      "op": "chain",
+      "from": "InsiderTransaction",
+      "group_by": ["person_nid", "issuer_cik"],
+      "order_by": "transaction_date",
+      "edge": "NEXT_TX"
+    },
+    {
+      "op": "aggregate",
+      "from": "InsiderTransaction",
+      "group_by": ["person_nid", "issuer_cik"],
+      "into": "InsiderActivity",
+      "agg": {
+        "n_transactions": "count(*)",
+        "n_purchases": "sum(if(direction == 'purchase', 1, 0))",
+        "n_sales": "sum(if(direction == 'sale', 1, 0))",
+        "shares_bought": "sum(if(direction == 'purchase', shares, 0))",
+        "shares_sold": "sum(if(direction == 'sale', shares, 0))",
+        "buy_value": "sum(if(direction == 'purchase', total_value, 0))",
+        "sell_value": "sum(if(direction == 'sale', total_value, 0))",
+        "first_transaction": "min(transaction_date)",
+        "last_transaction": "max(transaction_date)"
+      },
+      "edges": [
+        { "to": "Person", "fk": "person_nid", "edge": "ACTIVITY_OF" },
+        { "to": "Company", "fk": "issuer_cik", "edge": "ACTIVITY_AT" }
+      ]
+    }
+  ]
 }
