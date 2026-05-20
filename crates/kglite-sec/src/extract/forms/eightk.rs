@@ -5,15 +5,12 @@
 //! Delisting, 4.01 Auditor Change, 4.02 Restatement, 5.02 Officer /
 //! Director Change, 5.07 Vote Results, 7.01 Reg FD, 8.01 Other.
 //!
-//! ## Emits (F5)
+//! ## Emits
 //!
 //! - `corporate_event.csv` — one row per (filing, item_code), with
-//!   short item description.
-//!
-//! Future depth (F13/F14): NER-style typed extractors for Item 5.02
-//! → `officer_change.csv`, Item 5.07 → `vote_result.csv`, Item 4.01 →
-//! `auditor_change.csv`, Item 4.02 → `restatement.csv`, Item 2.02 +
-//! EX-99 → `earnings_release.csv`.
+//!   short item description (F5).
+//! - `officer_change.csv` — Item 5.02 officer / director changes
+//!   (F13): person, change type, title, effective date.
 
 use std::fs::read_to_string;
 use std::path::Path;
@@ -21,6 +18,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::layout::Workdir;
 use crate::parsers::eightk::{extract_8k_items, EightKItem};
+use crate::parsers::officer_change::{extract_officer_changes, OfficerChange};
 use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
@@ -36,7 +34,7 @@ pub fn extract(
     workdir: &Workdir,
     slice: &SliceSpec,
     sinks: &mut Sinks,
-    _identities: &mut Identities,
+    identities: &mut Identities,
     extracted_at: &str,
 ) -> Result<FormReport> {
     let mut report = FormReport::default();
@@ -62,6 +60,7 @@ pub fn extract(
             if items.is_empty() {
                 return FileParse::Skipped;
             }
+            let officer_changes = extract_officer_changes(&text);
             let issuer_cik_raw = match cik_from_filing_path(path) {
                 Some(v) => v,
                 None => return FileParse::Skipped,
@@ -70,14 +69,16 @@ pub fn extract(
             if !slice.cik_matches(issuer_cik_int) {
                 return FileParse::Skipped;
             }
-            FileParse::Parsed((items, issuer_cik_raw))
+            FileParse::Parsed((items, officer_changes, issuer_cik_raw))
         },
-        |path, (items, issuer_cik_raw)| {
+        |path, (items, officer_changes, issuer_cik_raw)| {
             emit_8k(
                 &items,
+                &officer_changes,
                 &issuer_cik_raw,
                 path,
                 sinks,
+                identities,
                 extracted_at,
                 &mut report,
             )
@@ -88,12 +89,16 @@ pub fn extract(
     Ok(report)
 }
 
-/// Emit `corporate_event` rows for one parsed 8-K. Runs single-threaded.
+/// Emit `corporate_event` + `officer_change` rows for one parsed 8-K.
+/// Runs single-threaded.
+#[allow(clippy::too_many_arguments)]
 fn emit_8k(
     items: &[EightKItem],
+    officer_changes: &[OfficerChange],
     issuer_cik_raw: &str,
     path: &Path,
     sinks: &mut Sinks,
+    identities: &mut Identities,
     extracted_at: &str,
     report: &mut FormReport,
 ) -> Result<()> {
@@ -125,5 +130,47 @@ fn emit_8k(
         report.rows_written += 1;
     }
 
+    // Item 5.02 officer / director changes (F13). The person is
+    // name-keyed (8-K prose carries no CIK for individuals).
+    for (i, c) in officer_changes.iter().enumerate() {
+        let person_nid = format!("p-{}", normalise_name(&c.person_name));
+        identities.ensure_person(sinks, &person_nid, &c.person_name, "")?;
+        let nid = format!("{}-oc-{}", accession, i);
+        write_info_row(
+            &mut sinks.officer_change,
+            &[
+                nid.as_str(),
+                issuer_cik.as_str(),
+                c.person_name.as_str(),
+                person_nid.as_str(),
+                c.change_type.as_str(),
+                c.position_title.as_str(),
+                c.effective_date.as_str(),
+                c.reason_summary.as_str(),
+            ],
+            &prov,
+        )?;
+        report.rows_written += 1;
+    }
+
     Ok(())
+}
+
+/// Lowercase, hyphenate, strip non-alphanumerics — the person_nid
+/// stem for a name-keyed individual.
+fn normalise_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else if c.is_whitespace() {
+                '-'
+            } else {
+                '\0'
+            }
+        })
+        .filter(|c| *c != '\0')
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }

@@ -281,6 +281,17 @@ graph across 17 node types and 19 edge types, no junction edges.
   Item-section scanner is lifted out of the SC 13D parser into a
   shared module so the 10-K / DEF 14A section extractors reuse it.
 
+### 8-K officer changes (F13)
+
+- **`officer_change.csv` + `OfficerChange` node** — 8-Ks carrying an
+  Item 5.02 are scanned for officer / director changes. The change
+  detail is frequently cross-referenced into Item 8.01, so the whole
+  (short) 8-K is scanned: each "Mr./Ms./Mrs./Dr." person mention
+  yields a change typed from the surrounding verb (resignation /
+  retirement / appointment / election / departure) with a title and
+  effective date. The lowest-precision extractor in the set — a
+  person without a recoverable name or a change verb is skipped.
+
 ### Sodir loader ported to Rust — `pandas` dropped
 
 - The Sodir FactMaps dataset loader is now a pure-Rust crate

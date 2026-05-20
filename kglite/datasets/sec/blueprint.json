@@ -288,6 +288,26 @@
       }
     },
 
+    "OfficerChange": {
+      "csv": "processed/officer_change.csv",
+      "pk": "officer_change_nid",
+      "title": "person_name",
+      "properties": {
+        "person_name": "string",
+        "change_type": "string",
+        "position_title": "string",
+        "effective_date": "string",
+        "reason_summary": "string"
+      },
+      "connections": {
+        "fk_edges": {
+          "OF_PERSON": { "target": "Person", "fk": "person_nid" },
+          "AT_COMPANY": { "target": "Company", "fk": "issuer_cik" },
+          "REPORTED_IN": { "target": "Filing", "fk": "source_accession" }
+        }
+      }
+    },
+
     "MetricFact": {
       "csv": "processed/metric_fact.csv",
       "pk": "metric_fact_nid",
