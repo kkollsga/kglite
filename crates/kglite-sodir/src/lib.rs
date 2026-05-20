@@ -21,6 +21,7 @@
 //!   └── error         SodirError                                        [A1]
 //! ```
 
+pub mod blueprint;
 pub mod catalog;
 pub mod client;
 pub mod error;
@@ -28,11 +29,14 @@ pub mod fetch;
 pub mod geojson_wkt;
 pub mod index;
 pub mod layout;
+pub mod orchestrator;
 pub mod preprocess;
 
+pub use blueprint::{datasets_used_by_blueprint, deep_merge};
 pub use catalog::{is_known, kind_of, resolve, DataKind};
 pub use client::ArcGISClient;
 pub use error::{Result, SodirError};
 pub use index::{Action, DatasetEntry, SodirIndex};
 pub use layout::{StorageMode, Workdir};
+pub use orchestrator::{fetch_all, refresh_csvs, FetchAllReport, RefreshReport};
 pub use preprocess::{apply as apply_preprocess, PreprocessReport};
