@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_provisional` is a reserved property name — a blueprint node spec
   declaring it is rejected.
 
+### SEC loader — ownership / 13F / Exhibit 21 extraction scoped to filing_index
+
+- These three extractors walked `raw/filings/` directly, parsing every
+  cached document regardless of the build's `form_types` / year scope
+  — whereas `Filing` nodes come scope-filtered from `filing_index.csv`.
+  On a re-scoped rebuild of an existing workdir the mismatch produced
+  detail rows (`InsiderTransaction`, `Holding`, `InstitutionalHolding`,
+  `Subsidiary`) referencing out-of-scope filings. They now walk via
+  `walk_filings_in_index` — only documents whose filing is in
+  `filing_index.csv` — so extraction and the `Filing` node set agree.
+
 ## [0.9.49] — SEC loader: form-typed extraction + 3-phase build progress
 
 ### SEC loader — per-filing documents selected by form type, not filename

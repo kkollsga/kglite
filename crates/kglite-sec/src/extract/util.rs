@@ -180,6 +180,24 @@ pub fn walk_filings_of_form(
         .collect())
 }
 
+/// Walk per-filing documents matching `ext_predicate` whose filing is
+/// present in `processed/filing_index.csv` — i.e. inside the current
+/// build's (CIK ∧ form ∧ date) scope. Unlike `walk_filings_of_form`
+/// this does not constrain the form type, so it suits extractors that
+/// detect the form from document content (ownership XML, 13F XML, the
+/// Exhibit 21 attachment walk).
+pub fn walk_filings_in_index(
+    workdir: &Workdir,
+    root: &Path,
+    ext_predicate: impl Fn(&str) -> bool,
+) -> Result<Vec<PathBuf>> {
+    let index = load_form_index(workdir);
+    Ok(walk_filings(root, ext_predicate)?
+        .into_iter()
+        .filter(|p| accession_from_path(p).is_some_and(|a| index.contains_key(&a)))
+        .collect())
+}
+
 /// Predicate for 13F info-table XML files. The fetcher writes them
 /// with names like `13f.xml`, `13F.xml`, or `*_infotable.xml`.
 pub fn is_13f_xml(name: &str) -> bool {

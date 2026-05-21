@@ -28,7 +28,7 @@ use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
     accession_from_path, cik_from_filing_path, format_float, is_exhibit21_name, par_parse_emit,
-    strip_leading_zeros, walk_filings, walk_filings_of_form, FileParse, PARSE_CHUNK,
+    strip_leading_zeros, walk_filings_in_index, walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -53,7 +53,7 @@ pub fn extract(
     // Item 13 — related-party transactions.
     extract_item13_related_party(workdir, slice, sinks, extracted_at, &mut report)?;
 
-    let paths = walk_filings(&root, is_exhibit21_name)?;
+    let paths = walk_filings_in_index(workdir, &root, is_exhibit21_name)?;
 
     // Exhibit 21 is heavy HTML; parse in parallel, emit sequentially.
     let (files_read, parse_errors) = par_parse_emit(

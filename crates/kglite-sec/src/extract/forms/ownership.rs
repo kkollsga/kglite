@@ -24,7 +24,9 @@ use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::sinks::Sinks;
-use super::super::util::{is_ownership_xml, par_parse_emit, walk_filings, FileParse, PARSE_CHUNK};
+use super::super::util::{
+    is_ownership_xml, par_parse_emit, walk_filings_in_index, FileParse, PARSE_CHUNK,
+};
 use super::{form144, form3, form4, form5, formd, FormReport};
 
 /// The five per-form reports produced by one ownership-XML pass.
@@ -63,7 +65,7 @@ pub fn extract(
         return Ok(reports);
     }
 
-    let paths = walk_filings(&root, is_ownership_xml)?;
+    let paths = walk_filings_in_index(workdir, &root, is_ownership_xml)?;
 
     // Parallel: read each file once, cascade through the three
     // schemas (Form 4 is the common case, so it is tried first).

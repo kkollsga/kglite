@@ -30,7 +30,7 @@ use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
     accession_from_path, cik_from_filing_path, format_float, is_13f_xml, par_parse_emit,
-    strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
+    strip_leading_zeros, walk_filings_in_index, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -47,7 +47,7 @@ pub fn extract(
         return Ok(report);
     }
 
-    let paths = walk_filings(&root, is_13f_xml)?;
+    let paths = walk_filings_in_index(workdir, &root, is_13f_xml)?;
 
     // Parallel CPU-bound parse (each info table is independent);
     // sequential emit so the sinks + identity dedup need no locking.
