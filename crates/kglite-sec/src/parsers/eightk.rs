@@ -85,12 +85,15 @@ pub fn extract_8k_items(text: &str) -> Vec<EightKItem> {
         if !seen.insert(first_token.clone()) {
             continue;
         }
+        // The item heading is the first sentence after the code. On
+        // inline-XBRL filings the whole document is one line (no
+        // newlines between elements), so split on the first period or
+        // newline rather than taking the line — otherwise the
+        // description runs on into the filing body.
         let description = after
-            .lines()
+            .split(['.', '\n'])
             .next()
             .unwrap_or("")
-            .trim()
-            .trim_end_matches('.')
             .trim()
             .to_string();
         items.push(EightKItem {
@@ -192,5 +195,21 @@ mod tests {
     fn empty_input_yields_no_items() {
         assert_eq!(extract_8k_items("").len(), 0);
         assert_eq!(extract_8k_items("<html></html>").len(), 0);
+    }
+
+    #[test]
+    fn description_stops_at_first_sentence_on_inline_xbrl() {
+        // Inline-XBRL 8-Ks (Workiva) carry no newlines — the heading
+        // runs straight into the body. The description must stop at
+        // the heading sentence, not swallow the whole document.
+        let s = "Item 2.02&#160;&#160;Results of Operations and Financial \
+                 Condition.On April 2, 2026, the registrant published ...";
+        let items = extract_8k_items(s);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_code, "2.02");
+        assert_eq!(
+            items[0].description,
+            "Results of Operations and Financial Condition"
+        );
     }
 }

@@ -144,13 +144,16 @@ pub fn is_exhibit21_name(name: &str) -> bool {
         || lc.contains("exhibit-21")
 }
 
-/// Predicate for 8-K primary documents.
+/// Loose predicate for candidate 8-K documents — any filing HTML /
+/// text doc. Modern 8-K primary documents are named
+/// `{ticker}-{date}.htm` (Workiva inline-XBRL) with no "8-K" token in
+/// the filename, so a name-substring test silently misses them. The
+/// real filter is `parsers::eightk::extract_8k_items`, which
+/// self-gates: a non-8-K document yields no `Item N.NN` codes and is
+/// skipped by the caller.
 pub fn is_8k_name(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();
-    if !(lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")) {
-        return false;
-    }
-    lc.contains("8-k") || lc.contains("8k") || lc.contains("eightk")
+    lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")
 }
 
 /// Predicate for Exhibit 99 attachments — earnings press releases,

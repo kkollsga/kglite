@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   download loop, re-acquiring it only to fire each progress event.
   Holding it for the whole batch starved a Jupyter kernel's IOPub
   thread, so tqdm progress couldn't render until the call returned.
+- 8-K events are now extracted from modern inline-XBRL filings. The
+  extractor's file predicate required `8k` in the filename, but
+  recent 8-K primary documents are named `{ticker}-{date}.htm` — so
+  `CorporateEvent` nodes were silently empty. The predicate is now
+  loose (the `Item N.NN` parser self-gates), and the event
+  description stops at the heading sentence instead of running on
+  into the filing body (inline-XBRL has no newlines).
 
 ## [0.9.47] — SEC EDGAR value-prop upgrade + blueprint compute pipeline
 
