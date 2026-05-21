@@ -20,7 +20,7 @@
 //! into the orchestrator's loop, so callers don't need (and shouldn't
 //! have) a per-form Python binding.
 
-use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
@@ -106,7 +106,8 @@ fn run_batch<T, F>(
     fetch_one: F,
 ) -> PyResult<(usize, usize)>
 where
-    F: Fn(SecClient, Workdir, T) -> FetchDeltaFut,
+    T: Send,
+    F: Fn(SecClient, Workdir, T) -> FetchDeltaFut + Send,
 {
     let client = SecClient::new(user_agent).map_err(map_err)?;
     let wd = Workdir::new(workdir);
@@ -126,24 +127,39 @@ where
         Ok(())
     })?;
 
-    let mut downloaded = 0usize;
-    let mut skipped = 0usize;
-    let loop_result: PyResult<()> = rt.block_on(async {
-        for (i, item) in batch.into_iter().enumerate() {
-            let (dl, sk) = fetch_one(client.clone(), wd.clone(), item).await;
-            downloaded += dl;
-            skipped += sk;
-            let current = i + 1;
-            fire_event(py, progress, |ev| {
-                ev.set_item("kind", "update")?;
-                ev.set_item("phase", phase)?;
-                ev.set_item("current", current)?;
-                Ok(())
-            })?;
-        }
-        Ok(())
+    // Release the GIL for the rate-limited network loop, re-acquiring
+    // it only to fire each progress event. Without this the GIL stays
+    // held for the whole batch, starving a Jupyter kernel's IOPub
+    // thread — progress output can't flush until the call returns.
+    let outcome: Result<(usize, usize), ()> = py.detach(|| {
+        rt.block_on(async move {
+            let mut downloaded = 0usize;
+            let mut skipped = 0usize;
+            for (i, item) in batch.into_iter().enumerate() {
+                let (dl, sk) = fetch_one(client.clone(), wd.clone(), item).await;
+                downloaded += dl;
+                skipped += sk;
+                let current = i + 1;
+                let fired = Python::attach(|py| {
+                    fire_event(py, progress, |ev| {
+                        ev.set_item("kind", "update")?;
+                        ev.set_item("phase", phase)?;
+                        ev.set_item("current", current)?;
+                        Ok(())
+                    })
+                    .is_ok()
+                });
+                if !fired {
+                    return Err(());
+                }
+            }
+            Ok((downloaded, skipped))
+        })
     });
-    loop_result?;
+    let (downloaded, skipped) = match outcome {
+        Ok(totals) => totals,
+        Err(()) => return Err(PyKeyboardInterrupt::new_err("fetch interrupted")),
+    };
 
     let _ = fire_event(py, progress, |d| {
         d.set_item("kind", "complete")?;

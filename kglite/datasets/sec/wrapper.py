@@ -531,6 +531,20 @@ class SEC:
         # primary docs, DEF 14A proxies, and Exhibit 21 attachments
         # so the orchestrator below has something to read.
         if detailed > 0:
+            # The per-filing dispatcher reads processed/filing_index.csv,
+            # which the extractor's identity pre-pass emits. On a cold
+            # workdir it doesn't exist yet — run extraction once to
+            # produce it, so the dispatch has filings to fetch.
+            if not (workdir / "processed" / "filing_index.csv").is_file():
+                if verbose:
+                    print("[SEC] building filing index (cold workdir)")
+                _sec_internal.extract_all_py(
+                    str(workdir),
+                    force=True,
+                    cik_list=companies,
+                    form_types=form_types,
+                    year_range=year_range,
+                )
             fetch_dispatch = _dispatch_per_filing_fetches(
                 workdir,
                 user_agent=user_agent,
@@ -551,12 +565,16 @@ class SEC:
         # Step 3: single feature-extraction call. The Rust orchestrator
         # dispatches every form-specific extractor, populates identity
         # tables, and emits the info-row CSVs in processed/.
+        #
+        # force=True whenever a per-filing dispatch ran (detailed > 0):
+        # the dispatch just fetched payloads the cold-start extract
+        # above could not see, so processed/ must be regenerated.
         if verbose:
             scope = _format_slice_summary(companies, form_types, year_range)
             print(f"[SEC] extracting processed/ feature CSVs ({scope})")
         extract_report = _sec_internal.extract_all_py(
             str(workdir),
-            force=force_rebuild,
+            force=force_rebuild or detailed > 0,
             cik_list=companies,
             form_types=form_types,
             year_range=year_range,

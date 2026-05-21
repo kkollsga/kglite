@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SEC loader — cold-start + Jupyter progress fixes
+
+- `SEC.fetch` / `SEC.open` on a fresh workdir now collect per-filing
+  detail in one call. The per-filing dispatcher reads
+  `processed/filing_index.csv` — emitted by the extractor's identity
+  pre-pass — which didn't exist yet on a cold workdir, so the dispatch
+  fetched nothing and the graph had `Company`/`Filing` nodes but no
+  insider transactions, events, or roles. The wrapper now builds the
+  filing index before the dispatch and re-extracts after it.
+- The per-filing fetch releases the GIL during the rate-limited
+  download loop, re-acquiring it only to fire each progress event.
+  Holding it for the whole batch starved a Jupyter kernel's IOPub
+  thread, so tqdm progress couldn't render until the call returned.
+
 ## [0.9.47] — SEC EDGAR value-prop upgrade + blueprint compute pipeline
 
 Two big additions land in this release. The first (J0–J7) overhauls
