@@ -25,8 +25,8 @@ use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, format_float, is_s1_name, par_parse_emit,
-    strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
+    accession_from_path, cik_from_filing_path, format_float, par_parse_emit, strip_leading_zeros,
+    walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -43,7 +43,7 @@ pub fn extract(
         sinks,
         identities,
         extracted_at,
-        is_s1_name,
+        &["S-1", "S-1/A"],
         "S-1",
     )
 }
@@ -57,15 +57,16 @@ struct OfferingDoc {
     issuer_cik_raw: String,
 }
 
-/// Walk every filing matching `predicate`, parse the offering records
-/// and emit them. Shared by the S-1 and 424B extractors.
+/// Walk every filing whose form type is in `forms`, parse the
+/// offering records and emit them. Shared by the S-1 and 424B
+/// extractors.
 pub(crate) fn extract_offering_filings(
     workdir: &Workdir,
     slice: &SliceSpec,
     sinks: &mut Sinks,
     identities: &mut Identities,
     extracted_at: &str,
-    predicate: fn(&str) -> bool,
+    forms: &[&str],
     source_form: &str,
 ) -> Result<FormReport> {
     let mut report = FormReport::default();
@@ -73,7 +74,7 @@ pub(crate) fn extract_offering_filings(
     if !root.is_dir() {
         return Ok(report);
     }
-    let paths = walk_filings(&root, predicate)?;
+    let paths = walk_filings_of_form(workdir, &root, forms)?;
     let (files_read, parse_errors) = par_parse_emit(
         &paths,
         PARSE_CHUNK,

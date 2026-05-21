@@ -5,11 +5,13 @@
 //! `extract.rs`. Keeping them in one module lets each per-form
 //! extractor stay tight (just I/O + parse + emit).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
 use crate::error::Result;
+use crate::layout::Workdir;
 
 // ─────────────────────── parallel parse helper ───────────────────────
 
@@ -122,6 +124,62 @@ pub fn is_ownership_xml(name: &str) -> bool {
     name.ends_with(".xml")
 }
 
+/// Map accession number (dashed) → filing form type, read from
+/// `processed/filing_index.csv` (emitted by the identity pre-pass).
+/// Empty if the index isn't present yet.
+fn load_form_index(workdir: &Workdir) -> HashMap<String, String> {
+    let mut idx = HashMap::new();
+    let Ok(mut rdr) = csv::Reader::from_path(workdir.processed_csv("filing_index")) else {
+        return idx;
+    };
+    let Ok(headers) = rdr.headers().cloned() else {
+        return idx;
+    };
+    let acc_col = headers.iter().position(|c| c == "accession_number");
+    let form_col = headers.iter().position(|c| c == "form_type");
+    let (Some(acc_col), Some(form_col)) = (acc_col, form_col) else {
+        return idx;
+    };
+    for rec in rdr.records().flatten() {
+        if let (Some(acc), Some(form)) = (rec.get(acc_col), rec.get(form_col)) {
+            if !acc.is_empty() && !form.is_empty() {
+                idx.insert(acc.to_string(), form.to_string());
+            }
+        }
+    }
+    idx
+}
+
+/// Walk per-filing documents whose *filing's* form type is one of
+/// `forms`, resolved by accession against `processed/filing_index.csv`.
+///
+/// Form extractors must select documents by their filing's form type,
+/// not by filename: modern inline-XBRL filings are named
+/// `{ticker}-{date}.htm` and carry no form-type token, so a filename
+/// test silently misses them. Returns the `.htm` / `.html` / `.txt`
+/// documents (primary doc + any HTML exhibits) under matching
+/// accessions; the caller's parser still self-gates on document
+/// content.
+pub fn walk_filings_of_form(
+    workdir: &Workdir,
+    root: &Path,
+    forms: &[&str],
+) -> Result<Vec<PathBuf>> {
+    let index = load_form_index(workdir);
+    let html = walk_filings(root, |n| {
+        let lc = n.to_ascii_lowercase();
+        lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")
+    })?;
+    Ok(html
+        .into_iter()
+        .filter(|p| {
+            accession_from_path(p)
+                .and_then(|a| index.get(&a))
+                .is_some_and(|ft| forms.contains(&ft.as_str()))
+        })
+        .collect())
+}
+
 /// Predicate for 13F info-table XML files. The fetcher writes them
 /// with names like `13f.xml`, `13F.xml`, or `*_infotable.xml`.
 pub fn is_13f_xml(name: &str) -> bool {
@@ -142,66 +200,6 @@ pub fn is_exhibit21_name(name: &str) -> bool {
         || lc.contains("exhibit21")
         || lc.contains("ex-21")
         || lc.contains("exhibit-21")
-}
-
-/// Loose predicate for candidate 8-K documents — any filing HTML /
-/// text doc. Modern 8-K primary documents are named
-/// `{ticker}-{date}.htm` (Workiva inline-XBRL) with no "8-K" token in
-/// the filename, so a name-substring test silently misses them. The
-/// real filter is `parsers::eightk::extract_8k_items`, which
-/// self-gates: a non-8-K document yields no `Item N.NN` codes and is
-/// skipped by the caller.
-pub fn is_8k_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")
-}
-
-/// Predicate for Exhibit 99 attachments — earnings press releases,
-/// quarterly update letters. Names vary widely (`ex99.htm`,
-/// `ex-99_1.htm`, `dNNdex991.htm`, `tsla-ex991.htm`).
-pub fn is_ex99_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    if !(lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")) {
-        return false;
-    }
-    lc.contains("ex99") || lc.contains("ex-99") || lc.contains("ex_99") || lc.contains("exhibit99")
-}
-
-/// Predicate for S-1 registration-statement primary documents.
-/// Names vary (`forms-1.htm`, `dNNNds1.htm`, `tmNN-1_s1.htm`).
-pub fn is_s1_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    if !(lc.ends_with(".htm") || lc.ends_with(".html")) {
-        return false;
-    }
-    lc.contains("s-1") || lc.contains("ds1") || lc.contains("_s1") || lc.contains("forms1")
-}
-
-/// Predicate for 424B prospectus documents (`*424b5.htm`, …).
-pub fn is_424b_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    (lc.ends_with(".htm") || lc.ends_with(".html")) && lc.contains("424b")
-}
-
-/// Predicate for SC 13D / SC 13G primary documents.
-pub fn is_sc13_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    if !(lc.ends_with(".htm") || lc.ends_with(".html") || lc.ends_with(".txt")) {
-        return false;
-    }
-    lc.contains("sc13d") || lc.contains("sc13g") || lc.contains("sc-13")
-}
-
-/// Predicate for DEF 14A / PRE 14A / DEFA14A primary documents.
-pub fn is_def14a_name(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    if !(lc.ends_with(".htm") || lc.ends_with(".html")) {
-        return false;
-    }
-    lc.contains("def14a")
-        || lc.contains("def-14a")
-        || lc.contains("defa14a")
-        || lc.contains("pre14a")
 }
 
 /// Extract `{cik}` from `.../filings/{cik}/{accession}/file.xml`.

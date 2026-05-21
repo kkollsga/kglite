@@ -28,8 +28,8 @@ use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, format_float, is_8k_name, is_ex99_name,
-    par_parse_emit, strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
+    accession_from_path, cik_from_filing_path, format_float, par_parse_emit, strip_leading_zeros,
+    walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -46,7 +46,7 @@ pub fn extract(
         return Ok(report);
     }
 
-    let paths = walk_filings(&root, is_8k_name)?;
+    let paths = walk_filings_of_form(workdir, &root, &["8-K", "8-K/A"])?;
 
     // Parallel CPU-bound item extraction; sequential emit.
     let (files_read, parse_errors) = par_parse_emit(
@@ -108,7 +108,7 @@ fn extract_earnings(
     report: &mut FormReport,
 ) -> Result<()> {
     let root = workdir.raw_filings_dir();
-    let paths = walk_filings(&root, |n| is_8k_name(n) || is_ex99_name(n))?;
+    let paths = walk_filings_of_form(workdir, &root, &["8-K", "8-K/A"])?;
     par_parse_emit(
         &paths,
         PARSE_CHUNK,

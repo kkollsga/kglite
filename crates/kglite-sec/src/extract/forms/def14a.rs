@@ -40,8 +40,8 @@ use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, format_float, is_def14a_name, par_parse_emit,
-    strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
+    accession_from_path, cik_from_filing_path, format_float, par_parse_emit, strip_leading_zeros,
+    walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -70,7 +70,7 @@ pub fn extract(
         return Ok(report);
     }
 
-    let paths = walk_filings(&root, is_def14a_name)?;
+    let paths = walk_filings_of_form(workdir, &root, &["DEF 14A", "DEFA14A", "PRE 14A"])?;
 
     let (files_read, parse_errors) = par_parse_emit(
         &paths,

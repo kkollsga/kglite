@@ -28,7 +28,7 @@ use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
     accession_from_path, cik_from_filing_path, format_float, is_exhibit21_name, par_parse_emit,
-    strip_leading_zeros, walk_filings, FileParse, PARSE_CHUNK,
+    strip_leading_zeros, walk_filings, walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -147,7 +147,7 @@ fn extract_item12_ownership(
     report: &mut FormReport,
 ) -> Result<()> {
     let root = workdir.raw_filings_dir();
-    let paths = walk_filings(&root, is_ten_k_primary)?;
+    let paths = walk_filings_of_form(workdir, &root, &["10-K", "10-K/A"])?;
 
     // Full-document HTML scan is the heavy part — parallelise it.
     // files_read / parse_errors stay on the Exhibit 21 pass; Item 12
@@ -241,14 +241,6 @@ fn emit_item12(
     Ok(())
 }
 
-/// True for a 10-K primary-document filename — the full-document
-/// HTML the Item 12 and Item 13 section scans run over.
-fn is_ten_k_primary(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    (lc.ends_with(".htm") || lc.ends_with(".html"))
-        && (lc.contains("10-k") || lc.contains("10k") || lc.contains("10kform"))
-}
-
 /// Walk 10-K primary documents and extract Item 13 related-party
 /// transactions. Most 10-Ks delegate Item 13 to the proxy statement,
 /// so this is low-yield by design.
@@ -260,7 +252,7 @@ fn extract_item13_related_party(
     report: &mut FormReport,
 ) -> Result<()> {
     let root = workdir.raw_filings_dir();
-    let paths = walk_filings(&root, is_ten_k_primary)?;
+    let paths = walk_filings_of_form(workdir, &root, &["10-K", "10-K/A"])?;
     par_parse_emit(
         &paths,
         PARSE_CHUNK,

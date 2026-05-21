@@ -22,7 +22,6 @@ use crate::slicing::SliceSpec;
 
 use super::super::identity::Identities;
 use super::super::sinks::Sinks;
-use super::super::util::is_424b_name;
 use super::FormReport;
 
 /// Extract offering records from 424B prospectuses. Reuses the shared
@@ -40,7 +39,9 @@ pub fn extract(
         sinks,
         identities,
         extracted_at,
-        is_424b_name,
+        &[
+            "424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8",
+        ],
         "424B",
     )
 }

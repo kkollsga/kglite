@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SEC loader — per-filing documents selected by form type, not filename
+
+- The form extractors (DEF 14A, SC 13D/G, S-1, 424B, 10-K — and 8-K)
+  picked their documents with filename predicates that required a
+  form-type token (`def14a`, `sc13d`, …). Modern inline-XBRL filings
+  are named `{ticker}-{date}.htm` and carry no such token, so on
+  recent filings those extractors silently produced nothing
+  (`Compensation`, `Proposal`, `ActivistFiling`, … came out empty).
+  They now resolve each document's form type by accession against
+  `filing_index.csv` (`walk_filings_of_form`) — reliable regardless of
+  filename. Verified live: TSLA 8-K events (37) and DEF 14A
+  compensation + proposals now extract from 2025-2026 filings.
+
 ## [0.9.48] — SEC loader: cold-start, Jupyter progress, 8-K extraction
 
 - `SEC.fetch` / `SEC.open` on a fresh workdir now collect per-filing

@@ -37,8 +37,8 @@ use super::super::identity::Identities;
 use super::super::provenance::Provenance;
 use super::super::sinks::{write_info_row, Sinks};
 use super::super::util::{
-    accession_from_path, cik_from_filing_path, is_sc13_name, par_parse_emit, strip_leading_zeros,
-    walk_filings, FileParse, PARSE_CHUNK,
+    accession_from_path, cik_from_filing_path, par_parse_emit, strip_leading_zeros,
+    walk_filings_of_form, FileParse, PARSE_CHUNK,
 };
 use super::FormReport;
 
@@ -55,7 +55,20 @@ pub fn extract(
         return Ok(report);
     }
 
-    let paths = walk_filings(&root, is_sc13_name)?;
+    let paths = walk_filings_of_form(
+        workdir,
+        &root,
+        &[
+            "SC 13D",
+            "SC 13D/A",
+            "SC 13G",
+            "SC 13G/A",
+            "SCHEDULE 13D",
+            "SCHEDULE 13D/A",
+            "SCHEDULE 13G",
+            "SCHEDULE 13G/A",
+        ],
+    )?;
 
     let (files_read, parse_errors) = par_parse_emit(
         &paths,
