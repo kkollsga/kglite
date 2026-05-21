@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### SEC loader — cold-start + Jupyter progress fixes
+## [0.9.48] — SEC loader: cold-start, Jupyter progress, 8-K extraction
 
 - `SEC.fetch` / `SEC.open` on a fresh workdir now collect per-filing
   detail in one call. The per-filing dispatcher reads
