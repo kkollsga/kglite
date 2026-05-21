@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.49] — SEC loader: form-typed extraction + 3-phase build progress
+
 ### SEC loader — per-filing documents selected by form type, not filename
 
 - The form extractors (DEF 14A, SC 13D/G, S-1, 424B, 10-K — and 8-K)
