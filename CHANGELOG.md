@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `KnowledgeGraph.purge_provisional()` deletes any stub never
   promoted (a genuinely dangling reference) and its incident edges,
   returning `{nodes_purged, edges_removed}`.
+- A blueprint can set `settings.auto_purge: true` to run that purge
+  automatically at the end of `from_blueprint` (default `false` —
+  stubs are kept so no edge is lost).
 - `_provisional` is a reserved property name — a blueprint node spec
   declaring it is rejected.
 

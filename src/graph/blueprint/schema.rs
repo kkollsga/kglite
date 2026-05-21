@@ -34,6 +34,11 @@ pub struct Settings {
     pub output_path: Option<String>,
     #[serde(default, alias = "output")]
     pub output_file: Option<String>,
+    /// Drop unpromoted provisional stub nodes (edges to a node that no
+    /// CSV provided) at the end of the build. Default `false` — stubs
+    /// are kept so no edge is lost; opt in to discard dangling refs.
+    #[serde(default)]
+    pub auto_purge: bool,
 }
 
 impl Settings {

@@ -29,6 +29,8 @@ pub struct BuildReport {
     pub edges_by_type: BTreeMap<String, usize>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+    /// Provisional stub nodes dropped by `settings.auto_purge`.
+    pub provisional_purged: usize,
 }
 
 pub fn build(
@@ -68,6 +70,7 @@ pub fn build(
         edges_by_type: BTreeMap::new(),
         warnings: Vec::new(),
         errors: Vec::new(),
+        provisional_purged: 0,
     };
 
     let profile = std::env::var("KGLITE_BLUEPRINT_PROFILE").is_ok();
@@ -186,6 +189,24 @@ pub fn build(
     load_junction_edges(graph, &all_specs, &root, &csv_cache, &mut report)?;
     if profile {
         eprintln!("  load_junction_edges: {} ms", t.elapsed().as_millis());
+    }
+
+    // Phase 6: drop unpromoted provisional stub nodes if the blueprint
+    // opted in. A stub no real node row ever promoted is a dangling
+    // reference; `auto_purge` discards it (and its edges) at build end.
+    if blueprint.settings.auto_purge {
+        let t = std::time::Instant::now();
+        let (purged, _edges) = maintain::purge_provisional_nodes(graph);
+        report.provisional_purged = purged;
+        if profile {
+            eprintln!(
+                "  purge_provisional: {} ms ({} purged)",
+                t.elapsed().as_millis(),
+                purged
+            );
+        }
+    }
+    if profile {
         eprintln!("  TOTAL build: {} ms", t0.elapsed().as_millis());
     }
 

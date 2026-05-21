@@ -1130,3 +1130,38 @@ class TestProvisionalNodes:
         assert result["nodes_purged"] == 1  # only 9
         ids = sorted(r["id"] for r in g.cypher("MATCH (s:Student) RETURN s.id AS id"))
         assert ids == [1, 8]
+
+    def test_blueprint_auto_purge_drops_unpromoted_stubs(self, tmp_path):
+        students = pd.DataFrame({"id": [1, 2], "name": ["a", "b"]})
+        _write_csv(tmp_path / "students.csv", students)
+        friends = pd.DataFrame({"src": [1, 2], "dst": [2, 9]})  # 9 has no row
+        _write_csv(tmp_path / "friends.csv", friends)
+        bp = {
+            "settings": {"root": str(tmp_path), "auto_purge": True},
+            "nodes": {
+                "Student": {
+                    "csv": "students.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": {"name": "string"},
+                    "connections": {
+                        "junction_edges": {
+                            "FRIEND": {
+                                "csv": "friends.csv",
+                                "source_fk": "src",
+                                "target": "Student",
+                                "target_fk": "dst",
+                                "properties": [],
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        g = from_blueprint(tmp_path / "bp.json", save=False)
+        # Stub 9 and the 2->9 edge purged at build end; real nodes and
+        # the 1->2 edge kept.
+        assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 2
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 1
+        assert g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN count(s) AS n")[0]["n"] == 0

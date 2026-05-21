@@ -130,6 +130,12 @@ pub fn from_blueprint_rust(
                             e_input.saturating_sub(e_actual),
                         );
                     }
+                    if report.provisional_purged > 0 {
+                        println!(
+                            "  auto_purge: dropped {} unpromoted provisional stub node(s)",
+                            report.provisional_purged
+                        );
+                    }
                 }
                 if !report.warnings.is_empty() {
                     if verbose {
