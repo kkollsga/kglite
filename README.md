@@ -37,7 +37,8 @@ structural validators that compose with Cypher.
 > the full-control entry point — XBRL financials, Exhibit 21
 > subsidiaries, the full ~14M-filing index since 1993. Public-domain
 > data (US Govt work). **→
-> [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+> [`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
+> walks it end-to-end · [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
 ## Use cases
 
