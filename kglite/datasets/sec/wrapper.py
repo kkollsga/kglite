@@ -89,6 +89,64 @@ def _resolve_fetch_buckets(form_types: Optional[list[str]], verbose: bool) -> se
     return active
 
 
+class _PhaseProgress:
+    """Minimalist 3-phase progress display for ``SEC.open`` — Fetch,
+    Process, Build — rendered as tqdm bars.
+
+    Falls back to a no-op when ``tqdm`` isn't installed (the wrapper
+    then prints its plain ``[SEC]`` lines instead). Bypassed entirely
+    when the caller supplies its own ``progress`` callback: that
+    callback receives the raw per-filing fetch events directly.
+    """
+
+    def __init__(self, user_callback: object | None, enabled: bool) -> None:
+        self._user = user_callback
+        self._tqdm: Any = None
+        if enabled and user_callback is None:
+            try:
+                from tqdm.auto import tqdm
+
+                self._tqdm = tqdm
+            except ImportError:
+                pass
+        self._bar: Any = None
+
+    @property
+    def active(self) -> bool:
+        """True when a progress mechanism is engaged — the signal to
+        mute the wrapper's plain ``[SEC]`` prints."""
+        return self._user is not None or self._tqdm is not None
+
+    def fetch(self) -> object | None:
+        """Open the Fetch bar; return the per-filing callback handed to
+        the Rust fetchers (or the caller's own callback, unchanged)."""
+        if self._user is not None:
+            return self._user
+        if self._tqdm is None:
+            return None
+        self._close()
+        self._bar = self._tqdm(desc="Fetch".ljust(7), unit=" file", dynamic_ncols=True)
+        bar = self._bar
+        return lambda ev: bar.update(1) if isinstance(ev, dict) and ev.get("kind") == "update" else None
+
+    def step(self, label: str) -> None:
+        """Open a bar for a single-call phase (Process / Build)."""
+        if self._tqdm is None:
+            return
+        self._close()
+        self._bar = self._tqdm(total=1, desc=label.ljust(7), dynamic_ncols=True, bar_format="{desc}  {bar}  {elapsed}")
+
+    def finish(self) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        if self._bar is not None:
+            if self._bar.total and self._bar.n < self._bar.total:
+                self._bar.update(self._bar.total - self._bar.n)
+            self._bar.close()
+            self._bar = None
+
+
 def _dispatch_per_filing_fetches(
     workdir: Path,
     user_agent: str,
@@ -458,11 +516,11 @@ class SEC:
             force_refetch: Re-download ``raw/`` from SEC. Rare;
                 normally raw/ is immutable cache.
             verbose: Print build progress.
-            progress: Optional callable receiving structured progress
-                events from the per-filing fetch (see
-                ``kglite.progress``). Default ``None`` auto-selects a
-                tqdm progress bar on ``verbose`` runs when ``tqdm`` is
-                installed, falling back to plain ``[SEC]`` prints.
+            progress: Optional callable receiving the per-filing fetch
+                events (see ``kglite.progress``). Default ``None`` shows
+                a minimalist 3-phase tqdm display (Fetch / Process /
+                Build) on ``verbose`` runs when ``tqdm`` is installed,
+                falling back to plain ``[SEC]`` prints otherwise.
 
         Returns:
             ``KnowledgeGraph`` ready for queries.
@@ -473,10 +531,15 @@ class SEC:
             )
         workdir = Path(path).expanduser().resolve()
         workdir.mkdir(parents=True, exist_ok=True)
+        # Minimalist 3-phase progress display (Fetch / Process / Build).
+        # `display.active` is the signal to mute the plain `[SEC]` lines
+        # — bars and prints would otherwise fight over the terminal.
+        display = _PhaseProgress(progress, verbose and progress is None)
+        quiet = display.active
         # Resolve string tickers in companies to int CIKs before any
         # downstream code sees the slice. Idempotent: int-only lists
         # pass through unchanged.
-        companies = _resolve_companies(companies, workdir, user_agent, verbose)
+        companies = _resolve_companies(companies, workdir, user_agent, verbose and not quiet)
         current_year, current_quarter = _current_year_quarter()
         years_int_predict = _resolve_years(years, current_year)
         if mode is None:
@@ -489,21 +552,21 @@ class SEC:
                 include_8k_events=include_8k_events,
             )
             mode = _sec_internal.pick_storage_mode(predicted_gb)
-            if verbose:
+            if verbose and not quiet:
                 print(f"[SEC] mode='{mode}' auto-picked (predicted ~{predicted_gb:.1f} GB)")
         if mode not in _STORAGE_MODES:
             raise ValueError(f"mode must be one of {_STORAGE_MODES!r}; got {mode!r}")
 
         # Step 0: if graph exists for this mode, just load it.
         if not force_rebuild and _sec_internal.graph_exists(str(workdir), mode):
-            if verbose:
+            if verbose and not quiet:
                 print(f"[SEC] loading cached graph: {workdir}/graph/{mode}/")
             return _load_graph(workdir, mode)
 
         years_int = years_int_predict
 
         # Step 1: fetch raw/
-        if verbose:
+        if verbose and not quiet:
             print(f"[SEC] fetching raw/ (years={years_int}, detailed={detailed}, ua='{user_agent}')")
         fetch_report = _sec_internal.fetch_raw(
             str(workdir),
@@ -513,30 +576,23 @@ class SEC:
             current_quarter=current_quarter,
             force_refetch=force_refetch,
         )
-        if verbose:
+        if verbose and not quiet:
             print(f"[SEC]   fetch: {fetch_report}")
-
-        # Default the per-filing fetch to a tqdm progress bar on
-        # verbose runs — silent (plain `[SEC]` prints) if tqdm is absent.
-        if progress is None and verbose:
-            try:
-                from ...progress import TqdmBuildProgress
-
-                progress = TqdmBuildProgress(memory=False)
-            except ImportError:
-                progress = None
 
         # Step 2: per-filing payload fetch. Populates raw/filings/
         # with Form 4 XMLs, 13F info tables, 8-K cover pages, SC 13D
         # primary docs, DEF 14A proxies, and Exhibit 21 attachments
         # so the orchestrator below has something to read.
         if detailed > 0:
+            # Open the Fetch bar; `fetch_cb` is the per-filing callback
+            # the Rust fetchers stream their progress events into.
+            fetch_cb = display.fetch()
             # The per-filing dispatcher reads processed/filing_index.csv,
             # which the extractor's identity pre-pass emits. On a cold
             # workdir it doesn't exist yet — run extraction once to
             # produce it, so the dispatch has filings to fetch.
             if not (workdir / "processed" / "filing_index.csv").is_file():
-                if verbose:
+                if verbose and not quiet:
                     print("[SEC] building filing index (cold workdir)")
                 _sec_internal.extract_all_py(
                     str(workdir),
@@ -557,9 +613,9 @@ class SEC:
                 include_8k_events=include_8k_events,
                 include_xbrl=include_xbrl_metrics,
                 verbose=verbose,
-                progress=progress,
+                progress=fetch_cb,
             )
-            if verbose and fetch_dispatch:
+            if verbose and not quiet and fetch_dispatch:
                 print(f"[SEC]   per-filing fetch: {fetch_dispatch}")
 
         # Step 3: single feature-extraction call. The Rust orchestrator
@@ -569,9 +625,10 @@ class SEC:
         # force=True whenever a per-filing dispatch ran (detailed > 0):
         # the dispatch just fetched payloads the cold-start extract
         # above could not see, so processed/ must be regenerated.
-        if verbose:
+        if verbose and not quiet:
             scope = _format_slice_summary(companies, form_types, year_range)
             print(f"[SEC] extracting processed/ feature CSVs ({scope})")
+        display.step("Process")
         extract_report = _sec_internal.extract_all_py(
             str(workdir),
             force=force_rebuild or detailed > 0,
@@ -579,17 +636,19 @@ class SEC:
             form_types=form_types,
             year_range=year_range,
         )
-        if verbose:
+        if verbose and not quiet:
             total = extract_report.get("total_rows", 0)
             comps = extract_report.get("companies", 0)
             people = extract_report.get("people", 0)
             print(f"[SEC]   extract: {total:,} info-rows, {comps:,} companies, {people:,} people")
 
         # Step 4: build graph/{mode}/
-        if verbose:
+        if verbose and not quiet:
             print(f"[SEC] building graph/{mode}/")
+        display.step("Build")
         g = _build_graph(workdir, mode, verbose=verbose)
-        if verbose:
+        display.finish()
+        if verbose and not quiet:
             info = g.graph_info()
             print(f"[SEC] done: {info.get('node_count', 0):,} nodes, {info.get('edge_count', 0):,} edges")
         return g

@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filename. Verified live: TSLA 8-K events (37) and DEF 14A
   compensation + proposals now extract from 2025-2026 filings.
 
+### SEC loader — minimalist 3-phase build progress
+
+- `SEC.open` / `SEC.fetch` render a minimalist 3-phase tqdm display —
+  **Fetch** (per-filing download, live count), **Process** (extraction)
+  and **Build** (graph assembly) — replacing the per-form-bucket bars.
+  The verbose `[SEC] …` lines are muted whenever a progress display
+  (or a caller-supplied `progress` callback) is active, so the terminal
+  shows the three phases and nothing else. Falls back to the plain
+  `[SEC]` prints when `tqdm` isn't installed.
+
 ## [0.9.48] — SEC loader: cold-start, Jupyter progress, 8-K extraction
 
 - `SEC.fetch` / `SEC.open` on a fresh workdir now collect per-filing
