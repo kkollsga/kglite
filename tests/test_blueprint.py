@@ -945,3 +945,94 @@ class TestStreamingFkEdges:
         assert n_nodes == n_reserves
         n_edges = graph.cypher("MATCH (r:Reserve)-[:OF_FIELD]->(f:Field) RETURN count(r) AS n")[0]["n"]
         assert n_edges == n_reserves
+
+
+class TestProvisionalNodes:
+    """Auto-vivification: an edge to a missing node creates a
+    `_provisional` stub instead of silently dropping the edge."""
+
+    def test_fk_edge_to_missing_node_vivifies_stub(self, tmp_path):
+        # Person 2 reports to manager 99, which has no row of its own.
+        persons = pd.DataFrame({"id": [1, 2], "name": ["A", "B"], "mgr": [2, 99]})
+        _write_csv(tmp_path / "persons.csv", persons)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Person": {
+                    "csv": "persons.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": {"name": "string"},
+                    "connections": {
+                        "fk_edges": {"REPORTS_TO": {"target": "Person", "fk": "mgr"}}
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        g = from_blueprint(tmp_path / "bp.json", save=False)
+        # 2 real Person nodes + 1 vivified stub (id 99).
+        assert g.cypher("MATCH (p:Person) RETURN count(p) AS n")[0]["n"] == 3
+        # Both REPORTS_TO edges present — none dropped.
+        assert g.cypher("MATCH ()-[r:REPORTS_TO]->() RETURN count(r) AS n")[0]["n"] == 2
+        stub = g.cypher("MATCH (p:Person) WHERE p._provisional = true RETURN p.id AS id")
+        assert [r["id"] for r in stub] == [99]
+
+    def test_junction_edge_to_missing_nodes_vivifies(self, tmp_path):
+        # The loading-order case: Class A is loaded, but the friends
+        # CSV references Class B ids (4,5,6) that have no rows.
+        students = pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+        _write_csv(tmp_path / "students.csv", students)
+        friends = pd.DataFrame({"src": [1, 2, 4], "dst": [2, 5, 6]})
+        _write_csv(tmp_path / "friends.csv", friends)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Student": {
+                    "csv": "students.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": {"name": "string"},
+                    "connections": {
+                        "junction_edges": {
+                            "FRIEND": {
+                                "csv": "friends.csv",
+                                "source_fk": "src",
+                                "target": "Student",
+                                "target_fk": "dst",
+                                "properties": [],
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        g = from_blueprint(tmp_path / "bp.json", save=False)
+        # 3 real + 3 vivified (4,5,6).
+        assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 6
+        # All 3 friend edges present — none dropped.
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 3
+        prov = g.cypher(
+            "MATCH (s:Student) WHERE s._provisional = true RETURN s.id AS id ORDER BY id"
+        )
+        assert [r["id"] for r in prov] == [4, 5, 6]
+
+    def test_reserved_provisional_property_name_rejected(self, tmp_path):
+        items = pd.DataFrame({"id": [1], "_provisional": ["x"]})
+        _write_csv(tmp_path / "items.csv", items)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Item": {
+                    "csv": "items.csv",
+                    "pk": "id",
+                    "title": "id",
+                    "properties": {"_provisional": "string"},
+                    "connections": {},
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        with pytest.raises(Exception, match="reserved"):
+            from_blueprint(tmp_path / "bp.json", save=False)

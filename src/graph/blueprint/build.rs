@@ -19,7 +19,7 @@ use super::schema::{Blueprint, NodeSpec};
 use super::timeseries as ts;
 use crate::datatypes::values::DataFrame;
 use crate::graph::mutation::maintain;
-use crate::graph::schema::{DirGraph, SpatialConfig};
+use crate::graph::schema::{DirGraph, SpatialConfig, PROVISIONAL_KEY};
 use indexmap::IndexMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +74,16 @@ pub fn build(
     let t0 = std::time::Instant::now();
 
     let (core_specs, sub_specs) = collect_specs(&blueprint.nodes);
+    // `_provisional` is the reserved auto-vivification marker — a node
+    // spec must not declare a property of that name.
+    for spec in core_specs.iter().chain(sub_specs.iter()) {
+        if spec.spec.properties.contains_key(PROVISIONAL_KEY) {
+            return Err(format!(
+                "node type '{}': property '{}' is reserved (auto-vivification marker)",
+                spec.node_type, PROVISIONAL_KEY
+            ));
+        }
+    }
     if profile {
         eprintln!(
             "  collect_specs: {} ms ({} core + {} sub)",
@@ -1412,6 +1422,12 @@ fn connect(
                 report.warnings.push(format!(
                     "[{}] -[{}]-> {}: {} skipped ({})",
                     source_type, connection_type, target_type, r.connections_skipped, detail
+                ));
+            }
+            if r.stubs_vivified > 0 {
+                report.warnings.push(format!(
+                    "[{}] -[{}]-> {}: {} stub node(s) vivified for missing endpoints",
+                    source_type, connection_type, target_type, r.stubs_vivified
                 ));
             }
             Ok(r.connections_created)

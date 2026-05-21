@@ -22,6 +22,14 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Reserved property name marking an auto-vivified stub node — one
+/// created to satisfy an edge whose endpoint had no row of its own.
+/// Set to `true` at vivification; cleared (`Null`) when the real node
+/// row later upserts the node ("promotion"). `purge_provisional()`
+/// deletes whatever is still marked. Reserved: a user-supplied
+/// property of this name is rejected at blueprint validation.
+pub const PROVISIONAL_KEY: &str = "_provisional";
+
 // ─── Type Schema & Compact Property Storage ──────────────────────────────────
 
 /// Shared schema for all nodes of one type — maps property keys to dense slot indices.

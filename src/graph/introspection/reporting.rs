@@ -95,6 +95,9 @@ pub struct ConnectionOperationReport {
     pub operation_type: String,
     pub connections_created: usize,
     pub connections_skipped: usize,
+    /// Stub nodes auto-created so an edge to a missing endpoint could
+    /// still connect (see `add_connections` vivification).
+    pub stubs_vivified: usize,
     pub property_fields_tracked: usize,
     pub processing_time_ms: f64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -113,6 +116,7 @@ impl ConnectionOperationReport {
             operation_type,
             connections_created,
             connections_skipped,
+            stubs_vivified: 0,
             property_fields_tracked,
             processing_time_ms,
             timestamp: chrono::Utc::now(),

@@ -4,7 +4,7 @@ use crate::graph::introspection::reporting::{ConnectionOperationReport, NodeOper
 use crate::graph::mutation::batch::{
     BatchProcessor, ConflictHandling, ConnectionBatchProcessor, NodeAction,
 };
-use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema};
+use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY};
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
@@ -299,20 +299,9 @@ pub fn add_connections(
         ));
     }
 
-    // Check if source and target types exist
-    if !graph.has_node_type(&source_type) {
-        errors.push(format!(
-            "Source node type '{}' does not exist in the graph",
-            source_type
-        ));
-    }
-
-    if !graph.has_node_type(&target_type) {
-        errors.push(format!(
-            "Target node type '{}' does not exist in the graph",
-            target_type
-        ));
-    }
+    // A source/target type that doesn't exist yet is no longer an
+    // error: an edge to a missing endpoint vivifies a stub node (which
+    // registers the type). See Pass B below.
 
     let source_id_idx = df_data
         .get_column_index(&source_id_field)
@@ -347,9 +336,15 @@ pub fn add_connections(
     let mut skipped_count = 0;
     let mut skipped_null_source = 0;
     let mut skipped_null_target = 0;
-    // Instead of tracking ids directly, track counts of missing items
-    let mut missing_source_count = 0;
-    let mut missing_target_count = 0;
+    // Edges whose endpoint has no node are deferred — not dropped: the
+    // missing endpoints are vivified as provisional stub nodes (Pass B)
+    // and the rows replayed (Pass C). `missing_*` are deduped ordered
+    // id lists; `deferred` holds (row, source_id, target_id).
+    let mut deferred: Vec<(usize, Value, Value)> = Vec::new();
+    let mut missing_sources: Vec<Value> = Vec::new();
+    let mut missing_targets: Vec<Value> = Vec::new();
+    let mut seen_missing_source: HashSet<Value> = HashSet::new();
+    let mut seen_missing_target: HashSet<Value> = HashSet::new();
 
     // Cache column names and pre-compute which columns are property columns (not ID or title fields)
     // This avoids repeated allocations and string comparisons in the loop
@@ -368,28 +363,33 @@ pub fn add_connections(
         })
         .collect();
 
+    // Extract a row's edge properties — shared by the happy path and
+    // the deferred-row replay (Pass C). Skip nulls: property access
+    // returns Null for missing keys anyway.
+    let extract_props = |row_idx: usize| -> HashMap<String, Value> {
+        let mut properties = HashMap::with_capacity(property_columns.len());
+        for col_name in &property_columns {
+            if let Some(value) = df_data.get_value(row_idx, col_name) {
+                if !matches!(value, Value::Null) {
+                    properties.insert(col_name.clone(), value);
+                }
+            }
+        }
+        properties
+    };
+
+    // Pass A — connect rows whose endpoints both exist; defer the rest.
     for row_idx in 0..df_data.row_count() {
         let source_id = match df_data.get_value_by_index(row_idx, source_id_idx) {
-            Some(Value::Null) => {
-                skipped_count += 1;
-                skipped_null_source += 1;
-                continue;
-            }
-            None => {
+            Some(Value::Null) | None => {
                 skipped_count += 1;
                 skipped_null_source += 1;
                 continue;
             }
             Some(id) => id,
         };
-
         let target_id = match df_data.get_value_by_index(row_idx, target_id_idx) {
-            Some(Value::Null) => {
-                skipped_count += 1;
-                skipped_null_target += 1;
-                continue;
-            }
-            None => {
+            Some(Value::Null) | None => {
                 skipped_count += 1;
                 skipped_null_target += 1;
                 continue;
@@ -402,23 +402,17 @@ pub fn add_connections(
             lookup.check_target(&target_id),
         ) {
             (Some(src_idx), Some(tgt_idx)) => (src_idx, tgt_idx),
-            (None, Some(_)) => {
-                // Track missing source node
-                missing_source_count += 1;
-                skipped_count += 1;
-                continue;
-            }
-            (Some(_), None) => {
-                // Track missing target node
-                missing_target_count += 1;
-                skipped_count += 1;
-                continue;
-            }
-            (None, None) => {
-                // Track both missing
-                missing_source_count += 1;
-                missing_target_count += 1;
-                skipped_count += 1;
+            (s_opt, t_opt) => {
+                // One or both endpoints missing — defer the row rather
+                // than drop the edge. The missing ids are vivified as
+                // provisional stubs in Pass B, then replayed in Pass C.
+                if s_opt.is_none() && seen_missing_source.insert(source_id.clone()) {
+                    missing_sources.push(source_id.clone());
+                }
+                if t_opt.is_none() && seen_missing_target.insert(target_id.clone()) {
+                    missing_targets.push(target_id.clone());
+                }
+                deferred.push((row_idx, source_id, target_id));
                 continue;
             }
         };
@@ -432,29 +426,72 @@ pub fn add_connections(
             target_title_idx,
             &df_data,
         )?;
-
-        // Use pre-computed property columns (avoids get_column_names() call per row).
-        // Skip null values — property access returns Null for missing keys anyway.
-        let mut properties = HashMap::with_capacity(property_columns.len());
-        for col_name in &property_columns {
-            if let Some(value) = df_data.get_value(row_idx, col_name) {
-                if !matches!(value, Value::Null) {
-                    properties.insert(col_name.clone(), value);
-                }
-            }
-        }
-
-        // This will respect the conflict handling mode we set earlier
-        if let Err(e) =
-            batch.add_connection(source_idx, target_idx, properties, graph, &connection_type)
-        {
+        if let Err(e) = batch.add_connection(
+            source_idx,
+            target_idx,
+            extract_props(row_idx),
+            graph,
+            &connection_type,
+        ) {
             skipped_count += 1;
             errors.push(format!("Failed to add connection: {}", e));
-            continue;
         }
     }
 
-    // Report skip reasons
+    // Pass B — vivify the missing endpoints as provisional stub nodes.
+    let mut stubs_vivified = 0usize;
+    if !missing_sources.is_empty() {
+        stubs_vivified += vivify_stubs(graph, &source_type, &missing_sources)?;
+    }
+    if !missing_targets.is_empty() {
+        stubs_vivified += vivify_stubs(graph, &target_type, &missing_targets)?;
+    }
+
+    // Pass C — replay the deferred rows now that every endpoint exists.
+    if !deferred.is_empty() {
+        let lookup2 = CombinedTypeLookup::from_id_indices(
+            &graph.id_indices,
+            &graph.graph,
+            source_type.clone(),
+            target_type.clone(),
+        )?;
+        for (row_idx, source_id, target_id) in deferred {
+            let (source_idx, target_idx) = match (
+                lookup2.check_source(&source_id),
+                lookup2.check_target(&target_id),
+            ) {
+                (Some(s), Some(t)) => (s, t),
+                _ => {
+                    // Vivification did not produce the node — count as
+                    // a genuine skip (should not happen in practice).
+                    skipped_count += 1;
+                    continue;
+                }
+            };
+            update_node_titles(
+                graph,
+                source_idx,
+                target_idx,
+                row_idx,
+                source_title_idx,
+                target_title_idx,
+                &df_data,
+            )?;
+            if let Err(e) = batch.add_connection(
+                source_idx,
+                target_idx,
+                extract_props(row_idx),
+                graph,
+                &connection_type,
+            ) {
+                skipped_count += 1;
+                errors.push(format!("Failed to add connection: {}", e));
+            }
+        }
+    }
+
+    // Report skip reasons — genuine skips only (null ids). Missing
+    // endpoints are vivified, not skipped.
     if skipped_null_source > 0 {
         errors.push(format!(
             "Skipped {} rows: null values in source ID field '{}'",
@@ -465,18 +502,6 @@ pub fn add_connections(
         errors.push(format!(
             "Skipped {} rows: null values in target ID field '{}'",
             skipped_null_target, target_id_field
-        ));
-    }
-    if missing_source_count > 0 {
-        errors.push(format!(
-            "Skipped {} rows: source node not found in type '{}'",
-            missing_source_count, source_type
-        ));
-    }
-    if missing_target_count > 0 {
-        errors.push(format!(
-            "Skipped {} rows: target node not found in type '{}'",
-            missing_target_count, target_type
         ));
     }
 
@@ -511,6 +536,7 @@ pub fn add_connections(
         stats.properties_tracked,
         metrics.processing_time * 1000.0, // Convert to milliseconds
     );
+    report.stubs_vivified = stubs_vivified;
 
     // Add errors if we found any
     if !errors.is_empty() {
@@ -518,6 +544,33 @@ pub fn add_connections(
     }
 
     Ok(report)
+}
+
+/// Auto-vivify missing edge endpoints as provisional stub nodes.
+///
+/// Each id in `ids` becomes a node of `node_type` carrying only its id
+/// (also used as the title) and a `_provisional = true` marker. Routed
+/// through `add_nodes` so a stub lands in the same storage (columnar,
+/// on the disk/mapped backends) as every other node; `preserve` mode
+/// makes a re-vivified id (same id missing as both a source and a
+/// target on a same-type edge) a no-op. Returns the count actually
+/// created.
+fn vivify_stubs(graph: &mut DirGraph, node_type: &str, ids: &[Value]) -> Result<usize, String> {
+    let rows: Vec<Vec<Value>> = ids
+        .iter()
+        .map(|id| vec![id.clone(), Value::Boolean(true)])
+        .collect();
+    let df =
+        DataFrame::from_cypher_rows(vec!["id".to_string(), PROVISIONAL_KEY.to_string()], rows)?;
+    let report = add_nodes(
+        graph,
+        df,
+        node_type.to_string(),
+        "id".to_string(),
+        None,
+        Some("preserve".to_string()),
+    )?;
+    Ok(report.nodes_created)
 }
 
 fn update_node_titles(
