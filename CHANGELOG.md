@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.50] — Lossless edge loading: auto-vivified provisional stub nodes
+
 ### Lossless edge loading — auto-vivified provisional stub nodes
 
 - An edge loaded against a node that doesn't exist is no longer
