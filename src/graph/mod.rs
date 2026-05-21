@@ -319,6 +319,7 @@ impl KnowledgeGraph {
             report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
             report_dict.set_item("connections_created", result.connections_created)?;
             report_dict.set_item("connections_skipped", result.connections_skipped)?;
+            report_dict.set_item("stubs_vivified", result.stubs_vivified)?;
             report_dict.set_item("property_fields_tracked", result.property_fields_tracked)?;
             report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
 
@@ -348,6 +349,23 @@ impl KnowledgeGraph {
                         connection_type, detail
                     )
                 };
+                let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+                let _ = PyErr::warn(
+                    py,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                    cmsg.as_c_str(),
+                    1,
+                );
+            }
+
+            // Vivification is not an error — but the caller implicitly
+            // created stub nodes, so surface it the same way.
+            if result.stubs_vivified > 0 {
+                let msg = format!(
+                    "add_connections('{}'): {} stub node(s) vivified for missing endpoints — \
+                     call purge_provisional() to drop any left unpromoted.",
+                    connection_type, result.stubs_vivified
+                );
                 let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
                 let _ = PyErr::warn(
                     py,

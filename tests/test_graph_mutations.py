@@ -240,8 +240,9 @@ class TestMutationErrors:
         # Within a single batch, duplicates are both created
         assert len(nodes) == 2
 
-    def test_connection_missing_source(self, graph):
-        """Connection referencing non-existent source node should be skipped."""
+    def test_connection_missing_source_vivifies_stub(self, graph):
+        """Connection referencing a non-existent source node vivifies a
+        provisional stub — the edge is kept, not dropped."""
         df = pd.DataFrame({"id": ["bob"], "name": ["Bob"]})
         graph.add_nodes(df, "Person", "id", "name")
         conn = pd.DataFrame(
@@ -250,10 +251,11 @@ class TestMutationErrors:
                 "to": ["bob"],
             }
         )
-        # Should not crash; connection just skipped
         graph.add_connections(conn, "KNOWS", "Person", "from", "Person", "to")
         result = graph.cypher("MATCH ()-[:KNOWS]->() RETURN count(*) AS cnt")
-        assert result[0]["cnt"] == 0
+        assert result[0]["cnt"] == 1
+        prov = graph.cypher("MATCH (p:Person) WHERE p._provisional = true RETURN p.id AS id")
+        assert [r["id"] for r in prov] == ["nonexistent"]
 
 
 class TestBulkLoadWarnings:
@@ -290,7 +292,10 @@ class TestBulkLoadWarnings:
         assert len(user_warnings) >= 1, "expected a UserWarning when has_errors=True"
         assert any("error" in str(w.message).lower() for w in user_warnings)
 
-    def test_warn_on_skipped_connections(self, graph):
+    def test_warn_on_vivified_connections(self, graph):
+        """A connection to a missing node no longer drops the edge — it
+        vivifies a provisional stub — but the implicit node creation is
+        still surfaced as a UserWarning."""
         import warnings
 
         graph.add_nodes(pd.DataFrame({"id": ["a"], "name": ["A"]}), "Person", "id", "name")
@@ -299,7 +304,7 @@ class TestBulkLoadWarnings:
             warnings.simplefilter("always")
             graph.add_connections(conn, "KNOWS", "Person", "from", "Person", "to")
         user_warnings = [w for w in wlist if w.category is UserWarning]
-        assert any("KNOWS" in str(w.message) and "skipped" in str(w.message) for w in user_warnings)
+        assert any("KNOWS" in str(w.message) and "vivified" in str(w.message) for w in user_warnings)
 
 
 # ---------------------------------------------------------------------------
