@@ -1,6 +1,8 @@
 // src/graph/batch.rs
 use crate::datatypes::Value;
-use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage};
+use crate::graph::schema::{
+    DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
+};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -373,6 +375,9 @@ impl BatchProcessor {
         //   O(types) clones per chunk instead of the broken O(rows) pattern.
         let is_disk = GraphRead::is_disk(&graph.graph);
         let mut disk_updates_applied = false;
+        // Promotion: a real node-row upsert clears the `_provisional`
+        // stub marker. Interned once — only the Update/Sum arms use it.
+        let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
 
         for update in self.updates.drain(..) {
             if update.conflict_mode == ConflictHandling::Skip {
@@ -436,6 +441,10 @@ impl BatchProcessor {
                         for (k, v) in interned_props {
                             store.set(row_id, k, &v, None);
                         }
+                        // Promote: a real-row upsert clears the stub marker.
+                        if store.get(row_id, provisional_key).is_some() {
+                            store.set(row_id, provisional_key, &Value::Null, None);
+                        }
                     }
                     ConflictHandling::Preserve => {
                         if let Some(new_title) = update.title {
@@ -470,6 +479,10 @@ impl BatchProcessor {
                         }
                         for (k, v) in interned_props {
                             node.properties.insert(k, v);
+                        }
+                        // Promote: a real-row upsert clears the stub marker.
+                        if node.properties.get(provisional_key).is_some() {
+                            node.properties.insert(provisional_key, Value::Null);
                         }
                     }
                     ConflictHandling::Preserve => {

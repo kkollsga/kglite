@@ -963,9 +963,7 @@ class TestProvisionalNodes:
                     "pk": "id",
                     "title": "name",
                     "properties": {"name": "string"},
-                    "connections": {
-                        "fk_edges": {"REPORTS_TO": {"target": "Person", "fk": "mgr"}}
-                    },
+                    "connections": {"fk_edges": {"REPORTS_TO": {"target": "Person", "fk": "mgr"}}},
                 }
             },
         }
@@ -1013,9 +1011,7 @@ class TestProvisionalNodes:
         assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 6
         # All 3 friend edges present — none dropped.
         assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 3
-        prov = g.cypher(
-            "MATCH (s:Student) WHERE s._provisional = true RETURN s.id AS id ORDER BY id"
-        )
+        prov = g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN s.id AS id ORDER BY id")
         assert [r["id"] for r in prov] == [4, 5, 6]
 
     def test_reserved_provisional_property_name_rejected(self, tmp_path):
@@ -1036,3 +1032,62 @@ class TestProvisionalNodes:
         _write_blueprint(tmp_path / "bp.json", bp)
         with pytest.raises(Exception, match="reserved"):
             from_blueprint(tmp_path / "bp.json", save=False)
+
+    def test_same_type_edge_missing_both_endpoints(self, tmp_path):
+        # Id 9 has no row and is referenced as both a source and a
+        # target — it must be vivified exactly once and stay marked.
+        students = pd.DataFrame({"id": [1], "name": ["a"]})
+        _write_csv(tmp_path / "students.csv", students)
+        friends = pd.DataFrame({"src": [1, 9], "dst": [9, 1]})
+        _write_csv(tmp_path / "friends.csv", friends)
+        bp = {
+            "settings": {"root": str(tmp_path)},
+            "nodes": {
+                "Student": {
+                    "csv": "students.csv",
+                    "pk": "id",
+                    "title": "name",
+                    "properties": {"name": "string"},
+                    "connections": {
+                        "junction_edges": {
+                            "FRIEND": {
+                                "csv": "friends.csv",
+                                "source_fk": "src",
+                                "target": "Student",
+                                "target_fk": "dst",
+                                "properties": [],
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        _write_blueprint(tmp_path / "bp.json", bp)
+        g = from_blueprint(tmp_path / "bp.json", save=False)
+        assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 2
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 2
+        prov = g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN s.id AS id")
+        assert [r["id"] for r in prov] == [9]
+
+    def test_promotion_clears_marker_on_real_upsert(self):
+        # The loading-order fix end to end: Class A, then Friends
+        # (vivifies Class B stubs), then Class B — the real rows
+        # promote the stubs and keep their friendships.
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]}), "Student", "id", "name")
+        g.add_connections(
+            pd.DataFrame({"src": [1, 2, 4], "dst": [2, 5, 6]}),
+            "FRIEND",
+            "Student",
+            "src",
+            "Student",
+            "dst",
+        )
+        assert g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN count(s) AS n")[0]["n"] == 3
+        # Class B arrives last — its rows promote the stubs.
+        g.add_nodes(pd.DataFrame({"id": [4, 5, 6], "name": ["d", "e", "f"]}), "Student", "id", "name")
+        assert g.cypher("MATCH (s:Student) WHERE s._provisional = true RETURN count(s) AS n")[0]["n"] == 0
+        assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 6
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 3
+        # Class B kept the friendships made before its rows loaded.
+        assert g.cypher("MATCH (s:Student {id: 5}) RETURN s.name AS name")[0]["name"] == "e"
