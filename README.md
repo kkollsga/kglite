@@ -12,15 +12,13 @@ first queryable graph in seconds. It ships with a bundled MCP server,
 a `describe()` method that emits a system-prompt-shaped schema, and
 structural validators that compose with Cypher.
 
-> ### 🚀 See it end-to-end: codebase → Claude in ~50 lines
+> ### Codebase → Claude
 >
 > [**`examples/codebase_to_claude_mcp.ipynb`**](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
-> clones a GitHub repo, parses it into a code knowledge graph, runs a
-> few Cypher queries, then registers a workspace MCP server in Claude
-> Desktop. Closes with a screenshot of Claude calling `repo_management`
-> → `graph_overview` → `cypher_query` against the live graph.
+> clones a GitHub repo, parses it into a code knowledge graph, and
+> registers a workspace MCP server in Claude Desktop.
 
-> ### 🏦 Or: SEC filings as a knowledge graph, in one call
+> ### SEC filings → graph
 >
 > ```python
 > from kglite.datasets.sec import SEC
@@ -28,33 +26,23 @@ structural validators that compose with Cypher.
 >               user_agent="Your Name your@email.com")
 > ```
 >
-> `SEC.fetch` names the forms, the companies, and a span — then
-> downloads from SEC EDGAR (with a progress bar) and hands back a
-> Cypher-queryable graph: Form 4 insider transactions, 13F
-> institutional holdings, SC 13D activist stakes, DEF 14A board
-> composition, 8-K material events. Every fact is a typed node, and
-> the same person is one `:Person` across every form. `SEC.open` is
-> the full-control entry point — XBRL financials, Exhibit 21
-> subsidiaries, the full ~14M-filing index since 1993. Public-domain
-> data (US Govt work). **→
-> [`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
-> walks it end-to-end · [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+> `SEC.fetch` downloads the named forms for the named companies and
+> returns a Cypher-queryable graph — Form 4 insider transactions,
+> 13F holdings, SC 13D stakes, DEF 14A board composition, 8-K events.
+> **→ [`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
+> · [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 
 ## Use cases
 
-KGLite is shape-agnostic — the agent-facing surface is the same
-whether the graph holds your legal precedents, a Wikidata slice,
-your SQL warehouse, a RAG corpus, or a parsed codebase.
+The same agent-facing surface works whether the graph holds legal
+precedents, a Wikidata slice, a SQL warehouse, a RAG corpus, or a
+parsed codebase.
 
-- 🏦 **SEC EDGAR in one call.** `SEC.fetch(path, "13F-HR", "TSLA",
-  years=2, user_agent="...")` builds a US-public-company knowledge
-  graph from the SEC's free data: companies, filings, insider
+- 🏦 **SEC EDGAR.** `SEC.fetch(path, forms, companies, years=2)`
+  builds a US-public-company graph from the SEC's free data: insider
   transactions (Form 4), institutional holdings (13F), activist
-  stakes (SC 13D), board composition (DEF 14A), 8-K material events
-  — with XBRL financials and Exhibit 21 subsidiary trees a flag away
-  via `SEC.open`. Facts are typed nodes; the same person is one
-  `:Person` across every form. Three-tier `raw` / `processed` /
-  `graph` cache that never re-fetches. **→
+  stakes (SC 13D), board composition (DEF 14A), 8-K events — with
+  XBRL financials and Exhibit 21 subsidiaries via `SEC.open`. **→
   [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
   regulatory rules, medical ontologies, manufacturing BOMs, scientific
@@ -69,12 +57,11 @@ your SQL warehouse, a RAG corpus, or a parsed codebase.
   graph on top of your warehouse and the agent reasons over the
   relationships without you writing a server. **→
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).**
-- 🌐 **Public datasets, one line.** `wikidata.open(path)` and
-  `sodir.open(path)` handle the *fetch + build + cache* cycle. Run
-  Cypher queries on a billion-edge Wikidata graph from a 16 GB
-  laptop — mapped/disk storage means you can operate and query
-  datasets that won't fit in RAM. **→ See
-  [Bundled datasets](#bundled-datasets) below.**
+- 🌐 **Public datasets.** `wikidata.open(path)` and `sodir.open(path)`
+  handle the *fetch + build + cache* cycle. Mapped and disk storage
+  query graphs that don't fit in RAM — a billion-edge Wikidata graph
+  on a 16 GB laptop. **→ See [Bundled datasets](#bundled-datasets)
+  below.**
 - 📚 **RAG with structure.** Documents, chunks, entities, and the
   edges between them in one graph. Combine `text_score()` vector
   similarity with Cypher traversal — *"find court cases semantically
@@ -90,26 +77,21 @@ your SQL warehouse, a RAG corpus, or a parsed codebase.
 
 ## Why Cypher?
 
-A question every investor asks: *which insiders are selling, and at
-what price?* Against raw SEC XML you parse 1000s of Form 4 documents,
-join on issuer CIK, filter by transaction code. Against a graph it's
-one query:
+Questions over connected data — *which insiders sold this stock, who
+sits on two boards, what cites this case* — are pattern matches. In
+SQL they become multi-table joins; in Cypher the pattern is the
+query:
 
 ```cypher
--- Insider sells at Apple (CIK 320193), most recent first
-MATCH (c:Company {cik: 320193})-[:HAS_INSIDER]->(p:Person)
-      <-[:OF_PERSON]-(t:Transaction {transaction_code: 'S'})
-RETURN p.display_name, t.transaction_date, t.shares, t.price_per_share
+-- Insider sells, most recent first
+MATCH (t:InsiderTransaction {direction: 'sale'})-[:BY_INSIDER]->(p:Person)
+MATCH (t)-[:IN_COMPANY]->(c:Company)
+RETURN p.title, c.title, t.shares, t.price_per_share
 ORDER BY t.transaction_date DESC LIMIT 10
 ```
 
-Three node types (`Company`, `Person`, `Transaction`), two edge
-types (`HAS_INSIDER`, `OF_PERSON`), pattern-matched and joined in
-one expression. The same shape composes into harder questions —
-swap `:HAS_INSIDER` for `:HOLDS` and you're walking institutional
-positions; add `:SERVES_ON_BOARD` and you're checking who's an
-insider AND a director. Cypher pays off most when the data has
-real structure and your questions traverse it.
+Cypher pays off most when the data has real structure and your
+questions traverse it.
 
 ## How it compares
 
@@ -386,9 +368,11 @@ The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)
 directory has runnable, self-contained artifacts:
 
 - **[`codebase_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)**
-  — clone a famous open-source repo, parse it into a code knowledge
-  graph, register a workspace MCP server in Claude Desktop. End-to-end
-  in ~50 lines.
+  — clone an open-source repo, parse it into a code knowledge graph,
+  register a workspace MCP server in Claude Desktop.
+- **[`sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)**
+  — build a graph of SEC filings with `SEC.fetch`, query it, register
+  it as a Claude Desktop MCP server.
 - **[`open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)**
   — annotated workspace-mode manifest for the github-clone-tracker
   pattern. Walked through in the
