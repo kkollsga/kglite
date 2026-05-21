@@ -191,6 +191,32 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Delete every node still marked provisional — a stub auto-created
+    /// to satisfy an edge to a missing node, never promoted by a real
+    /// node row — together with its incident edges.
+    ///
+    /// Resets the current selection (node indices change). Call between
+    /// query chains, not mid-chain.
+    ///
+    /// Returns:
+    ///     dict with keys:
+    ///         - ``nodes_purged``: provisional stub nodes deleted
+    ///         - ``edges_removed``: incident edges removed with them
+    fn purge_provisional(&mut self) -> PyResult<Py<PyAny>> {
+        let graph = get_graph_mut(&mut self.inner);
+        let (nodes_purged, edges_removed) =
+            crate::graph::mutation::maintain::purge_provisional_nodes(graph);
+        if nodes_purged > 0 {
+            self.selection = CowSelection::new();
+        }
+        Python::attach(|py| {
+            let result = PyDict::new(py);
+            result.set_item("nodes_purged", nodes_purged)?;
+            result.set_item("edges_removed", edges_removed)?;
+            Ok(result.into())
+        })
+    }
+
     /// Get diagnostic information about graph storage health.
     ///
     /// Returns a dictionary with storage metrics useful for deciding when

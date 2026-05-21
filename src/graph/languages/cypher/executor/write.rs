@@ -791,98 +791,21 @@ fn execute_delete(
         }
     }
 
-    // Phase 4: for DETACH DELETE, remove all incident edges of nodes being deleted
-    if delete.detach {
-        for &node_idx in &nodes_to_delete {
-            // Collect incident edge indices first (can't mutate while iterating)
-            let incident: Vec<petgraph::graph::EdgeIndex> = graph
-                .graph
-                .edges_directed(node_idx, petgraph::Direction::Outgoing)
-                .chain(
-                    graph
-                        .graph
-                        .edges_directed(node_idx, petgraph::Direction::Incoming),
-                )
-                .map(|e| e.id())
-                .collect();
-            for edge_idx in incident {
-                if deleted_edges.insert(edge_idx) {
-                    GraphWrite::remove_edge(&mut graph.graph, edge_idx);
-                    stats.relationships_deleted += 1;
-                }
-            }
-        }
-    }
-
-    // Invalidate edge-type-related caches when edges are deleted.
-    // The lazy `connection_types` HashSet is consulted *first* by
-    // `has_connection_type`; if it was populated before the delete it
-    // may now contain stale entries (or — worse — be missing nothing
-    // but be checked authoritatively despite this graph having more
-    // types than the cache reflects). Clearing it forces the next
-    // `has_connection_type` call to re-walk metadata + the disk-side
-    // `conn_type_index_*`, which stay live across DETACH DELETE.
-    // 0.8.16 — without this clear, `traverse(conn)` after a DETACH
-    // DELETE on disk graphs errors with "Connection type … does not
-    // exist in graph" even when the conn type still has live edges.
+    // Phase 3's explicit edge-variable deletes still need cache
+    // invalidation (`detach_delete_nodes` only covers its own edges).
     if stats.relationships_deleted > 0 {
         graph.invalidate_edge_type_counts_cache();
         graph.connection_types.clear();
     }
 
-    // Phase 5: collect node types before deletion (for index cleanup)
-    let mut affected_types: HashSet<String> = HashSet::new();
-    for &node_idx in &nodes_to_delete {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
-            affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
-        }
-    }
-
-    // Phase 6: delete nodes
-    for &node_idx in &nodes_to_delete {
-        GraphWrite::remove_node(&mut graph.graph, node_idx);
-        graph.timeseries_store.remove(&node_idx.index());
-        stats.nodes_deleted += 1;
-    }
-
-    // Phase 7: index cleanup (StableDiGraph keeps remaining indices stable)
-    for node_type in &affected_types {
-        // type_indices: remove deleted entries (materializes base entry on
-        // first mutation; subsequent reads come from the overlay).
-        graph
-            .type_indices
-            .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx));
-        // id_indices: invalidate for lazy rebuild
-        graph.id_indices.remove(node_type);
-        // property_indices: remove deleted entries for affected types
-        let prop_keys: Vec<_> = graph
-            .property_indices
-            .keys()
-            .filter(|(nt, _)| nt == node_type)
-            .cloned()
-            .collect();
-        for key in prop_keys {
-            if let Some(value_map) = graph.property_indices.get_mut(&key) {
-                for indices in value_map.values_mut() {
-                    indices.retain(|idx| !nodes_to_delete.contains(idx));
-                }
-            }
-        }
-        // composite_indices: same treatment
-        let comp_keys: Vec<_> = graph
-            .composite_indices
-            .keys()
-            .filter(|(nt, _)| nt == node_type)
-            .cloned()
-            .collect();
-        for key in comp_keys {
-            if let Some(value_map) = graph.composite_indices.get_mut(&key) {
-                for indices in value_map.values_mut() {
-                    indices.retain(|idx| !nodes_to_delete.contains(idx));
-                }
-            }
-        }
-    }
+    // Phase 4-7: DETACH-delete the nodes — incident edges, the nodes,
+    // and index cleanup. For a plain DELETE, Phase 2 has verified the
+    // nodes carry no edges, so none are removed here. Shared with
+    // `purge_provisional` via `maintain::detach_delete_nodes`.
+    let (nodes_deleted, edges_removed) =
+        crate::graph::mutation::maintain::detach_delete_nodes(graph, &nodes_to_delete);
+    stats.nodes_deleted += nodes_deleted;
+    stats.relationships_deleted += edges_removed;
 
     Ok(())
 }

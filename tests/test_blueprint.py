@@ -1091,3 +1091,42 @@ class TestProvisionalNodes:
         assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 3
         # Class B kept the friendships made before its rows loaded.
         assert g.cypher("MATCH (s:Student {id: 5}) RETURN s.name AS name")[0]["name"] == "e"
+
+    def test_purge_provisional_deletes_unpromoted_stubs(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "Student", "id", "name")
+        g.add_connections(
+            pd.DataFrame({"src": [1, 2], "dst": [2, 9]}),  # 9 has no row -> stub
+            "FRIEND",
+            "Student",
+            "src",
+            "Student",
+            "dst",
+        )
+        assert g.cypher("MATCH (s:Student) RETURN count(s) AS n")[0]["n"] == 3
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 2
+        result = g.purge_provisional()
+        assert result["nodes_purged"] == 1
+        assert result["edges_removed"] == 1
+        # Stub 9 + its incident edge gone; real nodes and the 1->2 edge spared.
+        ids = sorted(r["id"] for r in g.cypher("MATCH (s:Student) RETURN s.id AS id"))
+        assert ids == [1, 2]
+        assert g.cypher("MATCH ()-[r:FRIEND]->() RETURN count(r) AS n")[0]["n"] == 1
+
+    def test_purge_provisional_spares_promoted_stubs(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1], "name": ["a"]}), "Student", "id", "name")
+        g.add_connections(
+            pd.DataFrame({"src": [1, 1], "dst": [8, 9]}),  # 8 and 9 both missing
+            "FRIEND",
+            "Student",
+            "src",
+            "Student",
+            "dst",
+        )
+        # Stub 8 is promoted by a real row; stub 9 is left dangling.
+        g.add_nodes(pd.DataFrame({"id": [8], "name": ["h"]}), "Student", "id", "name")
+        result = g.purge_provisional()
+        assert result["nodes_purged"] == 1  # only 9
+        ids = sorted(r["id"] for r in g.cypher("MATCH (s:Student) RETURN s.id AS id"))
+        assert ids == [1, 8]

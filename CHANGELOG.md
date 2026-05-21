@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Lossless edge loading — auto-vivified provisional stub nodes
+
+- An edge loaded against a node that doesn't exist is no longer
+  silently dropped. The missing endpoint is auto-vivified as a
+  *provisional* stub node (marked `_provisional`) so the edge always
+  connects — across blueprint fk-edges, blueprint junction-edges and
+  the imperative `add_connections` API. This removes a load-order
+  hazard: loading edges before some of their nodes (e.g. `Friends`
+  before `Class B`) previously lost every edge into the not-yet-loaded
+  nodes.
+- A later load of the real node row **promotes** the stub — the
+  `_provisional` marker is cleared on node upsert.
+- New `KnowledgeGraph.purge_provisional()` deletes any stub never
+  promoted (a genuinely dangling reference) and its incident edges,
+  returning `{nodes_purged, edges_removed}`.
+- `_provisional` is a reserved property name — a blueprint node spec
+  declaring it is rejected.
+
 ## [0.9.49] — SEC loader: form-typed extraction + 3-phase build progress
 
 ### SEC loader — per-filing documents selected by form type, not filename

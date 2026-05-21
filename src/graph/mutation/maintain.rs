@@ -7,7 +7,7 @@ use crate::graph::mutation::batch::{
 use crate::graph::schema::{CurrentSelection, DirGraph, InternedKey, TypeSchema, PROVISIONAL_KEY};
 use crate::graph::storage::lookups::{CombinedTypeLookup, TypeLookup};
 use crate::graph::storage::{GraphRead, GraphWrite};
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -571,6 +571,114 @@ fn vivify_stubs(graph: &mut DirGraph, node_type: &str, ids: &[Value]) -> Result<
         Some("preserve".to_string()),
     )?;
     Ok(report.nodes_created)
+}
+
+/// DETACH-delete a set of nodes: remove every incident edge, then the
+/// nodes, then clean the type / id / property / composite indexes.
+/// Shared by the Cypher DETACH DELETE executor and `purge_provisional`.
+/// Returns `(nodes_deleted, edges_removed)`.
+///
+/// Clearing `connection_types` matters on disk graphs: the lazy
+/// `has_connection_type` cache would otherwise report a still-live
+/// type as gone after a delete.
+pub(crate) fn detach_delete_nodes(
+    graph: &mut DirGraph,
+    nodes_to_delete: &HashSet<NodeIndex>,
+) -> (usize, usize) {
+    if nodes_to_delete.is_empty() {
+        return (0, 0);
+    }
+
+    // Remove every incident edge — a self-loop is listed twice, so dedup.
+    let mut deleted_edges: HashSet<EdgeIndex> = HashSet::new();
+    for &node_idx in nodes_to_delete {
+        let incident: Vec<EdgeIndex> = graph
+            .graph
+            .edges_directed(node_idx, petgraph::Direction::Outgoing)
+            .chain(
+                graph
+                    .graph
+                    .edges_directed(node_idx, petgraph::Direction::Incoming),
+            )
+            .map(|e| e.id())
+            .collect();
+        for edge_idx in incident {
+            if deleted_edges.insert(edge_idx) {
+                GraphWrite::remove_edge(&mut graph.graph, edge_idx);
+            }
+        }
+    }
+    let edges_removed = deleted_edges.len();
+    if edges_removed > 0 {
+        graph.invalidate_edge_type_counts_cache();
+        graph.connection_types.clear();
+    }
+
+    // Affected node types — collected before deletion for index cleanup.
+    let mut affected_types: HashSet<String> = HashSet::new();
+    for &node_idx in nodes_to_delete {
+        if let Some(node) = graph.graph.node_weight(node_idx) {
+            affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
+        }
+    }
+
+    for &node_idx in nodes_to_delete {
+        GraphWrite::remove_node(&mut graph.graph, node_idx);
+        graph.timeseries_store.remove(&node_idx.index());
+    }
+
+    // Index cleanup — StableDiGraph keeps surviving indices stable.
+    for node_type in &affected_types {
+        graph
+            .type_indices
+            .retain_in_type(node_type, |idx| !nodes_to_delete.contains(idx));
+        graph.id_indices.remove(node_type);
+        let prop_keys: Vec<_> = graph
+            .property_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in prop_keys {
+            if let Some(value_map) = graph.property_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+            }
+        }
+        let comp_keys: Vec<_> = graph
+            .composite_indices
+            .keys()
+            .filter(|(nt, _)| nt == node_type)
+            .cloned()
+            .collect();
+        for key in comp_keys {
+            if let Some(value_map) = graph.composite_indices.get_mut(&key) {
+                for indices in value_map.values_mut() {
+                    indices.retain(|idx| !nodes_to_delete.contains(idx));
+                }
+            }
+        }
+    }
+
+    (nodes_to_delete.len(), edges_removed)
+}
+
+/// Delete every node still marked `_provisional` — a stub vivified for
+/// an edge but never promoted by a real node row — along with all its
+/// incident edges. Returns `(nodes_purged, edges_removed)`.
+pub(crate) fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
+    let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
+    let mut to_delete: HashSet<NodeIndex> = HashSet::new();
+    for node_idx in graph.graph.node_indices() {
+        if matches!(
+            GraphRead::get_node_property(&graph.graph, node_idx, provisional_key),
+            Some(Value::Boolean(true))
+        ) {
+            to_delete.insert(node_idx);
+        }
+    }
+    detach_delete_nodes(graph, &to_delete)
 }
 
 fn update_node_titles(

@@ -1233,6 +1233,31 @@ class KnowledgeGraph:
         """
         ...
 
+    def purge_provisional(self) -> dict[str, Any]:
+        """Delete provisional stub nodes that were never promoted.
+
+        When an edge is loaded against a node that doesn't exist, the node
+        is auto-vivified as a *provisional* stub (carrying ``_provisional``)
+        so the edge isn't lost. A later load of the real node row clears
+        the marker. ``purge_provisional()`` deletes whatever is still
+        marked — genuinely dangling references — along with their incident
+        edges.
+
+        **Important**: This resets the current selection since node indices
+        change. Call this between query chains, not in the middle of one.
+
+        Returns:
+            dict with keys:
+                - ``nodes_purged``: Number of provisional stub nodes deleted
+                - ``edges_removed``: Number of incident edges removed with them
+
+        Example::
+
+            result = graph.purge_provisional()
+            print(f"Dropped {result['nodes_purged']} dangling stubs")
+        """
+        ...
+
     def set_auto_vacuum(self, threshold: float | None) -> None:
         """Configure automatic vacuum after DELETE operations.
 
