@@ -30,7 +30,22 @@ fn intern_connection_types(connection_types: Option<&[String]>) -> Option<Vec<In
 }
 
 /// Get undirected neighbors filtered by edge connection type.
-/// When connection_types is None, returns all neighbors (equivalent to neighbors_undirected).
+/// When connection_types is None, returns all neighbors (equivalent to
+/// neighbors_undirected).
+///
+/// Both branches deduplicate — petgraph's `neighbors_undirected` walks
+/// every incident edge so parallel edges and a→b/b→a pairs each appear
+/// twice; the filtered branch concatenates Outgoing + Incoming and has
+/// the same property. Without dedup, undirected `shortestPath` and
+/// `all_paths` over a bidirectional pair surfaced duplicate
+/// (A, B) / (B, A) entries during enumeration (B4) — the visited
+/// bitmap downstream caught most cases for `shortestPath`, but
+/// `all_paths` paid wasted DFS work per duplicate.
+///
+/// Sort + dedup is faster than a presence-set probe for the typical
+/// small-degree case (n ≲ 32) because the in-place comparison fits in
+/// cache; insertion order is not load-bearing for any caller (BFS,
+/// DFS path enumeration use set-membership, not order).
 fn filtered_neighbors_undirected(
     graph: &DirGraph,
     node: NodeIndex,
@@ -38,23 +53,28 @@ fn filtered_neighbors_undirected(
 ) -> Vec<NodeIndex> {
     use petgraph::Direction;
     let g = &graph.graph;
-    match connection_types {
+    let mut neighbors: Vec<NodeIndex> = match connection_types {
         None => g.neighbors_undirected(node).collect(),
         Some(types) => {
-            let mut neighbors = Vec::new();
+            let mut n = Vec::new();
             for edge in g.edges_directed(node, Direction::Outgoing) {
                 if types.iter().any(|t| *t == edge.weight().connection_type) {
-                    neighbors.push(edge.target());
+                    n.push(edge.target());
                 }
             }
             for edge in g.edges_directed(node, Direction::Incoming) {
                 if types.iter().any(|t| *t == edge.weight().connection_type) {
-                    neighbors.push(edge.source());
+                    n.push(edge.source());
                 }
             }
-            neighbors
+            n
         }
+    };
+    if neighbors.len() > 1 {
+        neighbors.sort_unstable();
+        neighbors.dedup();
     }
+    neighbors
 }
 
 /// Get directed (outgoing only) neighbors filtered by edge connection type.

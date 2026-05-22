@@ -293,6 +293,37 @@ class TestShortestPathUndirected:
         assert len(result) == 1
         assert result[0]["length(p)"] == 4
 
+    def test_undirected_bidirectional_pair_dedup(self):
+        """B4: a→b and b→a both exist; undirected neighbor collection must
+        not double-count, and shortestPath must still report length 1."""
+        g = KnowledgeGraph()
+        for nm in ["A", "B"]:
+            g.cypher(f"CREATE (:N {{name: '{nm}'}})")
+        g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R]->(b)")
+        g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (b)-[:R]->(a)")
+        rows = g.cypher(
+            "MATCH p = shortestPath((a:N {name:'A'})-[*]-(b:N {name:'B'})) "
+            "RETURN length(p) AS L"
+        )
+        assert len(rows) == 1
+        assert rows[0]["L"] == 1
+
+    def test_undirected_parallel_edges_dedup(self):
+        """B4: two parallel a→b edges of the same type must surface b once,
+        not twice, in the undirected neighbor list."""
+        g = KnowledgeGraph()
+        for nm in ["A", "B", "C"]:
+            g.cypher(f"CREATE (:N {{name: '{nm}'}})")
+        # Two parallel edges A→B, then a chain to C.
+        g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R {tag:'x'}]->(b)")
+        g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R {tag:'y'}]->(b)")
+        g.cypher("MATCH (b:N {name:'B'}), (c:N {name:'C'}) CREATE (b)-[:R]->(c)")
+        rows = g.cypher(
+            "MATCH p = shortestPath((a:N {name:'A'})-[*]-(c:N {name:'C'})) "
+            "RETURN length(p) AS L"
+        )
+        assert rows[0]["L"] == 2
+
 
 class TestShortestPathConsistency:
     """Tests for consistency between Cypher shortestPath and fluent API."""
