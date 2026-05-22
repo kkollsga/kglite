@@ -19,19 +19,25 @@
 //!   - Member fields → AttributeInfo; top-level `const`/`final` → ConstantInfo;
 //!     `typedef` → ConstantInfo (kind="type_alias").
 //!   - Top-level functions / getters / setters → FunctionInfo.
-//!   - `import` / `export` directives → FileInfo.imports.
+//!   - Call sites → `FunctionInfo.calls` (CALLS edges); structured
+//!     parameters and cyclomatic branch metrics.
+//!   - `import` / `export` directives → FileInfo.imports; `part of` files
+//!     adopt their parent library's module path.
+//!   - TODO/FIXME-style comment annotations; Dart 3 class modifiers.
 //!   - Visibility from the Dart naming convention (leading `_` = private).
 //!
-//! Follow-up phases: calls, part/part-of, complexity metrics, the Flutter pass.
+//! Follow-up phase: the Flutter widget pass.
 
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
-use super::shared::node_text;
+use super::shared::{
+    compute_complexity, extract_comment_annotations, node_text, BRANCH_KINDS_DART,
+};
 use super::LanguageParser;
 use crate::code_tree::models::{
     AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, MetadataMap,
-    ParseResult, TypeRelationship,
+    ParameterInfo, ParameterKind, ParseResult, TypeRelationship,
 };
 
 pub struct DartParser;
@@ -53,6 +59,16 @@ const CONSTRUCTOR_KINDS: &[&str] = &[
     "constant_constructor_signature",
     "redirecting_factory_constructor_signature",
 ];
+
+/// Function/closure node kinds `compute_complexity` must not descend into —
+/// their branches belong to the nested callable, not the parent.
+const NESTED_SCOPES: &[&str] = &["function_expression", "local_function_declaration"];
+
+/// Comment node kinds scanned for TODO/FIXME-style annotations.
+const DART_COMMENT_TYPES: &[&str] = &["comment", "block_comment", "documentation_block_comment"];
+
+/// Class-declaration modifier keywords surfaced into `ClassInfo.metadata`.
+const CLASS_MODIFIERS: &[&str] = &["abstract", "base", "interface", "sealed", "final"];
 
 impl DartParser {
     pub fn new() -> Self {
@@ -128,19 +144,7 @@ impl DartParser {
     /// stripped). Both directions create a file-level dependency, so both
     /// land in `FileInfo.imports`.
     fn extract_import(node: Node, source: &[u8]) -> Option<String> {
-        fn first_string<'a>(n: Node<'a>, source: &'a [u8]) -> Option<String> {
-            if n.kind() == "string_literal" {
-                return Some(strip_string_quotes(node_text(n, source)));
-            }
-            let mut cursor = n.walk();
-            for child in n.named_children(&mut cursor) {
-                if let Some(s) = first_string(child, source) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        first_string(node, source).filter(|s| !s.is_empty())
+        first_string_literal(node, source).filter(|s| !s.is_empty())
     }
 
     /// Parse a class / mixin / extension / extension-type declaration into a
@@ -172,6 +176,22 @@ impl DartParser {
         let qname = make_qualified(module_path, "", &name);
 
         let supertypes = collect_supertypes(node, source);
+
+        // Dart 3 class modifiers (abstract / base / interface / sealed /
+        // final) → metadata, with `is_abstract` lifted out for convenience.
+        let mut metadata = MetadataMap::new();
+        let mods: Vec<serde_json::Value> = CLASS_MODIFIERS
+            .iter()
+            .filter(|m| has_token_child(node, m))
+            .map(|m| serde_json::Value::String((*m).to_string()))
+            .collect();
+        if mods.iter().any(|v| v.as_str() == Some("abstract")) {
+            metadata.insert("is_abstract".into(), serde_json::Value::Bool(true));
+        }
+        if !mods.is_empty() {
+            metadata.insert("modifiers".into(), serde_json::Value::Array(mods));
+        }
+
         result.classes.push(ClassInfo {
             name: name.clone(),
             qualified_name: qname.clone(),
@@ -183,7 +203,7 @@ impl DartParser {
             bases: supertypes.iter().map(|(t, _)| t.clone()).collect(),
             type_parameters: None,
             end_line: Some(end_line),
-            metadata: Default::default(),
+            metadata,
         });
         for (target, relationship) in &supertypes {
             result.type_relationships.push(TypeRelationship {
@@ -647,6 +667,20 @@ fn emit_function(
         .filter(|s| !s.is_empty());
     let visibility = visibility_from_name(&name).to_string();
 
+    let parameters = extract_parameters(sig, source);
+    let param_count = Some(parameters.len() as u32);
+    let calls = body.map(|b| extract_calls(b, source)).unwrap_or_default();
+    let (branch_count, max_nesting) = match body {
+        Some(b) => {
+            let (c, n) = compute_complexity(b, BRANCH_KINDS_DART, NESTED_SCOPES);
+            (Some(c), Some(n))
+        }
+        None => (None, None),
+    };
+    // Heuristic self-recursion: a bare call to the function's own short name.
+    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+    let is_recursive = Some(calls.iter().any(|(callee, _)| *callee == short));
+
     result.functions.push(FunctionInfo {
         name,
         qualified_name: qname,
@@ -662,19 +696,100 @@ fn emit_function(
         docstring: None,
         return_type,
         decorators: Vec::new(),
-        calls: Vec::new(),
+        calls,
         references: Vec::new(),
         function_refs: Vec::new(),
         type_parameters: None,
         end_line: Some(end_line),
-        parameters: Vec::new(),
-        branch_count: None,
-        param_count: None,
-        max_nesting: None,
-        is_recursive: None,
+        parameters,
+        branch_count,
+        param_count,
+        max_nesting,
+        is_recursive,
         procedure_names: Vec::new(),
         metadata,
     });
+}
+
+/// Recursively collect call sites in a function body. Dart calls surface as
+/// `call_expression` (bare or member-access callee) and `new` / `const`
+/// constructor invocations.
+fn extract_calls(node: Node, source: &[u8]) -> Vec<(String, u32)> {
+    fn callee_name(func: Node, source: &[u8]) -> Option<String> {
+        match func.kind() {
+            "identifier" => Some(node_text(func, source).to_string()),
+            "member_expression" => func
+                .child_by_field_name("property")
+                .map(|p| node_text(p, source).to_string()),
+            _ => None,
+        }
+    }
+    fn walk(n: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+        let line = n.start_position().row as u32 + 1;
+        match n.kind() {
+            "call_expression" => {
+                if let Some(name) = n
+                    .child_by_field_name("function")
+                    .and_then(|f| callee_name(f, source))
+                {
+                    if !name.is_empty() {
+                        out.push((name, line));
+                    }
+                }
+            }
+            "new_expression" | "const_object_expression" => {
+                if let Some(t) = n.child_by_field_name("type") {
+                    let name = bare_type_name(node_text(t, source));
+                    if !name.is_empty() {
+                        out.push((name, line));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            walk(child, source, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, source, &mut out);
+    out
+}
+
+/// Structured parameter list for a signature. Best-effort: names are
+/// reliable, declared types stay on the `signature` string (which the
+/// USES_TYPE scanner already reads).
+fn extract_parameters(sig: Node, source: &[u8]) -> Vec<ParameterInfo> {
+    fn collect(node: Node, source: &[u8], out: &mut Vec<ParameterInfo>) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            match child.kind() {
+                "formal_parameter" => {
+                    let name = child
+                        .child_by_field_name("name")
+                        .map(|n| node_text(n, source).to_string())
+                        .unwrap_or_default();
+                    out.push(ParameterInfo {
+                        name,
+                        type_annotation: None,
+                        default: None,
+                        kind: ParameterKind::Positional,
+                    });
+                }
+                // `[...]` / `{...}` optional & named parameter groups.
+                "optional_formal_parameters" => collect(child, source, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for list in children_by_field(sig, "parameters") {
+        if list.kind() == "formal_parameter_list" {
+            collect(list, source, &mut out);
+        }
+    }
+    out
 }
 
 /// Collect a type declaration's supertypes as `(bare_name, relationship)`
@@ -846,6 +961,50 @@ fn truncate_preview(text: &str) -> String {
     collapsed.chars().take(100).collect()
 }
 
+/// First `string_literal` descendant of `node`, surrounding quotes stripped.
+fn first_string_literal(node: Node, source: &[u8]) -> Option<String> {
+    if node.kind() == "string_literal" {
+        return Some(strip_string_quotes(node_text(node, source)));
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(s) = first_string_literal(child, source) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// If the file is a library `part`, resolve the parent library's module
+/// path so `part` files collapse into one logical module. Only the URI
+/// form (`part of 'parent.dart';`) maps onto the synthetic per-file module
+/// scheme; the dotted-name form is left to the file's own module path.
+fn resolve_part_of(root: Node, source: &[u8], src_root: &Path) -> Option<String> {
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        if child.kind() != "part_of_directive" {
+            continue;
+        }
+        let uri = first_string_literal(child, source)?;
+        let stem = uri
+            .rsplit('/')
+            .next()
+            .unwrap_or(&uri)
+            .strip_suffix(".dart")
+            .unwrap_or(&uri);
+        if stem.is_empty() {
+            return None;
+        }
+        let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
+        return Some(if pkg.is_empty() {
+            stem.to_string()
+        } else {
+            format!("{pkg}.{stem}")
+        });
+    }
+    None
+}
+
 /// Strip one matching pair of surrounding `'` or `"` quotes.
 fn strip_string_quotes(s: &str) -> String {
     let s = s.trim();
@@ -900,11 +1059,16 @@ impl LanguageParser for DartParser {
             .unwrap_or(filepath)
             .to_string_lossy()
             .to_string();
-        let module_path = file_to_module_path(filepath, src_root);
 
         let Some(tree) = self.parse_tree(source_bytes) else {
             return result;
         };
+        let root = tree.root_node();
+
+        // A `part of` file adopts its parent library's module path so the
+        // split-across-files library collapses into one logical module.
+        let module_path = resolve_part_of(root, source_bytes, src_root)
+            .unwrap_or_else(|| file_to_module_path(filepath, src_root));
 
         let filename = filepath
             .file_name()
@@ -923,13 +1087,13 @@ impl LanguageParser for DartParser {
             submodule_declarations: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
-            annotations: None,
+            annotations: extract_comment_annotations(root, source_bytes, DART_COMMENT_TYPES),
             is_test,
             skip_reason: None,
         };
 
         Self::parse_source_file(
-            tree.root_node(),
+            root,
             source_bytes,
             &module_path,
             &rel_path,

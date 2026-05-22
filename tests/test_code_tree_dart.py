@@ -7,9 +7,8 @@ Coverage grows per implementation phase:
     extensions (:Class kind="extension"), enums (:Enum + variants).
   - Phase 3: named/factory constructors, getters/setters, member fields,
     top-level const/final → Constant, typedef → Constant, async flag.
-
-Import-edge resolution (URI → module/file) lands with the part/part-of
-work in a later phase; that's where import assertions are added.
+  - Phase 4: CALLS edges, cyclomatic branch counts, part/part-of module
+    sharing, TODO/FIXME comment annotations.
 """
 
 import json
@@ -326,3 +325,72 @@ int plain() {
     by_name = {r["n"]: r["a"] for r in rows}
     assert by_name.get("fetchValue") is True, by_name
     assert by_name.get("plain") is False, by_name
+
+
+def test_dart_calls_resolved(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "calls.dart",
+        """
+int helper() => 1;
+
+int caller() {
+  return helper() + helper();
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher(
+        "MATCH (a:Function {name: 'caller'})-[:CALLS]->(b:Function {name: 'helper'}) RETURN b.name AS n"
+    ).to_list()
+    assert rows, "expected caller → helper CALLS edge"
+
+
+def test_dart_branch_count(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "classify.dart",
+        """
+int classify(int n) {
+  if (n > 0) {
+    return 1;
+  } else if (n < 0) {
+    return -1;
+  }
+  return 0;
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (f:Function {name: 'classify'}) RETURN f.branch_count AS bc").to_list()
+    assert rows, "expected classify function"
+    assert (rows[0]["bc"] or 0) >= 2, rows
+
+
+def test_dart_part_files_share_module(tmp_path):
+    pkg = tmp_path / "dart_pkg"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "lib.dart").write_text("library mylib;\npart 'lib_part.dart';\n\nclass Core {}\n")
+    (pkg / "lib_part.dart").write_text("part of 'lib.dart';\n\nclass Helper {}\n")
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (f:File) RETURN f.filename AS n, f.module AS m").to_list()
+    by_file = {r["n"]: r["m"] for r in rows}
+    # The `part of` file adopts the parent library's module path.
+    assert by_file.get("lib.dart") == by_file.get("lib_part.dart"), by_file
+    assert by_file.get("lib_part.dart"), by_file
+
+
+def test_dart_comment_annotations(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "todo.dart",
+        """
+// TODO: refactor this mess
+void messy() {}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (f:File {filename: 'todo.dart'}) RETURN f.annotations AS a").to_list()
+    assert rows, "expected todo.dart File node"
+    annotations = rows[0]["a"] or ""
+    assert "refactor" in str(annotations), annotations

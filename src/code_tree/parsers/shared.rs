@@ -252,6 +252,22 @@ pub const BRANCH_KINDS_CSHARP: &[&str] = &[
     "conditional_expression",
 ];
 
+pub const BRANCH_KINDS_DART: &[&str] = &[
+    "if_statement",
+    "while_statement",
+    "for_statement",
+    "do_statement",
+    "switch_statement_case",
+    "switch_expression_case",
+    "catch_clause",
+    "conditional_expression",
+    "if_null_expression",
+    "logical_and_expression",
+    "logical_or_expression",
+    "if_element",
+    "for_element",
+];
+
 /// Walk `body` and return (branch_count, max_nesting).
 ///
 /// `branch_count` increments for every node whose kind is in `branch_kinds`.
