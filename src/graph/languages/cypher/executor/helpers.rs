@@ -410,6 +410,13 @@ pub(super) fn node_to_map_value(node: &NodeData) -> Value {
 /// Parse a list value from string format "[a, b, c]".
 /// Splits at top-level commas only — respects brace/bracket/quote nesting so that
 /// JSON objects like `{"id": 1, "name": "Alice"}` are kept intact.
+///
+/// Track C swap-point — list values currently round-trip through
+/// `Value::String` (a JSON encoding), so this parses them back. When
+/// `Value::List` is introduced (see docs/explanation/multi-label-rationale.md),
+/// this function should short-circuit on `Value::List(items)` before
+/// falling through to the string path, then the string path can be
+/// retired once every producer emits `Value::List`.
 pub(super) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::String(s) => {

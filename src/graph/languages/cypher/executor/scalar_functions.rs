@@ -332,15 +332,27 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "labels" => {
-                // labels(n) returns list of node labels (as JSON list)
+                // labels(n) returns the list of node labels.
+                //
+                // Track C swap-point — KGLite is single-label today, so this
+                // emits a single-element list encoded as a JSON string. The
+                // py_convert layer parses it back into a Python list, and
+                // parse_list_value() (helpers.rs) re-parses it inside `IN` /
+                // `size()` / index access. When the multi-label data model
+                // lands, swap this to `Value::List(Vec<Value::String>)` once
+                // that variant exists; the JSON-string consumers should
+                // either move to native list handling or stay parameterised
+                // by Value type. See docs/explanation/multi-label-rationale.md.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             let node_type = node.get_node_type_ref(&self.graph.interner);
-                            return Ok(Value::String(format!(
-                                "[\"{}\"]",
-                                node_type.replace('\\', "\\\\").replace('"', "\\\"")
-                            )));
+                            // Proper JSON escaping (handles control chars,
+                            // backslashes, quotes — the hand-rolled escape
+                            // we used to do covered only `"` and `\`).
+                            let encoded = serde_json::to_string(&[node_type])
+                                .unwrap_or_else(|_| String::from("[]"));
+                            return Ok(Value::String(encoded));
                         }
                     }
                 }

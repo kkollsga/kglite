@@ -45,6 +45,42 @@ class TestLabelsFunction:
         names = [r["n.name"] for r in rows]
         assert names == ["Alice", "Bob", "Charlie"]
 
+    # --- Track-C swap-point lock-in (B5): pin the consumer invariants ---
+
+    def test_in_labels_matches(self, social_graph):
+        """'Label' IN labels(n) works through the JSON-string encoding."""
+        rows = social_graph.cypher(
+            "MATCH (n) WHERE 'Person' IN labels(n) RETURN count(n) AS c"
+        )
+        assert rows[0]["c"] == 3
+
+    def test_in_labels_does_not_match(self, social_graph):
+        rows = social_graph.cypher(
+            "MATCH (n) WHERE 'Nope' IN labels(n) RETURN count(n) AS c"
+        )
+        assert rows[0]["c"] == 0
+
+    def test_size_of_labels(self, social_graph):
+        """Single-label model: size(labels(n)) == 1 for every node."""
+        rows = social_graph.cypher(
+            "MATCH (n:Person) RETURN size(labels(n)) AS s LIMIT 1"
+        )
+        assert rows[0]["s"] == 1
+
+    def test_labels_escape_double_quote(self):
+        """JSON-escape path handles labels containing `"` correctly."""
+        g = KnowledgeGraph()
+        g.cypher('CREATE (n:`Has"Quote` {name: "x"})')
+        rows = g.cypher('MATCH (n) WHERE n.name = "x" RETURN labels(n) AS l')
+        assert rows[0]["l"] == ['Has"Quote']
+
+    def test_labels_escape_backslash(self):
+        """JSON-escape path handles labels containing `\\` correctly."""
+        g = KnowledgeGraph()
+        g.cypher(r'CREATE (n:`Has\Backslash` {name: "x"})')
+        rows = g.cypher('MATCH (n) WHERE n.name = "x" RETURN labels(n) AS l')
+        assert rows[0]["l"] == [r"Has\Backslash"]
+
 
 class TestIndexAccess:
     """Index access expr[i] on various list expressions."""
