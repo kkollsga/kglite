@@ -153,9 +153,11 @@ fn ping(message: Option<String>) -> String {
 // ---------------------------------------------------------------------------
 
 /// Generic GitHub REST GET. Relative paths (`pulls?state=open`) auto-
-/// prefix with `/repos/<repo>/`; absolute paths (`search/issues?q=...`)
-/// pass through. Returns pretty-printed JSON, truncated at `truncate_at`
-/// chars.
+/// prefix with `/repos/<repo>/`; top-level paths (`search/issues?q=...`,
+/// `repos/owner/repo`) pass through. A leading slash is optional and
+/// accepted on either form — `/repos/owner/repo` and `repos/owner/repo`
+/// resolve identically (mcp-methods 0.3.39). Returns pretty-printed JSON,
+/// truncated at `truncate_at` chars.
 #[pyfunction]
 #[pyo3(signature = (repo, path, *, truncate_at=80_000))]
 fn git_api(repo: &str, path: &str, truncate_at: usize) -> String {
