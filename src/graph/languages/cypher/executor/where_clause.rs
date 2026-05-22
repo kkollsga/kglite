@@ -520,9 +520,7 @@ impl<'a> CypherExecutor<'a> {
                     _ => Ok(None),
                 }
             }
-            Predicate::Not(inner) => {
-                Ok(self.evaluate_predicate_tristate(inner, row)?.map(|b| !b))
-            }
+            Predicate::Not(inner) => Ok(self.evaluate_predicate_tristate(inner, row)?.map(|b| !b)),
             Predicate::LabelCheck { variable, label } => {
                 // True iff the variable is bound to a node whose type matches `label`.
                 // Unbound (OPTIONAL MATCH) or non-node bindings are false.
@@ -692,7 +690,10 @@ impl<'a> CypherExecutor<'a> {
                         // — same as `false` — to keep with Cypher's "exists
                         // a row that satisfies" semantics. Strict tristate
                         // is preserved at the outer boundary, not here.
-                        matches!(self.evaluate_predicate_tristate(where_pred, r), Ok(Some(true)))
+                        matches!(
+                            self.evaluate_predicate_tristate(where_pred, r),
+                            Ok(Some(true))
+                        )
                     })))
                 } else {
                     Ok(Some(true))

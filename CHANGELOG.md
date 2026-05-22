@@ -7,6 +7,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.52] — Cypher NULL semantics, batch dedup, shortestPath dedup
+
+### Fixed — Three-valued NULL logic in WHERE predicates
+
+KGLite's WHERE evaluator collapsed Cypher three-valued NULL logic
+to boolean at the predicate boundary, producing silent wrong rows
+in two patterns. Both are openCypher violations.
+
+- `WHERE x <> 'literal'` now correctly excludes rows where `x` is
+  missing. Before this fix, `NotEquals(NULL, 'literal')` returned
+  `true`, so missing-property rows were kept.
+- `WHERE NOT (x CONTAINS 'lit')` (and the `STARTS WITH` / `ENDS WITH`
+  variants) now correctly excludes rows where `x` is missing.
+  Before this fix, `NULL CONTAINS x` was `false` and `NOT false` was
+  `true`, keeping the rows.
+- Kleene `AND` / `OR` / `XOR` composition is correct: NULL only
+  propagates when no absorbing element is present.
+- `Predicate::Not(None)` is `None`, not flipped to `true`.
+
+External `evaluate_predicate` callers (HAVING, OPTIONAL MATCH filter,
+list comprehensions, spatial joins) keep their `Result<bool, _>`
+contract — the internal `evaluate_predicate_tristate` does the
+NULL-aware composition and the wrapper collapses `None` to `false`
+(which every external caller already treated as "drop the row").
+
+### Fixed — `labels(n)` JSON escape
+
+The hand-rolled escape in `scalar_functions::"labels"` covered only
+`\\` and `"`. Labels containing control characters or non-ASCII
+escapes could produce invalid JSON, breaking the Python deserializer.
+Switched to `serde_json::to_string` for the encoding side; the
+consumer (`parse_list_value`) was already symmetric. No user-visible
+change for ASCII-only labels — this hardens the edge cases.
+
+The two call sites (`scalar_functions.rs::"labels"` and
+`helpers.rs::parse_list_value`) carry a Track-C swap-point note: when
+`Value::List` lands they're the first sites to migrate. See
+`docs/explanation/multi-label-rationale.md`.
+
+### Fixed — Undirected `shortestPath` neighbour dedup
+
+`filtered_neighbors_undirected` concatenated outgoing and incoming
+neighbours into one `Vec` without deduplicating. Bidirectional edge
+pairs (a→b plus b→a) and parallel edges of the same type each
+surfaced the same neighbour twice. BFS-based `shortestPath` was
+saved by its visited bitmap, but `all_paths` (DFS) paid duplicate
+work per visit.
+
+In-place sort + dedup after collection. Insertion order isn't
+load-bearing for any caller (BFS / DFS use set-membership, not order).
+
+### Performance — Per-chunk HashMap dedup in batch flush
+
+`ConnectionBatchProcessor::flush_chunk` called
+`graph.edges_connecting(src, tgt).find(...)` per edge to detect
+existing edges of the same connection type — O(degree(src)) per
+edge. For hub-source fan-out into an *existing* connection type
+(the `skip_existence_check=false` path), a chunk of N edges from
+a hub of degree D ran in O(N·D).
+
+`flush_chunk` now builds a single
+`HashMap<(NodeIndex, NodeIndex), EdgeIndex>` at the top of the chunk
+keyed on the unique source set's outgoing edges of the target
+connection type, then probes the map per edge. The map is mutated
+as edges are created (preserving within-chunk consolidation
+semantics) and updated on Replace (so later iterations hit the new
+edge id, not the removed one).
+
+Microbenchmark on 5 hubs × 10k targets = 50k edges added to an
+existing `:R` connection type: scales linearly with N (≈1.4s
+wall-clock for the fan-out add, ≈0.5s for a re-add in Update or
+Skip mode), instead of the prior O(N·D) curve.
+
+### Added — Multi-label decision doc
+
+`docs/explanation/multi-label-rationale.md` captures the
+investigation: KGLite stays single-label by design, the v3
+columnar layout is keyed by primary type, and the motivating
+multi-label use cases (Wikidata, code-tree refinements) are
+already served by `INSTANCE_OF` / `KIND_OF` edges. Lists three
+stepping-stone helpers (`Value::List`, subtype-edge planner
+rewrite, `GraphRead::node_types_of` shim) that lower the future
+cost without committing to the full multi-label implementation.
+
+### Added — Differential corpus coverage
+
+`tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` gains 12
+entries covering the shapes the above fixes address (NULL
+comparisons, NULL through string predicates under NOT, Kleene
+composition, `labels()` consumers, undirected `shortestPath`).
+The corpus is the regression guard against silent wrong-row bugs;
+the additions lock in the new behaviour.
+
+### Internal — Cleared 9 pre-existing parity-test failures
+
+Housekeeping pass on `pytest -m parity` — every failure pre-dated
+0.9.52 and none were caused by the work above. Fixed in bulk so
+the release lands a clean gate:
+
+- Phase 2 — restrict CREATE/MERGE-via-cypher tests to memory+mapped
+  (disk lockout has been intentional since 0.9.26); replaced the
+  legacy "disk MERGE works" test with two dedicated lockout-message
+  guards.
+- Phase 4 — refresh the `.kgl` v3 golden digest. The hash embeds the
+  version string in the header, so every release shifts it; the
+  allowlist hadn't been updated since 0.9.7.
+- Phase 5/6 — extend the `GraphBackend::` enum-match whitelist to
+  cover `mutation/subgraph_streaming.rs` (disk-to-disk streaming
+  filter) and `pyapi/algorithms.rs` (disk-only PyO3 entry points).
+  Both are structural peers of existing whitelist entries.
+- Phase 7 — extract `column_store.rs`'s 293-line test block to a
+  sibling `column_store_tests.rs` via `#[path]`, dropping the
+  production file from 2515 to 2228 lines (under the 2500-line
+  god-file cap). Add `// SAFETY:` comments to 5 mmap fadvise /
+  env-var-cleanup blocks (each was correct as written; only the
+  justification was missing).
+- Phase 5 — bump `test_binary_size_regression` baseline from the
+  stale 0.9.0 value (23.5 MB) to the current 0.9.52 size (35.9 MB).
+  Gate stays +10% on the new baseline. The docstring carries an
+  explicit "what grew" breakdown so the next bump is grounded —
+  primary growth contributors over the 0.9.0 → 0.9.52 window were
+  the 14 tree-sitter grammars, the fastembed feature default-on
+  for the kglite-mcp-server binary, mcp-methods evolution, and
+  the sodir / wikidata workspace crates.
+
+All 98 parity-marked tests now pass.
+
+### Fixed — Four more Cypher correctness fixes (from the fortified suite)
+
+A test-suite fortification pass (see Internal section below) surfaced
+three additional bugs in the Cypher engine plus one discoverability
+inconsistency. All four are fixed:
+
+- `IN` predicates now propagate NULL per openCypher. Completes the
+  tri-state work the 0.9.52 B1/B2 fix started: `WHERE x IN
+  [literal, ...]`, `WHERE x IN $param`, and the `InLiteralSet`
+  fast-path all return NULL on NULL LHS or no-match-with-NULL-element.
+  Pre-fix, those rows leaked through `NOT (x IN [...])` and similar
+  shapes.
+- `list[..]` parses as a full-range slice (both ends omitted). Was a
+  parser asymmetry — `[start..]` and `[..end]` worked, `[..]` errored.
+- `Int64::MIN` (`-9223372036854775808`) is now expressible as a
+  literal. Tokenizer-level lookback: when the digit string overflows
+  i64 *and* is exactly `9223372036854775808` *and* the previous token
+  is `Dash`, the pair collapses to a single `IntLit(i64::MIN)`.
+- `keys(n)` enumerates the user-set unique-id-field and title-field
+  column names (e.g. `person_id`, `name`) alongside the virtual
+  aliases (`id`, `title`, `type`). Discoverability fix: `n.person_id`
+  was readable but absent from `keys(n)`.
+
+### Internal — Test-suite fortification
+
+The 0.9.52 release surfaced a structural gap in the test
+infrastructure: parity gates were excluded from default CI, perf
+benchmarks tracked but didn't gate, and several captured constants
+drifted silently across releases. Six-commit overhaul:
+
+- **Structural parity gates → default CI** (god-file cap,
+  unsafe-needs-SAFETY, mod_rs purity, enum-match audit, recording
+  symbol export). Previously opt-in via `-m parity`; 10 had drifted
+  to red on `main` before this session cleared them.
+- **Perf-regression gate** (`scripts/compare_bench.py`,
+  `tests/benchmarks/baselines/0_9_52.json`, CI `perf-regression`
+  job). Blocks PRs on >20% min-time regression against the
+  versioned baseline. Threshold matches the CLAUDE.md performance
+  protocol.
+- **Captured-constants refresh ritual**
+  (`scripts/refresh_release_constants.py`,
+  `make refresh-release-constants`, CLAUDE.md section). One script
+  refreshes the `.kgl` golden digest, binary-size baseline, and perf
+  baseline at release time. Idempotent; only the version-tagged
+  baseline triggers re-capture. Pre-existing stale `.kgl` golden
+  digest fixed in the same commit.
+- **+25 openCypher edge-case tests** + 1 differential corpus query
+  covering NULL semantics, unicode strings, numeric boundaries,
+  collection edges, aggregate NULL handling, and pattern-matching
+  edges (self-loops, zero-length paths, parallel edges). Surfaced
+  the three Cypher bugs above + one pre-existing parser bug
+  (`Int64::MIN` literal) that's also now fixed.
+- **On-demand Neo4j conformance runner**
+  (`scripts/cypher_conformance.py`, `make neo4j-{up,down,conformance}`,
+  `docs/explanation/cypher-conformance.md`). Standalone — not in CI,
+  no external service dependency for the regular test run. Reuses
+  the differential corpus + shared fixtures.
+- **Property-naming round-trip pins** (`test_export.py`). Six tests
+  documenting `d3` export flattening, alias-table semantics, and
+  `to_neo4j` renaming. Caught the `keys(n)` discoverability bug
+  fixed above.
+
+Test count: `pytest tests/` goes from ~2786 (pre-session) to **2826
+passed / 1 skipped / 0 xfailed**. `pytest -m parity` stays 98/98
+green. `make lint` clean.
+
 ## [0.9.51] — Dart / Flutter code-tree support
 
 ### Added — Dart language parser

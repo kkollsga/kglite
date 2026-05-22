@@ -1531,32 +1531,21 @@ class TestThreeValuedNullSemantics:
     # B1: comparison operators propagate NULL
 
     def test_b1_ne_with_null_excludes_missing(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email <> 'alice@test.com' "
-            "RETURN p.title AS n ORDER BY n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email <> 'alice@test.com' RETURN p.title AS n ORDER BY n")
         # Bob, Diana excluded (NULL <> 'alice' is NULL); Alice excluded by inequality.
         assert [r["n"] for r in rows] == ["Charlie", "Eve"]
 
     def test_b1_eq_with_null_still_excludes(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email = 'alice@test.com' "
-            "RETURN p.title AS n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email = 'alice@test.com' RETURN p.title AS n")
         assert [r["n"] for r in rows] == ["Alice"]
 
     def test_b1_lt_with_null_excludes_missing(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email < 'z' RETURN p.title AS n ORDER BY n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email < 'z' RETURN p.title AS n ORDER BY n")
         # Bob, Diana excluded (NULL < 'z' is NULL).
         assert [r["n"] for r in rows] == ["Alice", "Charlie", "Eve"]
 
     def test_b1_not_lt_with_null_excludes_missing(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE NOT (p.email < 'z') "
-            "RETURN p.title AS n ORDER BY n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE NOT (p.email < 'z') RETURN p.title AS n ORDER BY n")
         # All three with email evaluate `< 'z'` as true → NOT true → false → drop.
         # Bob and Diana: NULL < 'z' is NULL → NOT NULL is NULL → drop.
         # Nobody matches.
@@ -1566,33 +1555,27 @@ class TestThreeValuedNullSemantics:
 
     def test_b2_not_contains_with_null_excludes_missing(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE NOT (p.email CONTAINS 'alice') "
-            "RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE NOT (p.email CONTAINS 'alice') RETURN p.title AS n ORDER BY n"
         )
         # Before fix: kept Bob and Diana because NOT (NULL CONTAINS 'x') = NOT false = true.
         assert [r["n"] for r in rows] == ["Charlie", "Eve"]
 
     def test_b2_not_starts_with_with_null_excludes_missing(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE NOT (p.email STARTS WITH 'alice') "
-            "RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE NOT (p.email STARTS WITH 'alice') RETURN p.title AS n ORDER BY n"
         )
         assert [r["n"] for r in rows] == ["Charlie", "Eve"]
 
     def test_b2_not_ends_with_with_null_excludes_missing(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE NOT (p.email ENDS WITH 'test.com') "
-            "RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE NOT (p.email ENDS WITH 'test.com') RETURN p.title AS n ORDER BY n"
         )
         # Everyone with email matches `ENDS WITH 'test.com'` → NOT true → false → drop.
         # Bob, Diana: NULL → NOT NULL → NULL → drop.
         assert len(rows) == 0
 
     def test_b2_contains_with_null_excludes_missing(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email CONTAINS 'alice' "
-            "RETURN p.title AS n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email CONTAINS 'alice' RETURN p.title AS n")
         # Bare positive CONTAINS — the existing collapse already gave the
         # right answer here, but lock it in alongside the fix.
         assert [r["n"] for r in rows] == ["Alice"]
@@ -1601,34 +1584,28 @@ class TestThreeValuedNullSemantics:
 
     def test_kleene_or_null_absorbs_when_other_is_true(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email = 'never' OR p.title = 'Bob' "
-            "RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE p.email = 'never' OR p.title = 'Bob' RETURN p.title AS n ORDER BY n"
         )
         # For Bob: (NULL OR true) = true → kept. Others fail both sides.
         assert [r["n"] for r in rows] == ["Bob"]
 
     def test_kleene_and_null_absorbs_when_other_is_false(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email <> 'never' AND p.title = 'Alice' "
-            "RETURN p.title AS n"
+            "MATCH (p:Person) WHERE p.email <> 'never' AND p.title = 'Alice' RETURN p.title AS n"
         )
         # For Bob: (NULL AND false) = false → dropped. For Alice: (true AND true) = true.
         assert [r["n"] for r in rows] == ["Alice"]
 
     def test_kleene_and_null_when_other_is_true(self, cypher_graph):
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email <> 'never' AND p.age > 0 "
-            "RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE p.email <> 'never' AND p.age > 0 RETURN p.title AS n ORDER BY n"
         )
         # For Bob/Diana: (NULL AND true) = NULL → dropped (row excluded).
         # For Alice/Charlie/Eve: (true AND true) = true → kept.
         assert [r["n"] for r in rows] == ["Alice", "Charlie", "Eve"]
 
     def test_kleene_or_null_when_other_is_false(self, cypher_graph):
-        rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE p.email = 'never' OR p.age < 0 "
-            "RETURN p.title AS n"
-        )
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE p.email = 'never' OR p.age < 0 RETURN p.title AS n")
         # Bob/Diana: (NULL OR false) = NULL → dropped.
         # Others: (false OR false) = false → dropped.
         assert len(rows) == 0

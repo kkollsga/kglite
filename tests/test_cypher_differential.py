@@ -469,15 +469,13 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "kleene_or_null_lhs",
         "social_graph",
-        "MATCH (p:Person) WHERE p.email = 'never' OR p.city = 'Oslo' "
-        "RETURN p.name AS n ORDER BY n",
+        "MATCH (p:Person) WHERE p.email = 'never' OR p.city = 'Oslo' RETURN p.name AS n ORDER BY n",
         None,
     ),
     (
         "kleene_and_null_lhs",
         "social_graph",
-        "MATCH (p:Person) WHERE p.email <> 'never' AND p.city = 'Oslo' "
-        "RETURN p.name AS n ORDER BY n",
+        "MATCH (p:Person) WHERE p.email <> 'never' AND p.city = 'Oslo' RETURN p.name AS n ORDER BY n",
         None,
     ),
     # ── B5: labels() consumer invariants (single-label model lock-in) ──
@@ -596,8 +594,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "shortest_undirected_dense",
         "social_graph",
-        "MATCH p = shortestPath((a:Person {person_id:1})-[*..6]-(b:Person {person_id:20})) "
-        "RETURN length(p) AS L",
+        "MATCH p = shortestPath((a:Person {person_id:1})-[*..6]-(b:Person {person_id:20})) RETURN length(p) AS L",
         None,
     ),
     # Zero-length variable-length path: `[:R*0..N]` matches the anchor

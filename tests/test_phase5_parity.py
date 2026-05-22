@@ -203,16 +203,29 @@ def test_graph_copy_cow_correctness_mapped():
 
 @pytest.mark.binary_size
 def test_binary_size_regression():
-    """Release `.dylib` size stays under the 0.9.0 budget.
+    """Release `.dylib` size stays under a +10% budget over the
+    last baseline.
 
-    Phase 4 exit baseline was 6,996,688 bytes (≈6.67 MB). Codebase
-    has grown ~3.4× since (multi-mode storage, spatial, timeseries,
-    code-tree, MCP, Cypher dialect coverage). 0.9.0 baseline:
-    23,535,664 bytes (~22.4 MB) at the end of the
-    Cluster-2/3/6/7 sweep. Gate is +10% on this baseline.
-    Raising it requires a deliberate "what grew" review — see the
-    `bench/api_benchmark.py` pre/post comparison or `cargo
-    bloat --release` for the drilldown.
+    Baseline history:
+      - Phase 4 exit:  6,996,688 bytes (≈6.67 MB).
+      - 0.9.0:        23,535,664 bytes (≈22.4 MB). Multi-mode storage,
+                      spatial, timeseries, code-tree, MCP, Cypher
+                      dialect coverage all landed in the 0.8.x sweep.
+      - 0.9.52:       35,925,104 bytes (≈34.3 MB). Growth between
+                      0.9.0 and 0.9.52 (~52%) is concentrated in:
+                        * 14 tree-sitter grammars (Dart added 0.9.51,
+                          Swift 0.9.40, PHP/HTML/CSS in the 0.9.2x
+                          range — each grammar is ~0.5-1 MB);
+                        * fastembed feature default-on for the
+                          kglite-mcp-server binary build (ort runtime
+                          + hf-hub native TLS path, ~3-4 MB);
+                        * mcp-methods 0.3.x server-feature evolution;
+                        * sodir / wikidata workspace crates with
+                          their own dependency closures.
+
+    Raising the baseline is a deliberate act — every bump should
+    be accompanied by an updated growth note above. For a precise
+    drilldown, run `cargo bloat --release --crates --filter kglite`.
     """
 
     candidates = [
@@ -224,12 +237,13 @@ def test_binary_size_regression():
         pytest.skip("release build not present — run `cargo build --release` first")
 
     size = bin_path.stat().st_size
-    baseline = 23_535_664
+    baseline = 35_925_104  # 0.9.52 baseline
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.9.0 baseline {baseline:,}). "
-        "Investigate what grew before raising the gate."
+        f"(+10% over 0.9.52 baseline {baseline:,}). "
+        "Investigate what grew before raising the gate — see the "
+        "growth note in this test's docstring for the breakdown shape."
     )
 
 

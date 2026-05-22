@@ -97,21 +97,35 @@ class TestBatchFlushDedup:
         g = KnowledgeGraph()
         g.add_nodes(
             pd.DataFrame([{"id": h, "name": f"hub{h}"} for h in range(num_hubs)]),
-            "Hub", "id", "name",
+            "Hub",
+            "id",
+            "name",
         )
         g.add_nodes(
-            pd.DataFrame([
-                {"id": h * targets_per_hub + t, "name": f"t{h * targets_per_hub + t}"}
-                for h in range(num_hubs) for t in range(targets_per_hub)
-            ]),
-            "Target", "id", "name",
+            pd.DataFrame(
+                [
+                    {"id": h * targets_per_hub + t, "name": f"t{h * targets_per_hub + t}"}
+                    for h in range(num_hubs)
+                    for t in range(targets_per_hub)
+                ]
+            ),
+            "Target",
+            "id",
+            "name",
         )
         g.add_connections(
-            pd.DataFrame([
-                {"from_id": h, "to_id": h * targets_per_hub + t}
-                for h in range(num_hubs) for t in range(targets_per_hub)
-            ]),
-            "R", "Hub", "from_id", "Target", "to_id",
+            pd.DataFrame(
+                [
+                    {"from_id": h, "to_id": h * targets_per_hub + t}
+                    for h in range(num_hubs)
+                    for t in range(targets_per_hub)
+                ]
+            ),
+            "R",
+            "Hub",
+            "from_id",
+            "Target",
+            "to_id",
         )
         return g
 
@@ -124,11 +138,12 @@ class TestBatchFlushDedup:
         before = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
 
         g.add_connections(
-            pd.DataFrame([
-                {"from_id": h, "to_id": h * 200 + t}
-                for h in range(3) for t in range(200)
-            ]),
-            "R", "Hub", "from_id", "Target", "to_id",
+            pd.DataFrame([{"from_id": h, "to_id": h * 200 + t} for h in range(3) for t in range(200)]),
+            "R",
+            "Hub",
+            "from_id",
+            "Target",
+            "to_id",
         )
         after = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
         assert before == after == 600, (before, after)
@@ -139,14 +154,17 @@ class TestBatchFlushDedup:
         # New targets 1000..1599 — entirely new IDs.
         g.add_nodes(
             pd.DataFrame([{"id": 1000 + i, "name": f"u{i}"} for i in range(600)]),
-            "Target", "id", "name",
+            "Target",
+            "id",
+            "name",
         )
         g.add_connections(
-            pd.DataFrame([
-                {"from_id": h, "to_id": 1000 + h * 200 + t}
-                for h in range(3) for t in range(200)
-            ]),
-            "R", "Hub", "from_id", "Target", "to_id",
+            pd.DataFrame([{"from_id": h, "to_id": 1000 + h * 200 + t} for h in range(3) for t in range(200)]),
+            "R",
+            "Hub",
+            "from_id",
+            "Target",
+            "to_id",
         )
         total = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
         assert total == 1200, total
@@ -155,11 +173,12 @@ class TestBatchFlushDedup:
         """Skip-mode (pre-buffer + flush) still drops all duplicates."""
         g = self._seed(num_hubs=2, targets_per_hub=50)
         stats = g.add_connections(
-            pd.DataFrame([
-                {"from_id": h, "to_id": h * 50 + t}
-                for h in range(2) for t in range(50)
-            ]),
-            "R", "Hub", "from_id", "Target", "to_id",
+            pd.DataFrame([{"from_id": h, "to_id": h * 50 + t} for h in range(2) for t in range(50)]),
+            "R",
+            "Hub",
+            "from_id",
+            "Target",
+            "to_id",
             conflict_handling="skip",
         )
         assert stats["connections_created"] == 0, stats
@@ -174,14 +193,9 @@ class TestBatchFlushDedup:
         g = self._seed(num_hubs=2, targets_per_hub=10)
         # 20 existing edges. Replace all 20, then immediately replace the
         # same set again — exercises the lookup-update-on-replace path.
-        repl_df = pd.DataFrame([
-            {"from_id": h, "to_id": h * 10 + t}
-            for h in range(2) for t in range(10)
-        ])
-        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id",
-                          conflict_handling="replace")
-        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id",
-                          conflict_handling="replace")
+        repl_df = pd.DataFrame([{"from_id": h, "to_id": h * 10 + t} for h in range(2) for t in range(10)])
+        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id", conflict_handling="replace")
+        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id", conflict_handling="replace")
         total = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
         assert total == 20, total
 
@@ -197,23 +211,31 @@ class TestBatchFlushDedup:
         """
         g = KnowledgeGraph()
         g.add_nodes(
-            pd.DataFrame([{"id": 1, "name": "a"}, {"id": 2, "name": "b"},
-                          {"id": 3, "name": "c"}]),
-            "N", "id", "name",
+            pd.DataFrame([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}]),
+            "N",
+            "id",
+            "name",
         )
         # Establish the :R connection type with a sentinel edge.
         g.add_connections(
             pd.DataFrame([{"src": 1, "tgt": 3}]),
-            "R", "N", "src", "N", "tgt",
+            "R",
+            "N",
+            "src",
+            "N",
+            "tgt",
         )
         # Now :R exists, so skip_existence_check=false. Two identical
         # (1, 2) rows in one chunk must collapse to one edge.
         g.add_connections(
             pd.DataFrame([{"src": 1, "tgt": 2}, {"src": 1, "tgt": 2}]),
-            "R", "N", "src", "N", "tgt",
+            "R",
+            "N",
+            "src",
+            "N",
+            "tgt",
         )
-        total = g.cypher("MATCH (a:N {name:'a'})-[r:R]->(b:N {name:'b'}) "
-                         "RETURN count(r) AS c").to_list()[0]["c"]
+        total = g.cypher("MATCH (a:N {name:'a'})-[r:R]->(b:N {name:'b'}) RETURN count(r) AS c").to_list()[0]["c"]
         assert total == 1, total
 
 

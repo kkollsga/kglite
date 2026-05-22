@@ -49,22 +49,16 @@ class TestLabelsFunction:
 
     def test_in_labels_matches(self, social_graph):
         """'Label' IN labels(n) works through the JSON-string encoding."""
-        rows = social_graph.cypher(
-            "MATCH (n) WHERE 'Person' IN labels(n) RETURN count(n) AS c"
-        )
+        rows = social_graph.cypher("MATCH (n) WHERE 'Person' IN labels(n) RETURN count(n) AS c")
         assert rows[0]["c"] == 3
 
     def test_in_labels_does_not_match(self, social_graph):
-        rows = social_graph.cypher(
-            "MATCH (n) WHERE 'Nope' IN labels(n) RETURN count(n) AS c"
-        )
+        rows = social_graph.cypher("MATCH (n) WHERE 'Nope' IN labels(n) RETURN count(n) AS c")
         assert rows[0]["c"] == 0
 
     def test_size_of_labels(self, social_graph):
         """Single-label model: size(labels(n)) == 1 for every node."""
-        rows = social_graph.cypher(
-            "MATCH (n:Person) RETURN size(labels(n)) AS s LIMIT 1"
-        )
+        rows = social_graph.cypher("MATCH (n:Person) RETURN size(labels(n)) AS s LIMIT 1")
         assert rows[0]["s"] == 1
 
     def test_labels_escape_double_quote(self):

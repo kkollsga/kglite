@@ -301,10 +301,7 @@ class TestShortestPathUndirected:
             g.cypher(f"CREATE (:N {{name: '{nm}'}})")
         g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R]->(b)")
         g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (b)-[:R]->(a)")
-        rows = g.cypher(
-            "MATCH p = shortestPath((a:N {name:'A'})-[*]-(b:N {name:'B'})) "
-            "RETURN length(p) AS L"
-        )
+        rows = g.cypher("MATCH p = shortestPath((a:N {name:'A'})-[*]-(b:N {name:'B'})) RETURN length(p) AS L")
         assert len(rows) == 1
         assert rows[0]["L"] == 1
 
@@ -318,10 +315,7 @@ class TestShortestPathUndirected:
         g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R {tag:'x'}]->(b)")
         g.cypher("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:R {tag:'y'}]->(b)")
         g.cypher("MATCH (b:N {name:'B'}), (c:N {name:'C'}) CREATE (b)-[:R]->(c)")
-        rows = g.cypher(
-            "MATCH p = shortestPath((a:N {name:'A'})-[*]-(c:N {name:'C'})) "
-            "RETURN length(p) AS L"
-        )
+        rows = g.cypher("MATCH p = shortestPath((a:N {name:'A'})-[*]-(c:N {name:'C'})) RETURN length(p) AS L")
         assert rows[0]["L"] == 2
 
 

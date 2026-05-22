@@ -722,8 +722,7 @@ impl ConnectionBatchProcessor {
                         // Update the lookup so any later chunk entry with
                         // the same (src, tgt) hits the freshly-created edge,
                         // not the removed one.
-                        existing_lookup
-                            .insert((conn.source_idx, conn.target_idx), new_id);
+                        existing_lookup.insert((conn.source_idx, conn.target_idx), new_id);
                         stats.connections_created += 1;
                     }
                     ConflictHandling::Update => {
@@ -826,8 +825,7 @@ impl ConnectionBatchProcessor {
                 // No-op when skip_existence_check is true (the lookup is
                 // unused and kept empty for that path).
                 if !self.skip_existence_check {
-                    existing_lookup
-                        .insert((conn.source_idx, conn.target_idx), new_id);
+                    existing_lookup.insert((conn.source_idx, conn.target_idx), new_id);
                 }
                 stats.connections_created += 1;
             }
