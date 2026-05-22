@@ -422,11 +422,50 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
+    /// Evaluate a predicate in boolean (WHERE-row-keep) terms.
+    ///
+    /// External callers (HAVING, OPTIONAL MATCH filter, list comprehensions,
+    /// spatial joins) only care whether to keep the row. This wrapper
+    /// collapses three-valued NULL semantics: `Some(true)` → `true`,
+    /// `Some(false)` and `None` → `false`. That preserves the historical
+    /// "row drops on false" contract at every callsite while letting the
+    /// internal tristate machinery enforce correct NULL propagation
+    /// through `NOT` / `AND` / `OR` / `XOR` / comparison operators and
+    /// string predicates (B1, B2). See `evaluate_predicate_tristate`.
     pub(super) fn evaluate_predicate(
         &self,
         pred: &Predicate,
         row: &ResultRow,
     ) -> Result<bool, String> {
+        Ok(self.evaluate_predicate_tristate(pred, row)? == Some(true))
+    }
+
+    /// Three-valued predicate evaluator implementing openCypher NULL
+    /// semantics:
+    ///
+    /// - Comparison operators (`=`, `<>`, `<`, `<=`, `>`, `>=`) with any
+    ///   NULL operand → `None`. Fixes B1: `WHERE x <> 'lit'` no longer
+    ///   keeps rows where `x` is missing.
+    /// - String predicates (`STARTS WITH`, `ENDS WITH`, `CONTAINS`) with
+    ///   NULL operand → `None`. Combined with the NULL-aware `Not` arm,
+    ///   fixes B2: `WHERE NOT (x CONTAINS 'y')` no longer keeps
+    ///   rows where `x` is missing.
+    /// - `AND` / `OR` follow Kleene three-valued logic with short-circuit
+    ///   on the absorbing element.
+    /// - `XOR` is `None` if either side is `None`.
+    /// - `NOT None` is `None`; `NOT Some(b)` is `Some(!b)`.
+    ///
+    /// `IN`/`InExpression`/`InLiteralSet` keep their current boolean
+    /// behaviour for now. Strict openCypher says they should return
+    /// `None` when the LHS is NULL or when the list contains NULL and no
+    /// match is found — both are deferred (no concrete consumer broken
+    /// today, and the fix is symmetric to this one but lives in three
+    /// arms).
+    fn evaluate_predicate_tristate(
+        &self,
+        pred: &Predicate,
+        row: &ResultRow,
+    ) -> Result<Option<bool>, String> {
         match pred {
             Predicate::Comparison {
                 left,
@@ -435,86 +474,126 @@ impl<'a> CypherExecutor<'a> {
             } => {
                 let left_val = self.evaluate_expression(left, row)?;
                 let right_val = self.evaluate_expression(right, row)?;
+                if matches!(left_val, Value::Null) || matches!(right_val, Value::Null) {
+                    return Ok(None);
+                }
                 evaluate_comparison(&left_val, operator, &right_val, Some(&self.regex_cache))
+                    .map(Some)
             }
             Predicate::And(left, right) => {
-                // Short-circuit: if left is false, skip right
-                if !self.evaluate_predicate(left, row)? {
-                    return Ok(false);
+                // Kleene AND: FALSE absorbs (short-circuits even past NULL);
+                // NULL propagates only when no FALSE is present.
+                let lv = self.evaluate_predicate_tristate(left, row)?;
+                if lv == Some(false) {
+                    return Ok(Some(false));
                 }
-                self.evaluate_predicate(right, row)
+                let rv = self.evaluate_predicate_tristate(right, row)?;
+                if rv == Some(false) {
+                    return Ok(Some(false));
+                }
+                if lv.is_none() || rv.is_none() {
+                    return Ok(None);
+                }
+                Ok(Some(true))
             }
             Predicate::Or(left, right) => {
-                // Short-circuit: if left is true, skip right
-                if self.evaluate_predicate(left, row)? {
-                    return Ok(true);
+                // Kleene OR: TRUE absorbs; NULL propagates only when no
+                // TRUE is present.
+                let lv = self.evaluate_predicate_tristate(left, row)?;
+                if lv == Some(true) {
+                    return Ok(Some(true));
                 }
-                self.evaluate_predicate(right, row)
+                let rv = self.evaluate_predicate_tristate(right, row)?;
+                if rv == Some(true) {
+                    return Ok(Some(true));
+                }
+                if lv.is_none() || rv.is_none() {
+                    return Ok(None);
+                }
+                Ok(Some(false))
             }
             Predicate::Xor(left, right) => {
-                let l = self.evaluate_predicate(left, row)?;
-                let r = self.evaluate_predicate(right, row)?;
-                Ok(l ^ r)
+                let lv = self.evaluate_predicate_tristate(left, row)?;
+                let rv = self.evaluate_predicate_tristate(right, row)?;
+                match (lv, rv) {
+                    (Some(a), Some(b)) => Ok(Some(a ^ b)),
+                    _ => Ok(None),
+                }
             }
-            Predicate::Not(inner) => Ok(!self.evaluate_predicate(inner, row)?),
+            Predicate::Not(inner) => {
+                Ok(self.evaluate_predicate_tristate(inner, row)?.map(|b| !b))
+            }
             Predicate::LabelCheck { variable, label } => {
                 // True iff the variable is bound to a node whose type matches `label`.
                 // Unbound (OPTIONAL MATCH) or non-node bindings are false.
                 if let Some(&idx) = row.node_bindings.get(variable) {
                     if let Some(node) = self.graph.graph.node_weight(idx) {
-                        return Ok(node.node_type_str(&self.graph.interner) == label);
+                        return Ok(Some(node.node_type_str(&self.graph.interner) == label));
                     }
                 }
-                Ok(false)
+                Ok(Some(false))
             }
             Predicate::IsNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
-                Ok(matches!(val, Value::Null))
+                Ok(Some(matches!(val, Value::Null)))
             }
             Predicate::IsNotNull(expr) => {
                 let val = self.evaluate_expression(expr, row)?;
-                Ok(!matches!(val, Value::Null))
+                Ok(Some(!matches!(val, Value::Null)))
             }
             Predicate::In { expr, list } => {
+                // Deferred: strict openCypher returns NULL when LHS is NULL
+                // or when no match is found and the list contains NULL.
                 let val = self.evaluate_expression(expr, row)?;
                 for item in list {
                     let item_val = self.evaluate_expression(item, row)?;
                     if crate::graph::core::filtering::values_equal(&val, &item_val) {
-                        return Ok(true);
+                        return Ok(Some(true));
                     }
                 }
-                Ok(false)
+                Ok(Some(false))
             }
             Predicate::InLiteralSet { expr, values } => {
                 let val = self.evaluate_expression(expr, row)?;
                 // Try fast HashSet lookup first, fall back to cross-type comparison
-                Ok(values.contains(&val)
-                    || values
-                        .iter()
-                        .any(|v| crate::graph::core::filtering::values_equal(v, &val)))
+                Ok(Some(
+                    values.contains(&val)
+                        || values
+                            .iter()
+                            .any(|v| crate::graph::core::filtering::values_equal(v, &val)),
+                ))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
                 let pat = self.evaluate_expression(pattern, row)?;
+                if matches!(val, Value::Null) || matches!(pat, Value::Null) {
+                    return Ok(None);
+                }
                 match (&val, &pat) {
-                    (Value::String(s), Value::String(p)) => Ok(s.starts_with(p.as_str())),
-                    _ => Ok(false),
+                    (Value::String(s), Value::String(p)) => Ok(Some(s.starts_with(p.as_str()))),
+                    _ => Ok(Some(false)),
                 }
             }
             Predicate::EndsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
                 let pat = self.evaluate_expression(pattern, row)?;
+                if matches!(val, Value::Null) || matches!(pat, Value::Null) {
+                    return Ok(None);
+                }
                 match (&val, &pat) {
-                    (Value::String(s), Value::String(p)) => Ok(s.ends_with(p.as_str())),
-                    _ => Ok(false),
+                    (Value::String(s), Value::String(p)) => Ok(Some(s.ends_with(p.as_str()))),
+                    _ => Ok(Some(false)),
                 }
             }
             Predicate::Contains { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
                 let pat = self.evaluate_expression(pattern, row)?;
+                if matches!(val, Value::Null) || matches!(pat, Value::Null) {
+                    return Ok(None);
+                }
                 match (&val, &pat) {
-                    (Value::String(s), Value::String(p)) => Ok(s.contains(p.as_str())),
-                    _ => Ok(false),
+                    (Value::String(s), Value::String(p)) => Ok(Some(s.contains(p.as_str()))),
+                    _ => Ok(Some(false)),
                 }
             }
             Predicate::Exists {
@@ -524,7 +603,7 @@ impl<'a> CypherExecutor<'a> {
                 // Fast path: single 3-element pattern with one bound node
                 // — check edge existence directly without PatternExecutor
                 if let Some(result) = self.try_fast_exists_check(patterns, where_clause, row) {
-                    return result;
+                    return result.map(Some);
                 }
 
                 // Slow path: full pattern execution for complex EXISTS.
@@ -545,7 +624,7 @@ impl<'a> CypherExecutor<'a> {
                 let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
                 for pattern in patterns {
                     if combined_rows.is_empty() {
-                        return Ok(false);
+                        return Ok(Some(false));
                     }
                     // Resolve EqualsVar references against current row
                     let resolved;
@@ -579,26 +658,31 @@ impl<'a> CypherExecutor<'a> {
                 }
 
                 if combined_rows.is_empty() {
-                    return Ok(false);
+                    return Ok(Some(false));
                 }
                 if let Some(ref where_pred) = where_clause {
-                    Ok(combined_rows
-                        .iter()
-                        .any(|r| self.evaluate_predicate(where_pred, r).unwrap_or(false)))
+                    Ok(Some(combined_rows.iter().any(|r| {
+                        // EXISTS treats a NULL inner predicate as "no match"
+                        // — same as `false` — to keep with Cypher's "exists
+                        // a row that satisfies" semantics. Strict tristate
+                        // is preserved at the outer boundary, not here.
+                        matches!(self.evaluate_predicate_tristate(where_pred, r), Ok(Some(true)))
+                    })))
                 } else {
-                    Ok(true)
+                    Ok(Some(true))
                 }
             }
             Predicate::InExpression { expr, list_expr } => {
+                // Deferred: NULL LHS / NULL-bearing list should propagate NULL.
                 let val = self.evaluate_expression(expr, row)?;
                 let list_val = self.evaluate_expression(list_expr, row)?;
                 let items = parse_list_value(&list_val);
                 for item in &items {
                     if crate::graph::core::filtering::values_equal(&val, item) {
-                        return Ok(true);
+                        return Ok(Some(true));
                     }
                 }
-                Ok(false)
+                Ok(Some(false))
             }
         }
     }
