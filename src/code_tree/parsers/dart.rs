@@ -13,13 +13,16 @@
 //!     "extension_type") → `Class` graph nodes tagged by kind.
 //!   - `enum` declarations → EnumInfo (variants + enhanced-enum methods).
 //!   - `extends` / `with` / `implements` → EXTENDS / IMPLEMENTS edges.
-//!   - Methods + the `inherent` TypeRelationship for HAS_METHOD edges.
-//!   - Top-level functions → FunctionInfo.
+//!   - Methods, named & factory constructors, getters/setters, operators →
+//!     FunctionInfo + the `inherent` TypeRelationship for HAS_METHOD edges.
+//!     `is_async` / `is_static` / constructor & accessor flags in metadata.
+//!   - Member fields → AttributeInfo; top-level `const`/`final` → ConstantInfo;
+//!     `typedef` → ConstantInfo (kind="type_alias").
+//!   - Top-level functions / getters / setters → FunctionInfo.
 //!   - `import` / `export` directives → FileInfo.imports.
 //!   - Visibility from the Dart naming convention (leading `_` = private).
 //!
-//! Follow-up phases: constructors and accessors, calls, part/part-of,
-//! complexity metrics, and the Flutter pass.
+//! Follow-up phases: calls, part/part-of, complexity metrics, the Flutter pass.
 
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
@@ -27,7 +30,8 @@ use tree_sitter::{Node, Parser, Tree};
 use super::shared::node_text;
 use super::LanguageParser;
 use crate::code_tree::models::{
-    ClassInfo, EnumInfo, FileInfo, FunctionInfo, ParseResult, TypeRelationship,
+    AttributeInfo, ClassInfo, ConstantInfo, EnumInfo, FileInfo, FunctionInfo, MetadataMap,
+    ParseResult, TypeRelationship,
 };
 
 pub struct DartParser;
@@ -40,6 +44,15 @@ thread_local! {
         std::cell::RefCell::new(p)
     };
 }
+
+/// The constructor / accessor signature node kinds dispatched by
+/// [`DartParser::dispatch_signature`].
+const CONSTRUCTOR_KINDS: &[&str] = &[
+    "constructor_signature",
+    "factory_constructor_signature",
+    "constant_constructor_signature",
+    "redirecting_factory_constructor_signature",
+];
 
 impl DartParser {
     pub fn new() -> Self {
@@ -96,9 +109,15 @@ impl DartParser {
                 "enum_declaration" => {
                     Self::parse_enum(child, source, module_path, rel_path, result);
                 }
-                "function_declaration" => {
-                    // Top-level function — owner_prefix empty → not a method.
-                    Self::parse_function_declaration(child, source, "", rel_path, result, false);
+                "function_declaration" | "getter_declaration" | "setter_declaration" => {
+                    // Top-level — owner_prefix empty → not a method.
+                    Self::parse_outer_callable(child, source, "", rel_path, result);
+                }
+                "type_alias" => {
+                    Self::parse_type_alias(child, source, module_path, rel_path, result);
+                }
+                "top_level_variable_declaration" => {
+                    Self::parse_top_level_var(child, source, module_path, rel_path, result);
                 }
                 _ => {}
             }
@@ -267,9 +286,9 @@ impl DartParser {
         }
     }
 
-    /// One item inside a `class_member` — a method (with body) or a bare
-    /// `declaration` (abstract method / field). Constructors, accessors and
-    /// fields are handled in later phases; here we extract plain methods.
+    /// One item inside a `class_member`. `method_declaration` carries a
+    /// `method_signature` + body; a bare `declaration` carries a bodyless
+    /// signature (abstract method / redirecting constructor) or a field list.
     fn handle_member_item(
         item: Node,
         source: &[u8],
@@ -282,97 +301,380 @@ impl DartParser {
                 let Some(msig) = item.child_by_field_name("signature") else {
                     return;
                 };
-                if let Some(fsig) = first_child_of_kind(msig, "function_signature") {
-                    let body = item.child_by_field_name("body");
-                    Self::parse_function(fsig, body, source, class_qname, rel_path, result, true);
+                let body = item.child_by_field_name("body");
+                let is_static = has_token_child(msig, "static");
+                let mut cursor = msig.walk();
+                for sig in msig.named_children(&mut cursor) {
+                    Self::dispatch_signature(
+                        sig,
+                        body,
+                        source,
+                        class_qname,
+                        rel_path,
+                        result,
+                        is_static,
+                    );
                 }
             }
             "declaration" => {
-                // Abstract method: `declaration` directly carries a
-                // `function_signature` with no body.
-                if let Some(fsig) = first_child_of_kind(item, "function_signature") {
-                    Self::parse_function(fsig, None, source, class_qname, rel_path, result, true);
+                let is_static = has_token_child(item, "static");
+                let mut cursor = item.walk();
+                for sig in item.named_children(&mut cursor) {
+                    match sig.kind() {
+                        "static_final_declaration_list"
+                        | "initialized_identifier_list"
+                        | "identifier_list" => {
+                            Self::parse_fields(sig, source, class_qname, rel_path, result);
+                        }
+                        _ => Self::dispatch_signature(
+                            sig,
+                            None,
+                            source,
+                            class_qname,
+                            rel_path,
+                            result,
+                            is_static,
+                        ),
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    fn parse_function_declaration(
-        node: Node,
-        source: &[u8],
-        owner_prefix: &str,
-        rel_path: &str,
-        result: &mut ParseResult,
-        is_method: bool,
-    ) {
-        let Some(sig) = node.child_by_field_name("signature") else {
-            return;
-        };
-        let body = node.child_by_field_name("body");
-        Self::parse_function(sig, body, source, owner_prefix, rel_path, result, is_method);
-    }
-
-    /// Emit a `FunctionInfo` from a `function_signature` node and its
-    /// optional `function_body`.
-    fn parse_function(
+    /// Dispatch a single signature node (function / getter / setter /
+    /// operator / constructor) to a `FunctionInfo`.
+    fn dispatch_signature(
         sig: Node,
         body: Option<Node>,
         source: &[u8],
         owner_prefix: &str,
         rel_path: &str,
         result: &mut ParseResult,
-        is_method: bool,
+        is_static: bool,
     ) {
-        let Some(name) = sig
-            .child_by_field_name("name")
-            .map(|n| node_text(n, source))
-        else {
+        let is_method = !owner_prefix.is_empty();
+        let mut meta = MetadataMap::new();
+        if is_static {
+            meta.insert("is_static".into(), serde_json::Value::Bool(true));
+        }
+        match sig.kind() {
+            "function_signature" => {
+                let Some(name) = sig.child_by_field_name("name") else {
+                    return;
+                };
+                let name = node_text(name, source).to_string();
+                emit_function(
+                    result,
+                    rel_path,
+                    source,
+                    sig,
+                    body,
+                    name,
+                    owner_prefix,
+                    is_method,
+                    meta,
+                );
+            }
+            "getter_signature" | "setter_signature" => {
+                let Some(raw) = sig.child_by_field_name("name") else {
+                    return;
+                };
+                let raw = node_text(raw, source);
+                let is_setter = sig.kind() == "setter_signature";
+                meta.insert(
+                    "accessor".into(),
+                    serde_json::Value::String(if is_setter { "setter" } else { "getter" }.into()),
+                );
+                // A setter shares its bare name with the matching getter;
+                // the `=` suffix (idiomatic Dart) keeps their qualified
+                // names — and thus graph nodes — distinct.
+                let name = if is_setter {
+                    format!("{raw}=")
+                } else {
+                    raw.to_string()
+                };
+                emit_function(
+                    result,
+                    rel_path,
+                    source,
+                    sig,
+                    body,
+                    name,
+                    owner_prefix,
+                    is_method,
+                    meta,
+                );
+            }
+            "operator_signature" => {
+                let op = sig
+                    .child_by_field_name("operator")
+                    .map(|o| node_text(o, source).trim().to_string())
+                    .unwrap_or_default();
+                meta.insert("is_operator".into(), serde_json::Value::Bool(true));
+                emit_function(
+                    result,
+                    rel_path,
+                    source,
+                    sig,
+                    body,
+                    format!("operator{op}"),
+                    owner_prefix,
+                    true,
+                    meta,
+                );
+            }
+            k if CONSTRUCTOR_KINDS.contains(&k) => {
+                Self::parse_constructor(sig, body, source, owner_prefix, rel_path, result);
+            }
+            _ => {}
+        }
+    }
+
+    /// A constructor signature → `FunctionInfo`. The constructor `name`
+    /// field is a sequence of identifiers (`Point` / `Point . origin`):
+    /// unnamed constructors qualify as `Owner.Owner`, named ones as
+    /// `Owner.Owner.named` — distinct, addressable, collision-free.
+    fn parse_constructor(
+        sig: Node,
+        body: Option<Node>,
+        source: &[u8],
+        class_qname: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let ident_parts: Vec<String> = children_by_field(sig, "name")
+            .into_iter()
+            .filter(|n| n.kind() == "identifier")
+            .map(|n| node_text(n, source).to_string())
+            .collect();
+        if ident_parts.is_empty() {
+            return;
+        }
+        let ctor_name = ident_parts.join(".");
+        let mut meta = MetadataMap::new();
+        meta.insert("is_constructor".into(), serde_json::Value::Bool(true));
+        if matches!(
+            sig.kind(),
+            "factory_constructor_signature" | "redirecting_factory_constructor_signature"
+        ) {
+            meta.insert("is_factory".into(), serde_json::Value::Bool(true));
+        }
+        if sig.kind() == "constant_constructor_signature" {
+            meta.insert("is_const".into(), serde_json::Value::Bool(true));
+        }
+        if ctor_name.contains('.') {
+            meta.insert("is_named".into(), serde_json::Value::Bool(true));
+        }
+        emit_function(
+            result,
+            rel_path,
+            source,
+            sig,
+            body,
+            ctor_name,
+            class_qname,
+            true,
+            meta,
+        );
+    }
+
+    /// Top-level `function_declaration` / `getter_declaration` /
+    /// `setter_declaration` — a `signature` field plus a `body`.
+    fn parse_outer_callable(
+        node: Node,
+        source: &[u8],
+        owner_prefix: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let Some(sig) = node.child_by_field_name("signature") else {
             return;
         };
-        let line = sig.start_position().row as u32 + 1;
-        let end_line = body
-            .map(|b| b.end_position().row as u32 + 1)
-            .unwrap_or_else(|| sig.end_position().row as u32 + 1);
-        let qname = if owner_prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{owner_prefix}.{name}")
-        };
-        let return_type = sig
-            .child_by_field_name("return_type")
-            .map(|n| node_text(n, source).trim().to_string())
-            .filter(|s| !s.is_empty());
+        let body = node.child_by_field_name("body");
+        Self::dispatch_signature(sig, body, source, owner_prefix, rel_path, result, false);
+    }
 
-        result.functions.push(FunctionInfo {
-            name: name.to_string(),
-            qualified_name: qname,
-            visibility: visibility_from_name(name).to_string(),
-            is_async: false,
-            is_method,
-            signature: node_text(sig, source)
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
+    /// A field list inside a `declaration` → one `AttributeInfo` per name.
+    fn parse_fields(
+        list: Node,
+        source: &[u8],
+        owner_qname: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let mut cursor = list.walk();
+        for entry in list.named_children(&mut cursor) {
+            let name_node = match entry.kind() {
+                "identifier" => Some(entry),
+                _ => entry.child_by_field_name("name"),
+            };
+            let Some(name_node) = name_node else {
+                continue;
+            };
+            let name = node_text(name_node, source).to_string();
+            let line = entry.start_position().row as u32 + 1;
+            let default_value = entry
+                .child_by_field_name("value")
+                .map(|v| truncate_preview(node_text(v, source)));
+            result.attributes.push(AttributeInfo {
+                qualified_name: format!("{owner_qname}.{name}"),
+                owner_qualified_name: owner_qname.to_string(),
+                visibility: visibility_from_name(&name).to_string(),
+                name,
+                type_annotation: None,
+                file_path: rel_path.to_string(),
+                line_number: line,
+                default_value,
+            });
+        }
+    }
+
+    /// A top-level `const` / `final` declaration → one `ConstantInfo` per
+    /// declared name. Plain mutable `var`s are skipped — they are not
+    /// constants.
+    fn parse_top_level_var(
+        node: Node,
+        source: &[u8],
+        module_path: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let modifier = node
+            .child_by_field_name("modifier")
+            .map(|m| node_text(m, source));
+        if !matches!(modifier, Some("const") | Some("final")) {
+            return;
+        }
+        let type_annotation = node
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let line = node.start_position().row as u32 + 1;
+
+        let mut cursor = node.walk();
+        for list in node.named_children(&mut cursor) {
+            if !matches!(
+                list.kind(),
+                "static_final_declaration_list" | "initialized_identifier_list"
+            ) {
+                continue;
+            }
+            let mut inner = list.walk();
+            for entry in list.named_children(&mut inner) {
+                let Some(name_node) = entry.child_by_field_name("name") else {
+                    continue;
+                };
+                let name = node_text(name_node, source).to_string();
+                let value_preview = entry
+                    .child_by_field_name("value")
+                    .map(|v| truncate_preview(node_text(v, source)));
+                result.constants.push(ConstantInfo {
+                    qualified_name: make_qualified(module_path, "", &name),
+                    kind: "constant".to_string(),
+                    type_annotation: type_annotation.clone(),
+                    value_preview,
+                    visibility: visibility_from_name(&name).to_string(),
+                    file_path: rel_path.to_string(),
+                    line_number: line,
+                    name,
+                });
+            }
+        }
+    }
+
+    /// `typedef Name = ...;` → a `ConstantInfo` with kind `type_alias`,
+    /// matching how TypeScript type aliases are stored.
+    fn parse_type_alias(
+        node: Node,
+        source: &[u8],
+        module_path: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let Some(name_node) = first_child_of_kind(node, "type_identifier") else {
+            return;
+        };
+        let name = node_text(name_node, source).to_string();
+        let line = node.start_position().row as u32 + 1;
+        // The aliased type — the first `type` / `function_type` child past
+        // the alias name — becomes the value preview.
+        let mut cursor = node.walk();
+        let aliased = node
+            .named_children(&mut cursor)
+            .find(|c| matches!(c.kind(), "type" | "function_type") && c.id() != name_node.id())
+            .map(|c| truncate_preview(node_text(c, source)));
+        result.constants.push(ConstantInfo {
+            qualified_name: make_qualified(module_path, "", &name),
+            kind: "type_alias".to_string(),
+            type_annotation: None,
+            value_preview: aliased,
+            visibility: visibility_from_name(&name).to_string(),
             file_path: rel_path.to_string(),
             line_number: line,
-            docstring: None,
-            return_type,
-            decorators: Vec::new(),
-            calls: Vec::new(),
-            references: Vec::new(),
-            function_refs: Vec::new(),
-            type_parameters: None,
-            end_line: Some(end_line),
-            parameters: Vec::new(),
-            branch_count: None,
-            param_count: None,
-            max_nesting: None,
-            is_recursive: None,
-            procedure_names: Vec::new(),
-            metadata: Default::default(),
+            name,
         });
     }
+}
+
+/// Build a `FunctionInfo` from a signature node and optional body, and push
+/// it onto `result`. Shared by every callable shape — plain functions,
+/// methods, accessors, operators, constructors.
+#[allow(clippy::too_many_arguments)]
+fn emit_function(
+    result: &mut ParseResult,
+    rel_path: &str,
+    source: &[u8],
+    sig: Node,
+    body: Option<Node>,
+    name: String,
+    owner_prefix: &str,
+    is_method: bool,
+    metadata: MetadataMap,
+) {
+    let line = sig.start_position().row as u32 + 1;
+    let end_line = body
+        .map(|b| b.end_position().row as u32 + 1)
+        .unwrap_or_else(|| sig.end_position().row as u32 + 1);
+    let qname = if owner_prefix.is_empty() {
+        name.clone()
+    } else {
+        format!("{owner_prefix}.{name}")
+    };
+    let return_type = sig
+        .child_by_field_name("return_type")
+        .map(|n| node_text(n, source).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let visibility = visibility_from_name(&name).to_string();
+
+    result.functions.push(FunctionInfo {
+        name,
+        qualified_name: qname,
+        visibility,
+        is_async: body.map(is_body_async).unwrap_or(false),
+        is_method,
+        signature: node_text(sig, source)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        file_path: rel_path.to_string(),
+        line_number: line,
+        docstring: None,
+        return_type,
+        decorators: Vec::new(),
+        calls: Vec::new(),
+        references: Vec::new(),
+        function_refs: Vec::new(),
+        type_parameters: None,
+        end_line: Some(end_line),
+        parameters: Vec::new(),
+        branch_count: None,
+        param_count: None,
+        max_nesting: None,
+        is_recursive: None,
+        procedure_names: Vec::new(),
+        metadata,
+    });
 }
 
 /// Collect a type declaration's supertypes as `(bare_name, relationship)`
@@ -445,26 +747,19 @@ fn collect_supertypes(node: Node, source: &[u8]) -> Vec<(String, &'static str)> 
     out
 }
 
-/// Collect the methods appended to `result.functions` since `methods_start`
-/// that belong directly to `owner_qname`, and push an `inherent`
-/// TypeRelationship so the builder emits HAS_METHOD edges.
+/// Push an `inherent` TypeRelationship carrying every method appended to
+/// `result.functions` since `methods_start` — the builder turns it into
+/// HAS_METHOD edges. Dart has no nested type declarations, so everything a
+/// `walk_class_body` appends is a direct member of `owner_qname`.
 fn append_inherent_rel(result: &mut ParseResult, owner_qname: &str, methods_start: usize) {
-    let direct_prefix = format!("{owner_qname}.");
-    let mut method_rel = TypeRelationship {
-        source_type: owner_qname.to_string(),
-        target_type: None,
-        relationship: "inherent".to_string(),
-        methods: Vec::new(),
-    };
-    for fn_info in &result.functions[methods_start..] {
-        if let Some(rest) = fn_info.qualified_name.strip_prefix(&direct_prefix) {
-            if !rest.contains('.') {
-                method_rel.methods.push(fn_info.clone());
-            }
-        }
-    }
-    if !method_rel.methods.is_empty() {
-        result.type_relationships.push(method_rel);
+    let methods: Vec<FunctionInfo> = result.functions[methods_start..].to_vec();
+    if !methods.is_empty() {
+        result.type_relationships.push(TypeRelationship {
+            source_type: owner_qname.to_string(),
+            target_type: None,
+            relationship: "inherent".to_string(),
+            methods,
+        });
     }
 }
 
@@ -480,10 +775,12 @@ fn decl_name(node: Node, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Dart visibility is by convention: a name whose first character is `_`
-/// is library-private; everything else is public.
+/// Dart visibility is by convention: a name whose first character is `_` is
+/// library-private. The terminal `.`-segment is what carries the privacy —
+/// a named constructor `Foo._internal` is private, `Foo.origin` is not.
 fn visibility_from_name(name: &str) -> &'static str {
-    if name.starts_with('_') {
+    let terminal = name.rsplit('.').next().unwrap_or(name);
+    if terminal.starts_with('_') {
         "private"
     } else {
         "public"
@@ -497,6 +794,42 @@ fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     found
 }
 
+/// All children of `node` assigned the field name `field` — needed for
+/// tree-sitter `multiple:true` fields, where `child_by_field_name` returns
+/// only the first.
+fn children_by_field<'a>(node: Node<'a>, field: &str) -> Vec<Node<'a>> {
+    let mut cursor = node.walk();
+    let mut out = Vec::new();
+    if cursor.goto_first_child() {
+        loop {
+            if cursor.field_name() == Some(field) {
+                out.push(cursor.node());
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `node` has a direct child (named or anonymous) of kind `kind` —
+/// used to spot keyword tokens like `static`.
+fn has_token_child(node: Node, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    let hit = node.children(&mut cursor).any(|c| c.kind() == kind);
+    hit
+}
+
+/// Whether a `function_body` is declared `async` / `async*` / `sync*`.
+fn is_body_async(body: Node) -> bool {
+    let mut cursor = body.walk();
+    let hit = body
+        .children(&mut cursor)
+        .any(|c| matches!(c.kind(), "async" | "async*" | "sync*"));
+    hit
+}
+
 /// Bare type name — strips generic arguments (`Foo<T>` → `Foo`) and
 /// nullability (`Foo?` → `Foo`); a prefixed type (`p.Foo`) is kept whole.
 fn bare_type_name(text: &str) -> String {
@@ -505,6 +838,12 @@ fn bare_type_name(text: &str) -> String {
         .find(|c: char| c == '<' || c == '?' || c.is_whitespace() || c == '(')
         .unwrap_or(t.len());
     t[..end].trim().to_string()
+}
+
+/// First ~100 chars of an expression, for `value_preview` / `default_value`.
+fn truncate_preview(text: &str) -> String {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(100).collect()
 }
 
 /// Strip one matching pair of surrounding `'` or `"` quotes.

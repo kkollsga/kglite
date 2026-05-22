@@ -5,11 +5,14 @@ Coverage grows per implementation phase:
     File.language == "dart".
   - Phase 2: inheritance (EXTENDS / IMPLEMENTS), mixins (:Mixin nodes),
     extensions (:Class kind="extension"), enums (:Enum + variants).
+  - Phase 3: named/factory constructors, getters/setters, member fields,
+    top-level const/final → Constant, typedef → Constant, async flag.
 
 Import-edge resolution (URI → module/file) lands with the part/part-of
 work in a later phase; that's where import assertions are added.
 """
 
+import json
 import pathlib
 
 import pytest
@@ -202,3 +205,124 @@ enum Color { red, green, blue }
     # `variants` is stored as a comma-joined string property.
     variants = {v.strip() for v in (rows[0]["v"] or "").split(",")}
     assert variants == {"red", "green", "blue"}, rows[0]["v"]
+
+
+def test_dart_named_and_factory_constructors(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "point.dart",
+        """
+class Point {
+  final int x;
+  final int y;
+  Point(this.x, this.y);
+  Point.origin() : x = 0, y = 0;
+  factory Point.fromJson(Map<String, dynamic> j) => Point(j['x'], j['y']);
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher(
+        "MATCH (c:Class {name: 'Point'})-[:HAS_METHOD]->(f:Function) RETURN f.name AS n, f.qualified_name AS q"
+    ).to_list()
+    by_name = {r["n"]: r["q"] for r in rows}
+    assert {"Point", "Point.origin", "Point.fromJson"} <= set(by_name), by_name
+    # Every constructor resolves to a distinct, addressable qualified_name.
+    qnames = [by_name["Point"], by_name["Point.origin"], by_name["Point.fromJson"]]
+    assert len(set(qnames)) == 3, qnames
+
+
+def test_dart_getter_and_setter(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "temp.dart",
+        """
+class Temp {
+  double _c = 0;
+  double get celsius => _c;
+  set celsius(double v) => _c = v;
+}
+""",
+    )
+    g = build(str(pkg))
+    methods = g.cypher("MATCH (c:Class {name: 'Temp'})-[:HAS_METHOD]->(f:Function) RETURN f.name AS n").to_list()
+    names = {r["n"] for r in methods}
+    # Getter and setter share a bare name; the `=` suffix keeps the
+    # setter's qualified name distinct.
+    assert "celsius" in names, names
+    assert "celsius=" in names, names
+
+
+def test_dart_typedef_is_type_alias_constant(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "types.dart",
+        """
+typedef IntList = List<int>;
+typedef Callback = void Function(int);
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (c:Constant) WHERE c.kind = 'type_alias' RETURN c.name AS n").to_list()
+    names = {r["n"] for r in rows}
+    assert {"IntList", "Callback"} <= names, names
+
+
+def test_dart_top_level_const(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "consts.dart",
+        """
+const int maxRetries = 3;
+final String appName = 'KGLite';
+var mutable = 1;
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (c:Constant) WHERE c.kind = 'constant' RETURN c.name AS n").to_list()
+    names = {r["n"] for r in rows}
+    assert {"maxRetries", "appName"} <= names, names
+    # Plain mutable `var` is not a constant.
+    assert "mutable" not in names, names
+
+
+def test_dart_member_fields(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "account.dart",
+        """
+class Account {
+  int balance = 0;
+  String owner = 'anon';
+}
+""",
+    )
+    g = build(str(pkg))
+    # Member fields are embedded as the `fields` JSON string property on
+    # the Class node (there is no separate Attribute node type).
+    rows = g.cypher("MATCH (c:Class {name: 'Account'}) RETURN c.fields AS f").to_list()
+    assert rows, "expected Account class node"
+    fields = json.loads(rows[0]["f"] or "[]")
+    names = {fld["name"] for fld in fields}
+    assert {"balance", "owner"} <= names, fields
+
+
+def test_dart_async_flag(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "fetch.dart",
+        """
+Future<int> fetchValue() async {
+  return 42;
+}
+
+int plain() {
+  return 1;
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (f:Function) RETURN f.name AS n, f.is_async AS a").to_list()
+    by_name = {r["n"]: r["a"] for r in rows}
+    assert by_name.get("fetchValue") is True, by_name
+    assert by_name.get("plain") is False, by_name
