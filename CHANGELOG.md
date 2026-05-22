@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.51] — Dart / Flutter code-tree support
+
+### Added — Dart language parser
+
+`kglite.code_tree` now parses `.dart` sources, bringing the supported-
+language count to 14. A Flutter repository — previously indexed as a
+periphery-only graph (native-runner Swift/C++/C scaffolding, the
+marketing site) with its entire Dart application core silently dropped
+— now produces a queryable graph of the real app.
+
+- Classes, mixins, extensions, enums, top-level and member functions,
+  named & factory constructors, getters/setters/operators, constants
+  and typedefs — emitted with the same node/edge vocabulary as the
+  other languages, so cross-language Cypher patterns just work.
+- `extends` / `with` / `implements` → `EXTENDS` / `IMPLEMENTS` edges;
+  call sites → `CALLS`; methods → `HAS_METHOD`; cyclomatic branch
+  counts and structured parameters as for every other language.
+- Named and factory constructors resolve to distinct, addressable
+  qualified names (`Owner.Owner`, `Owner.Owner.named`).
+- `import` / `export` directives → `IMPORTS` edges (relative and
+  same-package URIs); `part` / `part of` files collapse into one
+  logical module.
+
+### Added — `Mixin` node label
+
+Dart `mixin` declarations land as a dedicated `Mixin` graph node,
+beside the existing `Class` / `Struct` / `Trait` / `Protocol` family.
+`extension` / `extension type` are `Class` nodes tagged by `kind`.
+
+### Added — Flutter widget pass
+
+`StatelessWidget` / `StatefulWidget` / `State` subclasses carry a
+`flutter_widget` property, and their `build` methods a `flutter_build`
+flag — "show me the screens" is one hop away. New queryable `Function`
+columns: `is_constructor`, `is_factory`, `accessor`.
+
+### Fixed — `github_api` leading-slash 404
+
+Bumped the `mcp-methods` dependency to 0.3.39, which fixes `github_api`
+malforming its URL for a path written with a leading slash
+(`/repos/owner/repo` → doubled `/repos/` → 404). A leading slash is now
+optional and accepted on either path form.
+
+### Fixed — comment-annotation char-boundary panic
+
+`extract_comment_annotations` panicked when a TODO/FIXME comment body
+exceeded 200 bytes with a multi-byte character straddling the
+truncation boundary — reachable from every language parser, surfaced
+by Dart comments that use `────` rules.
+
 ## [0.9.50] — Lossless edge loading: auto-vivified provisional stub nodes
 
 ### Lossless edge loading — auto-vivified provisional stub nodes

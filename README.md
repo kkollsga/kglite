@@ -441,7 +441,7 @@ Quick reference. Each links into the appropriate guide.
 | **[Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html)** | Declarative CSV-to-graph loading via JSON config |
 | **[Import/Export](https://kglite.readthedocs.io/en/latest/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
 | **[AI integration](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
-| **[Code analysis](https://kglite.readthedocs.io/en/latest/guides/code-tree.html)** | 13-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
+| **[Code analysis](https://kglite.readthedocs.io/en/latest/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
 
 ## Documentation
 
