@@ -75,9 +75,9 @@ graph.toc("src/graph/mod.rs")
 
 ## Graph Schema
 
-**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`, `Element` (HTML), `Selector` (CSS)
+**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Mixin` (Dart), `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`, `Element` (HTML), `Selector` (CSS)
 
-**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item, incl. File→Element / File→Selector for HTML/CSS), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `HAS_CHILD` (Element→Element, document outline), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item, incl. File→Element / File→Selector for HTML/CSS), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class/Mixin→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `HAS_CHILD` (Element→Element, document outline), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
 
 ### Web-stack node types (0.9.36+)
 

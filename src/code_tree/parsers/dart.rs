@@ -8,20 +8,27 @@
 //!
 //! Coverage so far:
 //!   - `class` declarations → ClassInfo (kind="class").
-//!   - Class methods + the `inherent` TypeRelationship for HAS_METHOD edges.
+//!   - `mixin` declarations → ClassInfo (kind="mixin") → `Mixin` graph nodes.
+//!   - `extension` / `extension type` → ClassInfo (kind="extension" /
+//!     "extension_type") → `Class` graph nodes tagged by kind.
+//!   - `enum` declarations → EnumInfo (variants + enhanced-enum methods).
+//!   - `extends` / `with` / `implements` → EXTENDS / IMPLEMENTS edges.
+//!   - Methods + the `inherent` TypeRelationship for HAS_METHOD edges.
 //!   - Top-level functions → FunctionInfo.
 //!   - `import` / `export` directives → FileInfo.imports.
 //!   - Visibility from the Dart naming convention (leading `_` = private).
 //!
-//! Follow-up phases: inheritance/mixins/extensions/enums, constructors and
-//! accessors, calls, part/part-of, complexity metrics, and the Flutter pass.
+//! Follow-up phases: constructors and accessors, calls, part/part-of,
+//! complexity metrics, and the Flutter pass.
 
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::node_text;
 use super::LanguageParser;
-use crate::code_tree::models::{ClassInfo, FileInfo, FunctionInfo, ParseResult, TypeRelationship};
+use crate::code_tree::models::{
+    ClassInfo, EnumInfo, FileInfo, FunctionInfo, ParseResult, TypeRelationship,
+};
 
 pub struct DartParser;
 
@@ -61,7 +68,33 @@ impl DartParser {
                     }
                 }
                 "class_declaration" => {
-                    Self::parse_class(child, source, module_path, "", rel_path, result);
+                    Self::parse_type_decl(child, source, module_path, rel_path, result, "class");
+                }
+                "mixin_declaration" => {
+                    Self::parse_type_decl(child, source, module_path, rel_path, result, "mixin");
+                }
+                "extension_declaration" => {
+                    Self::parse_type_decl(
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        result,
+                        "extension",
+                    );
+                }
+                "extension_type_declaration" => {
+                    Self::parse_type_decl(
+                        child,
+                        source,
+                        module_path,
+                        rel_path,
+                        result,
+                        "extension_type",
+                    );
+                }
+                "enum_declaration" => {
+                    Self::parse_enum(child, source, module_path, rel_path, result);
                 }
                 "function_declaration" => {
                     // Top-level function — owner_prefix empty → not a method.
@@ -74,7 +107,7 @@ impl DartParser {
 
     /// `import_or_export` → the imported/exported library URI (quotes
     /// stripped). Both directions create a file-level dependency, so both
-    /// land in `FileInfo.imports` and drive DEPENDS_ON edges.
+    /// land in `FileInfo.imports`.
     fn extract_import(node: Node, source: &[u8]) -> Option<String> {
         fn first_string<'a>(n: Node<'a>, source: &'a [u8]) -> Option<String> {
             if n.kind() == "string_literal" {
@@ -91,67 +124,123 @@ impl DartParser {
         first_string(node, source).filter(|s| !s.is_empty())
     }
 
-    fn parse_class(
+    /// Parse a class / mixin / extension / extension-type declaration into a
+    /// `ClassInfo`. `kind` tags the graph node type ("mixin" → `Mixin`,
+    /// everything else → `Class`, distinguished by the `kind` property).
+    fn parse_type_decl(
         node: Node,
         source: &[u8],
         module_path: &str,
-        owner_prefix: &str,
         rel_path: &str,
         result: &mut ParseResult,
+        kind: &str,
     ) {
-        let Some(name) = node
-            .child_by_field_name("name")
-            .map(|n| node_text(n, source))
-        else {
-            return;
-        };
+        let name = decl_name(node, source).unwrap_or_else(|| {
+            // Anonymous `extension on Foo { ... }` — synthesize a stable,
+            // addressable name from the extended type.
+            let ext = node
+                .child_by_field_name("class")
+                .map(|c| bare_type_name(node_text(c, source)))
+                .unwrap_or_default();
+            if ext.is_empty() {
+                "extension".to_string()
+            } else {
+                format!("extension_on_{ext}")
+            }
+        });
         let line = node.start_position().row as u32 + 1;
         let end_line = node.end_position().row as u32 + 1;
-        let qname = make_qualified(module_path, owner_prefix, name);
+        let qname = make_qualified(module_path, "", &name);
 
+        let supertypes = collect_supertypes(node, source);
         result.classes.push(ClassInfo {
-            name: name.to_string(),
+            name: name.clone(),
             qualified_name: qname.clone(),
-            kind: "class".to_string(),
-            visibility: visibility_from_name(name).to_string(),
+            kind: kind.to_string(),
+            visibility: visibility_from_name(&name).to_string(),
             file_path: rel_path.to_string(),
             line_number: line,
             docstring: None,
-            bases: Vec::new(),
+            bases: supertypes.iter().map(|(t, _)| t.clone()).collect(),
             type_parameters: None,
             end_line: Some(end_line),
             metadata: Default::default(),
         });
-
-        let Some(body) = node.child_by_field_name("body") else {
-            return;
-        };
-        // Synthesize a TypeRelationship so the builder emits HAS_METHOD
-        // edges from the class to each of its direct methods. Mirrors the
-        // Swift/Python parsers' `method_rel`.
-        let mut method_rel = TypeRelationship {
-            source_type: qname.clone(),
-            target_type: None,
-            relationship: "inherent".to_string(),
-            methods: Vec::new(),
-        };
-        let methods_start = result.functions.len();
-        Self::walk_class_body(body, source, &qname, rel_path, result);
-
-        let direct_prefix = format!("{qname}.");
-        for fn_info in &result.functions[methods_start..] {
-            if let Some(rest) = fn_info.qualified_name.strip_prefix(&direct_prefix) {
-                if !rest.contains('.') {
-                    method_rel.methods.push(fn_info.clone());
-                }
-            }
+        for (target, relationship) in &supertypes {
+            result.type_relationships.push(TypeRelationship {
+                source_type: name.clone(),
+                target_type: Some(target.clone()),
+                relationship: relationship.to_string(),
+                methods: Vec::new(),
+            });
         }
-        if !method_rel.methods.is_empty() {
-            result.type_relationships.push(method_rel);
+
+        if let Some(body) = node.child_by_field_name("body") {
+            let methods_start = result.functions.len();
+            Self::walk_class_body(body, source, &qname, rel_path, result);
+            append_inherent_rel(result, &qname, methods_start);
         }
     }
 
-    /// Walk a `class_body`, descending through `class_member` wrappers.
+    /// Parse an `enum_declaration` into an `EnumInfo` (variants + any
+    /// enhanced-enum methods).
+    fn parse_enum(
+        node: Node,
+        source: &[u8],
+        module_path: &str,
+        rel_path: &str,
+        result: &mut ParseResult,
+    ) {
+        let Some(name) = decl_name(node, source) else {
+            return;
+        };
+        let line = node.start_position().row as u32 + 1;
+        let end_line = node.end_position().row as u32 + 1;
+        let qname = make_qualified(module_path, "", &name);
+
+        let mut variants: Vec<String> = Vec::new();
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.named_children(&mut cursor) {
+                if child.kind() == "enum_constant" {
+                    if let Some(v) = child.child_by_field_name("name") {
+                        variants.push(node_text(v, source).to_string());
+                    }
+                }
+            }
+        }
+
+        result.enums.push(EnumInfo {
+            name: name.clone(),
+            qualified_name: qname.clone(),
+            visibility: visibility_from_name(&name).to_string(),
+            file_path: rel_path.to_string(),
+            line_number: line,
+            docstring: None,
+            variants,
+            end_line: Some(end_line),
+            variant_details: None,
+        });
+
+        for (target, relationship) in collect_supertypes(node, source) {
+            result.type_relationships.push(TypeRelationship {
+                source_type: name.clone(),
+                target_type: Some(target),
+                relationship: relationship.to_string(),
+                methods: Vec::new(),
+            });
+        }
+
+        // Enhanced enums may carry methods inside the enum body.
+        if let Some(body) = node.child_by_field_name("body") {
+            let methods_start = result.functions.len();
+            Self::walk_class_body(body, source, &qname, rel_path, result);
+            append_inherent_rel(result, &qname, methods_start);
+        }
+    }
+
+    /// Walk a `class_body` / `extension_body` / `enum_body`, descending
+    /// through `class_member` wrappers.
     fn walk_class_body(
         body: Node,
         source: &[u8],
@@ -286,6 +375,111 @@ impl DartParser {
     }
 }
 
+/// Collect a type declaration's supertypes as `(bare_name, relationship)`
+/// pairs. `relationship` is `"extends"` for the base class and
+/// `"implements"` for `with`-clause mixins and `implements`-clause
+/// interfaces — `with` folds into the implements/HAS_METHOD graph since a
+/// mixin contributes capability rather than a base class.
+fn collect_supertypes(node: Node, source: &[u8]) -> Vec<(String, &'static str)> {
+    fn add(out: &mut Vec<(String, &'static str)>, name: String, rel: &'static str) {
+        if !name.is_empty() {
+            out.push((name, rel));
+        }
+    }
+    fn each_type<'a>(node: Node<'a>, source: &'a [u8], out: &mut Vec<String>) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            let t = bare_type_name(node_text(child, source));
+            if !t.is_empty() {
+                out.push(t);
+            }
+        }
+    }
+
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+
+    // `extends Base with M1, M2` — the `superclass` field carries the base
+    // type and an optional nested `mixins` clause.
+    if let Some(sc) = node.child_by_field_name("superclass") {
+        let mut cursor = sc.walk();
+        for child in sc.named_children(&mut cursor) {
+            if child.kind() == "mixins" {
+                let mut mixins = Vec::new();
+                each_type(child, source, &mut mixins);
+                for m in mixins {
+                    add(&mut out, m, "implements");
+                }
+            } else {
+                add(
+                    &mut out,
+                    bare_type_name(node_text(child, source)),
+                    "extends",
+                );
+            }
+        }
+    }
+
+    // `with M1, M2` on an enum — `mixins` is a direct child there.
+    {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "mixins" {
+                let mut mixins = Vec::new();
+                each_type(child, source, &mut mixins);
+                for m in mixins {
+                    add(&mut out, m, "implements");
+                }
+            }
+        }
+    }
+
+    // `implements I1, I2` — the `interfaces` field.
+    if let Some(intf) = node.child_by_field_name("interfaces") {
+        let mut ifaces = Vec::new();
+        each_type(intf, source, &mut ifaces);
+        for i in ifaces {
+            add(&mut out, i, "implements");
+        }
+    }
+
+    out
+}
+
+/// Collect the methods appended to `result.functions` since `methods_start`
+/// that belong directly to `owner_qname`, and push an `inherent`
+/// TypeRelationship so the builder emits HAS_METHOD edges.
+fn append_inherent_rel(result: &mut ParseResult, owner_qname: &str, methods_start: usize) {
+    let direct_prefix = format!("{owner_qname}.");
+    let mut method_rel = TypeRelationship {
+        source_type: owner_qname.to_string(),
+        target_type: None,
+        relationship: "inherent".to_string(),
+        methods: Vec::new(),
+    };
+    for fn_info in &result.functions[methods_start..] {
+        if let Some(rest) = fn_info.qualified_name.strip_prefix(&direct_prefix) {
+            if !rest.contains('.') {
+                method_rel.methods.push(fn_info.clone());
+            }
+        }
+    }
+    if !method_rel.methods.is_empty() {
+        result.type_relationships.push(method_rel);
+    }
+}
+
+/// Declaration name. Handles the `extension_type_name` wrapper and returns
+/// `None` for an anonymous extension (no `name` field).
+fn decl_name(node: Node, source: &[u8]) -> Option<String> {
+    let name_node = node.child_by_field_name("name")?;
+    match name_node.kind() {
+        "extension_type_name" => {
+            first_child_of_kind(name_node, "identifier").map(|id| node_text(id, source).to_string())
+        }
+        _ => Some(node_text(name_node, source).to_string()),
+    }
+}
+
 /// Dart visibility is by convention: a name whose first character is `_`
 /// is library-private; everything else is public.
 fn visibility_from_name(name: &str) -> &'static str {
@@ -301,6 +495,16 @@ fn first_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     let found = node.named_children(&mut cursor).find(|c| c.kind() == kind);
     found
+}
+
+/// Bare type name — strips generic arguments (`Foo<T>` → `Foo`) and
+/// nullability (`Foo?` → `Foo`); a prefixed type (`p.Foo`) is kept whole.
+fn bare_type_name(text: &str) -> String {
+    let t = text.trim();
+    let end = t
+        .find(|c: char| c == '<' || c == '?' || c.is_whitespace() || c == '(')
+        .unwrap_or(t.len());
+    t[..end].trim().to_string()
 }
 
 /// Strip one matching pair of surrounding `'` or `"` quotes.

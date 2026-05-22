@@ -101,6 +101,7 @@ const ENTRY_NODE_TYPES: &[&str] = &[
     "Function",
     "Class",
     "Struct",
+    "Mixin",
     "Interface",
     "Trait",
     "Protocol",

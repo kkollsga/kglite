@@ -1234,12 +1234,9 @@ fn defines_edges(result: &ParseResult) -> Vec<DefinesEdge> {
             target_id: f.qualified_name.clone(),
         });
     }
-    // File DEFINES Class / Struct / Enum / Interface / Protocol / Trait / Constant
+    // File DEFINES Class / Struct / Mixin / Enum / Interface / Protocol / Trait / Constant
     for c in &result.classes {
-        let target_type = match c.kind.as_str() {
-            "struct" => "Struct",
-            _ => "Class",
-        };
+        let target_type = super::class_node_type(&c.kind);
         out.push(DefinesEdge {
             source_type: "File".into(),
             source_id: c.file_path.clone(),
@@ -1530,15 +1527,29 @@ pub fn load_into_graph(
         )
         .map_err(py_err)?;
     }
-    // Separate struct vs class
-    let (structs, classes): (Vec<_>, Vec<_>) =
+    // Separate struct / mixin / class — each is a distinct graph node label.
+    let (structs, non_structs): (Vec<_>, Vec<_>) =
         result.classes.iter().partition(|c| c.kind == "struct");
+    let (mixins, classes): (Vec<_>, Vec<_>) =
+        non_structs.into_iter().partition(|c| c.kind == "mixin");
     if !structs.is_empty() {
         let structs_owned: Vec<ClassInfo> = structs.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
             classes_df(&structs_owned, &attrs_by_owner, &file_to_module),
             "Struct".into(),
+            "qualified_name".into(),
+            Some("name".into()),
+            None,
+        )
+        .map_err(py_err)?;
+    }
+    if !mixins.is_empty() {
+        let mixins_owned: Vec<ClassInfo> = mixins.into_iter().cloned().collect();
+        maintain::add_nodes(
+            graph,
+            classes_df(&mixins_owned, &attrs_by_owner, &file_to_module),
+            "Mixin".into(),
             "qualified_name".into(),
             Some("name".into()),
             None,
@@ -2017,11 +2028,7 @@ pub fn load_into_graph(
         // Python's _add_typed_connections does the equivalent via name_to_qname.
         let mut qname_to_type: HashMap<String, &'static str> = HashMap::new();
         for c in &result.classes {
-            let nt = if c.kind == "struct" {
-                "Struct"
-            } else {
-                "Class"
-            };
+            let nt = super::class_node_type(&c.kind);
             qname_to_type.insert(c.qualified_name.clone(), nt);
             qname_to_type.insert(c.name.clone(), nt);
         }
@@ -2140,12 +2147,7 @@ pub fn load_into_graph(
         // Build qualified_name → node_type for every parsed owner type.
         let mut qname_to_type: HashMap<String, &'static str> = HashMap::new();
         for c in &result.classes {
-            let nt = if c.kind == "struct" {
-                "Struct"
-            } else {
-                "Class"
-            };
-            qname_to_type.insert(c.qualified_name.clone(), nt);
+            qname_to_type.insert(c.qualified_name.clone(), super::class_node_type(&c.kind));
         }
         for i in &result.interfaces {
             let nt = match i.kind.as_str() {

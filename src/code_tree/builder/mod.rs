@@ -13,6 +13,22 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Graph node label for a `ClassInfo`, keyed on its `kind` discriminator.
+/// `struct` → `Struct`, `mixin` (Dart) → `Mixin`; everything else →
+/// `Class` (covers `class`, `extension` / `extension_type`, Swift `actor`,
+/// …, all distinguished further by the node's `kind` property).
+///
+/// Single source of truth for the `ClassInfo.kind` → label mapping —
+/// used by node creation and by the DEFINES / HAS_METHOD / IMPLEMENTS /
+/// USES_TYPE edge routers, which must all agree on the endpoint label.
+pub(crate) fn class_node_type(kind: &str) -> &'static str {
+    match kind {
+        "struct" => "Struct",
+        "mixin" => "Mixin",
+        _ => "Class",
+    }
+}
+
 /// Full `build()` entry point matching the Python API.
 ///
 /// Accepts either a directory or an explicit manifest file. When given a

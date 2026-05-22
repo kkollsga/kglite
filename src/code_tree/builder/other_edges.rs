@@ -186,11 +186,7 @@ pub fn build_uses_type_edges(
     let mut type_lookup: HashMap<String, (String, &'static str)> = HashMap::new();
     for c in classes {
         if c.name.chars().count() > 1 {
-            let target = if c.kind == "struct" {
-                "Struct"
-            } else {
-                "Class"
-            };
+            let target = super::class_node_type(&c.kind);
             type_lookup.insert(c.name.clone(), (c.qualified_name.clone(), target));
         }
     }

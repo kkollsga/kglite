@@ -426,6 +426,7 @@ impl KnowledgeGraph {
         "Function",
         "Struct",
         "Class",
+        "Mixin",
         "Enum",
         "Trait",
         "Protocol",
