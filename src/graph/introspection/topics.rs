@@ -1337,7 +1337,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <item feature=\"CALL {} subqueries\" workaround=\"Use WITH chaining or multiple cypher() calls\"/>\n");
     xml.push_str("    <item feature=\"LOAD CSV\" workaround=\"Use Python pandas/csv, then CREATE nodes from dicts\"/>\n");
     xml.push_str("    <item feature=\"CREATE INDEX\" note=\"Type indices are automatic; no manual index management needed\"/>\n");
-    xml.push_str("    <item feature=\"Multi-label nodes\" note=\"Single label per node. labels(n) returns string, not list. Change type via SET n.type = 'NewType'\"/>\n");
+    xml.push_str("    <item feature=\"Multi-label nodes\" note=\"Single label per node by design (not a TODO). labels(n) returns a 1-element list; 'X' IN labels(n) works. Change a node's type via SET n.type = 'NewType'. Rationale + scope: docs/explanation/multi-label-rationale.md\"/>\n");
     xml.push_str("    <item feature=\"SET n:Label / REMOVE n:Label\" workaround=\"SET n.type = 'NewType' to change node type\"/>\n");
     xml.push_str("    <item feature=\"Variable-length weighted paths\" note=\"Unweighted variable-length paths (*1..3) are supported\"/>\n");
     xml.push_str("  </limitations>\n");
