@@ -476,3 +476,15 @@ class Box {
     assert {"Box", "Box.empty"} <= names, names
     factory = g.cypher("MATCH (f:Function) WHERE f.is_factory = true RETURN f.name AS n").to_list()
     assert {r["n"] for r in factory} == {"Box.empty"}, factory
+
+
+def test_dart_multibyte_comment_no_panic(tmp_path):
+    # Regression: a TODO comment whose body exceeds 200 bytes with
+    # multi-byte box-drawing chars straddling the truncation boundary
+    # used to panic extract_comment_annotations (`&body[..200]` slicing
+    # inside a `─`). The build must complete cleanly.
+    rule = "─" * 90  # 270 bytes of U+2500 (3 bytes each)
+    pkg = _write(tmp_path, "boxed.dart", f"// TODO {rule}\nvoid noop() {{}}\n")
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (f:File {filename: 'boxed.dart'}) RETURN f.path AS p").to_list()
+    assert rows, "build must succeed on a multi-byte comment body"

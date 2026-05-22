@@ -143,10 +143,13 @@ pub fn extract_comment_annotations(
                     .map(|m| m.as_str().to_ascii_uppercase())
                     .unwrap_or_default();
                 let body = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-                let truncated = if body.len() > 200 { &body[..200] } else { body };
+                // Cap at 200 chars — `&body[..200]` would panic when byte
+                // 200 lands inside a multi-byte char (e.g. a `─` rule in a
+                // comment), so truncate on a char boundary.
+                let truncated: String = body.chars().take(200).collect();
                 out.push(Annotation {
                     kind,
-                    text: truncated.to_string(),
+                    text: truncated,
                     line: node.start_position().row as u32 + 1,
                 });
             }
