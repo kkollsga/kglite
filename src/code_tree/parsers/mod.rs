@@ -6,6 +6,7 @@
 pub mod cpp;
 pub mod csharp;
 pub mod css;
+pub mod dart;
 pub mod go;
 pub mod html;
 pub mod java;
@@ -74,6 +75,7 @@ pub const EXTENSION_MAP: &[(&str, &str)] = &[
     ("html", "html"),
     ("htm", "html"),
     ("css", "css"),
+    ("dart", "dart"),
 ];
 
 /// Look up a language identifier for a file path by extension.
@@ -176,6 +178,7 @@ pub fn get_parser(language: &str) -> Option<Box<dyn LanguageParser + Send + Sync
         "php" => Some(Box::new(php::PhpParser::new())),
         "html" => Some(Box::new(html::HtmlParser::new())),
         "css" => Some(Box::new(css::CssParser::new())),
+        "dart" => Some(Box::new(dart::DartParser::new())),
         _ => None,
     }
 }
