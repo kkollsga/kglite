@@ -424,6 +424,81 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     ("null_check", "social_graph", "MATCH (p:Person) WHERE p.email IS NOT NULL RETURN count(p) AS n", None),
+    # ── B1: three-valued NULL semantics in WHERE comparisons ──
+    # social_graph has email=None for odd-numbered persons. Each of
+    # these triggers a code path that the pre-0.9.52 collapse-to-bool
+    # would have surfaced as silent wrong rows.
+    (
+        "b1_ne_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email <> 'person2@test.com' RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "b1_lt_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email < 'zzz' RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "b1_not_lt_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT (p.email < 'zzz') RETURN count(p) AS n",
+        None,
+    ),
+    # ── B2: NULL propagation through string predicates under NOT ──
+    (
+        "b2_not_contains_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT (p.email CONTAINS 'person') RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "b2_not_starts_with_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT (p.email STARTS WITH 'person') RETURN count(p) AS n",
+        None,
+    ),
+    (
+        "b2_not_ends_with_with_null",
+        "social_graph",
+        "MATCH (p:Person) WHERE NOT (p.email ENDS WITH 'test.com') RETURN count(p) AS n",
+        None,
+    ),
+    # ── Kleene AND/OR with NULL operand ──
+    (
+        "kleene_or_null_lhs",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email = 'never' OR p.city = 'Oslo' "
+        "RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    (
+        "kleene_and_null_lhs",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.email <> 'never' AND p.city = 'Oslo' "
+        "RETURN p.name AS n ORDER BY n",
+        None,
+    ),
+    # ── B5: labels() consumer invariants (single-label model lock-in) ──
+    (
+        "labels_in",
+        "social_graph",
+        "MATCH (n) WHERE 'Person' IN labels(n) RETURN count(n) AS n",
+        None,
+    ),
+    (
+        "labels_size",
+        "social_graph",
+        "MATCH (n:Person) RETURN size(labels(n)) AS s ORDER BY s LIMIT 1",
+        None,
+    ),
+    (
+        "labels_index",
+        "social_graph",
+        "MATCH (n:Person) RETURN labels(n)[0] AS l LIMIT 1",
+        None,
+    ),
     ("in_list", "social_graph", "MATCH (p:Person) WHERE p.city IN ['Oslo', 'Bergen'] RETURN count(p) AS n", None),
     (
         "predicate_stack",
@@ -509,6 +584,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "shortest_typed",
         "social_graph",
         "MATCH p = shortestPath((a:Person {person_id:1})-[:KNOWS*..5]-(b:Person {person_id:10})) RETURN length(p) AS L",
+        None,
+    ),
+    # B4: undirected shortestPath over a graph that has bidirectional
+    # neighbours (KNOWS edges chain forward, but the undirected
+    # traversal sees both directions). Pre-fix, `filtered_neighbors_undirected`
+    # returned duplicate entries; the visited bitmap masked the
+    # wrong-answer symptom for shortestPath but DFS-style enumeration
+    # paid wasted work per duplicate. Locking the count here guards
+    # against a future regression that surfaces the duplicate.
+    (
+        "shortest_undirected_dense",
+        "social_graph",
+        "MATCH p = shortestPath((a:Person {person_id:1})-[*..6]-(b:Person {person_id:20})) "
+        "RETURN length(p) AS L",
         None,
     ),
     # ── multiple OPTIONAL MATCH ──
