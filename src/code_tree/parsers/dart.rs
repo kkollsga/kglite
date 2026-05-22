@@ -25,8 +25,8 @@
 //!     adopt their parent library's module path.
 //!   - TODO/FIXME-style comment annotations; Dart 3 class modifiers.
 //!   - Visibility from the Dart naming convention (leading `_` = private).
-//!
-//! Follow-up phase: the Flutter widget pass.
+//!   - Flutter pass: `StatelessWidget` / `StatefulWidget` / `State`
+//!     subclasses and their `build` methods are tagged for fast lookup.
 
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
@@ -69,6 +69,13 @@ const DART_COMMENT_TYPES: &[&str] = &["comment", "block_comment", "documentation
 
 /// Class-declaration modifier keywords surfaced into `ClassInfo.metadata`.
 const CLASS_MODIFIERS: &[&str] = &["abstract", "base", "interface", "sealed", "final"];
+
+/// Flutter widget base classes → the `flutter_widget` tag each implies.
+const FLUTTER_WIDGET_BASES: &[(&str, &str)] = &[
+    ("StatelessWidget", "stateless"),
+    ("StatefulWidget", "stateful"),
+    ("State", "state"),
+];
 
 impl DartParser {
     pub fn new() -> Self {
@@ -862,6 +869,44 @@ fn collect_supertypes(node: Node, source: &[u8]) -> Vec<(String, &'static str)> 
     out
 }
 
+/// Flutter pass: tag `StatelessWidget` / `StatefulWidget` / `State`
+/// subclasses with `flutter_widget`, and their `build` methods with
+/// `flutter_build`, so "show me the screens" queries are one hop away.
+/// Pure metadata — no model-shape or builder change beyond two columns.
+fn flutter_annotate(result: &mut ParseResult) {
+    let mut widget_qnames: Vec<String> = Vec::new();
+    for class in &mut result.classes {
+        let tag = FLUTTER_WIDGET_BASES.iter().find_map(|&(base, tag)| {
+            class
+                .bases
+                .iter()
+                .any(|b| b.as_str() == base)
+                .then_some(tag)
+        });
+        if let Some(tag) = tag {
+            class.metadata.insert(
+                "flutter_widget".into(),
+                serde_json::Value::String(tag.into()),
+            );
+            widget_qnames.push(class.qualified_name.clone());
+        }
+    }
+    if widget_qnames.is_empty() {
+        return;
+    }
+    for func in &mut result.functions {
+        if func.name != "build" {
+            continue;
+        }
+        if let Some(owner) = func.qualified_name.strip_suffix(".build") {
+            if widget_qnames.iter().any(|w| w == owner) {
+                func.metadata
+                    .insert("flutter_build".into(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+}
+
 /// Push an `inherent` TypeRelationship carrying every method appended to
 /// `result.functions` since `methods_start` — the builder turns it into
 /// HAS_METHOD edges. Dart has no nested type declarations, so everything a
@@ -1100,6 +1145,8 @@ impl LanguageParser for DartParser {
             &mut result,
             &mut file_info,
         );
+
+        flutter_annotate(&mut result);
 
         result.files.push(file_info);
         result

@@ -9,6 +9,8 @@ Coverage grows per implementation phase:
     top-level const/final → Constant, typedef → Constant, async flag.
   - Phase 4: CALLS edges, cyclomatic branch counts, part/part-of module
     sharing, TODO/FIXME comment annotations.
+  - Phase 5: Flutter pass — widget subclasses (flutter_widget) and their
+    build methods (flutter_build); constructor flags queryable.
 """
 
 import json
@@ -394,3 +396,83 @@ void messy() {}
     assert rows, "expected todo.dart File node"
     annotations = rows[0]["a"] or ""
     assert "refactor" in str(annotations), annotations
+
+
+def test_dart_flutter_stateless_widget(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "home.dart",
+        """
+import 'package:flutter/material.dart';
+
+class HomePage extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container();
+  }
+}
+
+class PlainModel {
+  void build() {}
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (c:Class) RETURN c.name AS n, c.flutter_widget AS w").to_list()
+    widget = {r["n"]: r["w"] for r in rows}
+    assert widget.get("HomePage") == "stateless", widget
+    assert widget.get("PlainModel") in (None, ""), widget
+
+    builds = g.cypher(
+        "MATCH (c:Class {name: 'HomePage'})-[:HAS_METHOD]->(f:Function {name: 'build'}) RETURN f.flutter_build AS fb"
+    ).to_list()
+    assert builds and builds[0]["fb"] is True, builds
+    # The plain class's build() is not a Flutter build method.
+    plain = g.cypher(
+        "MATCH (c:Class {name: 'PlainModel'})-[:HAS_METHOD]->(f:Function {name: 'build'}) RETURN f.flutter_build AS fb"
+    ).to_list()
+    assert plain and plain[0]["fb"] is False, plain
+
+
+def test_dart_flutter_stateful_and_state(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "counter.dart",
+        """
+import 'package:flutter/material.dart';
+
+class Counter extends StatefulWidget {
+  @override
+  State<Counter> createState() => _CounterState();
+}
+
+class _CounterState extends State<Counter> {
+  @override
+  Widget build(BuildContext context) => Container();
+}
+""",
+    )
+    g = build(str(pkg))
+    rows = g.cypher("MATCH (c:Class) RETURN c.name AS n, c.flutter_widget AS w").to_list()
+    widget = {r["n"]: r["w"] for r in rows}
+    assert widget.get("Counter") == "stateful", widget
+    assert widget.get("_CounterState") == "state", widget
+
+
+def test_dart_constructor_flag_queryable(tmp_path):
+    pkg = _write(
+        tmp_path,
+        "box.dart",
+        """
+class Box {
+  Box();
+  factory Box.empty() => Box();
+}
+""",
+    )
+    g = build(str(pkg))
+    ctors = g.cypher("MATCH (f:Function) WHERE f.is_constructor = true RETURN f.name AS n").to_list()
+    names = {r["n"] for r in ctors}
+    assert {"Box", "Box.empty"} <= names, names
+    factory = g.cypher("MATCH (f:Function) WHERE f.is_factory = true RETURN f.name AS n").to_list()
+    assert {r["n"] for r in factory} == {"Box.empty"}, factory

@@ -461,6 +461,49 @@ fn functions_df(
                     .collect(),
             ),
         ),
+        // Dart callable metadata (set by the Dart parser; false/absent
+        // for other languages).
+        (
+            "is_constructor",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_constructor")))
+                    .collect(),
+            ),
+        ),
+        (
+            "is_factory",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "is_factory")))
+                    .collect(),
+            ),
+        ),
+        (
+            "flutter_build",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(meta_bool(f, "flutter_build")))
+                    .collect(),
+            ),
+        ),
+        (
+            "accessor",
+            ColumnType::String,
+            str_col(
+                fns.iter()
+                    .map(|f| {
+                        f.metadata
+                            .get("accessor")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect(),
+            ),
+        ),
         (
             "branch_count",
             ColumnType::Int64,
@@ -639,6 +682,23 @@ fn classes_df(
                 classes
                     .iter()
                     .map(|c| Some(class_meta_bool(c, "is_pyclass")))
+                    .collect(),
+            ),
+        ),
+        // Dart Flutter pass: "stateless" / "stateful" / "state" for a
+        // widget subclass, absent otherwise.
+        (
+            "flutter_widget",
+            ColumnType::String,
+            str_col(
+                classes
+                    .iter()
+                    .map(|c| {
+                        c.metadata
+                            .get("flutter_widget")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
                     .collect(),
             ),
         ),
