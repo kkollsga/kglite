@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 fn get_separator(language: &str) -> &'static str {
     match language {
         "rust" | "cpp" => "::",
-        "python" | "java" | "csharp" => ".",
+        "python" | "java" | "csharp" | "dart" => ".",
         "php" => "\\",
         _ => "/",
     }

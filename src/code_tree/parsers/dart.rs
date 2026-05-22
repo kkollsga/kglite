@@ -95,11 +95,14 @@ impl DartParser {
         result: &mut ParseResult,
         file_info: &mut FileInfo,
     ) {
+        // The package root — the first `.`-segment of the module path —
+        // anchors import-URI normalisation.
+        let pkg_root = module_path.split('.').next().unwrap_or("");
         let mut cursor = root.walk();
         for child in root.named_children(&mut cursor) {
             match child.kind() {
                 "import_or_export" => {
-                    if let Some(target) = Self::extract_import(child, source) {
+                    if let Some(target) = Self::extract_import(child, source, pkg_root) {
                         file_info.imports.push(target);
                     }
                 }
@@ -147,11 +150,14 @@ impl DartParser {
         }
     }
 
-    /// `import_or_export` → the imported/exported library URI (quotes
-    /// stripped). Both directions create a file-level dependency, so both
-    /// land in `FileInfo.imports`.
-    fn extract_import(node: Node, source: &[u8]) -> Option<String> {
-        first_string_literal(node, source).filter(|s| !s.is_empty())
+    /// `import_or_export` → the imported/exported library, normalised to
+    /// the synthetic module-path scheme so import edges resolve. Both
+    /// directions create a file-level dependency, so both land in
+    /// `FileInfo.imports`.
+    fn extract_import(node: Node, source: &[u8], pkg_root: &str) -> Option<String> {
+        first_string_literal(node, source)
+            .filter(|s| !s.is_empty())
+            .map(|uri| normalize_dart_import(&uri, pkg_root))
     }
 
     /// Parse a class / mixin / extension / extension-type declaration into a
@@ -1004,6 +1010,37 @@ fn bare_type_name(text: &str) -> String {
 fn truncate_preview(text: &str) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(100).collect()
+}
+
+/// Normalise a Dart import/export URI to the synthetic `<root>.<stem>`
+/// module path so the builder's import resolver can match it against a
+/// project file. `dart:` core libraries and `package:` URIs for *other*
+/// packages are left verbatim — they are genuinely external and resolve
+/// to nothing, which is correct. Relative imports and same-package
+/// `package:` URIs resolve to a project module.
+fn normalize_dart_import(uri: &str, pkg_root: &str) -> String {
+    if pkg_root.is_empty() || uri.starts_with("dart:") {
+        return uri.to_string();
+    }
+    let path_part = match uri.strip_prefix("package:") {
+        Some(rest) => match rest.split_once('/') {
+            // `package:<pkg>/...` resolves only within our own package.
+            Some((pkg, p)) if pkg == pkg_root => p,
+            _ => return uri.to_string(),
+        },
+        None => uri,
+    };
+    let stem = path_part
+        .rsplit('/')
+        .next()
+        .unwrap_or(path_part)
+        .strip_suffix(".dart")
+        .unwrap_or(path_part);
+    if stem.is_empty() {
+        uri.to_string()
+    } else {
+        format!("{pkg_root}.{stem}")
+    }
 }
 
 /// First `string_literal` descendant of `node`, surrounding quotes stripped.

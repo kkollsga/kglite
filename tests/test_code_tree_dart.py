@@ -11,6 +11,8 @@ Coverage grows per implementation phase:
     sharing, TODO/FIXME comment annotations.
   - Phase 5: Flutter pass — widget subclasses (flutter_widget) and their
     build methods (flutter_build); constructor flags queryable.
+  - Bug-fix pass: relative-import resolution → IMPORTS edges;
+    multi-byte comment-annotation panic regression.
 """
 
 import json
@@ -488,3 +490,20 @@ def test_dart_multibyte_comment_no_panic(tmp_path):
     g = build(str(pkg))
     rows = g.cypher("MATCH (f:File {filename: 'boxed.dart'}) RETURN f.path AS p").to_list()
     assert rows, "build must succeed on a multi-byte comment body"
+
+
+def test_dart_relative_import_resolves(tmp_path):
+    pkg = tmp_path / "dart_pkg"
+    pkg.mkdir(exist_ok=True)
+    (pkg / "helper.dart").write_text("int help() => 1;\n")
+    (pkg / "app.dart").write_text("import 'helper.dart';\n\nvoid main() {\n  help();\n}\n")
+    g = build(str(pkg))
+    # A relative Dart import normalises to the imported file's module and
+    # produces an IMPORTS edge.
+    rows = g.cypher(
+        "MATCH (a:File {filename: 'app.dart'})-[:IMPORTS]->(t) "
+        "RETURN labels(t)[0] AS lbl, t.filename AS fn, t.qualified_name AS qn"
+    ).to_list()
+    assert rows, "expected app.dart → helper IMPORTS edge"
+    targets = {(r["fn"] or r["qn"]) for r in rows}
+    assert any("helper" in str(t) for t in targets), rows
