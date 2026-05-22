@@ -78,6 +78,145 @@ class TestGetConnections:
         assert report["connections_created"] >= 1
 
 
+class TestBatchFlushDedup:
+    """A1: per-flush HashMap dedup replaces the O(degree) edges_connecting
+    walk that ran per edge when adding into an existing connection type.
+
+    These tests pin the correctness invariants that the in-flush lookup
+    map must preserve: no duplicate edges, Skip-mode suppression still
+    works, Replace-mode updates the lookup so later chunk entries hit the
+    freshly-created edge, and within-chunk duplicates consolidate onto a
+    single edge instead of creating two.
+    """
+
+    @staticmethod
+    def _seed(num_hubs: int = 3, targets_per_hub: int = 200) -> KnowledgeGraph:
+        """Hub-source fan-out fixture. The connection type :R is
+        established by the first pass so subsequent passes go through
+        the existence-check path (the path A1 accelerates)."""
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame([{"id": h, "name": f"hub{h}"} for h in range(num_hubs)]),
+            "Hub", "id", "name",
+        )
+        g.add_nodes(
+            pd.DataFrame([
+                {"id": h * targets_per_hub + t, "name": f"t{h * targets_per_hub + t}"}
+                for h in range(num_hubs) for t in range(targets_per_hub)
+            ]),
+            "Target", "id", "name",
+        )
+        g.add_connections(
+            pd.DataFrame([
+                {"from_id": h, "to_id": h * targets_per_hub + t}
+                for h in range(num_hubs) for t in range(targets_per_hub)
+            ]),
+            "R", "Hub", "from_id", "Target", "to_id",
+        )
+        return g
+
+    def test_fan_out_into_existing_type_creates_no_duplicates(self):
+        """Re-adding the exact same edge set with the default (Update)
+        conflict mode must not produce duplicate edges. Pre-fix this
+        relied on the O(degree) walk; post-fix it relies on the
+        per-flush HashMap finding each pre-existing edge."""
+        g = self._seed(num_hubs=3, targets_per_hub=200)
+        before = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
+
+        g.add_connections(
+            pd.DataFrame([
+                {"from_id": h, "to_id": h * 200 + t}
+                for h in range(3) for t in range(200)
+            ]),
+            "R", "Hub", "from_id", "Target", "to_id",
+        )
+        after = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
+        assert before == after == 600, (before, after)
+
+    def test_fan_out_into_existing_type_adds_new_edges(self):
+        """Net-new edges into an existing connection type all land."""
+        g = self._seed(num_hubs=3, targets_per_hub=200)
+        # New targets 1000..1599 — entirely new IDs.
+        g.add_nodes(
+            pd.DataFrame([{"id": 1000 + i, "name": f"u{i}"} for i in range(600)]),
+            "Target", "id", "name",
+        )
+        g.add_connections(
+            pd.DataFrame([
+                {"from_id": h, "to_id": 1000 + h * 200 + t}
+                for h in range(3) for t in range(200)
+            ]),
+            "R", "Hub", "from_id", "Target", "to_id",
+        )
+        total = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
+        assert total == 1200, total
+
+    def test_skip_mode_suppresses_duplicates(self):
+        """Skip-mode (pre-buffer + flush) still drops all duplicates."""
+        g = self._seed(num_hubs=2, targets_per_hub=50)
+        stats = g.add_connections(
+            pd.DataFrame([
+                {"from_id": h, "to_id": h * 50 + t}
+                for h in range(2) for t in range(50)
+            ]),
+            "R", "Hub", "from_id", "Target", "to_id",
+            conflict_handling="skip",
+        )
+        assert stats["connections_created"] == 0, stats
+        total = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
+        assert total == 100, total
+
+    def test_replace_mode_does_not_duplicate(self):
+        """Replace-mode removes the existing edge and inserts a new one;
+        the per-flush lookup must be updated to the new edge id so a later
+        chunk entry hitting the same (src, tgt) finds the new edge — not
+        the now-removed one. Net edge count stays the same."""
+        g = self._seed(num_hubs=2, targets_per_hub=10)
+        # 20 existing edges. Replace all 20, then immediately replace the
+        # same set again — exercises the lookup-update-on-replace path.
+        repl_df = pd.DataFrame([
+            {"from_id": h, "to_id": h * 10 + t}
+            for h in range(2) for t in range(10)
+        ])
+        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id",
+                          conflict_handling="replace")
+        g.add_connections(repl_df, "R", "Hub", "from_id", "Target", "to_id",
+                          conflict_handling="replace")
+        total = g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c").to_list()[0]["c"]
+        assert total == 20, total
+
+    def test_within_chunk_duplicate_consolidates(self):
+        """When the connection type already exists, two chunk entries
+        with the same (src, tgt) must consolidate onto a single edge —
+        the first iteration creates an edge, the per-flush lookup is
+        updated, and the second iteration finds it via Update mode.
+
+        (The skip_existence_check=true initial-load fast path bypasses
+        within-chunk dedup by design — first-batch consolidation is the
+        caller's responsibility there. That path is unchanged.)
+        """
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame([{"id": 1, "name": "a"}, {"id": 2, "name": "b"},
+                          {"id": 3, "name": "c"}]),
+            "N", "id", "name",
+        )
+        # Establish the :R connection type with a sentinel edge.
+        g.add_connections(
+            pd.DataFrame([{"src": 1, "tgt": 3}]),
+            "R", "N", "src", "N", "tgt",
+        )
+        # Now :R exists, so skip_existence_check=false. Two identical
+        # (1, 2) rows in one chunk must collapse to one edge.
+        g.add_connections(
+            pd.DataFrame([{"src": 1, "tgt": 2}, {"src": 1, "tgt": 2}]),
+            "R", "N", "src", "N", "tgt",
+        )
+        total = g.cypher("MATCH (a:N {name:'a'})-[r:R]->(b:N {name:'b'}) "
+                         "RETURN count(r) AS c").to_list()[0]["c"]
+        assert total == 1, total
+
+
 class TestConflictHandlingSum:
     """Tests for conflict_handling='sum' on add_connections."""
 

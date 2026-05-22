@@ -4,7 +4,8 @@ use crate::graph::schema::{
     DirGraph, EdgeData, InternedKey, NodeData, PropertyStorage, PROVISIONAL_KEY,
 };
 use crate::graph::storage::{GraphRead, GraphWrite};
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
+use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -655,18 +656,47 @@ impl ConnectionBatchProcessor {
         // Pre-intern the connection type for edge type comparison
         let conn_type_key = graph.interner.get_or_intern(connection_type);
 
+        // A1 fix: build a per-flush (source, target) -> edge_id map once,
+        // restricted to the chunk's unique source set and this connection
+        // type. Replaces the per-edge `edges_connecting().find()` walk —
+        // for hub-source fan-out into an *existing* connection type, the
+        // old code was O(N * max_degree); this is O(sum_of_unique_source_degrees).
+        //
+        // The map is mutated as we go: newly-created edges are inserted,
+        // Replace-mode edges have their entry updated to the new id, and
+        // Update/Preserve/Sum modes leave the id untouched. This
+        // preserves the within-chunk dedup semantics of the original
+        // `edges_connecting`-per-iteration code: two chunk entries with
+        // the same (src, tgt) consolidate onto a single edge instead of
+        // creating duplicates.
+        //
+        // `skip_existence_check` (initial-load fast path) skips both the
+        // build and the per-edge lookup entirely — there are no existing
+        // edges of this type, and within-chunk consolidation is the
+        // responsibility of the caller in that mode.
+        let mut existing_lookup: HashMap<(NodeIndex, NodeIndex), EdgeIndex> = HashMap::new();
+        if !self.skip_existence_check {
+            let unique_sources: HashSet<NodeIndex> =
+                self.connections.iter().map(|c| c.source_idx).collect();
+            for src in &unique_sources {
+                for edge_ref in graph.graph.edges_directed(*src, Direction::Outgoing) {
+                    if edge_ref.weight().connection_type == conn_type_key {
+                        existing_lookup.insert((*src, edge_ref.target()), edge_ref.id());
+                    }
+                }
+            }
+        }
+
         // Create or update edges in current chunk
         for conn in self.connections.drain(..) {
             // On initial load, skip existence check for performance (no existing edges).
-            // When checking, find an edge of the SAME connection type (not just any edge).
+            // Otherwise consult the per-flush lookup map built above.
             let existing_edge = if self.skip_existence_check {
                 None
             } else {
-                graph
-                    .graph
-                    .edges_connecting(conn.source_idx, conn.target_idx)
-                    .find(|e| e.weight().connection_type == conn_type_key)
-                    .map(|e| e.id())
+                existing_lookup
+                    .get(&(conn.source_idx, conn.target_idx))
+                    .copied()
             };
 
             if let Some(edge_idx) = existing_edge {
@@ -683,12 +713,17 @@ impl ConnectionBatchProcessor {
                             conn.properties,
                             &mut graph.interner,
                         );
-                        GraphWrite::add_edge(
+                        let new_id = GraphWrite::add_edge(
                             &mut graph.graph,
                             conn.source_idx,
                             conn.target_idx,
                             edge_data,
                         );
+                        // Update the lookup so any later chunk entry with
+                        // the same (src, tgt) hits the freshly-created edge,
+                        // not the removed one.
+                        existing_lookup
+                            .insert((conn.source_idx, conn.target_idx), new_id);
                         stats.connections_created += 1;
                     }
                     ConflictHandling::Update => {
@@ -780,12 +815,20 @@ impl ConnectionBatchProcessor {
                     conn.properties,
                     &mut graph.interner,
                 );
-                GraphWrite::add_edge(
+                let new_id = GraphWrite::add_edge(
                     &mut graph.graph,
                     conn.source_idx,
                     conn.target_idx,
                     edge_data,
                 );
+                // Within-chunk dedup: later iterations targeting the same
+                // (src, tgt) now resolve to this edge via Update/Preserve/Sum.
+                // No-op when skip_existence_check is true (the lookup is
+                // unused and kept empty for that path).
+                if !self.skip_existence_check {
+                    existing_lookup
+                        .insert((conn.source_idx, conn.target_idx), new_id);
+                }
                 stats.connections_created += 1;
             }
         }
