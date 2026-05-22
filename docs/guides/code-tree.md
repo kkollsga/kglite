@@ -70,14 +70,19 @@ graph.toc("src/graph/mod.rs")
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx` |
 | Swift | `.swift` |
 | PHP | `.php` |
+| Dart | `.dart` |
 | HTML | `.html`, `.htm` |
 | CSS | `.css` |
 
 ## Graph Schema
 
-**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Mixin` (Dart), `Enum`, `Trait`, `Protocol`, `Interface`, `Attribute`, `Constant`, `Route`, `Procedure`, `Element` (HTML), `Selector` (CSS)
+**Node types:** `Project`, `Dependency`, `File`, `Module`, `Function`, `Struct`, `Class`, `Mixin` (Dart), `Enum`, `Trait`, `Protocol`, `Interface`, `Constant`, `Route`, `Procedure`, `Element` (HTML), `Selector` (CSS)
 
-**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item, incl. File→Element / File→Selector for HTML/CSS), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class/Mixin→Function), `HAS_ATTRIBUTE` (Struct/Class→Attribute), `HAS_SUBMODULE` (Module→Module), `HAS_CHILD` (Element→Element, document outline), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+**Relationship types:** `DEPENDS_ON` (Project→Dependency), `HAS_SOURCE` (Project→File), `DEFINES` (File→item, incl. File→Element / File→Selector for HTML/CSS), `CALLS` (Function→Function), `HAS_METHOD` (Struct/Class/Mixin→Function), `HAS_SUBMODULE` (Module→Module), `HAS_CHILD` (Element→Element, document outline), `IMPLEMENTS` (type→trait), `EXTENDS` (class→class), `IMPORTS` (File→Module, File→File), `USES_TYPE`, `REFERENCES` (Function→Constant), `REFERENCES_FN` (Function→Function), `DECORATES` (Function→Function), `HANDLES` (Route→Function), `BINDS` (PyO3 wrapper → Rust impl), `EXPOSES` (Module→item)
+
+Class / Struct / Mixin nodes carry their fields inline as a JSON `fields`
+property — a list of `{name, type, visibility, default}` — rather than as
+separate nodes.
 
 ### Web-stack node types (0.9.36+)
 
@@ -209,6 +214,7 @@ embeddings are keyed by. The format is per-language:
 | Java | `.` | `com.example.Widget.render` |
 | C# | `.` | `MyProject.Widget.Render` |
 | Go | `.` | `package.Widget.Render` |
+| Dart | `.` | `lib.widgets.home.HomePage.build` |
 | C | `/` | `src/parser/main.c/parse_file` |
 
 The general shape is always `<module-path><separator><owner><separator><name>`,
