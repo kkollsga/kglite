@@ -109,6 +109,16 @@ git log origin/main..HEAD --oneline | grep -E "^\w+ release\("
 
 If that returns a commit, keep the version it picked. Only mint a new version after a clean push to origin.
 
+### Captured-constant refresh at release time
+
+Three captured values drift across releases and need a version-paired refresh as part of the release commit. The gates that check them are otherwise reliable — see Test infrastructure → Phase 4 / Phase 5 / perf-regression — but they go stale silently when nobody updates the captured constants. `make refresh-release-constants` does all three in one pass and prints a `git diff --stat` so the maintainer can stage them into the release commit.
+
+- `tests/test_phase4_parity.py::GOLDEN_V3_DIGEST` (and demote the prior value into `ACCEPTABLE_DIGESTS`). The version string lives in the `.kgl` header, so every release shifts the digest.
+- `tests/test_phase5_parity.py::test_binary_size_regression` baseline. Update the docstring's "what grew" note with each bump — the script adds a `TODO: describe what grew since the prior baseline` line for the maintainer to fill in.
+- `tests/benchmarks/baselines/<version>.json` and `current.json`. Captured by re-running the 11 tracked core benchmarks. The script is idempotent — if `<version>.json` already exists, recapture is skipped (delete the file to force a fresh capture; benchmark numbers are inherently noisy so we don't want to overwrite on every script run).
+
+The script requires a fresh release build (`maturin develop --release`) for steps 2 and 3.
+
 ### Multi-phase plans
 
 When a plan has Steps 1 / 2 / 3 / …:
