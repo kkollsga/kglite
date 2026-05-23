@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs refresh-release-constants check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs refresh-release-constants neo4j-up neo4j-down neo4j-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -79,6 +79,21 @@ bench-bugs:
 refresh-release-constants:
 	$(ACTIVATE) && maturin develop --release --quiet
 	$(ACTIVATE) && python scripts/refresh_release_constants.py
+
+## On-demand openCypher conformance check vs Neo4j. Not part of CI.
+## See docs/explanation/cypher-conformance.md for the full workflow.
+neo4j-up:
+	docker run -d --name kglite-neo4j-conformance \
+		-p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/conformance \
+		neo4j:5
+
+neo4j-down:
+	-docker rm -f kglite-neo4j-conformance
+
+neo4j-conformance:
+	$(ACTIVATE) && pip install -q -e '.[neo4j]'
+	$(ACTIVATE) && python scripts/cypher_conformance.py \
+		--uri bolt://localhost:7687 --user neo4j --password conformance
 
 ## Fast compilation check (no codegen)
 check:

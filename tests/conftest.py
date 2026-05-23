@@ -12,13 +12,9 @@ def empty_graph():
     return KnowledgeGraph()
 
 
-@pytest.fixture
-def small_graph():
-    """Small graph: 3 Person nodes + 3 KNOWS edges.
-
-    Persons: Alice (age=28, city=Oslo), Bob (age=35, city=Bergen), Charlie (age=42, city=Oslo)
-    Edges: Alice->Bob, Bob->Charlie, Alice->Charlie
-    """
+def build_small_graph() -> KnowledgeGraph:
+    """Builder for `small_graph` — exposed as a plain function so non-pytest
+    callers (e.g. scripts/cypher_conformance.py) can reuse the fixture."""
     graph = KnowledgeGraph()
 
     people = pd.DataFrame(
@@ -41,6 +37,16 @@ def small_graph():
     graph.add_connections(edges, "KNOWS", "Person", "from_id", "Person", "to_id", columns=["since"])
 
     return graph
+
+
+@pytest.fixture
+def small_graph():
+    """Small graph: 3 Person nodes + 3 KNOWS edges.
+
+    Persons: Alice (age=28, city=Oslo), Bob (age=35, city=Bergen), Charlie (age=42, city=Oslo)
+    Edges: Alice->Bob, Bob->Charlie, Alice->Charlie
+    """
+    return build_small_graph()
 
 
 @pytest.fixture
@@ -104,16 +110,9 @@ def file_imports_graph():
     return graph
 
 
-@pytest.fixture
-def social_graph():
-    """Medium graph: 20 Person + 5 Company nodes, KNOWS/WORKS_AT edges.
-
-    Persons: Person_1..Person_20, age=21..40, city in [Oslo, Bergen, Stavanger, Trondheim]
-             email is None for odd-numbered persons (nullable field)
-    Companies: TechCorp, DataInc, CloudSoft, AILabs, DevHouse
-    KNOWS: each person knows next 3 persons (with 'since' property)
-    WORKS_AT: each person works at one company (with 'start_year' property)
-    """
+def build_social_graph() -> KnowledgeGraph:
+    """Builder for `social_graph` — exposed as a plain function so non-pytest
+    callers (e.g. scripts/cypher_conformance.py) can reuse the fixture."""
     graph = KnowledgeGraph()
 
     people = pd.DataFrame(
@@ -154,6 +153,19 @@ def social_graph():
     graph.add_connections(works_at, "WORKS_AT", "Person", "person_id", "Company", "company_id", columns=["start_year"])
 
     return graph
+
+
+@pytest.fixture
+def social_graph():
+    """Medium graph: 20 Person + 5 Company nodes, KNOWS/WORKS_AT edges.
+
+    Persons: Person_1..Person_20, age=21..40, city in [Oslo, Bergen, Stavanger, Trondheim]
+             email is None for odd-numbered persons (nullable field)
+    Companies: TechCorp, DataInc, CloudSoft, AILabs, DevHouse
+    KNOWS: each person knows next 3 persons (with 'since' property)
+    WORKS_AT: each person works at one company (with 'start_year' property)
+    """
+    return build_social_graph()
 
 
 @pytest.fixture
