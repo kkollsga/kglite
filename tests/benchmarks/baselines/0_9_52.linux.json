@@ -1,0 +1,264 @@
+{
+  "machine_info": {
+    "platform": "linux",
+    "system": "Linux"
+  },
+  "commit_info": {
+    "id": "synthesized-from-826c0b5-ci-run"
+  },
+  "benchmarks": [
+    {
+      "name": "test_bench_traversal",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_traversal",
+      "stats": {
+        "min": 1.058e-06,
+        "max": 1.281e-05,
+        "mean": 1.11e-06,
+        "stddev": 1.226e-07,
+        "median": 1.097e-06,
+        "rounds": 89040,
+        "iterations": 1,
+        "ops": 900900.900900901,
+        "total": 0.0988344,
+        "iqr": 1.839e-07,
+        "q1": 1.04215e-06,
+        "q3": 1.15185e-06,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 1.058e-06,
+        "hd15iqr": 1.281e-05
+      }
+    },
+    {
+      "name": "test_bench_shortest_path",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_shortest_path",
+      "stats": {
+        "min": 7.394e-06,
+        "max": 5.398e-05,
+        "mean": 7.968e-06,
+        "stddev": 1.424e-06,
+        "median": 7.794e-06,
+        "rounds": 128140,
+        "iterations": 1,
+        "ops": 125502.0080321285,
+        "total": 1.02101952,
+        "iqr": 2.136e-06,
+        "q1": 7.4042999999999996e-06,
+        "q3": 8.183700000000001e-06,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 7.394e-06,
+        "hd15iqr": 5.398e-05
+      }
+    },
+    {
+      "name": "test_bench_columnar_cypher_match",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_match",
+      "stats": {
+        "min": 1.138e-05,
+        "max": 6.597e-05,
+        "mean": 1.292e-05,
+        "stddev": 1.714e-06,
+        "median": 1.268e-05,
+        "rounds": 78722,
+        "iterations": 1,
+        "ops": 77399.38080495356,
+        "total": 1.01708824,
+        "iqr": 2.571e-06,
+        "q1": 1.2046e-05,
+        "q3": 1.3314000000000002e-05,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 1.138e-05,
+        "hd15iqr": 6.597e-05
+      }
+    },
+    {
+      "name": "test_bench_cypher_match",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_cypher_match",
+      "stats": {
+        "min": 1.158e-05,
+        "max": 0.0001878,
+        "mean": 1.226e-05,
+        "stddev": 1.671e-06,
+        "median": 1.202e-05,
+        "rounds": 82967,
+        "iterations": 1,
+        "ops": 81566.06851549755,
+        "total": 1.01717542,
+        "iqr": 2.5065e-06,
+        "q1": 1.1419e-05,
+        "q3": 1.2621e-05,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 1.158e-05,
+        "hd15iqr": 0.0001878
+      }
+    },
+    {
+      "name": "test_bench_columnar_enable",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
+      "stats": {
+        "min": 0.0003909,
+        "max": 0.0005937,
+        "mean": 0.0004222,
+        "stddev": 1.15e-05,
+        "median": 0.0004238,
+        "rounds": 4221,
+        "iterations": 1,
+        "ops": 2368.5457129322594,
+        "total": 1.7821062,
+        "iqr": 1.725e-05,
+        "q1": 0.00040260999999999997,
+        "q3": 0.00044499000000000003,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0003909,
+        "hd15iqr": 0.0005937
+      }
+    },
+    {
+      "name": "test_bench_cypher_where",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_cypher_where",
+      "stats": {
+        "min": 0.0004678,
+        "max": 0.0007399,
+        "mean": 0.0004959,
+        "stddev": 1.825e-05,
+        "median": 0.0004912,
+        "rounds": 2217,
+        "iterations": 1,
+        "ops": 2016.5355918531964,
+        "total": 1.0994103,
+        "iqr": 2.7375e-05,
+        "q1": 0.00046664,
+        "q3": 0.0005157600000000001,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0004678,
+        "hd15iqr": 0.0007399
+      }
+    },
+    {
+      "name": "test_bench_columnar_cypher_where",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_columnar_cypher_where",
+      "stats": {
+        "min": 0.0004876,
+        "max": 0.0006764,
+        "mean": 0.0005126,
+        "stddev": 1.511e-05,
+        "median": 0.000511,
+        "rounds": 2013,
+        "iterations": 1,
+        "ops": 1950.8388607101053,
+        "total": 1.0318638,
+        "iqr": 2.2665e-05,
+        "q1": 0.00048544999999999995,
+        "q3": 0.00053655,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0004876,
+        "hd15iqr": 0.0006764
+      }
+    },
+    {
+      "name": "test_bench_add_nodes",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_add_nodes",
+      "stats": {
+        "min": 0.0007576,
+        "max": 0.001351,
+        "mean": 0.0007836,
+        "stddev": 2.239e-05,
+        "median": 0.0007823,
+        "rounds": 1295,
+        "iterations": 1,
+        "ops": 1276.1613067891783,
+        "total": 1.014762,
+        "iqr": 3.3585e-05,
+        "q1": 0.0007431849999999999,
+        "q3": 0.000821415,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0007576,
+        "hd15iqr": 0.001351
+      }
+    },
+    {
+      "name": "test_bench_save_v3",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_save_v3",
+      "stats": {
+        "min": 0.0008779,
+        "max": 0.001269,
+        "mean": 0.0009129,
+        "stddev": 2.382e-05,
+        "median": 0.0009085,
+        "rounds": 1136,
+        "iterations": 1,
+        "ops": 1095.4102311315587,
+        "total": 1.0370544,
+        "iqr": 3.573e-05,
+        "q1": 0.0008630749999999999,
+        "q3": 0.0009539250000000001,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0008779,
+        "hd15iqr": 0.001269
+      }
+    },
+    {
+      "name": "test_bench_columnar_save_kgl",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_columnar_save_kgl",
+      "stats": {
+        "min": 0.0008975,
+        "max": 0.001129,
+        "mean": 0.0009201,
+        "stddev": 1.155e-05,
+        "median": 0.0009195,
+        "rounds": 1092,
+        "iterations": 1,
+        "ops": 1086.8383871318335,
+        "total": 1.0047492,
+        "iqr": 1.7325e-05,
+        "q1": 0.0008735249999999999,
+        "q3": 0.000965475,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.0008975,
+        "hd15iqr": 0.001129
+      }
+    },
+    {
+      "name": "test_bench_add_connections",
+      "fullname": "tests/benchmarks/test_bench_core.py::test_bench_add_connections",
+      "stats": {
+        "min": 0.001444,
+        "max": 0.001647,
+        "mean": 0.001476,
+        "stddev": 2.436e-05,
+        "median": 0.001472,
+        "rounds": 693,
+        "iterations": 1,
+        "ops": 677.5067750677506,
+        "total": 1.022868,
+        "iqr": 3.654e-05,
+        "q1": 0.0013984,
+        "q3": 0.0015456,
+        "iqr_outliers": 0,
+        "stddev_outliers": 0,
+        "outliers": "0;0",
+        "ld15iqr": 0.001444,
+        "hd15iqr": 0.001647
+      }
+    }
+  ]
+}

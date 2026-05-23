@@ -57,15 +57,20 @@ bench-check-v090:
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare=v0_9_0_baseline --benchmark-compare-fail=mean:5%
 
 ## Perf regression gate: compare the tracked core benchmarks against
-## the current baseline (tests/benchmarks/baselines/current.json) and
-## fail on >20% regression on `min` time. This is the gate CI runs.
+## the current platform's baseline and fail on >20% regression on
+## `min` time. This is the gate CI runs (on Linux); local
+## developers usually hit the macOS arm. Baselines are platform-
+## specific because Linux GitHub runners are ~2-3x slower than
+## Apple Silicon for these benchmarks (same source, different
+## hardware).
 ## Refresh the baseline at release time via `make refresh-release-constants`.
 bench-check:
 	$(ACTIVATE) && maturin develop --release --quiet \
 		&& pytest tests/benchmarks/test_bench_core.py -m benchmark \
 			--benchmark-min-rounds=100 --benchmark-warmup=on --benchmark-warmup-iterations=20 \
 			--benchmark-json=.bench-current.json \
-		&& python scripts/compare_bench.py tests/benchmarks/baselines/current.json .bench-current.json \
+		&& BASELINE=tests/benchmarks/baselines/current$$( [ "$$(uname)" = "Linux" ] && echo ".linux" )$$( [ "$$(uname)" = "Darwin" ] && echo "" ).json \
+		&& python scripts/compare_bench.py $$BASELINE .bench-current.json \
 			--metric min --threshold 20
 
 ## Run bug-path performance benchmarks (pre/post bugfix baseline)

@@ -184,14 +184,22 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
     """Capture pytest-benchmark JSON for the 11 tracked core benchmarks
     and slim the per-iteration ``data`` field out of the result.
 
-    Idempotent: when ``<version>.json`` already exists, we skip the
-    re-capture. Benchmark numbers are inherently noisy (thermal /
-    system-load) so re-running would produce churn even when nothing
-    relevant has changed. The version slug is the trigger — bump
-    Cargo.toml → file missing → fresh capture.
+    Per-platform — Linux runners are ~2-3x slower than Apple Silicon for
+    these benchmarks (same source, different hardware), so a single
+    baseline can't gate both. The output filename gets a `.linux` infix
+    on Linux; macOS uses the bare name (legacy / default). Both files
+    coexist in `tests/benchmarks/baselines/`; CI picks
+    `current.linux.json`, local macOS dev uses `current.json`.
+
+    Idempotent: when ``<version>.json`` already exists for *this*
+    platform, we skip the re-capture. Benchmark numbers are inherently
+    noisy (thermal / system-load) so re-running would produce churn
+    even when nothing relevant has changed. The version slug + platform
+    are the trigger — bump Cargo.toml → file missing → fresh capture.
     """
-    target = BASELINES_DIR / f"{version_slug(version)}.json"
-    current = BASELINES_DIR / "current.json"
+    plat_suffix = ".linux" if sys.platform.startswith("linux") else ""
+    target = BASELINES_DIR / f"{version_slug(version)}{plat_suffix}.json"
+    current = BASELINES_DIR / f"current{plat_suffix}.json"
 
     if target.exists():
         return False, f"perf baseline {target.name} already present (delete it to force re-capture)"

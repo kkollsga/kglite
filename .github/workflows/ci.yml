@@ -199,7 +199,11 @@ jobs:
             --benchmark-json=.bench-current.json
 
       - name: Compare against baseline
+        # CI runs on Linux; the Linux baseline lives in current.linux.json.
+        # macOS local development uses current.json (the platform divergence
+        # is real — Linux GitHub runners run ~2-3x slower than Apple Silicon
+        # for these benchmarks, so a single baseline can't gate both).
         run: |
           python scripts/compare_bench.py \
-            tests/benchmarks/baselines/current.json .bench-current.json \
+            tests/benchmarks/baselines/current.linux.json .bench-current.json \
             --metric min --threshold 20
