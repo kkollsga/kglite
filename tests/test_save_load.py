@@ -105,10 +105,15 @@ class TestSaveLoadWithFeatures:
 
 
 class TestV3Format:
-    """Tests for the v3 columnar binary format."""
+    """Tests for the columnar binary format.
+
+    Class name kept as `TestV3Format` for git-blame continuity; Phase A.1 / C5
+    bumped the format to v4 (RGF\\x04) and bumped core_data_version to 2
+    when the `Value` enum gained Node/Relationship/Path/List/Map variants.
+    """
 
     def test_v3_magic_bytes(self):
-        """Saved files should start with the v3 magic header RGF\\x03."""
+        """Saved files should start with the v4 magic header RGF\\x04."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"]})
         graph.add_nodes(df, "Node", "id", "name")
@@ -119,7 +124,7 @@ class TestV3Format:
             graph.save(path)
             with open(path, "rb") as f:
                 header = f.read(4)
-            assert header == b"RGF\x03", f"Expected v3 magic bytes, got {header!r}"
+            assert header == b"RGF\x04", f"Expected v4 magic bytes, got {header!r}"
         finally:
             os.unlink(path)
 
@@ -140,8 +145,8 @@ class TestV3Format:
                 core_version = struct.unpack("<I", f.read(4))[0]
                 metadata_len = struct.unpack("<I", f.read(4))[0]
 
-            assert magic == b"RGF\x03"
-            assert core_version == 1  # current core data version
+            assert magic == b"RGF\x04"
+            assert core_version == 2  # Phase A.1 — bumped for Value enum extension
             assert metadata_len > 0  # metadata should not be empty
         finally:
             os.unlink(path)
@@ -306,9 +311,10 @@ class TestV3Format:
             os.unlink(path)
 
     def test_truncated_v3_file_error(self):
-        """A truncated v3 file should give a clear error."""
+        """A truncated v4 file should give a clear error."""
         with tempfile.NamedTemporaryFile(suffix=".kgl", delete=False) as f:
-            f.write(b"RGF\x03\x01\x00\x00\x00")  # magic + core_version, but no metadata_length
+            # Phase A.1 / C5 — bumped to v4 magic.
+            f.write(b"RGF\x04\x02\x00\x00\x00")  # magic + core_version, but no metadata_length
             path = f.name
         try:
             with pytest.raises(Exception, match="(?i)(truncated|incomplete|failed)"):
@@ -320,9 +326,10 @@ class TestV3Format:
         """A file with a future core_data_version should give a helpful upgrade message."""
         import struct
 
-        # Create a minimal v3 file with core_data_version = 99
+        # Phase A.1 / C5 — v4 magic. Future core_data_version=99 still
+        # trips the in-loader "supports up to version N" error.
         metadata = b"{}"
-        header = b"RGF\x03"
+        header = b"RGF\x04"
         header += struct.pack("<I", 99)  # future core version
         header += struct.pack("<I", len(metadata))
 

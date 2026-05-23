@@ -196,10 +196,14 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "size" => {
+                // Phase A.1 / C2 — native Value::List fast path;
+                // string fallback stays for legacy collect-as-JSON
+                // and parameter-passed lists.
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
+                    Value::List(items) => Ok(Value::Int64(items.len() as i64)),
+                    Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
                     Value::String(s) => {
-                        // Lists are stored as JSON-like strings; count elements
                         if s.starts_with('[') && s.ends_with(']') {
                             let items = parse_list_value(&Value::String(s));
                             Ok(Value::Int64(items.len() as i64))
@@ -219,6 +223,10 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
+                    // Phase A.1 / C2 — native Value::List/Path/Map paths.
+                    Value::List(items) => Ok(Value::Int64(items.len() as i64)),
+                    Value::Map(m) => Ok(Value::Int64(m.len() as i64)),
+                    Value::Path(p) => Ok(Value::Int64(p.rels.len() as i64)),
                     Value::String(s) => {
                         if s.starts_with('[') && s.ends_with(']') {
                             let items = parse_list_value(&Value::String(s));
@@ -231,73 +239,53 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "nodes" => {
-                // nodes(p) returns the list of node dicts in a path
-                // (source + intermediates + target). Pre-0.9.35 the dict
-                // only carried `{id, title, type}` — sufficient for
-                // identity but lossy when the agent needed property
-                // values without re-MATCHing each node. 0.9.35 enriches
-                // every dict with every node property the schema
-                // exposes, so `UNWIND nodes(p) AS n RETURN n.name` works
-                // without a follow-up MATCH. Output remains a
-                // KGLite-convention JSON-string list (Value::String of
-                // `[{...}, {...}]`) so the existing list-indexing and
-                // UNWIND paths handle it unchanged.
+                // nodes(p) returns the list of nodes in a path
+                // (source + intermediates + target).
+                //
+                // Phase A.1 / C2 — native `Value::List(Vec<Value::Node>)`.
+                // Each element is a full NodeValue (id, labels, properties)
+                // mirroring what `RETURN n` would emit. Replaces the
+                // pre-A.1 JSON-string list of dicts.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
-                        let mut entries = Vec::new();
-                        let mut node_indices = vec![path.source];
-                        for (node_idx, _) in &path.path {
-                            node_indices.push(*node_idx);
+                        let mut items: Vec<Value> = Vec::with_capacity(path.path.len() + 1);
+                        if let Some(src) = materialize_node_value(path.source, self.graph) {
+                            items.push(Value::Node(Box::new(src)));
                         }
-                        for node_idx in &node_indices {
-                            if let Some(node) = self.graph.graph.node_weight(*node_idx) {
-                                let mut props = Vec::new();
-                                props.push(format!("\"id\": {}", format_value_json(&node.id())));
-                                props.push(format!(
-                                    "\"title\": {}",
-                                    format_value_json(&node.title())
-                                ));
-                                props.push(format!(
-                                    "\"type\": \"{}\"",
-                                    node.node_type_str(&self.graph.interner)
-                                ));
-                                // Enrich with every property the node
-                                // carries. Uses property_iter() so the
-                                // serialization is uniform with the
-                                // rest of KGLite's JSON-string list
-                                // surface (collect(), RETURN n, etc.).
-                                for (key, val) in node.property_iter(&self.graph.interner) {
-                                    // Skip id/title aliases — already
-                                    // emitted above with the canonical
-                                    // names.
-                                    if key == "id" || key == "title" || key == "type" {
-                                        continue;
-                                    }
-                                    props.push(format!(
-                                        "\"{}\": {}",
-                                        key.replace('\\', "\\\\").replace('"', "\\\""),
-                                        format_value_json(val),
-                                    ));
-                                }
-                                entries.push(format!("{{{}}}", props.join(", ")));
+                        for (node_idx, _conn_type) in &path.path {
+                            if let Some(node) = materialize_node_value(*node_idx, self.graph) {
+                                items.push(Value::Node(Box::new(node)));
                             }
                         }
-                        return Ok(Value::String(format!("[{}]", entries.join(", "))));
+                        return Ok(Value::List(items));
                     }
                 }
                 Ok(Value::Null)
             }
             "relationships" | "rels" => {
-                // relationships(p) returns list of relationship types in a path (JSON array)
+                // relationships(p) — list of relationships in a path.
+                //
+                // Phase A.1 / C2 — native `Value::List(Vec<Value::Relationship>)`.
+                // Each element is a full RelValue (id, start, end, type,
+                // properties), recovered by walking the path's
+                // (node_idx, _) pairs and looking up the connecting
+                // edge between consecutive nodes (mirrors
+                // materialize_path_value's hop-recovery).
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
-                        let mut rel_strs = Vec::new();
-                        for (_, conn_type) in &path.path {
-                            if !conn_type.is_empty() {
-                                rel_strs.push(format!("\"{}\"", conn_type));
+                        let mut items: Vec<Value> = Vec::with_capacity(path.path.len());
+                        let mut prev_idx = path.source;
+                        for (node_idx, _conn_type) in &path.path {
+                            if let Some(edge_idx) =
+                                self.graph.graph.find_edge(prev_idx, *node_idx)
+                            {
+                                if let Some(rel) = materialize_rel_value(edge_idx, self.graph) {
+                                    items.push(Value::Relationship(Box::new(rel)));
+                                }
                             }
+                            prev_idx = *node_idx;
                         }
-                        return Ok(Value::String(format!("[{}]", rel_strs.join(", "))));
+                        return Ok(Value::List(items));
                     }
                 }
                 Ok(Value::Null)
@@ -334,39 +322,30 @@ impl<'a> CypherExecutor<'a> {
             "labels" => {
                 // labels(n) returns the list of node labels.
                 //
-                // Track C swap-point — KGLite is single-label today, so this
-                // emits a single-element list encoded as a JSON string. The
-                // py_convert layer parses it back into a Python list, and
-                // parse_list_value() (helpers.rs) re-parses it inside `IN` /
-                // `size()` / index access. When the multi-label data model
-                // lands, swap this to `Value::List(Vec<Value::String>)` once
-                // that variant exists; the JSON-string consumers should
-                // either move to native list handling or stay parameterised
-                // by Value type. See docs/explanation/multi-label-rationale.md.
+                // Phase A.1 / C2 — flipped the Track C swap-point:
+                // emits native `Value::List(Vec<Value::String>)` now
+                // that the variant exists. KGLite is still single-
+                // label so the list has one element. When multi-label
+                // lands (ROADMAP §5), this returns N elements with
+                // no consumer changes required.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             let node_type = node.get_node_type_ref(&self.graph.interner);
-                            // Proper JSON escaping (handles control chars,
-                            // backslashes, quotes — the hand-rolled escape
-                            // we used to do covered only `"` and `\`).
-                            let encoded = serde_json::to_string(&[node_type])
-                                .unwrap_or_else(|_| String::from("[]"));
-                            return Ok(Value::String(encoded));
+                            return Ok(Value::List(vec![Value::String(node_type.to_string())]));
                         }
                     }
                 }
                 Ok(Value::Null)
             }
             "keys" => {
-                // keys(n) or keys(r) — return property names as a JSON list.
+                // keys(n) or keys(r) — return property names as a list.
                 //
+                // Phase A.1 / C2 — native `Value::List(Vec<Value::String>)`.
                 // Includes both the virtual aliases (`id`, `title`, `type`)
                 // and the user's original column names (the unique-id-field
                 // and title-field passed to add_nodes), so the output
-                // matches what `n.<name>` would resolve at query time. The
-                // alias machinery (DirGraph::resolve_alias) treats both
-                // forms as readable; keys() should make both discoverable.
+                // matches what `n.<name>` would resolve at query time.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
@@ -383,13 +362,9 @@ impl<'a> CypherExecutor<'a> {
                             keys.extend(node.property_keys(&self.graph.interner).map(String::from));
                             keys.sort();
                             keys.dedup();
-                            return Ok(Value::String(format!(
-                                "[{}]",
-                                keys.iter()
-                                    .map(|k| format!("\"{}\"", k))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )));
+                            return Ok(Value::List(
+                                keys.into_iter().map(Value::String).collect(),
+                            ));
                         }
                     }
                     if let Some(edge) = row.edge_bindings.get(var) {
@@ -397,16 +372,16 @@ impl<'a> CypherExecutor<'a> {
                             let g = &self.graph.graph;
                             g.edge_weight(edge.edge_index)
                         } {
-                            let mut keys: Vec<&str> = vec!["type"];
-                            keys.extend(edge_data.property_keys(&self.graph.interner));
+                            let mut keys: Vec<String> = vec!["type".to_string()];
+                            keys.extend(
+                                edge_data
+                                    .property_keys(&self.graph.interner)
+                                    .map(String::from),
+                            );
                             keys.sort();
-                            return Ok(Value::String(format!(
-                                "[{}]",
-                                keys.iter()
-                                    .map(|k| format!("\"{}\"", k))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )));
+                            return Ok(Value::List(
+                                keys.into_iter().map(Value::String).collect(),
+                            ));
                         }
                     }
                 }
@@ -423,33 +398,35 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "properties" => {
-                // properties(n) / properties(r) → JSON-formatted property map
+                // properties(n) / properties(r) → native Value::Map.
+                //
+                // Phase A.1 / C2 — emits `Value::Map(BTreeMap)` directly.
+                // For nodes, includes the virtual id/title/type plus
+                // every user-set property (mirrors materialize_node_value).
+                // For relationships, includes `type` + every user-set
+                // edge property.
                 if args.len() != 1 {
                     return Err("properties() requires 1 argument: a node or relationship".into());
                 }
                 if let Expression::Variable(var) = &args[0] {
                     if let Some(&idx) = row.node_bindings.get(var.as_str()) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let mut props: Vec<String> = Vec::new();
+                            let mut props: std::collections::BTreeMap<String, Value> =
+                                std::collections::BTreeMap::new();
                             for &builtin in &["id", "title", "type"] {
                                 let val = resolve_node_property(node, builtin, self.graph);
                                 if !matches!(val, Value::Null) {
-                                    props.push(format!(
-                                        "{}: {}",
-                                        format_value_json(&Value::String(builtin.to_string())),
-                                        format_value_json(&val)
-                                    ));
+                                    props.insert(builtin.to_string(), val);
                                 }
                             }
                             for key in node.property_keys(&self.graph.interner) {
+                                if key == "id" || key == "title" || key == "type" {
+                                    continue;
+                                }
                                 let val = resolve_node_property(node, key, self.graph);
-                                props.push(format!(
-                                    "{}: {}",
-                                    format_value_json(&Value::String(key.to_string())),
-                                    format_value_json(&val)
-                                ));
+                                props.insert(key.to_string(), val);
                             }
-                            return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                            return Ok(Value::Map(props));
                         }
                     }
                     if let Some(edge) = row.edge_bindings.get(var.as_str()) {
@@ -457,26 +434,22 @@ impl<'a> CypherExecutor<'a> {
                             let g = &self.graph.graph;
                             g.edge_weight(edge.edge_index)
                         } {
-                            let mut props: Vec<String> = Vec::new();
-                            props.push(format!(
-                                "{}: {}",
-                                format_value_json(&Value::String("type".to_string())),
-                                format_value_json(&Value::String(
+                            let mut props: std::collections::BTreeMap<String, Value> =
+                                std::collections::BTreeMap::new();
+                            props.insert(
+                                "type".to_string(),
+                                Value::String(
                                     edge_data
                                         .connection_type_str(&self.graph.interner)
-                                        .to_string()
-                                ))
-                            ));
+                                        .to_string(),
+                                ),
+                            );
                             for key in edge_data.property_keys(&self.graph.interner) {
                                 if let Some(val) = edge_data.get_property(key) {
-                                    props.push(format!(
-                                        "{}: {}",
-                                        format_value_json(&Value::String(key.to_string())),
-                                        format_value_json(val)
-                                    ));
+                                    props.insert(key.to_string(), val.clone());
                                 }
                             }
-                            return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                            return Ok(Value::Map(props));
                         }
                     }
                 }
@@ -589,6 +562,7 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "text_ngrams" => {
+                // Phase A.1 / C4 — native Value::List of Value::String.
                 if args.len() != 2 {
                     return Err("text_ngrams() requires 2 arguments: (string, n)".into());
                 }
@@ -601,17 +575,14 @@ impl<'a> CypherExecutor<'a> {
                             return Err("text_ngrams(): n must be ≥ 1".into());
                         }
                         let chars: Vec<char> = s.chars().collect();
-                        let mut grams: Vec<String> = Vec::new();
+                        let mut grams: Vec<Value> = Vec::new();
                         if chars.len() >= n {
                             for i in 0..=chars.len() - n {
                                 let gram: String = chars[i..i + n].iter().collect();
-                                grams.push(format!(
-                                    "\"{}\"",
-                                    gram.replace('\\', "\\\\").replace('"', "\\\"")
-                                ));
+                                grams.push(Value::String(gram));
                             }
                         }
-                        Ok(Value::String(format!("[{}]", grams.join(", "))))
+                        Ok(Value::List(grams))
                     }
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     _ => Ok(Value::Null),
@@ -626,9 +597,21 @@ impl<'a> CypherExecutor<'a> {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Value::Null),
                 };
-                // Accept either a literal list as second arg, or variadic remaining args.
+                // Phase A.1 / C4 — accept native Value::List, legacy
+                // JSON-string list, single-string second arg, or
+                // variadic remaining args.
                 if args.len() == 2 {
                     let list_val = self.evaluate_expression(&args[1], row)?;
+                    if let Value::List(needles) = &list_val {
+                        for needle in needles {
+                            if let Value::String(n) = needle {
+                                if s.contains(n.as_str()) {
+                                    return Ok(Value::Boolean(true));
+                                }
+                            }
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
                     if let Value::String(ref ls) = list_val {
                         if ls.starts_with('[') && ls.ends_with(']') {
                             let needles = parse_list_value(&list_val);
@@ -666,8 +649,20 @@ impl<'a> CypherExecutor<'a> {
                     Value::String(s) => s.clone(),
                     _ => return Ok(Value::Null),
                 };
+                // Phase A.1 / C4 — same native-list handling as
+                // text_contains_any.
                 if args.len() == 2 {
                     let list_val = self.evaluate_expression(&args[1], row)?;
+                    if let Value::List(prefixes) = &list_val {
+                        for prefix in prefixes {
+                            if let Value::String(p) = prefix {
+                                if s.starts_with(p.as_str()) {
+                                    return Ok(Value::Boolean(true));
+                                }
+                            }
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
                     if let Value::String(ref ls) = list_val {
                         if ls.starts_with('[') && ls.ends_with(']') {
                             let prefixes = parse_list_value(&list_val);
@@ -1153,9 +1148,18 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let mut geoms: Vec<geo::Geometry<f64>> = Vec::new();
                 // Single list argument: parse list of WKT strings.
+                // Phase A.1 / C4 — native Value::List path.
                 if args.len() == 1 {
                     let val = self.evaluate_expression(&args[0], row)?;
-                    if let Value::String(ref s) = val {
+                    if let Value::List(items) = &val {
+                        for item in items {
+                            if let Value::String(wkt) = item {
+                                if let Ok(g) = crate::graph::features::spatial::parse_wkt(wkt) {
+                                    geoms.push(g);
+                                }
+                            }
+                        }
+                    } else if let Value::String(ref s) = val {
                         if s.starts_with('[') && s.ends_with(']') {
                             for item in parse_list_value(&val) {
                                 if let Value::String(wkt) = item {
@@ -1459,6 +1463,8 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "ts_series" => {
+                // Phase A.1 / C4 — native Value::List of Value::Map.
+                // Each entry: {"time": <date-str>, "value": <float|null>}.
                 if args.is_empty() || args.len() > 3 {
                     return Err(
                         "ts_series() requires 1-3 arguments: (n.channel [, 'start'] [, 'end'])"
@@ -1467,19 +1473,22 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let (ts, channel, _config) = self.resolve_timeseries_channel(&args[0], row)?;
                 let (lo, hi) = self.resolve_ts_range(ts, &args[1..], row)?;
-                let mut entries = Vec::with_capacity(hi - lo);
+                let mut entries: Vec<Value> = Vec::with_capacity(hi - lo);
                 for (date, &val) in ts.keys[lo..hi].iter().zip(&channel[lo..hi]) {
-                    entries.push(format!(
-                        "{{\"time\":\"{}\",\"value\":{}}}",
-                        date,
+                    let mut entry: std::collections::BTreeMap<String, Value> =
+                        std::collections::BTreeMap::new();
+                    entry.insert("time".to_string(), Value::String(date.to_string()));
+                    entry.insert(
+                        "value".to_string(),
                         if val.is_finite() {
-                            val.to_string()
+                            Value::Float64(val)
                         } else {
-                            "null".to_string()
-                        }
-                    ));
+                            Value::Null
+                        },
+                    );
+                    entries.push(Value::Map(entry));
                 }
-                Ok(Value::String(format!("[{}]", entries.join(","))))
+                Ok(Value::List(entries))
             }
             // ── List functions ────────────────────────────────────
             "range" => {
@@ -1499,20 +1508,21 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     1
                 };
-                let mut vals = Vec::new();
+                // Phase A.1 / C4 — native Value::List of Value::Int64.
+                let mut vals: Vec<Value> = Vec::new();
                 let mut cur = start;
                 if step > 0 {
                     while cur <= end {
-                        vals.push(cur.to_string());
+                        vals.push(Value::Int64(cur));
                         cur += step;
                     }
                 } else {
                     while cur >= end {
-                        vals.push(cur.to_string());
+                        vals.push(Value::Int64(cur));
                         cur += step;
                     }
                 }
-                Ok(Value::String(format!("[{}]", vals.join(","))))
+                Ok(Value::List(vals))
             }
 
             // ── Numeric math functions ──────────────────────────
@@ -1989,9 +1999,26 @@ impl<'a> CypherExecutor<'a> {
                 Ok(result)
             }
             _ => {
-                // Evaluate and try to parse from JSON string "[1.0, 2.0, ...]"
+                // Evaluate; accept Value::List (post-A.1 native shape)
+                // or Value::String (legacy JSON string).
                 let val = self.evaluate_expression(expr, row)?;
                 match val {
+                    Value::List(items) => {
+                        let mut result = Vec::with_capacity(items.len());
+                        for item in &items {
+                            match item {
+                                Value::Float64(f) => result.push(*f as f32),
+                                Value::Int64(i) => result.push(*i as f32),
+                                other => {
+                                    return Err(format!(
+                                        "vector_score(): query vector elements must be numeric, got {:?}",
+                                        other
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(result)
+                    }
                     Value::String(s) => parse_json_float_list(&s),
                     _ => Err("vector_score(): query vector must be a list of numbers".into()),
                 }

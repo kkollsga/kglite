@@ -20,13 +20,31 @@ impl<'a> CypherExecutor<'a> {
         for mut row in result_set.rows {
             let val = self.evaluate_expression(&clause.expression, &row)?;
             match val {
+                // Phase A.1 / C4 — native Value::List fast path.
+                // Replaces the prior JSON-string split, which only
+                // fired when collect() / list-literals emitted strings.
+                Value::List(items) => {
+                    let total = items.len();
+                    for (i, item_val) in items.into_iter().enumerate() {
+                        if i + 1 == total {
+                            // Last item: move row instead of cloning
+                            row.projected.insert(clause.alias.clone(), item_val);
+                            new_rows.push(row);
+                            break;
+                        }
+                        let mut new_row = row.clone();
+                        new_row.projected.insert(clause.alias.clone(), item_val);
+                        new_rows.push(new_row);
+                    }
+                }
                 Value::String(s) if s.starts_with('[') && s.ends_with(']') => {
+                    // Legacy JSON-string list (parameters, leftover
+                    // producers). Kept as fallback.
                     let items = split_list_top_level(&s);
                     let total = items.len();
                     for (i, item_str) in items.into_iter().enumerate() {
                         let parsed_val = parse_value_string(item_str.trim());
                         if i + 1 == total {
-                            // Last item: move row instead of cloning
                             row.projected.insert(clause.alias.clone(), parsed_val);
                             new_rows.push(row);
                             break;

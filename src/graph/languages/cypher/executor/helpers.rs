@@ -407,18 +407,139 @@ pub(super) fn node_to_map_value(node: &NodeData) -> Value {
     node.title().into_owned()
 }
 
-/// Parse a list value from string format "[a, b, c]".
-/// Splits at top-level commas only — respects brace/bracket/quote nesting so that
-/// JSON objects like `{"id": 1, "name": "Alice"}` are kept intact.
+/// Phase A.1 / C2 — materialise a graph node into an owned
+/// [`NodeValue`] suitable for `Value::Node`.
 ///
-/// Track C swap-point — list values currently round-trip through
-/// `Value::String` (a JSON encoding), so this parses them back. When
-/// `Value::List` is introduced (see docs/explanation/multi-label-rationale.md),
-/// this function should short-circuit on `Value::List(items)` before
-/// falling through to the string path, then the string path can be
-/// retired once every producer emits `Value::List`.
+/// Returns `None` if the index doesn't resolve (defensive — callers
+/// pass indices from active bindings, so this should always succeed).
+///
+/// The `id` field uses the petgraph NodeIndex as a stable internal
+/// identity (mirrors Neo4j's INT64 node identity in Bolt). The
+/// user-set `id` field, if any, is preserved inside `properties.id`.
+pub(crate) fn materialize_node_value(
+    idx: petgraph::graph::NodeIndex,
+    graph: &crate::graph::DirGraph,
+) -> Option<crate::datatypes::values::NodeValue> {
+    use crate::datatypes::values::NodeValue;
+    use std::collections::BTreeMap;
+    let node = graph.graph.node_weight(idx)?;
+    let node_type = node.node_type_str(&graph.interner).to_string();
+    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
+    // Include the three virtual builtins so consumers always see
+    // id/title/type, matching what n.id / n.title / n.type would
+    // resolve to via the alias machinery.
+    properties.insert("id".to_string(), node.id().into_owned());
+    properties.insert("title".to_string(), node.title().into_owned());
+    properties.insert("type".to_string(), Value::String(node_type.clone()));
+    // Then every user-set property the node carries.
+    //
+    // Cross-backend discovery: in memory mode NodeData.property_iter
+    // returns every property. In disk/mapped mode the property values
+    // live in the column store, NOT in NodeData — property_iter
+    // returns nothing useful there. Use node_type_metadata as the
+    // schema source for "which properties does this type have", then
+    // read each via `resolve_node_property` (which knows the
+    // backend-specific access path).
+    for (key, val) in node.property_iter(&graph.interner) {
+        if key == "id" || key == "title" || key == "type" {
+            continue;
+        }
+        properties.insert(key.to_string(), val.clone());
+    }
+    if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
+        for prop_name in type_meta.keys() {
+            if prop_name == "id" || prop_name == "title" || prop_name == "type" {
+                continue;
+            }
+            if properties.contains_key(prop_name) {
+                continue;
+            }
+            let val = resolve_node_property(node, prop_name, graph);
+            if !matches!(val, Value::Null) {
+                properties.insert(prop_name.clone(), val);
+            }
+        }
+    }
+    Some(NodeValue {
+        id: idx.index() as u32,
+        labels: vec![node_type],
+        properties,
+    })
+}
+
+/// Phase A.1 / C2 — materialise an edge into an owned [`RelValue`]
+/// suitable for `Value::Relationship`. Mirrors `materialize_node_value`.
+pub(crate) fn materialize_rel_value(
+    edge_idx: petgraph::graph::EdgeIndex,
+    graph: &crate::graph::DirGraph,
+) -> Option<crate::datatypes::values::RelValue> {
+    use crate::datatypes::values::RelValue;
+    use std::collections::BTreeMap;
+    let edge_data = graph.graph.edge_weight(edge_idx)?;
+    let (src, dst) = graph.graph.edge_endpoints(edge_idx)?;
+    let mut properties: BTreeMap<String, Value> = BTreeMap::new();
+    for key in edge_data.property_keys(&graph.interner) {
+        if let Some(val) = edge_data.get_property(key) {
+            properties.insert(key.to_string(), val.clone());
+        }
+    }
+    Some(RelValue {
+        id: edge_idx.index() as u32,
+        start_id: src.index() as u32,
+        end_id: dst.index() as u32,
+        rel_type: edge_data
+            .connection_type_str(&graph.interner)
+            .to_string(),
+        properties,
+    })
+}
+
+/// Phase A.1 / C2 — materialise a variable-length [`PathBinding`]
+/// into an owned [`PathValue`] suitable for `Value::Path`.
+///
+/// The path stores `(NodeIndex, connection_type_string)` per hop
+/// rather than `EdgeIndex`, so we look up each edge via
+/// `petgraph::find_edge(prev, curr)` to recover its properties. If
+/// multiple parallel edges exist between two nodes, we pick the first
+/// — same indeterminacy as the rest of the variable-length matcher.
+pub(crate) fn materialize_path_value(
+    path: &super::PathBinding,
+    graph: &crate::graph::DirGraph,
+) -> crate::datatypes::values::PathValue {
+    use crate::datatypes::values::PathValue;
+    let mut nodes = Vec::with_capacity(path.path.len() + 1);
+    let mut rels = Vec::with_capacity(path.path.len());
+
+    if let Some(src_node) = materialize_node_value(path.source, graph) {
+        nodes.push(src_node);
+    }
+    let mut prev_idx = path.source;
+    for (node_idx, _conn_type) in &path.path {
+        if let Some(edge_idx) = graph.graph.find_edge(prev_idx, *node_idx) {
+            if let Some(rel) = materialize_rel_value(edge_idx, graph) {
+                rels.push(rel);
+            }
+        }
+        if let Some(node) = materialize_node_value(*node_idx, graph) {
+            nodes.push(node);
+        }
+        prev_idx = *node_idx;
+    }
+    PathValue { nodes, rels }
+}
+
+/// Parse a list value.
+///
+/// Phase A.1 / C2 — fast path for native `Value::List`: just clone the
+/// items, no parsing needed. The legacy `Value::String("[a, b, c]")`
+/// path stays for back-compat with any remaining JSON-string-producing
+/// sites and for parameters / literals that come in as strings. Once
+/// every producer emits native lists (C4 removes PreProcessedValue;
+/// later cleanups retire the string path), this function can shrink
+/// to just the List arm.
 pub(super) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
+        Value::List(items) => items.clone(),
         Value::String(s) => {
             let trimmed = s.trim();
             if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
@@ -822,9 +943,26 @@ pub(super) fn call_param_string_list(
     key: &str,
 ) -> Option<Vec<String>> {
     params.get(key).and_then(|v| match v {
+        // Phase A.1 / C4 — native Value::List from list literals
+        // (`connection_types: ['CALLS', 'IMPORTS']`).
+        Value::List(items) => {
+            let strs: Vec<String> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            if strs.is_empty() {
+                None
+            } else {
+                Some(strs)
+            }
+        }
         Value::String(s) => {
             if s.starts_with('[') {
-                // List literal was serialized as JSON string — parse it back
+                // Legacy JSON-string list (kept as fallback for
+                // parameters/literals that come in as strings).
                 let items = parse_list_value(v);
                 if items.is_empty() {
                     return None;

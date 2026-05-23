@@ -1475,13 +1475,10 @@ impl KnowledgeGraph {
                         .into_iter()
                         .map(|row| {
                             row.into_iter()
+                                // Phase A.1 / C7a — ParsedJson variant deleted;
+                                // only Plain remains.
                                 .map(|pv| match pv {
                                     cypher::py_convert::PreProcessedValue::Plain(v) => v,
-                                    cypher::py_convert::PreProcessedValue::ParsedJson(jv) => {
-                                        Value::String(
-                                            serde_json::to_string(&jv).unwrap_or_default(),
-                                        )
-                                    }
                                 })
                                 .collect()
                         })

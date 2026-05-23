@@ -97,7 +97,7 @@ class TestPathBindingConsistency:
         """)
         assert len(result) == 1
         nodes = result[0]["path_nodes"]
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert titles == ["Alice", "Bob", "Charlie", "Diana"]
 
     def test_nodes_variable_length_includes_all_nodes(self, chain_graph):
@@ -108,7 +108,7 @@ class TestPathBindingConsistency:
         """)
         assert len(result) == 1
         nodes = result[0]["path_nodes"]
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert titles == ["Alice", "Bob", "Charlie", "Diana"]
 
     def test_nodes_consistency_shortest_vs_varlen(self, chain_graph):
@@ -121,17 +121,21 @@ class TestPathBindingConsistency:
             MATCH p = (a:Person {name: 'Alice'})-[:KNOWS*3]->(d:Person {name: 'Diana'})
             RETURN nodes(p) AS n
         """)
-        sp_titles = [n["title"] for n in sp_result[0]["n"]]
-        vl_titles = [n["title"] for n in vl_result[0]["n"]]
+        sp_titles = [n["properties"]["title"] for n in sp_result[0]["n"]]
+        vl_titles = [n["properties"]["title"] for n in vl_result[0]["n"]]
         assert sp_titles == vl_titles == ["Alice", "Bob", "Charlie", "Diana"]
 
     def test_relationships_shortest_path(self, chain_graph):
-        """relationships(p) for shortestPath returns all edge types."""
+        """relationships(p) for shortestPath returns all edge types.
+
+        Phase A.1 / C2 — extract `.type` from each Rel dict for the
+        legacy list-of-strings shape.
+        """
         result = chain_graph.cypher("""
             MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(d:Person {name: 'Diana'}))
             RETURN relationships(p) AS rels
         """)
-        assert result[0]["rels"] == ["KNOWS", "KNOWS", "KNOWS"]
+        assert [r["type"] for r in result[0]["rels"]] == ["KNOWS", "KNOWS", "KNOWS"]
 
     def test_relationships_variable_length(self, chain_graph):
         """relationships(p) for variable-length path returns all edge types."""
@@ -139,7 +143,7 @@ class TestPathBindingConsistency:
             MATCH p = (a:Person {name: 'Alice'})-[:KNOWS*1..5]->(d:Person {name: 'Diana'})
             RETURN relationships(p) AS rels
         """)
-        assert result[0]["rels"] == ["KNOWS", "KNOWS", "KNOWS"]
+        assert [r["type"] for r in result[0]["rels"]] == ["KNOWS", "KNOWS", "KNOWS"]
 
     def test_length_matches_node_count_minus_one(self, chain_graph):
         """length(p) equals len(nodes(p)) - 1 for all path types."""
@@ -174,7 +178,7 @@ class TestPathBindingConsistency:
         """)
         assert len(result) >= 1
         for row in result:
-            titles = [n["title"] for n in row["n"]]
+            titles = [n["properties"]["title"] for n in row["n"]]
             assert titles[0] == "A"  # Starts with A
             assert titles[-1] == "A"  # Ends with A (cycle)
             assert row["len"] == len(titles) - 1
@@ -652,14 +656,18 @@ class TestCollectNodePropertyAccess:
         assert result[0]["t"] == "2025-12-31"
 
     def test_collect_index_bare_variable(self, reserves_graph):
-        """RETURN lr (without property) should still show the title."""
+        """RETURN lr (without property) should still expose the title.
+
+        Phase A.1 / C2 — `RETURN lr` (the variable) now returns a full
+        Node dict; the title lives in `properties["title"]`.
+        """
         result = reserves_graph.cypher(
             "MATCH (fr:FieldReserves)-[:OF_FIELD]->(f:Field {name: 'ULA'}) "
             "WITH f, fr ORDER BY fr.title DESC "
             "WITH f, collect(fr)[0] AS lr "
             "RETURN lr"
         )
-        assert result[0]["lr"] == "2025-12-31"
+        assert result[0]["lr"]["properties"]["title"] == "2025-12-31"
 
     def test_collect_scalar_property_unchanged(self, reserves_graph):
         """collect(node.prop)[0] should still work for scalar properties."""
@@ -1033,8 +1041,14 @@ class TestMapStringFieldAccess:
         assert result[0]["distances"] == [10.5, 20.5, 5.5]
 
     def test_map_string_passthrough_when_property_missing(self, hub_graph):
-        """A property access that doesn't match any map key still falls
-        through to the projected value (does not crash)."""
+        """A property access that doesn't match any map key returns
+        Null (Cypher semantics).
+
+        Phase A.1 / C4 — Value::Map is now a proper Python dict at the
+        boundary; accessing a missing key returns Null rather than
+        the legacy "whole map string passthrough" behaviour, which
+        was an artifact of the pre-A.1 JSON-string representation.
+        """
         result = list(
             hub_graph.cypher("""
                 MATCH (h:Hub)
@@ -1042,9 +1056,8 @@ class TestMapStringFieldAccess:
                 RETURN m.missing AS x ORDER BY h.name
             """)
         )
-        # Falls through: returns the whole map string when no match
         assert len(result) == 3
-        assert all("h" in str(r["x"]) for r in result)
+        assert all(r["x"] is None for r in result)
 
     def test_map_string_handles_quoted_string_values(self):
         g = rg.KnowledgeGraph()

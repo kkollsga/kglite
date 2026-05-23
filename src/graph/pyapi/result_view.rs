@@ -765,12 +765,9 @@ impl ResultIter {
 // ========================================================================
 
 fn format_preprocessed_value(pv: &PreProcessedValue) -> String {
+    // Phase A.1 / C7a — ParsedJson variant deleted; only Plain remains.
     match pv {
         PreProcessedValue::Plain(v) => crate::datatypes::values::format_value(v),
-        PreProcessedValue::ParsedJson(jv) => {
-            // Compact JSON string
-            serde_json::to_string(jv).unwrap_or_else(|_| "???".to_string())
-        }
     }
 }
 

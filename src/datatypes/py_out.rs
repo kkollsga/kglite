@@ -53,6 +53,67 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
             dict.set_item("seconds", seconds)?;
             Ok(dict.into_any().unbind())
         }
+        // Phase A.1 / C4 — native conversion of the collection /
+        // graph-entity variants. Replaces the prior JSON-string-
+        // inference hack (PreProcessedValue in py_convert.rs).
+        Value::List(items) => {
+            let py_items: PyResult<Vec<Py<PyAny>>> =
+                items.iter().map(|v| value_to_py(py, v)).collect();
+            Ok(PyList::new(py, py_items?)?.into_any().unbind())
+        }
+        Value::Map(entries) => {
+            let dict = PyDict::new(py);
+            for (k, v) in entries {
+                dict.set_item(k, value_to_py(py, v)?)?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+        Value::Node(node_val) => {
+            let dict = PyDict::new(py);
+            dict.set_item("id", node_val.id)?;
+            // labels mirror Neo4j/Bolt shape: list of strings
+            let py_labels = PyList::new(py, &node_val.labels)?;
+            dict.set_item("labels", py_labels)?;
+            // properties as a nested dict — recursive value_to_py
+            // means nested Nodes/Lists/Maps round-trip cleanly.
+            let props_dict = PyDict::new(py);
+            for (k, v) in &node_val.properties {
+                props_dict.set_item(k, value_to_py(py, v)?)?;
+            }
+            dict.set_item("properties", props_dict)?;
+            Ok(dict.into_any().unbind())
+        }
+        Value::Relationship(rel_val) => {
+            let dict = PyDict::new(py);
+            dict.set_item("id", rel_val.id)?;
+            dict.set_item("start", rel_val.start_id)?;
+            dict.set_item("end", rel_val.end_id)?;
+            dict.set_item("type", &rel_val.rel_type)?;
+            let props_dict = PyDict::new(py);
+            for (k, v) in &rel_val.properties {
+                props_dict.set_item(k, value_to_py(py, v)?)?;
+            }
+            dict.set_item("properties", props_dict)?;
+            Ok(dict.into_any().unbind())
+        }
+        Value::Path(path_val) => {
+            let dict = PyDict::new(py);
+            // Recurse into the Node/Rel conversions above so the
+            // path nests cleanly.
+            let py_nodes: PyResult<Vec<Py<PyAny>>> = path_val
+                .nodes
+                .iter()
+                .map(|n| value_to_py(py, &Value::Node(Box::new(n.clone()))))
+                .collect();
+            let py_rels: PyResult<Vec<Py<PyAny>>> = path_val
+                .rels
+                .iter()
+                .map(|r| value_to_py(py, &Value::Relationship(Box::new(r.clone()))))
+                .collect();
+            dict.set_item("nodes", PyList::new(py, py_nodes?)?)?;
+            dict.set_item("relationships", PyList::new(py, py_rels?)?)?;
+            Ok(dict.into_any().unbind())
+        }
     }
 }
 

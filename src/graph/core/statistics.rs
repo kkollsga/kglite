@@ -173,6 +173,15 @@ fn calculate_stats_for_nodes(
                             Value::Duration { .. } => "duration",
                             Value::Null => "null",
                             Value::NodeRef(_) => "noderef",
+                            // Phase A.1 — collection / graph-entity variants
+                            // shouldn't appear as stored property values
+                            // (they're query-result-time), but classify
+                            // defensively if they do.
+                            Value::List(_) => "list",
+                            Value::Map(_) => "map",
+                            Value::Node(_) => "node",
+                            Value::Relationship(_) => "relationship",
+                            Value::Path(_) => "path",
                         });
                     }
                 }

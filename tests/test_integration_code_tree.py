@@ -147,19 +147,22 @@ def test_explore_finds_route_handler(tmp_path):
 
 
 def test_nodes_path_includes_properties_on_code_tree(tmp_path):
-    """0.9.35: nodes(p) dicts must carry every node property — verified
-    here on a real code-tree graph (not just the synthetic fixture in
-    test_cypher_path_functions.py). Function nodes carry branch_count,
-    file_path, signature, etc. — every one of those should appear in
-    the per-node dict, not just `id`/`title`/`type`."""
+    """nodes(p) dicts must carry every node property — verified here on
+    a real code-tree graph. Function nodes carry branch_count,
+    file_path, signature, etc.
+
+    Phase A.1 / C2 — node dicts have the Bolt-shaped {id, labels,
+    properties} structure; user properties are nested under `properties`."""
     pkg = _build_flask_app(tmp_path)
     g = build(str(pkg))
     rows = g.cypher("MATCH p = (a:Function {name: 'list_users'})-[:CALLS]->(b:Function) RETURN nodes(p) AS N").to_list()
     assert rows, "expected list_users → helper CALLS path"
     first = rows[0]["N"][0]
-    # Canonical fields plus real properties from the parser.
-    assert first["type"] == "Function"
+    # Phase A.1 shape: type is in properties (and labels carries the
+    # type name as the canonical Neo4j-compatible field).
+    assert first["labels"] == ["Function"]
     # Every Function node carries branch_count and file_path on the
-    # graph property layer — they must appear in the path-node dict.
-    assert "branch_count" in first, f"missing branch_count: {first}"
-    assert "file_path" in first, f"missing file_path: {first}"
+    # graph property layer — they must appear in the path-node dict's
+    # `properties` map.
+    assert "branch_count" in first["properties"], f"missing branch_count: {first}"
+    assert "file_path" in first["properties"], f"missing file_path: {first}"

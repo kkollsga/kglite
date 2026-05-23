@@ -44,18 +44,19 @@ def test_nodes_returns_list_of_dicts():
 
 
 def test_nodes_dict_carries_all_properties():
-    """0.9.35 enrichment: dicts include every node property, not just
-    id/title/type. Lets agents do `UNWIND nodes(p) AS n RETURN n.age`
-    without re-MATCHing each node."""
+    """0.9.35 enrichment + Phase A.1 / C2 reshape: dicts include every
+    node property, now nested under the `properties` key (Bolt-shaped).
+    Agents do `UNWIND nodes(p) AS n RETURN n.age` — that goes through
+    PropertyAccess directly, no shape concern."""
     kg = _build_graph()
     rows = kg.cypher("MATCH p = (a:Person {pid:1})-[:KNOWS]->(b:Person) RETURN nodes(p) AS N").to_list()
     first = rows[0]["N"][0]
-    # Canonical fields always present.
-    assert first["id"] == 1
-    assert first["title"] == "Alice"
-    assert first["type"] == "Person"
-    # 0.9.35: real property values are now there.
-    assert first["age"] == 28, first
+    # Phase A.1 shape: {id, labels, properties}.
+    assert first["labels"] == ["Person"]
+    assert first["properties"]["title"] == "Alice"
+    assert first["properties"]["type"] == "Person"
+    # Real property values are nested in properties.
+    assert first["properties"]["age"] == 28, first
 
 
 def test_unwind_nodes_then_access_property():
@@ -71,19 +72,24 @@ def test_unwind_nodes_then_access_property():
 
 
 def test_relationships_returns_list_of_strings():
+    """Phase A.1 / C2 — relationships() now returns full Rel dicts.
+    Extract `.type` to get the prior list-of-strings shape."""
     kg = _build_graph()
     rows = kg.cypher(
         "MATCH p = (a:Person {pid:1})-[:KNOWS*1..2]->(b:Person) RETURN relationships(p) AS R ORDER BY length(p)"
     ).to_list()
-    assert rows[0]["R"] == ["KNOWS"]
-    assert rows[1]["R"] == ["KNOWS", "KNOWS"]
+    types_0 = [r["type"] for r in rows[0]["R"]]
+    types_1 = [r["type"] for r in rows[1]["R"]]
+    assert types_0 == ["KNOWS"]
+    assert types_1 == ["KNOWS", "KNOWS"]
 
 
 def test_rels_alias_works():
     """`rels(p)` is the short alias for `relationships(p)` (existing surface)."""
     kg = _build_graph()
     rows = kg.cypher("MATCH p = (a:Person {pid:1})-[:KNOWS]->(b:Person) RETURN rels(p) AS R").to_list()
-    assert rows[0]["R"] == ["KNOWS"]
+    # Phase A.1 / C2 — list of Rel dicts; extract .type for legacy shape.
+    assert [r["type"] for r in rows[0]["R"]] == ["KNOWS"]
 
 
 def test_size_of_nodes_consistent_with_length():
@@ -115,4 +121,5 @@ def test_special_chars_in_property_values_escaped():
         "tgt",
     )
     rows = kg.cypher("MATCH p = (a:Person {pid:1})-[:KNOWS]->(b:Person) RETURN nodes(p) AS N").to_list()
-    assert rows[0]["N"][0]["title"] == 'has "quote"', rows
+    # Phase A.1 — title is now nested in `properties`.
+    assert rows[0]["N"][0]["properties"]["title"] == 'has "quote"', rows

@@ -127,18 +127,22 @@ class TestShortestPathFunctions:
         )
         nodes = result[0]["nodes(p)"]
         assert isinstance(nodes, list)
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert titles == ["Alice", "Bob", "Charlie"]
 
     def test_relationships_function(self, chain_graph):
-        """relationships(p) returns list of relationship type strings."""
+        """relationships(p) returns list of Rel dicts (post-A.1).
+
+        Pre-A.1 returned list of type strings; Phase A.1 / C2 now
+        returns full Rel dicts. Extract `.type` for legacy shape.
+        """
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN relationships(p)"
         )
         rels = result[0]["relationships(p)"]
         assert isinstance(rels, list)
-        assert rels == ["KNOWS", "KNOWS"]
+        assert [r["type"] for r in rels] == ["KNOWS", "KNOWS"]
 
     def test_all_path_functions_together(self, chain_graph):
         """All path functions work in the same RETURN."""
@@ -150,11 +154,12 @@ class TestShortestPathFunctions:
         assert row["length(p)"] == 3
         nodes = row["nodes(p)"]
         assert isinstance(nodes, list)
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert "Alice" in titles and "Dave" in titles
         rels = row["relationships(p)"]
         assert isinstance(rels, list)
-        assert all(r == "KNOWS" for r in rels)
+        # Phase A.1 / C2 — Rel dicts; check .type field.
+        assert all(r["type"] == "KNOWS" for r in rels)
 
     def test_source_target_variables(self, chain_graph):
         """Source and target node variables are accessible."""
@@ -228,7 +233,7 @@ class TestShortestPathWithClause:
             "RETURN nodes(p)"
         )
         nodes = result[0]["nodes(p)"]
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert titles == ["Alice", "Bob", "Charlie"]
 
     def test_path_with_aggregation(self, chain_graph):
@@ -281,7 +286,7 @@ class TestShortestPathUndirected:
         assert len(result) == 1
         nodes = result[0]["nodes(p)"]
         assert len(nodes) == 5
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert titles[0] == "Eve"
         assert titles[-1] == "Alice"
 

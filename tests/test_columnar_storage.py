@@ -316,13 +316,14 @@ class TestV3Roundtrip:
         assert names == ["Charlie", "Eve"]
 
     def test_v3_magic_bytes(self, person_graph, tmp_path):
-        """v3 file starts with magic bytes RGF\\x03."""
+        """v4 file starts with magic bytes RGF\\x04 (Phase A.1 / C5
+        bumped the format from v3)."""
         fp = str(tmp_path / "magic.kgl")
         person_graph.save(fp)
 
         with open(fp, "rb") as f:
             header = f.read(4)
-        assert header == b"RGF\x03"
+        assert header == b"RGF\x04"
 
     def test_save_auto_columnar(self, person_graph, tmp_path):
         """save() auto-enables columnar for non-columnar graphs (stays columnar)."""

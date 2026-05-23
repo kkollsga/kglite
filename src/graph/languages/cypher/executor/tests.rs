@@ -1509,12 +1509,14 @@ fn test_list_slice_basic() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
 
+    // Phase A.1 / C4 — slice now returns Value::List, not JSON string.
+
     // [start..end]
     let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][1..3]").unwrap();
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[2, 3]".into()))
+        Some(&Value::List(vec![Value::Int64(2), Value::Int64(3)]))
     );
 
     // [..end]
@@ -1522,7 +1524,7 @@ fn test_list_slice_basic() {
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[1, 2]".into()))
+        Some(&Value::List(vec![Value::Int64(1), Value::Int64(2)]))
     );
 
     // [start..]
@@ -1530,7 +1532,7 @@ fn test_list_slice_basic() {
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[2, 3]".into()))
+        Some(&Value::List(vec![Value::Int64(2), Value::Int64(3)]))
     );
 }
 
@@ -1540,25 +1542,27 @@ fn test_list_slice_edge_cases() {
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
 
+    // Phase A.1 / C4 — slice returns native Value::List.
+
     // Out of bounds — clamps to available
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][..100]").unwrap();
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[1, 2, 3]".into()))
+        Some(&Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]))
     );
 
     // Empty slice (start >= end)
     let q = super::super::parser::parse_cypher("RETURN [1,2,3][3..1]").unwrap();
     let result = executor.execute(&q).unwrap();
-    assert_eq!(result.rows[0].first(), Some(&Value::String("[]".into())));
+    assert_eq!(result.rows[0].first(), Some(&Value::List(Vec::new())));
 
     // Negative index in slice
     let q = super::super::parser::parse_cypher("RETURN [1,2,3,4,5][-3..]").unwrap();
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[3, 4, 5]".into()))
+        Some(&Value::List(vec![Value::Int64(3), Value::Int64(4), Value::Int64(5)]))
     );
 }
 

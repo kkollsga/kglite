@@ -1,7 +1,7 @@
 // src/datatypes/values.rs
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -56,15 +56,97 @@ pub enum Value {
     /// bounded around ±2e9 — 178 M years / 5.8 M years respectively
     /// — far past anything the user can reasonably need.
     ///
-    /// **Layout note**: Duration is the LAST variant on purpose.
-    /// serde derives the discriminant from positional order, so any
-    /// new Value variant gets appended to keep older `.kgl` files
-    /// backward-compatible — discriminants 0..=8 stay stable.
+    /// **Layout note**: Duration was the LAST variant in `.kgl` v3.
+    /// Phase A.1 (0.10.0) appends Node/Relationship/Path/List/Map
+    /// after it and bumps the `.kgl` format to v4 — a hard break;
+    /// v3 files do not load with v4 binaries. Discriminants 0..=8
+    /// (Null .. NodeRef .. Duration) stay stable; 9..=13 are the
+    /// new collection / graph-entity variants.
     Duration {
         months: i32,
         days: i32,
         seconds: i64,
     },
+    /// A materialised graph node — the projection result for `RETURN n`.
+    /// Boxed because [`NodeValue`] is large (id + labels + props map)
+    /// and Node values are rarer than scalars; the indirection cost is
+    /// amortised over typical query workloads.
+    ///
+    /// `Value::NodeRef(u32)` (variant 8) stays as the *transient*
+    /// internal handle used during WITH/UNWIND chains. NodeRef is
+    /// never user-visible — it gets materialised to `Node` at
+    /// projection time and never persisted.
+    Node(Box<NodeValue>),
+    /// A materialised graph relationship — the projection result for
+    /// `RETURN r` where `r` is a relationship variable.
+    Relationship(Box<RelValue>),
+    /// A materialised path — the projection result for variable-length
+    /// path patterns and `shortestPath(...)` results.
+    Path(Box<PathValue>),
+    /// An ordered, heterogeneous list of values.
+    ///
+    /// `[]` in Cypher syntax; `labels(n)`, `nodes(p)`, `collect(...)`,
+    /// `range(...)` all produce this. Kept inline (not Boxed) because
+    /// list iteration is a hot path; the +24 bytes vs the prior
+    /// largest variant (Point at 16) is the deliberate cost of
+    /// having native collections.
+    List(Vec<Value>),
+    /// A string-keyed map of values.
+    ///
+    /// `{key: val, ...}` in Cypher syntax; `properties(n)`,
+    /// `RETURN n.*` produce this. `BTreeMap` chosen over `HashMap`
+    /// so equality / hashing / serialisation are deterministic by
+    /// key order (Cypher consumers expect stable iteration order).
+    Map(BTreeMap<String, Value>),
+}
+
+/// Owned, serialisable shape for a node value at the consumer
+/// boundary. Distinct from [`crate::graph::schema::NodeData`], which
+/// is interner-bound (carries `InternedKey` fields tied to the
+/// graph's StringInterner) and therefore not portable across the
+/// projection boundary.
+///
+/// Built at projection time (`Expression::Variable` → `Value::Node`)
+/// by resolving the NodeData's interned fields against the active
+/// graph's interner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeValue {
+    /// Stable integer id; mirrors what Bolt encodes as the Node struct's
+    /// `identity` field. Sourced from `NodeData.id` if numeric, else a
+    /// fallback derived from the petgraph NodeIndex.
+    pub id: u32,
+    /// Type labels. KGLite is single-label (one entry today), but the
+    /// list shape matches Neo4j/Bolt's `labels` field and forward-
+    /// compatible-with-multi-label work (ROADMAP §5).
+    pub labels: Vec<String>,
+    /// Properties as a string-keyed map. Key order is stable
+    /// (BTreeMap), so equality/hash/serialisation are deterministic.
+    pub properties: BTreeMap<String, Value>,
+}
+
+/// Owned, serialisable shape for a relationship value. See
+/// [`NodeValue`] for the rationale (interner-decoupled, projection-
+/// boundary-friendly).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RelValue {
+    pub id: u32,
+    pub start_id: u32,
+    pub end_id: u32,
+    pub rel_type: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
+/// Owned, serialisable shape for a path value (sequence of nodes +
+/// relationships from a variable-length pattern).
+///
+/// Stored as parallel vectors rather than alternating segments so
+/// the common iteration patterns (just the nodes, just the rels)
+/// are cheap. For a path of length k there are k+1 nodes and k
+/// rels; consumers that need alternation can `zip` them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PathValue {
+    pub nodes: Vec<NodeValue>,
+    pub rels: Vec<RelValue>,
 }
 
 /// Zero-copy view of a [`Value`] for hot read paths that don't need
@@ -141,6 +223,15 @@ impl Ord for Value {
                 Value::Duration { .. } => 7,
                 Value::Point { .. } => 8,
                 Value::NodeRef(_) => 9,
+                // Phase A.1 — collection / graph-entity variants sort
+                // after the scalars. Mirrors openCypher's general
+                // "scalars < lists < maps < entities" ordering loosely;
+                // exact ordering within is by id / structural compare.
+                Value::List(_) => 10,
+                Value::Map(_) => 11,
+                Value::Node(_) => 12,
+                Value::Relationship(_) => 13,
+                Value::Path(_) => 14,
             }
         }
         match (self, other) {
@@ -188,6 +279,14 @@ impl Ord for Value {
                     seconds: bs,
                 },
             ) => am.cmp(bm).then(ad.cmp(bd)).then(as_.cmp(bs)),
+            // Phase A.1 same-variant arms — defer to the derived Ord
+            // on the contained payload types (NodeValue, RelValue,
+            // PathValue all `#[derive(Ord)]`; Vec/BTreeMap do too).
+            (Value::List(a), Value::List(b)) => a.cmp(b),
+            (Value::Map(a), Value::Map(b)) => a.cmp(b),
+            (Value::Node(a), Value::Node(b)) => a.cmp(b),
+            (Value::Relationship(a), Value::Relationship(b)) => a.cmp(b),
+            (Value::Path(a), Value::Path(b)) => a.cmp(b),
             // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
@@ -236,6 +335,25 @@ impl Hash for Value {
             }
             Value::Null => 0.hash(state),
             Value::NodeRef(v) => v.hash(state),
+            // Phase A.1 — defer to derived Hash on payload types.
+            // BTreeMap<String, Value> implements Hash (iterates in
+            // key order); Vec<Value> implements Hash; NodeValue/
+            // RelValue/PathValue all derive Hash.
+            Value::List(v) => v.hash(state),
+            Value::Map(v) => {
+                // BTreeMap doesn't implement Hash in std. Hash the
+                // length, then each (key, value) pair in iteration
+                // order (BTreeMap iterates in sorted key order, so
+                // this is deterministic).
+                v.len().hash(state);
+                for (k, val) in v {
+                    k.hash(state);
+                    val.hash(state);
+                }
+            }
+            Value::Node(v) => v.hash(state),
+            Value::Relationship(v) => v.hash(state),
+            Value::Path(v) => v.hash(state),
         }
     }
 }
@@ -246,6 +364,45 @@ impl Value {
             Value::String(s) => Some(s.clone()),
             _ => None,
         }
+    }
+
+    /// Canonical PascalCase variant name. Phase A.1 / C7a — added so
+    /// the (formerly duplicated) `value_type_name` / `value_kind`
+    /// helpers across executor/write.rs and mutation/subgraph_streaming_
+    /// writer.rs share one source of truth. Other classifiers
+    /// (introspection/schema_overview.rs `str`/`int`/..., validation.rs
+    /// `string`/`integer`/..., export.rs blueprint shape) use
+    /// consumer-specific conventions and keep their own tables.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "Null",
+            Value::Boolean(_) => "Boolean",
+            Value::Int64(_) => "Int64",
+            Value::Float64(_) => "Float64",
+            Value::UniqueId(_) => "UniqueId",
+            Value::String(_) => "String",
+            Value::DateTime(_) => "DateTime",
+            Value::Point { .. } => "Point",
+            Value::NodeRef(_) => "NodeRef",
+            Value::Duration { .. } => "Duration",
+            Value::List(_) => "List",
+            Value::Map(_) => "Map",
+            Value::Node(_) => "Node",
+            Value::Relationship(_) => "Relationship",
+            Value::Path(_) => "Path",
+        }
+    }
+}
+
+/// Phase A.1 / C7a — Display impl delegating to the existing
+/// `format_value` free function. Lets `format!("{}", value)` and
+/// `to_string()` work directly on `Value`, replacing the need to
+/// import + call `format_value` everywhere. The free function stays
+/// for now (some callers explicitly import it); a follow-up pass can
+/// retire it once every site converts.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", format_value(self))
     }
 }
 
@@ -473,6 +630,15 @@ impl DataFrame {
                     // Durations are query-time-only — never persisted as
                     // a column (Cluster 2). Serialize via the String column.
                     Value::Duration { .. } => Some(ColumnType::String),
+                    // Phase A.1 — collection / graph-entity variants
+                    // don't fit columnar; serialise via String column
+                    // (JSON-ish). A future enhancement could add
+                    // dedicated columnar shapes.
+                    Value::List(_)
+                    | Value::Map(_)
+                    | Value::Node(_)
+                    | Value::Relationship(_)
+                    | Value::Path(_) => Some(ColumnType::String),
                     Value::Null | Value::NodeRef(_) => None,
                 };
             }
@@ -619,6 +785,21 @@ impl DataFrame {
                         .to_string(),
                 )
             }
+            // Phase A.1 — collection / graph-entity variants don't
+            // fit columnar storage. Same rationale as Duration: these
+            // are query-result-time values, not column types.
+            Value::List(_)
+            | Value::Map(_)
+            | Value::Node(_)
+            | Value::Relationship(_)
+            | Value::Path(_) => {
+                return Err(
+                    "Cannot add a constant column with List/Map/Node/Relationship/Path value \
+                     — collection and graph-entity variants are query-result-time values, \
+                     not column types"
+                        .to_string(),
+                )
+            }
         };
         self.add_column(name, col_type, data)
     }
@@ -724,6 +905,32 @@ pub fn format_value(value: &Value) -> String {
             "duration(months={}, days={}, seconds={})",
             months, days, seconds
         ),
+        // Phase A.1 — Cypher-ish surface syntax for the collection /
+        // graph-entity variants. Not round-trip-parseable; this fn is
+        // for display / debug, not serialisation.
+        Value::List(items) => {
+            let inner: Vec<String> = items.iter().map(format_value).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Map(entries) => {
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, format_value(v)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        Value::Node(n) => {
+            format!("(:{} {{id: {}}})", n.labels.join(":"), n.id)
+        }
+        Value::Relationship(r) => {
+            format!(
+                "[:{} {{id: {}, start: {}, end: {}}}]",
+                r.rel_type, r.id, r.start_id, r.end_id
+            )
+        }
+        Value::Path(p) => {
+            format!("path(nodes={}, rels={})", p.nodes.len(), p.rels.len())
+        }
     }
 }
 

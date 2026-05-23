@@ -155,9 +155,17 @@ pub(super) fn execute_affected_tests(
 /// case. Only a missing or wrong-type parameter is an error.
 fn require_files_param(params: &HashMap<String, Value>) -> Result<Vec<String>, String> {
     match params.get("files") {
+        // Phase A.1 / C4 — native Value::List path.
+        Some(Value::List(items)) => Ok(items
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()),
         Some(Value::String(s)) => {
             if s.starts_with('[') {
-                // List literal serialized as JSON-ish string.
+                // Legacy JSON-string list (kept as fallback).
                 let items = super::helpers::parse_list_value(&Value::String(s.clone()));
                 Ok(items
                     .into_iter()

@@ -352,5 +352,12 @@ fn csv_value(buf: &mut String, val: &Value) {
             use std::fmt::Write;
             let _ = write!(buf, "{}", idx);
         }
+        // Phase A.1 — collection / graph-entity variants are CSV-
+        // serialised as JSON-ish strings (delegate to format_value
+        // and quote-escape via csv_field).
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            let s = crate::datatypes::values::format_value(val);
+            csv_field(buf, &s);
+        }
     }
 }

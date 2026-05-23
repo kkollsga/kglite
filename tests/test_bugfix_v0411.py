@@ -124,6 +124,8 @@ class TestPathFunctionReturnTypes:
     """nodes(p) should return list of dicts, relationships(p) list of strings."""
 
     def test_nodes_returns_list_of_dicts(self, social_graph):
+        # Phase A.1 / C6 — nodes() returns full Node dicts with
+        # id/labels/properties (was JSON-string-of-dicts pre-A.1).
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Charlie'})) "
             "RETURN nodes(p)"
@@ -131,19 +133,22 @@ class TestPathFunctionReturnTypes:
         nodes = rows[0]["nodes(p)"]
         assert isinstance(nodes, list)
         assert all(isinstance(n, dict) for n in nodes)
-        titles = [n["title"] for n in nodes]
+        titles = [n["properties"]["title"] for n in nodes]
         assert "Alice" in titles
         assert "Charlie" in titles
 
     def test_relationships_returns_list_of_strings(self, social_graph):
+        # Phase A.1 / C6 — relationships() returns full Rel dicts
+        # (was list of type strings pre-A.1). Extract `.type` to get
+        # the prior shape.
         rows = social_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..5]->(b:Person {name: 'Bob'})) "
             "RETURN relationships(p)"
         )
         rels = rows[0]["relationships(p)"]
         assert isinstance(rels, list)
-        assert all(isinstance(r, str) for r in rels)
-        assert rels == ["KNOWS"]
+        assert all(isinstance(r, dict) for r in rels)
+        assert [r["type"] for r in rels] == ["KNOWS"]
 
     def test_collect_returns_list(self, social_graph):
         rows = social_graph.cypher("MATCH (n:Person) RETURN collect(n.name) AS names")

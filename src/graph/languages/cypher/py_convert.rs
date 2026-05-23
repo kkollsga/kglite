@@ -9,60 +9,36 @@ use pyo3::types::{PyDict, PyList};
 use pyo3::IntoPyObjectExt;
 
 // ========================================================================
-// JSON → Python conversion
-// ========================================================================
-
-/// Recursively convert a serde_json::Value to a Python object.
-fn json_value_to_py(py: Python<'_>, val: &serde_json::Value) -> PyResult<Py<PyAny>> {
-    match val {
-        serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => b.into_py_any(py),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i.into_py_any(py)
-            } else if let Some(f) = n.as_f64() {
-                f.into_py_any(py)
-            } else {
-                Ok(py.None())
-            }
-        }
-        serde_json::Value::String(s) => s.clone().into_py_any(py),
-        serde_json::Value::Array(arr) => {
-            let list = PyList::empty(py);
-            for item in arr {
-                list.append(json_value_to_py(py, item)?)?;
-            }
-            Ok(list.into_any().unbind())
-        }
-        serde_json::Value::Object(map) => {
-            let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, json_value_to_py(py, v)?)?;
-            }
-            Ok(dict.into_any().unbind())
-        }
-    }
-}
-
-// ========================================================================
 // PreProcessedValue — the core data type for ResultView rows
 // ========================================================================
+//
+// Phase A.1 / C7a — the standalone `json_value_to_py` helper that
+// recursively converted a `serde_json::Value` to a Python object is
+// deleted along with `ParsedJson`. The JSON-string inference hack
+// it served (C4 removal target) is gone, so no caller remains.
+// Native `Value::List` / `Value::Map` / `Value::Node` / ... flow
+// straight through `py_out::value_to_py` instead.
 
-/// A value that may contain pre-parsed JSON for efficient Python conversion.
-/// Used by ResultView to store row data in Rust and convert lazily on access.
+/// Wraps a Value for the Python conversion boundary.
+///
+/// Phase A.1 / C7a — collapsed to a single `Plain(Value)` variant
+/// after the C4 removal of the JSON-string inference hack made the
+/// `ParsedJson(serde_json::Value)` variant dead. Kept as a newtype-
+/// style enum (rather than an `pub struct(Value)` or just `Value`)
+/// because the existing public API surface in `result_view.rs` and
+/// `kg_core.rs` consumes `PreProcessedValue` by pattern match — a
+/// later cleanup can collapse this enum entirely once those sites
+/// migrate to bare `Value`.
 #[derive(Clone)]
 pub enum PreProcessedValue {
-    /// Plain value — convert directly via py_out::value_to_py
+    /// The only variant. Convert via py_out::value_to_py.
     Plain(Value),
-    /// JSON already parsed during GIL-free phase
-    ParsedJson(serde_json::Value),
 }
 
 /// Convert a pre-processed value to a Python object.
 pub fn preprocessed_value_to_py(py: Python<'_>, pv: &PreProcessedValue) -> PyResult<Py<PyAny>> {
     match pv {
         PreProcessedValue::Plain(v) => py_out::value_to_py(py, v),
-        PreProcessedValue::ParsedJson(jv) => json_value_to_py(py, jv),
     }
 }
 
@@ -70,33 +46,24 @@ pub fn preprocessed_value_to_py(py: Python<'_>, pv: &PreProcessedValue) -> PyRes
 // Pre-processing: Value → PreProcessedValue (runs without GIL)
 // ========================================================================
 
-/// Pre-parse JSON strings in owned Value rows. Takes ownership (zero cloning for non-JSON values).
-/// Runs in pure Rust without the GIL — used in py.detach blocks and ResultView constructors.
+/// Wrap owned Value rows for the Python conversion boundary.
+///
+/// Phase A.1 / C4 — the prior JSON-string inference hack here (detect
+/// `Value::String("[...]")` / `Value::String("{...}")` and re-parse via
+/// `serde_json::from_str` into `PreProcessedValue::ParsedJson`) is
+/// removed. Native `Value::List` / `Value::Map` / `Value::Node` /
+/// `Value::Relationship` / `Value::Path` now flow through
+/// `py_out::value_to_py` directly — no inference, no mis-parse risk
+/// (a user-set property value of `"[shopping list]"` no longer gets
+/// silently re-typed as a list).
+///
+/// `PreProcessedValue::ParsedJson` is preserved as a variant for now
+/// (other call sites reference it); slated for removal in the C7a
+/// slim-down pass once the dead path is fully audited.
 pub fn preprocess_values_owned(rows: Vec<Vec<Value>>) -> Vec<Vec<PreProcessedValue>> {
-    use rayon::prelude::*;
-
-    fn preprocess_row(row: Vec<Value>) -> Vec<PreProcessedValue> {
-        row.into_iter()
-            .map(|val| {
-                if let Value::String(ref s) = val {
-                    if (s.starts_with('[') && s.ends_with(']'))
-                        || (s.starts_with('{') && s.ends_with('}'))
-                    {
-                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
-                            return PreProcessedValue::ParsedJson(json_val);
-                        }
-                    }
-                }
-                PreProcessedValue::Plain(val)
-            })
-            .collect()
-    }
-
-    if rows.len() >= 256 {
-        rows.into_par_iter().map(preprocess_row).collect()
-    } else {
-        rows.into_iter().map(preprocess_row).collect()
-    }
+    rows.into_iter()
+        .map(|row| row.into_iter().map(PreProcessedValue::Plain).collect())
+        .collect()
 }
 
 // ========================================================================

@@ -2031,15 +2031,18 @@ class TestBugMultiHopPath:
         assert len(rows[0]["chain"]) == 3  # a, b, pr
 
     def test_two_hop_path_relationships(self, cypher_graph):
+        # Phase A.1 / C2 — relationships() returns Rel dicts; extract
+        # `.type` for the legacy list-of-strings shape.
         rows = cypher_graph.cypher("""
             MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:PURCHASED]->(pr:Product)
             WHERE a.name = 'Alice'
             RETURN relationships(p) AS rels
             LIMIT 1
         """)
-        assert len(rows[0]["rels"]) == 2
-        assert "KNOWS" in rows[0]["rels"]
-        assert "PURCHASED" in rows[0]["rels"]
+        rel_types = [r["type"] for r in rows[0]["rels"]]
+        assert len(rel_types) == 2
+        assert "KNOWS" in rel_types
+        assert "PURCHASED" in rel_types
 
     def test_two_hop_path_intermediate_node(self, cypher_graph):
         """The intermediate node must appear in nodes(p)."""
@@ -2105,9 +2108,15 @@ class TestBugLabelsInconsistency:
             )
 
     def test_labels_filter_equality(self, cypher_graph):
-        """Should be able to filter by labels(n) in WHERE."""
-        # labels(n) returns ['Person'], so compare to list or string should work
+        """Should be able to filter by labels(n) in WHERE.
+
+        Phase A.1 / C2 — labels(n) returns native list ['Person'] now,
+        so the WHERE comparison is against a list, not a string. The
+        legacy `labels(n) = 'Person'` comparison was a string-vs-string
+        comparison via the JSON-encoded list; that surface is gone.
+        Use `labels(n)[0] = 'Person'` or membership instead.
+        """
         rows = cypher_graph.cypher("""
-            MATCH (n) WHERE labels(n) = 'Person' RETURN count(n) AS cnt
+            MATCH (n) WHERE labels(n)[0] = 'Person' RETURN count(n) AS cnt
         """)
         assert rows[0]["cnt"] == 5

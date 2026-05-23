@@ -2,8 +2,8 @@
 //
 // Versioned binary format for KnowledgeGraph persistence.
 //
-// File format v3 layout:
-//   [0..4]    Magic: b"RGF\x03" (Rusty Graph Format, version 3)
+// File format v4 layout (Phase A.1 / C5 of bolt_implementation.md):
+//   [0..4]    Magic: b"RGF\x04" (Rusty Graph Format, version 4)
 //   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
 //   [8..12]   metadata_length: u32 LE
 //   [12..12+N]  JSON metadata (column schemas, section sizes, all config)
@@ -11,6 +11,14 @@
 //   [section]  columns_<Type>.zst — one per node type, packed column data
 //   [section]  embeddings.zst (optional)
 //   [section]  timeseries.zst (optional)
+//
+// v4 vs v3: the Value enum gained five variants (Node, Relationship,
+// Path, List, Map). Variants 0..=8 (the v3 scalar set) preserve their
+// serde discriminants, so v3 files COULD be deserialised structurally
+// — but a v3 binary cannot read v4 files (unknown discriminants 9..=13),
+// and Phase A.1 makes the *hard break* user-decision: a v4 binary
+// refuses v3 files outright with a clear "rebuild your graph" message.
+// One file format, one set of in-flight Value semantics.
 
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::introspection::reporting::OperationReports;
@@ -51,12 +59,23 @@ fn bincode_options() -> impl bincode::Options {
         .with_limit(2 * 1024 * 1024 * 1024) // 2 GiB
 }
 
-/// Magic bytes for the v3 columnar format: "RGF\x03"
+/// Magic bytes for the v3 columnar format: "RGF\x03". Retained ONLY
+/// so the loader can detect a v3 file and emit a specific
+/// "rebuild your graph" error rather than a generic "unrecognized".
 const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
+
+/// Magic bytes for the v4 columnar format: "RGF\x04". Phase A.1 / C5
+/// introduced v4 alongside the `Value::Node`/`Relationship`/`Path`/
+/// `List`/`Map` enum extension. Hard break on v3 files (no read-compat
+/// path) per the bolt_implementation.md plan.
+const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
-const CURRENT_CORE_DATA_VERSION: u32 = 1;
+///
+/// 0.9.52 / Phase A.1: bumped to 2 — the `Value` enum gained five
+/// structured variants (Node, Relationship, Path, List, Map).
+const CURRENT_CORE_DATA_VERSION: u32 = 2;
 
 /// Column section metadata for v3 format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1053,7 +1072,9 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
     let mut writer = BufWriter::new(file);
 
     // Header: magic (4B) + core_data_version (4B) + metadata_length (4B)
-    writer.write_all(&V3_MAGIC)?;
+    // Phase A.1 / C5 — write the v4 magic. v3 files become unloadable
+    // with this binary (intentional hard break).
+    writer.write_all(&V4_MAGIC)?;
     writer.write_all(&CURRENT_CORE_DATA_VERSION.to_le_bytes())?;
     writer.write_all(&(metadata_json.len() as u32).to_le_bytes())?;
     writer.write_all(&metadata_json)?;
@@ -1141,8 +1162,11 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
                 "File is too small to be a valid kglite file.",
             ));
         }
+        if mmap[..4] == V4_MAGIC {
+            return load_v4(&mmap);
+        }
         if mmap[..4] == V3_MAGIC {
-            return load_v3(&mmap);
+            return Err(io::Error::other(V3_HARD_BREAK_MSG));
         }
         return Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
@@ -1157,8 +1181,10 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
             "File is too small to be a valid kglite file.",
         ));
     }
-    if buf[..4] == V3_MAGIC {
-        load_v3(&buf)
+    if buf[..4] == V4_MAGIC {
+        load_v4(&buf)
+    } else if buf[..4] == V3_MAGIC {
+        Err(io::Error::other(V3_HARD_BREAK_MSG))
     } else {
         Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
@@ -1166,6 +1192,19 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
         ))
     }
 }
+
+/// Hard-break message for v3 files in a v4 binary. Per the
+/// Phase A.1 user-decision in bolt_implementation.md: no read-compat
+/// path; rebuild the graph from source. Message gives the operator
+/// enough breadcrumbs to know what changed and what to do.
+const V3_HARD_BREAK_MSG: &str =
+    "kglite .kgl file format v3 is not supported by this binary. \
+     kglite 0.10+ uses v4 — the Value enum gained structured Node / \
+     Relationship / Path / List / Map variants, which changes the \
+     serialised property representation. Rebuild your graph from its \
+     original source (CSV, DataFrame, dataset loader) and save again, \
+     or downgrade kglite to the 0.9.x line if you need to read this \
+     file.";
 
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
@@ -1627,11 +1666,16 @@ fn load_column_sidecars(
     Ok(())
 }
 
-/// Load v3 columnar format.
-fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
+/// Load v4 columnar format (Phase A.1 / C5+).
+///
+/// Same on-disk layout as v3 by section structure; v4 differs by
+/// magic bytes + Value enum gaining Node/Relationship/Path/List/Map
+/// variants (serde discriminants 9..=13). Old v3 files are rejected
+/// at the magic check before they reach this function.
+fn load_v4(buf: &[u8]) -> io::Result<KnowledgeGraph> {
     if buf.len() < 12 {
         return Err(io::Error::other(
-            "v3 file is truncated — header incomplete.",
+            "v4 file is truncated — header incomplete.",
         ));
     }
 
@@ -1650,7 +1694,7 @@ fn load_v3(buf: &[u8]) -> io::Result<KnowledgeGraph> {
     let metadata_end = 12 + metadata_len;
     if buf.len() < metadata_end {
         return Err(io::Error::other(
-            "v3 file is truncated — metadata incomplete.",
+            "v4 file is truncated — metadata incomplete.",
         ));
     }
 

@@ -767,6 +767,11 @@ fn value_type_name(value: &Value) -> String {
         Value::Duration { .. } => "string".to_string(),
         Value::Null => "string".to_string(),
         Value::NodeRef(_) => "int".to_string(),
+        // Phase A.1 — collection / graph-entity values serialize as
+        // JSON-ish strings in CSV (round-trip is best-effort).
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            "string".to_string()
+        }
     }
 }
 
@@ -913,6 +918,10 @@ fn value_to_string(value: &Value) -> String {
         } => format!("duration(M={}, D={}, S={})", months, days, seconds),
         Value::Null => String::new(),
         Value::NodeRef(idx) => format!("node#{}", idx),
+        // Phase A.1 — delegate to format_value for the new variants.
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            crate::datatypes::values::format_value(value)
+        }
     }
 }
 
@@ -950,6 +959,13 @@ fn json_value(value: &Value) -> String {
         ),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => idx.to_string(),
+        // Phase A.1 — JSON-encode the new variants recursively via
+        // serde_json (List, Map, Node, Relationship, Path all derive
+        // Serialize). Fallback to "null" if serialisation fails (it
+        // shouldn't — these are owned structures with no cycles).
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+        }
     }
 }
 

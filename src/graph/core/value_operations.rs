@@ -278,6 +278,11 @@ pub fn format_value_compact(val: &Value) -> String {
         } => format!("duration(M={}, D={}, S={})", months, days, seconds),
         Value::Null => "null".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
+        // Phase A.1 — delegate to format_value (which handles
+        // List/Map/Node/Relationship/Path with Cypher-ish syntax).
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            crate::datatypes::values::format_value(val)
+        }
     }
 }
 
@@ -318,6 +323,10 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         } => write!(buf, "duration(M={}, D={}, S={})", months, days, seconds).unwrap(),
         Value::Null => buf.push_str("null"),
         Value::NodeRef(idx) => write!(buf, "node#{}", idx).unwrap(),
+        // Phase A.1 — delegate to format_value for the new variants.
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            buf.push_str(&crate::datatypes::values::format_value(val))
+        }
     }
 }
 

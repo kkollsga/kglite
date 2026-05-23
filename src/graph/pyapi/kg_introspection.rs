@@ -1351,6 +1351,10 @@ impl KnowledgeGraph {
                         }) => format!("duration(M={},D={},S={})", months, days, seconds),
                         Some(Value::NodeRef(idx)) => format!("node#{}", idx),
                         Some(Value::Null) | None => "null".to_string(),
+                        // Phase A.1 — collection / graph-entity
+                        // property values delegate to format_value
+                        // for the group-by key.
+                        Some(other) => crate::datatypes::values::format_value(other),
                     };
                     *groups.entry(key).or_insert(0) += 1;
                 }

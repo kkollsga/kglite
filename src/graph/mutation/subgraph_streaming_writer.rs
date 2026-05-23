@@ -946,18 +946,9 @@ fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
 /// would print large payloads.
 #[cfg(test)]
 fn value_kind(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "Null",
-        Value::Boolean(_) => "Boolean",
-        Value::Int64(_) => "Int64",
-        Value::Float64(_) => "Float64",
-        Value::UniqueId(_) => "UniqueId",
-        Value::String(_) => "String",
-        Value::DateTime(_) => "DateTime",
-        Value::Point { .. } => "Point",
-        Value::NodeRef(_) => "NodeRef",
-        Value::Duration { .. } => "Duration",
-    }
+    // Phase A.1 / C7a — delegates to Value::type_name (canonical
+    // PascalCase form); was a duplicate per-variant match.
+    v.type_name()
 }
 
 #[cfg(test)]

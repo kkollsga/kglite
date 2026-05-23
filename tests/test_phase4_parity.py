@@ -129,54 +129,15 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "edf6b44068254650ad8c3d323031cecf7b4d564f1edf0ce8afbac6acede8bdc2"
+GOLDEN_V3_DIGEST = "adf955b60f07eaf1fb87e49f4c01e5e685c7236e2f6f562c1738e5ba462e4c67"
 
-# Set of acceptable digests — lets us tolerate one-off wall-clock or
-# per-run entropy that shouldn't count as drift. If the actual digest
-# isn't in this set, the test fails and we investigate.
-#
-# 0.9.0 entry: the v3 format itself is unchanged (CURRENT_FORMAT_VERSION
-# still 3), but the fixture-graph digest drifted across the 0.8.x →
-# 0.9.0 line as save-path / compactor / interner refinements landed
-# (StringInterner SET fix in 0.8.41, Cluster-2 Value variant tail-add).
-# Backward compatibility is verified by loading a pre-0.9.0 Sodir
-# `.kgl` cleanly (manual integration test on every Cluster commit).
-# When the v3 format truly changes, bump CURRENT_FORMAT_VERSION and
-# clear this set.
-ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
-    {
-        # Pre-0.9.0 digest captured during the Cluster-2 sweep when the
-        # version was still 0.8.41.
-        "640c1736230d54084ce13592d0f9c6bee023d5c64d3d01b3a44d5ab0d9ef1343",
-        # 0.9.0 release digest. Version string is embedded in the .kgl
-        # header, so every version bump shifts this. Format itself
-        # unchanged (CURRENT_FORMAT_VERSION still 3); old .kgl files
-        # still load.
-        "68af967421fa01d7db6afd4bf4efb9baa36c11bf269b42393430420ce9e7f494",
-        # 0.9.1 release digest.
-        "feaa0333408efb695a1c8668f016079248577a83ade3ca37f8e495641c3b7654",
-        # 0.9.2 release digest.
-        "4fd36b16170278853c7f87a561cdee446a49cd264c5514b3cd1eb4af04dc0018",
-        # 0.9.3 release digest.
-        "1c583de0ac66262090ac1b3aa34caf6e35d3464638758392a6e3b016173e6f60",
-        # 0.9.4 release digest.
-        "0dd1302773292785868d927fb471bf8c9a3eabbe20ce93354b957fb2e343b6a0",
-        # 0.9.5 release digest.
-        "0aad1cdeb1584d5e8397edf65dddbd14b024bad5d3fdc796c91f406f2c0765bd",
-        # 0.9.6 release digest.
-        "3d4a3393a6e1b0237a7dd5b7337050eb8129203708f612ea72fe8d6bd62cf263",
-        # 0.9.7 release digest.
-        "851964119211324fea04d125fa5375dbd5b71ad9e7cfa85b13b0dec1e9ac462e",
-        # 0.9.8 — 0.9.51 release digests were not back-filled (the test
-        # was left red over that window — the format itself is unchanged
-        # and `.kgl` files round-trip across versions; see manual
-        # integration check noted above). Coverage resumes from 0.9.52.
-        # 0.9.51 release digest (final pre-0.9.52 baseline).
-        "03a40002568ceea467914e4b0b344a829ff9236ae004fe7d93181dc6f37122bb",
-        # Demoted from GOLDEN_V3_DIGEST when 0.9.52 took over.
-        "7d0af291c7645ab4a9ab2dc0e32da8de7ca8e5fcff7af713ec872f8008e1cfa3",
-    }
-)
+# Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
+# new v4 loader rejects v3 files (per the user-decided hard break
+# in bolt_implementation.md), so every digest captured against a v3
+# binary is now meaningless — the test would never re-see those byte
+# patterns. The name `GOLDEN_V3_DIGEST` is kept for git-blame
+# continuity; the digest itself is now the v4 byte pattern.
+ACCEPTABLE_DIGESTS: frozenset[str] = frozenset()
 
 
 def _save_memory_fixture_to_bytes() -> bytes:
@@ -215,6 +176,42 @@ def test_kgl_v3_golden_hash():
         f"    actual:   {digest}\n"
         "If this change is intentional, update GOLDEN_V3_DIGEST (and bump "
         "CURRENT_FORMAT_VERSION if the format truly changed)."
+    )
+
+
+@pytest.mark.parity
+def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
+    """Phase A.1 / C5 — v3 `.kgl` files must error cleanly under the v4
+    binary, with a message that names the format change and tells the
+    user how to recover.
+
+    Crafts a minimal v3 header (`RGF\\x03`) on disk and confirms
+    `kglite.load` fails with the documented hard-break error rather
+    than panicking or returning silently-wrong data.
+    """
+    import kglite
+
+    # Minimal v3-magic header — enough bytes to pass the "too small"
+    # check but not enough to actually deserialise. The loader's
+    # FIRST check is the magic, so it short-circuits before any
+    # downstream parser is exercised.
+    v3_file = tmp_path / "fake_v3.kgl"
+    v3_file.write_bytes(
+        b"RGF\x03"  # v3 magic
+        + (0).to_bytes(4, "little")  # core_data_version = 0
+        + (0).to_bytes(4, "little")  # metadata_length = 0
+    )
+
+    with pytest.raises((OSError, RuntimeError, ValueError)) as exc_info:
+        kglite.load(str(v3_file))
+
+    msg = str(exc_info.value)
+    assert "v3" in msg, f"error message must name the v3 format: {msg!r}"
+    assert "v4" in msg or "0.10" in msg, (
+        f"error message must point at the v4 / 0.10 boundary: {msg!r}"
+    )
+    assert "rebuild" in msg.lower() or "downgrade" in msg.lower(), (
+        f"error message must tell the user how to recover: {msg!r}"
     )
 
 

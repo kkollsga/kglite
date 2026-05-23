@@ -1587,6 +1587,10 @@ pub fn get_children_properties(
                             ),
                             Some(Value::Null) => "null".to_string(),
                             Some(Value::NodeRef(idx)) => format!("node#{}", idx),
+                            // Phase A.1 — collection / graph-entity property
+                            // values are an edge case for hierarchical
+                            // child-grouping; delegate to format_value.
+                            Some(other) => crate::datatypes::values::format_value(other),
                             None => continue,
                         };
 

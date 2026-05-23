@@ -434,6 +434,13 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Duration { .. } => "duration",
         Value::Null => "unknown",
         Value::NodeRef(_) => "noderef",
+        // Phase A.1 — these typically appear in query results, not as
+        // stored properties, but classify defensively for introspection.
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+        Value::Node(_) => "node",
+        Value::Relationship(_) => "relationship",
+        Value::Path(_) => "path",
     }
 }
 
@@ -471,6 +478,11 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
         } => format!("dur(M={},D={},S={})", months, days, seconds),
         Value::NodeRef(idx) => format!("node#{}", idx),
         Value::Null => String::new(),
+        // Phase A.1 — collection / graph-entity variants delegate to
+        // format_value; truncation applies only to the String variant.
+        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+            crate::datatypes::values::format_value(v)
+        }
     }
 }
 

@@ -160,7 +160,11 @@ class TestListComprehensionPathFunctions:
         assert len(node_list) == 3
 
     def test_relationships_identity(self, chain_graph):
-        """[r IN relationships(p)] returns relationship types."""
+        """[r IN relationships(p)] returns the relationships themselves.
+
+        Phase A.1 / C2 — `r` is now a Rel dict; pre-A.1 it was a type
+        string. Check `.type` for the legacy shape.
+        """
         result = chain_graph.cypher(
             "MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*..10]->(b:Person {name: 'Charlie'})) "
             "RETURN [r IN relationships(p)] AS rels"
@@ -168,7 +172,7 @@ class TestListComprehensionPathFunctions:
         assert len(result) == 1
         rels = result[0]["rels"]
         assert isinstance(rels, list)
-        assert rels == ["KNOWS", "KNOWS"]
+        assert [r["type"] for r in rels] == ["KNOWS", "KNOWS"]
 
     def test_nodes_after_with(self, chain_graph):
         """nodes(p) in list comprehension works after WITH clause."""

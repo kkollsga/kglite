@@ -975,6 +975,19 @@ impl ColumnStore {
                 // the overflow bag (Cluster 2). Skip as null.
                 buf.push(0);
             }
+            // Phase A.1 — collection / graph-entity variants are
+            // query-result-time values; they don't belong in the
+            // overflow property bag. Skip as null (matches the
+            // Duration/NodeRef precedent). C5 (the .kgl v4 format
+            // bump) revisits this if structural property storage
+            // becomes a requirement.
+            Value::List(_)
+            | Value::Map(_)
+            | Value::Node(_)
+            | Value::Relationship(_)
+            | Value::Path(_) => {
+                buf.push(0);
+            }
         }
     }
 

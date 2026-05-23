@@ -16,13 +16,25 @@ from kglite.code_tree import build  # noqa: E402
 
 
 def _annotations_for(graph, suffix: str) -> list[dict]:
-    # Cypher auto-deserialises JSON-shaped string properties — the
-    # `annotations` column is stored as JSON but reads back as a list[dict].
+    # Phase A.1 / C4 removed the PreProcessedValue JSON-string inference
+    # hack at the Python boundary. The code-tree extractor still stores
+    # annotations as a JSON string property on the File node, so the
+    # test parses it explicitly here. Future cleanup: emit the property
+    # as a native `Value::List(Vec<Value::Map>)` from the extractor and
+    # drop the json.loads (lands alongside the C7a slim-down or in a
+    # focused code-tree follow-up).
+    import json
+
     rows = graph.cypher(
         "MATCH (f:File) WHERE f.path ENDS WITH $suf AND f.annotations IS NOT NULL RETURN f.annotations AS a",
         params={"suf": suffix},
     ).to_list()
-    return rows[0]["a"] if rows else []
+    if not rows:
+        return []
+    raw = rows[0]["a"]
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
 
 
 def test_todo_fixme_extracted(tmp_path):

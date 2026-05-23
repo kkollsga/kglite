@@ -590,7 +590,12 @@ impl<'a> CypherExecutor<'a> {
                     Ok(max_val.unwrap_or(Value::Null))
                 }
                 "collect" => {
-                    let mut values = Vec::new();
+                    // Phase A.1 / C2 — native `Value::List`. Pre-A.1
+                    // this emitted a JSON-formatted string; the
+                    // `parse_list_value()` helper now handles both
+                    // shapes during the cutover, but new producers
+                    // should emit native lists.
+                    let mut values: Vec<Value> = Vec::new();
                     let mut seen = HashSet::new();
                     for row in rows {
                         let val = self.evaluate_expression(&args[0], row)?;
@@ -601,10 +606,10 @@ impl<'a> CypherExecutor<'a> {
                                     continue;
                                 }
                             }
-                            values.push(format_value_json(&val));
+                            values.push(val);
                         }
                     }
-                    Ok(Value::String(format!("[{}]", values.join(", "))))
+                    Ok(Value::List(values))
                 }
                 "std" | "stdev" => {
                     let values = self.collect_numeric_values(&args[0], rows, *distinct)?;

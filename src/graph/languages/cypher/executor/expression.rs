@@ -21,31 +21,54 @@ impl<'a> CypherExecutor<'a> {
                 self.resolve_property(variable, property, row)
             }
             Expression::Variable(name) => {
-                // Check projected values first (from WITH)
+                // Check projected values first (from WITH).
                 if let Some(val) = row.projected.get(name) {
                     return Ok(val.clone());
                 }
-                // For node variables, return a NodeRef (preserves identity
-                // through collect → index → WITH → property-access)
+                // Phase A.1 / C2 — materialise the binding into a
+                // structured Value variant (Node / Relationship /
+                // Path) instead of the prior NodeRef / type-string /
+                // hop-count surrogates. This is the architectural
+                // turn: from this point on, `RETURN n` carries the
+                // full node value through to Python and Bolt.
+                //
+                // Property access (`n.name`) goes through
+                // `Expression::PropertyAccess` → `resolve_property`,
+                // not through Variable, so the new heavier shape
+                // doesn't slow scalar reads. Variable resolution is
+                // hit by RETURN, WITH (carries the materialised Node
+                // forward — at the cost of cloning), and aggregates.
                 if let Some(&idx) = row.node_bindings.get(name) {
-                    return Ok(Value::NodeRef(idx.index() as u32));
-                }
-                // Edge variable — return connection_type as representative value
-                if let Some(edge) = row.edge_bindings.get(name) {
-                    if let Some(edge_data) = {
-                        let g = &self.graph.graph;
-                        g.edge_weight(edge.edge_index)
-                    } {
-                        return Ok(Value::String(
-                            edge_data
-                                .connection_type_str(&self.graph.interner)
-                                .to_string(),
-                        ));
+                    if let Some(node_value) = materialize_node_value(idx, self.graph) {
+                        return Ok(Value::Node(Box::new(node_value)));
                     }
+                    // Node was deleted in the same query (DETACH DELETE
+                    // before RETURN). Cypher semantics: count(n) and
+                    // similar must still see the row. Return a
+                    // tombstone Node carrying only the index — non-Null,
+                    // structurally a Node, but with no properties.
+                    return Ok(Value::Node(Box::new(crate::datatypes::values::NodeValue {
+                        id: idx.index() as u32,
+                        labels: vec![],
+                        properties: std::collections::BTreeMap::new(),
+                    })));
                 }
-                // Path variable — return hops count
+                if let Some(edge) = row.edge_bindings.get(name) {
+                    if let Some(rel_value) = materialize_rel_value(edge.edge_index, self.graph) {
+                        return Ok(Value::Relationship(Box::new(rel_value)));
+                    }
+                    // Same tombstone treatment for deleted edges.
+                    return Ok(Value::Relationship(Box::new(crate::datatypes::values::RelValue {
+                        id: edge.edge_index.index() as u32,
+                        start_id: edge.source.index() as u32,
+                        end_id: edge.target.index() as u32,
+                        rel_type: String::new(),
+                        properties: std::collections::BTreeMap::new(),
+                    })));
+                }
                 if let Some(path) = row.path_bindings.get(name) {
-                    return Ok(Value::Int64(path.hops as i64));
+                    let path_value = materialize_path_value(path, self.graph);
+                    return Ok(Value::Path(Box::new(path_value)));
                 }
                 // Variable might be unbound (OPTIONAL MATCH null)
                 Ok(Value::Null)
@@ -102,14 +125,16 @@ impl<'a> CypherExecutor<'a> {
                 self.evaluate_scalar_function(name, args, row)
             }
             Expression::ListLiteral(items) => {
-                // Evaluate each item - for now represent as string
+                // Phase A.1 / C4 — emit native Value::List. Pre-A.1
+                // this stringified to a JSON-formatted Value::String
+                // and the PreProcessedValue inference hack at the
+                // Python boundary turned it back into a Python list;
+                // both halves are gone now.
                 let values: Result<Vec<Value>, String> = items
                     .iter()
                     .map(|item| self.evaluate_expression(item, row))
                     .collect();
-                let vals = values?;
-                let formatted: Vec<String> = vals.iter().map(format_value_json).collect();
-                Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                Ok(Value::List(values?))
             }
             Expression::Case {
                 operand,
@@ -153,7 +178,11 @@ impl<'a> CypherExecutor<'a> {
                 let list_val = self.evaluate_expression(list_expr, row)?;
                 let items = parse_list_value(&list_val);
 
-                let mut results = Vec::new();
+                // Phase A.1 / C4 — emit native Value::List instead
+                // of JSON-stringifying. parse_list_value already
+                // handles Value::List as a fast path (C2), so
+                // chained comprehensions short-circuit.
+                let mut results: Vec<Value> = Vec::new();
                 for item in items {
                     // Create a temporary row with the variable bound
                     let mut temp_row = row.clone();
@@ -173,78 +202,60 @@ impl<'a> CypherExecutor<'a> {
                         item
                     };
 
-                    results.push(format_value_json(&result));
+                    results.push(result);
                 }
 
-                Ok(Value::String(format!("[{}]", results.join(", "))))
+                Ok(Value::List(results))
             }
 
             Expression::MapProjection { variable, items } => {
-                // Look up the node from bindings
+                // Phase A.1 / C4 — emit native Value::Map.
                 if let Some(&node_idx) = row.node_bindings.get(variable.as_str()) {
                     if let Some(node) = self.graph.graph.node_weight(node_idx) {
-                        let mut props = Vec::new();
+                        let mut props: std::collections::BTreeMap<String, Value> =
+                            std::collections::BTreeMap::new();
                         for item in items {
                             match item {
                                 MapProjectionItem::Property(prop) => {
                                     let val = resolve_node_property(node, prop, self.graph);
-                                    props.push(format!(
-                                        "{}: {}",
-                                        format_value_json(&Value::String(prop.clone())),
-                                        format_value_json(&val)
-                                    ));
+                                    props.insert(prop.clone(), val);
                                 }
                                 MapProjectionItem::AllProperties => {
-                                    // Include standard fields first
                                     for &builtin in &["title", "id", "type"] {
                                         let val = resolve_node_property(node, builtin, self.graph);
                                         if !matches!(val, Value::Null) {
-                                            props.push(format!(
-                                                "{}: {}",
-                                                format_value_json(&Value::String(
-                                                    builtin.to_string()
-                                                )),
-                                                format_value_json(&val)
-                                            ));
+                                            props.insert(builtin.to_string(), val);
                                         }
                                     }
-                                    // Then all user-defined properties
                                     for key in node.property_keys(&self.graph.interner) {
+                                        if key == "id" || key == "title" || key == "type" {
+                                            continue;
+                                        }
                                         let val = resolve_node_property(node, key, self.graph);
-                                        props.push(format!(
-                                            "{}: {}",
-                                            format_value_json(&Value::String(key.to_string())),
-                                            format_value_json(&val)
-                                        ));
+                                        props.insert(key.to_string(), val);
                                     }
                                 }
                                 MapProjectionItem::Alias { key, expr } => {
                                     let val = self.evaluate_expression(expr, row)?;
-                                    props.push(format!(
-                                        "{}: {}",
-                                        format_value_json(&Value::String(key.clone())),
-                                        format_value_json(&val)
-                                    ));
+                                    props.insert(key.clone(), val);
                                 }
                             }
                         }
-                        return Ok(Value::String(format!("{{{}}}", props.join(", "))));
+                        return Ok(Value::Map(props));
                     }
                 }
                 Ok(Value::Null)
             }
 
             Expression::MapLiteral(entries) => {
-                let mut props = Vec::new();
+                // Phase A.1 / C4 — emit native Value::Map.
+                let mut props: std::collections::BTreeMap<String, Value> =
+                    std::collections::BTreeMap::new();
                 for (key, expr) in entries {
                     let val = self.evaluate_expression(expr, row)?;
-                    props.push(format!(
-                        "{}: {}",
-                        format_value_json(&Value::String(key.clone())),
-                        format_value_json(&val)
-                    ));
+                    props.insert(key.clone(), val);
                 }
-                Ok(Value::String(format!("{{{}}}", props.join(", "))))
+                Ok(Value::Map(props))
             }
 
             Expression::IndexAccess { expr, index } => {
@@ -334,12 +345,11 @@ impl<'a> CypherExecutor<'a> {
                     len as usize
                 };
 
+                // Phase A.1 / C4 — emit native Value::List.
                 if s >= e {
-                    Ok(Value::String("[]".to_string()))
+                    Ok(Value::List(Vec::new()))
                 } else {
-                    let sliced = &items[s..e];
-                    let formatted: Vec<String> = sliced.iter().map(format_value_json).collect();
-                    Ok(Value::String(format!("[{}]", formatted.join(", "))))
+                    Ok(Value::List(items[s..e].to_vec()))
                 }
             }
             Expression::IsNull(inner) => {
@@ -608,6 +618,11 @@ impl<'a> CypherExecutor<'a> {
 
     /// List comprehension over nodes(p): bind each path node as a node_binding
     /// so that property access (n.name, n.type, etc.) resolves correctly.
+    ///
+    /// Phase A.1 / C4 — emits native Value::List. When no map expression
+    /// is provided, each item is a Value::Node (matching what
+    /// `RETURN n` produces); with a map expression, each item is the
+    /// projected Value directly.
     pub(super) fn list_comp_nodes(
         &self,
         variable: &str,
@@ -621,7 +636,7 @@ impl<'a> CypherExecutor<'a> {
             node_indices.push(*node_idx);
         }
 
-        let mut results = Vec::new();
+        let mut results: Vec<Value> = Vec::new();
         for node_idx in node_indices {
             let mut temp_row = row.clone();
             temp_row
@@ -637,30 +652,24 @@ impl<'a> CypherExecutor<'a> {
             let result = if let Some(ref expr) = map_expr {
                 self.evaluate_expression(expr, &temp_row)?
             } else {
-                // No map expression — serialize node as JSON dict (backward compatible)
-                if let Some(node) = self.graph.graph.node_weight(node_idx) {
-                    let mut props = Vec::new();
-                    props.push(format!("\"id\": {}", format_value_compact(&node.id())));
-                    props.push(format!(
-                        "\"title\": \"{}\"",
-                        format_value_compact(&node.title()).replace('"', "\\\"")
-                    ));
-                    props.push(format!(
-                        "\"type\": \"{}\"",
-                        node.node_type_str(&self.graph.interner)
-                    ));
-                    Value::String(format!("{{{}}}", props.join(", ")))
-                } else {
-                    Value::Null
+                // No map expression — emit the full materialised
+                // Value::Node (same shape `RETURN n` would produce).
+                match materialize_node_value(node_idx, self.graph) {
+                    Some(nv) => Value::Node(Box::new(nv)),
+                    None => Value::Null,
                 }
             };
 
-            results.push(format_value_json(&result));
+            results.push(result);
         }
-        Ok(Value::String(format!("[{}]", results.join(", "))))
+        Ok(Value::List(results))
     }
 
-    /// List comprehension over relationships(p): bind each relationship type as a projected value.
+    /// List comprehension over relationships(p): bind each relationship as a projected value.
+    ///
+    /// Phase A.1 / C4 — emits native Value::List of Value::Relationship.
+    /// Recovers EdgeIndex via find_edge between consecutive nodes
+    /// (PathBinding doesn't carry EdgeIndex directly).
     pub(super) fn list_comp_relationships(
         &self,
         variable: &str,
@@ -669,15 +678,31 @@ impl<'a> CypherExecutor<'a> {
         map_expr: &Option<Box<Expression>>,
         row: &ResultRow,
     ) -> Result<Value, String> {
-        let mut results = Vec::new();
-        for (_, conn_type) in &path.path {
+        let mut results: Vec<Value> = Vec::new();
+        let mut prev_idx = path.source;
+        for (node_idx, conn_type) in &path.path {
+            let rel_value = self
+                .graph
+                .graph
+                .find_edge(prev_idx, *node_idx)
+                .and_then(|eidx| materialize_rel_value(eidx, self.graph));
+
+            let projected_for_var = match &rel_value {
+                Some(rv) => Value::Relationship(Box::new(rv.clone())),
+                // Fallback: at least carry the type string so simple
+                // filters like `r = "KNOWS"` keep working in legacy
+                // path shapes.
+                None => Value::String(conn_type.clone()),
+            };
+
             let mut temp_row = row.clone();
             temp_row
                 .projected
-                .insert(variable.to_string(), Value::String(conn_type.clone()));
+                .insert(variable.to_string(), projected_for_var.clone());
 
             if let Some(ref pred) = filter {
                 if !self.evaluate_predicate(pred, &temp_row)? {
+                    prev_idx = *node_idx;
                     continue;
                 }
             }
@@ -685,12 +710,13 @@ impl<'a> CypherExecutor<'a> {
             let result = if let Some(ref expr) = map_expr {
                 self.evaluate_expression(expr, &temp_row)?
             } else {
-                Value::String(conn_type.clone())
+                projected_for_var
             };
 
-            results.push(format_value_json(&result));
+            results.push(result);
+            prev_idx = *node_idx;
         }
-        Ok(Value::String(format!("[{}]", results.join(", "))))
+        Ok(Value::List(results))
     }
 
     /// Evaluate a CASE expression
@@ -1124,6 +1150,43 @@ impl<'a> CypherExecutor<'a> {
                     return Ok(resolve_node_property(node, property, self.graph));
                 }
                 return Ok(Value::Null);
+            }
+            // Phase A.1 / C2 — Value::Node in projected (the post-A.1
+            // shape that `RETURN n` / Variable resolution emits). Look
+            // up the property directly off the materialised node value.
+            // For node-aliased properties (id/title vs user-set names),
+            // try the canonical names first since materialize_node_value
+            // populated them under the virtual keys.
+            if let Value::Node(node_val) = val {
+                // Map alias to canonical: if the user asked for the
+                // aliased name and the canonical is in properties,
+                // return the canonical; otherwise return the aliased
+                // key directly.
+                if let Some(v) = node_val.properties.get(property) {
+                    return Ok(v.clone());
+                }
+                // Try the alias map — `n.person_id` should resolve
+                // to properties["id"] if person_id is the id alias.
+                let node_type_name = node_val.labels.first().map(|s| s.as_str()).unwrap_or("");
+                let resolved = self.graph.resolve_alias(node_type_name, property);
+                if let Some(v) = node_val.properties.get(resolved) {
+                    return Ok(v.clone());
+                }
+                return Ok(Value::Null);
+            }
+            // Value::Relationship in projected — same idea.
+            if let Value::Relationship(rel_val) = val {
+                return Ok(match property {
+                    "id" => Value::Int64(rel_val.id as i64),
+                    "type" => Value::String(rel_val.rel_type.clone()),
+                    "start" | "start_id" => Value::Int64(rel_val.start_id as i64),
+                    "end" | "end_id" => Value::Int64(rel_val.end_id as i64),
+                    other => rel_val.properties.get(other).cloned().unwrap_or(Value::Null),
+                });
+            }
+            // Value::Map in projected — key access (e.g. for properties(n))
+            if let Value::Map(map) = val {
+                return Ok(map.get(property).cloned().unwrap_or(Value::Null));
             }
             // DateTime property accessors: .year, .month, .day
             if let Value::DateTime(date) = val {

@@ -466,20 +466,13 @@ fn ensure_type_metadata(
 }
 
 /// Map a Value variant to its type name string (for SchemaNode property types).
+///
+/// Phase A.1 / C7a — thin wrapper around the canonical `Value::type_name`
+/// method; kept as a free function so `value_type_name(&v)` callsites
+/// don't have to change. Future cleanup can replace each callsite with
+/// the method form and drop this.
 fn value_type_name(v: &Value) -> String {
-    match v {
-        Value::String(_) => "String",
-        Value::Int64(_) => "Int64",
-        Value::Float64(_) => "Float64",
-        Value::Boolean(_) => "Boolean",
-        Value::UniqueId(_) => "UniqueId",
-        Value::DateTime(_) => "DateTime",
-        Value::Point { .. } => "Point",
-        Value::Duration { .. } => "Duration",
-        Value::Null => "Null",
-        Value::NodeRef(_) => "NodeRef",
-    }
-    .to_string()
+    v.type_name().to_string()
 }
 
 /// Extract the variable name from a CreateElement::Node
