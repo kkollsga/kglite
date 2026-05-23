@@ -411,7 +411,16 @@ fn create_node(
     for &ik in &interned_keys {
         schema_mut.add_key(ik);
     }
-    let schema = Arc::clone(graph.type_schemas.get(&label).unwrap());
+    // Phase A.2 / C4 — invariant: type_schemas was populated above
+    // (Arc::make_mut at line 410 forces an entry). expect() instead
+    // of unwrap() gives a clear panic message if the invariant ever
+    // breaks (e.g. a future refactor moves the populate step).
+    let schema = Arc::clone(
+        graph
+            .type_schemas
+            .get(&label)
+            .expect("invariant: type_schemas entry populated above"),
+    );
 
     // Create compact node using the shared TypeSchema
     let node_data = NodeData::new_compact(

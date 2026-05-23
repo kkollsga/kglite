@@ -104,7 +104,7 @@ class TestAutoTemporalConfig:
     def test_set_temporal_unknown_type(self):
         """set_temporal raises error for unknown types."""
         g = kglite.KnowledgeGraph()
-        with pytest.raises(ValueError, match="not a known"):
+        with pytest.raises(kglite.KgError, match="not a known"):
             g.set_temporal("NonExistent", "from", "to")
 
 
@@ -344,7 +344,7 @@ class TestDateAll:
 
     def test_end_without_start_raises(self, temporal_graph):
         """date(None, '2015') raises an error."""
-        with pytest.raises(ValueError, match="requires a start"):
+        with pytest.raises(kglite.KgError, match="requires a start"):
             temporal_graph.date(None, "2015")
 
 

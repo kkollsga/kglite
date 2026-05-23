@@ -487,9 +487,7 @@ pub(crate) fn materialize_rel_value(
         id: edge_idx.index() as u32,
         start_id: src.index() as u32,
         end_id: dst.index() as u32,
-        rel_type: edge_data
-            .connection_type_str(&graph.interner)
-            .to_string(),
+        rel_type: edge_data.connection_type_str(&graph.interner).to_string(),
         properties,
     })
 }

@@ -52,3 +52,4 @@ docs/autoapi/
 # macOS system files
 .DS_Store
 /projects/
+.bench-current.json

@@ -530,7 +530,7 @@ impl KnowledgeGraph {
                 &nodes,
                 target_property,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
             if !keep_selection.unwrap_or(false) {
                 self.selection.clear();
@@ -611,9 +611,10 @@ impl KnowledgeGraph {
         // Resolve where → filter_target alias (error if both provided)
         let effective_filter_target =
             match (filter_target, r#where) {
-                (Some(_), Some(_)) => return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Cannot use both 'filter_target' and 'where' — they are aliases. Use 'where'.",
-                )),
+                (Some(_), Some(_)) => return Err(PyErr::from(crate::error::KgError::Argument(
+                    "Cannot use both 'filter_target' and 'where' — they are aliases. Use 'where'."
+                        .to_string(),
+                ))),
                 (Some(ft), None) => Some(ft),
                 (None, Some(w)) => Some(w),
                 (None, None) => None,
@@ -622,9 +623,7 @@ impl KnowledgeGraph {
         // Resolve where_connection → filter_connection alias
         let effective_filter_connection = match (filter_connection, where_connection) {
             (Some(_), Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Cannot use both 'filter_connection' and 'where_connection' — they are aliases. Use 'where_connection'.",
-                ))
+                return Err(PyErr::from(crate::error::KgError::Argument("Cannot use both 'filter_connection' and 'where_connection' — they are aliases. Use 'where_connection'.".to_string())))
             }
             (Some(fc), None) => Some(fc),
             (None, Some(wc)) => Some(wc),
@@ -642,9 +641,9 @@ impl KnowledgeGraph {
                     Some(list)
                 }
             } else {
-                return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "target_type must be a string or list of strings",
-                ));
+                return Err(PyErr::from(crate::error::KgError::Argument(
+                    "target_type must be a string or list of strings".to_string(),
+                )));
             }
         } else {
             None
@@ -674,7 +673,7 @@ impl KnowledgeGraph {
             None
         } else if let Some(at_str) = at {
             let (date, _) = crate::graph::features::timeseries::parse_date_query(at_str)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
             self.inner
                 .temporal_edge_configs
                 .get(&connection_type)
@@ -683,9 +682,9 @@ impl KnowledgeGraph {
                 })
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = crate::graph::features::timeseries::parse_date_query(start_str)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
             let (end, _) = crate::graph::features::timeseries::parse_date_query(end_str)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
             self.inner
                 .temporal_edge_configs
                 .get(&connection_type)
@@ -746,7 +745,7 @@ impl KnowledgeGraph {
             temporal_filter.as_ref(),
             target_types.as_deref(),
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let actual = new_kg
             .selection
@@ -798,9 +797,9 @@ impl KnowledgeGraph {
         } else if let Ok(list) = target_type.extract::<Vec<String>>() {
             list.into_iter().next()
         } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "target_type must be a string or list of strings",
-            ));
+            return Err(PyErr::from(crate::error::KgError::Argument(
+                "target_type must be a string or list of strings".to_string(),
+            )));
         };
 
         let config = parse_method_param(method)?;
@@ -922,7 +921,7 @@ impl KnowledgeGraph {
             source_type,
             target_type,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
@@ -987,17 +986,17 @@ impl KnowledgeGraph {
                 }
                 spec_map.insert(source_type, PropertySpec::RenameMap(rename_map));
             } else {
-                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                return Err(PyErr::from(crate::error::KgError::Argument(format!(
                     "Value for type '{}' must be a list (copy) or dict (rename/aggregate). Got: {:?}",
                     source_type,
                     value.get_type().name()?
-                )));
+                ))));
             }
         }
 
         let graph = get_graph_mut(&mut self.inner);
         let result = core_add_properties(graph, &self.selection, spec_map)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
@@ -1054,7 +1053,7 @@ impl KnowledgeGraph {
                 sort_fields,
                 limit,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
 
@@ -1063,7 +1062,7 @@ impl KnowledgeGraph {
                 &mut filtered_kg.selection,
                 sort_fields,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
             if let Some(max) = limit {
                 crate::graph::core::filtering::limit_nodes_per_group(
@@ -1071,7 +1070,7 @@ impl KnowledgeGraph {
                     &mut filtered_kg.selection,
                     max,
                 )
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
             }
         } else if let Some(max) = limit {
             crate::graph::core::filtering::limit_nodes_per_group(
@@ -1079,7 +1078,7 @@ impl KnowledgeGraph {
                 &mut filtered_kg.selection,
                 max,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         }
 
         // Generate the property lists with titles already included
@@ -1108,7 +1107,7 @@ impl KnowledgeGraph {
             &nodes,
             store_as.unwrap(),
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
@@ -1252,12 +1251,13 @@ impl KnowledgeGraph {
 
                     Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
                 }
-                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Unexpected result type when storing calculation result",
-                )),
+                Ok(_) => Err(crate::error::KgError::Argument(
+                    "Unexpected result type when storing calculation result".to_string(),
+                )
+                .into()),
                 Err(e) => {
                     let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
-                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg))
+                    Err(crate::error::KgError::Argument(error_msg).into())
                 }
             }
         } else {
@@ -1296,20 +1296,22 @@ impl KnowledgeGraph {
                         .collect();
 
                     if valid_results.is_empty() {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        return Err(crate::error::KgError::Argument(format!(
                             "No valid results found for expression '{}'",
                             expression
-                        )));
+                        ))
+                        .into());
                     }
 
                     py_out::convert_computation_results_for_python(valid_results)
                 }
-                Ok(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Unexpected result type when computing",
-                )),
+                Ok(_) => Err(crate::error::KgError::Argument(
+                    "Unexpected result type when computing".to_string(),
+                )
+                .into()),
                 Err(e) => {
                     let error_msg = format!("Error evaluating expression '{}': {}", expression, e);
-                    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(error_msg))
+                    Err(crate::error::KgError::Argument(error_msg).into())
                 }
             }
         }
@@ -1437,16 +1439,18 @@ impl KnowledgeGraph {
     #[pyo3(signature = (node_type, parent_type))]
     fn set_parent_type(&mut self, node_type: String, parent_type: String) -> PyResult<()> {
         if !self.inner.type_indices.contains_key(&node_type) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(crate::error::KgError::Argument(format!(
                 "Node type '{}' not found",
                 node_type
-            )));
+            ))
+            .into());
         }
         if !self.inner.type_indices.contains_key(&parent_type) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            return Err(crate::error::KgError::Argument(format!(
                 "Parent type '{}' not found",
                 parent_type
-            )));
+            ))
+            .into());
         }
         let graph = get_graph_mut(&mut self.inner);
         graph.parent_types.insert(node_type, parent_type);
@@ -1499,7 +1503,7 @@ impl KnowledgeGraph {
             max_pairs,
             sample_truncate,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })
     }
 
     /// One-call codebase exploration: lexical search over Function/Class/

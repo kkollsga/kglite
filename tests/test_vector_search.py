@@ -476,12 +476,12 @@ class TestCypherVectorScore:
 
     def test_vector_score_missing_embedding(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        with pytest.raises(RuntimeError, match="no embedding"):
+        with pytest.raises(kglite.KgError, match="no embedding"):
             graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'nonexistent_emb', [1.0, 0.0, 0.0]) AS score")
 
     def test_vector_score_dimension_mismatch(self, graph_with_embeddings):
         graph = graph_with_embeddings
-        with pytest.raises(RuntimeError, match="dimension"):
+        with pytest.raises(kglite.KgError, match="dimension"):
             graph.cypher("MATCH (n:Article) RETURN vector_score(n, 'summary_emb', [1.0, 0.0]) AS score")
 
 
@@ -1074,19 +1074,19 @@ class TestCypherTextScore:
         graph.add_nodes(df, "Article", "id", "title", ["summary"])
         graph.set_embeddings("Article", "summary", {1: [1.0, 0.0, 0.0]})
 
-        with pytest.raises(RuntimeError, match="set_embedder"):
+        with pytest.raises(kglite.KgError, match="set_embedder"):
             graph.cypher("MATCH (n:Article) RETURN text_score(n, 'summary', 'hello') AS score")
 
     def test_text_score_wrong_arg_count(self):
         """text_score with wrong number of args raises clear error."""
         graph, _ = self._make_graph()
-        with pytest.raises(ValueError, match="3 arguments"):
+        with pytest.raises(kglite.KgError, match="3 arguments"):
             graph.cypher("MATCH (n:Article) RETURN text_score(n, 'summary') AS score")
 
     def test_text_score_non_string_column(self):
         """text_score with non-string column name raises."""
         graph, _ = self._make_graph()
-        with pytest.raises(ValueError, match="string literal"):
+        with pytest.raises(kglite.KgError, match="string literal"):
             graph.cypher("MATCH (n:Article) RETURN text_score(n, n.summary, 'hello') AS score")
 
     def test_text_score_fused_topk(self):
@@ -1269,13 +1269,13 @@ class TestEmbeddingNorm:
     def test_embedding_norm_missing_property_error(self, graph_with_poincare_embeddings):
         """embedding_norm() with wrong property raises error."""
         graph = graph_with_poincare_embeddings
-        with pytest.raises(RuntimeError, match="no embedding"):
+        with pytest.raises(kglite.KgError, match="no embedding"):
             graph.cypher("MATCH (n:Concept) RETURN embedding_norm(n, 'nonexistent') AS norm")
 
     def test_embedding_norm_wrong_arg_count(self, graph_with_poincare_embeddings):
         """embedding_norm() with wrong number of args raises error."""
         graph = graph_with_poincare_embeddings
-        with pytest.raises(RuntimeError, match="requires 2 arguments"):
+        with pytest.raises(kglite.KgError, match="requires 2 arguments"):
             graph.cypher("MATCH (n:Concept) RETURN embedding_norm(n) AS norm")
 
     def test_embedding_norm_in_where(self, graph_with_poincare_embeddings):

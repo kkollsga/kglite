@@ -343,9 +343,11 @@ impl KnowledgeGraph {
                 } else if let Ok(i) = arg.extract::<usize>() {
                     (None, i)
                 } else {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(
-                        "sample() first argument must be a node type (str) or count (int)",
-                    ));
+                    return Err(crate::error::KgError::Argument(
+                        "sample() first argument must be a node type (str) or count (int)"
+                            .to_string(),
+                    )
+                    .into());
                 }
             }
             None => (None, n.unwrap_or(default_n)),
@@ -353,7 +355,9 @@ impl KnowledgeGraph {
 
         if let Some(nt) = node_type {
             let type_indices = self.inner.type_indices.get(&nt).ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!("Node type '{}' not found", nt))
+                PyErr::from(crate::error::KgError::Argument(
+                    (format!("Node type '{}' not found", nt)).to_string(),
+                ))
             })?;
             let indices: Vec<_> = type_indices.iter().take(count).collect();
             let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
@@ -366,15 +370,15 @@ impl KnowledgeGraph {
         // Selection-based: sample from current selection
         let level_count = self.selection.get_level_count();
         if level_count == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "sample() requires either a selection or a node_type argument",
-            ));
+            return Err(crate::error::KgError::Argument(
+                "sample() requires either a selection or a node_type argument".to_string(),
+            )
+            .into());
         }
         let last = level_count - 1;
-        let level = self
-            .selection
-            .get_level(last)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Empty selection"))?;
+        let level = self.selection.get_level(last).ok_or_else(|| -> PyErr {
+            crate::error::KgError::Argument("Empty selection".to_string()).into()
+        })?;
         let all_indices = level.get_all_nodes();
         let indices: Vec<_> = all_indices.into_iter().take(count).collect();
         let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
@@ -1244,19 +1248,22 @@ impl KnowledgeGraph {
             Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
         };
 
-        // Parse the Cypher query (no borrow needed)
-        let mut parsed = cypher::parse_cypher(query).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Cypher syntax error: {}", e))
-        })?;
+        // Parse the Cypher query (no borrow needed).
+        // Phase A.2 / C2 — `?` flows the typed KgError through
+        // `From<KgError> for PyErr` (in src/error_py.rs), which picks
+        // the appropriate exception subclass (here CypherSyntaxError).
+        // Line/col preserved as struct fields on the Rust side; the
+        // message also includes them for human display.
+        let mut parsed = cypher::parse_cypher(query)?;
 
         // Schema validation — catches unknown node/edge types and properties
         // before any execution or scan. Runs in O(clauses) against in-memory
         // metadata; skipped when the graph has no declared schema.
+        // Phase A.2 / C3 — SchemaError flows via From<SchemaError> for KgError
+        // and From<KgError> for PyErr, automatically raising kglite.SchemaError.
         {
             let this = slf.borrow();
-            cypher::validate_schema(&parsed, &this.inner).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
-            })?;
+            cypher::validate_schema(&parsed, &this.inner).map_err(crate::error::KgError::from)?;
         }
 
         let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
@@ -1274,9 +1281,14 @@ impl KnowledgeGraph {
             std::collections::HashMap::new()
         };
 
-        // Rewrite text_score() → vector_score() and collect texts to embed
-        let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        // Rewrite text_score() → vector_score() and collect texts to embed.
+        // Phase A.2 / C3 — typed CypherExecutionError via the From boundary.
+        let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map).map_err(|e| {
+            crate::error::KgError::CypherExecution {
+                message: e,
+                position: None,
+            }
+        })?;
 
         // Embed collected query texts if any (skip for EXPLAIN)
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
@@ -1284,15 +1296,21 @@ impl KnowledgeGraph {
             let model: std::sync::Arc<dyn crate::graph::embedder::Embedder> = match &this.embedder {
                 Some(m) => std::sync::Arc::clone(m),
                 None => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "text_score() requires a registered embedding model. \
-                         Call g.set_embedder(model) first.",
-                    ))
+                    return Err(crate::error::KgError::CypherExecution {
+                        message: "text_score() requires a registered embedding model. \
+                             Call g.set_embedder(model) first."
+                            .to_string(),
+                        position: None,
+                    }
+                    .into())
                 }
             };
             model
                 .load()
-                .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+                .map_err(|e| crate::error::KgError::CypherExecution {
+                    message: e,
+                    position: None,
+                })?;
 
             let texts: Vec<String> = rewrite
                 .texts_to_embed
@@ -1305,14 +1323,21 @@ impl KnowledgeGraph {
             let embed_result = py.detach(|| model.embed(&texts));
             model.unload();
             let embeddings: Vec<Vec<f32>> =
-                embed_result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+                embed_result.map_err(|e| crate::error::KgError::CypherExecution {
+                    message: e,
+                    position: None,
+                })?;
 
             if embeddings.len() != texts.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "text_score: model.embed() returned {} vectors for {} texts",
-                    embeddings.len(),
-                    texts.len()
-                )));
+                return Err(crate::error::KgError::CypherExecution {
+                    message: format!(
+                        "text_score: model.embed() returned {} vectors for {} texts",
+                        embeddings.len(),
+                        texts.len()
+                    ),
+                    position: None,
+                }
+                .into());
             }
 
             for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
@@ -1364,14 +1389,19 @@ impl KnowledgeGraph {
         }
 
         if cypher::is_mutation_query(&parsed) {
-            // Read-only guard: reject mutations when read_only is enabled
+            // Read-only guard: reject mutations when read_only is enabled.
+            // Phase A.2 / C3 — typed CypherExecutionError.
             {
                 let this = slf.borrow();
                 if this.inner.read_only {
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
-                         are disabled. Use kg.read_only(False) to re-enable mutations.",
-                    ));
+                    return Err(crate::error::KgError::CypherExecution {
+                        message:
+                            "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
+                             are disabled. Use kg.read_only(False) to re-enable mutations."
+                                .to_string(),
+                        position: None,
+                    }
+                    .into());
                 }
             }
             // Mutation path: needs exclusive borrow
@@ -1379,10 +1409,10 @@ impl KnowledgeGraph {
             let graph = get_graph_mut(&mut this.inner);
             let mut result =
                 cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Cypher execution error: {}",
-                        e
-                    ))
+                    crate::error::KgError::CypherExecution {
+                        message: e,
+                        position: None,
+                    }
                 })?;
             // Auto-vacuum after deletions
             if let Some(ref stats) = result.stats {
@@ -1425,11 +1455,9 @@ impl KnowledgeGraph {
                     .with_streaming(streaming);
                 py.detach(|| executor.execute(&parsed))
             }
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error: {}",
-                    e
-                ))
+            .map_err(|e| crate::error::KgError::CypherExecution {
+                message: e,
+                position: None,
             })?;
             let elapsed_ms = query_started.elapsed().as_millis() as u64;
             // `Some(0)` is the documented "disable deadline" escape hatch.

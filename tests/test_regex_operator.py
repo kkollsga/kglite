@@ -96,10 +96,12 @@ class TestRegexAdvanced:
         assert names == ["Bob", "Charlie"]
 
     def test_invalid_regex_raises_error(self, name_graph):
-        """Invalid regex pattern raises a RuntimeError."""
+        """Invalid regex pattern raises typed kglite.CypherExecutionError (was RuntimeError pre-A.2)."""
         import pytest
 
-        with pytest.raises(RuntimeError, match="Invalid regular expression"):
+        import kglite
+
+        with pytest.raises(kglite.KgError, match="Invalid regular expression"):
             name_graph.cypher("""
                 MATCH (p:Person)
                 WHERE p.name =~ '[invalid('

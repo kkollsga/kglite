@@ -57,31 +57,31 @@ class TestCreateNodeValidation:
     def test_create_unknown_node_type(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Unknown node type 'Persom'"):
+        with pytest.raises(kglite.KgError, match="Unknown node type 'Persom'"):
             g.cypher("CREATE (p:Persom {name: 'x'})")
 
     def test_create_unknown_type_suggests(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Did you mean 'Person'"):
+        with pytest.raises(kglite.KgError, match="Did you mean 'Person'"):
             g.cypher("CREATE (p:Persom {name: 'x'})")
 
     def test_create_unknown_property(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Unknown property 'agee' on Person"):
+        with pytest.raises(kglite.KgError, match="Unknown property 'agee' on Person"):
             g.cypher("CREATE (p:Person {name: 'x', agee: 30})")
 
     def test_create_unknown_property_suggests(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Did you mean 'age'"):
+        with pytest.raises(kglite.KgError, match="Did you mean 'age'"):
             g.cypher("CREATE (p:Person {name: 'x', agee: 30})")
 
     def test_create_type_mismatch(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="expects integer, got string"):
+        with pytest.raises(kglite.KgError, match="expects integer, got string"):
             g.cypher("CREATE (p:Person {name: 'x', age: 'thirty'})")
 
 
@@ -100,7 +100,7 @@ class TestCreateEdgeValidation:
     def test_create_unknown_edge_type(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Unknown edge type 'WRITES'"):
+        with pytest.raises(kglite.KgError, match="Unknown edge type 'WRITES'"):
             g.cypher("""
                 MATCH (p:Person {name: 'Alice'}), (pa:Paper {title: 'Paper B'})
                 CREATE (p)-[:WRITES]->(pa)
@@ -109,7 +109,7 @@ class TestCreateEdgeValidation:
     def test_create_invalid_edge_endpoints(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="AUTHORED edges connect"):
+        with pytest.raises(kglite.KgError, match="AUTHORED edges connect"):
             g.cypher("""
                 MATCH (a:Paper {title: 'Paper A'}), (b:Paper {title: 'Paper B'})
                 CREATE (a)-[:AUTHORED]->(b)
@@ -128,13 +128,13 @@ class TestSetValidation:
     def test_set_unknown_property(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Unknown property 'salary' on Person"):
+        with pytest.raises(kglite.KgError, match="Unknown property 'salary' on Person"):
             g.cypher("MATCH (p:Person {name: 'Alice'}) SET p.salary = 100000")
 
     def test_set_type_mismatch(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="expects integer, got string"):
+        with pytest.raises(kglite.KgError, match="expects integer, got string"):
             g.cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 'old'")
 
     def test_set_title_always_allowed(self):
@@ -167,7 +167,7 @@ class TestMergeValidation:
     def test_merge_unknown_type(self):
         g = _make_graph()
         g.lock_schema()
-        with pytest.raises(RuntimeError, match="Unknown node type 'Auther'"):
+        with pytest.raises(kglite.KgError, match="Unknown node type 'Auther'"):
             g.cypher("MERGE (a:Auther {name: 'x'})")
 
 

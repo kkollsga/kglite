@@ -53,10 +53,10 @@ impl KnowledgeGraph {
                 .or_default()
                 .push(config);
         } else {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            return Err(PyErr::from(crate::error::KgError::Argument(format!(
                 "'{}' is not a known node type or connection type",
                 type_name
-            )));
+            ))));
         }
         Ok(())
     }
@@ -77,24 +77,28 @@ impl KnowledgeGraph {
             (Some("all"), _) => TemporalContext::All,
             (Some(start), Some(end)) => {
                 let (start_date, _) = crate::graph::features::timeseries::parse_date_query(start)
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                    .map_err(|e: String| -> PyErr {
+                    crate::error::KgError::Argument(e).into()
+                })?;
                 let (end_date, end_precision) =
-                    crate::graph::features::timeseries::parse_date_query(end)
-                        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                    crate::graph::features::timeseries::parse_date_query(end).map_err(
+                        |e: String| -> PyErr { crate::error::KgError::Argument(e).into() },
+                    )?;
                 let expanded_end =
                     crate::graph::features::timeseries::expand_end(end_date, end_precision);
                 TemporalContext::During(start_date, expanded_end)
             }
             (Some(s), None) => {
                 let (date, _) = crate::graph::features::timeseries::parse_date_query(s)
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                    .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
                 TemporalContext::At(date)
             }
             (None, None) => TemporalContext::Today,
             (None, Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "date() end_str requires a start date_str",
-                ));
+                return Err(crate::error::KgError::Argument(
+                    "date() end_str requires a start date_str".to_string(),
+                )
+                .into());
             }
         };
         Ok(new_kg)
@@ -141,7 +145,7 @@ impl KnowledgeGraph {
             sort_fields,
             limit,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Apply temporal filtering if configured and not disabled
         if temporal != Some(false) && !self.temporal_context.is_all() {
@@ -208,7 +212,7 @@ impl KnowledgeGraph {
             sort_fields,
             limit,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Record actual result
         let actual = new_kg
@@ -238,19 +242,21 @@ impl KnowledgeGraph {
         let condition_sets: Vec<HashMap<String, FilterCondition>> = conditions
             .iter()
             .map(|item| {
-                let dict = item.cast::<PyDict>().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "where_any expects a list of condition dicts",
+                let dict = item.cast::<PyDict>().map_err(|_| -> PyErr {
+                    crate::error::KgError::Argument(
+                        "where_any expects a list of condition dicts".to_string(),
                     )
+                    .into()
                 })?;
                 py_in::pydict_to_filter_conditions(dict)
             })
             .collect::<PyResult<Vec<_>>>()?;
 
         if condition_sets.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "where_any requires at least one condition set",
-            ));
+            return Err(crate::error::KgError::Argument(
+                "where_any requires at least one condition set".to_string(),
+            )
+            .into());
         }
 
         let sort_fields = match sort {
@@ -265,7 +271,7 @@ impl KnowledgeGraph {
             sort_fields,
             limit,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         Ok(new_kg)
     }
@@ -293,7 +299,7 @@ impl KnowledgeGraph {
             sort_fields.as_ref(),
             limit,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         Ok(new_kg)
     }
@@ -304,7 +310,7 @@ impl KnowledgeGraph {
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
 
         crate::graph::core::filtering::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         Ok(new_kg)
     }
 
@@ -315,7 +321,7 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             max_per_group,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         Ok(new_kg)
     }
@@ -326,7 +332,7 @@ impl KnowledgeGraph {
     fn offset(&mut self, n: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
         crate::graph::core::filtering::offset_nodes(&self.inner, &mut new_kg.selection, n)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         Ok(new_kg)
     }
 
@@ -344,10 +350,11 @@ impl KnowledgeGraph {
             "incoming" | "in" => Some(petgraph::Direction::Incoming),
             "any" | "both" => None,
             d => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                return Err(crate::error::KgError::Argument(format!(
                     "Invalid direction '{}'. Use 'outgoing', 'incoming', or 'any'",
                     d
-                )))
+                ))
+                .into())
             }
         };
 
@@ -357,7 +364,7 @@ impl KnowledgeGraph {
             connection_type,
             dir,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         Ok(new_kg)
     }
@@ -395,7 +402,7 @@ impl KnowledgeGraph {
         let ref_date = match date {
             Some(d) => {
                 let (parsed, _) = crate::graph::features::timeseries::parse_date_query(d)
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                    .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
                 parsed
             }
             None => match &self.temporal_context {
@@ -480,9 +487,9 @@ impl KnowledgeGraph {
 
         // Parse dates
         let (start_parsed, _) = crate::graph::features::timeseries::parse_date_query(start_date)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         let (end_parsed, _) = crate::graph::features::timeseries::parse_date_query(end_date)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Use temporal helper for NULL-aware overlap check
         let config = schema::TemporalConfig {
@@ -562,22 +569,28 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // Get the current level's nodes
         let current_index = self.selection.get_level_count().saturating_sub(1);
-        let level = self.selection.get_level(current_index).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>("No active selection level")
-        })?;
+        let level = self
+            .selection
+            .get_level(current_index)
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument("No active selection level".to_string()).into()
+            })?;
 
         let nodes = level.get_all_nodes();
         if nodes.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "No nodes selected for update",
-            ));
+            return Err(crate::error::KgError::Argument(
+                "No nodes selected for update".to_string(),
+            )
+            .into());
         }
 
         // Pre-extract Python values before mutating the graph
         let mut parsed_properties: Vec<(String, Value)> = Vec::new();
         for (key, value) in properties.iter() {
             let property_name: String = key.extract().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>("Property names must be strings")
+                PyErr::from(crate::error::KgError::Argument(
+                    "Property names must be strings".to_string(),
+                ))
             })?;
             let property_value = py_in::py_value_to_value(&value)?;
             parsed_properties.push((property_name, property_value));
@@ -935,10 +948,12 @@ impl KnowledgeGraph {
             Ok(buf)
         } else {
             // Multi-level: walk traversal chains via DFS
-            let level0 = self
-                .selection
-                .get_level(0)
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("no selection levels"))?;
+            let level0 = self.selection.get_level(0).ok_or_else(|| {
+                PyErr::from(crate::error::KgError::CypherExecution {
+                    message: ("no selection levels").to_string(),
+                    position: None,
+                })
+            })?;
 
             let mut chains: Vec<Vec<NodeIndex>> = Vec::new();
             let roots = level0.get_all_nodes();
@@ -1289,10 +1304,11 @@ impl KnowledgeGraph {
             }
         };
 
-        let target_node = self
-            .inner
-            .get_node(target_idx)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
+        let target_node = self.inner.get_node(target_idx).ok_or_else(|| {
+            PyErr::from(crate::error::KgError::Argument(
+                "Node disappeared".to_string(),
+            ))
+        })?;
 
         // Phase 2: Build result dict
         Python::attach(|py| {

@@ -78,12 +78,12 @@ def test_orphan_node_clean_type_returns_zero(integrity_graph):
 
 
 def test_orphan_node_unknown_type_errors(integrity_graph):
-    with pytest.raises((ValueError, RuntimeError), match="no nodes"):
+    with pytest.raises(kglite.KgError, match="no nodes"):
         integrity_graph.cypher("CALL orphan_node({type: 'NoSuchType'}) YIELD node RETURN node")
 
 
 def test_orphan_node_missing_param_errors(integrity_graph):
-    with pytest.raises((ValueError, RuntimeError), match="missing required parameter"):
+    with pytest.raises(kglite.KgError, match="missing required parameter"):
         integrity_graph.cypher("CALL orphan_node({}) YIELD node RETURN node")
 
 
@@ -92,7 +92,7 @@ def test_orphan_node_missing_param_error_lists_accepted_params(integrity_graph):
     users don't have to brute-force-guess the param name (issue #13)."""
     try:
         integrity_graph.cypher("CALL orphan_node({wrong: 'X'}) YIELD node RETURN node")
-    except (ValueError, RuntimeError) as exc:
+    except kglite.KgError as exc:
         msg = str(exc)
         assert "Accepted parameters" in msg, f"missing schema hint in error: {msg}"
         assert "type" in msg, f"required param 'type' must be listed in error: {msg}"
@@ -145,7 +145,7 @@ def test_orphan_node_link_type_filters_to_specific_edge_type(integrity_graph):
 
 
 def test_orphan_node_invalid_direction_errors(integrity_graph):
-    with pytest.raises((ValueError, RuntimeError), match="invalid direction"):
+    with pytest.raises(kglite.KgError, match="invalid direction"):
         integrity_graph.cypher("CALL orphan_node({type: 'LawSection', direction: 'sideways'}) YIELD node RETURN node")
 
 
@@ -153,7 +153,7 @@ def test_cardinality_violation_error_lists_optional_params(integrity_graph):
     """Optional params (min, max) should also appear in the schema hint."""
     try:
         integrity_graph.cypher("CALL cardinality_violation({}) YIELD node RETURN node")
-    except (ValueError, RuntimeError) as exc:
+    except kglite.KgError as exc:
         msg = str(exc)
         assert "required: [type, edge]" in msg, f"required list missing/wrong: {msg}"
         assert "optional: [min, max]" in msg, f"optional list missing/wrong: {msg}"
@@ -288,7 +288,7 @@ def test_missing_inbound_edge_finds_no_inbound(directional_graph):
 
 def test_direction_validator_blocks_outbound_misuse(directional_graph):
     """Calling missing_required_edge with type=Licence flips on direction validator."""
-    with pytest.raises((ValueError, RuntimeError), match="DirectionMismatch"):
+    with pytest.raises(kglite.KgError, match="DirectionMismatch"):
         directional_graph.cypher(
             "CALL missing_required_edge({type: 'Licence', edge: 'IN_LICENCE'}) YIELD node RETURN node"
         )
@@ -296,7 +296,7 @@ def test_direction_validator_blocks_outbound_misuse(directional_graph):
 
 def test_direction_validator_blocks_inbound_misuse(directional_graph):
     """Calling missing_inbound_edge with type=Wellbore flips on direction validator."""
-    with pytest.raises((ValueError, RuntimeError), match="DirectionMismatch"):
+    with pytest.raises(kglite.KgError, match="DirectionMismatch"):
         directional_graph.cypher(
             "CALL missing_inbound_edge({type: 'Wellbore', edge: 'IN_LICENCE'}) YIELD node RETURN node"
         )
@@ -385,7 +385,7 @@ def test_list_procedures_includes_rule_procedures(integrity_graph):
 
 
 def test_invalid_yield_column_rejected(integrity_graph):
-    with pytest.raises((ValueError, RuntimeError), match="does not yield"):
+    with pytest.raises(kglite.KgError, match="does not yield"):
         integrity_graph.cypher("CALL orphan_node({type: 'LawSection'}) YIELD bogus RETURN bogus")
 
 

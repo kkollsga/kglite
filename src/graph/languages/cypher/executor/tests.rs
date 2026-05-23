@@ -1549,7 +1549,11 @@ fn test_list_slice_edge_cases() {
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]))
+        Some(&Value::List(vec![
+            Value::Int64(1),
+            Value::Int64(2),
+            Value::Int64(3)
+        ]))
     );
 
     // Empty slice (start >= end)
@@ -1562,7 +1566,11 @@ fn test_list_slice_edge_cases() {
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::List(vec![Value::Int64(3), Value::Int64(4), Value::Int64(5)]))
+        Some(&Value::List(vec![
+            Value::Int64(3),
+            Value::Int64(4),
+            Value::Int64(5)
+        ]))
     );
 }
 

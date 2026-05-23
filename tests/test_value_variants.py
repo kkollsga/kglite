@@ -61,14 +61,10 @@ def _build_person_knows_graph(g: kglite.KnowledgeGraph) -> None:
             {"src": "bob", "tgt": "carol", "since": 2020},
         ]
     )
-    g.add_connections(
-        knows, "KNOWS", "Person", "src", "Person", "tgt"
-    )
+    g.add_connections(knows, "KNOWS", "Person", "src", "Person", "tgt")
 
     likes = pd.DataFrame([{"src": "alice", "tgt": "carol"}])
-    g.add_connections(
-        likes, "LIKES", "Person", "src", "Person", "tgt"
-    )
+    g.add_connections(likes, "LIKES", "Person", "src", "Person", "tgt")
 
 
 @pytest.fixture(params=STORAGE_MODES, ids=STORAGE_MODES)
@@ -88,32 +84,24 @@ class TestReturnNode:
     """RETURN n yields a dict with id/labels/properties (not a title string)."""
 
     def test_return_node_yields_dict(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n"))
         assert len(rows) == 1
         node = rows[0]["n"]
         assert isinstance(node, dict), f"expected dict, got {type(node).__name__}"
 
     def test_return_node_has_id_labels_properties_keys(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n"))
         node = rows[0]["n"]
         assert set(node.keys()) >= {"id", "labels", "properties"}
 
     def test_return_node_labels_is_single_element_list(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n"))
         node = rows[0]["n"]
         assert isinstance(node["labels"], list)
         assert node["labels"] == ["Person"]
 
     def test_return_node_properties_carries_user_set_columns(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN n"))
         node = rows[0]["n"]
         # User set: id (via add_nodes), name (title), age, city
         assert node["properties"]["age"] == 30
@@ -126,21 +114,13 @@ class TestReturnRelationship:
     def test_return_relationship_yields_dict(self, graph_all_modes):
         # Anchor via the source node to avoid edge-property WHERE
         # filter quirks (those have their own tests).
-        rows = list(
-            graph_all_modes.cypher(
-                "MATCH (a:Person {id: 'alice'})-[r:KNOWS]->() RETURN r LIMIT 1"
-            )
-        )
+        rows = list(graph_all_modes.cypher("MATCH (a:Person {id: 'alice'})-[r:KNOWS]->() RETURN r LIMIT 1"))
         assert len(rows) == 1
         rel = rows[0]["r"]
         assert isinstance(rel, dict)
 
     def test_return_relationship_has_endpoints_and_type(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher(
-                "MATCH (a:Person {id: 'alice'})-[r:KNOWS]->() RETURN r LIMIT 1"
-            )
-        )
+        rows = list(graph_all_modes.cypher("MATCH (a:Person {id: 'alice'})-[r:KNOWS]->() RETURN r LIMIT 1"))
         rel = rows[0]["r"]
         assert set(rel.keys()) >= {"id", "start", "end", "type", "properties"}
         assert rel["type"] == "KNOWS"
@@ -152,8 +132,7 @@ class TestReturnPath:
     def test_shortest_path_yields_dict_with_nodes_and_rels(self, graph_all_modes):
         rows = list(
             graph_all_modes.cypher(
-                "MATCH p = shortestPath((a:Person {id: 'alice'})-[*]->(c:Person {id: 'carol'})) "
-                "RETURN p"
+                "MATCH p = shortestPath((a:Person {id: 'alice'})-[*]->(c:Person {id: 'carol'})) RETURN p"
             )
         )
         assert len(rows) == 1
@@ -172,17 +151,13 @@ class TestReturnPath:
 
 class TestScalarFunctionsNative:
     def test_labels_returns_list_not_json_string(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN labels(n) AS L")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN labels(n) AS L"))
         labels = rows[0]["L"]
         assert isinstance(labels, list), f"expected list, got {type(labels).__name__}"
         assert labels == ["Person"]
 
     def test_keys_returns_list_of_strings(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN keys(n) AS K")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN keys(n) AS K"))
         keys = rows[0]["K"]
         assert isinstance(keys, list)
         assert all(isinstance(k, str) for k in keys)
@@ -190,9 +165,7 @@ class TestScalarFunctionsNative:
         assert {"id", "title", "type", "age", "city"} <= set(keys)
 
     def test_properties_returns_dict_not_json_string(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN properties(n) AS P")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person {id: 'alice'}) RETURN properties(n) AS P"))
         props = rows[0]["P"]
         assert isinstance(props, dict), f"expected dict, got {type(props).__name__}"
         assert props["age"] == 30
@@ -200,9 +173,7 @@ class TestScalarFunctionsNative:
 
     def test_nodes_returns_list_of_node_dicts(self, graph_all_modes):
         rows = list(
-            graph_all_modes.cypher(
-                "MATCH p = (a:Person {id: 'alice'})-[*1..2]->(z) RETURN nodes(p) AS ns LIMIT 1"
-            )
+            graph_all_modes.cypher("MATCH p = (a:Person {id: 'alice'})-[*1..2]->(z) RETURN nodes(p) AS ns LIMIT 1")
         )
         ns = rows[0]["ns"]
         assert isinstance(ns, list)
@@ -234,20 +205,14 @@ class TestNativeCollections:
         assert rows[0]["m"] == {"a": 1, "b": "two"}
 
     def test_collect_yields_list_of_node_dicts(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person) RETURN collect(n) AS ns")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person) RETURN collect(n) AS ns"))
         ns = rows[0]["ns"]
         assert isinstance(ns, list)
         assert len(ns) == 3
         assert all(isinstance(n, dict) and "labels" in n for n in ns)
 
     def test_collect_scalar_yields_list_of_scalars(self, graph_all_modes):
-        rows = list(
-            graph_all_modes.cypher(
-                "MATCH (n:Person) RETURN collect(n.name) AS names"
-            )
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person) RETURN collect(n.name) AS names"))
         names = rows[0]["names"]
         assert sorted(names) == ["Alice", "Bob", "Carol"]
 
@@ -258,11 +223,7 @@ class TestNativeCollections:
     def test_list_comprehension_yields_python_list(self, graph_all_modes):
         # List comprehensions don't accept aggregates in the source —
         # use a literal range / list to feed the comprehension.
-        rows = list(
-            graph_all_modes.cypher(
-                "RETURN [x IN [10, 20, 30, 40] WHERE x > 15 | x * 2] AS doubled"
-            )
-        )
+        rows = list(graph_all_modes.cypher("RETURN [x IN [10, 20, 30, 40] WHERE x > 15 | x * 2] AS doubled"))
         doubled = rows[0]["doubled"]
         assert isinstance(doubled, list)
         assert doubled == [40, 60, 80]
@@ -278,9 +239,7 @@ class TestNativeCollections:
 class TestNodeChaining:
     def test_with_node_then_property_access(self, graph_all_modes):
         rows = list(
-            graph_all_modes.cypher(
-                "MATCH (n:Person) WITH n WHERE n.age > 28 RETURN n.name AS name ORDER BY name"
-            )
+            graph_all_modes.cypher("MATCH (n:Person) WITH n WHERE n.age > 28 RETURN n.name AS name ORDER BY name")
         )
         names = [r["name"] for r in rows]
         assert names == ["Alice", "Bob"]
@@ -291,8 +250,7 @@ class TestNodeChaining:
         # nodes, then any(x IN xs WHERE x.prop ...) iterates.
         rows = list(
             graph_all_modes.cypher(
-                "MATCH (n:Person) WITH collect(n) AS xs "
-                "RETURN any(x IN xs WHERE x.age > 30) AS has_over_30"
+                "MATCH (n:Person) WITH collect(n) AS xs RETURN any(x IN xs WHERE x.age > 30) AS has_over_30"
             )
         )
         assert rows[0]["has_over_30"] is True
@@ -308,23 +266,15 @@ class TestDeleteSurvivesCountInSameQuery:
 
     def test_detach_delete_count_in_same_query(self, graph_all_modes):
         rows = list(
-            graph_all_modes.cypher(
-                "MATCH (n:Person) WHERE n.age >= 30 DETACH DELETE n RETURN count(n) AS deleted"
-            )
+            graph_all_modes.cypher("MATCH (n:Person) WHERE n.age >= 30 DETACH DELETE n RETURN count(n) AS deleted")
         )
         assert rows[0]["deleted"] == 2
 
     def test_remaining_nodes_after_delete(self, graph_all_modes):
         # First delete...
-        list(
-            graph_all_modes.cypher(
-                "MATCH (n:Person) WHERE n.age >= 30 DETACH DELETE n"
-            )
-        )
+        list(graph_all_modes.cypher("MATCH (n:Person) WHERE n.age >= 30 DETACH DELETE n"))
         # ...then verify what's left
-        rows = list(
-            graph_all_modes.cypher("MATCH (n:Person) RETURN n.name AS name")
-        )
+        rows = list(graph_all_modes.cypher("MATCH (n:Person) RETURN n.name AS name"))
         assert [r["name"] for r in rows] == ["Carol"]
 
 
@@ -343,8 +293,7 @@ class TestEdgeCases:
     def test_nested_list_of_nodes_in_map(self, graph_all_modes):
         rows = list(
             graph_all_modes.cypher(
-                "MATCH (n:Person) WITH collect(n) AS people "
-                "RETURN {people: people, count: size(people)} AS bundle"
+                "MATCH (n:Person) WITH collect(n) AS people RETURN {people: people, count: size(people)} AS bundle"
             )
         )
         bundle = rows[0]["bundle"]

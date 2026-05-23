@@ -828,10 +828,12 @@ fn require_node_yield(
     proc: &str,
     expected: &str,
 ) -> Result<String, String> {
-    if yield_items.iter().any(|y| y.name == expected) {
+    // Phase A.2 / C4 — replaced `any()` + `find().unwrap()` brittle
+    // pattern with a single find() match. Same behavior, no unwrap
+    // surface to maintain across refactors.
+    if let Some(item) = yield_items.iter().find(|y| y.name == expected) {
         // Use alias when present so the binding is reachable downstream
         // by the name the agent picked.
-        let item = yield_items.iter().find(|y| y.name == expected).unwrap();
         Ok(item.alias.clone().unwrap_or_else(|| expected.to_string()))
     } else {
         Err(format!(

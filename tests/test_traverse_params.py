@@ -189,7 +189,7 @@ class TestWhereAlias:
 
     def test_both_where_and_filter_target_raises(self, graph):
         """Using both where= and filter_target= raises ValueError."""
-        with pytest.raises(ValueError, match="alias"):
+        with pytest.raises(kglite.KgError, match="alias"):
             graph.select("Person").traverse(
                 "AFFILIATED_WITH",
                 filter_target={"city": "Oslo"},
@@ -211,7 +211,7 @@ class TestWhereConnectionAlias:
 
     def test_both_where_connection_and_filter_connection_raises(self, graph):
         """Using both where_connection= and filter_connection= raises ValueError."""
-        with pytest.raises(ValueError, match="alias"):
+        with pytest.raises(kglite.KgError, match="alias"):
             graph.select("Person").traverse(
                 "RATED",
                 filter_connection={"score": {">": 3}},
@@ -238,6 +238,6 @@ class TestTargetTypeEdgeCases:
         assert len(r1) == len(r2)
 
     def test_target_type_invalid_type_raises(self, graph):
-        """target_type=123 raises TypeError."""
-        with pytest.raises(TypeError, match="string or list"):
+        """target_type=123 raises typed kglite.KgError (was TypeError pre-A.2)."""
+        with pytest.raises(kglite.KgError, match="string or list"):
             graph.select("Person").traverse("AFFILIATED_WITH", target_type=123)

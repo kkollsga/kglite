@@ -81,11 +81,11 @@ class TestPoint:
         assert len(rows) == 1
 
     def test_point_wrong_args(self, geo_graph):
-        with pytest.raises(Exception, match="point.*requires 2"):
+        with pytest.raises(kglite.KgError, match="point.*requires 2"):
             geo_graph.cypher("MATCH (n:City) RETURN point(1.0)")
 
     def test_point_non_numeric(self, geo_graph):
-        with pytest.raises(Exception, match="numeric"):
+        with pytest.raises(kglite.KgError, match="numeric"):
             geo_graph.cypher("MATCH (n:City) RETURN point('hello', 10.0)")
 
 
@@ -154,7 +154,7 @@ class TestDistance:
         assert rows[0]["dist"] < 50_000.0
 
     def test_distance_wrong_arg_count(self, geo_graph):
-        with pytest.raises(Exception, match="distance.*requires"):
+        with pytest.raises(kglite.KgError, match="distance.*requires"):
             geo_graph.cypher("MATCH (n:City) RETURN distance(point(1,2), point(3,4), point(5,6))")
 
 
@@ -502,7 +502,7 @@ class TestGeomPrimitives:
 
     def test_geom_buffer_negative_errors(self):
         g = kglite.KnowledgeGraph()
-        with pytest.raises((ValueError, RuntimeError), match="negative"):
+        with pytest.raises(kglite.KgError, match="negative"):
             list(g.cypher("RETURN geom_buffer('POINT(0 0)', -10) AS b"))
 
 
@@ -551,7 +551,7 @@ class TestKgKnn:
         assert rows[0]["t"] == "Bergen"
 
     def test_knn_missing_lat_errors(self, cities):
-        with pytest.raises((ValueError, RuntimeError), match="missing required parameter"):
+        with pytest.raises(kglite.KgError, match="missing required parameter"):
             list(cities.cypher("CALL kg_knn({lon: 5.3, target_type: 'City', k: 3}) YIELD node RETURN node"))
 
 
@@ -646,5 +646,5 @@ class TestSpatialConfigInference:
         g = kglite.KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["P1"], "color": ["red"]})
         g.add_nodes(df, "Item", "id", "name")
-        with pytest.raises(RuntimeError, match="conventional property name"):
+        with pytest.raises(kglite.KgError, match="conventional property name"):
             list(g.cypher("MATCH (a:Item), (b:Item) RETURN intersects(a, b) AS x"))

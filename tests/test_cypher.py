@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -253,7 +254,12 @@ class TestEmptyResults:
 
 class TestSyntaxErrors:
     def test_invalid_query(self, cypher_graph):
-        with pytest.raises(ValueError):
+        # Phase A.2 / C2 — parse_cypher raises typed CypherSyntaxError
+        # (was ValueError pre-A.2). Catchable via either the specific
+        # class or the universal kglite.KgError base.
+        import kglite
+
+        with pytest.raises(kglite.CypherSyntaxError):
             cypher_graph.cypher("NOT A VALID QUERY")
 
 
@@ -381,7 +387,7 @@ class TestParameters:
         assert "Alice" not in names  # Oslo, age 30 (not > 30)
 
     def test_missing_parameter_error(self, cypher_graph):
-        with pytest.raises(RuntimeError, match="Missing parameter"):
+        with pytest.raises(kglite.KgError, match="Missing parameter"):
             cypher_graph.cypher("MATCH (n:Person) WHERE n.age > $nonexistent RETURN n.name")
 
     def test_parameter_with_to_df(self, cypher_graph):
@@ -610,7 +616,7 @@ class TestSetClause:
 
     def test_set_id_error(self, cypher_graph):
         """SET n.id = x should raise an error (id is immutable)."""
-        with pytest.raises(RuntimeError):
+        with pytest.raises(kglite.KgError):
             cypher_graph.cypher("""
                 MATCH (n:Person) WHERE n.name = 'Alice'
                 SET n.id = 999
@@ -706,7 +712,7 @@ class TestDeleteClause:
 
     def test_delete_node_error_has_edges(self, cypher_graph):
         """Plain DELETE on a node with edges should error."""
-        with pytest.raises(RuntimeError, match="DETACH DELETE"):
+        with pytest.raises(kglite.KgError, match="DETACH DELETE"):
             cypher_graph.cypher("""
                 MATCH (n:Person) WHERE n.name = 'Alice'
                 DELETE n
@@ -1052,7 +1058,7 @@ class TestRange:
         assert result[0]["r"] == [1, 2, 3]
 
     def test_range_step_zero_errors(self, cypher_graph):
-        with pytest.raises(RuntimeError, match="step must not be zero"):
+        with pytest.raises(kglite.KgError, match="step must not be zero"):
             cypher_graph.cypher("UNWIND range(1, 5, 0) AS x RETURN x")
 
 

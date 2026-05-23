@@ -207,9 +207,7 @@ def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
 
     msg = str(exc_info.value)
     assert "v3" in msg, f"error message must name the v3 format: {msg!r}"
-    assert "v4" in msg or "0.10" in msg, (
-        f"error message must point at the v4 / 0.10 boundary: {msg!r}"
-    )
+    assert "v4" in msg or "0.10" in msg, f"error message must point at the v4 / 0.10 boundary: {msg!r}"
     assert "rebuild" in msg.lower() or "downgrade" in msg.lower(), (
         f"error message must tell the user how to recover: {msg!r}"
     )

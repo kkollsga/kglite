@@ -135,7 +135,10 @@ class TestAddConnectionsBulk:
             }
         ]
 
-        with pytest.raises(ValueError) as exc_info:
+        # Phase A.2 / C6 — typed kglite.KgError (was ValueError pre-A.2).
+        import kglite
+
+        with pytest.raises(kglite.KgError) as exc_info:
             graph.add_connections_bulk(bad_conn)
         assert "source_id" in str(exc_info.value)
 

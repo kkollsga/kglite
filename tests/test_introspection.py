@@ -246,7 +246,7 @@ class TestSample:
         assert node["type"] == "Person"
 
     def test_unknown_type_raises(self, small_graph):
-        with pytest.raises(KeyError):
+        with pytest.raises(kglite.KgError):
             small_graph.sample("NonExistent")
 
 
@@ -468,14 +468,14 @@ class TestDescribe:
         assert root.find("extensions") is None
 
     def test_focused_invalid_type_raises(self, small_graph):
-        with pytest.raises(ValueError):
+        with pytest.raises(kglite.KgError):
             small_graph.describe(types=["NonExistent"])
 
     def test_focused_error_lists_available(self, social_graph):
         """Error message should list available types."""
         try:
             social_graph.describe(types=["Bogus"])
-        except ValueError as e:
+        except kglite.KgError as e:
             msg = str(e)
             assert "Person" in msg
             assert "Company" in msg
@@ -564,11 +564,11 @@ class TestDescribeTiers:
         social_graph.set_parent_type("Company", "Person")
 
     def test_set_parent_type_invalid_child(self, social_graph):
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(kglite.KgError, match="not found"):
             social_graph.set_parent_type("Bogus", "Person")
 
     def test_set_parent_type_invalid_parent(self, social_graph):
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(kglite.KgError, match="not found"):
             social_graph.set_parent_type("Company", "Bogus")
 
     # -- Inventory only shows core types --
@@ -1142,12 +1142,12 @@ class TestPerformanceGuards:
 
     def test_focused_detail_error_suggests_search(self, large_graph):
         """Error on unknown type in large graph should suggest type_search."""
-        with pytest.raises(ValueError, match="type_search"):
+        with pytest.raises(kglite.KgError, match="type_search"):
             large_graph.describe(types=["NonExistent"])
 
     def test_focused_detail_error_lists_types_small(self, social_graph):
         """Error on unknown type in small graph should list available types."""
-        with pytest.raises(ValueError, match="Available:"):
+        with pytest.raises(kglite.KgError, match="Available:"):
             social_graph.describe(types=["NonExistent"])
 
     def test_exploration_hints_skip_large(self, large_graph):

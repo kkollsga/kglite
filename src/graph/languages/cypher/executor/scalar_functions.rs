@@ -276,8 +276,7 @@ impl<'a> CypherExecutor<'a> {
                         let mut items: Vec<Value> = Vec::with_capacity(path.path.len());
                         let mut prev_idx = path.source;
                         for (node_idx, _conn_type) in &path.path {
-                            if let Some(edge_idx) =
-                                self.graph.graph.find_edge(prev_idx, *node_idx)
+                            if let Some(edge_idx) = self.graph.graph.find_edge(prev_idx, *node_idx)
                             {
                                 if let Some(rel) = materialize_rel_value(edge_idx, self.graph) {
                                     items.push(Value::Relationship(Box::new(rel)));
@@ -362,9 +361,7 @@ impl<'a> CypherExecutor<'a> {
                             keys.extend(node.property_keys(&self.graph.interner).map(String::from));
                             keys.sort();
                             keys.dedup();
-                            return Ok(Value::List(
-                                keys.into_iter().map(Value::String).collect(),
-                            ));
+                            return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
                         }
                     }
                     if let Some(edge) = row.edge_bindings.get(var) {
@@ -379,9 +376,7 @@ impl<'a> CypherExecutor<'a> {
                                     .map(String::from),
                             );
                             keys.sort();
-                            return Ok(Value::List(
-                                keys.into_iter().map(Value::String).collect(),
-                            ));
+                            return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
                         }
                     }
                 }

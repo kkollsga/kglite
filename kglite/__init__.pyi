@@ -9,6 +9,80 @@ import pandas as pd
 
 __version__: str
 
+# ─── Typed exception hierarchy (Phase A.2 / C1) ──────────────────────────────
+#
+# Every kglite-raised exception subclasses `KgError`. See
+# docs/explanation/error-handling.md for the full hierarchy and Bolt
+# wire-protocol mapping.
+#
+# Migration note: pre-A.2 kglite raised `ValueError` / `RuntimeError` /
+# `KeyError` etc. directly. Existing `except ValueError:` catches no
+# longer match — use the specific typed class or the `KgError` base.
+
+class KgError(Exception):
+    """Base class for every kglite-raised exception.
+
+    Use ``except kglite.KgError:`` to catch any error raised by kglite,
+    regardless of category.
+    """
+
+class CypherError(KgError):
+    """Base for all Cypher-related errors (syntax, timeout, execution, type)."""
+
+class CypherSyntaxError(CypherError):
+    """Cypher parser / tokenizer rejected the query.
+
+    The Python-side exception message includes line and column when the
+    parser knows them; the underlying Rust ``KgError::CypherSyntax``
+    variant carries them as ``Option<usize>`` fields. A future minor
+    release may expose them as attributes.
+    """
+
+class CypherTimeoutError(CypherError):
+    """Cypher query exceeded its ``timeout_ms`` budget."""
+
+class CypherExecutionError(CypherError):
+    """Cypher executor failure during query evaluation."""
+
+class CypherTypeMismatchError(CypherError):
+    """Cypher value-type mismatch (e.g. arithmetic on a String)."""
+
+class SchemaError(KgError):
+    """Schema validation failure (unknown property, type mismatch at pattern literal)."""
+
+class ValidationError(KgError):
+    """Structural validation failure (missing required field, wrong connection endpoint)."""
+
+class ExprError(KgError):
+    """Blueprint expression evaluation failure."""
+
+class NodeNotFoundError(KgError):
+    """A node identified by ``(node_type, id)`` doesn't exist."""
+
+class ConnectionNotFoundError(KgError):
+    """A connection type isn't declared in the schema."""
+
+class PropertyNotFoundError(KgError):
+    """A property is missing from a node or relationship."""
+
+class FileError(KgError):
+    """A file the user named doesn't exist on disk."""
+
+class FileFormatError(KgError):
+    """A file's contents are malformed (bad ``.kgl`` header, truncated blueprint, etc.)."""
+
+class FileIoError(KgError):
+    """Generic I/O failure (permission denied, mid-read EOF, mmap failure)."""
+
+class ArgumentError(KgError):
+    """A user-supplied argument violated a precondition."""
+
+class MissingArgumentError(KgError):
+    """A required argument wasn't passed."""
+
+class InternalError(KgError):
+    """Invariant violation — kglite-internal bug. Reports the source location."""
+
 @runtime_checkable
 class EmbeddingModel(Protocol):
     """Protocol for embedding models passed to ``embed_texts`` / ``search_text``.

@@ -5,6 +5,7 @@ import math
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -309,7 +310,7 @@ class TestPercentileAggregates:
         assert rows[0]["p"] == 30.0
 
     def test_percentile_invalid_p(self, stats_graph):
-        with pytest.raises((ValueError, RuntimeError), match="between 0 and 1"):
+        with pytest.raises(kglite.KgError, match="between 0 and 1"):
             list(stats_graph.cypher("MATCH (n:Person) RETURN percentile_cont(n.age, 1.5) AS p"))
 
     def test_median(self, stats_graph):

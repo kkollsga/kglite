@@ -1197,8 +1197,7 @@ pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
 /// Phase A.1 user-decision in bolt_implementation.md: no read-compat
 /// path; rebuild the graph from source. Message gives the operator
 /// enough breadcrumbs to know what changed and what to do.
-const V3_HARD_BREAK_MSG: &str =
-    "kglite .kgl file format v3 is not supported by this binary. \
+const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by this binary. \
      kglite 0.10+ uses v4 — the Value enum gained structured Node / \
      Relationship / Path / List / Map variants, which changes the \
      serialised property representation. Rebuild your graph from its \

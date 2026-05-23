@@ -335,7 +335,7 @@ class TestTraversalEdgeCases:
         df = pd.DataFrame({"id": [1, 2], "name": ["A", "B"]})
         graph.add_nodes(df, "Node", "id", "name")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(kglite.KgError):
             graph.select("Node").traverse("NONEXISTENT")
 
     def test_traverse_with_existing_connection_type(self):
@@ -388,7 +388,7 @@ class TestCalculationsEdgeCases:
 
         result = graph.select("Node").where({"name": "NonExistent"})
 
-        with pytest.raises(ValueError):
+        with pytest.raises(kglite.KgError):
             result.calculate("sum(value)")
 
     def test_calculate_with_null_values(self):
@@ -422,7 +422,7 @@ class TestBatchUpdateEdgeCases:
 
         selection = graph.select("Node").where({"name": "NonExistent"})
 
-        with pytest.raises(ValueError):
+        with pytest.raises(kglite.KgError):
             selection.update({"new_prop": "value"})
 
     def test_update_existing_property(self):

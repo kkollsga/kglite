@@ -226,8 +226,10 @@ fn run_cypher_inner(
     params: std::collections::HashMap<String, Value>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
-    let mut parsed =
-        cypher::parse_cypher(query).map_err(|e| format!("Cypher syntax error: {e}"))?;
+    // Phase A.2 / C10 — parse_cypher now returns typed KgError (post-C2).
+    // Its Display impl already includes "Cypher syntax error at line X, col Y: ..."
+    // so we don't re-wrap with a "Cypher syntax error: " prefix.
+    let mut parsed = cypher::parse_cypher(query).map_err(|e| e.to_string())?;
     let mut params = params;
 
     let rewrite = cypher::rewrite_text_score(&mut parsed, &params)?;
@@ -409,8 +411,16 @@ fn push_value_repr(out: &mut String, val: &Value) {
         // form is already what agents consume via `to_dict()` /
         // `to_list()`. Falls back to `?` on serialisation failure
         // (shouldn't happen — these all derive Serialize).
-        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
-            let _ = write!(out, "{}", serde_json::to_string(val).unwrap_or_else(|_| "?".to_string()));
+        Value::List(_)
+        | Value::Map(_)
+        | Value::Node(_)
+        | Value::Relationship(_)
+        | Value::Path(_) => {
+            let _ = write!(
+                out,
+                "{}",
+                serde_json::to_string(val).unwrap_or_else(|_| "?".to_string())
+            );
         }
     }
 }

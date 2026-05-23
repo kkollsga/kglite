@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -61,7 +62,7 @@ class TestRegexFilter:
         assert sorted(r) == ["Alice", "Charlie", "Eve"]
 
     def test_regex_invalid_pattern(self, graph):
-        with pytest.raises(ValueError, match="Invalid regex"):
+        with pytest.raises(kglite.KgError, match="Invalid regex"):
             graph.select("Person").where({"name": {"regex": "[invalid"}})
 
     def test_regex_tilde_operator(self, graph):
@@ -172,7 +173,7 @@ class TestFilterAny:
         assert r == ["Diana"]
 
     def test_filter_any_empty_raises(self, graph):
-        with pytest.raises(ValueError, match="at least one"):
+        with pytest.raises(kglite.KgError, match="at least one"):
             graph.select("Person").where_any([])
 
 
@@ -231,7 +232,7 @@ class TestHasConnection:
         assert not r  # empty selection
 
     def test_has_connection_invalid_direction(self, graph):
-        with pytest.raises(ValueError, match="Invalid direction"):
+        with pytest.raises(kglite.KgError, match="Invalid direction"):
             graph.select("Person").where_connected("KNOWS", direction="sideways")
 
     def test_has_connection_chained(self, graph):

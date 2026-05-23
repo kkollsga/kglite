@@ -1,5 +1,14 @@
 // src/lib.rs
 
+// Phase A.2 / C2 — crate-wide allow for clippy::result_large_err.
+// `KgError` is intentionally rich (16 variants spanning Cypher /
+// schema / IO / argument validation) so its size pushes past clippy's
+// default 128-byte threshold. Boxing the error variant in every
+// `Result<T, KgError>` would add an allocation per error path for no
+// real benefit — error paths aren't hot. Standard pattern for crates
+// with a unified typed error.
+#![allow(clippy::result_large_err)]
+
 // mimalloc as the global allocator. samply profile of the N-Triples
 // build showed libsystem_malloc accounting for ~32% of loader-thread
 // CPU time. mimalloc is consistently faster than macOS's default
@@ -12,6 +21,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use pyo3::prelude::*;
 mod code_tree;
 mod datatypes;
+mod error;
+mod error_py;
 mod graph;
 mod mcp_tools;
 mod sec;
@@ -99,6 +110,9 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;
     m.add_class::<ResultIter>()?;
+    // Phase A.2 / C1 — typed exception class hierarchy. Every kglite
+    // error surfaces as `kglite.KgError` or a more specific subclass.
+    error_py::register(py, m)?;
     code_tree::pyapi::register(py, m)?;
     mcp_tools::register(py, m)?;
     sec::register(py, m)?;

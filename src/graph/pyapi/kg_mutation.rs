@@ -46,19 +46,21 @@ impl KnowledgeGraph {
                     })?;
                     let data_dir = std::path::Path::new(dir);
                     let dg = crate::graph::storage::disk::graph::DiskGraph::new_at_path(data_dir)
-                        .map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
-                            "Failed to create disk graph at '{}': {}",
-                            dir, e
-                        ))
+                        .map_err(|e| -> PyErr {
+                        crate::error::KgError::FileFormat {
+                            path: std::path::PathBuf::new(),
+                            message: format!("Failed to create disk graph at '{}': {}", dir, e),
+                        }
+                        .into()
                     })?;
                     graph.graph = schema::GraphBackend::Disk(Box::new(dg));
                 }
                 other => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    return Err(crate::error::KgError::Argument(format!(
                         "Unknown storage mode '{}'. Expected 'mapped', 'disk', or None.",
                         other
-                    )));
+                    ))
+                    .into());
                 }
             }
         }
@@ -231,7 +233,7 @@ impl KnowledgeGraph {
             node_title_field,
             conflict_handling,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Merge spatial config into graph
         if let Some(cfg) = spatial_cfg {
@@ -300,7 +302,9 @@ impl KnowledgeGraph {
                                     .map(|(d, _)| d)
                             })
                             .collect::<Result<Vec<_>, _>>()
-                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                            .map_err(|e: String| -> PyErr {
+                                crate::error::KgError::Argument(e).into()
+                            })?
                     }
                     TimeSpec::SeparateColumns(col_names) => {
                         let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(col_names.len());
@@ -325,14 +329,17 @@ impl KnowledgeGraph {
                                 crate::graph::features::timeseries::date_from_ymd(year, month, day)
                             })
                             .collect::<Result<Vec<_>, _>>()
-                            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                            .map_err(|e: String| -> PyErr {
+                                crate::error::KgError::Argument(e).into()
+                            })?
                     }
                 };
 
                 // Resolve resolution
                 let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
-                    crate::graph::features::timeseries::validate_resolution(r)
-                        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                    crate::graph::features::timeseries::validate_resolution(r).map_err(
+                        |e: String| -> PyErr { crate::error::KgError::Argument(e).into() },
+                    )?;
                     r.clone()
                 } else {
                     // Auto-detect from time spec
@@ -607,11 +614,9 @@ impl KnowledgeGraph {
         // ── Query path: run Cypher, convert to internal DataFrame ──
         if let Some(query_str) = query {
             // Parse the cypher query
-            let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Cypher syntax error in query: {}",
-                    e
-                ))
+            let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| -> PyErr {
+                crate::error::KgError::Argument(format!("Cypher syntax error in query: {}", e))
+                    .into()
             })?;
 
             // Reject mutation queries — add_connections query must be read-only
@@ -633,11 +638,12 @@ impl KnowledgeGraph {
                     cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
                 executor.execute(&parsed)
             }
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error in add_connections query: {}",
-                    e
-                ))
+            .map_err(|e| -> PyErr {
+                crate::error::KgError::CypherExecution {
+                    message: format!("Cypher execution error in add_connections query: {}", e),
+                    position: None,
+                }
+                .into()
             })?;
 
             // Resolve NodeRef values to actual IDs/titles
@@ -646,11 +652,12 @@ impl KnowledgeGraph {
 
             // Convert row-oriented Cypher result to columnar DataFrame
             let mut df_result = KgDataFrame::from_cypher_rows(cypher_result.columns, rows)
-                .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                .map_err(|e| -> PyErr {
+                    crate::error::KgError::Argument(format!(
                         "Failed to convert query results to DataFrame: {}",
                         e
                     ))
+                    .into()
                 })?;
 
             // Apply extra_properties as constant columns
@@ -660,11 +667,12 @@ impl KnowledgeGraph {
                     let value = py_in::py_value_to_value(&val)?;
                     df_result
                         .add_constant_column(col_name.clone(), value)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        .map_err(|e| -> PyErr {
+                            crate::error::KgError::Argument(format!(
                                 "Failed to add extra_property '{}': {}",
                                 col_name, e
                             ))
+                            .into()
                         })?;
                 }
             }
@@ -687,7 +695,7 @@ impl KnowledgeGraph {
                 target_title_field,
                 conflict_handling,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
             self.selection.clear();
             self.add_report(OperationReport::ConnectionOperation(result.clone()));
@@ -766,7 +774,7 @@ impl KnowledgeGraph {
             target_title_field,
             conflict_handling,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
         if let Some(cfg) = temporal_cfg {
@@ -865,7 +873,9 @@ impl KnowledgeGraph {
                 })?
                 .extract()?;
             let data = spec.get_item("data")?.ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in node spec")
+                PyErr::from(crate::error::KgError::Argument(
+                    "Missing 'data' in node spec".to_string(),
+                ))
             })?;
 
             // Get columns from dataframe
@@ -889,7 +899,7 @@ impl KnowledgeGraph {
                 Some(node_title_field),
                 None,
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
         }
@@ -1010,7 +1020,9 @@ impl KnowledgeGraph {
                 })?
                 .extract()?;
             let data = spec.get_item("data")?.ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyKeyError, _>("Missing 'data' in connection spec")
+                PyErr::from(crate::error::KgError::Argument(
+                    "Missing 'data' in connection spec".to_string(),
+                ))
             })?;
 
             // Skip if filtering and types not loaded
@@ -1030,18 +1042,20 @@ impl KnowledgeGraph {
 
             // Verify required columns exist
             if !all_columns.contains(&source_id_field) {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                return Err(crate::error::KgError::Argument(format!(
                     "Connection spec for '{}' missing required 'source_id' column. Available: [{}]",
                     connection_name,
                     all_columns.join(", ")
-                )));
+                ))
+                .into());
             }
             if !all_columns.contains(&target_id_field) {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                return Err(crate::error::KgError::Argument(format!(
                     "Connection spec for '{}' missing required 'target_id' column. Available: [{}]",
                     connection_name,
                     all_columns.join(", ")
-                )));
+                ))
+                .into());
             }
 
             let df_result = py_in::pandas_to_dataframe(
@@ -1065,7 +1079,7 @@ impl KnowledgeGraph {
                 None, // target_title_field
                 None, // conflict_handling
             )
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
             result_dict.set_item(&connection_name, report.connections_created)?;
         }

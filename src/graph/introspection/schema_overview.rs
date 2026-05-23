@@ -480,9 +480,11 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
         Value::Null => String::new(),
         // Phase A.1 — collection / graph-entity variants delegate to
         // format_value; truncation applies only to the String variant.
-        Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
-            crate::datatypes::values::format_value(v)
-        }
+        Value::List(_)
+        | Value::Map(_)
+        | Value::Node(_)
+        | Value::Relationship(_)
+        | Value::Path(_) => crate::datatypes::values::format_value(v),
     }
 }
 

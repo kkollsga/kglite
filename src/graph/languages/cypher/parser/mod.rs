@@ -15,6 +15,7 @@ use super::ast::*;
 use super::tokenizer::{token_to_keyword_name, CypherToken};
 #[cfg(test)]
 use crate::datatypes::values::Value;
+use crate::error::KgError;
 
 pub mod clauses;
 pub mod expression;
@@ -267,8 +268,32 @@ impl CypherParser {
 /// offset to every token, the parser threads them through, and
 /// `format_parse_error` walks `input.chars()` to convert to
 /// (line, col).
-pub fn parse_cypher(input: &str) -> Result<CypherQuery, String> {
-    let positioned = super::tokenizer::tokenize_cypher_with_positions(input)?;
+/// Parse Cypher source into a typed AST.
+///
+/// Phase A.2 / C2 — returns [`KgError`] with structured `line` and
+/// `col` fields (when the parser knows them) instead of an opaque
+/// `Result<_, String>` whose message embedded the position. The
+/// position survives the PyO3 boundary and reaches Python consumers
+/// via `kglite.CypherSyntaxError.args[0]` (still in the message for
+/// human display) and — eventually — as dedicated `.line` / `.col`
+/// attributes once PyO3 lands a clean per-exception attribute API.
+///
+/// The internal tokenizer/parser still produce `Result<_, String>`
+/// for ergonomic `?` chains inside the parsing code — only the
+/// outer boundary is typed.
+pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
+    let positioned =
+        super::tokenizer::tokenize_cypher_with_positions(input).map_err(|tokenizer_err| {
+            // Tokenizer errors don't carry a position the way parser
+            // errors do — they happen during char-stream scanning,
+            // before token positions are computed. Surface the
+            // message without line/col.
+            KgError::CypherSyntax {
+                message: tokenizer_err,
+                line: None,
+                col: None,
+            }
+        })?;
     let (tokens, positions): (Vec<_>, Vec<_>) = positioned.into_iter().unzip();
     let mut parser = CypherParser::new(tokens);
     match parser.parse_query() {
@@ -280,7 +305,18 @@ pub fn parse_cypher(input: &str) -> Result<CypherQuery, String> {
                 .get(parser.pos)
                 .copied()
                 .unwrap_or_else(|| input.chars().count());
-            Err(format_parse_error(input, &e, char_offset))
+            let (line, col) = char_offset_to_line_col(input, char_offset);
+            // Keep the human-readable excerpt formatting in the
+            // message — caret marker, source line — so error output
+            // is still informative when only the message is shown.
+            // The (line, col) struct fields enable programmatic
+            // access for the agent surface.
+            let message = format_parse_error_message(input, &e, line, col);
+            Err(KgError::CypherSyntax {
+                message,
+                line: Some(line),
+                col: Some(col),
+            })
         }
     }
 }
@@ -319,9 +355,12 @@ fn intent_level_rewrite(_input: &str, _err: &str) -> Option<String> {
     None
 }
 
-fn format_parse_error(input: &str, err: &str, char_offset: usize) -> String {
+/// Build the human-readable parse-error message body. The (line, col)
+/// is included in the message text *and* carried as struct fields on
+/// `KgError::CypherSyntax`; the duplication is intentional so the
+/// raw message printed by `Display` is still self-contained.
+fn format_parse_error_message(input: &str, err: &str, line: usize, col: usize) -> String {
     let intent = intent_level_rewrite(input, err);
-    let (line, col) = char_offset_to_line_col(input, char_offset);
 
     // Build a single-line excerpt of the offending line + a caret
     // marker. Avoids dumping the whole multi-line query.
@@ -336,7 +375,7 @@ fn format_parse_error(input: &str, err: &str, char_offset: usize) -> String {
     };
 
     let body = intent.as_deref().unwrap_or(err);
-    format!("{} (line {} col {}){}", body, line, col, excerpt)
+    format!("{}{}", body, excerpt)
 }
 
 // ============================================================================

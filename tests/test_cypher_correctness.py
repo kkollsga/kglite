@@ -243,7 +243,7 @@ class TestRegexErrors:
 
     def test_regex_invalid_pattern_raises_error(self, social_graph):
         """Invalid regex pattern raises RuntimeError."""
-        with pytest.raises(RuntimeError, match="Invalid regular expression"):
+        with pytest.raises(rg.KgError, match="Invalid regular expression"):
             social_graph.cypher("""
                 MATCH (p:Person) WHERE p.name =~ '[unclosed' RETURN p.name
             """)

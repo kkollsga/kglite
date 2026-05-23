@@ -50,30 +50,33 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
-        let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Source node with id {:?} not found in type '{}'",
-                source_value, source_type
-            ))
-        })?;
+        let source_idx = source_lookup
+            .check_uid(&source_value)
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
+                    "Source node with id {:?} not found in type '{}'",
+                    source_value, source_type
+                ))
+                .into()
+            })?;
 
         // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
         let target_idx = target_lookup.check_uid(&target_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            PyErr::from(crate::error::KgError::Argument(format!(
                 "Target node with id {:?} not found in type '{}'",
                 target_value, target_type
-            ))
+            )))
         })?;
 
         // Find shortest path — Dijkstra when weight_property is set,
@@ -210,11 +213,12 @@ impl KnowledgeGraph {
         let source_idx = self
             .inner
             .lookup_by_id_normalized(source_type, &source_value)
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
                     "Source node with id {:?} not found in type '{}'",
                     source_value, source_type
                 ))
+                .into()
             })?;
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -222,10 +226,10 @@ impl KnowledgeGraph {
             .inner
             .lookup_by_id_normalized(target_type, &target_value)
             .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                PyErr::from(crate::error::KgError::Argument(format!(
                     "Target node with id {:?} not found in type '{}'",
                     target_value, target_type
-                ))
+                )))
             })?;
 
         if let Some(prop) = weight_property {
@@ -283,11 +287,12 @@ impl KnowledgeGraph {
             let src_idx = self
                 .inner
                 .lookup_by_id_normalized(node_type, &src_val)
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                .ok_or_else(|| -> PyErr {
+                    crate::error::KgError::Argument(format!(
                         "Node with id {:?} not found in type '{}'",
                         src_val, node_type
                     ))
+                    .into()
                 })?;
 
             let tgt_val = py_in::py_value_to_value(tgt_py)?;
@@ -295,10 +300,10 @@ impl KnowledgeGraph {
                 .inner
                 .lookup_by_id_normalized(node_type, &tgt_val)
                 .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    PyErr::from(crate::error::KgError::Argument(format!(
                         "Node with id {:?} not found in type '{}'",
                         tgt_val, node_type
-                    ))
+                    )))
                 })?;
 
             index_pairs.push((src_idx, tgt_idx));
@@ -352,11 +357,12 @@ impl KnowledgeGraph {
         let source_idx = self
             .inner
             .lookup_by_id_normalized(source_type, &source_value)
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
                     "Source node with id {:?} not found in type '{}'",
                     source_value, source_type
                 ))
+                .into()
             })?;
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -364,10 +370,10 @@ impl KnowledgeGraph {
             .inner
             .lookup_by_id_normalized(target_type, &target_value)
             .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                PyErr::from(crate::error::KgError::Argument(format!(
                     "Target node with id {:?} not found in type '{}'",
                     target_value, target_type
-                ))
+                )))
             })?;
 
         // Find shortest path
@@ -431,11 +437,12 @@ impl KnowledgeGraph {
         let source_idx = self
             .inner
             .lookup_by_id_normalized(source_type, &source_value)
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
                     "Source node with id {:?} not found in type '{}'",
                     source_value, source_type
                 ))
+                .into()
             })?;
 
         let target_value = py_in::py_value_to_value(target_id)?;
@@ -443,10 +450,10 @@ impl KnowledgeGraph {
             .inner
             .lookup_by_id_normalized(target_type, &target_value)
             .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                PyErr::from(crate::error::KgError::Argument(format!(
                     "Target node with id {:?} not found in type '{}'",
                     target_value, target_type
-                ))
+                )))
             })?;
 
         let deadline =
@@ -501,30 +508,33 @@ impl KnowledgeGraph {
 
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
-        let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Source node with id {:?} not found in type '{}'",
-                source_value, source_type
-            ))
-        })?;
+        let source_idx = source_lookup
+            .check_uid(&source_value)
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
+                    "Source node with id {:?} not found in type '{}'",
+                    source_value, source_type
+                ))
+                .into()
+            })?;
 
         // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
         let target_idx = target_lookup.check_uid(&target_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            PyErr::from(crate::error::KgError::Argument(format!(
                 "Target node with id {:?} not found in type '{}'",
                 target_value, target_type
-            ))
+            )))
         })?;
 
         let deadline =
@@ -606,7 +616,7 @@ impl KnowledgeGraph {
                 &self.inner,
                 None,
             )
-            .map_err(pyo3::exceptions::PyValueError::new_err)?
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?
         } else {
             crate::graph::algorithms::graph_algorithms::connected_components(&self.inner)
         };
@@ -678,30 +688,33 @@ impl KnowledgeGraph {
     ) -> PyResult<bool> {
         // Look up source node
         let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
-        let source_idx = source_lookup.check_uid(&source_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Source node with id {:?} not found in type '{}'",
-                source_value, source_type
-            ))
-        })?;
+        let source_idx = source_lookup
+            .check_uid(&source_value)
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(format!(
+                    "Source node with id {:?} not found in type '{}'",
+                    source_value, source_type
+                ))
+                .into()
+            })?;
 
         // Look up target node
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
             lookups::TypeLookup::new(&self.inner.graph, target_type.to_string())
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?
         };
 
         let target_value = py_in::py_value_to_value(target_id)?;
         let target_idx = target_lookup.check_uid(&target_value).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            PyErr::from(crate::error::KgError::Argument(format!(
                 "Target node with id {:?} not found in type '{}'",
                 target_value, target_type
-            ))
+            )))
         })?;
 
         Ok(crate::graph::algorithms::graph_algorithms::are_connected(
@@ -795,7 +808,7 @@ impl KnowledgeGraph {
                     deadline,
                 )
             })
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -867,7 +880,7 @@ impl KnowledgeGraph {
                     deadline,
                 )
             })
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -929,7 +942,7 @@ impl KnowledgeGraph {
                     deadline,
                 )
             })
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -998,7 +1011,7 @@ impl KnowledgeGraph {
                     deadline,
                 )
             })
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         if to_df.unwrap_or(false) {
             centrality_results_to_dataframe(py, &self.inner, results, top_k)
@@ -1048,7 +1061,7 @@ impl KnowledgeGraph {
             connection_types.as_deref(),
             deadline,
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -1079,7 +1092,7 @@ impl KnowledgeGraph {
             connection_types.as_deref(),
             deadline,
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
         community_results_to_py(py, &self.inner, result)
     }
 
@@ -1121,7 +1134,7 @@ impl KnowledgeGraph {
             &mut new_kg.selection,
             hops,
         )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         // Record actual result - use node_count() to avoid allocation
         let actual = new_kg
@@ -1161,7 +1174,7 @@ impl KnowledgeGraph {
     fn to_subgraph(&self) -> PyResult<Self> {
         let extracted =
             crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.selection)
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         Ok(KnowledgeGraph {
             inner: Arc::new(extracted),
@@ -1444,7 +1457,7 @@ impl KnowledgeGraph {
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let stats =
             crate::graph::mutation::subgraph::get_subgraph_stats(&self.inner, &self.selection)
-                .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;
@@ -1528,7 +1541,7 @@ impl KnowledgeGraph {
             Some(path_str) => {
                 let path = std::path::Path::new(path_str);
                 let result = pass_a_scan_to_file(disk, &spec, path)
-                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+                    .map_err(|e: String| -> PyErr { crate::error::KgError::Argument(e).into() })?;
 
                 // Build the rank index from the bitset we got back —
                 // exercises the Phase 3 primitive end-to-end on real

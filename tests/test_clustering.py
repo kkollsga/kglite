@@ -2,6 +2,7 @@
 
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -408,14 +409,14 @@ class TestDescribeCypherTiers:
 
     def test_tier3_unknown_topic_error(self):
         g = KnowledgeGraph()
-        with pytest.raises(ValueError, match="Unknown Cypher topic"):
+        with pytest.raises(kglite.KgError, match="Unknown Cypher topic"):
             g.describe(cypher=["nonexistent"])
 
     def test_tier3_error_lists_available(self):
         g = KnowledgeGraph()
         try:
             g.describe(cypher=["bogus"])
-        except ValueError as e:
+        except kglite.KgError as e:
             msg = str(e)
             assert "MATCH" in msg
             assert "cluster" in msg
@@ -569,13 +570,13 @@ class TestDescribeConnections:
         assert "Field" in desc
 
     def test_connections_detail_unknown_error(self, connected_graph):
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(kglite.KgError, match="not found"):
             connected_graph.describe(connections=["BOGUS"])
 
     def test_connections_detail_error_lists_available(self, connected_graph):
         try:
             connected_graph.describe(connections=["BOGUS"])
-        except ValueError as e:
+        except kglite.KgError as e:
             msg = str(e)
             assert "BELONGS_TO" in msg
 

@@ -480,7 +480,12 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(ref var) = other_var {
                     eval_row.node_bindings.insert(var.clone(), other_idx);
                 }
-                match self.evaluate_predicate(where_clause.as_ref().unwrap(), &eval_row) {
+                match self.evaluate_predicate(
+                    where_clause
+                        .as_ref()
+                        .expect("invariant: has_where guards Some(where_clause)"),
+                    &eval_row,
+                ) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(e) => return Some(Err(e)),
@@ -1607,7 +1612,9 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(ref props) = group_node_props {
                         if !prop_executor
                             .as_ref()
-                            .unwrap()
+                            .expect(
+                                "invariant: prop_executor is Some when group_node_props is Some",
+                            )
                             .node_matches_properties_pub(node_idx, props)
                         {
                             continue;
@@ -1642,7 +1649,9 @@ impl<'a> CypherExecutor<'a> {
                     if let Some(ref props) = group_node_props {
                         if !prop_executor
                             .as_ref()
-                            .unwrap()
+                            .expect(
+                                "invariant: prop_executor is Some when group_node_props is Some",
+                            )
                             .node_matches_properties_pub(node_idx, props)
                         {
                             continue;
@@ -1959,7 +1968,7 @@ impl<'a> CypherExecutor<'a> {
             if let Some(ref props) = node_pattern.properties {
                 if !pattern_executor
                     .as_ref()
-                    .unwrap()
+                    .expect("invariant: pattern_executor is Some when node has property filters")
                     .node_matches_properties_pub(node_idx, props)
                 {
                     continue;
@@ -1967,7 +1976,11 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Set the node binding for expression evaluation
-            *eval_row.node_bindings.get_mut(node_var).unwrap() = node_idx;
+            *eval_row
+                .node_bindings
+                .get_mut(node_var)
+                .expect("invariant: node_var binding inserted upstream by pattern match") =
+                node_idx;
 
             // Check WHERE predicate (using pre-folded version for optimal evaluation)
             if let Some(pred) = folded_where_ref {
@@ -2019,10 +2032,16 @@ impl<'a> CypherExecutor<'a> {
                         acc.sums[ai] += f;
                     }
                     if !matches!(val, Value::Null) {
+                        // Phase A.2 / C4 — short-circuit on is_none()
+                        // guarantees the unwrap can't fire, but the
+                        // .expect() makes the invariant explicit if a
+                        // future refactor reorders the conditions.
                         if acc.mins[ai].is_none()
                             || crate::graph::core::filtering::compare_values(
                                 val,
-                                acc.mins[ai].as_ref().unwrap(),
+                                acc.mins[ai]
+                                    .as_ref()
+                                    .expect("invariant: is_none() short-circuited above"),
                             ) == Some(std::cmp::Ordering::Less)
                         {
                             acc.mins[ai] = Some(val.clone());
@@ -2030,7 +2049,9 @@ impl<'a> CypherExecutor<'a> {
                         if acc.maxs[ai].is_none()
                             || crate::graph::core::filtering::compare_values(
                                 val,
-                                acc.maxs[ai].as_ref().unwrap(),
+                                acc.maxs[ai]
+                                    .as_ref()
+                                    .expect("invariant: is_none() short-circuited above"),
                             ) == Some(std::cmp::Ordering::Greater)
                         {
                             acc.maxs[ai] = Some(val.clone());
@@ -2261,7 +2282,7 @@ impl<'a> CypherExecutor<'a> {
             if let Some(ref props) = node_pattern.properties {
                 if !pattern_executor
                     .as_ref()
-                    .unwrap()
+                    .expect("invariant: pattern_executor is Some when node has property filters")
                     .node_matches_properties_pub(node_idx, props)
                 {
                     continue;
@@ -2269,7 +2290,11 @@ impl<'a> CypherExecutor<'a> {
             }
 
             // Set node binding for expression evaluation
-            *eval_row.node_bindings.get_mut(node_var).unwrap() = node_idx;
+            *eval_row
+                .node_bindings
+                .get_mut(node_var)
+                .expect("invariant: node_var binding inserted upstream by pattern match") =
+                node_idx;
 
             // WHERE filter
             if let Some(pred) = folded_where_ref {
@@ -2318,7 +2343,10 @@ impl<'a> CypherExecutor<'a> {
 
         let mut result_rows = Vec::with_capacity(top_k.len());
         for (_, winner_idx) in &top_k {
-            *eval_row.node_bindings.get_mut(node_var).unwrap() = *winner_idx;
+            *eval_row
+                .node_bindings
+                .get_mut(node_var)
+                .expect("invariant: node_var binding inserted upstream") = *winner_idx;
             let mut projected = Bindings::with_capacity(columns.len());
             for (j, expr) in folded_return_exprs.iter().enumerate() {
                 let val = self.evaluate_expression(expr, &eval_row)?;

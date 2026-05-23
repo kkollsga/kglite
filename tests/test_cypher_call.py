@@ -2,6 +2,7 @@
 
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 
@@ -261,15 +262,20 @@ class TestCallErrors:
     """Test error handling."""
 
     def test_unknown_procedure(self, graph):
-        with pytest.raises(RuntimeError, match="Unknown procedure"):
+        with pytest.raises(kglite.KgError, match="Unknown procedure"):
             graph.cypher("CALL unknown_algo() YIELD node, score")
 
     def test_invalid_yield_column(self, graph):
-        with pytest.raises(RuntimeError, match="does not yield"):
+        with pytest.raises(kglite.KgError, match="does not yield"):
             graph.cypher("CALL pagerank() YIELD node, community")
 
     def test_missing_yield(self, graph):
-        with pytest.raises(ValueError, match="YIELD"):
+        # Phase A.2 / C2 — typed CypherSyntaxError (was ValueError).
+        # "CALL pagerank()" without YIELD is a parse error, not an
+        # execution error.
+        import kglite
+
+        with pytest.raises(kglite.CypherSyntaxError, match="YIELD"):
             graph.cypher("CALL pagerank()")
 
 
@@ -312,7 +318,7 @@ class TestCallLargeGraphGuard:
         (including the size guard) must not leave the executor in a bad state.
         """
         # Trigger an error path first.
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(kglite.KgError):
             graph.cypher("CALL unknown_algo() YIELD node, score")
         # Subsequent trivial query must still work.
         rows = graph.cypher("MATCH (n:Person) RETURN count(n) AS c")

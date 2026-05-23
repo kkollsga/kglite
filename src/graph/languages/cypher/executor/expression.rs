@@ -58,13 +58,15 @@ impl<'a> CypherExecutor<'a> {
                         return Ok(Value::Relationship(Box::new(rel_value)));
                     }
                     // Same tombstone treatment for deleted edges.
-                    return Ok(Value::Relationship(Box::new(crate::datatypes::values::RelValue {
-                        id: edge.edge_index.index() as u32,
-                        start_id: edge.source.index() as u32,
-                        end_id: edge.target.index() as u32,
-                        rel_type: String::new(),
-                        properties: std::collections::BTreeMap::new(),
-                    })));
+                    return Ok(Value::Relationship(Box::new(
+                        crate::datatypes::values::RelValue {
+                            id: edge.edge_index.index() as u32,
+                            start_id: edge.source.index() as u32,
+                            end_id: edge.target.index() as u32,
+                            rel_type: String::new(),
+                            properties: std::collections::BTreeMap::new(),
+                        },
+                    )));
                 }
                 if let Some(path) = row.path_bindings.get(name) {
                     let path_value = materialize_path_value(path, self.graph);
@@ -1181,7 +1183,11 @@ impl<'a> CypherExecutor<'a> {
                     "type" => Value::String(rel_val.rel_type.clone()),
                     "start" | "start_id" => Value::Int64(rel_val.start_id as i64),
                     "end" | "end_id" => Value::Int64(rel_val.end_id as i64),
-                    other => rel_val.properties.get(other).cloned().unwrap_or(Value::Null),
+                    other => rel_val
+                        .properties
+                        .get(other)
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 });
             }
             // Value::Map in projected — key access (e.g. for properties(n))

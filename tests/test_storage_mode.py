@@ -22,7 +22,10 @@ class TestStorageModeConstruction:
         assert graph.select("Item").len() == 0
 
     def test_invalid_mode_raises(self):
-        with pytest.raises(ValueError, match="Unknown storage mode"):
+        # Phase A.2 / C6 — typed kglite.ArgumentError (was ValueError pre-A.2).
+        import kglite
+
+        with pytest.raises(kglite.ArgumentError, match="Unknown storage mode"):
             KnowledgeGraph(storage="invalid")
 
 
