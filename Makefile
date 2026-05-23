@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -55,6 +55,18 @@ bench-compare:
 ## Run after each 0.9.0 gate-item lands to enforce the no-regression rule.
 bench-check-v090:
 	$(ACTIVATE) && maturin develop --release --quiet && pytest tests/benchmarks/test_bench_core.py -m benchmark --benchmark-compare=v0_9_0_baseline --benchmark-compare-fail=mean:5%
+
+## Perf regression gate: compare the tracked core benchmarks against
+## the current baseline (tests/benchmarks/baselines/current.json) and
+## fail on >20% regression on `min` time. This is the gate CI runs.
+## Refresh the baseline at release time via `make refresh-release-constants`.
+bench-check:
+	$(ACTIVATE) && maturin develop --release --quiet \
+		&& pytest tests/benchmarks/test_bench_core.py -m benchmark \
+			--benchmark-min-rounds=100 --benchmark-warmup=on --benchmark-warmup-iterations=20 \
+			--benchmark-json=.bench-current.json \
+		&& python scripts/compare_bench.py tests/benchmarks/baselines/current.json .bench-current.json \
+			--metric min --threshold 20
 
 ## Run bug-path performance benchmarks (pre/post bugfix baseline)
 bench-bugs:

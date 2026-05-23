@@ -144,3 +144,50 @@ jobs:
         with:
           files: coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  perf-regression:
+    name: Perf regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-perf-
+
+      - name: Install dependencies
+        run: pip install maturin pytest pytest-benchmark pandas
+
+      - name: Build and install extension (release)
+        run: maturin develop --release
+
+      - name: Run tracked benchmarks
+        # Match the harness shape from CLAUDE.md's performance protocol:
+        # 100 rounds, warmup on, 20 warmup iterations. The JSON-dump path
+        # is what compare_bench.py reads.
+        run: |
+          pytest tests/benchmarks/test_bench_core.py -m benchmark \
+            --benchmark-min-rounds=100 \
+            --benchmark-warmup=on --benchmark-warmup-iterations=20 \
+            --benchmark-json=.bench-current.json
+
+      - name: Compare against baseline
+        run: |
+          python scripts/compare_bench.py \
+            tests/benchmarks/baselines/current.json .bench-current.json \
+            --metric min --threshold 20
