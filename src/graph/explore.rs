@@ -51,17 +51,6 @@ use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 use crate::graph::KnowledgeGraph;
 
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Int64(n) => n.to_string(),
-        Value::Float64(f) => f.to_string(),
-        Value::Boolean(b) => b.to_string(),
-        Value::Null => String::new(),
-        other => format!("{:?}", other),
-    }
-}
-
 /// Tunable knobs. Defaults match the pymethod's defaults.
 #[derive(Debug, Clone)]
 pub struct ExploreOptions {
@@ -205,7 +194,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
             let Some(node) = kg.inner.graph.node_weight(nidx) else {
                 continue;
             };
-            let title = value_to_string(&node.title());
+            let title = crate::datatypes::values::raw_string(&node.title());
             let title_lower = title.to_lowercase();
             let mut score: i64 = 0;
             if title_lower == q_lower {
@@ -218,7 +207,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
             let signature = node
                 .get_property("signature")
                 .as_deref()
-                .map(value_to_string);
+                .map(crate::datatypes::values::raw_string);
             if let Some(sig) = signature.as_deref().map(str::to_lowercase) {
                 if sig.contains(&q_lower) {
                     score += 10;
@@ -227,7 +216,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
             let docstring = node
                 .get_property("docstring")
                 .as_deref()
-                .map(value_to_string);
+                .map(crate::datatypes::values::raw_string);
             if let Some(doc) = docstring.as_deref().map(str::to_lowercase) {
                 if doc.contains(&q_lower) {
                     score += 5;
@@ -239,7 +228,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
             let file_path = node
                 .get_property("file_path")
                 .as_deref()
-                .map(value_to_string);
+                .map(crate::datatypes::values::raw_string);
             let line_number = node
                 .get_property("line_number")
                 .as_deref()
@@ -254,7 +243,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
                     Value::Int64(n) => Some(*n),
                     _ => None,
                 });
-            let qname = value_to_string(&node.id());
+            let qname = crate::datatypes::values::raw_string(&node.id());
             hits.push(Hit {
                 nidx,
                 score,
@@ -326,12 +315,12 @@ fn traverse(kg: &KnowledgeGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
         if !ENTRY_NODE_TYPES.contains(&kind.as_str()) {
             continue;
         }
-        let qname = value_to_string(&node.id());
-        let name = value_to_string(&node.title());
+        let qname = crate::datatypes::values::raw_string(&node.id());
+        let name = crate::datatypes::values::raw_string(&node.title());
         let file_path = node
             .get_property("file_path")
             .as_deref()
-            .map(value_to_string);
+            .map(crate::datatypes::values::raw_string);
         let line_number = node
             .get_property("line_number")
             .as_deref()

@@ -29,7 +29,7 @@
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
-use super::shared::node_text;
+use super::shared::{file_to_module_path, make_qualified, node_text};
 use super::LanguageParser;
 use crate::code_tree::models::{
     ClassInfo, ConstantInfo, FileInfo, FunctionInfo, InterfaceInfo, ParseResult, TypeRelationship,
@@ -323,7 +323,7 @@ impl PhpParser {
         let visibility = Self::extract_visibility(node, source);
         let line = node.start_position().row as u32 + 1;
         let end_line = node.end_position().row as u32 + 1;
-        let qname = make_qualified(module_path, owner_prefix, name);
+        let qname = make_qualified(module_path, owner_prefix, name, '\\');
 
         result.classes.push(ClassInfo {
             qualified_name: qname.clone(),
@@ -446,7 +446,7 @@ impl PhpParser {
         let visibility = Self::extract_visibility(node, source);
         let line = node.start_position().row as u32 + 1;
         let end_line = node.end_position().row as u32 + 1;
-        let qname = make_qualified(module_path, owner_prefix, name);
+        let qname = make_qualified(module_path, owner_prefix, name, '\\');
 
         result.interfaces.push(InterfaceInfo {
             qualified_name: qname.clone(),
@@ -658,15 +658,6 @@ impl PhpParser {
     }
 }
 
-fn make_qualified(module_path: &str, owner_prefix: &str, name: &str) -> String {
-    match (module_path.is_empty(), owner_prefix.is_empty()) {
-        (true, true) => name.to_string(),
-        (true, false) => format!("{owner_prefix}\\{name}"),
-        (false, true) => format!("{module_path}\\{name}"),
-        (false, false) => format!("{owner_prefix}\\{name}"),
-    }
-}
-
 /// Find the first top-level `namespace_definition` that lacks a body
 /// (`namespace Foo;` form). Its name becomes the file's
 /// module_path. Block-form namespaces (`namespace Foo { ... }`) are
@@ -681,16 +672,6 @@ fn extract_file_namespace(program: Node, source: &[u8]) -> Option<String> {
         }
     }
     None
-}
-
-fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
-    let stem = filepath.file_stem().and_then(|o| o.to_str()).unwrap_or("");
-    let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
-    match (pkg.is_empty(), stem.is_empty()) {
-        (true, _) => stem.to_string(),
-        (false, true) => pkg.to_string(),
-        (false, false) => format!("{pkg}\\{stem}"),
-    }
 }
 
 impl LanguageParser for PhpParser {
@@ -715,7 +696,7 @@ impl LanguageParser for PhpParser {
             .unwrap_or(filepath)
             .to_string_lossy()
             .to_string();
-        let path_default_module = file_to_module_path(filepath, src_root);
+        let path_default_module = file_to_module_path(filepath, src_root, '\\');
 
         let Some(tree) = self.parse_tree(source_bytes) else {
             return result;

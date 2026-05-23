@@ -3,6 +3,7 @@
 //! (b) mutate the source type in place (when `into` is omitted —
 //!     non-matching rows are dropped).
 
+use super::sanitize_filename;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -138,18 +139,6 @@ pub fn run_filter(
 
     let _ = kept; // available for verbose logging in the future
     Ok(())
-}
-
-fn sanitize_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Helper added to NodeSpec for filter-into cloning. The source

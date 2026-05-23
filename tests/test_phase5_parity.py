@@ -211,8 +211,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 35_925_104,  # 0.9.52 macOS .dylib
-    "linux": 59_529_016,  # 0.9.52 Linux .so (captured from CI run 26328166598)
+    "darwin": 35_416_608,  # 0.10.0 macOS .dylib (down ~500 KB from 0.9.52 — A.2 deleted
+    # the prior PyErr-mapping boilerplate at every error site, replaced with the smaller
+    # typed-exception boundary conversion in src/error_py.rs)
+    "linux": 59_529_016,  # 0.9.52 Linux .so (captured from CI run 26328166598;
+    # 0.10.0 Linux baseline pending — refresh on next CI run)
 }
 
 

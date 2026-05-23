@@ -21,7 +21,7 @@
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
-use super::shared::node_text;
+use super::shared::{file_to_module_path, node_text};
 use super::LanguageParser;
 use crate::code_tree::models::{ConstantInfo, FileInfo, ParseResult, SelectorInfo};
 
@@ -248,16 +248,6 @@ fn slugify(s: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
-    let stem = filepath.file_stem().and_then(|o| o.to_str()).unwrap_or("");
-    let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
-    match (pkg.is_empty(), stem.is_empty()) {
-        (true, _) => stem.to_string(),
-        (false, true) => pkg.to_string(),
-        (false, false) => format!("{pkg}.{stem}"),
-    }
-}
-
 impl LanguageParser for CssParser {
     fn language_name(&self) -> &'static str {
         "css"
@@ -277,7 +267,7 @@ impl LanguageParser for CssParser {
             .unwrap_or(filepath)
             .to_string_lossy()
             .to_string();
-        let module_path = file_to_module_path(filepath, src_root);
+        let module_path = file_to_module_path(filepath, src_root, '.');
 
         let Some(tree) = self.parse_tree(source_bytes) else {
             return result;

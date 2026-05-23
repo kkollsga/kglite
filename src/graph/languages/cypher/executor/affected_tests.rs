@@ -19,6 +19,7 @@
 //!
 //! @procedure: affected_tests
 
+use super::helpers::yield_alias;
 use std::collections::{HashMap, VecDeque};
 
 use petgraph::graph::NodeIndex;
@@ -186,15 +187,4 @@ fn require_files_param(params: &HashMap<String, Value>) -> Result<Vec<String>, S
              Use map syntax — e.g. CALL {PROC}({{files: ['src/foo.py'], max_depth: 5}})."
         )),
     }
-}
-
-/// Return the alias the caller gave a particular YIELD column, or `None`
-/// if they didn't ask for it. Unknown YIELD names are rejected upstream
-/// by the executor's `valid_yields` check, so we don't need to validate
-/// names here.
-fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<String> {
-    yield_items
-        .iter()
-        .find(|y| y.name == expected)
-        .map(|item| item.alias.clone().unwrap_or_else(|| expected.to_string()))
 }

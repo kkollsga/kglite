@@ -26,7 +26,7 @@
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
-use super::shared::node_text;
+use super::shared::{file_to_module_path, node_text};
 use super::typescript::JstsParser;
 use super::LanguageParser;
 use crate::code_tree::models::{ElementInfo, FileInfo, ParseResult};
@@ -482,16 +482,6 @@ fn truncate(s: &str, n: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
-    let stem = filepath.file_stem().and_then(|o| o.to_str()).unwrap_or("");
-    let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
-    match (pkg.is_empty(), stem.is_empty()) {
-        (true, _) => stem.to_string(),
-        (false, true) => pkg.to_string(),
-        (false, false) => format!("{pkg}.{stem}"),
-    }
-}
-
 impl LanguageParser for HtmlParser {
     fn language_name(&self) -> &'static str {
         "html"
@@ -511,7 +501,7 @@ impl LanguageParser for HtmlParser {
             .unwrap_or(filepath)
             .to_string_lossy()
             .to_string();
-        let module_path = file_to_module_path(filepath, src_root);
+        let module_path = file_to_module_path(filepath, src_root, '.');
 
         let Some(tree) = self.parse_tree(source_bytes) else {
             return result;

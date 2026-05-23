@@ -7,6 +7,7 @@
 //! NodeSpec to consume the new file. New properties are typed by
 //! inferring from the first non-null result.
 
+use super::sanitize_filename;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::Path;
@@ -198,18 +199,6 @@ fn build_output_headers(
         }
     }
     (headers, overwrites)
-}
-
-fn sanitize_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -70,11 +70,11 @@ pub fn to_graphml(
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_title\">{}</data>\n",
-                escape_xml(&value_to_string(&node.title()))
+                escape_xml(&crate::datatypes::values::raw_string(&node.title()))
             ));
             xml.push_str(&format!(
                 "      <data key=\"node_id\">{}</data>\n",
-                escape_xml(&value_to_string(&node.id()))
+                escape_xml(&crate::datatypes::values::raw_string(&node.id()))
             ));
 
             // Serialize properties as JSON
@@ -290,7 +290,7 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
     xml.push_str("    <nodes>\n");
     for &idx in &node_indices {
         if let Some(node) = graph.graph.node_weight(idx) {
-            let title_str = value_to_string(&node.title());
+            let title_str = crate::datatypes::values::raw_string(&node.title());
             xml.push_str(&format!(
                 "      <node id=\"{}\" label=\"{}\">\n",
                 idx.index(),
@@ -382,7 +382,7 @@ pub fn to_csv(
                 "{},{},{}\n",
                 idx.index(),
                 escape_csv(node.node_type_str(&graph.interner)),
-                escape_csv(&value_to_string(&node.title()))
+                escape_csv(&crate::datatypes::values::raw_string(&node.title()))
             ));
         }
     }
@@ -560,13 +560,17 @@ pub fn to_csv_dir(
         // Rows
         for &idx in indices {
             if let Some(node) = graph.graph.node_weight(idx) {
-                csv.push_str(&escape_csv(&value_to_string(&node.id())));
+                csv.push_str(&escape_csv(&crate::datatypes::values::raw_string(
+                    &node.id(),
+                )));
                 csv.push(',');
-                csv.push_str(&escape_csv(&value_to_string(&node.title())));
+                csv.push_str(&escape_csv(&crate::datatypes::values::raw_string(
+                    &node.title(),
+                )));
                 for col in &prop_cols {
                     csv.push(',');
                     if let Some(val) = node.get_property(col) {
-                        csv.push_str(&escape_csv(&value_to_string(&val)));
+                        csv.push_str(&escape_csv(&crate::datatypes::values::raw_string(&val)));
                     }
                 }
                 csv.push('\n');
@@ -654,7 +658,7 @@ pub fn to_csv_dir(
             let source_id = graph
                 .graph
                 .node_weight(edge.source_idx)
-                .map(|n| value_to_string(&n.id()))
+                .map(|n| crate::datatypes::values::raw_string(&n.id()))
                 .unwrap_or_default();
             let src_type = graph
                 .graph
@@ -664,7 +668,7 @@ pub fn to_csv_dir(
             let target_id = graph
                 .graph
                 .node_weight(edge.target_idx)
-                .map(|n| value_to_string(&n.id()))
+                .map(|n| crate::datatypes::values::raw_string(&n.id()))
                 .unwrap_or_default();
             let tgt_type = graph
                 .graph
@@ -682,7 +686,7 @@ pub fn to_csv_dir(
             for col in &prop_cols {
                 csv.push(',');
                 if let Some(val) = edge.properties.get(col) {
-                    csv.push_str(&escape_csv(&value_to_string(val)));
+                    csv.push_str(&escape_csv(&crate::datatypes::values::raw_string(val)));
                 }
             }
             csv.push('\n');
@@ -901,31 +905,6 @@ fn escape_csv(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
-    }
-}
-
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Int64(n) => n.to_string(),
-        Value::Float64(f) => f.to_string(),
-        Value::Boolean(b) => b.to_string(),
-        Value::DateTime(dt) => dt.to_string(),
-        Value::UniqueId(id) => id.to_string(),
-        Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
-        Value::Duration {
-            months,
-            days,
-            seconds,
-        } => format!("duration(M={}, D={}, S={})", months, days, seconds),
-        Value::Null => String::new(),
-        Value::NodeRef(idx) => format!("node#{}", idx),
-        // Phase A.1 — delegate to format_value for the new variants.
-        Value::List(_)
-        | Value::Map(_)
-        | Value::Node(_)
-        | Value::Relationship(_)
-        | Value::Path(_) => crate::datatypes::values::format_value(value),
     }
 }
 

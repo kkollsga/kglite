@@ -121,7 +121,7 @@ pub(crate) struct FileMetadata {
     #[serde(default)]
     title_field_aliases: HashMap<String, String>,
     /// Auto-vacuum threshold (None = disabled, default Some(0.3))
-    #[serde(default = "default_auto_vacuum_threshold")]
+    #[serde(default = "crate::graph::dir_graph::default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,
     /// Parent types: child_type → parent_type. Determines which types are
     /// "core" vs "supporting" in describe() output.
@@ -162,10 +162,6 @@ pub(crate) struct FileMetadata {
     /// Pre-computed type-level graph for instant describe() at any scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     type_connectivity: Option<Vec<ConnectivityTriple>>,
-}
-
-fn default_auto_vacuum_threshold() -> Option<f64> {
-    Some(0.3)
 }
 
 fn default_ts_data_version() -> u32 {

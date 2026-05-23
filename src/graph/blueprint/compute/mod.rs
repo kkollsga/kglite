@@ -27,6 +27,23 @@ pub mod chain;
 pub mod derive;
 pub mod filter;
 
+/// Sanitize a string for use in a generated filename — keep
+/// `[A-Za-z0-9_]`, replace everything else with `_`. Shared by every
+/// compute primitive that names output CSVs after a node type or
+/// property name. Consolidated 0.9.53 from per-file copies in
+/// `derive.rs`, `chain.rs`, `filter.rs`.
+pub(super) fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Run every compute op in declared order. Each op reads from
 /// `input_root` (typically the blueprint's resolved root) and
 /// writes its output CSVs under `input_root/computed/`. The

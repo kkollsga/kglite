@@ -21,34 +21,52 @@ use std::sync::Arc;
 ///
 /// ## Isolation semantics
 ///
-/// - **Snapshot isolation**: `begin()` clones the entire `DirGraph` (via
-///   `Arc` deep-copy). The transaction sees a frozen snapshot of the graph
-///   at the moment `begin()` was called.
-/// - **Write isolation**: mutations inside the transaction (via `cypher()`,
-///   `add_nodes()`, etc.) modify only the working copy. The original graph
-///   is untouched until `commit()`.
-/// - **Commit**: `commit()` replaces the owner's `Arc<DirGraph>` with the
-///   transaction's working copy. This is an atomic pointer swap — other
-///   Python references to the `KnowledgeGraph` will see the new state on
-///   their next operation.
+/// - **Snapshot isolation**: `begin()` takes an `Arc` snapshot (O(1)) and
+///   defers the deep clone until the first mutation lands. Read-only-then-
+///   commit cycles pay zero clone cost. Read-write transactions that
+///   actually mutate clone on demand. Either way the transaction sees a
+///   frozen view of the graph at the moment `begin()` was called.
+/// - **Write isolation**: the first mutation triggers
+///   `Arc::try_unwrap` (cheap if no other ref) or a deep clone, swapping
+///   the transaction from "snapshot-only" mode into "working-copy" mode.
+///   Subsequent mutations all land on the working copy without touching
+///   the original graph.
+/// - **Commit**: `commit()` of a no-write transaction is a no-op (no
+///   version bump, no Arc swap). `commit()` of a tx that did mutate
+///   replaces the owner's `Arc<DirGraph>` with the working copy via an
+///   atomic pointer swap.
 /// - **No concurrent-transaction guarantees**: if two transactions are
 ///   created from the same graph, each gets an independent snapshot.
-///   Whichever commits last wins (last-writer-wins). There is no conflict
-///   detection or merge — the second commit silently overwrites the first.
+///   The first commit wins; the second raises a `Transaction conflict`
+///   error via optimistic concurrency control (version check).
 /// - **No read-snapshot across transactions**: reads on the original graph
 ///   while a transaction is open will see the pre-transaction state. After
 ///   commit, they see the post-transaction state.
+///
+/// ## State transitions
+///
+/// A read-write transaction has two states:
+///   - **Deferred** (initial): `snapshot=Some, working=None`. Reads
+///     run against the Arc snapshot.
+///   - **Materialized** (after first mutation): `snapshot=None,
+///     working=Some`. All reads + writes run against the working copy.
+///
+/// Read-only transactions stay in the snapshot state for their lifetime.
 #[pyclass]
 pub struct Transaction {
     /// Back-reference to the owning KnowledgeGraph (for commit)
     pub(crate) owner: Py<KnowledgeGraph>,
-    /// Mutable working copy of the graph — `None` after commit/rollback
+    /// Mutable working copy — `Some` only after the first mutation lands
+    /// (read-write transactions only).
     pub(crate) working: Option<DirGraph>,
     /// Whether commit() was called
     pub(crate) committed: bool,
-    /// Read-only transactions hold an Arc snapshot instead of a mutable clone
+    /// Read-only transactions hold an Arc snapshot for their lifetime
     pub(crate) read_only: bool,
-    /// Arc snapshot for read-only transactions (O(1) to create, zero memory overhead)
+    /// Arc snapshot:
+    ///   - read-only tx: held for the tx's full lifetime
+    ///   - read-write tx in deferred state (before first mutation): held
+    ///     until materialization swaps it into `working`
     pub(crate) snapshot: Option<Arc<DirGraph>>,
     /// Graph version at `begin()` time — used for optimistic concurrency control
     pub(crate) base_version: u64,
@@ -88,9 +106,12 @@ impl Transaction {
         // Check transaction-level deadline first
         if let Some(tx_deadline) = self.deadline {
             if std::time::Instant::now() >= tx_deadline {
-                return Err(PyErr::new::<pyo3::exceptions::PyTimeoutError, _>(
-                    "Transaction timed out",
-                ));
+                // Phase A.3 / 0.9.53 — typed exception (was PyTimeoutError).
+                return Err(crate::error::KgError::CypherTimeout {
+                    elapsed_ms: 0,
+                    limit_ms: 0,
+                }
+                .into());
             }
         }
 
@@ -129,161 +150,169 @@ impl Transaction {
             None => HashMap::new(),
         };
 
-        if self.read_only {
-            // Read-only transaction: execute against Arc snapshot
-            let graph = self.snapshot.as_ref().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Read-only transaction already closed",
+        // Phase A.3 / 0.9.53 — Issue #1 fix: deferred clone on begin().
+        //
+        // The transaction starts in one of two states:
+        //   - read_only=true: snapshot=Some, working=None (forever)
+        //   - read_only=false: snapshot=Some, working=None (deferred state)
+        //                       OR snapshot=None, working=Some (after first
+        //                       mutation materialized the clone)
+        //
+        // We parse + validate against whichever graph is currently active
+        // (snapshot OR working), then — only if a mutation needs to land
+        // — materialize the working copy lazily. Read-only-then-commit
+        // transactions never pay the clone cost.
+        let active_graph: &DirGraph = self
+            .working
+            .as_ref()
+            .map(|g| g as &DirGraph)
+            .or(self.snapshot.as_deref())
+            .ok_or_else(|| -> PyErr {
+                crate::error::KgError::Argument(
+                    "Transaction already committed or rolled back".to_string(),
                 )
+                .into()
             })?;
 
-            let mut parsed = cypher::parse_cypher(query).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher parse error: {}",
-                    e
-                ))
-            })?;
-            cypher::validate_schema(&parsed, graph).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
-            })?;
-            cypher::optimize(&mut parsed, graph, &param_map);
+        let mut parsed = cypher::parse_cypher(query)?;
+        cypher::validate_schema(&parsed, active_graph).map_err(crate::error::KgError::from)?;
+        cypher::optimize(&mut parsed, active_graph, &param_map);
 
-            if parsed.explain {
-                let result = cypher::generate_explain_result(&parsed, graph);
-                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-                return Py::new(py, view).map(|v| v.into_any());
+        if parsed.explain {
+            let result = cypher::generate_explain_result(&parsed, active_graph);
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+            return Py::new(py, view).map(|v| v.into_any());
+        }
+
+        let is_mut = cypher::is_mutation_query(&parsed);
+        if is_mut && self.read_only {
+            return Err(crate::error::KgError::Argument(
+                "Read-only transaction does not support mutations \
+                 (CREATE, SET, DELETE, REMOVE, MERGE). Use begin() for read-write."
+                    .to_string(),
+            )
+            .into());
+        }
+
+        let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+
+        let result = if is_mut {
+            // Materialize the working copy on first mutation. Arc::try_unwrap
+            // skips the clone when this transaction holds the only reference
+            // (true when no Python-side ResultView / other tx holds the graph).
+            if self.working.is_none() {
+                let snap = self.snapshot.take().ok_or_else(|| -> PyErr {
+                    crate::error::KgError::Argument(
+                        "Transaction already committed or rolled back".to_string(),
+                    )
+                    .into()
+                })?;
+                let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| (*arc).clone());
+                self.working = Some(working);
             }
-
-            if cypher::is_mutation_query(&parsed) {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Read-only transaction does not support mutations \
-                     (CREATE, SET, DELETE, REMOVE, MERGE). Use begin() for read-write.",
-                ));
-            }
-
-            let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
-
-            let executor = cypher::CypherExecutor::with_params(graph, &param_map, deadline);
-            let result = executor.execute(&parsed).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher execution error: {}",
-                    e
-                ))
-            })?;
-
-            if output_csv {
-                result.to_csv().into_py_any(py)
-            } else if to_df {
-                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-                cypher::py_convert::preprocessed_result_to_dataframe(
-                    py,
-                    &result.columns,
-                    &preprocessed,
-                )
-            } else {
-                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-                Py::new(py, view).map(|v| v.into_any())
-            }
+            let working = self
+                .working
+                .as_mut()
+                .expect("invariant: materialized above");
+            cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
+                crate::error::KgError::CypherExecution {
+                    message: e,
+                    position: None,
+                }
+            })?
         } else {
-            // Read-write transaction: execute against mutable working copy
-            let working = self.working.as_mut().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Transaction already committed or rolled back",
-                )
-            })?;
-
-            let mut parsed = cypher::parse_cypher(query).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Cypher parse error: {}",
-                    e
-                ))
-            })?;
-            cypher::validate_schema(&parsed, working).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Schema error: {}", e))
-            })?;
-            cypher::optimize(&mut parsed, working, &param_map);
-
-            if parsed.explain {
-                let result = cypher::generate_explain_result(&parsed, working);
-                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-                return Py::new(py, view).map(|v| v.into_any());
-            }
-
-            let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
-
-            let result = if cypher::is_mutation_query(&parsed) {
-                cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Cypher execution error: {}",
-                        e
-                    ))
+            // Read path: route to whichever graph is active. We already
+            // grabbed `active_graph` above but the borrow ended at parse;
+            // re-acquire to satisfy the borrow checker.
+            let graph: &DirGraph = self
+                .working
+                .as_ref()
+                .map(|g| g as &DirGraph)
+                .or(self.snapshot.as_deref())
+                .expect("invariant: active_graph existed above");
+            let executor = cypher::CypherExecutor::with_params(graph, &param_map, deadline);
+            executor
+                .execute(&parsed)
+                .map_err(|e| crate::error::KgError::CypherExecution {
+                    message: e,
+                    position: None,
                 })?
-            } else {
-                let executor = cypher::CypherExecutor::with_params(working, &param_map, deadline);
-                executor.execute(&parsed).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Cypher execution error: {}",
-                        e
-                    ))
-                })?
-            };
+        };
 
-            if output_csv {
-                result.to_csv().into_py_any(py)
-            } else if to_df {
-                let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
-                cypher::py_convert::preprocessed_result_to_dataframe(
-                    py,
-                    &result.columns,
-                    &preprocessed,
-                )
-            } else {
-                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-                Py::new(py, view).map(|v| v.into_any())
-            }
+        if output_csv {
+            result.to_csv().into_py_any(py)
+        } else if to_df {
+            let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
+            cypher::py_convert::preprocessed_result_to_dataframe(py, &result.columns, &preprocessed)
+        } else {
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+            Py::new(py, view).map(|v| v.into_any())
         }
     }
 
     /// Commit the transaction — apply all changes to the original graph.
     ///
     /// For read-only transactions, this is a no-op.
+    /// For a read-write transaction that performed no mutations (deferred
+    /// state never materialized), this is also a no-op — no version bump,
+    /// no Arc swap, no OCC check needed.
     /// After commit, the transaction cannot be used again.
     fn commit(&mut self) -> PyResult<()> {
         if self.read_only {
             // Read-only: just release the snapshot
+            if self.snapshot.is_none() && !self.committed {
+                return Err(crate::error::KgError::Argument(
+                    "Transaction already committed or rolled back".to_string(),
+                )
+                .into());
+            }
             self.snapshot = None;
             self.committed = true;
             return Ok(());
         }
 
-        let working = self.working.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Transaction already committed or rolled back",
+        // Read-write transaction. Two sub-cases:
+        //   - working.is_some(): the deferred clone got materialized by a
+        //     mutation. Run OCC check + Arc swap.
+        //   - working.is_none() && snapshot.is_some(): deferred state
+        //     never materialized — no writes happened. No-op commit.
+        //   - both None: already committed/rolled back; error.
+        if let Some(working) = self.working.take() {
+            // Optimistic concurrency control: check version hasn't changed.
+            let current_version = Python::attach(|py| {
+                let kg = self.owner.borrow(py);
+                kg.inner.version
+            });
+            if current_version != self.base_version {
+                return Err(crate::error::KgError::Argument(
+                    "Transaction conflict: graph was modified since begin(). \
+                     Retry the transaction."
+                        .to_string(),
+                )
+                .into());
+            }
+
+            Python::attach(|py| {
+                let mut kg = self.owner.borrow_mut(py);
+                let mut working = working;
+                working.version = current_version + 1;
+                kg.inner = Arc::new(working);
+                kg.selection = CowSelection::new();
+            });
+
+            self.committed = true;
+            Ok(())
+        } else if self.snapshot.is_some() {
+            // Deferred state never materialized — no writes, no-op commit.
+            self.snapshot = None;
+            self.committed = true;
+            Ok(())
+        } else {
+            Err(crate::error::KgError::Argument(
+                "Transaction already committed or rolled back".to_string(),
             )
-        })?;
-
-        // Optimistic concurrency control: check version hasn't changed
-        let current_version = Python::attach(|py| {
-            let kg = self.owner.borrow(py);
-            kg.inner.version
-        });
-        if current_version != self.base_version {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Transaction conflict: graph was modified since begin(). \
-                 Retry the transaction.",
-            ));
+            .into())
         }
-
-        Python::attach(|py| {
-            let mut kg = self.owner.borrow_mut(py);
-            let mut working = working;
-            working.version = current_version + 1;
-            kg.inner = Arc::new(working);
-            kg.selection = CowSelection::new();
-        });
-
-        self.committed = true;
-        Ok(())
     }
 
     /// Roll back the transaction — discard all changes.
@@ -292,19 +321,24 @@ impl Transaction {
     fn rollback(&mut self) -> PyResult<()> {
         if self.read_only {
             if self.snapshot.is_none() {
-                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "Transaction already committed or rolled back",
-                ));
+                return Err(crate::error::KgError::Argument(
+                    "Transaction already committed or rolled back".to_string(),
+                )
+                .into());
             }
             self.snapshot = None;
             return Ok(());
         }
-        if self.working.is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "Transaction already committed or rolled back",
-            ));
+        // Read-write: discard whichever container holds state. Both empty
+        // = already committed/rolled back.
+        if self.working.is_none() && self.snapshot.is_none() {
+            return Err(crate::error::KgError::Argument(
+                "Transaction already committed or rolled back".to_string(),
+            )
+            .into());
         }
         self.working = None;
+        self.snapshot = None;
         Ok(())
     }
 
@@ -320,11 +354,10 @@ impl Transaction {
         _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
     ) -> PyResult<bool> {
-        let is_active = if self.read_only {
-            self.snapshot.is_some()
-        } else {
-            self.working.is_some()
-        };
+        // A transaction is active if either container holds state.
+        // After Issue #1 (deferred clone), a read-write tx in the deferred
+        // state has snapshot=Some / working=None — still active.
+        let is_active = self.snapshot.is_some() || self.working.is_some();
 
         if !is_active {
             // Already committed or rolled back

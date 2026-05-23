@@ -1002,6 +1002,10 @@ KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
 
 
 @pytest.mark.differential
+@pytest.mark.skipif(
+    not KNOWN_DIVERGENT,
+    reason="no known divergences pending — corpus is clean (this is the desired state)",
+)
 @pytest.mark.parametrize(
     "name,fixture,query,reason",
     KNOWN_DIVERGENT,

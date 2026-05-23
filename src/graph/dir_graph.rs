@@ -185,7 +185,7 @@ pub struct DirGraph {
     pub(crate) type_schemas: HashMap<String, Arc<TypeSchema>>,
 }
 
-fn default_auto_vacuum_threshold() -> Option<f64> {
+pub(crate) fn default_auto_vacuum_threshold() -> Option<f64> {
     Some(0.3)
 }
 
@@ -785,6 +785,16 @@ impl DirGraph {
 
     /// Create an index on a property for a specific node type.
     /// Returns the number of entries indexed.
+    ///
+    /// The id-alias / title-alias fields (e.g. `add_nodes(df, "Star",
+    /// "starId", "title")` makes `starId` the alias for the canonical
+    /// id) are intentionally NOT special-cased here: their indices
+    /// would build as empty (id/title live off the properties map).
+    /// Lookups against id-alias names route through `lookup_by_id_readonly`
+    /// in the matcher (`try_index_lookup`), which uses the auto-
+    /// maintained per-type `id_index` — no separate `create_index` call
+    /// required, and SET-on-id always stays in sync because id mutation
+    /// updates the id_index directly.
     pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
         let key = (node_type.to_string(), property.to_string());
 

@@ -1,0 +1,211 @@
+# Concurrency
+
+kglite is designed for embedded use, but the read path is genuinely
+parallel and the Bolt server (Phase B/C of `bolt_implementation.md`)
+runs N concurrent sessions against one shared `KnowledgeGraph`. This
+document explains the thread-safety contract bindings can rely on and
+the two documented contention quirks.
+
+## TL;DR
+
+- **Reads parallelize.** `graph.cypher()` releases the GIL via
+  `py.detach()` during execution. Multiple Python threads (or async
+  tasks calling into Python) can read in parallel against the same
+  graph without serialization.
+- **Mutations serialize.** `Arc::make_mut` in the mutation path
+  guarantees write isolation but pays a copy-on-write (CoW) clone
+  cost whenever a mutation runs with other references to the graph
+  open (e.g. read-only transactions, ResultViews, cloned references).
+- **Read-only transactions are free.** `begin_read()` takes an `Arc`
+  reference (no clone). Use them for long-running read sessions to
+  guarantee a stable snapshot.
+
+## How the read path parallelizes
+
+The `cypher()` method on `KnowledgeGraph` (and on `Transaction`):
+
+1. Clones the `Arc<DirGraph>` reference (O(1), atomic refcount bump).
+2. Releases the GIL via `py.detach()`.
+3. Runs the executor against the cloned `Arc` reference. Inside the
+   executor, the graph is shared-immutable; multiple threads can
+   traverse it concurrently without locking the structural data
+   (nodes, edges, types).
+4. Reacquires the GIL only to convert the result back to Python
+   objects.
+
+Existing test coverage at `tests/test_concurrency.py`:
+
+- `test_concurrent_cypher_reads` — 4 threads with disjoint filters.
+- `test_concurrent_reads_produce_correct_results` — 8 threads with
+  the same query, asserting all return the sequential baseline.
+- `test_concurrent_reads_result_equivalence` — 4 ThreadPoolExecutor
+  workers, full result-set equality.
+- `test_16_concurrent_readers_complete_correctly` — 16 threads × 4
+  queries = 64 reads, all return baseline. Pins Bolt-scale read
+  parallelism.
+- `test_no_panic_under_high_contention` — 32 threads (16 readers +
+  16 mutators) for 500 ms. Asserts zero panics and zero errors.
+
+## How the mutation path is isolated
+
+`graph.cypher("CREATE ...")` (and any other mutation) needs an
+exclusive write reference to the `DirGraph`. The implementation
+uses `Arc::make_mut`, which gives copy-on-write semantics:
+
+- If the `Arc` refcount is 1 (no other live references), the
+  mutation happens in-place: O(1) write isolation.
+- If the refcount is > 1, `Arc::make_mut` deep-clones the entire
+  `DirGraph` to give the mutator a private copy; other refs continue
+  to see the original (pre-mutation) state.
+
+This means **reads and mutations never block each other** — readers
+get a stable snapshot, mutators get isolation. The trade-off: a
+mutation that races with active read-only transactions or held
+ResultView references pays a clone cost proportional to the graph
+size.
+
+At Bolt scale (tens of connections, sparse write patterns), this
+is fine. At sustained-write-heavy workloads on large graphs (10M+
+nodes), the clone cost shows up. If you find yourself in that
+shape, see "Phase C performance considerations" below.
+
+## The two documented quirks
+
+### Quirk 1: WKT cache write-lock on first encounter
+
+`DirGraph.wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry>>>>`
+caches parsed WKT geometries to avoid re-parsing on every spatial
+predicate. The cache is read-locked for hits and write-locked
+on misses (first encounter with a given WKT string).
+
+- **Per-WKT contention.** N threads simultaneously parsing the
+  *same* novel WKT string will serialize through the write lock
+  for the first thread; the rest hit the (now-warmed) read path.
+- **Microsecond-scale.** WKT parsing is fast; the contention
+  window is per-query, not per-row.
+- **Bolt-scale impact: negligible.** At ≤100 concurrent sessions
+  with realistic WKT diversity, the cache warms within the first
+  few requests and then operates entirely on the read path.
+
+Pinned by `test_wkt_cache_warmup_is_safe_under_contention` — 8
+threads concurrently evaluating the same `contains(area, point)`
+query complete without panic or wrong results.
+
+### Quirk 2: `Arc::make_mut` CoW clone on mutation with held refs
+
+When `begin_read()` is active (or any other code holds an
+`Arc<DirGraph>` reference), an outside mutation triggers a full
+graph clone before mutating. The reader's snapshot is preserved
+intact; the outside view reflects the new state.
+
+- **Per-mutation cost.** Proportional to graph size: ~10 ns/node +
+  ~5 ns/edge + property data. For a 100k-node / 500k-edge graph,
+  that's ~5 ms; for a 10M-node graph, ~500 ms.
+- **Bolt-scale impact: depends on write pattern.** Bolt sessions
+  that mostly read with sparse writes don't notice. Sustained-write
+  workloads with many open read sessions multiply the cost.
+- **Mitigation:** consolidate writes into batch transactions
+  (`begin()` / many `cypher()` / one `commit()`) to amortize the
+  clone cost across many mutations.
+
+Pinned by `test_arc_makemut_cow_isolates_reader_from_mutation` — a
+read-only transaction keeps reading the pre-mutation state while
+an outside mutation succeeds and changes the post-mutation view.
+
+## Bolt server recipe
+
+```rust
+// One Arc<KnowledgeGraph> shared across all tokio tasks.
+let graph = Arc::new(KnowledgeGraph::load("...")?);
+
+// Per-connection task:
+tokio::spawn(async move {
+    let graph = Arc::clone(&graph);
+    handle_bolt_session(graph).await;
+});
+
+async fn handle_bolt_session(graph: Arc<KnowledgeGraph>) {
+    // Reads parallelize across sessions; mutations serialize via
+    // Python's GIL on the transaction.cypher() call.
+    loop {
+        match bolt_recv().await {
+            Bolt::Begin => let tx = graph.begin()?,
+            Bolt::Run(query) => /* tx.cypher(query) or graph.cypher(query) */,
+            Bolt::Commit => tx.commit(),
+            Bolt::Rollback => tx.rollback(),
+        }
+    }
+}
+```
+
+## What's NOT supported (and why)
+
+- **Lock-free MVCC.** kglite uses `Arc::make_mut` for isolation, not
+  a versioned multi-snapshot store. Each mutation that races a held
+  reference pays a clone; we accept that for simplicity.
+- **Cross-process concurrency.** kglite is embedded. For multi-
+  process workloads, use the Bolt server as the coordination point.
+- **Lock-free reads of mutating fields.** Caches like `wkt_cache`
+  and `edge_type_counts_cache` are `RwLock`-protected, not lock-free.
+  The contention is bounded but not zero.
+
+## Phase C performance considerations
+
+Two concerns that aren't blockers for first-cut Bolt but are worth
+profiling once the server is live:
+
+1. **GIL contention on write commits.** Every `tx.commit()` reacquires
+   the GIL. If profiling reveals contention, a future release can
+   add a Rust-native `TransactionHandle` that bypasses the Python
+   boundary. Not in scope for Phase B/C.
+2. **`Arc::make_mut` clone cost on write-heavy + many-reader
+   workloads.** If you see ms-scale write latencies with many
+   open read sessions, consider a write-mutex strategy that fences
+   mutations to a single committer thread. Out of scope.
+
+## Performance reference
+
+Phase A.3 / 0.9.53 measured concurrent-read scaling on Apple M4 (4
+performance cores + 6 efficiency cores = 10 logical) using the
+audit script `scripts/perf_audit.py`. Bench query is a 5k-Person
+WHERE + count.
+
+| Threads | µs/query | Speedup | Efficiency | Note |
+|---:|---:|---:|---:|---|
+| 1 | 489 µs | 1.00× | 100% | sequential baseline |
+| 2 | 246 µs | 1.99× | 99% | |
+| 4 | 129 µs | 3.80× | 95% | **fills perf cores** |
+| 8 | 94 µs | 5.19× | 65% | efficiency cores active |
+| 10 | 84 µs | 5.82× | 58% | full CPU saturation |
+| 16 | 85 µs | 5.74× | 36% | hardware-bound plateau |
+| 32 | 86 µs | 5.69× | 18% | no additional throughput |
+
+The plateau past 8-10 threads is **hardware-bound on M-series CPUs**
+— Apple Silicon has heterogeneous cores (perf cores ~2× faster than
+efficiency cores). Theoretical max on M4: 4 + 6 × 0.5 = ~7×; we hit
+5.8×, which is ~83% of theoretical. On homogeneous x86 server CPUs
+(EPYC, Xeon) the linear scaling region extends further; expect
+near-linear speedup up to the physical core count.
+
+### What Phase A.3 / 0.9.53 changed
+
+- Issue #3 fix: moved `resolve_noderefs` into the executor's
+  `py.detach` block so it runs GIL-free along with the rest of
+  Cypher execution. Improved per-thread efficiency by 2-3 percentage
+  points across all thread counts.
+- The remaining inefficiency at 4-thread scale (~5%) splits between
+  heap allocator contention and GIL re-acquisition on PyObject
+  result construction — both system-wide concerns rather than
+  kglite-specific bottlenecks. A future release can revisit if
+  profiling reveals headroom.
+
+## See also
+
+- [`transactions.md`](transactions.md) — `begin()` / `commit()` /
+  OCC semantics + per-call cost reference.
+- [`error-handling.md`](error-handling.md) — typed exception
+  hierarchy.
+- `tests/test_concurrency.py` — the executable contract for the
+  guarantees above.
+- `scripts/perf_audit.py` — re-runnable audit harness for the
+  scaling numbers.

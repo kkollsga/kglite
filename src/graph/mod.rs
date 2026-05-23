@@ -211,20 +211,8 @@ pub enum SourceLookup {
     NotFound,
 }
 
-/// Render a `Value` into a `String` for the pure-Rust source-location
-/// API. Mirrors `py_out::value_to_py`'s coercion for the field types
-/// `code_tree` actually emits (String / Int64 / UniqueId).
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Int64(n) => n.to_string(),
-        Value::UniqueId(u) => u.to_string(),
-        Value::Float64(f) => f.to_string(),
-        Value::Boolean(b) => b.to_string(),
-        Value::Null => String::new(),
-        other => format!("{:?}", other),
-    }
-}
+// (formerly `fn value_to_string`; consolidated 0.9.53 into
+// `crate::datatypes::values::raw_string`)
 
 impl KnowledgeGraph {
     /// Create a fresh in-memory KnowledgeGraph without going through PyO3.
@@ -595,12 +583,12 @@ impl KnowledgeGraph {
                 None => return SourceLookup::NotFound,
             };
             let type_name = node.get_node_type_ref(&self.inner.interner).to_string();
-            let entity_name = value_to_string(&node.title());
-            let qname = value_to_string(&node.id());
+            let entity_name = crate::datatypes::values::raw_string(&node.title());
+            let qname = crate::datatypes::values::raw_string(&node.id());
             let file_path = node
                 .get_field_ref("file_path")
                 .as_deref()
-                .map(value_to_string);
+                .map(crate::datatypes::values::raw_string);
             let line_number = node
                 .get_field_ref("line_number")
                 .as_deref()
@@ -618,7 +606,7 @@ impl KnowledgeGraph {
             let signature = node
                 .get_field_ref("signature")
                 .as_deref()
-                .map(value_to_string);
+                .map(crate::datatypes::values::raw_string);
             SourceLookup::Found(SourceLocation {
                 type_name,
                 name: entity_name,
@@ -633,7 +621,7 @@ impl KnowledgeGraph {
         } else {
             let qnames: Vec<String> = matches
                 .iter()
-                .map(|(_, info)| value_to_string(&info.id))
+                .map(|(_, info)| crate::datatypes::values::raw_string(&info.id))
                 .collect();
             SourceLookup::Ambiguous(qnames)
         }

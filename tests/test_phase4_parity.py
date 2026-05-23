@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "adf955b60f07eaf1fb87e49f4c01e5e685c7236e2f6f562c1738e5ba462e4c67"
+GOLDEN_V3_DIGEST = "6efd22ca8d49059e32ed62b22658a9e02e65700c0bd1363a7cfbdefcc7c336fa"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -137,7 +137,17 @@ GOLDEN_V3_DIGEST = "adf955b60f07eaf1fb87e49f4c01e5e685c7236e2f6f562c1738e5ba462e
 # binary is now meaningless — the test would never re-see those byte
 # patterns. The name `GOLDEN_V3_DIGEST` is kept for git-blame
 # continuity; the digest itself is now the v4 byte pattern.
-ACCEPTABLE_DIGESTS: frozenset[str] = frozenset()
+#
+# 0.10.0 release: the `.kgl` header embeds the package version string,
+# so every release shifts the digest even with byte-identical payload.
+# Prior release digests are preserved here for ergonomic bisection
+# back to a working v4 era.
+ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
+    {
+        "adf955b60f07eaf1fb87e49f4c01e5e685c7236e2f6f562c1738e5ba462e4c67",  # 0.9.52
+        "5b728f348d8e98c3c32a9b9262941a2740624c8d9b59f48a2c5ed79fe852a35a",  # 0.9.53 (never pushed)
+    }
+)
 
 
 def _save_memory_fixture_to_bytes() -> bytes:

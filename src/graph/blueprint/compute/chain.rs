@@ -13,6 +13,7 @@
 //! ordered by quarter). Domain-agnostic — any temporal/ordered
 //! sequence within a partition of a node type.
 
+use super::sanitize_filename;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -190,18 +191,6 @@ fn value_cmp(a: &super::super::expr::Value, b: &super::super::expr::Value) -> Or
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         _ => Ordering::Equal,
     }
-}
-
-fn sanitize_filename(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

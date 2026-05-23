@@ -7,33 +7,337 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Docs — `ROADMAP.md` + identity-aligned README and docs
+## [0.10.0] — Phase A (Bolt prep): Value variants + KgError + db.* procedures + audit
 
-- **`ROADMAP.md`** (new, repo root) — forward-looking strategy doc.
-  Vision, positioning vs Kuzu (with Kuzu's 2025 archival as the
-  strategic opening), identity-to-lean-into vs identity-to-tone-down,
-  and 9 sequenced roadmap items led by **§1 Bolt protocol server**.
-- **README** — Sodir section trimmed from a full subsection to a brief
-  example-dataset mention with a link to the datasets guide. The
-  "How it compares" Kuzu blurb now notes the archival. Spatial /
-  timeseries descriptions trimmed to acknowledge they are pragmatic
-  primitives, not full-product breadth. New "What's coming" callout
-  links to `ROADMAP.md`.
-- **`docs/index.md`** — opener now leads with the LLM-agent identity
-  ("embedded openCypher engine for LLM-agent workloads"). The
-  "Two APIs" framing is replaced by "Cypher first" — the fluent
-  loaders `add_nodes` / `add_connections` are reframed as how data
-  gets in, not a parallel query surface.
-- **`docs/explanation/design-decisions.md`** — new
-  **"Why an LLM-agent surface"** section names the three concrete
-  decisions (`describe()`, the MCP server binary, honest Cypher over
-  coverage maximalism). The "Why Cypher" section's fluent-API
-  mention is reframed: not a peer surface; new query capabilities land
-  in Cypher first.
+The foundation for the Bolt protocol server (`ROADMAP.md` §1). Three
+sub-phases shipped as bisectable commits; user-visible surface area is
+Cypher type-system completeness, a typed Python exception hierarchy,
+and the Neo4j-canonical schema-introspection procedures. Plus the
+post-A.3 "are we ready?" audit: fixture rebuild for the v3→v4 hard
+break, transaction + concurrency hardening tests, and binding-implementer
+docs for Phase B/C.
 
-No code changes. The identity itself is what already shipped in 0.9.52
-(MCP server, `describe()`, the Phase-5 conformance work) — this pass
-just makes the docs say what the library has become.
+### Added — `Value::{Node, Relationship, Path, List, Map}` variants (A.1)
+
+The Cypher `Value` enum now carries the full openCypher type lattice
+natively, replacing the prior JSON-string round-trip for compound
+values. Lists no longer serialise through `String` shapes on the way
+out; UNWIND fast-paths a native `Value::List`; the columnar exporter
+gets per-row typing without re-parsing.
+
+Per-row execution shaves a few µs on list-heavy queries
+(test_bench_cypher_where -16%, columnar -17.5%). The
+`Box<NodeValue>`-tax on common-case matches shows up as
+test_bench_cypher_match +14.4%; within ±20% policy budget.
+
+### Added — `kglite.KgError` taxonomy + typed Python exceptions (A.2)
+
+Pre-0.10.0 every error from kglite arrived as a built-in Python
+exception with a `format!` string body. Now:
+
+- New `kglite.KgError` base class + 17 typed subclasses
+  (`CypherSyntaxError`, `CypherTimeoutError`,
+  `CypherExecutionError`, `SchemaError`, `ValidationError`,
+  `FileError`, `ArgumentError`, etc.). Hierarchy descends from
+  `kglite.KgError → Exception`; the Cypher subtree extends
+  `kglite.CypherError` for narrower catches.
+- Cypher syntax errors carry `line` and `col` as struct fields
+  (preserved through the parser → boundary route rather than
+  embedded only in the message).
+- ~80 `PyErr` sites across the Python surface migrated to the
+  typed exceptions (kg_core, kg_mutation, kg_introspection,
+  algorithms, kg_fluent, py_in, mcp-server).
+- See `docs/explanation/error-handling.md` for the full reference.
+
+**Breaking.** PyO3's `create_exception!` is single-inheritance, so the
+typed exceptions extend `KgError`, NOT also the built-in equivalents.
+`except ValueError:` / `except RuntimeError:` no longer catches kglite
+errors — migrate to `except kglite.CypherSyntaxError:` (or the
+universal `except kglite.KgError:`). See the migration table in
+`docs/explanation/error-handling.md`.
+
+### Added — `CALL db.labels()` / `db.relationshipTypes()` / `db.indexes()` (A.3)
+
+The Neo4j-canonical schema introspection procedures, callable from any
+Bolt-compatible client (cypher-shell, Neo4j Browser, Python `neo4j`
+driver):
+
+- `CALL db.labels() YIELD name` — every node-type name, sorted.
+- `CALL db.relationshipTypes() YIELD name` — every connection-type
+  name, sorted.
+- `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes,
+  properties, state` — every installed index with structured columns.
+
+The parser now accepts namespaced procedure names (`db.labels`,
+`apoc.coll.sum`); previously only single-identifier names parsed.
+Procedure names are case-insensitive on dispatch (Neo4j convention).
+
+A KGLite-specific extension: `db.indexes()` returns `type='RANGE'`
+for B-tree range indexes (Neo4j collapses them under `'PROPERTY'`).
+The planner uses the distinction — an equality index can't serve a
+range query — so the procedure surfaces it for index advisors.
+
+Behind the scenes, the new procedures share `pub(crate)` Rust
+helpers (`collect_labels`, `collect_relationship_types`,
+`collect_indexes_structured`) with `describe()` and `schema()` so
+all introspection surfaces report identical data.
+
+### Performance — Pre-Bolt audit + targeted fixes
+
+The pre-Bolt audit identified five performance issues. Four shipped
+fixes; the fifth was investigated and documented (root cause is the
+A.1 Value enum expansion — a known trade-off).
+
+**Issue #1 — Deferred clone on `begin()`.** The biggest Bolt win in
+this release. `begin()` used to deep-clone the entire DirGraph up
+front (O(graph_size)); now it takes an Arc snapshot (O(1)) and
+defers the clone until the first mutation lands. Read-only-then-
+commit transactions pay no clone cost regardless of graph size.
+
+| Graph | `begin() + commit()` *(no writes)* | Before | After |
+|---|---:|---:|---:|
+| 1k nodes | 40 µs | → | **166 ns** (~240× faster) |
+| 10k nodes | 391 µs | → | **166 ns** (~2,400× faster) |
+| 100k nodes | 4.16 ms | → | **166 ns** (~25,000× faster) |
+
+A mutating transaction still pays the clone cost on first
+`tx.cypher("CREATE ...")` (~30 µs / k nodes), unchanged.
+
+**Issue #2 — Query parse cache.** `cypher()` used to re-parse every
+input string from scratch. Added an LRU cache (256-entry, FIFO
+eviction, RwLock-protected) at
+`src/graph/languages/cypher/parse_cache.rs`. Cache HIT is ~700 ns
+end-to-end vs ~1.4 µs uncached — a 50% reduction for the
+Bolt-typical "agent re-issues the same parameterized query in a
+hot loop" pattern.
+
+**Issue #3 — Concurrent-read scaling.** Audit found the read path
+plateaus at ~5.8× speedup beyond 8 threads. On Apple M4 this is
+hardware-bound (4 perf + 6 efficiency cores). Targeted fix: moved
+`resolve_noderefs` (pure-Rust post-execution step) into the
+`py.detach` block so it runs GIL-free, improving per-thread
+efficiency by 2-3 percentage points. The remaining inefficiency is
+heap allocator contention + minor GIL re-acquisition on PyObject
+construction, both system-wide rather than kglite-specific. On
+homogeneous x86 server CPUs, scaling extends further than M4
+permits.
+
+**Issue #4 — `columnar_enable` regression investigated.** The A.3
+release reported a +27% capture variance; rigorous re-measurement
+shows the actual regression vs 0.9.52 is +2.7% — within noise.
+The minor slowdown is consistent with the documented A.1 Value
+enum expansion (`cypher_match` +1.9%). `enable_columnar` is a
+one-time setup operation, not in the hot Bolt path.
+
+**Issue #5 — Documentation.** New "Performance reference" sections
+in `docs/explanation/transactions.md` and
+`docs/explanation/concurrency.md` document the post-fix numbers,
+the M-series CPU plateau, and the Bolt-server design implications.
+`scripts/perf_audit.py` is the re-runnable audit harness for these
+numbers.
+
+### Performance — NornicDB shortestPath benchmark: kglite is now 10–250× faster
+
+Replicated NornicDB's published 500K-node `shortestPath` benchmark
+(`scripts/nornicdb_compare.py`, faithful port of
+`pkg/cypher/demo_shortest_path_largescale_test.go`). Pre-fix run on the
+500K Star / 4M HYPERLANE fixture exposed two compounded bottlenecks
+in the hot Cypher path: a quiet **35 ms floor on every shortestPath
+call** + a **500 K × 500 K cartesian product when prior bindings
+weren't propagated to the shortestPath executor.** Combined with the
+trivial-but-disastrous "did you forget to call create_index()?" trap
+when the indexed field is the id-alias, the unfixed pipeline timed
+out at 10 s per call past depth 3.
+
+**Three targeted fixes shipped:**
+
+1. **Pre-bind propagation in `execute_shortest_path_match`** —
+   `MATCH (a {id: X}), (b {id: Y}) MATCH p = shortestPath((a)-[*]-(b))`
+   used to re-resolve `(a)` and `(b)` as bare patterns inside the
+   shortestPath executor, which (correctly) returned all 500K nodes
+   for each, then ran a 250-billion-pair cartesian-product BFS. Now
+   the executor reads bindings from the input ResultSet on the fast
+   path; only bare-pattern shortestPath callers fall through to the
+   pre-fix cartesian behaviour. Extracted into a new
+   `executor/shortest_path.rs` submodule.
+
+2. **Id-alias routing in `try_index_lookup`** — when the user calls
+   `add_nodes(df, "Star", "starId", "title")`, `starId` becomes the
+   ID-field alias for the canonical `id`. Pre-fix, parameterized
+   `MATCH (s:Star {starId: $a})` queries fell through to a full
+   500K-node type scan because the matcher only special-cased the
+   literal property names `id` / `nid` / `qid`. The matcher now
+   consults the type's declared id-alias and routes through
+   `lookup_by_id_readonly` — O(1) lookup on the auto-maintained
+   per-type id_index. No `create_index` call needed.
+
+3. **HashMap-backed BFS state in `reconstruct_path_bfs`** — the BFS
+   used to allocate `Vec<bool>` (500 KB) + `Vec<u32>` (2 MB) +
+   `VecDeque` (~1 MB) per call sized to `node_bound`, regardless of
+   actual traversal scope. For a 1-hop visit (~16 nodes) the
+   alloc/init cost (~30 ms) dominated the operation. Now uses a
+   `HashMap<usize, u32>` for parent tracking (presence ⇔ visited);
+   shallow paths pay µs of alloc, deep paths pay O(visited_nodes).
+   Tradeoff: ~50% slower per-node visit cost for very deep BFS
+   (HashMap hash vs Vec index); on the NornicDB benchmark at d=60
+   this still beats the pre-fix code by 7× and beats NornicDB by
+   >100×.
+
+A `VecDeque + HashMap` (no overhead at small N) is a saner default
+than `Vec[node_bound]` for the realistic mix of shallow + medium
+BFS that real Bolt clients issue. Kept the `Vec<bool>` path on
+`shortest_path_directed` (less exercised; reverting the directed
+version's HashMap change had no measurable benefit).
+
+**Reverted (no impact / regression):** an earlier id-alias fix to
+`create_index` itself was reverted after breaking
+`test_set_name_updates_index` — the matcher-side routing covers the
+agent-typical case without needing the index-builder change.
+
+**Final NornicDB vs kglite (Apple M4 vs M3 Max, 500K nodes / 4M edges):**
+
+| Depth | kglite med | NornicDB med | Speedup |
+|---:|---:|---:|---:|
+| 1   | 3.9 µs     | 94.8 µs       | **24×** |
+| 5   | 122.9 µs   | 1.23 ms       | **10×** |
+| 10  | 418.7 µs   | ~15.5 ms      | **37×** |
+| 20  | 1.27 ms    | ~31.1 ms      | **24×** |
+| 40  | 2.97 ms    | 612.7 ms      | **206×** |
+| 60  | 5.70 ms    | >612.7 ms     | **>100×** |
+
+Graph build is **49× faster** on top of the per-query wins (4.25 s
+vs NornicDB's 3 m 32 s, BadgerDB-flush-dominated).
+
+### Refactor — Code-rot cleanup (pre-Bolt Tier 1 audit)
+
+Post-Bolt-audit code-rot review found light rot concentrated in
+duplicated helpers + one stale dead-code marker + an inbox folder
+holding 41 processed interproject messages. All cleaned in this
+release; god-file refactors (Tier 2) deferred — the existing files
+are working code, just large.
+
+- **Duplicated helpers consolidated.** Five copies of
+  `file_to_module_path` (dart/html/php/swift/css) and three copies of
+  `make_qualified` (dart/php/swift) — all byte-identical except for
+  the separator character — moved to
+  `code_tree/parsers/shared.rs` with a `separator: char` parameter.
+  Three byte-identical copies of `sanitize_filename` in
+  `blueprint/compute/{derive,chain,filter}.rs` consolidated into the
+  shared `blueprint/compute/mod.rs`. The `yield_alias` helper in
+  `cypher/executor/{affected_tests,refresh_stats}.rs` moved to the
+  shared `executor/helpers.rs`. Three slightly-different copies of
+  `value_to_string` (`graph/mod.rs`, `graph/explore.rs`,
+  `graph/io/export.rs`) consolidated into a single canonical
+  `crate::datatypes::values::raw_string` using the most complete of
+  the three impls (rich variant coverage for `DateTime`, `Point`,
+  `Duration`, A.1 collection variants). Two copies of
+  `default_auto_vacuum_threshold` consolidated as `pub(crate)` in
+  `dir_graph.rs`. Net: ~80 LoC deleted, no behavior change.
+
+- **Stale dead-code marker removed.** `subgraph_streaming.rs`'s
+  `#[allow(dead_code)] // Phase 4 consumes every method.` marker is no
+  longer needed — Phase 4 ships and `pyapi/algorithms.rs` consumes
+  `RankIndex::from_bitset` + `kept_count`. Removed the marker and the
+  one method that genuinely was unused (`Bitset::bitset` accessor).
+  (`unified_columns::WriteResult`'s marker is legitimately still
+  needed; its fields are reserved for a future caller and the marker
+  stays with a refreshed comment.)
+
+- **Inbox cleanup.** `inbox/read/` (41 messages, 476 KB of processed
+  MCP-methods / MCP-servers interproject correspondence) deleted —
+  git history preserves them. `tests/fixtures/build_fixtures.py`'s
+  origin-attribution comment updated to drop the dead URL reference.
+
+- **God-file size gate.** New `tests/test_god_files.py` rejects any
+  `src/**/*.rs` file over 3000 LoC unless it has an entry in an
+  explicit `ALLOWLIST` with a pinned ceiling and justification.
+  Current state: one allowlisted file
+  (`cypher/planner/fusion.rs` at 3028 LoC, pinned at 3050) — the
+  optimizer-fusion pass registry, on the deferred Tier 2 split list.
+  Companion `test_allowlist_is_not_stale` ensures the allowlist gets
+  pruned when files shrink below the default. The gate exists to
+  catch the NEXT file that drifts past 3000 — making
+  CLAUDE.md's *"each pass should leave it more compartmentalised"*
+  guidance mechanical.
+
+### Net Phase A regression matrix (0.9.52 → 0.10.0 with audit fixes)
+
+| Benchmark | 0.9.52 | 0.10.0 | Δ |
+|---|---:|---:|---:|
+| `shortest_path` | 2.6 µs | 1.3 µs | **−49.7%** |
+| `cypher_where` | 251 µs | 185 µs | **−26.3%** |
+| `columnar_cypher_where` | 261 µs | 200 µs | **−23.1%** |
+| `columnar_cypher_match` | 4.9 µs | 4.6 µs | −5.6% |
+| `save_v3` | 401 µs | 394 µs | −1.7% |
+| `traversal` | 348 ns | 339 ns | −2.5% |
+| `cypher_match` | 4.5 µs | 4.6 µs | +1.9% |
+| `columnar_enable` | 196 µs | 201 µs | +2.7% |
+| `add_connections` | 489 µs | 500 µs | +2.3% |
+| `add_nodes` | 243 µs | 253 µs | +4.2% |
+
+Phase A net: 6 benchmarks meaningfully faster, 4 marginally slower
+(all within noise / known A.1 trade-offs). No tracked benchmark
+regresses past +5%.
+
+### Added — Pre-Bolt audit: fixtures + tests + docs
+
+The "are we really done preparing kglite core for Bolt?" audit
+surfaced three working-but-unverified concerns; the audit work itself
+ships here.
+
+- **Test fixtures rebuilt for v4 format.** Phase A.1's `.kgl` v3→v4
+  hard break invalidated 4 committed binary fixtures
+  (`spatial_graph.kgl`, `timeseries_graph.kgl`,
+  `graph_with_orphans.kgl`, `graph_with_duplicates.kgl`). New
+  `tests/fixtures/build_fixtures.py` regenerates them deterministically
+  (`random.seed(42)`); 8 previously-xfailed MCP tests in
+  `tests/test_mcp_server_python_entry.py` (j1/j2/j3/k1/k2/k3/l1/l2)
+  now pass. 1 spurious "empty parametrize" SKIPPED in
+  `tests/test_cypher_differential.py` is now an intentional
+  `@pytest.mark.skipif` with a self-documenting reason.
+- **Transaction class typed-exception sweep.** A.2 missed
+  `src/graph/pyapi/transaction.rs`; this release migrated 15 PyErr
+  sites to typed `kglite.KgError` subclasses. Bolt server bindings
+  now see uniform error types from transaction operations (timeout
+  → `kglite.CypherTimeoutError`; OCC conflict + read-only mutation
+  + double-commit → typed `kglite.KgError`).
+- **Bolt-shaped tests pinned.** New
+  `tests/test_transaction_bolt_patterns.py` (18 tests) pins the
+  BEGIN → cypher × N → COMMIT/ROLLBACK flow, snapshot isolation,
+  OCC conflict semantics, context-manager auto-commit/rollback,
+  read-only enforcement, and timeout behavior.
+- **Bolt-scale concurrency stress.** New tests in
+  `tests/test_concurrency.py` (`TestBoltScaleConcurrency`,
+  `TestDocumentedQuirks`) cover 16-thread parallel readers and
+  32-thread reader+mutator contention without panic, plus pinned
+  contracts for the WKT cache write-lock and Arc::make_mut CoW
+  isolation quirks.
+- **Binding-implementer documentation.** New
+  `docs/explanation/transactions.md` and
+  `docs/explanation/concurrency.md` document the surface Bolt's
+  Phase C will consume — error → FAILURE-code mapping table,
+  per-session Arc<KnowledgeGraph> recipe, the two documented
+  contention quirks with rationale.
+
+### Verification
+
+- Test suite: 3010 passed (+61 from 0.9.52's 2949), 1 skipped, 8
+  warnings. The 0.9.52 baseline had 1 skipped + 8 xfailed; this
+  release flips all 8 xfailed → pass and converts the 1 skipped
+  to an intentional self-documenting skipif.
+- Cross-mode parity (memory/mapped/disk) preserved for all 3 phases.
+- `make lint` green across the release (fmt + clippy + ruff +
+  stubtest).
+- Benchmark gate: 11 tracked benchmarks within the ±20% policy
+  budget.
+
+### What this unlocks
+
+Phase B of `bolt_implementation.md` (Bolt server skeleton + failing
+test contract) can now start. Phase C.6 (Bolt FAILURE-code mapping
++ db.* pass-through) gates on this release's typed exceptions and
+procedures, both now shipped. The deferred streaming wrapper for
+Bolt PULL will land in Phase B/C alongside the protocol code itself.
 
 ## [0.9.52] — Cypher NULL semantics, batch dedup, shortestPath dedup
 

@@ -1443,7 +1443,13 @@ impl KnowledgeGraph {
                 Py::new(py, view).map(|v| v.into_any())
             }
         } else {
-            // Read-only path: clone Arc, release borrow, then execute without GIL
+            // Read-only path: clone Arc, release borrow, then execute without GIL.
+            // Phase A.3 / 0.9.53 — Issue #3 partial fix: extended py.detach to
+            // also cover resolve_noderefs. The resolve step is pure Rust
+            // (touches the graph, not Python) but was previously running under
+            // the GIL after execute returned. For result sets with NodeRef
+            // values this reduces per-call GIL hold time and helps concurrent
+            // read scaling on multi-core systems.
             let inner = {
                 let this = slf.borrow();
                 this.inner.clone()
@@ -1453,7 +1459,12 @@ impl KnowledgeGraph {
                 let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
                     .with_max_rows(effective_max_rows)
                     .with_streaming(streaming);
-                py.detach(|| executor.execute(&parsed))
+                let inner_for_detach = std::sync::Arc::clone(&inner);
+                py.detach(move || {
+                    let mut result = executor.execute(&parsed)?;
+                    resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
+                    Ok::<_, String>(result)
+                })
             }
             .map_err(|e| crate::error::KgError::CypherExecution {
                 message: e,
@@ -1475,9 +1486,9 @@ impl KnowledgeGraph {
             let columns = result.columns;
             let stats = result.stats;
             let profile = result.profile;
-            // Resolve NodeRef values to node titles before Python conversion
-            let mut rows = result.rows;
-            resolve_noderefs(&inner.graph, &mut rows);
+            // resolve_noderefs already happened inside the py.detach block
+            // above (Phase A.3 / 0.9.53 Issue #3 partial fix).
+            let rows = result.rows;
             if output_csv {
                 // CSV consumes every cell — if the executor handed us a
                 // lazy descriptor (RETURN was flagged `lazy_eligible`),
@@ -1627,18 +1638,28 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (timeout_ms=None))]
     fn begin(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
-        let (working, version) = Python::attach(|py| {
+        // Phase A.3 / 0.9.53 — Issue #1 fix: deferred clone.
+        //
+        // Previously this call deep-cloned the entire DirGraph up front,
+        // costing O(graph_size) per begin(). For a 100k-node graph that's
+        // ~3 ms; for 1M-node Bolt deployments that's tens of ms PER
+        // SESSION. Now we take an Arc snapshot (O(1)) and defer the clone
+        // until the first mutation actually lands. Read-only-then-commit
+        // transactions pay zero clone cost; mutating transactions pay
+        // the clone only when needed (and skip it entirely if
+        // Arc::try_unwrap succeeds in the materialization path).
+        let (snapshot, version) = Python::attach(|py| {
             let kg = slf.borrow(py);
-            ((*kg.inner).clone(), kg.inner.version)
+            (Arc::clone(&kg.inner), kg.inner.version)
         });
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {
             owner: slf,
-            working: Some(working),
+            working: None,
             committed: false,
             read_only: false,
-            snapshot: None,
+            snapshot: Some(snapshot),
             base_version: version,
             deadline,
         })

@@ -880,6 +880,41 @@ impl std::fmt::Display for DataFrame {
     }
 }
 
+/// Render a `Value` as a plain unquoted string — the form used for CSV
+/// cells, XML escaping, agent-facing human display, etc. Distinct from
+/// [`format_value`] which produces a Cypher-literal-style rendering
+/// (quoted strings, `NULL` for null, `%.2f` for floats).
+///
+/// `Null` → empty string. The Phase A.1 collection / graph-entity
+/// variants delegate to [`format_value`] (their multi-line shapes are
+/// the same in both contexts).
+///
+/// Consolidated 0.9.53 from three nearly-identical copies in
+/// `graph/mod.rs`, `graph/explore.rs`, `graph/io/export.rs`.
+pub fn raw_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Int64(n) => n.to_string(),
+        Value::Float64(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::DateTime(dt) => dt.to_string(),
+        Value::UniqueId(id) => id.to_string(),
+        Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
+        Value::Duration {
+            months,
+            days,
+            seconds,
+        } => format!("duration(M={}, D={}, S={})", months, days, seconds),
+        Value::Null => String::new(),
+        Value::NodeRef(idx) => format!("node#{}", idx),
+        Value::List(_)
+        | Value::Map(_)
+        | Value::Node(_)
+        | Value::Relationship(_)
+        | Value::Path(_) => format_value(value),
+    }
+}
+
 pub fn format_value(value: &Value) -> String {
     match value {
         Value::UniqueId(v) => format!("{}", v),

@@ -4,8 +4,47 @@ use crate::code_tree::models::Annotation;
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::OnceLock;
 use tree_sitter::Node;
+
+/// Build a module path from a file's location, joining the source-root
+/// directory name and the file stem with `separator` (`.` for Dart /
+/// Swift / HTML / CSS / JS / similar; `\` for PHP namespace style).
+///
+/// Phase A.3 / 0.9.53 code-rot cleanup — consolidated from per-parser
+/// copies in `dart.rs`, `html.rs`, `php.rs`, `swift.rs`, `css.rs`.
+pub(super) fn file_to_module_path(filepath: &Path, src_root: &Path, separator: char) -> String {
+    let stem = filepath.file_stem().and_then(|o| o.to_str()).unwrap_or("");
+    let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
+    match (pkg.is_empty(), stem.is_empty()) {
+        (true, _) => stem.to_string(),
+        (false, true) => pkg.to_string(),
+        (false, false) => format!("{pkg}{separator}{stem}"),
+    }
+}
+
+/// Combine module path / owner prefix / name into a single qualified
+/// identifier, joined with `separator` (`.` for most languages, `\` for
+/// PHP). When an `owner_prefix` is present (e.g. an enclosing class /
+/// struct / namespace), it wins over the module path — the owner is the
+/// closer scope.
+///
+/// Phase A.3 / 0.9.53 code-rot cleanup — consolidated from
+/// `dart.rs`, `php.rs`, `swift.rs`.
+pub(super) fn make_qualified(
+    module_path: &str,
+    owner_prefix: &str,
+    name: &str,
+    separator: char,
+) -> String {
+    match (module_path.is_empty(), owner_prefix.is_empty()) {
+        (true, true) => name.to_string(),
+        (true, false) => format!("{owner_prefix}{separator}{name}"),
+        (false, true) => format!("{module_path}{separator}{name}"),
+        (false, false) => format!("{owner_prefix}{separator}{name}"),
+    }
+}
 
 /// Fast byte-level filter: do any of the annotation keywords appear in
 /// `source` at all? Built with aho-corasick (case-insensitive, no word

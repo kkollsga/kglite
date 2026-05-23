@@ -53,3 +53,4 @@ docs/autoapi/
 .DS_Store
 /projects/
 .bench-current.json
+.perf_audit_*.json

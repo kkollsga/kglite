@@ -157,3 +157,118 @@ class TestGILReleasePerformance:
         # The counter should have incremented at least once during the computation
         # (if GIL wasn't released, counter would stay at 0)
         assert counter["value"] > 0
+
+
+# ── Phase A.3 / 0.9.53 — Bolt-scale concurrency stress + documented quirks ──
+
+
+class TestBoltScaleConcurrency:
+    """16+ concurrent readers (the expected lower-bound for a Bolt server's
+    session count) must not panic, deadlock, or produce inconsistent results."""
+
+    def test_16_concurrent_readers_complete_correctly(self, large_graph):
+        """16 threads × 4 queries each = 64 reads completing within budget,
+        all returning the sequential baseline."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        baseline = large_graph.cypher("MATCH (n:Person) WHERE n.city = 'Oslo' RETURN count(n) AS cnt")[0]["cnt"]
+        query = "MATCH (n:Person) WHERE n.city = 'Oslo' RETURN count(n) AS cnt"
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(lambda: large_graph.cypher(query)) for _ in range(64)]
+            results = [f.result(timeout=20)[0]["cnt"] for f in futures]
+
+        assert len(results) == 64
+        assert all(r == baseline for r in results), "concurrent reads diverged"
+
+    def test_no_panic_under_high_contention(self, large_graph):
+        """32 threads, half readers / half mutators, run for 500 ms. Pin that
+        no panic occurs (Bolt server must not crash under contention)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        stop_event = threading.Event()
+        errors: list[str] = []
+
+        def reader():
+            while not stop_event.is_set():
+                try:
+                    large_graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt")
+                except Exception as e:
+                    errors.append(f"reader: {e!r}")
+
+        def mutator(idx):
+            while not stop_event.is_set():
+                try:
+                    large_graph.cypher(f"CREATE (:Marker {{tid: {idx}}})")
+                except Exception as e:
+                    errors.append(f"mutator-{idx}: {e!r}")
+
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            for _ in range(16):
+                pool.submit(reader)
+            for i in range(16):
+                pool.submit(mutator, i)
+            time.sleep(0.5)
+            stop_event.set()
+
+        assert errors == [], f"errors during contention: {errors[:5]}"
+
+
+class TestDocumentedQuirks:
+    """Pin the two contention quirks documented in concurrency.md so future
+    refactors don't silently change the behavior shape."""
+
+    def test_arc_makemut_cow_isolates_reader_from_mutation(self, large_graph):
+        """While a read-only transaction holds an Arc snapshot of the graph,
+        an outside-the-tx mutation triggers a CoW clone in Arc::make_mut.
+        The reader's snapshot is preserved (pre-mutation state); the outside
+        view reflects the new state."""
+        # Open a read-only tx — holds an Arc reference.
+        tx = large_graph.begin_read()
+        baseline_count = tx.cypher("MATCH (n:Person) RETURN count(n) AS cnt")[0]["cnt"]
+        assert baseline_count == 5000
+
+        # Outside mutation while reader holds the snapshot.
+        large_graph.cypher("CREATE (:Person {id: 99999, title: 'Latecomer'})")
+
+        # The reader still sees the original count (snapshot isolation).
+        post_count = tx.cypher("MATCH (n:Person) RETURN count(n) AS cnt")[0]["cnt"]
+        assert post_count == 5000, "read-only snapshot must not see post-begin mutations"
+
+        # Outside view reflects the mutation.
+        outside_count = large_graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt")[0]["cnt"]
+        assert outside_count == 5001, "outside graph must reflect the mutation"
+
+    def test_wkt_cache_warmup_is_safe_under_contention(self):
+        """Spatial cypher hits an Arc<RwLock<HashMap>> wkt_cache that takes a
+        write lock on first encounter with each WKT string. Pin that 8 threads
+        each parsing the same novel WKT complete without panic or wrong
+        results (the read-after-warmup path stays parallel)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Build a tiny spatial graph (separate from `large_graph` because the
+        # area needs to be created via add_nodes() to register the id field
+        # in the schema; CREATE on a fresh graph auto-assigns numeric ids).
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame(
+                [
+                    {
+                        "id": "unit",
+                        "title": "UNIT_SQUARE",
+                        "wkt_geometry": "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+                    }
+                ]
+            ),
+            "Area",
+            "id",
+            "title",
+        )
+
+        # Multi-thread evaluation of the same WKT-touching query — first
+        # thread warms the cache, the rest hit it from the read path.
+        query = "MATCH (a:Area {id: 'unit'}) RETURN contains(a, point(0.5, 0.5)) AS inside"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(lambda: g.cypher(query)) for _ in range(8)]
+            results = [f.result(timeout=10)[0]["inside"] for f in futures]
+        assert all(r is True for r in results), "spatial reads under contention diverged"

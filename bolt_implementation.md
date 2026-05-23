@@ -44,12 +44,12 @@ the wins are everyone's.
 
 ## Phase summary
 
-| Phase | Name | Output | Estimate | Plan-loop boundary |
-|---|---|---|---|---|
-| **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) |
-| **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop |
-| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) |
-| **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop |
+| Phase | Name | Output | Estimate | Plan-loop boundary | Status |
+|---|---|---|---|---|---|
+| **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
+| **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop | Next |
+| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | Pending |
+| **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
 
@@ -73,7 +73,7 @@ Three library-level changes that the Bolt scoping work surfaced as
 *the right shape*. Each lands in its own commit, has its own
 non-Bolt beneficiaries, and gates a later Phase C sub-phase.
 
-### A.1 — `Value::Node` / `Relationship` / `Path` / `List` / `Map` enum variants
+### A.1 — `Value::Node` / `Relationship` / `Path` / `List` / `Map` enum variants — ✅ Shipped (0.10.0)
 
 **Why now.** Today's `Value` enum (`src/datatypes/values.rs`) lacks
 all five. `RETURN n` collapses to `Value::String(node.title)`;
@@ -122,7 +122,7 @@ start until this is shipped.
 match-site sweep is a week; the serialization back-compat is 2 days;
 the test pinning is 2 days.
 
-### A.2 — `KgErrorCode` enum + typed Python exception hierarchy
+### A.2 — `KgErrorCode` enum + typed Python exception hierarchy — ✅ Shipped (0.10.0)
 
 **Why now.** Today's Cypher errors flatten to `PyErr(msg: String)` at
 the boundary. The Bolt server needs typed codes for FAILURE messages
@@ -162,7 +162,7 @@ is shipped.
 
 **Estimate.** ~3-5 days.
 
-### A.3 — `CALL db.labels()` / `db.relationshipTypes()` / `db.indexes()` procedures
+### A.3 — `CALL db.labels()` / `db.relationshipTypes()` / `db.indexes()` procedures — ✅ Shipped (0.10.0)
 
 **Why now.** These are the canonical Neo4j schema-introspection
 procedures. Every Bolt client uses them. KGLite already has

@@ -32,7 +32,8 @@ use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
 
 use super::shared::{
-    compute_complexity, extract_comment_annotations, node_text, BRANCH_KINDS_DART,
+    compute_complexity, extract_comment_annotations, file_to_module_path, make_qualified,
+    node_text, BRANCH_KINDS_DART,
 };
 use super::LanguageParser;
 use crate::code_tree::models::{
@@ -186,7 +187,7 @@ impl DartParser {
         });
         let line = node.start_position().row as u32 + 1;
         let end_line = node.end_position().row as u32 + 1;
-        let qname = make_qualified(module_path, "", &name);
+        let qname = make_qualified(module_path, "", &name, '.');
 
         let supertypes = collect_supertypes(node, source);
 
@@ -248,7 +249,7 @@ impl DartParser {
         };
         let line = node.start_position().row as u32 + 1;
         let end_line = node.end_position().row as u32 + 1;
-        let qname = make_qualified(module_path, "", &name);
+        let qname = make_qualified(module_path, "", &name, '.');
 
         let mut variants: Vec<String> = Vec::new();
         if let Some(body) = node.child_by_field_name("body") {
@@ -603,7 +604,7 @@ impl DartParser {
                     .child_by_field_name("value")
                     .map(|v| truncate_preview(node_text(v, source)));
                 result.constants.push(ConstantInfo {
-                    qualified_name: make_qualified(module_path, "", &name),
+                    qualified_name: make_qualified(module_path, "", &name, '.'),
                     kind: "constant".to_string(),
                     type_annotation: type_annotation.clone(),
                     value_preview,
@@ -638,7 +639,7 @@ impl DartParser {
             .find(|c| matches!(c.kind(), "type" | "function_type") && c.id() != name_node.id())
             .map(|c| truncate_preview(node_text(c, source)));
         result.constants.push(ConstantInfo {
-            qualified_name: make_qualified(module_path, "", &name),
+            qualified_name: make_qualified(module_path, "", &name, '.'),
             kind: "type_alias".to_string(),
             type_annotation: None,
             value_preview: aliased,
@@ -1098,28 +1099,9 @@ fn strip_string_quotes(s: &str) -> String {
     s.to_string()
 }
 
-fn make_qualified(module_path: &str, owner_prefix: &str, name: &str) -> String {
-    match (module_path.is_empty(), owner_prefix.is_empty()) {
-        (true, true) => name.to_string(),
-        (true, false) => format!("{owner_prefix}.{name}"),
-        (false, true) => format!("{module_path}.{name}"),
-        (false, false) => format!("{owner_prefix}.{name}"),
-    }
-}
-
-/// Dart has no build-system-independent module identity (libraries are
-/// named by `pubspec.yaml` package + file path). Mirror the Swift parser:
-/// derive a per-file module name from the source-root dir + file stem so
-/// the module-graph machinery still has a unique handle per file.
-fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
-    let stem = filepath.file_stem().and_then(|o| o.to_str()).unwrap_or("");
-    let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
-    match (pkg.is_empty(), stem.is_empty()) {
-        (true, _) => stem.to_string(),
-        (false, true) => pkg.to_string(),
-        (false, false) => format!("{pkg}.{stem}"),
-    }
-}
+// `make_qualified` and `file_to_module_path` were inlined here pre-0.9.53;
+// consolidated into `super::shared` with a `separator` parameter (Dart and
+// most other languages use `.`; PHP uses `\`).
 
 impl LanguageParser for DartParser {
     fn language_name(&self) -> &'static str {
@@ -1150,7 +1132,7 @@ impl LanguageParser for DartParser {
         // A `part of` file adopts its parent library's module path so the
         // split-across-files library collapses into one logical module.
         let module_path = resolve_part_of(root, source_bytes, src_root)
-            .unwrap_or_else(|| file_to_module_path(filepath, src_root));
+            .unwrap_or_else(|| file_to_module_path(filepath, src_root, '.'));
 
         let filename = filepath
             .file_name()

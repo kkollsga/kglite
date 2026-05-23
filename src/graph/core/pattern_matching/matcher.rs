@@ -896,9 +896,22 @@ impl<'a> PatternExecutor<'a> {
         // Try ID index for {id: value} patterns — O(1) lookup.
         // Alias-aware: `nid` / `qid` anchor via the same per-type
         // id_index that `id` does — same index, same semantics.
+        //
+        // Phase A.3 / 0.9.53 fix: also routes through `lookup_by_id_readonly`
+        // when the queried property is the user-declared ID alias for
+        // this type (e.g. `add_nodes(df, "Star", "starId", "title")`
+        // makes `starId` an alias for the canonical id). Pre-fix, those
+        // queries fell through to a full type scan.
         if equality_props.len() == 1 {
             let (prop_name, value) = equality_props[0];
-            if matches!(prop_name.as_str(), "id" | "nid" | "qid") {
+            let is_id_alias = matches!(prop_name.as_str(), "id" | "nid" | "qid")
+                || self
+                    .graph
+                    .id_field_aliases
+                    .get(node_type)
+                    .map(|alias| alias == prop_name.as_str())
+                    .unwrap_or(false);
+            if is_id_alias {
                 if let Some(idx) = self.graph.lookup_by_id_readonly(node_type, value) {
                     return Some(vec![idx]);
                 }

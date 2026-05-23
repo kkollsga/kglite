@@ -135,7 +135,6 @@ pub struct RankIndex {
     kept_count: u32,
 }
 
-#[allow(dead_code)] // Phase 4 consumes every method.
 impl RankIndex {
     /// Build the rank-1 index from a kept-nodes bitset. Single linear
     /// pass over the `Vec<u64>` blocks; cost is O(n_blocks).
@@ -189,13 +188,6 @@ impl RankIndex {
         let mask: u64 = if bit == 0 { 0 } else { (1u64 << bit) - 1 };
         let within_block = (block & mask).count_ones();
         Some(self.block_prefix[block_idx] + within_block)
-    }
-
-    /// Borrow the underlying bitset — used by tests and Phase 4 when
-    /// iterating kept ids directly.
-    #[inline]
-    pub fn bitset(&self) -> &Bitset {
-        &self.bitset
     }
 }
 

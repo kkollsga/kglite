@@ -981,3 +981,16 @@ pub(super) fn call_param_string_list(
         _ => None,
     })
 }
+
+/// CALL procedure helper: look up a YIELD column's user-facing alias
+/// (returns the alias if `YIELD name AS alias` was used, or the bare
+/// column name when no alias). Returns `None` if the column wasn't
+/// listed in the YIELD clause — caller can skip emitting it.
+///
+/// Consolidated 0.9.53 from `affected_tests.rs` and `refresh_stats.rs`.
+pub(super) fn yield_alias(yield_items: &[YieldItem], expected: &str) -> Option<String> {
+    yield_items
+        .iter()
+        .find(|y| y.name == expected)
+        .map(|item| item.alias.clone().unwrap_or_else(|| expected.to_string()))
+}
