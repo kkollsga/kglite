@@ -108,12 +108,17 @@ questions traverse it.
 | **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want Cypher + Python ergonomics + LLM-agent
-plumbing in one wheel. **Pick Kuzu** for full openCypher coverage and
-analytical OLAP throughput. **Pick NetworkX** when you need its
+plumbing in one wheel. **Pick Kuzu** if your workload is heavy
+analytical OLAP and you can accept that the project is no longer
+maintained (archived 2025). **Pick NetworkX** when you need its
 enormous graph-algorithm library and your data fits in RAM. **Pick
 rustworkx** when you want NetworkX's API in Rust with no query
 language. **Pick Neo4j Embedded** when you've standardised on
 server-mode Cypher and want the in-process driver for tests.
+
+> **What's coming.** The [roadmap](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md)
+> lays out where this is heading — Bolt protocol server first
+> (drop-in for any Neo4j-aware client), then bindings beyond Python.
 
 ## Quick Start
 
@@ -288,22 +293,13 @@ g = wikidata.open("/data/wd", storage="memory",                  # in-memory, fa
 
 ### Sodir (Norwegian Offshore Directorate)
 
-Petroleum-domain graph from the public ArcGIS REST FeatureServer at
-[factmaps.sodir.no](https://factmaps.sodir.no/api/rest/services/DataService) —
-33 baseline node types (Field, Wellbore, Discovery, Licence,
-Stratigraphy, …), ~480 k nodes, parallel-fetched and built in seconds:
-
-```python
-from kglite.datasets import sodir
-
-g = sodir.open("/data/sodir")  # in-memory by default; ~30s first run
-g = sodir.open("/data/sodir", complement_blueprint="my_extras.json")  # extend baseline
-```
-
-Two-tier cooldown — cheap row-count probes every 14 days; full
-per-dataset re-fetch every 30 days. Add a *complement blueprint* to
-extend the baseline (new node types, custom edges) without touching
-the canonical schema.
+Petroleum-domain example dataset — `sodir.open("/data/sodir")` returns
+a queryable graph of fields, wellbores, discoveries, licences,
+stratigraphy and 28 more node types from the public ArcGIS REST
+FeatureServer at [factmaps.sodir.no](https://factmaps.sodir.no/api/rest/services/DataService).
+Built in ~30 s on first run, cached after. Useful as a worked example
+of `complement_blueprint` (extend a baseline schema without touching
+the canonical types) — **→ [Datasets guide](https://kglite.readthedocs.io/en/latest/guides/datasets.html).**
 
 ## Recipes
 
@@ -435,8 +431,8 @@ Quick reference. Each links into the appropriate guide.
 | **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` |
 | **[Graph algorithms](https://kglite.readthedocs.io/en/latest/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |
 | **Structural validators** | 14 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, more — agent-discoverable integrity checks composable with Cypher |
-| **[Spatial](https://kglite.readthedocs.io/en/latest/guides/spatial.html)** | Coordinates, WKT geometry, distance + containment, geometry primitives (`geom_buffer`, `geom_convex_hull`, `geom_union/intersection/difference`, `geom_is_valid`, `geom_length`), `kg_knn` k-nearest-neighbour |
-| **[Timeseries](https://kglite.readthedocs.io/en/latest/guides/timeseries.html)** | Time-indexed data with `ts_*()` Cypher functions |
+| **[Spatial](https://kglite.readthedocs.io/en/latest/guides/spatial.html)** | Coordinates, WKT geometry, distance + containment, `kg_knn` k-nearest-neighbour. Pragmatic primitives, not a full GIS stack. |
+| **[Timeseries](https://kglite.readthedocs.io/en/latest/guides/timeseries.html)** | Time-indexed values with `ts_*()` Cypher functions. For graphs whose nodes carry value-over-time series. |
 | **[Bulk loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)** | `add_nodes` / `add_connections` for DataFrames |
 | **[Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html)** | Declarative CSV-to-graph loading via JSON config |
 | **[Import/Export](https://kglite.readthedocs.io/en/latest/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |

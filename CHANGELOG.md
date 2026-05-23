@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs — `ROADMAP.md` + identity-aligned README and docs
+
+- **`ROADMAP.md`** (new, repo root) — forward-looking strategy doc.
+  Vision, positioning vs Kuzu (with Kuzu's 2025 archival as the
+  strategic opening), identity-to-lean-into vs identity-to-tone-down,
+  and 9 sequenced roadmap items led by **§1 Bolt protocol server**.
+- **README** — Sodir section trimmed from a full subsection to a brief
+  example-dataset mention with a link to the datasets guide. The
+  "How it compares" Kuzu blurb now notes the archival. Spatial /
+  timeseries descriptions trimmed to acknowledge they are pragmatic
+  primitives, not full-product breadth. New "What's coming" callout
+  links to `ROADMAP.md`.
+- **`docs/index.md`** — opener now leads with the LLM-agent identity
+  ("embedded openCypher engine for LLM-agent workloads"). The
+  "Two APIs" framing is replaced by "Cypher first" — the fluent
+  loaders `add_nodes` / `add_connections` are reframed as how data
+  gets in, not a parallel query surface.
+- **`docs/explanation/design-decisions.md`** — new
+  **"Why an LLM-agent surface"** section names the three concrete
+  decisions (`describe()`, the MCP server binary, honest Cypher over
+  coverage maximalism). The "Why Cypher" section's fluent-API
+  mention is reframed: not a peer surface; new query capabilities land
+  in Cypher first.
+
+No code changes. The identity itself is what already shipped in 0.9.52
+(MCP server, `describe()`, the Phase-5 conformance work) — this pass
+just makes the docs say what the library has become.
+
 ## [0.9.52] — Cypher NULL semantics, batch dedup, shortestPath dedup
 
 ### Fixed — Three-valued NULL logic in WHERE predicates

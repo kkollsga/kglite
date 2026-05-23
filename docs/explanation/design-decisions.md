@@ -21,7 +21,36 @@ protocol, no connection pool, no Docker container.
 
 **When this breaks down:** If you need multi-process access, horizontal
 scaling, or a always-on service. Use Neo4j, ArangoDB, or a similar
-server-based graph database for those cases.
+server-based graph database for those cases. The
+[roadmap](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md)
+includes a Bolt-protocol server (Neo4j's wire protocol) so that
+external tools can talk to a KGLite process when they need to, without
+changing the embedded-by-default design.
+
+## Why an LLM-agent surface
+
+The library is designed so that handing a graph to an agent is one
+step, not a project. Three concrete decisions follow from this:
+
+- **`describe()` returns an XML schema** shaped for system prompts —
+  node types, edge types, sample properties, structural rules — so the
+  agent can write correct Cypher on its first turn instead of
+  discovering the schema by trial and error.
+- **The bundled `kglite-mcp-server` binary** exposes `cypher_query`,
+  `graph_overview`, structural validators, and source-file tools over
+  MCP stdio. Any `.kgl` file becomes a Claude / Cursor / MCP-capable
+  workspace tool with one command.
+- **Honest Cypher semantics over coverage maximalism.** Silent wrong
+  rows would poison an agent's reasoning. The
+  [conformance runner](cypher-conformance.md) cross-checks KGLite
+  against Neo4j on demand, and the
+  [test-fortification work](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md#0952)
+  pinned 30+ NULL / boundary / unicode behaviours into the suite. The
+  preference is to say "we don't support that yet" rather than to
+  return a misleading row.
+
+This is the differentiator: every embedded graph DB stores triples.
+KGLite is the one whose default consumer is an LLM.
 
 ## Why Rust + PyO3
 
@@ -79,8 +108,10 @@ applications need.
 
 **Why Cypher at all?** It's the most widely known graph query language.
 AI agents can write it without learning a custom API. The fluent API
-(`select().where().traverse()`) exists for bulk operations where Cypher
-would be verbose, but Cypher is the primary query interface.
+(`select().where().traverse()`) remains available for Python code that
+benefits from it, but it is not a peer surface — new query
+capabilities land in Cypher first, and consumers should reach for
+`cypher()` by default.
 
 ## Why petgraph
 

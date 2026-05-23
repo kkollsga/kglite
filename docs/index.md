@@ -1,19 +1,29 @@
 # KGLite
 
-A knowledge graph that runs inside your Python process. Load data, query with Cypher, do semantic search — no server, no setup, no infrastructure.
+The embedded openCypher engine for LLM-agent workloads. A knowledge
+graph that runs inside your Python process — load data, query with
+Cypher, hand the graph to an agent via the bundled MCP server. No
+server to run, no infrastructure to manage, one `.kgl` file to ship.
 
-```{rubric} Two APIs
+```{rubric} Cypher first
 ```
 
-Use **Cypher** for querying, mutations, and semantic search. Use the **fluent API** (`add_nodes` / `add_connections`) for bulk-loading DataFrames. Most agent and application code only needs `cypher()`.
+**Cypher** is the primary query surface — agents already know it, and
+the engine targets honest openCypher semantics (three-valued NULL
+logic, conformance-tested against Neo4j on demand). DataFrame
+loaders `add_nodes()` / `add_connections()` exist to get bulk data
+in; once it's in, you query with Cypher.
 
 | | |
 |---|---|
 | Embedded, in-process | No server, no network; `import` and go |
-| In-memory | Persistence via `save()`/`load()` snapshots |
-| Cypher subset | Querying + mutations + `text_score()` for semantic search |
-| Single-label nodes | Each node has exactly one type |
-| Fluent bulk loading | Import DataFrames with `add_nodes()` / `add_connections()` |
+| LLM-agent surface | Bundled MCP server + `describe()` schema for system prompts |
+| Cypher subset, honest semantics | Querying + mutations + `text_score()` for semantic search |
+| In-memory by default | Mapped + disk modes for Wikidata-scale; in-memory is the design centre |
+| Single-label nodes | Each node has exactly one type — see [design decisions](explanation/design-decisions.md) |
+| One-file persistence | `.kgl` snapshots — copy, share, reload elsewhere |
+
+See [`ROADMAP.md`](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md) for what's next (Bolt protocol, multi-language bindings).
 
 **Requirements:** Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
 
