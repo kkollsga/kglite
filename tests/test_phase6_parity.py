@@ -21,7 +21,12 @@ The three tests here are gates, not functional coverage:
   should touch at most three src files beyond the test file. Computed
   against the last on-disk `Phase 5` commit.
 
-Run: pytest -m parity tests/test_phase6_parity.py
+Both gates are pure file scans (no fixtures, no backends), so they run
+in the default `pytest tests/` collection — no `parity` marker. The
+cross-backend functional parity tests live in test_phase{1,2,3,4}_parity.py
+and stay opt-in via `-m parity`.
+
+Run: pytest tests/test_phase6_parity.py
 """
 
 from __future__ import annotations
@@ -29,9 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-import pytest
-
-pytestmark = pytest.mark.parity
+import pytest  # noqa: F401  (kept for downstream marker decorators if added)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

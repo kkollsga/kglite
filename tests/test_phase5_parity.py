@@ -15,7 +15,21 @@ storage refactor. Tests here:
 - **binary-size regression gate** — the release `.dylib` stays under
   the +20% budget relative to the Phase 4 baseline.
 
-Run: pytest -m parity tests/test_phase5_parity.py
+Marker assignment is per-function so the structural gate runs in
+default CI while the rest stay opt-in:
+
+  - `test_enum_match_audit` — unmarked (pure file scan, < 1s).
+  - `test_graph_copy_cow_correctness_*` — `@pytest.mark.parity`
+    (functional, needs backend setup).
+  - `test_binary_size_regression` — `@pytest.mark.binary_size`
+    (needs the release `.dylib` built; CI's `python-tests` job
+    already does `cargo build --release`, so it plugs in there).
+  - `test_dead_code_check` — `@pytest.mark.parity` (runs
+    `cargo clippy --release`, ~30s).
+
+Run: pytest tests/test_phase5_parity.py                  (structural only)
+     pytest tests/test_phase5_parity.py -m parity        (functional)
+     pytest tests/test_phase5_parity.py -m binary_size   (release-build gate)
 """
 
 from __future__ import annotations
@@ -28,8 +42,6 @@ import pandas as pd
 import pytest
 
 from kglite import KnowledgeGraph
-
-pytestmark = pytest.mark.parity
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -138,6 +150,7 @@ def test_enum_match_audit():
     )
 
 
+@pytest.mark.parity
 def test_graph_copy_cow_correctness_memory():
     """Mutating the copy does not affect the original (in-memory backend)."""
 
@@ -164,6 +177,7 @@ def test_graph_copy_cow_correctness_memory():
     assert mod_rows == [{"age": 99}], f"copy update did not apply: {mod_rows}"
 
 
+@pytest.mark.parity
 def test_graph_copy_cow_correctness_mapped():
     """Mutating the copy does not affect the original (mapped backend)."""
 
@@ -187,6 +201,7 @@ def test_graph_copy_cow_correctness_mapped():
     assert mod == [{"age": 99}], f"mapped copy update lost: {mod}"
 
 
+@pytest.mark.binary_size
 def test_binary_size_regression():
     """Release `.dylib` size stays under the 0.9.0 budget.
 
@@ -218,6 +233,7 @@ def test_binary_size_regression():
     )
 
 
+@pytest.mark.parity
 def test_dead_code_check():
     """`cargo clippy -- -D dead_code` flags nothing in the graph module."""
 

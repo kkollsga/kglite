@@ -109,8 +109,9 @@ markers = [
     "stress: opt-in stress tests (30GB mapped, 10k-hop) — select with '-m stress'",
     "differential: cypher optimizer differential tests (optimized vs. naive)",
     "model_download: tests that fetch multi-GB ML model weights (bge-m3 etc.). Opt-in via '-m model_download'.",
+    "binary_size: structural gate that needs the release .dylib built (cargo build --release). CI runs it in the python-tests job which already builds the release artifact for the MCP smoke test.",
 ]
-addopts = "-m 'not benchmark and not parity and not stress and not model_download'"
+addopts = "-m 'not benchmark and not parity and not stress and not model_download and not binary_size'"
 
 [tool.mypy]
 ignore_missing_imports = true

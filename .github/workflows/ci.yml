@@ -106,15 +106,31 @@ jobs:
         # real tool-surface baseline gate.
         run: pip install -e .[mcp]
 
-      - name: Build kglite-mcp-server binary
-        # 0.9.45+: needed by tests/test_mcp_server_smoke.py, which is
+      - name: Build kglite-mcp-server binary + kglite cdylib
+        # 0.9.45+: kglite-mcp-server binary is needed by
+        # tests/test_mcp_server_smoke.py, which is
         # `pytest.mark.skipif(not BINARY.exists())`. Without this step
         # the smoke test silently skips in CI — it's how the Rust
         # save_graph dispatch regression (0.9.20→0.9.44) went undetected.
-        run: cargo build --release -p kglite-mcp-server
+        #
+        # `-p kglite` (in addition to mcp-server) explicitly forces the
+        # libkglite cdylib to build. Cargo only needs the rlib when
+        # kglite is consumed as a workspace dep, and may skip the
+        # cdylib to save time — but the binary_size gate below reads
+        # the cdylib's file size, so we must materialise it.
+        run: cargo build --release -p kglite-mcp-server -p kglite
 
       - name: Run Python tests
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
+
+      - name: Run binary-size gate
+        # The structural gates (god-file, unsafe-SAFETY, enum-match,
+        # mod_rs purity, recording-symbol-export) run inside the regular
+        # `pytest tests/` step above — they're unmarked since they're
+        # pure file scans. test_binary_size_regression needs the release
+        # artifact built above, so it carries `@pytest.mark.binary_size`
+        # and runs in this dedicated step.
+        run: pytest tests/test_phase5_parity.py -m binary_size -v
 
       - name: Run stubtest
         if: matrix.python-version == '3.12'

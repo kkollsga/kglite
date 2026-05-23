@@ -12,7 +12,12 @@ Evergreen quality gates that grew out of the 0.8.0 storage refactor:
   `src/graph/{algorithms,features,introspection,io,mutation,pyapi,query,storage}/`
   is short and contains no `impl` blocks or long function bodies.
 
-Run: pytest -m parity tests/test_phase7_parity.py
+These are pure file scans (no fixtures, no backends, < 1s total) so
+they run in the default `pytest tests/` collection — no `parity`
+marker. The cross-backend functional parity tests live in
+test_phase{1,2,3,4}_parity.py and stay opt-in via `-m parity`.
+
+Run: pytest tests/test_phase7_parity.py
 """
 
 from __future__ import annotations
@@ -21,8 +26,6 @@ from pathlib import Path
 import re
 
 import pytest
-
-pytestmark = pytest.mark.parity
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_GRAPH = REPO_ROOT / "src" / "graph"
