@@ -174,7 +174,15 @@ jobs:
         run: pip install maturin pytest pytest-benchmark pandas
 
       - name: Build and install extension (release)
-        run: maturin develop --release
+        # `maturin develop` requires an active virtualenv. CI's
+        # actions/setup-python uses the system Python directly, so use
+        # `pip install -e .` instead — it builds via maturin under the
+        # PEP517 hood. `MATURIN_PEP517_ARGS=--release` forces the release
+        # profile (default would be debug → slow benchmarks → false
+        # regression).
+        env:
+          MATURIN_PEP517_ARGS: "--release"
+        run: pip install -e .
 
       - name: Run tracked benchmarks
         # Match the harness shape from CLAUDE.md's performance protocol:

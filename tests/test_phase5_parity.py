@@ -37,6 +37,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pandas as pd
 import pytest
@@ -201,18 +202,35 @@ def test_graph_copy_cow_correctness_mapped():
     assert mod == [{"age": 99}], f"mapped copy update lost: {mod}"
 
 
+#: Per-platform 0.9.52 release-library size baseline. The Linux ELF
+#: (libkglite.so) is ~65% larger than the macOS Mach-O (.dylib) for the
+#: same source — different linker behaviour around debug info, lazy
+#: binding, and the absence of macOS-style `strip` defaults. CI runs on
+#: Linux; most local development happens on macOS; both pin separately.
+#: Update both at release time via `make refresh-release-constants`
+#: (run on each platform; the script writes whichever entry matches the
+#: current host).
+BINARY_SIZE_BASELINES = {
+    "darwin": 35_925_104,  # 0.9.52 macOS .dylib
+    "linux": 59_529_016,  # 0.9.52 Linux .so (captured from CI run 26328166598)
+}
+
+
 @pytest.mark.binary_size
 def test_binary_size_regression():
-    """Release `.dylib` size stays under a +10% budget over the
-    last baseline.
+    """Release library size stays under a +10% budget over the per-platform
+    baseline.
 
     Baseline history:
-      - Phase 4 exit:  6,996,688 bytes (≈6.67 MB).
-      - 0.9.0:        23,535,664 bytes (≈22.4 MB). Multi-mode storage,
-                      spatial, timeseries, code-tree, MCP, Cypher
-                      dialect coverage all landed in the 0.8.x sweep.
-      - 0.9.52:       35,925,104 bytes (≈34.3 MB). Growth between
-                      0.9.0 and 0.9.52 (~52%) is concentrated in:
+      - Phase 4 exit:  6,996,688 bytes (≈6.67 MB, macOS).
+      - 0.9.0:        23,535,664 bytes (≈22.4 MB, macOS). Multi-mode
+                      storage, spatial, timeseries, code-tree, MCP,
+                      Cypher dialect coverage all landed in the 0.8.x sweep.
+      - 0.9.52:       35,925,104 bytes (≈34.3 MB, macOS .dylib).
+                      59,529,016 bytes (≈56.8 MB, Linux .so) —
+                      added when the first CI run on 0.9.52 surfaced
+                      the platform divergence. Growth between 0.9.0
+                      and 0.9.52 (~52% on macOS) is concentrated in:
                         * 14 tree-sitter grammars (Dart added 0.9.51,
                           Swift 0.9.40, PHP/HTML/CSS in the 0.9.2x
                           range — each grammar is ~0.5-1 MB);
@@ -237,11 +255,12 @@ def test_binary_size_regression():
         pytest.skip("release build not present — run `cargo build --release` first")
 
     size = bin_path.stat().st_size
-    baseline = 35_925_104  # 0.9.52 baseline
+    platform_key = sys.platform if sys.platform in BINARY_SIZE_BASELINES else "linux"
+    baseline = BINARY_SIZE_BASELINES[platform_key]
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.9.52 baseline {baseline:,}). "
+        f"(+10% over 0.9.52 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )
