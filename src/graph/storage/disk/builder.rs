@@ -1178,6 +1178,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (dg, _) = build_graph_merge_sort(&dir, 4, &edges);
 
+        // SAFETY: paired cleanup for the `set_var` above; same
+        // single-test-scope contract — the build call is sequential
+        // and no concurrent env reads are outstanding here.
         unsafe {
             std::env::remove_var("KGLITE_CSR_FORCE_CHUNKS");
         }

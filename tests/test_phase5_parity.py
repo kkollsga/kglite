@@ -66,6 +66,15 @@ ENUM_MATCH_WHITELIST = {
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
     "io/file.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch.rs": "disk-internal update-path row_id lookup",
+    # Disk-to-disk streaming subgraph filter (save_subset_streaming_disk).
+    # Constructs a fresh DiskGraph destination, sets the bulk-loader
+    # defer_csr flag, and reaches into DiskGraph internals on both source
+    # and dest for sequential edge_endpoints / column_stores reads.
+    # Backend-agnostic dispatch through GraphRead is admitted as
+    # "less optimal but correct" fall-back at line 986+; the disk
+    # arm is the entire reason the file exists ("streaming pipeline is
+    # gated to disk-backed sources", per module doc).
+    "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter (Pass A/B)",
     # 0.9.0 entries: pre-existing leaks confirmed not regressed by
     # 0.9.0 work — none of these files were touched. Each carries a
     # backend-mode dispatch that benefits from monomorphisation
@@ -76,6 +85,13 @@ ENUM_MATCH_WHITELIST = {
     ),
     "pyapi/blueprint.rs": "PyO3 boundary (blueprint storage-mode dispatch)",
     "pyapi/indexes.rs": "PyO3 boundary (index-build storage-mode dispatch)",
+    # Disk-only PyO3 entry points (_save_subset_filtered_by_edge_type,
+    # _scan_edges_filtered) that bridge into the disk-streaming filter.
+    # The dispatch is "disk → call into subgraph_streaming, anything
+    # else → return a clear PyValueError." Trait-wrapping would
+    # invent disk-only trait methods (a smell) or sacrifice the
+    # error-message specificity users see at the Python boundary.
+    "pyapi/algorithms.rs": "PyO3 boundary (disk-only subgraph streaming entry points)",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")

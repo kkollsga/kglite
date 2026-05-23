@@ -29,6 +29,11 @@ STORAGE_MODES = ("memory", "mapped", "disk")
 # three known pre-existing divergences documented at the bottom of this
 # file — see `test_known_disk_divergences_*`. Phase 5 reconciles them.
 STRICT_PARITY_MODES = ("memory", "mapped")
+# 0.9.26 intentionally turned off Cypher CREATE / MERGE on disk-backed
+# graphs (DiskGraph::new_at_path's mutation surface is bulk-loader-only).
+# Tests that exercise mutating Cypher must iterate this subset and let
+# the dedicated disk-lockout test below guard the rejection.
+MUTATING_CYPHER_MODES = ("memory", "mapped")
 
 
 def _new_kg(mode: str, path: str | None = None) -> KnowledgeGraph:
@@ -67,14 +72,16 @@ def _snapshot(kg: KnowledgeGraph, cypher: str) -> list[dict]:
     return _rows(kg.cypher(cypher))
 
 
-def _per_mode(tmp_path, fn):
-    """Run `fn(kg)` on each backend, return {mode: kg}.
+def _per_mode(tmp_path, fn, modes: tuple[str, ...] = STORAGE_MODES):
+    """Run `fn(kg)` on each backend in `modes`, return {mode: kg}.
 
     `fn` performs the mutations under test. The returned kg's are kept
-    alive so follow-up queries can compare state.
+    alive so follow-up queries can compare state. Pass `modes` to
+    restrict to a subset (e.g. `MUTATING_CYPHER_MODES` for tests that
+    use CREATE / MERGE, which are disk-locked since 0.9.26).
     """
     kgs: dict[str, KnowledgeGraph] = {}
-    for mode in STORAGE_MODES:
+    for mode in modes:
         path = str(tmp_path / f"kg_{mode}") if mode == "disk" else None
         kg = _new_kg(mode, path=path)
         _build_seed(kg)
@@ -167,11 +174,17 @@ def test_mid_batch_failure_schema_locked(tmp_path):
 
 
 def test_schema_locked_unknown_property_message(tmp_path):
-    """Error message for CREATE with unknown property is identical across modes."""
+    """Error message for CREATE with unknown property is identical across
+    the modes that support mutating Cypher.
+
+    Disk-backed graphs reject the CREATE itself in 0.9.26+ (before any
+    schema check runs) — see test_disk_create_lockout_message. So the
+    schema-violation message parity is asserted across memory + mapped
+    only, and the disk lockout is guarded by its own dedicated test.
+    """
     messages: dict[str, str] = {}
-    for mode in STORAGE_MODES:
-        path = str(tmp_path / f"kg_{mode}") if mode == "disk" else None
-        kg = _new_kg(mode, path=path)
+    for mode in MUTATING_CYPHER_MODES:
+        kg = _new_kg(mode)
         _build_seed(kg)
         kg.lock_schema()
         try:
@@ -181,7 +194,7 @@ def test_schema_locked_unknown_property_message(tmp_path):
             messages[mode] = str(e)
 
     ref = messages["memory"]
-    for mode in ("mapped", "disk"):
+    for mode in MUTATING_CYPHER_MODES[1:]:
         assert messages[mode] == ref, (
             f"schema-lock message diverged in {mode}:\n  memory: {ref}\n  {mode}: {messages[mode]}"
         )
@@ -230,16 +243,21 @@ def test_tombstone_visibility_detach_delete(tmp_path):
 
 
 def test_merge_idempotency_node(tmp_path):
-    """Running the same MERGE twice: counts identical across backends."""
+    """Running the same MERGE twice: counts identical across the modes
+    that support MERGE.
+
+    Disk-mode MERGE is locked out in 0.9.26+ by design — guarded by
+    `test_disk_merge_lockout_message`.
+    """
 
     def mutate(kg):
         kg.cypher("MERGE (p:Person {id: 1})")
         kg.cypher("MERGE (p:Person {id: 1})")
 
-    kgs = _per_mode(tmp_path, mutate)
+    kgs = _per_mode(tmp_path, mutate, modes=MUTATING_CYPHER_MODES)
     q = "MATCH (n:Person) RETURN count(n) AS c"
     ref = _snapshot(kgs["memory"], q)
-    for mode in ("mapped", "disk"):
+    for mode in MUTATING_CYPHER_MODES[1:]:
         got = _snapshot(kgs[mode], q)
         assert got == ref, f"MERGE node count diverged in {mode}: {got} vs memory {ref}"
     # Sanity: we started with 3 and MERGEd an existing id, so count should stay 3
@@ -249,20 +267,18 @@ def test_merge_idempotency_node(tmp_path):
 def test_merge_idempotency_edge(tmp_path):
     """Same MERGE pattern for an edge, run twice, no duplicates.
 
-    Disk mode has a pre-existing divergence — see
-    `test_known_disk_divergences_merge_edge` below. Phase 5 reconciles.
+    Disk-mode MERGE is locked out in 0.9.26+ — see
+    `test_disk_merge_lockout_message`.
     """
 
     def mutate(kg):
         for _ in range(2):
             kg.cypher("MATCH (a:Person), (b:Person) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:KNOWS]->(b)")
 
-    kgs = _per_mode(tmp_path, mutate)
+    kgs = _per_mode(tmp_path, mutate, modes=MUTATING_CYPHER_MODES)
     q = "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id = 1 AND b.id = 2 RETURN a.id AS a, b.id AS b"
     ref = _snapshot(kgs["memory"], q)
-    for mode in STRICT_PARITY_MODES:
-        if mode == "memory":
-            continue
+    for mode in MUTATING_CYPHER_MODES[1:]:
         got = _snapshot(kgs[mode], q)
         assert got == ref, f"MERGE edge diverged in {mode}: {got} vs memory {ref}"
     assert ref == [{"a": 1, "b": 2}]
@@ -337,13 +353,35 @@ def test_disk_conflict_replace_clears_omitted_properties(tmp_path):
     assert rows == [{"age": None, "email": "alice@new.com"}]
 
 
-def test_disk_merge_edge_visible_after_creation(tmp_path):
-    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_merge"))
+def test_disk_create_lockout_message(tmp_path):
+    """CREATE on a disk-backed graph is intentionally rejected in
+    0.9.26+ — bulk loaders only. The error message must point users
+    at `add_nodes` and the build-then-`to_disk` escape hatch, so the
+    diagnostic is actionable.
+
+    Pinning the message guards against silent rewording — if the
+    rejection text changes, downstream docs / agent guidance need to
+    move with it.
+    """
+    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_create_lockout"))
     _build_seed(kg)
-    for _ in range(2):
-        kg.cypher("MATCH (a:Person), (b:Person) WHERE a.id = 1 AND b.id = 2 MERGE (a)-[:KNOWS]->(b)")
-    rows = _snapshot(
-        kg,
-        "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id = 1 AND b.id = 2 RETURN a.id AS a, b.id AS b",
-    )
-    assert rows == [{"a": 1, "b": 2}]
+    with pytest.raises(Exception) as ei:
+        kg.cypher("CREATE (p:Person {pid: 99, name: 'New'})")
+    msg = str(ei.value)
+    assert "CREATE" in msg and "disk" in msg
+    assert "add_nodes" in msg, msg
+    assert "to_disk" in msg, msg
+
+
+def test_disk_merge_lockout_message(tmp_path):
+    """MERGE on a disk-backed graph is intentionally rejected in
+    0.9.26+ (MERGE shares the CREATE write path). The diagnostic
+    must explain the lockout and the workaround."""
+    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_merge_lockout"))
+    _build_seed(kg)
+    with pytest.raises(Exception) as ei:
+        kg.cypher("MERGE (p:Person {pid: 1})")
+    msg = str(ei.value)
+    assert "MERGE" in msg and "disk" in msg
+    assert "add_nodes" in msg, msg
+    assert "to_disk" in msg, msg

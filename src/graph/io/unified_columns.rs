@@ -368,6 +368,11 @@ pub fn write_unified_columns(
         .truncate(true)
         .open(&bin_path)?;
     file.set_len(total_bytes as u64)?;
+    // SAFETY: `bin_path` was just create-truncated and `file` is the
+    // sole writer in this process for the duration of this function.
+    // memmap2::MmapMut requires the file not be modified externally
+    // while the map is alive; this writer holds the only handle and
+    // the temp path is unique-per-run, so the invariant holds.
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
     for pt in &planned {

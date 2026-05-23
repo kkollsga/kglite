@@ -62,6 +62,10 @@ ENUM_MATCH_WHITELIST = {
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
     "io/file.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch.rs": "disk-internal update-path row_id lookup",
+    # Disk-to-disk streaming subgraph filter (save_subset_streaming_disk).
+    # Mirrors Phase 5 entry; same justification — bulk-path sequential
+    # I/O over DiskGraph internals.
+    "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter (Pass A/B)",
     # 0.9.0 entries: same set as Phase 5 audit. Pre-existing leaks
     # confirmed not regressed by 0.9.0 work.
     "io/ntriples/column_builder.rs": "ntriples columnar-build hot path",
@@ -70,6 +74,9 @@ ENUM_MATCH_WHITELIST = {
     ),
     "pyapi/blueprint.rs": "PyO3 boundary (blueprint storage-mode dispatch)",
     "pyapi/indexes.rs": "PyO3 boundary (index-build storage-mode dispatch)",
+    # Disk-only PyO3 entry points (bridges into subgraph_streaming).
+    # Mirrors Phase 5 entry.
+    "pyapi/algorithms.rs": "PyO3 boundary (disk-only subgraph streaming entry points)",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")

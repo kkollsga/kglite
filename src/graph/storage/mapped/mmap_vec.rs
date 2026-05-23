@@ -289,6 +289,10 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
             // at least keeps subsequent reads from re-pinning more
             // pages. Errors are intentionally ignored — the call is a
             // hint and unprivileged fcntl flags vary across versions.
+            // SAFETY: `file.as_raw_fd()` is owned by `self` for the
+            // duration of the call; `libc::fcntl` with `F_NOCACHE` is
+            // safe to invoke on any valid fd — it does not mutate the
+            // file contents and the int return is ignored.
             unsafe {
                 let _ = libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1);
             }
@@ -755,6 +759,11 @@ impl MmapBytes {
         if let MmapBytes::Mapped { file, len, .. } = self {
             if *len > 0 {
                 use std::os::unix::io::AsRawFd;
+                // SAFETY: `file.as_raw_fd()` is owned by `self` for the
+                // duration of the call. `posix_fadvise` is a page-cache
+                // hint — it does not mutate file contents or read past
+                // `*len` (which is the file's own length); errors are
+                // intentionally ignored.
                 unsafe {
                     let _ = libc::posix_fadvise(
                         file.as_raw_fd(),
@@ -772,6 +781,9 @@ impl MmapBytes {
     pub fn fadvise_dontneed(&self) {
         if let MmapBytes::Mapped { file, .. } = self {
             use std::os::unix::io::AsRawFd;
+            // SAFETY: same contract as the MmapOrVec::fadvise_dontneed
+            // macOS path above — `fcntl(F_NOCACHE)` is a caching hint
+            // on the owned fd, no mutation of file contents.
             unsafe {
                 let _ = libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1);
             }
