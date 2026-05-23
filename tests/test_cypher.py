@@ -1734,12 +1734,6 @@ class TestNumericBoundaries:
         rows = g.cypher("RETURN 9223372036854775807 + 1 AS r").to_list()
         assert rows[0]["r"] == -9223372036854775808  # Int64::MIN
 
-    @pytest.mark.xfail(
-        reason="parser bug: Int64::MIN cannot be expressed as a literal — "
-        "`-9223372036854775808` is parsed as unary-minus on 9223372036854775808, "
-        "which overflows i64 before the minus applies. Fix is parser-side: "
-        "treat the `-DIGITS` combo as a single literal when DIGITS equals i64::MAX+1."
-    )
     def test_int64_min_expressible_as_literal(self):
         """`-9223372036854775808` should parse as Int64::MIN."""
         g = KnowledgeGraph()

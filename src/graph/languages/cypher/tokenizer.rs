@@ -363,10 +363,31 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, u
                         .map_err(|_| format!("Invalid float: {}", num_str))?;
                     tokens.push((CypherToken::FloatLit(f), start));
                 } else {
-                    let n: i64 = num_str
-                        .parse()
-                        .map_err(|_| format!("Invalid integer: {}", num_str))?;
-                    tokens.push((CypherToken::IntLit(n), start));
+                    match num_str.parse::<i64>() {
+                        Ok(n) => tokens.push((CypherToken::IntLit(n), start)),
+                        Err(_) => {
+                            // i64::MIN is the only integer whose magnitude
+                            // overflows i64::from_str (i64::MAX is 2^63-1,
+                            // |i64::MIN| is 2^63). The unary-minus path is
+                            // parsed as a Dash token followed by the
+                            // positive literal — so `-9223372036854775808`
+                            // is unrepresentable through the normal
+                            // route. Look back: if we're directly after a
+                            // Dash and the digit string is exactly 2^63,
+                            // consume the Dash and emit IntLit(i64::MIN).
+                            // Otherwise the literal is genuinely too large.
+                            if num_str == "9223372036854775808"
+                                && tokens
+                                    .last()
+                                    .is_some_and(|(t, _)| matches!(t, CypherToken::Dash))
+                            {
+                                let (_, dash_pos) = tokens.pop().unwrap();
+                                tokens.push((CypherToken::IntLit(i64::MIN), dash_pos));
+                            } else {
+                                return Err(format!("Invalid integer: {}", num_str));
+                            }
+                        }
+                    }
                 }
             }
 
