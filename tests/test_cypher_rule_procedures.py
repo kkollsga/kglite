@@ -546,3 +546,265 @@ class TestParallelEdges:
         g.cypher("MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:LINK]->(b)")
         rows = list(g.cypher("CALL parallel_edges({edge: 'LINK'}) YIELD a, b, count RETURN count"))
         assert rows == []
+
+
+# ============================================================================
+# Phase A.3 — db.* schema-introspection procedures.
+# ============================================================================
+
+
+@pytest.fixture
+def db_proc_graph():
+    """Small graph with 2 node types + 2 relationship types for db.* tests."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1, 2], "title": ["Alice", "Bob"]}),
+        "Person",
+        "id",
+        "title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [10], "title": ["Acme"]}),
+        "Company",
+        "id",
+        "title",
+    )
+    g.add_connections(
+        pd.DataFrame({"p": [1], "c": [10]}),
+        "WORKS_AT",
+        "Person",
+        "p",
+        "Company",
+        "c",
+    )
+    g.add_connections(
+        pd.DataFrame({"p": [2], "c": [10]}),
+        "CONSULTS_FOR",
+        "Person",
+        "p",
+        "Company",
+        "c",
+    )
+    return g
+
+
+class TestDbLabels:
+    """CALL db.labels() — Neo4j-compatible node-type enumeration."""
+
+    def test_returns_all_node_types(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
+        names = {r["name"] for r in rows}
+        assert names == {"Person", "Company"}
+
+    def test_alphabetical_order(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
+        names = [r["name"] for r in rows]
+        assert names == sorted(names), "db.labels() must return labels in alphabetical order"
+
+    def test_yield_alias(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name AS label RETURN label"))
+        assert {r["label"] for r in rows} == {"Person", "Company"}
+
+    def test_empty_graph_returns_zero_rows(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("CALL db.labels() YIELD name RETURN name"))
+        assert rows == []
+
+    def test_invalid_yield_column_rejected(self, db_proc_graph):
+        with pytest.raises(kglite.KgError, match="does not yield"):
+            db_proc_graph.cypher("CALL db.labels() YIELD bogus RETURN bogus")
+
+    def test_post_create_visibility(self, db_proc_graph):
+        """A node type added via CREATE must appear in db.labels() output."""
+        db_proc_graph.cypher("CREATE (n:Product {id: 999, title: 'Widget'})")
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
+        names = {r["name"] for r in rows}
+        assert "Product" in names
+
+    def test_composes_with_where(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name WHERE name STARTS WITH 'P' RETURN name"))
+        assert [r["name"] for r in rows] == ["Person"]
+
+
+class TestDbRelationshipTypes:
+    """CALL db.relationshipTypes() — Neo4j-compatible edge-type enumeration."""
+
+    def test_returns_all_relationship_types(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        names = {r["name"] for r in rows}
+        assert names == {"WORKS_AT", "CONSULTS_FOR"}
+
+    def test_alphabetical_order(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        names = [r["name"] for r in rows]
+        assert names == sorted(names)
+
+    def test_camel_case_procedure_name(self, db_proc_graph):
+        """Procedure dispatch is case-insensitive on the name (Neo4j convention)."""
+        rows_camel = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        rows_lower = list(db_proc_graph.cypher("CALL db.relationshiptypes() YIELD name RETURN name"))
+        assert {r["name"] for r in rows_camel} == {r["name"] for r in rows_lower}
+
+    def test_yield_alias(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name AS rel RETURN rel"))
+        assert {r["rel"] for r in rows} == {"WORKS_AT", "CONSULTS_FOR"}
+
+    def test_empty_graph_returns_zero_rows(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        assert rows == []
+
+    def test_post_create_visibility(self, db_proc_graph):
+        db_proc_graph.cypher("MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:FRIEND_OF]->(b)")
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        names = {r["name"] for r in rows}
+        assert "FRIEND_OF" in names
+
+    def test_invalid_yield_column_rejected(self, db_proc_graph):
+        with pytest.raises(kglite.KgError, match="does not yield"):
+            db_proc_graph.cypher("CALL db.relationshipTypes() YIELD bogus RETURN bogus")
+
+
+class TestNamespacedProcedureParsing:
+    """The parser must accept `<namespace>.<procedure>` qualified names."""
+
+    def test_unknown_dotted_procedure_errors_cleanly(self, db_proc_graph):
+        """A typo in a dotted name should produce 'Unknown procedure', not a parse error."""
+        with pytest.raises(kglite.KgError, match="Unknown procedure"):
+            db_proc_graph.cypher("CALL db.bogus() YIELD name RETURN name")
+
+    def test_dotted_name_with_no_yield_errors(self, db_proc_graph):
+        with pytest.raises(kglite.KgError):
+            db_proc_graph.cypher("CALL db.labels()")
+
+    def test_list_procedures_advertises_db_namespace(self, db_proc_graph):
+        rows = list(db_proc_graph.cypher("CALL list_procedures() YIELD name RETURN name"))
+        names = {r["name"] for r in rows}
+        assert "db.labels" in names
+        assert "db.relationshipTypes" in names
+        assert "db.indexes" in names
+
+
+@pytest.fixture
+def indexed_graph():
+    """Graph with equality, composite, and range indexes for db.indexes() tests."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "title": ["Alice", "Bob", "Carol"],
+                "age": [30, 25, 40],
+                "city": ["Oslo", "Bergen", "Oslo"],
+            }
+        ),
+        "Person",
+        "id",
+        "title",
+    )
+    g.add_nodes(
+        pd.DataFrame({"id": [10], "title": ["Acme"]}),
+        "Company",
+        "id",
+        "title",
+    )
+    g.create_index("Person", "city")  # equality
+    g.create_composite_index("Person", ["age", "city"])  # composite
+    g.create_range_index("Person", "age")  # range
+    return g
+
+
+class TestDbIndexes:
+    """CALL db.indexes() — Neo4j-compatible index enumeration with structured columns."""
+
+    def test_all_columns(self, indexed_graph):
+        rows = list(
+            indexed_graph.cypher(
+                "CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state "
+                "RETURN name, type, entityType, labelsOrTypes, properties, state ORDER BY name"
+            )
+        )
+        # 3 indexes: Person.city (equality), Person.(age,city) (composite), Person.age (range)
+        assert len(rows) == 3
+        # All cover NODE entities, all ONLINE.
+        for r in rows:
+            assert r["entityType"] == "NODE"
+            assert r["state"] == "ONLINE"
+            assert r["labelsOrTypes"] == ["Person"]
+
+    def test_equality_index_columns(self, indexed_graph):
+        rows = list(
+            indexed_graph.cypher(
+                "CALL db.indexes() YIELD name, type, properties WHERE name = 'Person.city' RETURN type, properties"
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0]["type"] == "PROPERTY"
+        assert rows[0]["properties"] == ["city"]
+
+    def test_composite_index_lists_multiple_properties(self, indexed_graph):
+        rows = list(
+            indexed_graph.cypher(
+                "CALL db.indexes() YIELD name, type, properties "
+                "WHERE name STARTS WITH 'Person.(' "
+                "RETURN type, properties"
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0]["type"] == "PROPERTY"
+        assert rows[0]["properties"] == ["age", "city"]
+
+    def test_range_index_marked_with_range_type(self, indexed_graph):
+        """KGLite-specific: range indexes report type='RANGE' (not Neo4j's 'PROPERTY')."""
+        rows = list(indexed_graph.cypher("CALL db.indexes() YIELD name, type WHERE type = 'RANGE' RETURN name"))
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Person.age"
+
+    def test_partial_yield_works(self, indexed_graph):
+        """Users can YIELD a subset of columns."""
+        rows = list(indexed_graph.cypher("CALL db.indexes() YIELD name RETURN name ORDER BY name"))
+        names = [r["name"] for r in rows]
+        assert names == sorted(names)
+        assert len(names) == 3
+
+    def test_yield_alias(self, indexed_graph):
+        rows = list(
+            indexed_graph.cypher(
+                "CALL db.indexes() YIELD name AS idx_name, type AS idx_type RETURN idx_name, idx_type ORDER BY idx_name"
+            )
+        )
+        assert {r["idx_name"] for r in rows} == {
+            "Person.city",
+            "Person.(age,city)",
+            "Person.age",
+        }
+
+    def test_empty_graph_returns_zero_rows(self):
+        g = kglite.KnowledgeGraph()
+        rows = list(g.cypher("CALL db.indexes() YIELD name RETURN name"))
+        assert rows == []
+
+    def test_graph_with_no_indexes_returns_zero_rows(self):
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1], "title": ["A"]}), "T", "id", "title")
+        rows = list(g.cypher("CALL db.indexes() YIELD name RETURN name"))
+        assert rows == []
+
+    def test_invalid_yield_column_rejected(self, indexed_graph):
+        with pytest.raises(kglite.KgError, match="does not yield"):
+            indexed_graph.cypher("CALL db.indexes() YIELD bogus RETURN bogus")
+
+    def test_alphabetical_order(self, indexed_graph):
+        rows = list(indexed_graph.cypher("CALL db.indexes() YIELD name RETURN name"))
+        names = [r["name"] for r in rows]
+        assert names == sorted(names)
+
+    def test_schema_method_still_reports_same_indexes(self, indexed_graph):
+        """Phase A.3 refactored compute_schema() to share collect_indexes_structured —
+        ensure the existing schema()['indexes'] output shape is preserved."""
+        schema_indexes = indexed_graph.schema()["indexes"]
+        # The schema() API formats names with " [range]" suffix and comma+space
+        # in composite property lists; verify both shapes survive the refactor.
+        assert "Person.city" in schema_indexes
+        assert "Person.(age, city)" in schema_indexes
+        assert "Person.age [range]" in schema_indexes

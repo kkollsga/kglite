@@ -647,19 +647,39 @@ impl CypherParser {
     pub(super) fn parse_call_clause(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Call)?;
 
-        // Parse procedure name
-        let procedure_name = match self.peek().cloned() {
+        // Parse procedure name (may be namespaced: `db.labels`, `apoc.coll.sum`).
+        // The tokenizer splits these into Identifier/Dot/Identifier sequences;
+        // we re-join them into a single flat `String` so the executor dispatch
+        // can match on the qualified name. Phase A.3 (Bolt-compat: `db.*`).
+        let mut procedure_name = match self.peek().cloned() {
             Some(CypherToken::Identifier(name)) => {
                 self.advance();
                 name
             }
             other => {
                 return Err(format!(
-                    "Expected procedure name after CALL, got {:?}",
+                    "Expected procedure name after CALL (e.g. `pagerank`, `db.labels`), \
+                     got {:?}",
                     other
                 ));
             }
         };
+        while self.check(&CypherToken::Dot) {
+            self.advance(); // consume `.`
+            match self.peek().cloned() {
+                Some(CypherToken::Identifier(part)) => {
+                    self.advance();
+                    procedure_name.push('.');
+                    procedure_name.push_str(&part);
+                }
+                other => {
+                    return Err(format!(
+                        "Expected identifier after `.` in procedure name, got {:?}",
+                        other
+                    ));
+                }
+            }
+        }
 
         // Parse argument list: ( [{key: val, ...}] )
         self.expect(&CypherToken::LParen)?;

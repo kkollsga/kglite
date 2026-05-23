@@ -113,6 +113,16 @@ impl<'a> CypherExecutor<'a> {
             "kg_knn" => &["node", "distance_m"],
             "affected_tests" => &["test_file", "depth"],
             "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
+            // Phase A.3 — Neo4j-compatible schema introspection procedures.
+            "db.labels" | "db.relationshiptypes" => &["name"],
+            "db.indexes" => &[
+                "name",
+                "type",
+                "entityType",
+                "labelsOrTypes",
+                "properties",
+                "state",
+            ],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -121,7 +131,8 @@ impl<'a> CypherExecutor<'a> {
                      missing_required_edge, missing_inbound_edge, duplicate_title, \
                      null_property, inverse_violation, transitivity_violation, \
                      cardinality_violation, type_domain_violation, \
-                     type_range_violation, parallel_edges",
+                     type_range_violation, parallel_edges, \
+                     db.labels, db.relationshipTypes, db.indexes",
                     clause.procedure_name
                 ));
             }
@@ -486,6 +497,22 @@ impl<'a> CypherExecutor<'a> {
                         "List all available procedures",
                         "name, description, yield_columns",
                     ),
+                    // Phase A.3 — Neo4j-compatible schema introspection.
+                    (
+                        "db.labels",
+                        "All node-type names ('labels') in the graph, sorted",
+                        "name",
+                    ),
+                    (
+                        "db.relationshipTypes",
+                        "All connection-type names ('relationship types') in the graph, sorted",
+                        "name",
+                    ),
+                    (
+                        "db.indexes",
+                        "All indexes in the graph (equality, composite, range), sorted by name",
+                        "name, type, entityType, labelsOrTypes, properties, state",
+                    ),
                 ];
                 let mut rows = Vec::new();
                 for (name, desc, yields) in &procedures {
@@ -511,6 +538,29 @@ impl<'a> CypherExecutor<'a> {
                     rows.push(row);
                 }
                 rows
+            }
+            // Phase A.3 — Neo4j schema introspection procedures. Both yield
+            // a single `name` column; the underlying helpers in
+            // `introspection::schema_overview` are the single source of
+            // truth and are also consumed by `describe()` to prevent drift.
+            "db.labels" => {
+                let labels =
+                    crate::graph::introspection::schema_overview::collect_labels(self.graph);
+                names_to_rows(&labels, &clause.yield_items)
+            }
+            "db.relationshiptypes" => {
+                let rel_types =
+                    crate::graph::introspection::schema_overview::collect_relationship_types(
+                        self.graph,
+                    );
+                names_to_rows(&rel_types, &clause.yield_items)
+            }
+            "db.indexes" => {
+                let infos =
+                    crate::graph::introspection::schema_overview::collect_indexes_structured(
+                        self.graph,
+                    );
+                indexes_to_rows(&infos, &clause.yield_items)
             }
             _ => unreachable!(),
         };
@@ -1054,4 +1104,69 @@ impl<'a> CypherExecutor<'a> {
             lazy: None,
         })
     }
+}
+
+// ============================================================================
+// Phase A.3 — shared helper for single-column name-yielding procedures.
+// ============================================================================
+
+/// Build `ResultRow`s for a procedure that yields a single string column.
+///
+/// Used by `db.labels()` and `db.relationshipTypes()` — both yield one
+/// row per name with a single `name` column. The YIELD validator
+/// guarantees only `name` reaches us, but we still honour the
+/// `YieldItem.alias` (e.g. `YIELD name AS label`).
+fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<ResultRow> {
+    let mut rows = Vec::with_capacity(names.len());
+    for name in names {
+        let mut row = ResultRow::new();
+        for item in yield_items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            if item.name == "name" {
+                row.projected
+                    .insert(alias.to_string(), Value::String(name.clone()));
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Build `ResultRow`s for `db.indexes()` from structured `IndexInfo`.
+///
+/// Column dispatch matches against `item.name`; the YIELD validator already
+/// pre-filtered to the known set so any unknown column would have been
+/// rejected at validate time. We still ignore unknowns defensively in case
+/// the validator's whitelist drifts.
+fn indexes_to_rows(
+    infos: &[crate::graph::introspection::schema_overview::IndexInfo],
+    yield_items: &[YieldItem],
+) -> Vec<ResultRow> {
+    let mut rows = Vec::with_capacity(infos.len());
+    for info in infos {
+        let mut row = ResultRow::new();
+        for item in yield_items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            let val = match item.name.as_str() {
+                "name" => Value::String(info.name.clone()),
+                "type" => Value::String(info.kind.neo4j_type().to_string()),
+                "entityType" => Value::String(info.entity_type.to_string()),
+                "labelsOrTypes" => Value::List(
+                    info.labels_or_types
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+                "properties" => {
+                    Value::List(info.properties.iter().cloned().map(Value::String).collect())
+                }
+                "state" => Value::String(info.state.to_string()),
+                _ => continue, // unreachable in practice (validator gate)
+            };
+            row.projected.insert(alias.to_string(), val);
+        }
+        rows.push(row);
+    }
+    rows
 }

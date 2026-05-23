@@ -887,6 +887,28 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN q.name AS q, c.name AS c ORDER BY q, c",
         None,
     ),
+    # ── Phase A.3 — db.* schema-introspection procedures ──
+    # Pin the canonical YIELD shapes against optimizer rewrites and
+    # cross-mode parity. These have no planner pass to validate, but
+    # the corpus also serves as the cross-mode oracle.
+    (
+        "db_labels_basic",
+        "social_graph",
+        "CALL db.labels() YIELD name RETURN name ORDER BY name",
+        None,
+    ),
+    (
+        "db_relationship_types_basic",
+        "social_graph",
+        "CALL db.relationshipTypes() YIELD name RETURN name ORDER BY name",
+        None,
+    ),
+    (
+        "db_labels_with_where_postfilter",
+        "social_graph",
+        "CALL db.labels() YIELD name WITH name WHERE name STARTS WITH 'C' RETURN name ORDER BY name",
+        None,
+    ),
 ]
 
 

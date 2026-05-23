@@ -366,6 +366,136 @@ pub(super) fn compute_join_candidates(
     candidates
 }
 
+/// All node-type names (Neo4j "labels"), sorted alphabetically.
+///
+/// Phase A.3 — single source of truth for `db.labels()` and any other
+/// caller that needs a deterministic enumeration of node types. Pulls
+/// from both `type_indices` (types with live nodes) and
+/// `node_type_metadata` (types declared via schema validation but no
+/// live nodes yet), matching the existing `get_node_types()` semantics.
+pub(crate) fn collect_labels(graph: &DirGraph) -> Vec<String> {
+    let mut labels = graph.get_node_types();
+    labels.sort();
+    labels
+}
+
+/// Index kind in KGLite's terminology — surfaces via `db.indexes()`.
+///
+/// KGLite has three distinct index kinds where Neo4j collapses two of them
+/// into `PROPERTY`. We expose the distinction because index advisors and
+/// query planners need it: an equality index can't serve a range query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IndexKind {
+    /// Hash-based equality lookup (one property per index).
+    Equality,
+    /// Multi-property equality lookup (conjunctive filters).
+    Composite,
+    /// B-Tree range lookup (supports comparison operators).
+    Range,
+}
+
+impl IndexKind {
+    /// Neo4j-compatible `type` column value for `db.indexes()`.
+    ///
+    /// Equality + Composite both map to `"PROPERTY"` (Neo4j convention);
+    /// `Range` is a KGLite-specific value documented in CYPHER.md.
+    pub(crate) fn neo4j_type(self) -> &'static str {
+        match self {
+            IndexKind::Equality | IndexKind::Composite => "PROPERTY",
+            IndexKind::Range => "RANGE",
+        }
+    }
+}
+
+/// One index entry surfaced by `db.indexes()`.
+///
+/// Field shape mirrors Neo4j's `db.indexes()` minimal subset:
+/// `name, type, entityType, labelsOrTypes, properties, state`. Degenerate
+/// columns (`uniqueness`, `populationPercent`, `indexProvider`) are
+/// deferred until a Bolt client demands them — see Phase A.3 plan.
+#[derive(Debug, Clone)]
+pub(crate) struct IndexInfo {
+    /// Stable string ID — `"<node_type>.<property>"` for equality/range,
+    /// `"<node_type>.(<p1>,<p2>,...)"` for composite.
+    pub name: String,
+    pub kind: IndexKind,
+    /// Always `"NODE"` today; relationship indexes not yet supported.
+    pub entity_type: &'static str,
+    /// Node types this index covers — always a single-element vec today.
+    pub labels_or_types: Vec<String>,
+    /// Indexed property names, in definition order. Length ≥ 2 for composite.
+    pub properties: Vec<String>,
+    /// Always `"ONLINE"` — KGLite indexes are atomic; no POPULATING state.
+    pub state: &'static str,
+}
+
+/// All indexes installed on the graph, in deterministic order.
+///
+/// Phase A.3 — single source of truth for `db.indexes()` and the
+/// `compute_schema()` formatted string list. Walks all three index
+/// stores (`property_indices`, `composite_indices`, `range_indices`)
+/// and produces structured rows. Sorted by `name` so the output is
+/// stable across runs and storage modes.
+pub(crate) fn collect_indexes_structured(graph: &DirGraph) -> Vec<IndexInfo> {
+    let mut out: Vec<IndexInfo> = Vec::new();
+
+    for (node_type, property) in graph.property_indices.keys() {
+        out.push(IndexInfo {
+            name: format!("{node_type}.{property}"),
+            kind: IndexKind::Equality,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties: vec![property.clone()],
+            state: "ONLINE",
+        });
+    }
+    for (node_type, properties) in graph.composite_indices.keys() {
+        out.push(IndexInfo {
+            name: format!("{node_type}.({})", properties.join(",")),
+            kind: IndexKind::Composite,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties: properties.clone(),
+            state: "ONLINE",
+        });
+    }
+    for (node_type, property) in graph.range_indices.keys() {
+        out.push(IndexInfo {
+            name: format!("{node_type}.{property}"),
+            kind: IndexKind::Range,
+            entity_type: "NODE",
+            labels_or_types: vec![node_type.clone()],
+            properties: vec![property.clone()],
+            state: "ONLINE",
+        });
+    }
+
+    out.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| (a.kind as u8).cmp(&(b.kind as u8)))
+    });
+    out
+}
+
+/// All connection-type names (Neo4j "relationship types"), sorted alphabetically.
+///
+/// Phase A.3 — single source of truth for `db.relationshipTypes()`. Unions
+/// two sources to match Neo4j semantics ("types that currently exist in
+/// the graph"):
+///   1. `connection_type_metadata` — types declared via `add_connections`
+///      (always populated for these; carries source/target/property schemas).
+///   2. `get_edge_type_counts` — live edge scan (populated for types added
+///      via raw `CREATE ()-[:T]->()` cypher, which doesn't upsert metadata
+///      for fresh types).
+pub(crate) fn collect_relationship_types(graph: &DirGraph) -> Vec<String> {
+    let mut types: HashSet<String> = graph.connection_type_metadata.keys().cloned().collect();
+    types.extend(graph.get_edge_type_counts().into_keys());
+    let mut out: Vec<String> = types.into_iter().collect();
+    out.sort();
+    out
+}
+
 /// Full schema overview: node types, connection types, indexes, totals.
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // Node types from type_indices
@@ -392,17 +522,22 @@ pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // Connection types via edge scan
     let connection_types = compute_connection_type_stats(graph);
 
-    // Indexes
-    let mut indexes: Vec<String> = Vec::new();
-    for (node_type, property) in graph.property_indices.keys() {
-        indexes.push(format!("{}.{}", node_type, property));
-    }
-    for (node_type, properties) in graph.composite_indices.keys() {
-        indexes.push(format!("{}.({})", node_type, properties.join(", ")));
-    }
-    for (node_type, property) in graph.range_indices.keys() {
-        indexes.push(format!("{}.{} [range]", node_type, property));
-    }
+    // Indexes — formatted from the structured helper that also feeds
+    // `db.indexes()`. String shape preserved to keep schema() Python API
+    // tests green:
+    //   - Equality: "Type.prop"
+    //   - Composite: "Type.(p1, p2)"
+    //   - Range: "Type.prop [range]"
+    let mut indexes: Vec<String> = collect_indexes_structured(graph)
+        .into_iter()
+        .map(|idx| match idx.kind {
+            IndexKind::Equality => format!("{}.{}", idx.labels_or_types[0], idx.properties[0]),
+            IndexKind::Composite => {
+                format!("{}.({})", idx.labels_or_types[0], idx.properties.join(", "))
+            }
+            IndexKind::Range => format!("{}.{} [range]", idx.labels_or_types[0], idx.properties[0]),
+        })
+        .collect();
     indexes.sort();
 
     SchemaOverview {

@@ -871,6 +871,70 @@ graph.shortest_path_length("Stop", "A", "Stop", "Z")                          # 
 
 Same Louvain plumbing — `weight_property=None` falls back to BFS.
 
+## Schema Introspection (`CALL db.*`)
+
+Neo4j-compatible schema procedures for discovering what's in the graph
+without leaving Cypher. Every Bolt client (cypher-shell, Neo4j Browser,
+the Python `neo4j` driver) calls these to populate type palettes, drive
+autocomplete, and surface index advisors.
+
+| Procedure | YIELD columns | Returns |
+|-----------|---------------|---------|
+| `CALL db.labels()` | `name` | One row per node-type ("label") in the graph, sorted alphabetically |
+| `CALL db.relationshipTypes()` | `name` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
+| `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name` |
+
+Procedure names are case-insensitive on dispatch (Neo4j convention
+preserves camelCase in docs: `db.relationshipTypes`, not
+`db.relationship_types`). YIELD columns are case-sensitive.
+
+```python
+# Enumerate node types
+for row in graph.cypher("CALL db.labels() YIELD name RETURN name"):
+    print(row["name"])
+
+# Find relationship types matching a prefix
+graph.cypher("""
+    CALL db.relationshipTypes() YIELD name
+    WHERE name STARTS WITH 'WORKS'
+    RETURN name
+""")
+
+# Inspect indexes
+for idx in graph.cypher("""
+    CALL db.indexes() YIELD name, type, properties
+    RETURN name, type, properties ORDER BY name
+"""):
+    print(f"{idx['name']:30}  type={idx['type']:9}  props={idx['properties']}")
+```
+
+### `db.indexes()` column semantics
+
+| Column | KGLite value |
+|--------|--------------|
+| `name` | `"<NodeType>.<property>"` (equality / range) or `"<NodeType>.(p1,p2,...)"` (composite) |
+| `type` | `"PROPERTY"` for equality + composite indexes; `"RANGE"` for B-tree range indexes |
+| `entityType` | Always `"NODE"` — relationship indexes are not yet supported |
+| `labelsOrTypes` | `[node_type]` — single-element list |
+| `properties` | `[property]` for equality/range; `[p1, p2, ...]` for composite |
+| `state` | Always `"ONLINE"` — KGLite indexes are atomic, no `POPULATING` state |
+
+**KGLite extension.** Neo4j collapses equality + range under a single
+`type = "PROPERTY"`; KGLite distinguishes range indexes
+(`type = "RANGE"`) because the planner uses the distinction — an
+equality index can't serve a range query. Index advisors and tooling
+that branch on `type` get the information they need without parsing
+the `name` string.
+
+### Cross-reference with the Python API
+
+`db.indexes()` is the procedure form of the Python
+`KnowledgeGraph.list_indexes()` method — both pull from the same
+introspection helper, so output stays in sync. Use `db.indexes()`
+from a Bolt client or inside a Cypher pipeline; use `list_indexes()`
+from Python code where you'd rather have a Python list of dicts than
+a `cypher()` result.
+
 ## CREATE / SET / DELETE / REMOVE / MERGE
 
 ```python
@@ -1137,6 +1201,7 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code-tree graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
+| **Schema** | `CALL db.labels() YIELD name`, `CALL db.relationshipTypes() YIELD name`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` (0.10.0+, Bolt-compatible) |
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
