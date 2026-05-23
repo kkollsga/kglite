@@ -359,13 +359,30 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "keys" => {
-                // keys(n) or keys(r) — return property names as a JSON list
+                // keys(n) or keys(r) — return property names as a JSON list.
+                //
+                // Includes both the virtual aliases (`id`, `title`, `type`)
+                // and the user's original column names (the unique-id-field
+                // and title-field passed to add_nodes), so the output
+                // matches what `n.<name>` would resolve at query time. The
+                // alias machinery (DirGraph::resolve_alias) treats both
+                // forms as readable; keys() should make both discoverable.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let mut keys: Vec<&str> = vec!["id", "title", "type"];
-                            keys.extend(node.property_keys(&self.graph.interner));
+                            let node_type = node.node_type_str(&self.graph.interner);
+                            let mut keys: Vec<String> =
+                                vec!["id".to_string(), "title".to_string(), "type".to_string()];
+                            if let Some(id_alias) = self.graph.id_field_aliases.get(node_type) {
+                                keys.push(id_alias.clone());
+                            }
+                            if let Some(title_alias) = self.graph.title_field_aliases.get(node_type)
+                            {
+                                keys.push(title_alias.clone());
+                            }
+                            keys.extend(node.property_keys(&self.graph.interner).map(String::from));
                             keys.sort();
+                            keys.dedup();
                             return Ok(Value::String(format!(
                                 "[{}]",
                                 keys.iter()

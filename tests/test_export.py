@@ -5,7 +5,6 @@ import os
 import tempfile
 
 import pandas as pd
-import pytest
 
 from kglite import KnowledgeGraph
 
@@ -211,37 +210,29 @@ class TestPropertyNamingRoundTrip:
 
     # ── keys() discoverability bug ─────────────────────────────────────
 
-    @pytest.mark.xfail(
-        reason="discoverability bug surfaced by Phase 5 conformance work: "
-        "keys(n) returns the virtual names (id/title/type) and omits the "
-        "user's `person_id` / `name` columns. n.person_id is READABLE but "
-        "not ENUMERABLE — inconsistent. Fix lives in the scalar `keys()` "
-        "implementation in cypher executor; should reflect the alias table "
-        "for the node's type so callers see the names they set."
-    )
     def test_keys_includes_user_set_column_names(self):
-        """`keys(n)` should enumerate `person_id` and `name` since both
-        are readable via `n.person_id` / `n.name`. Currently returns the
-        virtual `['id', 'title', 'type']` set instead."""
+        """`keys(n)` enumerates the original column names (`person_id`,
+        `name`) alongside the virtual aliases (`id`, `title`, `type`).
+        Both forms are readable via `n.<name>` thanks to KGLite's alias
+        machinery, and keys() reflects both."""
         g = self._fixture()
         rows = g.cypher("MATCH (n:Person {person_id: 1}) RETURN keys(n) AS k").to_list()
         keys = set(rows[0]["k"])
         assert "person_id" in keys, f"keys(n) should include 'person_id'; got {sorted(keys)}"
         assert "name" in keys, f"keys(n) should include 'name'; got {sorted(keys)}"
 
-    def test_keys_currently_returns_virtual_names_only(self):
-        """Pin the current keys(n) output so the discoverability bug is
-        visible. When the xfail test above starts passing, the user
-        column names will appear here too — at which point this test
-        becomes redundant and can be removed."""
+    def test_keys_still_includes_virtual_names(self):
+        """The additive keys() fix keeps `id`/`title`/`type` in the
+        output for backward compatibility — existing code that grep'd
+        for them keeps working alongside the new user-column-name
+        discoverability."""
         g = self._fixture()
         rows = g.cypher("MATCH (n:Person {person_id: 1}) RETURN keys(n) AS k").to_list()
         keys = set(rows[0]["k"])
-        # Today: virtual names + non-aliased user columns (city).
         assert "id" in keys
         assert "title" in keys
         assert "type" in keys
-        assert "city" in keys  # Non-aliased user column does appear.
+        assert "city" in keys  # Non-aliased user column.
 
     # ── to_neo4j naming ────────────────────────────────────────────────
 
