@@ -170,19 +170,23 @@ jobs:
           key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-perf-
 
+      - name: Set up venv (maturin develop needs one)
+        # `maturin develop --release` is the standard way to install
+        # the extension in release mode for development. It requires
+        # an active venv. CI's actions/setup-python uses the system
+        # Python, so we create `.venv` ourselves and prepend its bin
+        # to PATH so every subsequent step picks up the venv's pip /
+        # maturin / pytest. `.venv` is the directory name maturin
+        # auto-detects, so no VIRTUAL_ENV export needed.
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
       - name: Install dependencies
         run: pip install maturin pytest pytest-benchmark pandas
 
       - name: Build and install extension (release)
-        # `maturin develop` requires an active virtualenv. CI's
-        # actions/setup-python uses the system Python directly, so use
-        # `pip install -e .` instead — it builds via maturin under the
-        # PEP517 hood. `MATURIN_PEP517_ARGS=--release` forces the release
-        # profile (default would be debug → slow benchmarks → false
-        # regression).
-        env:
-          MATURIN_PEP517_ARGS: "--release"
-        run: pip install -e .
+        run: maturin develop --release
 
       - name: Run tracked benchmarks
         # Match the harness shape from CLAUDE.md's performance protocol:
