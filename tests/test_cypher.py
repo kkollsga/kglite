@@ -1634,6 +1634,325 @@ class TestThreeValuedNullSemantics:
         assert len(rows) == 0
 
 
+class TestNullInPredicate:
+    """openCypher: `IN` with a NULL operand propagates NULL.
+
+    Three cases:
+      1. NULL LHS:                     `NULL IN [1, 2]`        → NULL
+      2. NULL element, no match:       `'x' IN ['a', NULL]`    → NULL
+      3. NULL inside expr-evaluated:   `(NULL + 1) IN [2]`     → NULL
+
+    The deferred-fix path lives at where_clause.rs:543-552 (`Predicate::In`)
+    and 592-603 (`Predicate::InExpression`). Both currently collapse to
+    boolean (return `Ok(Some(false))` on no-match, even when NULL was
+    involved). These tests pin the desired behaviour against the
+    fixture-graph and are marked xfail with the source pointer until
+    the fix lands — same playbook as the B1/B2 NULL fix.
+    """
+
+    @pytest.mark.xfail(reason="deferred: where_clause.rs:543 — IN with NULL LHS still returns Some(false)")
+    def test_null_lhs_in_literal_list(self, cypher_graph):
+        """NULL IN [1, 2, 3] → NULL → row excluded.
+
+        Use Bob (email=None) so `p.email IN ['a', 'b']` exercises the
+        NULL-LHS path. None of his emails match either literal so the
+        pre-fix code returns false (row excluded), which happens to
+        agree with the openCypher answer in *this* case. Differential
+        check below tests the discriminating case.
+        """
+        # Pre-fix gives [Alice, Charlie] for the bare-positive query —
+        # these aren't NULL so they're fine. Bob and Diana (email=None):
+        # NULL IN [...] should be NULL → excluded. Pre-fix also excludes
+        # (no match → false). Same answer in that case.
+        # The discriminating case is the negation below: NULL IN [...]
+        # under NOT keeps Bob/Diana on the pre-fix path but should drop
+        # them under correct openCypher semantics.
+        rows_neg = cypher_graph.cypher(
+            "MATCH (p:Person) WHERE NOT (p.email IN ['alice@test.com', 'charlie@test.com']) "
+            "RETURN p.title AS n ORDER BY n"
+        )
+        # Eve should match (her email exists, ne both); Bob/Diana have NULL email,
+        # NULL IN [...] is NULL, NOT NULL is NULL, row excluded.
+        # Pre-fix: NULL IN [...] is false, NOT false is true, Bob+Diana INCLUDED.
+        assert [r["n"] for r in rows_neg] == ["Eve"], f"got {[r['n'] for r in rows_neg]}"
+
+    @pytest.mark.xfail(
+        reason="deferred: where_clause.rs:546 — IN with NULL list element, no match, returns false instead of NULL"
+    )
+    def test_null_element_in_list_no_match(self, cypher_graph):
+        """When the list contains NULL and the LHS doesn't match any
+        non-NULL element, openCypher returns NULL (not false). Pre-fix
+        returns false (which then incorrectly evaluates to true under NOT)."""
+        rows = cypher_graph.cypher(
+            "MATCH (p:Person) WHERE NOT (p.title IN ['Alice', null, 'Bob']) RETURN p.title AS n ORDER BY n"
+        )
+        # Charlie/Diana/Eve don't match the non-NULL entries; list contains NULL
+        # → NULL → NOT NULL is NULL → rows excluded.
+        # Pre-fix: NULL IN list returns false, NOT false is true, ALL excluded
+        # rows returned. The desired behaviour is empty result.
+        assert [r["n"] for r in rows] == [], f"got {[r['n'] for r in rows]}"
+
+    @pytest.mark.xfail(reason="deferred: same path as test_null_lhs_in_literal_list, expression-flavoured")
+    def test_null_expression_in_list(self, cypher_graph):
+        """Expression evaluating to NULL in IN LHS — same propagation rule.
+        Exercises `Predicate::InExpression` (the expression-RHS variant)."""
+        rows = cypher_graph.cypher(
+            "MATCH (p:Person) WHERE NOT ((p.email + '@x') IN ['a@x', 'b@x']) RETURN p.title AS n ORDER BY n"
+        )
+        # Bob/Diana: (NULL + '@x') is NULL → NULL IN [...] is NULL → NOT NULL is NULL → excluded.
+        # Alice/Charlie/Eve: their composed emails don't match — false → NOT false is true → included.
+        assert [r["n"] for r in rows] == ["Alice", "Charlie", "Eve"], f"got {[r['n'] for r in rows]}"
+
+
+class TestNumericBoundaries:
+    """Pin the observable behaviour for numeric edge cases.
+
+    Some of these are openCypher-spec-defensible, some are bugs. Each
+    test documents which is which. Pinning the current behaviour means
+    a future change is forced to be deliberate.
+    """
+
+    def test_int64_overflow_wraps_silently(self):
+        """Int64::MAX + 1 silently wraps to Int64::MIN.
+
+        This is the underlying Rust `wrapping_add` behaviour and is
+        worth flagging — openCypher technically expects either an
+        error or a Float64 promotion. KGLite chose silent wrap for
+        consistency with arithmetic on `+` / `-`. Pinning so a future
+        change to error/promote is deliberate.
+        """
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN 9223372036854775807 + 1 AS r").to_list()
+        assert rows[0]["r"] == -9223372036854775808  # Int64::MIN
+
+    @pytest.mark.xfail(
+        reason="parser bug: Int64::MIN cannot be expressed as a literal — "
+        "`-9223372036854775808` is parsed as unary-minus on 9223372036854775808, "
+        "which overflows i64 before the minus applies. Fix is parser-side: "
+        "treat the `-DIGITS` combo as a single literal when DIGITS equals i64::MAX+1."
+    )
+    def test_int64_min_expressible_as_literal(self):
+        """`-9223372036854775808` should parse as Int64::MIN."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN -9223372036854775808 AS r").to_list()
+        assert rows[0]["r"] == -9223372036854775808
+
+    def test_integer_division_truncates_toward_zero(self):
+        """-5 / 2 = -2 (not -3); 5 / -2 = -2 (not -3).
+
+        Matches Rust's i64 division semantics and most languages.
+        Neo4j also rounds toward zero. Stable and defensible."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN -5 / 2 AS a, 5 / -2 AS b").to_list()
+        assert rows[0]["a"] == -2
+        assert rows[0]["b"] == -2
+
+    def test_division_by_zero_returns_null(self):
+        """Both int and float division by zero returns NULL.
+
+        openCypher would prescribe NULL for int/0 and ±Inf / NaN for
+        float/0, but KGLite has chosen the more conservative
+        "always NULL" path. Pinning so a future Inf/NaN swap is
+        explicit."""
+        g = KnowledgeGraph()
+        rows = g.cypher(
+            "RETURN 5 / 0 AS int_zero, 1.0 / 0.0 AS pos_inf, -1.0 / 0.0 AS neg_inf, 0.0 / 0.0 AS nan"
+        ).to_list()
+        assert rows[0]["int_zero"] is None
+        assert rows[0]["pos_inf"] is None
+        assert rows[0]["neg_inf"] is None
+        assert rows[0]["nan"] is None
+
+    def test_modulo_sign_follows_dividend(self):
+        """-5 % 3 = -2; 5 % -3 = 2. Sign of result follows the dividend.
+
+        Rust / Java semantics; differs from Python's `(-5) % 3 == 1`."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN -5 % 3 AS a, 5 % -3 AS b").to_list()
+        assert rows[0]["a"] == -2
+        assert rows[0]["b"] == 2
+
+
+class TestCollectionEdges:
+    """Pin list/collection edge-case behaviour: indexing, slicing,
+    comprehension over empty / NULL inputs."""
+
+    def test_head_last_on_null_returns_null(self):
+        """head(null) and last(null) propagate NULL (not raise)."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN head(null) AS h, last(null) AS l").to_list()
+        assert rows[0] == {"h": None, "l": None}
+
+    def test_negative_indexing(self):
+        """`list[-1]` is the last element, `[-N]` the first if N == size."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN [1, 2, 3][-1] AS a, [1, 2, 3][-3] AS b").to_list()
+        assert rows[0] == {"a": 3, "b": 1}
+
+    def test_out_of_bounds_indexing_returns_null(self):
+        """`list[N]` and `list[-N]` where |N| > size(list) returns NULL.
+        openCypher's preferred semantics (no IndexError)."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN [1, 2, 3][10] AS pos, [1, 2, 3][-10] AS neg").to_list()
+        assert rows[0] == {"pos": None, "neg": None}
+
+    def test_out_of_bounds_slicing_returns_empty(self):
+        """`list[10..20]` on a 3-element list returns [] (not error)."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN [1, 2, 3][10..20] AS r").to_list()
+        assert rows[0]["r"] == []
+
+    def test_list_comprehension_on_empty_input(self):
+        """`[x IN [] WHERE … | …]` returns [] without raising."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN [x IN [] WHERE x IS NULL | x] AS r").to_list()
+        assert rows[0]["r"] == []
+
+    @pytest.mark.xfail(
+        reason="parser bug: `list[..]` (both ends omitted) fails with "
+        "'Unexpected token: RBracket'. openCypher allows it as `list[..] == list`. "
+        "Fix is parser-side: accept `..` as both bounds-omitted in slice expression."
+    )
+    def test_slice_with_both_ends_omitted(self):
+        """`[1,2,3][..]` should equal `[1, 2, 3]`."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN [1, 2, 3][..] AS r").to_list()
+        assert rows[0]["r"] == [1, 2, 3]
+
+
+class TestStringUnicodeEdges:
+    """Pin string-operation behaviour on unicode / edge inputs.
+
+    Probed during the 0.9.52+ test-suite fortification — all of these
+    *worked* as openCypher would expect. Pinning so a future refactor
+    that breaks unicode handling is caught immediately.
+    """
+
+    def test_substring_respects_char_boundaries_emoji(self):
+        """substring() counts logical characters, not bytes. 'a😀b' is
+        3 chars; substring(s, 0, 2) returns 'a😀' even though the emoji
+        occupies 4 UTF-8 bytes."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN substring('a😀b', 0, 2) AS r, substring('a😀b', 1, 1) AS s").to_list()
+        assert rows[0] == {"r": "a😀", "s": "😀"}
+
+    def test_trim_handles_unicode_whitespace(self):
+        """Non-breaking space (U+00A0) and ideographic space (U+3000)
+        both count as trimmable whitespace."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN trim(' x') AS a, trim('　x') AS b").to_list()
+        assert rows[0] == {"a": "x", "b": "x"}
+
+    def test_regex_accented_char_range(self):
+        """`=~ '^[À-ÿ]+$'` matches strings entirely composed of accented
+        Latin chars in that Unicode range, rejects ASCII-mixed strings."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN 'é' =~ '^[À-ÿ]+$' AS pure, 'Café' =~ '^[À-ÿ]+$' AS mixed").to_list()
+        # 'é' (U+00E9) is in [À-ÿ] (U+00C0..U+00FF), matches.
+        # 'C' (U+0043) is in ASCII, so 'Café' fails the class.
+        assert rows[0] == {"pure": True, "mixed": False}
+
+    def test_toupper_tolower_on_accented_chars(self):
+        """Accented Latin chars round-trip through case conversion."""
+        g = KnowledgeGraph()
+        rows = g.cypher("RETURN toUpper('café') AS u, toLower('CAFÉ') AS l").to_list()
+        assert rows[0] == {"u": "CAFÉ", "l": "café"}
+
+
+class TestAggregateNullHandling:
+    """Pin aggregate-function behaviour over NULL-bearing data.
+
+    openCypher rules (which KGLite already implements correctly per
+    the 0.9.52 probing): aggregates skip NULL inputs. count(*) counts
+    all rows; count(prop) counts non-NULL values. collect() drops
+    NULLs. min/max return NULL on all-NULL columns.
+
+    Pinning so a future change that propagates NULL through aggregates
+    (a real Cypher dialect choice for some engines) is deliberate.
+    """
+
+    @staticmethod
+    def _fixture():
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame(
+                [
+                    {"id": 1, "name": "a", "val": 10},
+                    {"id": 2, "name": "b", "val": None},
+                    {"id": 3, "name": "c", "val": 30},
+                    {"id": 4, "name": "d", "val": None},
+                ]
+            ),
+            "T",
+            "id",
+            "name",
+        )
+        return g
+
+    def test_count_star_vs_count_prop_with_nulls(self):
+        """count(*) = 4 (all rows), count(n.val) = 2 (non-NULL values)."""
+        g = self._fixture()
+        rows = g.cypher("MATCH (n:T) RETURN count(*) AS star, count(n.val) AS prop").to_list()
+        assert rows[0] == {"star": 4, "prop": 2}
+
+    def test_min_max_on_all_null_column_returns_null(self):
+        """min/max over a column that is NULL for every row → NULL (not error)."""
+        g = self._fixture()
+        rows = g.cypher("MATCH (n:T) RETURN min(n.nonexistent) AS mn, max(n.nonexistent) AS mx").to_list()
+        assert rows[0] == {"mn": None, "mx": None}
+
+    def test_collect_skips_nulls_by_default(self):
+        """collect(prop) returns only the non-NULL values. openCypher
+        does NOT preserve NULLs in collect by default — Neo4j and
+        Memgraph agree on this."""
+        g = self._fixture()
+        rows = g.cypher("MATCH (n:T) RETURN collect(n.val) AS r").to_list()
+        # Order-insensitive: just check the multiset.
+        assert sorted(rows[0]["r"]) == [10, 30] or sorted(rows[0]["r"]) == [10.0, 30.0]
+
+
+class TestPatternMatchingEdges:
+    """Pin pattern-matching behaviour on shapes that don't appear in the
+    shared fixtures: self-loops, parallel edges, zero-length variable-
+    length paths. Each builds its own focused graph."""
+
+    def test_self_loop_pattern(self):
+        """`(a)-[:SELF]->(b)` correctly matches the loop with a == b."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {eid: 1, name: 'a'}), (b:N {eid: 2, name: 'b'})")
+        g.cypher("MATCH (a:N {eid: 1}) CREATE (a)-[:SELF]->(a)")
+        rows = g.cypher("MATCH (a:N)-[:SELF]->(b:N) RETURN a.eid AS src, b.eid AS tgt").to_list()
+        assert rows == [{"src": 1, "tgt": 1}]
+
+    def test_zero_length_var_path_includes_anchor(self):
+        """`[:R*0..N]` matches the anchor node itself at length 0."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {eid: 1}), (b:N {eid: 2}), (c:N {eid: 3})")
+        g.cypher("MATCH (a:N {eid:1}), (b:N {eid:2}) CREATE (a)-[:R]->(b)")
+        g.cypher("MATCH (b:N {eid:2}), (c:N {eid:3}) CREATE (b)-[:R]->(c)")
+        rows = g.cypher("MATCH (a:N {eid:1})-[:R*0..2]->(b:N) RETURN b.eid AS r ORDER BY r").to_list()
+        # Distance 0: a itself; distance 1: b; distance 2: c.
+        assert [r["r"] for r in rows] == [1, 2, 3]
+
+    def test_zero_length_only_var_path_returns_anchor(self):
+        """`[:R*0..0]` matches only the anchor (no hops)."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {eid: 1}), (b:N {eid: 2})")
+        g.cypher("MATCH (a:N {eid:1}), (b:N {eid:2}) CREATE (a)-[:R]->(b)")
+        rows = g.cypher("MATCH (a:N {eid:1})-[:R*0..0]->(b:N) RETURN b.eid AS r").to_list()
+        assert rows == [{"r": 1}]
+
+    def test_parallel_edges_count_correctly(self):
+        """N parallel edges of the same type between the same pair must
+        all surface in `MATCH ()-[r:T]->()` — `count(r)` returns N, not 1."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:N {eid: 1}), (b:N {eid: 2})")
+        for _ in range(3):
+            g.cypher("MATCH (a:N {eid:1}), (b:N {eid:2}) CREATE (a)-[:DUP]->(b)")
+        rows = g.cypher("MATCH (a:N {eid:1})-[r:DUP]->(b:N {eid:2}) RETURN count(r) AS n").to_list()
+        assert rows == [{"n": 3}]
+
+
 class TestBugOrderByIntToFloat:
     """BUG: ORDER BY + LIMIT on aggregated columns converts int to float."""
 

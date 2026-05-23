@@ -600,6 +600,17 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN length(p) AS L",
         None,
     ),
+    # Zero-length variable-length path: `[:R*0..N]` matches the anchor
+    # itself at length 0, then each non-zero hop. The 0-length arm has
+    # historically been a planner gotcha (it's the only path-pattern
+    # shape that admits the anchor into the result set without an edge).
+    # Pinning in the corpus so both optimizer paths agree on the result.
+    (
+        "zero_length_var_path",
+        "social_graph",
+        "MATCH (a:Person {person_id: 1})-[:KNOWS*0..2]->(b:Person) RETURN b.person_id AS r ORDER BY r",
+        None,
+    ),
     # ── multiple OPTIONAL MATCH ──
     (
         "two_optional_match",
