@@ -83,14 +83,17 @@ jobs:
           cache: pip
 
       - name: Cache cargo registry & target
-        uses: actions/cache@v5
+        # 0.9.52: switched from actions/cache@v5 to Swatinem/rust-cache@v2.
+        # The Swatinem action is purpose-built for cargo — it knows how
+        # to handle target/ (drops stale incremental artifacts, keeps
+        # build-script outputs), sets CARGO_INCREMENTAL/RUSTC_WRAPPER
+        # sanely, and uses a smarter cache key that lets unrelated
+        # changes hit the cache. Wheels workflow has been using it since
+        # 0.9.22; this brings CI in line.
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-py${{ matrix.python-version }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-py${{ matrix.python-version }}-
+          shared-key: py${{ matrix.python-version }}
+          workspaces: ". -> target"
 
       - name: Install dependencies
         run: pip install maturin pytest pytest-cov pandas hypothesis
@@ -161,14 +164,10 @@ jobs:
           cache: pip
 
       - name: Cache cargo registry & target
-        uses: actions/cache@v5
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-perf-
+          shared-key: perf
+          workspaces: ". -> target"
 
       - name: Set up venv (maturin develop needs one)
         # `maturin develop --release` is the standard way to install
