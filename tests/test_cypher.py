@@ -1650,7 +1650,6 @@ class TestNullInPredicate:
     the fix lands — same playbook as the B1/B2 NULL fix.
     """
 
-    @pytest.mark.xfail(reason="deferred: where_clause.rs:543 — IN with NULL LHS still returns Some(false)")
     def test_null_lhs_in_literal_list(self, cypher_graph):
         """NULL IN [1, 2, 3] → NULL → row excluded.
 
@@ -1676,9 +1675,6 @@ class TestNullInPredicate:
         # Pre-fix: NULL IN [...] is false, NOT false is true, Bob+Diana INCLUDED.
         assert [r["n"] for r in rows_neg] == ["Eve"], f"got {[r['n'] for r in rows_neg]}"
 
-    @pytest.mark.xfail(
-        reason="deferred: where_clause.rs:546 — IN with NULL list element, no match, returns false instead of NULL"
-    )
     def test_null_element_in_list_no_match(self, cypher_graph):
         """When the list contains NULL and the LHS doesn't match any
         non-NULL element, openCypher returns NULL (not false). Pre-fix
@@ -1692,16 +1688,29 @@ class TestNullInPredicate:
         # rows returned. The desired behaviour is empty result.
         assert [r["n"] for r in rows] == [], f"got {[r['n'] for r in rows]}"
 
-    @pytest.mark.xfail(reason="deferred: same path as test_null_lhs_in_literal_list, expression-flavoured")
-    def test_null_expression_in_list(self, cypher_graph):
-        """Expression evaluating to NULL in IN LHS — same propagation rule.
-        Exercises `Predicate::InExpression` (the expression-RHS variant)."""
+    def test_null_lhs_in_parameter_list(self, cypher_graph):
+        """Same NULL-LHS rule but through `Predicate::InExpression` — the
+        parser routes parameter-RHS `IN` to that arm instead of the
+        literal-list `Predicate::In`."""
         rows = cypher_graph.cypher(
-            "MATCH (p:Person) WHERE NOT ((p.email + '@x') IN ['a@x', 'b@x']) RETURN p.title AS n ORDER BY n"
+            "MATCH (p:Person) WHERE NOT (p.email IN $allowed) RETURN p.title AS n ORDER BY n",
+            params={"allowed": ["alice@test.com", "charlie@test.com"]},
         )
-        # Bob/Diana: (NULL + '@x') is NULL → NULL IN [...] is NULL → NOT NULL is NULL → excluded.
-        # Alice/Charlie/Eve: their composed emails don't match — false → NOT false is true → included.
-        assert [r["n"] for r in rows] == ["Alice", "Charlie", "Eve"], f"got {[r['n'] for r in rows]}"
+        # Eve has an email that doesn't match either entry: NOT false = true → included.
+        # Bob/Diana have NULL email: NULL IN [...] is NULL → NOT NULL is NULL → excluded.
+        assert [r["n"] for r in rows] == ["Eve"], f"got {[r['n'] for r in rows]}"
+
+    def test_null_in_parameter_list_no_match(self, cypher_graph):
+        """RHS parameter containing NULL with no LHS match — same NULL
+        propagation rule, exercises the saw_null branch of InExpression."""
+        rows = cypher_graph.cypher(
+            "MATCH (p:Person) WHERE NOT (p.title IN $names) RETURN p.title AS n ORDER BY n",
+            params={"names": ["Alice", None, "Bob"]},
+        )
+        # Charlie/Diana/Eve: title not in [Alice, Bob]; list contains NULL → NULL → NOT NULL → excluded.
+        # Alice/Bob: matched → NOT true → false → excluded.
+        # Result: empty.
+        assert [r["n"] for r in rows] == [], f"got {[r['n'] for r in rows]}"
 
 
 class TestNumericBoundaries:

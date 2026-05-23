@@ -542,26 +542,52 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Some(!matches!(val, Value::Null)))
             }
             Predicate::In { expr, list } => {
-                // Deferred: strict openCypher returns NULL when LHS is NULL
-                // or when no match is found and the list contains NULL.
+                // openCypher three-valued IN semantics:
+                //   NULL IN anything                  → NULL
+                //   x IN [..]  (match present)        → true (NULLs in the list are immaterial)
+                //   x IN [..]  (no match, list has NULL) → NULL
+                //   x IN [..]  (no match, no NULL)    → false
                 let val = self.evaluate_expression(expr, row)?;
+                if matches!(val, Value::Null) {
+                    return Ok(None);
+                }
+                let mut saw_null = false;
                 for item in list {
                     let item_val = self.evaluate_expression(item, row)?;
+                    if matches!(item_val, Value::Null) {
+                        saw_null = true;
+                        continue;
+                    }
                     if crate::graph::core::filtering::values_equal(&val, &item_val) {
                         return Ok(Some(true));
                     }
                 }
-                Ok(Some(false))
+                if saw_null {
+                    Ok(None)
+                } else {
+                    Ok(Some(false))
+                }
             }
             Predicate::InLiteralSet { expr, values } => {
+                // Same Kleene rules as Predicate::In; the only difference is
+                // that `values` is a HashSet of pre-evaluated literals, so we
+                // detect a NULL element by checking `values.contains(&Value::Null)`
+                // once up front instead of per iteration.
                 let val = self.evaluate_expression(expr, row)?;
-                // Try fast HashSet lookup first, fall back to cross-type comparison
-                Ok(Some(
-                    values.contains(&val)
-                        || values
-                            .iter()
-                            .any(|v| crate::graph::core::filtering::values_equal(v, &val)),
-                ))
+                if matches!(val, Value::Null) {
+                    return Ok(None);
+                }
+                let matched = values.contains(&val)
+                    || values
+                        .iter()
+                        .any(|v| crate::graph::core::filtering::values_equal(v, &val));
+                if matched {
+                    return Ok(Some(true));
+                }
+                if values.contains(&Value::Null) {
+                    return Ok(None);
+                }
+                Ok(Some(false))
             }
             Predicate::StartsWith { expr, pattern } => {
                 let val = self.evaluate_expression(expr, row)?;
@@ -673,16 +699,35 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Predicate::InExpression { expr, list_expr } => {
-                // Deferred: NULL LHS / NULL-bearing list should propagate NULL.
+                // Same Kleene rules as Predicate::In; the LHS and the list are
+                // both arbitrary expressions, so NULL can come from either.
+                // `parse_list_value(&Value::Null)` returns an empty vec, so a
+                // NULL list_val collapses to "empty list, no NULLs seen" —
+                // we lift that check explicitly so it propagates NULL.
                 let val = self.evaluate_expression(expr, row)?;
+                if matches!(val, Value::Null) {
+                    return Ok(None);
+                }
                 let list_val = self.evaluate_expression(list_expr, row)?;
+                if matches!(list_val, Value::Null) {
+                    return Ok(None);
+                }
                 let items = parse_list_value(&list_val);
+                let mut saw_null = false;
                 for item in &items {
+                    if matches!(item, Value::Null) {
+                        saw_null = true;
+                        continue;
+                    }
                     if crate::graph::core::filtering::values_equal(&val, item) {
                         return Ok(Some(true));
                     }
                 }
-                Ok(Some(false))
+                if saw_null {
+                    Ok(None)
+                } else {
+                    Ok(Some(false))
+                }
             }
         }
     }
