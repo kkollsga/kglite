@@ -1817,11 +1817,6 @@ class TestCollectionEdges:
         rows = g.cypher("RETURN [x IN [] WHERE x IS NULL | x] AS r").to_list()
         assert rows[0]["r"] == []
 
-    @pytest.mark.xfail(
-        reason="parser bug: `list[..]` (both ends omitted) fails with "
-        "'Unexpected token: RBracket'. openCypher allows it as `list[..] == list`. "
-        "Fix is parser-side: accept `..` as both bounds-omitted in slice expression."
-    )
     def test_slice_with_both_ends_omitted(self):
         """`[1,2,3][..]` should equal `[1, 2, 3]`."""
         g = KnowledgeGraph()

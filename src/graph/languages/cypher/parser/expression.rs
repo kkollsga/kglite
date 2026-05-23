@@ -188,14 +188,22 @@ impl CypherParser {
             self.advance(); // consume [
 
             if self.check(&CypherToken::DotDot) {
-                // [..end] — slice with no start
+                // [..end] — slice with no start. Also accept [..] (both
+                // ends omitted) — openCypher allows it as "the whole list",
+                // and ListSlice with start=None/end=None already evaluates
+                // that way. Mirror the [start..] / [start..end] guard
+                // pattern just below.
                 self.advance(); // consume ..
-                let end_expr = self.parse_expression()?;
+                let end_expr = if self.check(&CypherToken::RBracket) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expression()?))
+                };
                 self.expect(&CypherToken::RBracket)?;
                 expr = Expression::ListSlice {
                     expr: Box::new(expr),
                     start: None,
-                    end: Some(Box::new(end_expr)),
+                    end: end_expr,
                 };
             } else {
                 let first = self.parse_expression()?;
