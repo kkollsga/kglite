@@ -213,32 +213,43 @@ pyo3::create_exception!(
 /// Convert a Rust [`RustKgError`] into a Python [`PyErr`], picking
 /// the most specific subclass for the variant.
 ///
-/// This is the canonical conversion at the PyO3 boundary — every
-/// `?` that flows a `Result<T, KgError>` into a `PyResult<T>` goes
-/// through this impl.
+/// This is the canonical conversion at the PyO3 boundary. Post-Phase
+/// G.3a the `impl From<KgError> for PyErr` form is orphan-rule
+/// blocked (KgError lives in kglite-core, PyErr in pyo3, neither
+/// local to this crate), so callers explicitly route through this
+/// function via `Err(kg_to_pyerr(KgError::Foo(...)))` or
+/// `.map_err(kg_to_pyerr)?`.
+pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
+    let message = e.to_string();
+    match e {
+        RustKgError::CypherSyntax { .. } => CypherSyntaxError::new_err(message),
+        RustKgError::CypherTimeout { .. } => CypherTimeoutError::new_err(message),
+        RustKgError::CypherExecution { .. } => CypherExecutionError::new_err(message),
+        RustKgError::CypherTypeMismatch { .. } => CypherTypeMismatchError::new_err(message),
+        RustKgError::Schema { .. } => SchemaError::new_err(message),
+        RustKgError::Validation(_) => ValidationError::new_err(message),
+        RustKgError::Expr(_) => ExprError::new_err(message),
+        RustKgError::NodeNotFound { .. } => NodeNotFoundError::new_err(message),
+        RustKgError::ConnectionNotFound { .. } => ConnectionNotFoundError::new_err(message),
+        RustKgError::PropertyNotFound { .. } => PropertyNotFoundError::new_err(message),
+        RustKgError::FileNotFound(_) => FileError::new_err(message),
+        RustKgError::FileFormat { .. } => FileFormatError::new_err(message),
+        RustKgError::FileIo(_) => FileIoError::new_err(message),
+        RustKgError::InvalidArgument { .. } | RustKgError::Argument(_) => {
+            ArgumentError::new_err(message)
+        }
+        RustKgError::MissingArgument(_) => MissingArgumentError::new_err(message),
+        RustKgError::Internal { .. } => InternalError::new_err(message),
+    }
+}
+
+/// Transitional: keeps existing `?` and `.into()` call sites working
+/// until the post-Phase-G.3a state where KgError lives in kglite-core
+/// (at which point this impl is orphan-rule blocked). Removed when
+/// the move lands.
 impl From<RustKgError> for PyErr {
     fn from(e: RustKgError) -> Self {
-        let message = e.to_string();
-        match e {
-            RustKgError::CypherSyntax { .. } => CypherSyntaxError::new_err(message),
-            RustKgError::CypherTimeout { .. } => CypherTimeoutError::new_err(message),
-            RustKgError::CypherExecution { .. } => CypherExecutionError::new_err(message),
-            RustKgError::CypherTypeMismatch { .. } => CypherTypeMismatchError::new_err(message),
-            RustKgError::Schema { .. } => SchemaError::new_err(message),
-            RustKgError::Validation(_) => ValidationError::new_err(message),
-            RustKgError::Expr(_) => ExprError::new_err(message),
-            RustKgError::NodeNotFound { .. } => NodeNotFoundError::new_err(message),
-            RustKgError::ConnectionNotFound { .. } => ConnectionNotFoundError::new_err(message),
-            RustKgError::PropertyNotFound { .. } => PropertyNotFoundError::new_err(message),
-            RustKgError::FileNotFound(_) => FileError::new_err(message),
-            RustKgError::FileFormat { .. } => FileFormatError::new_err(message),
-            RustKgError::FileIo(_) => FileIoError::new_err(message),
-            RustKgError::InvalidArgument { .. } | RustKgError::Argument(_) => {
-                ArgumentError::new_err(message)
-            }
-            RustKgError::MissingArgument(_) => MissingArgumentError::new_err(message),
-            RustKgError::Internal { .. } => InternalError::new_err(message),
-        }
+        kg_to_pyerr(e)
     }
 }
 

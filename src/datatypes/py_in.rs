@@ -60,11 +60,10 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
             })?;
             // Validate the regex at parse time
             regex::Regex::new(&pattern).map_err(|e| -> PyErr {
-                crate::error::KgError::Argument(format!(
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
                     "Invalid regex pattern '{}': {}",
                     pattern, e
-                ))
-                .into()
+                )))
             })?;
             Ok(FilterCondition::Regex(pattern))
         }
@@ -86,11 +85,10 @@ fn parse_operator_condition(op: &str, val: &Bound<'_, PyAny>) -> PyResult<Filter
                 )
             })?;
             regex::Regex::new(&pattern).map_err(|e| -> PyErr {
-                crate::error::KgError::Argument(format!(
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
                     "Invalid regex pattern '{}': {}",
                     pattern, e
-                ))
-                .into()
+                )))
             })?;
             Ok(FilterCondition::Not(Box::new(FilterCondition::Regex(
                 pattern,

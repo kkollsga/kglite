@@ -107,11 +107,12 @@ impl Transaction {
         if let Some(tx_deadline) = self.deadline {
             if std::time::Instant::now() >= tx_deadline {
                 // Phase A.3 / 0.9.53 — typed exception (was PyTimeoutError).
-                return Err(crate::error::KgError::CypherTimeout {
-                    elapsed_ms: 0,
-                    limit_ms: 0,
-                }
-                .into());
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::CypherTimeout {
+                        elapsed_ms: 0,
+                        limit_ms: 0,
+                    },
+                ));
             }
         }
 
@@ -167,12 +168,13 @@ impl Transaction {
         let is_mut = cypher::is_mutation_query(&pre_parsed);
 
         if is_mut && self.read_only {
-            return Err(crate::error::KgError::Argument(
-                "Read-only transaction does not support mutations \
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "Read-only transaction does not support mutations \
                  (CREATE, SET, DELETE, REMOVE, MERGE). Use begin() for read-write."
-                    .to_string(),
-            )
-            .into());
+                        .to_string(),
+                ),
+            ));
         }
 
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
@@ -194,10 +196,9 @@ impl Transaction {
             // (true when no Python-side ResultView / other tx holds the graph).
             if self.working.is_none() {
                 let snap = self.snapshot.take().ok_or_else(|| -> PyErr {
-                    crate::error::KgError::Argument(
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
                         "Transaction already committed or rolled back".to_string(),
-                    )
-                    .into()
+                    ))
                 })?;
                 let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| (*arc).clone());
                 self.working = Some(working);
@@ -214,10 +215,9 @@ impl Transaction {
                 .map(|g| g as &DirGraph)
                 .or(self.snapshot.as_deref())
                 .ok_or_else(|| -> PyErr {
-                    crate::error::KgError::Argument(
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
                         "Transaction already committed or rolled back".to_string(),
-                    )
-                    .into()
+                    ))
                 })?;
             crate::graph::session::execute_read(graph, query, &opts)?.result
         };
@@ -248,10 +248,11 @@ impl Transaction {
         if self.read_only {
             // Read-only: just release the snapshot
             if self.snapshot.is_none() && !self.committed {
-                return Err(crate::error::KgError::Argument(
-                    "Transaction already committed or rolled back".to_string(),
-                )
-                .into());
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(
+                        "Transaction already committed or rolled back".to_string(),
+                    ),
+                ));
             }
             self.snapshot = None;
             self.committed = true;
@@ -271,12 +272,13 @@ impl Transaction {
                 kg.inner.version
             });
             if current_version != self.base_version {
-                return Err(crate::error::KgError::Argument(
-                    "Transaction conflict: graph was modified since begin(). \
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(
+                        "Transaction conflict: graph was modified since begin(). \
                      Retry the transaction."
-                        .to_string(),
-                )
-                .into());
+                            .to_string(),
+                    ),
+                ));
             }
 
             Python::attach(|py| {
@@ -295,10 +297,11 @@ impl Transaction {
             self.committed = true;
             Ok(())
         } else {
-            Err(crate::error::KgError::Argument(
-                "Transaction already committed or rolled back".to_string(),
-            )
-            .into())
+            Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "Transaction already committed or rolled back".to_string(),
+                ),
+            ))
         }
     }
 
@@ -308,10 +311,11 @@ impl Transaction {
     fn rollback(&mut self) -> PyResult<()> {
         if self.read_only {
             if self.snapshot.is_none() {
-                return Err(crate::error::KgError::Argument(
-                    "Transaction already committed or rolled back".to_string(),
-                )
-                .into());
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::Argument(
+                        "Transaction already committed or rolled back".to_string(),
+                    ),
+                ));
             }
             self.snapshot = None;
             return Ok(());
@@ -319,10 +323,11 @@ impl Transaction {
         // Read-write: discard whichever container holds state. Both empty
         // = already committed/rolled back.
         if self.working.is_none() && self.snapshot.is_none() {
-            return Err(crate::error::KgError::Argument(
-                "Transaction already committed or rolled back".to_string(),
-            )
-            .into());
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "Transaction already committed or rolled back".to_string(),
+                ),
+            ));
         }
         self.working = None;
         self.snapshot = None;

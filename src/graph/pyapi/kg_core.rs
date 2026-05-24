@@ -342,11 +342,12 @@ impl KnowledgeGraph {
                 } else if let Ok(i) = arg.extract::<usize>() {
                     (None, i)
                 } else {
-                    return Err(crate::error::KgError::Argument(
-                        "sample() first argument must be a node type (str) or count (int)"
-                            .to_string(),
-                    )
-                    .into());
+                    return Err(crate::error_py::kg_to_pyerr(
+                        crate::error::KgError::Argument(
+                            "sample() first argument must be a node type (str) or count (int)"
+                                .to_string(),
+                        ),
+                    ));
                 }
             }
             None => (None, n.unwrap_or(default_n)),
@@ -354,7 +355,7 @@ impl KnowledgeGraph {
 
         if let Some(nt) = node_type {
             let type_indices = self.inner.type_indices.get(&nt).ok_or_else(|| {
-                PyErr::from(crate::error::KgError::Argument(
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
                     (format!("Node type '{}' not found", nt)).to_string(),
                 ))
             })?;
@@ -369,14 +370,17 @@ impl KnowledgeGraph {
         // Selection-based: sample from current selection
         let level_count = self.selection.get_level_count();
         if level_count == 0 {
-            return Err(crate::error::KgError::Argument(
-                "sample() requires either a selection or a node_type argument".to_string(),
-            )
-            .into());
+            return Err(crate::error_py::kg_to_pyerr(
+                crate::error::KgError::Argument(
+                    "sample() requires either a selection or a node_type argument".to_string(),
+                ),
+            ));
         }
         let last = level_count - 1;
         let level = self.selection.get_level(last).ok_or_else(|| -> PyErr {
-            crate::error::KgError::Argument("Empty selection".to_string()).into()
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
+                "Empty selection".to_string(),
+            ))
         })?;
         let all_indices = level.get_all_nodes();
         let indices: Vec<_> = all_indices.into_iter().take(count).collect();
@@ -1284,13 +1288,15 @@ impl KnowledgeGraph {
         if is_mutation {
             let this = slf.borrow();
             if this.inner.read_only {
-                return Err(crate::error::KgError::CypherExecution {
-                    message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
-                              are disabled. Use kg.read_only(False) to re-enable mutations."
-                        .to_string(),
-                    position: None,
-                }
-                .into());
+                return Err(crate::error_py::kg_to_pyerr(
+                    crate::error::KgError::CypherExecution {
+                        message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and \
+                                  MERGE are disabled. Use kg.read_only(False) to re-enable \
+                                  mutations."
+                            .to_string(),
+                        position: None,
+                    },
+                ));
             }
         }
 
