@@ -1,27 +1,32 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Phase C.1 (handshake + session lifecycle) shipped: `create_session` /
-//! `get_server_info` / `set_session_auth` / `close_session` /
-//! `reset_session` / `configure_session` are real, and `route` returns a
-//! clean structured error. `execute` and the transaction trio (`begin` /
-//! `commit` / `rollback`) remain `unimplemented!("phase C.X — ...")`
-//! tagged to their retiring sub-phase. The smoke tests in
-//! `tests/test_bolt_server_smoke.py` are `xfail(strict=True)` against
-//! the still-stubbed slices.
+//! Phase C.1 (handshake + session lifecycle) + C.2 (read-only RUN/PULL
+//! with scalar values) shipped: `create_session` / `get_server_info` /
+//! `set_session_auth` / `close_session` / `reset_session` /
+//! `configure_session` are real, `route` returns a clean structured
+//! error, and `execute` runs the full kglite Cypher pipeline for
+//! scalar-returning read queries with no parameters and no explicit
+//! transaction. The transaction trio (`begin_transaction` / `commit` /
+//! `rollback`) remains `unimplemented!("phase C.5 — ...")`. The smoke
+//! tests in `tests/test_bolt_server_smoke.py` are `xfail(strict=True)`
+//! against the still-stubbed slices.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use boltr::error::BoltError;
 use boltr::server::{
-    AuthInfo, BoltBackend, ResultStream, RoutingTable, SessionConfig, SessionHandle,
-    SessionProperty, TransactionHandle,
+    AuthInfo, BoltBackend, BoltRecord, ResultMetadata, ResultStream, RoutingTable, SessionConfig,
+    SessionHandle, SessionProperty, TransactionHandle,
 };
 use boltr::types::{BoltDict, BoltValue};
 
-use kglite::api::KnowledgeGraph;
+use kglite::api::{cypher, KnowledgeGraph, Value};
+
+use crate::value_adapter;
 
 /// Bolt backend wrapping a loaded kglite [`KnowledgeGraph`].
 ///
@@ -140,20 +145,130 @@ impl BoltBackend for KgliteBackend {
         Ok(())
     }
 
-    // ---- Query execution (Phase C.2 → C.3 → C.4) --------------------------
+    // ---- Query execution (Phase C.2 ✓ scalars; C.3 params; C.4 graph; C.5 mut) --
 
     async fn execute(
         &self,
         _session: &SessionHandle,
-        _query: &str,
-        _parameters: &HashMap<String, BoltValue>,
+        query: &str,
+        parameters: &HashMap<String, BoltValue>,
         _extra: &BoltDict,
-        _transaction: Option<&TransactionHandle>,
+        transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
-        unimplemented!(
-            "phase C.2 (scalar RUN/PULL) → C.3 (parameters) → \
-             C.4 (Node/Rel/Path) → C.6 (FAILURE mapping)"
-        )
+        // Defensive gates for slices that haven't shipped yet. boltr's
+        // state machine shouldn't route here with tx=Some until
+        // `begin_transaction` is real (Phase C.5), but a clean error
+        // beats a silent surprise during phase-boundary bisects.
+        if transaction.is_some() {
+            return Err(BoltError::Backend(
+                "explicit transactions (BEGIN/COMMIT/ROLLBACK) not yet supported \
+                 — Phase C.5"
+                    .into(),
+            ));
+        }
+
+        // Phase C.3 wires parameter PackStream decoding via
+        // `value_adapter::from_bolt`. For C.2 we reject non-empty
+        // parameters with a clean error; test #2 sends no params so
+        // it passes; test #3 raises ClientError and stays XFAIL.
+        let kg_params: HashMap<String, Value> = if parameters.is_empty() {
+            HashMap::new()
+        } else {
+            return Err(BoltError::Backend(
+                "Cypher parameters not yet supported — Phase C.3".into(),
+            ));
+        };
+
+        // Mirror the canonical kglite Cypher pipeline from
+        // `src/graph/pyapi/kg_core.rs::cypher`. The mcp-server crate
+        // uses the same shape — see `crates/kglite-mcp-server/src/tools.rs`
+        // around line 232 for the reference.
+        let dir = self.graph.dir();
+        let elapsed_start = Instant::now();
+
+        // 1. Parse — typed KgError carries syntax position info.
+        let mut parsed =
+            cypher::parse_cypher(query).map_err(|e| BoltError::Backend(e.to_string()))?;
+
+        // 2. Rewrite text_score(). We don't load embeddings in the
+        // bolt-server today; if the user issues a text_score() query,
+        // we'd need a registered embedder. Reject cleanly for now.
+        let rewrite =
+            cypher::rewrite_text_score(&mut parsed, &kg_params).map_err(BoltError::Backend)?;
+        if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
+            return Err(BoltError::Backend(
+                "text_score() requires an embedder; not yet wired into \
+                 kglite-bolt-server (consider Phase D end-to-end work)"
+                    .into(),
+            ));
+        }
+
+        // 3. Optimize (run all planner passes).
+        cypher::planner::optimize_with_disabled(
+            &mut parsed,
+            dir,
+            &kg_params,
+            cypher::planner::empty_disabled_set(),
+        );
+
+        // 4. Mark lazy eligibility on RETURN clauses.
+        cypher::mark_lazy_eligibility(&mut parsed);
+
+        // 5. Mutation gate. The read executor errors out on mutations;
+        // surface a clear "Phase C.5 not shipped" message instead. The
+        // BoltError::Backend → Neo.DatabaseError mapping means test #7
+        // (pytest.raises(ClientError)) doesn't catch this, so XFAIL
+        // holds until C.5 wires `execute_mutable`.
+        if cypher::is_mutation_query(&parsed) {
+            return Err(BoltError::Backend(
+                "Cypher mutations (CREATE/SET/DELETE/REMOVE/MERGE) not yet \
+                 supported by kglite-bolt-server — Phase C.5 wires \
+                 BEGIN/COMMIT/ROLLBACK + write execution"
+                    .into(),
+            ));
+        }
+
+        // 6. Execute. Force eager materialization (streaming=false) so
+        // result.rows is always populated; the lazy-descriptor path is
+        // a Phase D perf concern. boltr's PULL handler buffers anyway.
+        let result = cypher::CypherExecutor::with_params(dir, &kg_params, None)
+            .with_streaming(false)
+            .execute(&parsed)
+            .map_err(BoltError::Backend)?;
+
+        let elapsed_ms = elapsed_start.elapsed().as_millis() as i64;
+
+        // 7. Convert rows → BoltRecords. Scalar arms succeed; Node /
+        // Relationship / Path return Err (Phase C.4 fills them in).
+        // `.collect::<Result<_, _>>()` short-circuits on first failure.
+        let records: Vec<BoltRecord> = result
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(value_adapter::to_bolt)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|values| BoltRecord { values })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 8. Build the SUCCESS summary. The driver treats every key
+        // as optional; `type: "r"` + `t_last` is the minimal useful
+        // shape for ResultSummary metadata. Mutation stats / `type: "w"`
+        // come with C.5.
+        let summary = BoltDict::from([
+            ("type".to_string(), BoltValue::String("r".to_string())),
+            ("t_last".to_string(), BoltValue::Integer(elapsed_ms)),
+        ]);
+
+        Ok(ResultStream {
+            metadata: ResultMetadata {
+                columns: result.columns,
+                extra: BoltDict::new(),
+            },
+            records,
+            summary,
+        })
     }
 
     // ---- Transactions (Phase C.5) -----------------------------------------

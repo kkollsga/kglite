@@ -173,9 +173,8 @@ def test_bolt_handshake_and_verify_connectivity(bolt_server):
         driver.verify_connectivity()
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.2 — RUN/PULL scalars")
 def test_bolt_run_returns_scalar_rows(bolt_server):
-    """Phase C.2: RUN a trivial scalar query, PULL all, check the rows."""
+    """Phase C.2 ✓: RUN a trivial scalar query, PULL all, check the rows."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (n:Person) RETURN n.title AS name ORDER BY name")

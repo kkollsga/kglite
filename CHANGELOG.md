@@ -46,6 +46,49 @@ test contract, and the perf baseline that Phase C sub-phases will retire.
 This is **prep work**, not a feature release. No `Cargo.toml`
 version bump.
 
+### Internal — Bolt protocol C.2 (read-only RUN/PULL with scalar values)
+
+Second sub-phase of Phase C. The Bolt server now runs real Cypher
+queries end-to-end for scalar-returning reads. `verify_connectivity`
++ `session.run("MATCH (n:Person) RETURN n.title AS name")` works
+against a `bolt://` driver; mutations, parameters, and Node/Rel
+returns still fail by design.
+
+- **`crates/kglite-bolt-server/src/backend.rs::execute`**: replaces
+  `unimplemented!()` with the canonical kglite Cypher pipeline
+  (mirrors `kg_core.rs::cypher` / `kglite-mcp-server/src/tools.rs`):
+  parse → rewrite_text_score → optimize_with_disabled →
+  mark_lazy_eligibility → mutation gate → `CypherExecutor::with_params
+  (dir, &params, None).with_streaming(false).execute(&parsed)`.
+- **`crates/kglite-bolt-server/src/value_adapter.rs::to_bolt`**:
+  signature changed from `BoltValue` to `Result<BoltValue, BoltError>`
+  (graph-structure arms must not panic mid-connection — they
+  orphan tokio tasks). All 10 scalar variants now real:
+  Null/Bool/Int64/UniqueId/Float64/String + recursive List/Map +
+  Date/Duration/Point. Node/Relationship/Path return a structured
+  `Err(BoltError::Backend("phase C.4 ..."))`.
+- **CLI surface**: gates non-empty parameters (`Phase C.3`), explicit
+  transactions (`Phase C.5`), Cypher mutations (`Phase C.5`), and
+  text_score queries (`Phase D`) with clean `BoltError::Backend`
+  messages — each maps to `Neo.DatabaseError.General.UnknownError`
+  on the wire, so tests #3-#8's `pytest.raises(ClientError)` checks
+  don't catch them and the strict-xfail contract holds.
+- **`crates/kglite-bolt-server/Cargo.toml`**: adds `chrono` as a
+  direct dep (was transitive via kglite); needed for `Value::DateTime`
+  → `BoltDate` arithmetic (days-since-Unix-epoch).
+- **Test contract**: `xfail` removed from
+  `test_bolt_run_returns_scalar_rows`; `pytest -m bolt -v` now
+  reports `2 passed, 6 xfailed` (exit code 0).
+- **bolt_implementation.md**: Phase C summary row updated to
+  `C.1, C.2 ✅ Shipped · C.3–C.6 pending`; C.2 sub-section heading
+  flipped + body rewritten to reflect what shipped.
+
+The server is now a usable thin Bolt frontend for scalar-only
+read-only Cypher. SUCCESS metadata includes `type: "r"` + `t_last`
+(elapsed ms). The lazy-result-descriptor streaming path is forced
+off (`.with_streaming(false)`) for simplicity; revisit in Phase D
+if profiling demands it.
+
 ### Internal — Bolt protocol C.1 (handshake + session lifecycle)
 
 First sub-phase of Phase C. The Bolt server is now *connectable* —

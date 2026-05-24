@@ -48,7 +48,7 @@ the wins are everyone's.
 |---|---|---|---|---|---|
 | **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
 | **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop | ✅ Shipped |
-| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | C.1 ✅ Shipped · C.2–C.6 pending |
+| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | C.1, C.2 ✅ Shipped · C.3–C.6 pending |
 | **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
@@ -320,20 +320,37 @@ time: ~1.5 hours** (the original "~1 week" estimate pre-dated the
 boltr-internals exploration that revealed how much of the protocol
 the upstream crate already handles).
 
-### C.2 — Read-only RUN / PULL with scalar values
+### C.2 — Read-only RUN / PULL with scalar values — ✅ Shipped
 
-- RUN message: extract Cypher string + (empty) params + (empty)
-  metadata. Call `cypher::CypherExecutor::with_params(&inner,
-  &param_map, deadline).execute(&parsed)` from
-  `src/graph/languages/cypher/executor/mod.rs`.
-- Wrap `Arc<DirGraph>` in connection state for concurrent reads
-  (per `CLAUDE.md`: read-only sharing is free).
-- PULL_ALL: send SUCCESS with field metadata, then one RECORD per
-  row, then SUCCESS with summary.
-- Scalar `Value` → PackStream mapping per the table at the bottom
-  of this doc.
+**What shipped** (~150-line diff across backend.rs + value_adapter.rs,
+~1.5 hours):
 
-Retires: `test_bolt_run_returns_scalar_rows`. **Estimate ~3-5 days.**
+- `execute` body mirrors the canonical kglite Cypher pipeline
+  from `kg_core.rs::cypher` (parse → rewrite_text_score → optimize
+  → mark_lazy_eligibility → mutation gate → executor) using the
+  shared `kglite::api::cypher::*` surface. `.with_streaming(false)`
+  forces eager row materialization; the lazy-descriptor path is a
+  Phase D perf concern.
+- All 10 `Value` scalar variants implemented in `to_bolt`
+  (Null/Bool/Int64/UniqueId/Float64/String + recursive List/Map
+  + Date/Duration/Point). Graph-structure variants return a
+  structured `Err(BoltError::Backend("phase C.4 ..."))` rather than
+  panicking (which would orphan tokio tasks).
+- Defensive error gates for slices that haven't shipped yet —
+  parameters (C.3), explicit transactions (C.5), mutations (C.5),
+  text_score queries (D). All map to `Neo.DatabaseError.General.UnknownError`
+  on the wire, which the Python driver raises as `DatabaseError`,
+  not `ClientError` — so tests #3-#8 stay XFAIL.
+- SUCCESS summary metadata: `{ type: "r", t_last: elapsed_ms }`.
+  `bookmark` / `stats` / `db` keys omitted (all optional per the
+  driver's ResultSummary parser).
+- `chrono` becomes a direct dep of the bolt-server crate for
+  `Value::DateTime` → `BoltDate` arithmetic (was transitive via
+  kglite; making it direct keeps the dep surface honest).
+
+Retires: `test_bolt_run_returns_scalar_rows`. **Actual time:
+~1.5 hours** (original "~3-5 days" estimate pre-dated knowing
+boltr handles PackStream framing + PULL pagination internally).
 
 ### C.3 — Parameters
 
