@@ -111,8 +111,9 @@ markers = [
     "model_download: tests that fetch multi-GB ML model weights (bge-m3 etc.). Opt-in via '-m model_download'.",
     "binary_size: structural gate that needs the release .dylib built (cargo build --release). CI runs it in the python-tests job which already builds the release artifact for the MCP smoke test.",
     "bolt: Bolt protocol smoke tests (require kglite-bolt-server binary, neo4j driver, port binding). Failing-by-design contract per `bolt_implementation.md` Phase B — all 8 tests xfail(strict=True) until each Phase C sub-phase retires its slice.",
+    "bolt_stress: Bolt-protocol concurrency/stress tests (slow; multi-session under load). Opt-in via '-m bolt_stress'; excluded from default suite to keep iteration fast.",
 ]
-addopts = "-m 'not benchmark and not parity and not stress and not model_download and not binary_size and not bolt'"
+addopts = "-m 'not benchmark and not parity and not stress and not model_download and not binary_size and not bolt and not bolt_stress'"
 
 [tool.mypy]
 ignore_missing_imports = true
