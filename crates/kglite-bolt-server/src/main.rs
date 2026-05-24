@@ -94,6 +94,16 @@ struct Cli {
     /// internal default.
     #[arg(long, value_name = "BYTES", default_value_t = 16 * 1024 * 1024)]
     max_message_size: usize,
+
+    /// Address returned in `route()` responses to cluster-aware
+    /// drivers using `neo4j://` URIs (Phase F #5). Drivers will
+    /// reconnect to this `host:port` for subsequent sessions, so
+    /// it must be reachable from the client's network. Defaults
+    /// to `<bind>:<port>`; override when bound to `0.0.0.0` behind
+    /// a public hostname (e.g. `--advertise-addr db.example.com:7687`)
+    /// or fronted by a reverse proxy.
+    #[arg(long, value_name = "HOST:PORT")]
+    advertise_addr: Option<String>,
 }
 
 fn init_tracing() {
@@ -130,7 +140,14 @@ async fn main() -> Result<()> {
     // other refs (typical for fresh load), try_unwrap succeeds;
     // otherwise we deep-clone (one-time cost at boot).
     let dir = Arc::try_unwrap(dir_arc).unwrap_or_else(|arc| (*arc).clone());
-    let backend = KgliteBackend::new(dir, cli.readonly);
+    // Phase F #5: address advertised in route() responses for
+    // neo4j:// (cluster-aware) drivers. Default: format the bind
+    // address; override via --advertise-addr.
+    let advertised_addr = cli
+        .advertise_addr
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", cli.bind, cli.port));
+    let backend = KgliteBackend::new(dir, cli.readonly, advertised_addr);
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 

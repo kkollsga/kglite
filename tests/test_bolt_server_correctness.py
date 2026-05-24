@@ -164,14 +164,17 @@ def test_error_validate_schema_unknown_property(bolt_server):
                 session.run("MATCH (n:Person {ttle: 'Alice'}) RETURN n").consume()
 
 
-def test_error_routing_rejected(bolt_server):
-    """Routing not supported; bolt:// URI works, neo4j:// triggers route() which errors."""
-    # Substitute the URI scheme. Our bolt_server fixture yields bolt://; rewrite.
+def test_neo4j_scheme_uri_routing_works(bolt_server):
+    """Phase F #5: `neo4j://` routing is supported via a
+    single-server self-pointing routing table. Pre-F this raised a
+    Protocol error; post-F the cluster-aware driver path works the
+    same as direct `bolt://` connections."""
     routed_url = bolt_server.replace("bolt://", "neo4j://")
     with neo4j.GraphDatabase.driver(routed_url, auth=("neo4j", "password")) as driver:
-        # verify_connectivity uses ROUTE under neo4j:// scheme; should fail.
-        with pytest.raises(Exception):
-            driver.verify_connectivity()
+        # verify_connectivity uses ROUTE under neo4j:// scheme; the
+        # routing table returned by `KgliteBackend::route` makes the
+        # connection round-trip succeed.
+        driver.verify_connectivity()
 
 
 def test_error_basic_auth_wrong_password(tmp_path, bolt_binary_path):
@@ -404,8 +407,45 @@ def test_edge_call_db_relationship_types(bolt_server):
     `relationshipType` (Neo4j convention; was `name` pre-F)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            result = session.run(
-                "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
-            )
+            result = session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
             types = sorted([record["relationshipType"] for record in result])
             assert "KNOWS" in types
+
+
+# ─── Phase F #5: neo4j:// routing for cluster-aware drivers ─────────────────
+
+
+def test_neo4j_scheme_routing(bolt_server):
+    """`neo4j://` URIs trigger a ROUTE message; the backend now
+    returns a single-server routing table (Phase F #5). Pre-F this
+    raised a Protocol error from the bolt backend.
+
+    The driver internally calls `route()` at connect time when the
+    URI scheme is `neo4j://` (vs the direct `bolt://`). It then uses
+    the returned WRITE/READ/ROUTE entries for subsequent connections.
+    """
+    # bolt_server fixture yields a bolt:// URL; swap scheme to test routing.
+    neo4j_url = bolt_server.replace("bolt://", "neo4j://", 1)
+    with neo4j.GraphDatabase.driver(neo4j_url, auth=("neo4j", "password")) as driver:
+        # verify_connectivity exercises the routing path — fails fast
+        # with ServiceUnavailable if route() doesn't return a usable
+        # table.
+        driver.verify_connectivity()
+        # Run a query end-to-end to confirm the driver actually uses
+        # the routing table to connect (not just succeeds at the
+        # initial route fetch).
+        with driver.session() as session:
+            result = session.run("MATCH (n:Person) RETURN count(n) AS c")
+            count = result.single()["c"]
+            assert count > 0
+
+
+def test_neo4j_scheme_routing_readonly_session(bolt_server):
+    """A read-only session over neo4j:// should route to the READ
+    entry of our table. Since we're single-server it's the same
+    address as WRITE — but the test exercises the path."""
+    neo4j_url = bolt_server.replace("bolt://", "neo4j://", 1)
+    with neo4j.GraphDatabase.driver(neo4j_url, auth=("neo4j", "password")) as driver:
+        with driver.session(default_access_mode=neo4j.READ_ACCESS) as session:
+            result = session.run("MATCH (n) RETURN count(n) AS c")
+            assert result.single()["c"] >= 0

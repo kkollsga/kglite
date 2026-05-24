@@ -223,7 +223,8 @@ def test_db_labels_parity(graphs):
 def test_db_relationship_types_parity(graphs):
     """CALL db.relationshipTypes() must report the same connection-type set across modes (A.3)."""
     rows = {
-        mode: _rows(graphs[mode].cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")) for mode in STORAGE_MODES
+        mode: _rows(graphs[mode].cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
+        for mode in STORAGE_MODES
     }
     ref = rows["memory"]
     assert ref == [{"relationshipType": "ABOUT"}, {"relationshipType": "RELATED"}], f"unexpected memory baseline: {ref}"

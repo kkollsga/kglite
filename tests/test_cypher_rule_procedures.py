@@ -641,8 +641,12 @@ class TestDbRelationshipTypes:
 
     def test_camel_case_procedure_name(self, db_proc_graph):
         """Procedure dispatch is case-insensitive on the name (Neo4j convention)."""
-        rows_camel = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
-        rows_lower = list(db_proc_graph.cypher("CALL db.relationshiptypes() YIELD relationshipType RETURN relationshipType"))
+        rows_camel = list(
+            db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
+        )
+        rows_lower = list(
+            db_proc_graph.cypher("CALL db.relationshiptypes() YIELD relationshipType RETURN relationshipType")
+        )
         assert {r["relationshipType"] for r in rows_camel} == {r["relationshipType"] for r in rows_lower}
 
     def test_yield_alias(self, db_proc_graph):

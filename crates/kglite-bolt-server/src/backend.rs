@@ -83,6 +83,12 @@ pub struct KgliteBackend {
     session_counter: AtomicU64,
     /// Monotonic per-server transaction counter.
     tx_counter: AtomicU64,
+    /// "host:port" string returned in `route()`'s `RoutingTable`
+    /// so cluster-aware drivers (`neo4j://` URIs) know where to
+    /// reconnect. Phase F #5. Typically matches the bind address
+    /// but can differ when running behind a reverse proxy
+    /// (`--advertise-addr` flag on `main.rs`).
+    advertised_addr: String,
 }
 
 /// Per-Bolt-transaction state. Wraps the canonical
@@ -99,16 +105,22 @@ struct TxState {
 }
 
 impl KgliteBackend {
-    /// Construct a backend from an owned `DirGraph` + readonly flag.
-    /// The DirGraph is wrapped in a `session::Session` for the
-    /// shared-graph + commit-swap semantics.
-    pub fn new(graph: DirGraph, readonly: bool) -> Self {
+    /// Construct a backend. The DirGraph is wrapped in a
+    /// `session::Session` for shared-graph + commit-swap semantics.
+    /// `advertised_addr` (`host:port`, no scheme) is what `route()`
+    /// returns to cluster-aware drivers using `neo4j://` URIs —
+    /// they'll reconnect to this address for subsequent sessions,
+    /// so it must be reachable from the client's network. Usually
+    /// this matches the bind address but should differ when bound
+    /// to `0.0.0.0` behind a hostname or reverse proxy.
+    pub fn new(graph: DirGraph, readonly: bool, advertised_addr: String) -> Self {
         Self {
             session: Arc::new(kglite::api::session::Session::new(graph)),
             readonly,
             transactions: Arc::new(Mutex::new(HashMap::new())),
             session_counter: AtomicU64::new(0),
             tx_counter: AtomicU64::new(0),
+            advertised_addr,
         }
     }
 }
@@ -530,19 +542,45 @@ impl BoltBackend for KgliteBackend {
         Ok(info)
     }
 
-    // ---- Routing (Phase C.1 ✓: structured error, not a panic) -------------
+    // ---- Routing (Phase F #5: single-server self-pointing table) ----------
+    //
+    // Cluster-aware drivers (`neo4j://` URIs, the default scheme
+    // in Neo4j 5.x drivers) send a ROUTE message at connect time
+    // expecting back a `RoutingTable` with WRITE/READ/ROUTE roles.
+    // For a single-server kglite-bolt-server we return the same
+    // advertised address under all three roles so the driver does
+    // its remaining work against this same instance. `bolt://`
+    // (direct) URIs bypass routing entirely; either scheme works.
 
     async fn route(
         &self,
         _routing_context: &BoltDict,
         _bookmarks: &[String],
-        _db: Option<&str>,
+        db: Option<&str>,
     ) -> Result<RoutingTable, BoltError> {
-        Err(BoltError::Protocol(
-            "routing not supported by kglite-bolt-server — \
-             connect with bolt:// (direct) rather than neo4j:// (routed)"
-                .into(),
-        ))
+        // Default DB name aligns with Neo4j's: "neo4j" if none
+        // was negotiated at HELLO. kglite is single-database so
+        // the requested name is informational here.
+        let db_name = db.unwrap_or("neo4j").to_string();
+        // 300s TTL — the driver re-fetches the routing table on
+        // expiry. Matches Neo4j's typical default.
+        let ttl = 300;
+        let single_server = boltr::server::RoutingServer {
+            addresses: vec![self.advertised_addr.clone()],
+            role: String::new(), // populated per-role below
+        };
+        let mut servers = Vec::with_capacity(3);
+        for role in ["WRITE", "READ", "ROUTE"] {
+            servers.push(boltr::server::RoutingServer {
+                addresses: single_server.addresses.clone(),
+                role: role.to_string(),
+            });
+        }
+        Ok(RoutingTable {
+            ttl,
+            db: db_name,
+            servers,
+        })
     }
 }
 
