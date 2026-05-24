@@ -122,9 +122,22 @@ pub fn entry_count_for_tests() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// The parse cache is a process-wide singleton; cargo test runs the
+    /// `mod tests` cases in parallel by default and they interfere with
+    /// each other (one test's `clear_for_tests()` wipes another's
+    /// just-inserted entries before the assertion fires). Serialize via
+    /// a test-only Mutex so each test gets exclusive access to the
+    /// cache for its `clear → populate → assert` cycle. The lock is
+    /// also held during the cache mutations so a failure-poisoned
+    /// guard from one test surfaces as a "previous test poisoned the
+    /// lock" rather than as a spooky count-mismatch in the next.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn cache_hit_returns_equivalent_ast() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH (n:Person) RETURN n.name";
         let first = parse_cypher_cached(q).unwrap();
@@ -137,6 +150,7 @@ mod tests {
 
     #[test]
     fn cache_evicts_at_capacity() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         // Insert CACHE_CAPACITY + 5 unique queries.
         for i in 0..(CACHE_CAPACITY + 5) {
@@ -148,6 +162,7 @@ mod tests {
 
     #[test]
     fn parse_errors_are_not_cached() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_for_tests();
         let q = "MATCH NOT VALID CYPHER";
         let r1 = parse_cypher_cached(q);

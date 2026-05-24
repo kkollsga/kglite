@@ -103,7 +103,7 @@
       "name": "test_bench_columnar_enable",
       "fullname": "tests/benchmarks/test_bench_core.py::test_bench_columnar_enable",
       "stats": {
-        "min": 0.0003909,
+        "min": 0.00047,
         "max": 0.0005937,
         "mean": 0.0004222,
         "stddev": 1.15e-05,
