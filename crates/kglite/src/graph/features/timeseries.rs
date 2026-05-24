@@ -245,6 +245,121 @@ pub fn validate_keys_sorted(keys: &[NaiveDate]) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Inline timeseries config (lifted from kglite-py in 0.10.1) ──────────────
+//
+// Parsed shape of the `timeseries=` kwarg that `add_nodes()` accepts.
+// Used by bindings to drop the timeseries columns from regular node
+// properties before bulk-insert, and to drive the timeseries column
+// builders downstream. Pure-Rust data shapes (no PyO3) — lifted out
+// of the wheel so non-Python bindings (mcp-server, future Go/JS) can
+// share the same parser and column-name accounting.
+//
+// (HashMap is already imported at the top of the file.)
+
+/// How the time column(s) are specified in the `timeseries` dict.
+#[derive(Debug, Clone)]
+pub enum TimeSpec {
+    /// Single column holding date strings (`"2020-01"`, `"2020-01-15 10:30"`).
+    StringColumn(String),
+    /// Separate columns ordered by depth: `[year_col, month_col, ...]`.
+    SeparateColumns(Vec<String>),
+}
+
+/// Parsed inline timeseries configuration from the `timeseries` dict.
+#[derive(Debug, Clone)]
+pub struct InlineTimeseriesConfig {
+    pub time: TimeSpec,
+    pub channels: Vec<String>,
+    pub resolution: Option<String>,
+    pub units: HashMap<String, String>,
+}
+
+impl InlineTimeseriesConfig {
+    /// All column names used by the timeseries config — bindings exclude
+    /// these from regular node properties to avoid double-storing.
+    pub fn all_columns(&self) -> Vec<String> {
+        let mut cols = self.channels.clone();
+        match &self.time {
+            TimeSpec::StringColumn(c) => cols.push(c.clone()),
+            TimeSpec::SeparateColumns(cs) => cols.extend(cs.iter().cloned()),
+        }
+        cols
+    }
+
+    /// Construct from already-extracted components. The PyO3 binding
+    /// in kglite-py unpacks a `PyDict` into these arguments and calls
+    /// this constructor; pure-Rust callers (CLI tools, JSON/YAML
+    /// config loaders, future bindings) can call it directly.
+    /// Lifted from kglite-py in 0.10.1.
+    ///
+    /// `time_col` is `Some` for a single string column (Variant A);
+    /// `time_components` is `Some` for a semantic-key dict (Variant B)
+    /// — pass exactly one. Channels must be non-empty. Resolution is
+    /// validated via `validate_resolution()` when present.
+    pub fn from_components(
+        time_col: Option<String>,
+        time_components: Option<HashMap<String, String>>,
+        channels: Vec<String>,
+        resolution: Option<String>,
+        units: HashMap<String, String>,
+    ) -> Result<Self, String> {
+        let time = match (time_col, time_components) {
+            (Some(col), None) => TimeSpec::StringColumn(col),
+            (None, Some(dict)) => {
+                // Map semantic keys to column names, ordered by depth.
+                // Gaps (e.g. `day` set but not `month`) are an error.
+                let semantic_order = ["year", "month", "day", "hour", "minute"];
+                let mut ordered_cols = Vec::new();
+                let mut found_gap = false;
+                for &key in &semantic_order {
+                    if let Some(col) = dict.get(key) {
+                        if found_gap {
+                            return Err(format!(
+                                "timeseries time dict has '{}' but is missing a higher-level component",
+                                key
+                            ));
+                        }
+                        ordered_cols.push(col.clone());
+                    } else {
+                        found_gap = true;
+                    }
+                }
+                if ordered_cols.is_empty() {
+                    return Err("timeseries time dict must contain at least 'year'".to_string());
+                }
+                TimeSpec::SeparateColumns(ordered_cols)
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "timeseries 'time' must be EITHER a column name OR a semantic dict, not both"
+                        .to_string(),
+                );
+            }
+            (None, None) => {
+                return Err(
+                    "timeseries dict requires a 'time' key (column name or dict of year/month/day/hour/minute)"
+                        .to_string(),
+                );
+            }
+        };
+
+        if channels.is_empty() {
+            return Err("timeseries 'channels' must not be empty".to_string());
+        }
+
+        if let Some(ref r) = resolution {
+            validate_resolution(r)?;
+        }
+
+        Ok(Self {
+            time,
+            channels,
+            resolution,
+            units,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

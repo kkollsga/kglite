@@ -83,6 +83,51 @@ impl MethodConfig {
             )),
         }
     }
+
+    /// Build from already-extracted dict-style fields. The PyO3 binding
+    /// in kglite-py unpacks a `Bound<PyAny>` into these arguments and
+    /// calls this constructor; pure-Rust callers (CLI tools, JSON/YAML
+    /// config loaders, future bindings) can call it directly with the
+    /// same data shape. Lifted from kglite-py in 0.10.1.
+    ///
+    /// `method_type` is required — the dict's `"type"` key.
+    /// `resolve_str` is the dict's `"resolve"` key, validated via
+    /// [`Self::parse_resolve`]. All other fields are optional and
+    /// passed through unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_components(
+        method_type: String,
+        resolve_str: Option<String>,
+        max_distance_m: Option<f64>,
+        geometry_field: Option<String>,
+        property: Option<String>,
+        threshold: Option<f64>,
+        metric: Option<String>,
+        algorithm: Option<String>,
+        features: Option<Vec<String>>,
+        k: Option<usize>,
+        eps: Option<f64>,
+        min_samples: Option<usize>,
+    ) -> Result<Self, String> {
+        let resolve = match resolve_str {
+            Some(s) => Some(Self::parse_resolve(&s)?),
+            None => None,
+        };
+        Ok(Self {
+            method_type,
+            resolve,
+            max_distance_m,
+            geometry_field,
+            property,
+            threshold,
+            metric,
+            algorithm,
+            features,
+            k,
+            eps,
+            min_samples,
+        })
+    }
 }
 
 /// Check if edge properties match all given filter conditions

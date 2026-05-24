@@ -9,6 +9,9 @@
 /dev-documentation/
 /bench/
 /inbox/
+# Untracked competitive-library benchmarks (kglite vs NornicDB, kuzu,
+# etc.). Tracked internal benchmarks live alongside in /benchmarks/.
+/benchmarks/competitive/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target/

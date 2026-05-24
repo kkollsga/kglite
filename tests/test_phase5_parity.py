@@ -211,11 +211,13 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 35_416_608,  # 0.10.0 macOS .dylib (down ~500 KB from 0.9.52 — A.2 deleted
-    # the prior PyErr-mapping boilerplate at every error site, replaced with the smaller
-    # typed-exception boundary conversion in src/error_py.rs)
+    "darwin": 36_173_664,  # 0.10.1 macOS libkglite_py.dylib (+757 KB over 0.10.0 — Phase E
+    # added the session module + new public types; Phase G G.4 widened DirGraph visibility
+    # for cross-crate access (~23 fields + 6 helpers promoted pub); Phase F added TLS
+    # scaffolding behind boltr's tls feature. Wheel artifact (cdylib) is libkglite_py.dylib
+    # post-G.4 — pre-G.4 was libkglite.dylib at the same path.)
     "linux": 59_529_016,  # 0.9.52 Linux .so (captured from CI run 26328166598;
-    # 0.10.0 Linux baseline pending — refresh on next CI run)
+    # 0.10.0/0.10.1 Linux baseline still pending — refresh on next CI run)
 }
 
 
@@ -249,7 +251,15 @@ def test_binary_size_regression():
     drilldown, run `cargo bloat --release --crates --filter kglite`.
     """
 
+    # Post-G.4 the wheel cdylib is the kglite-py crate's output —
+    # `libkglite_py.{dylib,so}` — not the engine's `libkglite.{dylib,so}`
+    # (which is now an rlib + dylib pair for downstream Rust crates).
+    # The wheel artifact is what users `pip install`, so that's what
+    # the size gate should track. Pre-G.4 candidates kept for stale
+    # leftover compatibility, but listed second so the cdylib wins.
     candidates = [
+        REPO_ROOT / "target" / "release" / "libkglite_py.dylib",
+        REPO_ROOT / "target" / "release" / "libkglite_py.so",
         REPO_ROOT / "target" / "release" / "libkglite.dylib",
         REPO_ROOT / "target" / "release" / "libkglite.so",
     ]

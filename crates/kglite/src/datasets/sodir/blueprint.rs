@@ -70,6 +70,32 @@ pub fn deep_merge(base: &Value, complement: &Value, complement_overrides: bool) 
     Value::Object(out)
 }
 
+/// JSON-string convenience wrapper around [`deep_merge`]: parse two
+/// blueprint JSON strings, deep-merge, return the merged JSON string.
+/// `complement_json = None` returns the base unchanged.
+///
+/// Lifted from the wheel crate in 0.10.1 so CLI tools and other
+/// Rust consumers that work with on-disk JSON blueprints have a
+/// single entry point that mirrors the Python `merge_blueprint`
+/// pyfunction's contract.
+pub fn merge_blueprint_json(
+    base_json: &str,
+    complement_json: Option<&str>,
+    complement_overrides: bool,
+) -> Result<String, String> {
+    let base: Value =
+        serde_json::from_str(base_json).map_err(|e| format!("parse base blueprint: {e}"))?;
+    let merged = match complement_json {
+        Some(c) => {
+            let comp: Value =
+                serde_json::from_str(c).map_err(|e| format!("parse complement blueprint: {e}"))?;
+            deep_merge(&base, &comp, complement_overrides)
+        }
+        None => base,
+    };
+    serde_json::to_string(&merged).map_err(|e| format!("serialize merged blueprint: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

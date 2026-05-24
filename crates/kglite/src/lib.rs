@@ -60,6 +60,18 @@ pub mod api {
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
     pub use crate::graph::explore::{explore_markdown, ExploreOptions};
+    // Inline timeseries config types (lifted from kglite-py in 0.10.1).
+    pub use crate::graph::features::timeseries::{InlineTimeseriesConfig, TimeSpec};
+    // Thin pure-Rust graph handle for embedders + the free function
+    // backing it. The wheel crate (`kglite-py`) defines its own,
+    // Python-flavored `KnowledgeGraph` separately — same name,
+    // different audience (`pip install kglite` users), polars-style.
+    pub use crate::graph::handle::{
+        discover_property_keys_from_data, infer_selection_node_type, source_location,
+        KnowledgeGraph,
+    };
+    // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
+    pub use crate::graph::dir_graph::make_dir_graph_mut;
     pub use crate::graph::introspection::describe::compute_description;
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;
@@ -90,8 +102,8 @@ pub mod api {
     /// transaction model. See `docs/explanation/session.md`.
     pub mod session {
         pub use crate::graph::session::{
-            execute_mut, execute_read, CommitOutcome, ExecuteOptions, ExecuteOutcome, Session,
-            Transaction,
+            execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
+            ExecuteOutcome, Session, Transaction,
         };
     }
 }

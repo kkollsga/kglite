@@ -16,9 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
-use kglite_core::datasets::sodir::{
-    datasets_used_by_blueprint, deep_merge, fetch_all, SodirError, Workdir,
-};
+use kglite_core::datasets::sodir::{datasets_used_by_blueprint, fetch_all, SodirError, Workdir};
 
 fn map_err(e: SodirError) -> PyErr {
     match &e {
@@ -96,16 +94,15 @@ fn merge_blueprint(
     complement_json: Option<String>,
     complement_overrides: bool,
 ) -> PyResult<String> {
-    let base = parse_json(&base_json, "base blueprint")?;
-    let merged = match complement_json {
-        Some(c) => {
-            let comp = parse_json(&c, "complement blueprint")?;
-            deep_merge(&base, &comp, complement_overrides)
-        }
-        None => base,
-    };
-    serde_json::to_string(&merged)
-        .map_err(|e| PyRuntimeError::new_err(format!("serialize merged blueprint: {e}")))
+    // Engine logic lives in `kglite_core::datasets::sodir::merge_blueprint_json`
+    // (lifted from this file in 0.10.1). This wrapper only adapts the
+    // String → PyErr boundary.
+    kglite_core::datasets::sodir::merge_blueprint_json(
+        &base_json,
+        complement_json.as_deref(),
+        complement_overrides,
+    )
+    .map_err(PyRuntimeError::new_err)
 }
 
 /// The dataset stems a blueprint references (CSV filename stems).
@@ -131,13 +128,11 @@ fn graph_exists(workdir: String) -> PyResult<bool> {
 }
 
 /// Age in days of the disk-mode graph metadata, or `None` if no graph
-/// has been built. Drives the disk-mode cooldown short-circuit.
+/// has been built. Thin delegate to `Workdir::disk_graph_age_days`
+/// (lifted to core in 0.10.1).
 #[pyfunction]
 fn disk_graph_age_days(workdir: String) -> PyResult<Option<f64>> {
-    let wd = Workdir::new(workdir);
-    Ok(kglite_core::datasets::sodir::index::file_mtime_age_days(
-        &wd.disk_graph_meta(),
-    ))
+    Ok(Workdir::new(workdir).disk_graph_age_days())
 }
 
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {

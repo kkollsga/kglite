@@ -5,7 +5,7 @@
 #   kglite = { path = "..." }  # pre-publish
 #   kglite = "0.10"            # post-crates.io-publish
 name = "kglite"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
@@ -88,12 +88,16 @@ sodir = [
 wikidata = [
     "dep:thiserror",
     "dep:reqwest",
-    # Wikidata's `latest-truthy.nt.bz2` is a single-stream bz2; the
-    # `parallel-bz2` feature enables block-level parallel decode
-    # (~10× faster on M-series). Users who enable `wikidata` are
-    # implicitly opting in to the bzip2-rs git-fork dep — see the
-    # `parallel-bz2` feature docs.
-    "parallel-bz2",
+    # `wikidata` does NOT imply `parallel-bz2` even though Wikidata's
+    # `latest-truthy.nt.bz2` is the canonical workload for the
+    # parallel decoder. Reason: `parallel-bz2` depends on the
+    # paolobarbolini bzip2-rs git fork, which docs.rs (building
+    # from crates.io) can't see. If `wikidata` implied
+    # `parallel-bz2`, `[package.metadata.docs.rs]` couldn't enable
+    # `wikidata` to surface its API docs → broken docs.rs page on
+    # publish. The sequential `MultiBzDecoder` fallback handles
+    # wikidata correctly (just slower); opt into `parallel-bz2`
+    # explicitly for the ~10× speedup on M-series hardware.
 ]
 
 [dependencies]
@@ -165,3 +169,16 @@ quick-xml = { version = "0.36", optional = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# docs.rs builds with these features so the published API page covers
+# the dataset loaders + fastembed adapter, which would otherwise be
+# missing (defaults are intentionally empty). `parallel-bz2` is
+# excluded deliberately — it depends on the paolobarbolini bzip2-rs
+# git fork, which docs.rs (building from the crates.io registry)
+# can't resolve. `all-features = true` would pull `parallel-bz2` in
+# transitively and break the docs.rs build → broken
+# docs.rs/kglite badge in the README. `rustdoc-args` enables doc-cfg
+# annotations so feature-gated APIs are visually marked on the page.
+[package.metadata.docs.rs]
+features = ["sec", "sodir", "wikidata", "fastembed"]
+rustdoc-args = ["--cfg", "docsrs"]

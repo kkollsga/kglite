@@ -555,8 +555,23 @@ fn execute_set(
                     let (old_value, node_type_str) = match graph.get_node(*node_idx) {
                         Some(node) => {
                             let nt = node.get_node_type_ref(&graph.interner).to_string();
+                            // For `name` (the canonical title-alias name in
+                            // Cypher), the value is stored on `node.title`,
+                            // not in the property map. `get_field_ref("name")`
+                            // returns None for graphs where "name" isn't
+                            // also redundantly in properties — which is the
+                            // case for `.kgl`-loaded graphs and for indexes
+                            // built from `get_node_title` (see
+                            // `dir_graph.rs::create_index`'s alias-resolution
+                            // path). Falling back to the title keeps
+                            // index auto-maintenance consistent with how
+                            // those indexes were populated.
                             let old = match property.as_str() {
-                                "name" => node.get_field_ref("name").map(Cow::into_owned),
+                                "name" => node
+                                    .get_field_ref("name")
+                                    .map(Cow::into_owned)
+                                    .or_else(|| Some(node.title.clone())),
+                                "title" => Some(node.title.clone()),
                                 _ => node.get_field_ref(property).map(Cow::into_owned),
                             };
                             (old, nt)

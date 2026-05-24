@@ -37,28 +37,14 @@ use kglite_core::datasets::sec::{
 // loaded. `Workdir::new` takes `impl Into<PathBuf>`, so a `String`
 // slots in with no body changes.
 
-/// Build a SliceSpec from optional Python args. Empty / None args
-/// produce an unrestricted slice.
+/// Build a SliceSpec from optional Python args — thin delegate to
+/// `SliceSpec::from_optional_filters` (lifted to core in 0.10.1).
 fn build_slice(
     cik_list: Option<Vec<u64>>,
     form_types: Option<Vec<String>>,
     year_range: Option<(u16, u16)>,
 ) -> SliceSpec {
-    let mut s = SliceSpec::default();
-    if let Some(ciks) = cik_list {
-        if !ciks.is_empty() {
-            s = s.with_cik_list(ciks);
-        }
-    }
-    if let Some(forms) = form_types {
-        if !forms.is_empty() {
-            s = s.with_form_types(forms);
-        }
-    }
-    if let Some((lo, hi)) = year_range {
-        s = s.with_year_range(lo, hi);
-    }
-    s
+    SliceSpec::from_optional_filters(cik_list, form_types, year_range)
 }
 
 // ─────────────────────────── fetch surface ───────────────────────────

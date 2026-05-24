@@ -7,6 +7,313 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-05-25 — Polars-style crate split (Phase G), Bolt Phase F driver-compat fixes, two-track docs, crates.io publish (kglite + kglite-bolt-server + kglite-mcp-server)
+
+The headline of 0.10.1 is the **polars-style core split**: kglite is
+now a pure-Rust crate (`crates/kglite/`, zero pyo3 in the dep tree)
+publishable to crates.io as a standalone library. The Python wheel
+(`pip install kglite`) is unchanged — same install line, same
+Python API, same `kglite-mcp-server` console script. The wheel is
+now built by a sibling PyO3 wrapper crate (`crates/kglite-py/`).
+
+Three landings in one release:
+
+- **Phase G** — crate split + workspace reorganization. `cargo
+  install kglite-bolt-server` (no Python) now works; embedders
+  depend on `kglite = "0.10"` with no PyO3 inherited.
+- **Phase F** — three Bolt driver-compatibility fixes: TLS via
+  `--tls-cert`/`--tls-key` (so `bolt+s://` and `neo4j+s://` work),
+  `neo4j://` routing URIs via single-server routing table
+  (`--advertise-addr` for reverse-proxy deploys), and Neo4j-
+  conventional `db.labels()` / `db.relationshipTypes()` yield
+  column names (`label`, `relationshipType`).
+- **Two-track docs reorganization** — `docs/python/` and `docs/rust/`
+  now live alongside `docs/operators/`, `docs/concepts/`, and the
+  existing `docs/reference/`. URL breakage from the old
+  `/explanation/X` paths is acknowledged; ReadTheDocs per-path
+  redirects will be configured post-deploy.
+
+Plus everything tracked in `[Unreleased]` below (validate_schema
+exposure, the kglite::api::session standardization landed in 0.10.0
+Phase E, the Bolt protocol C.1–C.6 implementation, polars-style
+core split itself, two-track docs + cleanup of stale kglite-core
+references, crates.io publish prep with parallel-bz2 decoupling).
+
+`pip install kglite` users see no behavior change. Rust embedders
+get a new option: `cargo add kglite`. Bolt-server operators get
+production-grade TLS + Neo4j-driver compatibility. Wheel + Bolt-
+server CHANGELOG details are below; the Rust crate's docs.rs page
+will go live with the crates.io publish.
+
+### Added — Bolt server Phase F (TLS, neo4j:// routing, db.* yield naming)
+
+Three driver-compatibility fixes captured during the C.5 robustness
+pass that needed real work to close. All land in `kglite-bolt-server`.
+
+#### `--tls-cert` / `--tls-key` — Bolt over TLS (Phase F #6)
+
+`bolt+s://` and `neo4j+s://` URIs now work. Drivers that require
+TLS (production Neo4j deployments + most cloud setups) connect
+unchanged. PEM-encoded cert chain and private key files via two
+new CLI flags:
+
+```bash
+kglite-bolt-server --graph my.kgl \
+    --tls-cert ./cert.pem --tls-key ./key.pem \
+    --bind 0.0.0.0 --port 7687
+```
+
+Implementation: `boltr` 0.2 with the `tls` feature, `rustls = 0.23`
+with the `ring` crypto provider explicitly installed at startup
+(rustls 0.23+ requires the consumer to choose the provider; we
+install `ring::default_provider()`), `boltr::server::TlsConfig::from_pem(...)`
+wired into the existing `BoltServer::builder(...)`.
+
+#### `neo4j://` routing URIs (Phase F #5)
+
+Drivers that prefer the `neo4j://` scheme (most cluster-aware
+clients default to it; Neo4j Browser uses it; some LangChain
+flows hardcode it) make a `ROUTE` call on connect to discover the
+cluster topology. We were returning `Neo.ClientError.Routing.RoutingTableNotFound`,
+which made `neo4j://` URIs fail unless the user explicitly switched
+to `bolt://`.
+
+Now `BoltBackend::route()` returns a single-server routing table
+with the configured address in WRITE / READ / ROUTE roles. New
+`--advertise-addr HOST:PORT` flag for reverse-proxy deployments
+(the address advertised in the routing table may differ from
+`--bind`). When omitted, falls back to the bind address.
+
+```bash
+# Behind a reverse proxy at public.example.com:
+kglite-bolt-server --graph my.kgl \
+    --bind 0.0.0.0 --port 7687 \
+    --advertise-addr public.example.com:7687
+```
+
+#### `db.labels()` / `db.relationshipTypes()` column names (Phase F #7)
+
+These procedures previously yielded a column named `name` for
+both, while Neo4j convention (which all drivers + dashboards
+expect) is `label` for `db.labels()` and `relationshipType` for
+`db.relationshipTypes()`. Tools that pre-fill schema panels from
+those columns silently broke against kglite-bolt-server. Now
+matches Neo4j's naming exactly. The `valid_yields` table in the
+CALL clause executor was split per-procedure so the planner can
+validate the right column names per call site.
+
+### Fixed — `create_index` / `create_range_index` / `create_composite_index` returned 0 entries on reloaded `.kgl` graphs
+
+A user-facing perf foot-gun surfaced during competitive benchmarking:
+calling `create_index("Person", "ssn")` on a graph loaded from a
+`.kgl` file silently returned 0 entries, even when the graph had
+500k Person nodes. The `auto-rebuild on load`
+(`rebuild_indices_from_keys`, called from
+`crates/kglite/src/graph/io/file.rs:1818`) suffered the same bug,
+so users who created indexes pre-save lost them on reload without
+any error or warning. The result: `MATCH` patterns that should
+hit the index fell back to full scans, with no signal.
+
+Two root causes, both addressed:
+
+1. **`NodeData::get_property()` only reads the in-memory snapshot.**
+   For mapped/disk graphs loaded from `.kgl`, property values live
+   in a backend-managed column store; `NodeData.properties` is the
+   stripped-and-restored shell. The matcher's hot path
+   (`core/pattern_matching/matcher.rs::node_matches_properties_columnar`)
+   uses `GraphBackend::get_node_property()` instead, which dispatches
+   per-backend to the right storage. The three `create_*_index`
+   methods on `DirGraph` (`dir_graph.rs:815, 940, 985`) now mirror
+   that path.
+
+2. **`id` / `title` are special-cased — not in `properties` at all.**
+   Their values live on dedicated `NodeData` fields and on the
+   per-type id_index. Indexes on title-aliases (e.g. `name`) or
+   id-aliases (e.g. `starId`) need alias resolution + the
+   `get_node_id` / `get_node_title` accessors to populate
+   correctly. The fix adds `resolve_alias()` + special-cased
+   reads in each `create_*_index` (mirroring the matcher pattern
+   at `matcher.rs:1177-1182`).
+
+The `property_indices` HashMap is still keyed by the user-facing
+property name (e.g. `name`, not `title`) because the matcher's
+`try_index_lookup` (`matcher.rs:850`) looks up by the unresolved
+key — keeping storage / lookup / auto-maintenance keys in lockstep.
+
+A small follow-on fix in
+`crates/kglite/src/graph/languages/cypher/executor/write.rs:558`
+makes the index-maintenance old-value capture also alias-aware
+for the `name` / `title` cases, so SET-on-title-alias correctly
+updates an index that was built from `get_node_title`. Without
+this, the auto-maintenance silently drifts.
+
+#### Regression coverage
+
+Six new tests in `tests/test_indexes.py::TestIndexRebuildAfterReload`
+exercise the round-trip (build → save → reload → create_index/
+create_range_index/create_composite_index) for: id-alias names,
+the canonical `id` key, a plain property, range index, composite
+index, and a composite mixing an id-alias with a plain property.
+The 13 existing index-auto-maintenance tests continue to pass
+(one regressed during the fix iteration; root-caused to the SET
+path's old-value capture).
+
+#### Bench infrastructure
+
+A NornicDB shortestPath competitive bench landed at
+`benchmarks/competitive/nornic/` (untracked; the new
+`/benchmarks/competitive/` area is gitignored for competitive
+library comparisons). It exercises both surfaces — `kglite-py`
+(wheel) and `kglite` (Rust core) — against the same `.kgl` graph
+on all three storage modes. The wheel side reuses the existing
+`bench/nornicdb_compare.py` builder via a thin driver; the Rust
+side is a small standalone Cargo project calling
+`kglite::api::session::execute_read`.
+
+Initial runs surfaced an unexplained measurement inversion (the
+wheel measuring faster than the Rust core it wraps), which is
+physically impossible given the architecture. Tracked as a
+post-0.10.1 investigation — likely a bench harness issue
+(LTO scope / first-call lazy init / per-iteration overhead)
+rather than a shipped-code defect. The headline "shortestPath
+~0.07-0.5ms on a 500k-node Wikidata-scale graph" numbers from
+0.10.0's release notes were against the freshly-built graph
+(warm caches + live index data); reload-state perf for
+shortestPath specifically is ~10× slower because BFS traversal
+cost is distinct from endpoint-lookup cost — endpoint lookups
+for `MATCH (n:T {alias: $x})` remain fast (~1ms) on reloaded
+graphs via the id_indices auto-rebuild path.
+
+### Internal — Batch 2 kglite-py → kglite lifts (LIFT-low + HYBRID extracts)
+
+Continuing the polars-style cleanup, lifted every remaining
+non-Python-specific item from `kglite-py` into `kglite` (core).
+With Batch 1 (the earlier section below) this brings the wheel
+to **as thin as it can be**: everything left is genuinely
+PyO3-specific (`#[pyclass]`/`#[pymethods]`, PyDict/PyList
+extraction, GIL handling, Python embedder bridging).
+
+**LIFT-low — pure-Rust items moved to core with the wheel
+delegating in 1-line wrappers:**
+
+| Item | New home | Notes |
+|---|---|---|
+| `field_contains_ci`, `field_starts_with_ci` | Methods on `NodeData` (`kglite::graph::schema`) | Now natural API: `node.field_contains_ci("name", &needle_lower)`. Call sites in `pyapi/kg_fluent.rs` updated. Wheel's static-method wrappers deleted entirely. |
+| `discover_property_keys_from_data` | `kglite::api` (in `handle` module) | Generic property-key discovery for DataFrame/Arrow exporters. |
+| `infer_selection_node_type` | `kglite::api` (free function) | Takes `(&CowSelection, &Arc<DirGraph>)` — no longer wired to the wheel's `KnowledgeGraph` struct. |
+| `build_slice` (SEC) | `SliceSpec::from_optional_filters` | Constructor on the existing public type. |
+| `disk_graph_age_days` (Sodir) | `Workdir::disk_graph_age_days` method | Natural API: `wd.disk_graph_age_days()`. |
+
+**HYBRID — pure-Rust cores extracted; wheel keeps only the
+PyDict/PyAny → typed-args extraction layer:**
+
+| Item | Core API | Wheel becomes |
+|---|---|---|
+| `parse_inline_timeseries` | `InlineTimeseriesConfig::from_components(time_col, time_components, channels, resolution, units)` | PyDict extraction + 1-line constructor call |
+| `parse_spatial_column_types` | `kglite::api::parse_spatial_column_types_from_pairs(pairs)` | PyDict → `Vec<(String, String)>` + delegation |
+| `parse_temporal_column_types` | `kglite::api::parse_temporal_column_types_from_pairs(pairs)` | Same shape |
+| `parse_method_param` | `MethodConfig::from_components(...)` | Per-field `extract()` + constructor call |
+
+**Two items deliberately stay in `kglite-py`** even though they
+look like LIFT candidates:
+- `preprocess_values_owned` — single-variant enum wrapper
+  scaffolding for the Cypher → PyAny conversion phase. No core
+  to lift; the wrapper does nothing useful outside the Python
+  conversion pipeline.
+- `json_value_to_py` (in `mcp_tools.rs`) — the function's job
+  IS `serde_json::Value` → `PyAny` conversion. The "pure-Rust
+  core" would be a no-op since `serde_json::Value` already
+  exists in core; only the PyO3 conversion is wheel-specific.
+
+### Internal — Batch 1 kglite-py → kglite lifts
+
+Architectural cleanup continuing the polars-style split. Per the
+"`kglite-py` holds ONLY Python-specific code" principle, five
+pure-Rust items that had been trapped in the wheel crate moved to
+core. The wheel keeps 1-line `pub(crate) use ... as ...`
+re-exports so the existing call sites in `graph/pyapi/*.rs` compile
+unchanged.
+
+| Item | New home | Why |
+|---|---|---|
+| `resolve_noderefs(graph, rows)` | `kglite::api::session::resolve_noderefs` | Post-execute cleanup — replaces `Value::NodeRef` with node titles. Every Cypher-emitting binding needs this; previously trapped in the wheel. |
+| `TimeSpec` enum | `kglite::api::TimeSpec` (re-export of `graph::features::timeseries::TimeSpec`) | Pure-Rust data shape for inline timeseries config. |
+| `InlineTimeseriesConfig` struct | `kglite::api::InlineTimeseriesConfig` | Same. Includes `all_columns()` helper. |
+| `get_graph_mut(arc)` → `make_dir_graph_mut(arc)` | `kglite::api::make_dir_graph_mut` (defined in `graph::dir_graph`) | `Arc::make_mut` + version increment. Generic Arc<DirGraph> mutation helper for any binding. Renamed during the lift to match Rust naming conventions; wheel keeps the old name via `use ... as get_graph_mut`. |
+| `merge_blueprint(base, complement, overrides)` | `kglite::datasets::sodir::merge_blueprint_json` | JSON-string deep-merge wrapper for Sodir blueprints. CLI tools and other Rust consumers that work with on-disk JSON now have a single entry point. |
+
+All five are 100% pyo3-free; verified by `cargo tree -p kglite |
+grep pyo3` (empty) and confirmed by the audit Explore agent's
+transitive-dep trace. The wheel's call sites stay unchanged; the
+engine logic moves once and stays in one place.
+
+Saved as memory ([[feedback-kglite-py-python-only]]): the principle
+is "kglite-py contains ONLY PyO3 bindings + Python type conversions";
+engine logic belongs in `kglite` (core). Future work batches the
+remaining HYBRID candidates (`parse_spatial_column_types`,
+`parse_temporal_column_types`, `parse_inline_timeseries`,
+`parse_method_param`, `json_value_to_py`) into 0.11.0 — each
+needs a real refactor to split the pure-Rust core from the
+PyDict-extraction wrapper.
+
+### Fixed — kglite-mcp-server can now publish to crates.io (pyo3 lifted out of its dep tree)
+
+`kglite-mcp-server`'s `Cargo.toml` previously depended on `kglite-py`
+(the wheel crate, which has `pyo3` in its dep tree) because it
+used `KnowledgeGraph::source_location`,
+`KnowledgeGraph::set_embedder_native`, and other methods that
+lived on the wheel's `#[pyclass]`-decorated `KnowledgeGraph`
+struct. The binary's README claimed "No libpython link" — that
+claim was false (verified via `cargo tree -p kglite-mcp-server |
+grep pyo3` → showed pyo3 v0.28.3 and friends).
+
+The lift moves the heavy logic — `source_location` (50 lines) +
+`resolve_code_entity` (78-line helper) + `CODE_TYPES` const —
+into a new pure-Rust module at `crates/kglite/src/graph/handle.rs`
+as free functions. A new thin `kglite::api::KnowledgeGraph` struct
+(2 fields: `Arc<DirGraph>` + `Option<Arc<dyn Embedder>>`) bundles
+the binding-side convenience surface (`from_arc`, `dir`,
+`set_embedder_native`, `embedder`, `source_location`) without the
+wheel's full state (selection / reports / mutation stats /
+temporal context / default timeout / max-rows).
+
+Two types now share the `KnowledgeGraph` name across the
+workspace, in different crates with different audiences — mirrors
+the polars pattern (`polars::DataFrame` vs `polars.DataFrame`):
+
+| Crate | Type | Audience |
+|---|---|---|
+| `kglite` (core) | `kglite::api::KnowledgeGraph` | Rust embedders. Pure-Rust. 2 fields. No pyo3. |
+| `kglite-py` (wheel) | `kglite_py::KnowledgeGraph` | Python users via `pip install kglite`. PyO3-decorated. 8 fields. The wheel's heavy methods now delegate to the core's free functions for single-source-of-truth. |
+
+mcp-server's `Cargo.toml` switches its `kglite` dep from
+`{ package = "kglite-py", path = "../kglite-py" }` to
+`{ version = "0.10", path = "../kglite" }`. Mcp-server's source
+needed **zero changes** — every `kglite::api::*` import resolves
+to the same item under the new dep, just routed through core's
+api mod instead of the wheel's re-exports. Verified:
+
+```bash
+cargo tree -p kglite-mcp-server | grep pyo3     # → empty
+```
+
+`publish = false` removed from
+`crates/kglite-mcp-server/Cargo.toml`. The crate publishes to
+crates.io alongside `kglite` and `kglite-bolt-server` in this
+release — three crates in the same 0.10.1 publish cycle,
+orchestrated by `.github/workflows/publish_crates.yml`.
+
+Net effect: `cargo install kglite-mcp-server` works without a
+Python runtime, matching the binary's README claim.
+
+The wheel's `KnowledgeGraph::source_location` /
+`KnowledgeGraph::resolve_code_entity` methods stay on the
+PyO3-decorated struct for back-compat with Python callers via
+`#[pymethods]`, now implemented as 1-line delegates to the
+core's free functions. `kg_fluent::find_one`'s
+`Self::CODE_TYPES` reference now points at
+`kglite_core::graph::handle::CODE_TYPES`. No behavior change.
+
 ### Added — crates.io publish prep for the Rust crates
 
 The pure-Rust `kglite` core crate (and the standalone

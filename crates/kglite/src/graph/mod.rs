@@ -18,6 +18,7 @@ pub mod dir_graph;
 pub mod embedder;
 pub mod explore;
 pub mod features;
+pub mod handle;
 pub mod introspection;
 pub mod io;
 pub mod languages;

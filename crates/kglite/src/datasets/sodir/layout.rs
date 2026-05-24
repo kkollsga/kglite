@@ -114,6 +114,14 @@ impl Workdir {
         self.disk_graph_meta().is_file()
     }
 
+    /// Age in days of the disk-mode graph metadata, or `None` if no
+    /// graph has been built. Drives the disk-mode cooldown short-circuit
+    /// in `Workdir`-managed dataset fetchers. Lifted from kglite-py in
+    /// 0.10.1.
+    pub fn disk_graph_age_days(&self) -> Option<f64> {
+        crate::datasets::sodir::index::file_mtime_age_days(&self.disk_graph_meta())
+    }
+
     /// Create the `csv/` and `graph/` directories (idempotent).
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.csv_dir())?;

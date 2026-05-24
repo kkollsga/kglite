@@ -15,26 +15,33 @@ jobs:
     outputs:
       should_publish_kglite: ${{ steps.check.outputs.should_publish_kglite }}
       should_publish_bolt: ${{ steps.check.outputs.should_publish_bolt }}
+      should_publish_mcp: ${{ steps.check.outputs.should_publish_mcp }}
       kglite_version: ${{ steps.check.outputs.kglite_version }}
       bolt_version: ${{ steps.check.outputs.bolt_version }}
+      mcp_version: ${{ steps.check.outputs.mcp_version }}
     steps:
       - uses: actions/checkout@v6
-      - name: Check kglite + kglite-bolt-server versions against crates.io
+      - name: Check kglite + kglite-bolt-server + kglite-mcp-server versions against crates.io
         id: check
         run: |
           # Source-of-truth version files (post-G.4):
           KG_VERSION=$(grep -m 1 '^version' crates/kglite/Cargo.toml | cut -d '"' -f 2)
           BS_VERSION=$(grep -m 1 '^version' crates/kglite-bolt-server/Cargo.toml | cut -d '"' -f 2)
+          MS_VERSION=$(grep -m 1 '^version' crates/kglite-mcp-server/Cargo.toml | cut -d '"' -f 2)
           echo "kglite_version=$KG_VERSION" >> $GITHUB_OUTPUT
           echo "bolt_version=$BS_VERSION" >> $GITHUB_OUTPUT
+          echo "mcp_version=$MS_VERSION" >> $GITHUB_OUTPUT
           echo "kglite Cargo.toml version:              $KG_VERSION"
           echo "kglite-bolt-server Cargo.toml version:  $BS_VERSION"
+          echo "kglite-mcp-server Cargo.toml version:   $MS_VERSION"
 
           # crates.io API: 200 if version exists, 404 otherwise.
           KG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             "https://crates.io/api/v1/crates/kglite/$KG_VERSION")
           BS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             "https://crates.io/api/v1/crates/kglite-bolt-server/$BS_VERSION")
+          MS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://crates.io/api/v1/crates/kglite-mcp-server/$MS_VERSION")
 
           if [ "$KG_STATUS" = "200" ]; then
             echo "kglite $KG_VERSION already on crates.io — skipping kglite publish"
@@ -52,10 +59,18 @@ jobs:
             echo "should_publish_bolt=true" >> $GITHUB_OUTPUT
           fi
 
+          if [ "$MS_STATUS" = "200" ]; then
+            echo "kglite-mcp-server $MS_VERSION already on crates.io — skipping mcp publish"
+            echo "should_publish_mcp=false" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-mcp-server $MS_VERSION not on crates.io — will publish"
+            echo "should_publish_mcp=true" >> $GITHUB_OUTPUT
+          fi
+
   ci-gate:
     name: Wait for CI + wheel build to pass
     needs: [version-check]
-    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true'
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true'
     runs-on: ubuntu-latest
     steps:
       # Same Rust + Python gates the wheel workflow waits for. If
@@ -120,7 +135,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [version-check, ci-gate]
-    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true'
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -144,12 +159,12 @@ jobs:
         run: cargo publish -p kglite --locked
 
       # 2. Wait for crates.io's sparse index to surface the new
-      # version. Typical propagation is 30–60s but can stretch to
-      # several minutes under load. kglite-bolt-server depends on
-      # kglite being resolvable, so we must poll before stepping
-      # to step 3.
-      - name: Wait for crates.io index propagation
-        if: needs.version-check.outputs.should_publish_kglite == 'true' && needs.version-check.outputs.should_publish_bolt == 'true'
+      # kglite version. Typical propagation is 30–60s but can
+      # stretch to several minutes under load. Both bolt-server
+      # and mcp-server depend on kglite being resolvable, so we
+      # must poll before stepping to steps 3 + 5.
+      - name: Wait for crates.io index propagation (kglite)
+        if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true')
         run: |
           VERSION="${{ needs.version-check.outputs.kglite_version }}"
           echo "Polling crates.io for kglite $VERSION..."
@@ -181,3 +196,37 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite-bolt-server --locked
+
+      # 4. (Optional) Wait for kglite-bolt-server to surface in the
+      # crates.io index. mcp-server doesn't depend on bolt-server,
+      # so this isn't strictly required for correctness — but it
+      # gives the index a settling window before the next publish.
+      # Only fires when BOTH bolt and mcp are publishing this run.
+      - name: Wait for crates.io index propagation (kglite-bolt-server)
+        if: needs.version-check.outputs.should_publish_bolt == 'true' && needs.version-check.outputs.should_publish_mcp == 'true'
+        run: |
+          VERSION="${{ needs.version-check.outputs.bolt_version }}"
+          echo "Polling crates.io for kglite-bolt-server $VERSION..."
+          for i in $(seq 1 30); do
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://crates.io/api/v1/crates/kglite-bolt-server/$VERSION")
+            if [ "$HTTP" = "200" ]; then
+              echo "kglite-bolt-server $VERSION visible on crates.io (attempt $i)"
+              sleep 15
+              exit 0
+            fi
+            echo "Waiting for crates.io index... (attempt $i, HTTP=$HTTP)"
+            sleep 20
+          done
+          echo "Timed out waiting for crates.io index propagation after 10 min"
+          exit 1
+
+      # 5. Publish kglite-mcp-server. Skipped if its version is
+      # already on crates.io (mcp-server may bump independently).
+      # Pyo3 is no longer in the dep tree as of 0.10.1 — see the
+      # lift in `kglite::api::handle::*`.
+      - name: Publish kglite-mcp-server
+        if: needs.version-check.outputs.should_publish_mcp == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-mcp-server --locked

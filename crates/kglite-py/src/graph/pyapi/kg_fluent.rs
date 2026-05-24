@@ -1196,7 +1196,7 @@ impl KnowledgeGraph {
         let name_lower = name.to_lowercase();
         let types_to_search: Vec<&str> = match node_type {
             Some(nt) => vec![nt],
-            None => Self::CODE_TYPES.to_vec(),
+            None => kglite_core::graph::handle::CODE_TYPES.to_vec(),
         };
 
         let mut results: Vec<schema::NodeInfo> = Vec::new();
@@ -1206,12 +1206,12 @@ impl KnowledgeGraph {
                     if let Some(node) = self.inner.get_node(idx) {
                         let matches = match match_type {
                             "contains" => {
-                                Self::field_contains_ci(node, "name", &name_lower)
-                                    || Self::field_contains_ci(node, "title", &name_lower)
+                                node.field_contains_ci("name", &name_lower)
+                                    || node.field_contains_ci("title", &name_lower)
                             }
                             "starts_with" => {
-                                Self::field_starts_with_ci(node, "name", &name_lower)
-                                    || Self::field_starts_with_ci(node, "title", &name_lower)
+                                node.field_starts_with_ci("name", &name_lower)
+                                    || node.field_starts_with_ci("title", &name_lower)
                             }
                             _ => {
                                 // "exact" (default)

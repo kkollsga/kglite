@@ -813,23 +813,55 @@ impl DirGraph {
     /// required, and SET-on-id always stays in sync because id mutation
     /// updates the id_index directly.
     pub fn create_index(&mut self, node_type: &str, property: &str) -> usize {
-        let key = (node_type.to_string(), property.to_string());
+        // Store key uses the user's `property` name verbatim — the
+        // matcher's `try_index_lookup` indexes into `property_indices`
+        // by the unresolved user-facing key (matcher.rs:850), so the
+        // auto-maintenance path keeps things in sync only when the
+        // storage key matches.
+        let store_key = (node_type.to_string(), property.to_string());
 
-        // Build the index
+        // Mirror the matcher's property-READ path
+        // (`core/pattern_matching/matcher.rs::
+        // node_matches_properties_columnar`) so the index covers the
+        // same value-space MATCH consults. Three concerns the read
+        // path handles that `node.get_property()` did not:
+        //
+        // 1. **Alias resolution.** `starId` may be an id-alias for
+        //    `id`; same for title-aliases. Without resolving, we'd
+        //    look up "starId" in PropertyStorage and miss the data
+        //    (stored under "id").
+        // 2. **`id` / `title` are special.** Their values live in
+        //    `node_slots` (disk) / dedicated NodeData fields, NOT in
+        //    `properties`. The matcher reads them via `get_node_id`
+        //    / `get_node_title`; we do the same.
+        // 3. **Column-aware reads.** For mapped/disk graphs loaded
+        //    from .kgl, the actual values live in a `ColumnStore`,
+        //    not in the node's `PropertyStorage::Map`/`Compact`
+        //    snapshot. The backend's `get_node_property` knows how
+        //    to read from each storage type; `NodeData::get_property`
+        //    only reads the in-memory snapshot and silently returns
+        //    None for column-stored values.
+        let read_key = self.resolve_alias(node_type, property).to_string();
+        let interned_key = self.interner.get_or_intern(&read_key);
         let mut index: HashMap<Value, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                if let Some(node) = self.graph.node_weight(idx) {
-                    if let Some(value) = node.get_property(property) {
-                        index.entry(value.into_owned()).or_default().push(idx);
-                    }
+                let value = if read_key == "id" {
+                    self.graph.get_node_id(idx)
+                } else if read_key == "title" {
+                    self.graph.get_node_title(idx)
+                } else {
+                    self.graph.get_node_property(idx, interned_key)
+                };
+                if let Some(value) = value {
+                    index.entry(value).or_default().push(idx);
                 }
             }
         }
 
         let count = index.len();
-        self.property_indices.insert(key, index);
+        self.property_indices.insert(store_key, index);
         count
     }
 
@@ -907,15 +939,25 @@ impl DirGraph {
     /// Returns the number of unique values indexed.
     pub fn create_range_index(&mut self, node_type: &str, property: &str) -> usize {
         let key = (node_type.to_string(), property.to_string());
+        // Same alias-resolution + column-aware property read as
+        // `create_index` — see the comment there for the full
+        // rationale on why we don't use `node.get_property`.
+        let resolved = self.resolve_alias(node_type, property).to_string();
+        let interned_key = self.interner.get_or_intern(&resolved);
         let mut index: std::collections::BTreeMap<Value, Vec<NodeIndex>> =
             std::collections::BTreeMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                if let Some(node) = self.graph.node_weight(idx) {
-                    if let Some(value) = node.get_property(property) {
-                        index.entry(value.into_owned()).or_default().push(idx);
-                    }
+                let value = if resolved == "id" {
+                    self.graph.get_node_id(idx)
+                } else if resolved == "title" {
+                    self.graph.get_node_title(idx)
+                } else {
+                    self.graph.get_node_property(idx, interned_key)
+                };
+                if let Some(value) = value {
+                    index.entry(value).or_default().push(idx);
                 }
             }
         }
@@ -965,26 +1007,41 @@ impl DirGraph {
             properties.iter().map(|s| s.to_string()).collect(),
         );
 
-        // Build the composite index
+        // Pre-resolve each property name (alias → canonical "id" /
+        // "title" when applicable) and pre-intern so the per-node
+        // loop is HashMap-only. Mirrors the matcher's read path —
+        // see `create_index`'s comment for the full rationale.
+        let resolved: Vec<String> = properties
+            .iter()
+            .map(|p| self.resolve_alias(node_type, p).to_string())
+            .collect();
+        let interned_keys: Vec<InternedKey> = resolved
+            .iter()
+            .map(|r| self.interner.get_or_intern(r))
+            .collect();
+
         let mut index: HashMap<CompositeValue, Vec<NodeIndex>> = HashMap::new();
 
         if let Some(node_indices) = self.type_indices.get(node_type) {
             for idx in node_indices.iter() {
-                if let Some(node) = self.graph.node_weight(idx) {
-                    // Extract values for all properties in order
-                    let values: Vec<Value> = properties
-                        .iter()
-                        .map(|p| {
-                            node.get_property(p)
-                                .map(Cow::into_owned)
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
+                let values: Vec<Value> = resolved
+                    .iter()
+                    .zip(interned_keys.iter())
+                    .map(|(r, k)| {
+                        let v = if r == "id" {
+                            self.graph.get_node_id(idx)
+                        } else if r == "title" {
+                            self.graph.get_node_title(idx)
+                        } else {
+                            self.graph.get_node_property(idx, *k)
+                        };
+                        v.unwrap_or(Value::Null)
+                    })
+                    .collect();
 
-                    // Only index if at least one value is non-null
-                    if values.iter().any(|v| !matches!(v, Value::Null)) {
-                        index.entry(CompositeValue(values)).or_default().push(idx);
-                    }
+                // Only index if at least one value is non-null
+                if values.iter().any(|v| !matches!(v, Value::Null)) {
+                    index.entry(CompositeValue(values)).or_default().push(idx);
                 }
             }
         }
@@ -2399,4 +2456,25 @@ pub struct GraphInfo {
     pub columnar_total_rows: usize,
     /// Rows backed by live nodes (columnar_total_rows - columnar_live_rows = orphaned)
     pub columnar_live_rows: usize,
+}
+
+/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
+/// counter. Wraps [`Arc::make_mut`] (which clones the inner `DirGraph`
+/// if other strong refs exist) plus the canonical post-mutation
+/// `version += 1` increment that downstream OCC commit-checks rely on.
+///
+/// Lifted from the wheel crate in 0.10.1 so bindings + embedders that
+/// hold an `Arc<DirGraph>` and want to mutate it have a single,
+/// consistent entry point.
+///
+/// **Warning:** If other `Arc<DirGraph>` references exist (e.g. a
+/// snapshot held by an open transaction, or a clone held by a still-
+/// alive `ResultView`), this deep-clones the entire graph — every
+/// node, edge, and index. Mutation in a read-heavy workload is fine,
+/// but a lingering reference can cause an unexpected memory spike on
+/// the first write.
+pub fn make_dir_graph_mut(arc: &mut std::sync::Arc<DirGraph>) -> &mut DirGraph {
+    let graph = std::sync::Arc::make_mut(arc);
+    graph.version += 1;
+    graph
 }

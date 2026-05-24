@@ -43,6 +43,33 @@ impl SliceSpec {
         self
     }
 
+    /// Build a `SliceSpec` from optional filter args. Empty / None args
+    /// produce an unrestricted slice. Convenience wrapper for callers
+    /// (CLI tools, Python bindings, JSON/YAML config loaders) that
+    /// would otherwise repeat the `if let Some(...) && !empty { ... }`
+    /// pattern around the builder methods. Lifted from kglite-py in 0.10.1.
+    pub fn from_optional_filters(
+        cik_list: Option<Vec<u64>>,
+        form_types: Option<Vec<String>>,
+        year_range: Option<(u16, u16)>,
+    ) -> Self {
+        let mut s = Self::default();
+        if let Some(ciks) = cik_list {
+            if !ciks.is_empty() {
+                s = s.with_cik_list(ciks);
+            }
+        }
+        if let Some(forms) = form_types {
+            if !forms.is_empty() {
+                s = s.with_form_types(forms);
+            }
+        }
+        if let Some((lo, hi)) = year_range {
+            s = s.with_year_range(lo, hi);
+        }
+        s
+    }
+
     /// `true` if the CIK is admitted (or if no CIK filter is set).
     pub fn cik_matches(&self, cik: u64) -> bool {
         match &self.cik_list {

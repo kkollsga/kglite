@@ -3,7 +3,7 @@
 # Pure-Rust engine lives in the sibling `kglite` crate (`crates/kglite/`).
 # Polars pattern: `polars` (core) + `py-polars` (wrapper).
 name = "kglite-py"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."

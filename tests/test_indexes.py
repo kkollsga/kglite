@@ -93,3 +93,75 @@ class TestEmptyGraph:
         # Should not error
         indexes = graph.list_indexes()
         assert len(indexes) == 0
+
+
+class TestIndexRebuildAfterReload:
+    """Regression guard for the 0.10.1 fix where `create_index` /
+    `create_range_index` / `create_composite_index` returned 0 entries
+    when called on a graph loaded from .kgl in memory/mapped storage.
+
+    Root cause: `NodeData::get_property()` only reads the in-memory
+    `PropertyStorage::Map`/`Compact` snapshot, which is stripped during
+    save. The matcher's hot path uses
+    `GraphBackend::get_node_property()` (backend-aware) plus alias
+    resolution + id/title special-casing. The fix made `create_index`
+    use the same path.
+    """
+
+    @pytest.fixture
+    def reloaded_graph(self, tmp_path):
+        # Build, save, reload — round-trips properties through the .kgl
+        # format so loaded NodeData sees column-stored values rather
+        # than the in-memory snapshot the build path populates.
+        graph = KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "starId": [f"s{i}" for i in range(100)],
+                "title": [f"Star {i}" for i in range(100)],
+                "sector": [i // 10 for i in range(100)],
+                "lum": [float(i) * 1.5 for i in range(100)],
+            }
+        )
+        graph.add_nodes(df, "Star", "starId", "title")
+        kgl = tmp_path / "stars.kgl"
+        graph.save(str(kgl))
+        from kglite import load
+
+        return load(str(kgl))
+
+    def test_create_index_on_alias_after_reload(self, reloaded_graph):
+        # `starId` is an id-alias declared via add_nodes; create_index
+        # must resolve the alias to "id" and read via get_node_id() —
+        # without this, the matcher's column path is used but
+        # create_index would see 0 values.
+        result = reloaded_graph.create_index("Star", "starId")
+        assert result["unique_values"] == 100, (
+            f"create_index(Star, starId) on reloaded .kgl returned "
+            f"{result['unique_values']} entries — expected 100. "
+            f"Regression in alias-resolving column-store read path."
+        )
+
+    def test_create_index_on_id_after_reload(self, reloaded_graph):
+        # Same as above but via the canonical "id" key directly.
+        result = reloaded_graph.create_index("Star", "id")
+        assert result["unique_values"] == 100
+
+    def test_create_index_on_plain_property_after_reload(self, reloaded_graph):
+        # Non-id, non-title property — exercises the
+        # get_node_property() backend dispatch.
+        result = reloaded_graph.create_index("Star", "sector")
+        assert result["unique_values"] == 10  # 100 stars / 10 per sector
+
+    def test_create_range_index_after_reload(self, reloaded_graph):
+        result = reloaded_graph.create_range_index("Star", "lum")
+        assert result["unique_values"] == 100
+
+    def test_create_composite_index_after_reload(self, reloaded_graph):
+        result = reloaded_graph.create_composite_index("Star", ["sector", "lum"])
+        assert result["unique_combinations"] == 100  # every (sector, lum) pair is unique
+
+    def test_create_composite_with_alias_after_reload(self, reloaded_graph):
+        # Composite index that mixes an id-alias with a plain property —
+        # alias resolution must happen per-column.
+        result = reloaded_graph.create_composite_index("Star", ["starId", "sector"])
+        assert result["unique_combinations"] == 100

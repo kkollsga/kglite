@@ -46,12 +46,20 @@ BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
 
 
 def read_version() -> str:
-    """Pull `version = "X.Y.Z"` from Cargo.toml line 3 — the project's
-    declared source of truth per CLAUDE.md."""
-    text = (REPO_ROOT / "Cargo.toml").read_text()
+    """Pull ``version = "X.Y.Z"`` from the wheel crate's ``Cargo.toml``.
+
+    Pre-G.4 the root ``Cargo.toml`` held the project version (line 3).
+    Post-G.4 the workspace root is virtual; the wheel version now lives
+    in ``crates/kglite-py/Cargo.toml`` (read by maturin) and the core
+    crate version in ``crates/kglite/Cargo.toml``. Both should match in
+    a release commit. We read the wheel-crate value because the
+    captured constants (.kgl header, binary size, benchmark baselines)
+    all describe the wheel artifact.
+    """
+    text = (REPO_ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text()
     m = re.search(r'^\s*version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
     if not m:
-        sys.exit("Cargo.toml: no version found")
+        sys.exit("crates/kglite-py/Cargo.toml: no version found")
     return m.group(1)
 
 

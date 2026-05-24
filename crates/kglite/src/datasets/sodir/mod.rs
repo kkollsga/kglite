@@ -32,7 +32,7 @@ pub mod layout;
 pub mod orchestrator;
 pub mod preprocess;
 
-pub use blueprint::{datasets_used_by_blueprint, deep_merge};
+pub use blueprint::{datasets_used_by_blueprint, deep_merge, merge_blueprint_json};
 pub use catalog::{is_known, kind_of, resolve, DataKind};
 pub use client::ArcGISClient;
 pub use error::{Result, SodirError};

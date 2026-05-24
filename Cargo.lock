@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -1915,7 +1915,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "kglite-py",
+ "kglite",
  "mcp-methods",
  "rmcp",
  "schemars",
@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "bincode",

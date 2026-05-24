@@ -51,3 +51,34 @@ pub use self::transaction::{CommitOutcome, Session, Transaction};
 
 pub(crate) mod execute;
 pub(crate) mod transaction;
+
+use crate::datatypes::Value;
+use crate::graph::schema::GraphBackend;
+// `node_weight` is on the GraphRead trait; the wheel's import path
+// did `pub use kglite_core::graph::*` glob which brought it in.
+use crate::graph::storage::GraphRead;
+
+/// Resolve any `Value::NodeRef` entries in Cypher result rows to the
+/// referenced node's `title` value. Called by bindings just before
+/// emitting rows to their consumer (`PyDict`/`PyList` for the wheel,
+/// `RecordMessage` for bolt-server, JSON for mcp-server). `NodeRef`
+/// is an internal sentinel used by `collect()` / `WITH` to preserve
+/// node identity through the planner — it should never appear in
+/// output.
+///
+/// Lifted from the wheel crate in 0.10.1 so every binding can call
+/// the same post-execute cleanup instead of re-implementing it.
+pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
+    for row in rows.iter_mut() {
+        for val in row.iter_mut() {
+            if let Value::NodeRef(idx) = val {
+                let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
+                if let Some(node) = graph.node_weight(node_idx) {
+                    *val = node.title().into_owned();
+                } else {
+                    *val = Value::Null;
+                }
+            }
+        }
+    }
+}

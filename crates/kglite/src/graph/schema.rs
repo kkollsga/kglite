@@ -671,6 +671,137 @@ pub struct SpatialConfig {
     pub shapes: HashMap<String, String>,
 }
 
+/// Parse spatial column-type entries from the wheel's `column_types`
+/// dict shape. Recognizes `location.lat`, `location.lon`, `geometry`,
+/// `point.<name>.lat`, `point.<name>.lon`, `shape.<name>`. Returns
+/// `(Some(config), cleaned_pairs)` if any spatial entries were found,
+/// `(None, original_pairs)` otherwise. The cleaned pairs replace
+/// recognized spatial type strings with their natural storage types
+/// (`float` for lat/lon, `str` for WKT shapes) so downstream
+/// dataframe loaders treat them correctly.
+///
+/// Lifted from kglite-py's `parse_spatial_column_types` in 0.10.1 —
+/// the wheel keeps only the `Bound<PyDict>` → `Vec<(String, String)>`
+/// extraction wrapper.
+/// Result of column-type parsing: optional config + cleaned (col_name, type_str) pairs.
+pub type SpatialColumnParseResult = (Option<SpatialConfig>, Vec<(String, String)>);
+
+pub fn parse_spatial_column_types_from_pairs(
+    pairs: Vec<(String, String)>,
+) -> Result<SpatialColumnParseResult, String> {
+    let mut cleaned: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+    let mut config = SpatialConfig::default();
+    let mut has_spatial = false;
+
+    // Track partial location/point entries (need both lat and lon).
+    let mut location_lat: Option<String> = None;
+    let mut location_lon: Option<String> = None;
+    let mut point_lats: HashMap<String, String> = HashMap::new();
+    let mut point_lons: HashMap<String, String> = HashMap::new();
+
+    for (col_name, type_str) in pairs {
+        let type_lower = type_str.to_lowercase();
+        match type_lower.as_str() {
+            "location.lat" => {
+                location_lat = Some(col_name.clone());
+                cleaned.push((col_name, "float".to_string()));
+                has_spatial = true;
+            }
+            "location.lon" => {
+                location_lon = Some(col_name.clone());
+                cleaned.push((col_name, "float".to_string()));
+                has_spatial = true;
+            }
+            "geometry" => {
+                config.geometry = Some(col_name.clone());
+                cleaned.push((col_name, "str".to_string()));
+                has_spatial = true;
+            }
+            _ if type_lower.starts_with("point.") => {
+                let parts: Vec<&str> = type_lower.splitn(3, '.').collect();
+                if parts.len() == 3 {
+                    let name = parts[1].to_string();
+                    match parts[2] {
+                        "lat" => {
+                            point_lats.insert(name, col_name.clone());
+                        }
+                        "lon" => {
+                            point_lons.insert(name, col_name.clone());
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Invalid spatial type '{}' for column '{}'. \
+                                 Expected 'point.<name>.lat' or 'point.<name>.lon'.",
+                                type_str, col_name
+                            ));
+                        }
+                    }
+                    cleaned.push((col_name, "float".to_string()));
+                    has_spatial = true;
+                } else {
+                    return Err(format!(
+                        "Invalid spatial type '{}' for column '{}'. \
+                         Expected 'point.<name>.lat' or 'point.<name>.lon'.",
+                        type_str, col_name
+                    ));
+                }
+            }
+            _ if type_lower.starts_with("shape.") => {
+                let parts: Vec<&str> = type_lower.splitn(2, '.').collect();
+                if parts.len() == 2 {
+                    let name = parts[1].to_string();
+                    config.shapes.insert(name, col_name.clone());
+                    cleaned.push((col_name, "str".to_string()));
+                    has_spatial = true;
+                } else {
+                    return Err(format!(
+                        "Invalid spatial type '{}' for column '{}'.",
+                        type_str, col_name
+                    ));
+                }
+            }
+            _ => {
+                cleaned.push((col_name, type_str));
+            }
+        }
+    }
+
+    if !has_spatial {
+        return Ok((None, cleaned));
+    }
+
+    match (location_lat, location_lon) {
+        (Some(lat), Some(lon)) => config.location = Some((lat, lon)),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "Incomplete location: both 'location.lat' and 'location.lon' must be specified."
+                    .to_string(),
+            );
+        }
+        (None, None) => {}
+    }
+
+    let all_point_names: std::collections::HashSet<&String> =
+        point_lats.keys().chain(point_lons.keys()).collect();
+    for name in all_point_names {
+        match (point_lats.get(name), point_lons.get(name)) {
+            (Some(lat), Some(lon)) => {
+                config
+                    .points
+                    .insert(name.clone(), (lat.clone(), lon.clone()));
+            }
+            _ => {
+                return Err(format!(
+                    "Incomplete point '{}': both 'point.{}.lat' and 'point.{}.lon' must be specified.",
+                    name, name, name
+                ));
+            }
+        }
+    }
+
+    Ok((Some(config), cleaned))
+}
+
 /// Temporal configuration for a node type or connection type.
 /// Declares which properties hold validity-period dates (valid_from, valid_to).
 /// When configured, temporal filtering is applied automatically in
@@ -681,6 +812,57 @@ pub struct TemporalConfig {
     pub valid_from: String,
     /// Property name holding the end date, e.g. "fldLicenseeTo" or "date_to"
     pub valid_to: String,
+}
+
+/// Parse temporal column-type entries from the wheel's `column_types`
+/// dict shape. Recognizes `validFrom` / `validTo` (case-insensitive).
+/// Returns `(Some(config), cleaned_pairs)` if BOTH validFrom and
+/// validTo are found; `(None, original_pairs)` if neither is found.
+/// Returns `Err` if exactly one is found (asymmetric config is a
+/// data-shape mistake — better to fail loudly).
+///
+/// Lifted from kglite-py's `parse_temporal_column_types` in 0.10.1.
+/// Result of temporal column-type parsing: optional config + cleaned pairs.
+pub type TemporalColumnParseResult = (Option<TemporalConfig>, Vec<(String, String)>);
+
+pub fn parse_temporal_column_types_from_pairs(
+    pairs: Vec<(String, String)>,
+) -> Result<TemporalColumnParseResult, String> {
+    let mut cleaned: Vec<(String, String)> = Vec::with_capacity(pairs.len());
+    let mut valid_from_col: Option<String> = None;
+    let mut valid_to_col: Option<String> = None;
+
+    for (col_name, type_str) in pairs {
+        let type_lower = type_str.to_lowercase();
+        match type_lower.as_str() {
+            "validfrom" => {
+                valid_from_col = Some(col_name.clone());
+                cleaned.push((col_name, "datetime".to_string()));
+            }
+            "validto" => {
+                valid_to_col = Some(col_name.clone());
+                cleaned.push((col_name, "datetime".to_string()));
+            }
+            _ => {
+                cleaned.push((col_name, type_str));
+            }
+        }
+    }
+
+    match (valid_from_col, valid_to_col) {
+        (Some(from), Some(to)) => Ok((
+            Some(TemporalConfig {
+                valid_from: from,
+                valid_to: to,
+            }),
+            cleaned,
+        )),
+        (Some(_), None) | (None, Some(_)) => Err(
+            "Incomplete temporal config: both 'validFrom' and 'validTo' column types must be specified."
+                .to_string(),
+        ),
+        (None, None) => Ok((None, cleaned)),
+    }
 }
 
 /// Per-type ID index. Uses compact u32 keys when all IDs are UniqueId,
@@ -1364,6 +1546,32 @@ impl NodeData {
             "title" => Some(self.title()),
             _ => self.properties.get(InternedKey::from_str(field)),
         }
+    }
+
+    /// Case-insensitive substring check on a string-typed field. Returns
+    /// `false` if the field is missing or non-string. `needle_lower` is
+    /// expected to already be lowercased — the function only lowercases
+    /// the haystack. Lifted from kglite-py in 0.10.1 so all bindings
+    /// share the same case-insensitive matcher.
+    pub fn field_contains_ci(&self, field: &str, needle_lower: &str) -> bool {
+        self.get_field_ref(field)
+            .and_then(|v| match &*v {
+                Value::String(s) => Some(s.to_lowercase().contains(needle_lower)),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// Case-insensitive prefix check on a string-typed field. Returns
+    /// `false` if the field is missing or non-string. `prefix_lower` is
+    /// expected to already be lowercased.
+    pub fn field_starts_with_ci(&self, field: &str, prefix_lower: &str) -> bool {
+        self.get_field_ref(field)
+            .and_then(|v| match &*v {
+                Value::String(s) => Some(s.to_lowercase().starts_with(prefix_lower)),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     /// Returns a property value (excludes id/title/type).
