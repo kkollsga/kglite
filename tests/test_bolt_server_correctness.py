@@ -315,40 +315,32 @@ def test_edge_unicode_in_property_name(bolt_server):
     assert _roundtrip(bolt_server, val) == val
 
 
-def test_edge_float_nan_parameter(bolt_server):
-    """NaN as a parameter — pin current behavior.
-    RB-4 will reject with Protocol error; today round-trips."""
+def test_edge_float_nan_parameter_rejected(bolt_server):
+    """NaN as a parameter — RB-4 rejects with Protocol → ClientError.
+    NaN has ill-defined comparison semantics in Cypher (NaN != NaN);
+    sending it usually signals a client-side bug."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            # Either round-trips as NaN (current) or rejects (post-RB-4).
-            # We accept either outcome — the test pins that the server
-            # doesn't crash on the input.
-            try:
-                result = session.run("RETURN $x AS x", x=float("nan"))
-                value = result.single()["x"]
-                # NaN != NaN; if we got NaN back, that's the pre-RB-4 behavior.
-                import math
-
-                assert isinstance(value, float)
-                assert math.isnan(value)
-            except neo4j.exceptions.ClientError:
-                # Post-RB-4 — rejected as Protocol error.
-                pass
+            with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
+                session.run("RETURN $x AS x", x=float("nan")).consume()
+            assert "non-finite" in str(exc_info.value).lower()
 
 
-def test_edge_float_infinity_parameter(bolt_server):
-    """+Infinity as a parameter — same pin-or-reject pattern as NaN."""
+def test_edge_float_infinity_parameter_rejected(bolt_server):
+    """+Infinity as a parameter — RB-4 rejects with Protocol → ClientError."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            try:
-                result = session.run("RETURN $x AS x", x=float("inf"))
-                value = result.single()["x"]
-                import math
+            with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
+                session.run("RETURN $x AS x", x=float("inf")).consume()
+            assert "non-finite" in str(exc_info.value).lower()
 
-                assert isinstance(value, float)
-                assert math.isinf(value)
-            except neo4j.exceptions.ClientError:
-                pass
+
+def test_edge_float_negative_infinity_parameter_rejected(bolt_server):
+    """-Infinity as a parameter — RB-4 rejects with Protocol → ClientError."""
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            with pytest.raises(neo4j.exceptions.ClientError):
+                session.run("RETURN $x AS x", x=float("-inf")).consume()
 
 
 def test_edge_bytes_parameter_rejected(bolt_server):

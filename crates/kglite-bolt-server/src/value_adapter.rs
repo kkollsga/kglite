@@ -260,7 +260,24 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
         BoltValue::Null => Ok(Value::Null),
         BoltValue::Boolean(b) => Ok(Value::Boolean(*b)),
         BoltValue::Integer(n) => Ok(Value::Int64(*n)),
-        BoltValue::Float(f) => Ok(Value::Float64(*f)),
+        BoltValue::Float(f) => {
+            // Reject non-finite floats — NaN and ±Infinity have ill-
+            // defined comparison semantics in Cypher (NaN != NaN, etc.)
+            // and round-tripping them through a graph store typically
+            // signals a client-side bug. Pinning rejection here surfaces
+            // it early as a clear ClientError instead of letting odd
+            // values propagate into queries.
+            if !f.is_finite() {
+                return Err(BoltError::Protocol(format!(
+                    "non-finite Float parameter: {f} \
+                     (NaN and ±Infinity not supported — typically indicates \
+                     a client-side division-by-zero or sentinel-value bug; \
+                     send NULL instead if the absence of a value is what \
+                     you mean)"
+                )));
+            }
+            Ok(Value::Float64(*f))
+        }
         BoltValue::String(s) => Ok(Value::String(s.clone())),
 
         // ---- Recursive containers ---------------------------------------
