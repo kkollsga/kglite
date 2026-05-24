@@ -124,6 +124,62 @@ All three downstream Cypher consumers (Python `cypher()`, MCP
 validation. Bolt smoke contract still reports `3 passed, 5 xfailed`;
 MCP smoke still reports 32 passed.
 
+### Internal — Bolt protocol C.6 (typed FAILURE codes + `--auth basic` + `db.*` verified)
+
+Final sub-phase of Phase C. All 8 smoke tests now pass; the bolt-
+server can stand in for a Neo4j instance for the broad happy-path
+contract (handshake, auth, scalar reads, parameterized queries,
+graph-structure returns, explicit transactions, --readonly, typed
+FAILURE codes, schema-introspection procs).
+
+- **New module `crates/kglite-bolt-server/src/error_map.rs`**:
+  `kg_to_bolt(KgError) -> BoltError::Query { code, message }` with a
+  16-arm mapping table from `KgErrorCode` to `Neo.{Class}.{Category}.{Title}`
+  status codes:
+  - `CypherSyntax` → `Neo.ClientError.Statement.SyntaxError`
+  - `CypherTimeout` → `Neo.ClientError.Transaction.TransactionTimedOut`
+  - `CypherTypeMismatch` → `Neo.ClientError.Statement.TypeError`
+  - `CypherExecution` → `Neo.DatabaseError.Statement.ExecutionFailed`
+  - `Schema` → `Neo.ClientError.Schema.ConstraintValidationFailed`
+  - `Validation` / `Expr` / `InvalidArgument` → `Neo.ClientError.Statement.ArgumentError`
+  - `NodeNotFound` / `ConnectionNotFound` / `PropertyNotFound` → `Neo.ClientError.Statement.EntityNotFound`
+  - `MissingArgument` → `Neo.ClientError.Statement.ParameterMissing`
+  - `FileNotFound` / `FileFormat` / `FileIo` / `Internal` → `Neo.DatabaseError.General.UnknownError`
+  - 2 unit tests pin the table shape (every code maps to a
+    4-segment `Neo.*` string; the SyntaxError case is asserted
+    verbatim).
+- **`crates/kglite-bolt-server/src/backend.rs::execute`**:
+  `parse_cypher` errors now route through `kg_to_bolt` instead of
+  the `BoltError::Backend(e.to_string())` fallback. Other error
+  sources (`rewrite_text_score`, `CypherExecutor::execute`,
+  `execute_mutable`) still return `String` from kglite — when those
+  paths gain typed errors in a future refactor, they'll auto-flow
+  through the same mapper.
+- **New module `crates/kglite-bolt-server/src/auth.rs`**:
+  `BasicAuthValidator` implements the boltr `AuthValidator` trait.
+  Checks scheme + principal + credentials against the CLI's
+  `--auth-user` / `--auth-pass`; rejects with `BoltError::Authentication`
+  (maps to `Neo.ClientError.Security.Unauthorized`).
+- **`crates/kglite-bolt-server/src/main.rs`**: wires
+  `BasicAuthValidator` into `BoltServer::builder().auth(...)` when
+  `--auth basic` is selected. `--auth none` (default) leaves no
+  validator wired — boltr handles LOGON SUCCESS itself, accepting
+  any credentials.
+- **`kglite::api::{KgError, KgErrorCode}`** newly exposed
+  (`src/lib.rs`). The Python boundary already used them; bolt-
+  server now does too.
+- **`db.*` schema-introspection procs (`db.labels`, `db.relationshipTypes`,
+  `db.indexes`)**: verified to work via the standard Cypher CALL
+  pipeline. No bolt-server changes needed — Phase A.3 added the
+  procs to kglite's executor, they're routed through the existing
+  parse-plan-execute path, and they return scalar rows that the
+  C.2 `to_bolt` arms handle directly.
+- **Test contract**: `xfail` removed from
+  `test_bolt_returns_failure_on_parse_error`. `pytest -m bolt -v`
+  now reports **`8 passed, 0 xfailed`** (exit code 0). Strict-mode
+  contract retired cleanly — every test turned green on exactly
+  the sub-phase it was tagged for.
+
 ### Internal — Bolt protocol C.5 (BEGIN/COMMIT/ROLLBACK + --readonly)
 
 Fifth sub-phase of Phase C. Explicit transactions work end-to-end:

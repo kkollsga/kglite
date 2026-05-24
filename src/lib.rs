@@ -51,6 +51,10 @@ pub mod api {
     // and future Arrow/Polars exporters) want to pattern-match into them
     // without re-deriving accessors.
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
+    // Typed error surface — Phase A.2 added KgError + KgErrorCode for the
+    // Python boundary; Phase C.6 (bolt-server) consumes them to map onto
+    // Neo4j `Neo.ClientError.*` wire codes via `BoltError::Query`.
+    pub use crate::error::{KgError, KgErrorCode};
     pub use crate::graph::dir_graph::DirGraph;
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;

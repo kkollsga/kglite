@@ -280,12 +280,12 @@ def test_bolt_rejects_writes_when_readonly(bolt_server_readonly):
                 session.begin_transaction()
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.6 — KgError → Bolt FAILURE mapping (needs A.2 ✓)")
 def test_bolt_returns_failure_on_parse_error(bolt_server):
-    """Phase C.6: a syntactically invalid Cypher returns Bolt FAILURE
+    """Phase C.6 ✓: a syntactically invalid Cypher returns Bolt FAILURE
     with a `Neo.ClientError.Statement.SyntaxError` code (the canonical
     Neo4j status code for this case), driven by the KgErrorCode
-    enum that Phase A.2 shipped."""
+    enum that Phase A.2 shipped + the kg_to_bolt mapper that Phase C.6
+    added."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             with pytest.raises(neo4j.exceptions.ClientError) as exc_info:

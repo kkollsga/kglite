@@ -1,11 +1,13 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Phase C.1 + C.2 + C.3 + C.4 + C.5 shipped: handshake / session
-//! lifecycle / scalar RUN+PULL / parameter decoding / Node-Rel-Path
-//! RETURN / explicit transactions (BEGIN/COMMIT/ROLLBACK) + `--readonly`
-//! enforcement. Only C.6 (typed `KgErrorCode` → `Neo.ClientError.*`
-//! mapping + `--auth basic` validator + `db.*` proc pass-through)
-//! remains.
+//! Phase C.1 through C.6 ✅ shipped: handshake / session lifecycle /
+//! scalar RUN+PULL / parameter decoding / Node-Rel-Path RETURN /
+//! explicit transactions (BEGIN/COMMIT/ROLLBACK) + `--readonly`
+//! enforcement / typed `KgError` → `Neo.{Class}.{Category}.{Title}`
+//! FAILURE-code mapping (via `crate::error_map`) / `--auth basic`
+//! credential validator (wired in `main.rs`) / `db.*` schema-
+//! introspection procedure pass-through (works via the standard
+//! Cypher CALL pipeline — Phase A.3 added the procs to kglite core).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +24,7 @@ use boltr::types::{BoltDict, BoltValue};
 
 use kglite::api::{cypher, DirGraph, Value};
 
+use crate::error_map::kg_to_bolt;
 use crate::value_adapter;
 
 /// Bolt backend wrapping a loaded kglite graph.
@@ -450,8 +453,10 @@ impl KgliteBackend {
         kg_params: &HashMap<String, Value>,
         graph: &DirGraph,
     ) -> Result<(cypher::CypherQuery, bool), BoltError> {
-        let mut parsed =
-            cypher::parse_cypher(query).map_err(|e| BoltError::Backend(e.to_string()))?;
+        // Parse errors get typed Neo4j codes (Phase C.6). CypherSyntax →
+        // Neo.ClientError.Statement.SyntaxError → driver raises
+        // ClientError with .code containing "Syntax".
+        let mut parsed = cypher::parse_cypher(query).map_err(kg_to_bolt)?;
         cypher::validate_schema(&parsed, graph).map_err(|e| BoltError::Protocol(e.to_string()))?;
         let rewrite =
             cypher::rewrite_text_score(&mut parsed, kg_params).map_err(BoltError::Backend)?;

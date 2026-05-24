@@ -22,7 +22,9 @@ use kglite::api::load_file;
 
 use crate::backend::KgliteBackend;
 
+mod auth;
 mod backend;
+mod error_map;
 mod value_adapter;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -137,11 +139,20 @@ async fn main() -> Result<()> {
         builder = builder.idle_timeout(Duration::from_secs(secs));
     }
 
-    // Phase C.6 wires `--auth basic` to a real AuthValidator. For now
-    // (Phase B) the scheme + creds are accepted into the CLI surface
-    // and stored, but the connection panics on first Bolt message via
-    // the stubbed `set_session_auth` body.
-    let _ = (cli.auth, cli.auth_user.as_deref(), cli.auth_pass.as_deref());
+    // Phase C.6: wire `--auth basic` to a BasicAuthValidator. `--auth
+    // none` leaves the validator unset — boltr accepts any LOGON
+    // credentials in that mode (test #1 connects with default
+    // ("neo4j", "password") which is fine).
+    if matches!(cli.auth, AuthScheme::Basic) {
+        let user = cli.auth_user.clone().ok_or_else(|| {
+            anyhow::anyhow!("--auth basic requires both --auth-user and --auth-pass")
+        })?;
+        let pass = cli.auth_pass.clone().ok_or_else(|| {
+            anyhow::anyhow!("--auth basic requires both --auth-user and --auth-pass")
+        })?;
+        builder = builder.auth(crate::auth::BasicAuthValidator::new(user, pass));
+        tracing::info!(user = %cli.auth_user.as_deref().unwrap_or(""), "wired --auth basic validator");
+    }
 
     tracing::info!(%addr, readonly = cli.readonly, "Bolt server starting");
     builder
