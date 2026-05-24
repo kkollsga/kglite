@@ -124,6 +124,51 @@ All three downstream Cypher consumers (Python `cypher()`, MCP
 validation. Bolt smoke contract still reports `3 passed, 5 xfailed`;
 MCP smoke still reports 32 passed.
 
+### Internal — Bolt protocol C.4 (Node / Relationship / Path RETURN)
+
+Fourth sub-phase of Phase C. Cypher queries returning graph
+structures now round-trip over Bolt — `RETURN n` materializes as
+a `neo4j.graph.Node` in the Python driver, `RETURN r` as
+`neo4j.graph.Relationship`, and (via the Path encoding scheme)
+`RETURN p = (...)-[*]-(...)` returns a `neo4j.graph.Path`.
+
+- **`crates/kglite-bolt-server/src/value_adapter.rs::to_bolt`**:
+  graph-structure arms become real, replacing the Phase C.2
+  `Err(BoltError::Backend("phase C.4 ..."))` stubs:
+  - `Value::Node(node)` → `BoltNode { id: i64, labels, properties,
+    element_id: id.to_string() }`. `element_id` is the stringified
+    integer id (stable within one server lifetime — the contract
+    drivers care about; drivers shouldn't persist `element_id`
+    long-term).
+  - `Value::Relationship(rel)` → `BoltRelationship { id, start_node_id,
+    end_node_id, rel_type, properties, element_id, start_element_id,
+    end_element_id }`. All `*element_id` fields stringify the
+    numeric ids.
+  - `Value::Path(p)` → `BoltPath { nodes, rels: Vec<BoltUnboundRelationship>,
+    indices }`. The `indices` field encodes the Neo4j path-traversal
+    scheme: pairs of (signed-1-based-rel-index, 0-based-next-node-index)
+    where sign = direction (+ outgoing, - incoming relative to path
+    traversal). Direction inferred by comparing `rel.start_id` /
+    `rel.end_id` against the surrounding node ids.
+- New helpers in `value_adapter.rs`: `props_to_bolt_dict`
+  (recursive via `to_bolt`); `path_to_bolt_path` (handles the
+  indices arithmetic + tracing-logs corrupt paths where a rel
+  doesn't connect its surrounding nodes).
+- **`kglite::api`**: now exposes `NodeValue`, `RelValue`, `PathValue`
+  alongside `Value` (`src/lib.rs`). Downstream Rust consumers (the
+  bolt-server's path encoder, future Arrow/Polars exporters) can
+  pattern-match the carriers without re-deriving accessors.
+- **Test contract**: `xfail` removed from
+  `test_bolt_return_node_yields_node_struct` and
+  `test_bolt_return_relationship_yields_rel_struct`. `pytest -m bolt -v`
+  now reports `5 passed, 3 xfailed` (exit code 0). Only tests #6
+  (BEGIN/COMMIT), #7 (`--readonly` enforcement), and #8 (parse-error
+  → ClientError mapping) remain — all scoped to C.5 and C.6.
+
+`Value::NodeRef(_)` still returns an error (it's an internal executor
+placeholder that should never reach the boundary; leaking it
+indicates a kglite bug).
+
 ### Internal — Bolt protocol C.3 (parameter PackStream decoding)
 
 Third sub-phase of Phase C. The Bolt server now accepts parameterized

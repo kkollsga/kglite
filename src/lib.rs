@@ -45,6 +45,12 @@ use graph::{KnowledgeGraph, Transaction};
 pub mod api {
     pub use crate::code_tree::builder::run_with_options as build_code_tree;
     pub use crate::datatypes::Value;
+    // Per-variant carriers for the Value enum's compound shapes. Phase A.1
+    // added `Value::Node` / `Relationship` / `Path` carrying these struct
+    // types; downstream Rust consumers (kglite-bolt-server's value adapter,
+    // and future Arrow/Polars exporters) want to pattern-match into them
+    // without re-deriving accessors.
+    pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
     pub use crate::graph::dir_graph::DirGraph;
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;

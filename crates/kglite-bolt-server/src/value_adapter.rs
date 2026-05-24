@@ -1,12 +1,13 @@
 //! `kglite::api::Value` ↔ `boltr::types::BoltValue` adapter.
 //!
-//! Phase C.2 + C.3 status: BOTH directions are real for scalars +
-//! collections + temporal/spatial. `to_bolt`'s graph-structure arms
-//! (Node/Relationship/Path) return `Err(BoltError::Backend(...))` until
-//! Phase C.4. `from_bolt` rejects inbound Node/Rel/Path (drivers don't
-//! pass those as parameters), inbound time-of-day variants (kglite has
-//! date-only precision today), inbound Bytes (no Value variant), and
-//! inbound Point3D (kglite has only Point2D).
+//! Phase C.2 + C.3 + C.4 status: `to_bolt` is real for ALL outbound
+//! variants (scalars, collections, temporal/spatial, Node, Relationship,
+//! Path); only `Value::NodeRef` returns an error (it's an internal
+//! placeholder that shouldn't reach the boundary). `from_bolt` rejects
+//! inbound Node/Rel/Path (drivers don't pass those as parameters),
+//! inbound time-of-day variants (kglite has date-only precision today),
+//! inbound Bytes (no Value variant), and inbound Point3D (kglite has
+//! only Point2D).
 //!
 //! # Mapping table (the implementer's spec)
 //!
@@ -23,9 +24,9 @@
 //! | `DateTime(NaiveDate)`                   | `Date(BoltDate { days })`     | Days since Unix epoch (1970-01-01)                 |
 //! | `Duration { months, days, seconds }`    | `Duration(BoltDuration {..})` | All i64; kglite has second precision (`nanoseconds: 0`) |
 //! | `Point { lat, lon }`                    | `Point2D(BoltPoint2D { .. })` | srid=4326 for WGS84; Bolt convention x=lon, y=lat  |
-//! | `Node { id, labels, properties }`       | `Node(BoltNode { .. })`       | **Phase C.4** — currently returns `Err(BoltError::Backend)` |
-//! | `Relationship { ... }`                  | `Relationship(BoltRelationship { .. })` | **Phase C.4**                            |
-//! | `Path { nodes, rels, .. }`              | `Path(BoltPath { .. })`       | **Phase C.4**                                      |
+//! | `Node { id, labels, properties }`       | `Node(BoltNode { id, labels, properties, element_id })` | `element_id = id.to_string()` |
+//! | `Relationship { id, start_id, end_id, rel_type, properties }` | `Relationship(BoltRelationship { ... })` | `element_id` / `start_element_id` / `end_element_id` = stringified ids |
+//! | `Path { nodes, rels }`                  | `Path(BoltPath { nodes, rels: UnboundRel*, indices })` | `indices`: 1-based signed rel idx + 0-based node idx pairs |
 //! | `NodeRef(_)`                            | `Err(BoltError::Backend)`     | Internal placeholder — leaking here is an executor bug |
 //!
 //! `from_bolt` is the inbound direction for parameters. The graph-structure
@@ -36,7 +37,10 @@
 use std::collections::HashMap;
 
 use boltr::error::BoltError;
-use boltr::types::{BoltDate, BoltDuration, BoltPoint2D, BoltValue};
+use boltr::types::{
+    BoltDate, BoltDict, BoltDuration, BoltNode, BoltPath, BoltPoint2D, BoltRelationship,
+    BoltUnboundRelationship, BoltValue,
+};
 
 use kglite::api::Value;
 
@@ -100,13 +104,35 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
         })),
 
         // ---- Phase C.4 — Node / Relationship / Path ---------------------
-        Value::Node(_) | Value::Relationship(_) | Value::Path(_) => Err(BoltError::Backend(
-            "Cypher returned a Node/Relationship/Path — Phase C.4 (Bolt struct \
-             encoding) is not yet implemented in kglite-bolt-server. Project \
-             scalar properties explicitly (e.g. `RETURN n.title` instead of \
-             `RETURN n`) until C.4 lands."
-                .into(),
-        )),
+        Value::Node(node) => {
+            let properties = props_to_bolt_dict(&node.properties)?;
+            Ok(BoltValue::Node(BoltNode {
+                id: i64::from(node.id),
+                labels: node.labels.clone(),
+                properties,
+                // Bolt 5.x element_id: a stable string identifier.
+                // Neo4j uses a UUID-like string; for kglite we use the
+                // numeric id stringified — it's stable within one
+                // server lifetime, which is the contract drivers care
+                // about. (Across reloads the id may change; drivers
+                // shouldn't persist element_ids long-term.)
+                element_id: node.id.to_string(),
+            }))
+        }
+        Value::Relationship(rel) => {
+            let properties = props_to_bolt_dict(&rel.properties)?;
+            Ok(BoltValue::Relationship(BoltRelationship {
+                id: i64::from(rel.id),
+                start_node_id: i64::from(rel.start_id),
+                end_node_id: i64::from(rel.end_id),
+                rel_type: rel.rel_type.clone(),
+                properties,
+                element_id: rel.id.to_string(),
+                start_element_id: rel.start_id.to_string(),
+                end_element_id: rel.end_id.to_string(),
+            }))
+        }
+        Value::Path(path) => path_to_bolt_path(path.as_ref()).map(BoltValue::Path),
 
         // ---- Executor bug ----------------------------------------------
         Value::NodeRef(_) => Err(BoltError::Backend(
@@ -116,6 +142,106 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
                 .into(),
         )),
     }
+}
+
+/// Convert a kglite property map to a Bolt dict. Recursive through
+/// `to_bolt` so nested lists / maps round-trip; surface conversion
+/// failure on the first bad value.
+fn props_to_bolt_dict(
+    props: &std::collections::BTreeMap<String, Value>,
+) -> Result<BoltDict, BoltError> {
+    props
+        .iter()
+        .map(|(k, v)| to_bolt(v).map(|bv| (k.clone(), bv)))
+        .collect::<Result<HashMap<_, _>, _>>()
+}
+
+/// Build a `BoltPath` from a kglite `PathValue`. Encodes the
+/// Neo4j Bolt-protocol `indices` scheme: pairs of (signed-rel-index,
+/// next-node-index) where the rel index is 1-based with sign
+/// (+ = traversed in the rel's natural direction, - = traversed in
+/// reverse) and the node index is 0-based into `nodes`.
+///
+/// kglite's `PathValue` stores parallel `nodes` (k+1) + `rels` (k)
+/// vectors with no deduplication and no direction sign — direction is
+/// inferred per rel by comparing `rel.start_id` / `rel.end_id` against
+/// the node ids before and after the rel in the traversal order. We
+/// emit nodes 1:1 (no dedup) and one (signed_rel, next_node) pair
+/// per rel.
+fn path_to_bolt_path(p: &kglite::api::PathValue) -> Result<BoltPath, BoltError> {
+    // Sanity check: kglite paths are linear, so |nodes| = |rels| + 1.
+    if p.nodes.len() != p.rels.len() + 1 {
+        return Err(BoltError::Backend(format!(
+            "kglite PathValue invariant violated: {} nodes vs {} rels (expected {} vs {})",
+            p.nodes.len(),
+            p.rels.len(),
+            p.rels.len() + 1,
+            p.rels.len()
+        )));
+    }
+
+    let nodes: Vec<BoltNode> = p
+        .nodes
+        .iter()
+        .map(|nv| {
+            let properties = props_to_bolt_dict(&nv.properties)?;
+            Ok::<BoltNode, BoltError>(BoltNode {
+                id: i64::from(nv.id),
+                labels: nv.labels.clone(),
+                properties,
+                element_id: nv.id.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let rels: Vec<BoltUnboundRelationship> = p
+        .rels
+        .iter()
+        .map(|rv| {
+            let properties = props_to_bolt_dict(&rv.properties)?;
+            Ok::<BoltUnboundRelationship, BoltError>(BoltUnboundRelationship {
+                id: i64::from(rv.id),
+                rel_type: rv.rel_type.clone(),
+                properties,
+                element_id: rv.id.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut indices: Vec<i64> = Vec::with_capacity(p.rels.len() * 2);
+    for (i, rel) in p.rels.iter().enumerate() {
+        let node_before = &p.nodes[i];
+        let node_after = &p.nodes[i + 1];
+        // 1-based rel index; sign indicates traversal direction.
+        let rel_idx_1based = (i + 1) as i64;
+        let signed_rel: i64 = if rel.start_id == node_before.id && rel.end_id == node_after.id {
+            rel_idx_1based // outgoing in path's traversal
+        } else if rel.start_id == node_after.id && rel.end_id == node_before.id {
+            -rel_idx_1based // incoming (traversed in reverse)
+        } else {
+            // Rel doesn't connect the surrounding nodes — corrupt path
+            // produced by the executor. Best-effort: assume outgoing
+            // and let the client see what we have. Logging would be
+            // nice; deferred (the bolt-server already wires tracing).
+            tracing::warn!(
+                rel_id = rel.id,
+                rel_start = rel.start_id,
+                rel_end = rel.end_id,
+                path_node_before = node_before.id,
+                path_node_after = node_after.id,
+                "path rel doesn't connect surrounding nodes — defaulting to outgoing direction"
+            );
+            rel_idx_1based
+        };
+        indices.push(signed_rel);
+        indices.push((i + 1) as i64); // 0-based next-node index
+    }
+
+    Ok(BoltPath {
+        nodes,
+        rels,
+        indices,
+    })
 }
 
 /// Bolt → kglite. Called by `execute`'s parameter decoding (Phase C.3).

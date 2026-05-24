@@ -48,7 +48,7 @@ the wins are everyone's.
 |---|---|---|---|---|---|
 | **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
 | **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop | ✅ Shipped |
-| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | C.1, C.2, C.3 ✅ Shipped · C.4–C.6 pending |
+| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | C.1, C.2, C.3, C.4 ✅ Shipped · C.5–C.6 pending |
 | **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
@@ -371,16 +371,30 @@ removal in `backend.rs`, ~1 hour):
 
 Retires: `test_bolt_run_supports_parameters`. **Actual time ~1 hour.**
 
-### C.4 — Node / Relationship / Path RETURN
+### C.4 — Node / Relationship / Path RETURN — ✅ Shipped
 
-**Depends on A.1.** Map `Value::Node { id, labels, properties }` →
-PackStream Node struct (signature byte `0x4E`, three fields).
-Similarly for Relationship (`0x52`) and Path (`0x50`).
+**What shipped** (~140-line diff in `value_adapter.rs`, ~1.5 hours):
 
-Retires: `test_bolt_return_node_yields_node_struct`,
-`test_bolt_return_relationship_yields_rel_struct`. **Estimate ~3-5
-days** (much shorter than the original BOLT.md estimate because
-A.1 did the heavy lifting).
+- `Value::Node` → `BoltNode { id: i64, labels, properties, element_id }`.
+- `Value::Relationship` → `BoltRelationship { id, start_node_id,
+  end_node_id, rel_type, properties, element_id, start_element_id,
+  end_element_id }`. All `*element_id` fields stringify the
+  numeric ids — stable within one server lifetime, which is the
+  contract drivers care about.
+- `Value::Path` → `BoltPath { nodes, rels: Vec<UnboundRel>, indices }`.
+  The `indices` field encodes the Neo4j path scheme: pairs of
+  (signed-1-based-rel-index, 0-based-next-node-index) where sign
+  is direction (+ outgoing relative to traversal, - incoming).
+  Direction inferred by comparing `rel.start_id` / `rel.end_id`
+  against the surrounding node ids.
+- `kglite::api` gained `pub use NodeValue / RelValue / PathValue`
+  so downstream Rust consumers can pattern-match the carriers
+  without re-deriving accessors.
+
+Retires: `test_bolt_return_node_yields_node_struct` +
+`test_bolt_return_relationship_yields_rel_struct`. **Actual time
+~1.5 hours** (the A.1 work and the established `to_bolt` shape made
+this much faster than the original "~3-5 days" estimate).
 
 ### C.5 — BEGIN / COMMIT / ROLLBACK + mutations
 

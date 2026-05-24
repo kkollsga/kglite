@@ -194,9 +194,8 @@ def test_bolt_run_supports_parameters(bolt_server):
     assert names == ["Alice", "Carol"]
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.4 — Node/Rel/Path RETURN (needs A.1 ✓)")
 def test_bolt_return_node_yields_node_struct(bolt_server):
-    """Phase C.4: `RETURN n` maps Value::Node → BoltNode PackStream struct (0x4E)."""
+    """Phase C.4 ✓: `RETURN n` maps Value::Node → BoltNode PackStream struct (0x4E)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (n:Person {title: 'Alice'}) RETURN n")
@@ -209,9 +208,8 @@ def test_bolt_return_node_yields_node_struct(bolt_server):
             assert node["city"] == "Oslo"
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.4 — Node/Rel/Path RETURN (needs A.1 ✓)")
 def test_bolt_return_relationship_yields_rel_struct(bolt_server):
-    """Phase C.4: `RETURN r` maps Value::Relationship → BoltRelationship (0x52)."""
+    """Phase C.4 ✓: `RETURN r` maps Value::Relationship → BoltRelationship (0x52)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run("MATCH (:Person {title: 'Alice'})-[r:KNOWS]->(:Person {title: 'Bob'}) RETURN r")
