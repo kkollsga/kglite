@@ -533,7 +533,18 @@ impl KgliteBackend {
             kg_params,
             cypher::planner::empty_disabled_set(),
         );
-        cypher::mark_lazy_eligibility(&mut parsed);
+        // NOTE: deliberately do NOT call `mark_lazy_eligibility` here.
+        //
+        // The bolt-server materializes every result row eagerly into a
+        // `BoltRecord` before returning to boltr (boltr's PULL handler
+        // buffers anyway). If we marked the RETURN clause as lazy-
+        // eligible, the executor would populate `result.lazy` with a
+        // `LazyResultDescriptor` and leave `result.rows` empty —
+        // bolt-server has no lazy-materialization helper (that logic
+        // lives in `src/graph/pyapi/result_view.rs` and isn't exposed
+        // through `kglite::api`). Skipping the mark forces the eager
+        // path. The performance trade-off is the same one
+        // `with_streaming(false)` was meant to make.
         let is_mutation = cypher::is_mutation_query(&parsed);
         Ok((parsed, is_mutation))
     }

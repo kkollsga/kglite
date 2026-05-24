@@ -58,9 +58,7 @@ def _run_write_tx(driver, ids: list[int]) -> tuple[int, list]:
             tx = session.begin_transaction()
             try:
                 for nid in ids:
-                    tx.run(
-                        f"CREATE (:Person {{id: {nid}, title: 'thr{nid}'}})"
-                    ).consume()
+                    tx.run(f"CREATE (:Person {{id: {nid}, title: 'thr{nid}'}})").consume()
                 tx.commit()
                 successes = len(ids)
             except Exception as e:  # noqa: BLE001
@@ -109,8 +107,7 @@ def test_4_concurrent_writers(bolt_server):
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
-                pool.submit(_run_write_tx, driver, list(range(4000 + i * 100, 4005 + i * 100)))
-                for i in range(4)
+                pool.submit(_run_write_tx, driver, list(range(4000 + i * 100, 4005 + i * 100))) for i in range(4)
             ]
             for f in as_completed(futures):
                 _, errs = f.result()
@@ -119,9 +116,7 @@ def test_4_concurrent_writers(bolt_server):
         # last-writer-wins, we expect 5 nodes from ONE writer (not
         # 20 from all of them).
         with driver.session() as session:
-            result = session.run(
-                "MATCH (n:Person) WHERE n.title STARTS WITH 'thr4' RETURN count(n) AS c"
-            )
+            result = session.run("MATCH (n:Person) WHERE n.title STARTS WITH 'thr4' RETURN count(n) AS c")
             count = result.single()["c"]
             # 5 is the typical case (last writer wins); 20 would
             # mean OCC eventually lands and all serialize cleanly.
@@ -178,9 +173,7 @@ def test_begin_then_session_close_without_commit_or_rollback(bolt_server):
         # session's pending tx was cleanly rolled back by
         # close_session).
         with driver.session() as session:
-            count = session.run(
-                "MATCH (n:Person) WHERE n.title STARTS WITH 'leak' RETURN count(n) AS c"
-            ).single()["c"]
+            count = session.run("MATCH (n:Person) WHERE n.title STARTS WITH 'leak' RETURN count(n) AS c").single()["c"]
             assert count == 0
 
 
@@ -266,9 +259,7 @@ def test_reset_during_transaction(bolt_server):
                 tx.rollback()
         # None of the rolled-back creates should be visible.
         with driver.session() as session:
-            count = session.run(
-                "MATCH (n:Person) WHERE n.title STARTS WITH 'reset' RETURN count(n) AS c"
-            ).single()["c"]
+            count = session.run("MATCH (n:Person) WHERE n.title STARTS WITH 'reset' RETURN count(n) AS c").single()["c"]
             assert count == 0
 
 
@@ -278,9 +269,6 @@ def test_concurrent_sessions_creating_distinct_data(bolt_server):
     others' work is overwritten — but no SESSION should crash."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [
-                pool.submit(_run_write_tx, driver, [9000 + i])
-                for i in range(8)
-            ]
+            futures = [pool.submit(_run_write_tx, driver, [9000 + i]) for i in range(8)]
             errs = [e for f in as_completed(futures) for _, errs in [f.result()] for e in errs]
             assert errs == [], f"errors: {errs[:3]}"
