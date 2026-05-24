@@ -47,9 +47,9 @@ use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 
 use crate::datatypes::values::Value;
+use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
-use crate::graph::KnowledgeGraph;
 
 /// Tunable knobs. Defaults match the pymethod's defaults.
 #[derive(Debug, Clone)]
@@ -111,7 +111,7 @@ const TRAVERSAL_EDGES: &[&str] = &[
 /// Top-level entry point. Runs the search + traversal + rendering and
 /// returns a markdown string.
 pub fn explore_markdown(
-    kg: &KnowledgeGraph,
+    dir: &DirGraph,
     query: &str,
     opts: &ExploreOptions,
     source_roots: &[PathBuf],
@@ -120,7 +120,7 @@ pub fn explore_markdown(
     if query_trim.is_empty() {
         return "## Query\n\n_empty query_\n".to_string();
     }
-    let entry_hits = lexical_search(kg, query_trim, opts.max_entities);
+    let entry_hits = lexical_search(dir, query_trim, opts.max_entities);
 
     if entry_hits.is_empty() {
         return format!(
@@ -128,7 +128,7 @@ pub fn explore_markdown(
         );
     }
 
-    let related = traverse(kg, &entry_hits, opts.max_depth);
+    let related = traverse(dir, &entry_hits, opts.max_depth);
 
     let mut out = String::new();
     out.push_str("## Query\n\n");
@@ -182,16 +182,16 @@ pub fn explore_markdown(
     out
 }
 
-fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<Hit> {
+fn lexical_search(dir: &DirGraph, query: &str, max_entities: usize) -> Vec<Hit> {
     let q_lower = query.to_lowercase();
     let mut hits: Vec<Hit> = Vec::new();
 
     for node_type in ENTRY_NODE_TYPES {
-        let Some(idx_ref) = kg.inner.type_indices.get(node_type) else {
+        let Some(idx_ref) = dir.type_indices.get(node_type) else {
             continue;
         };
         for nidx in idx_ref.iter() {
-            let Some(node) = kg.inner.graph.node_weight(nidx) else {
+            let Some(node) = dir.graph.node_weight(nidx) else {
                 continue;
             };
             let title = crate::datatypes::values::raw_string(&node.title());
@@ -263,7 +263,7 @@ fn lexical_search(kg: &KnowledgeGraph, query: &str, max_entities: usize) -> Vec<
     hits
 }
 
-fn traverse(kg: &KnowledgeGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
+fn traverse(dir: &DirGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
     if max_depth == 0 {
         return Vec::new();
     }
@@ -278,12 +278,12 @@ fn traverse(kg: &KnowledgeGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
     for _ in 0..max_depth {
         let mut next: Vec<NodeIndex> = Vec::new();
         for nidx in &frontier {
-            for dir in [Direction::Outgoing, Direction::Incoming] {
-                for er in kg.inner.graph.edges_directed(*nidx, dir) {
+            for direction in [Direction::Outgoing, Direction::Incoming] {
+                for er in dir.graph.edges_directed(*nidx, direction) {
                     if !edge_keys.contains(&er.weight().connection_type) {
                         continue;
                     }
-                    let other = if dir == Direction::Outgoing {
+                    let other = if direction == Direction::Outgoing {
                         er.target()
                     } else {
                         er.source()
@@ -305,10 +305,10 @@ fn traverse(kg: &KnowledgeGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
         if seed_set.contains(&nidx) {
             continue;
         }
-        let Some(node) = kg.inner.graph.node_weight(nidx) else {
+        let Some(node) = dir.graph.node_weight(nidx) else {
             continue;
         };
-        let kind = node.get_node_type_ref(&kg.inner.interner).to_string();
+        let kind = node.get_node_type_ref(&dir.interner).to_string();
         // Only surface code-entity neighbors. Edges may also lead to
         // File / Module / Route nodes which are useful but visually
         // noisy in the "Related" list.

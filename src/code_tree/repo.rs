@@ -1,8 +1,12 @@
 //! GitHub shallow-clone helper (ported from repo.py).
 
-use crate::graph::KnowledgeGraph;
+// Phase G.3-pre: returns `Arc<DirGraph>` to match builder::run_with_options.
+// The pyapi callsite (`code_tree.repo_tree` pyfunction) wraps via
+// `KnowledgeGraph::from_arc`.
+use crate::graph::dir_graph::DirGraph;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub fn clone_and_build(
@@ -14,7 +18,7 @@ pub fn clone_and_build(
     verbose: bool,
     include_tests: bool,
     max_loc_per_file: Option<usize>,
-) -> Result<KnowledgeGraph, String> {
+) -> Result<Arc<DirGraph>, String> {
     if !repo.contains('/') || repo.matches('/').count() != 1 {
         return Err(format!(
             "repo must be in 'org/repo' format, got: {:?}",

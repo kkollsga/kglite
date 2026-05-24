@@ -118,17 +118,17 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!(path = %cli.graph.display(), "loading graph");
-    let kg = load_file(&cli.graph.to_string_lossy())
+    // Phase G.3-pre: load_file returns Arc<DirGraph> directly — no
+    // KnowledgeGraph wrapper between us and the engine.
+    let dir_arc = load_file(&cli.graph.to_string_lossy())
         .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))
         .with_context(|| format!("loading {}", cli.graph.display()))?;
     tracing::info!("graph loaded; constructing Bolt server");
 
-    // The backend stores the DirGraph behind its own Arc<Mutex<>> for the
-    // commit-swap pattern (Phase C.5). Unwrap the loaded KnowledgeGraph's
-    // inner Arc<DirGraph> — if no other refs (typical for fresh load),
-    // try_unwrap succeeds; otherwise we deep-clone (one-time cost at boot).
-    let dir_arc = kg.dir().clone();
-    drop(kg); // release the KnowledgeGraph wrapper's ref
+    // The backend stores the DirGraph behind its own Arc<Mutex<>> for
+    // the commit-swap pattern (Phase C.5). Unwrap the Arc — if no
+    // other refs (typical for fresh load), try_unwrap succeeds;
+    // otherwise we deep-clone (one-time cost at boot).
     let dir = Arc::try_unwrap(dir_arc).unwrap_or_else(|arc| (*arc).clone());
     let backend = KgliteBackend::new(dir, cli.readonly);
 

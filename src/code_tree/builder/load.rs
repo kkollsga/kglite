@@ -10,7 +10,12 @@ use crate::code_tree::models::{
 };
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
 use crate::graph::mutation::maintain;
-use crate::graph::{get_graph_mut, KnowledgeGraph};
+// Phase G.3-pre: build a `DirGraph` directly instead of constructing
+// a `KnowledgeGraph` wrapper. The pyapi callsite (`code_tree.build`
+// pyfunction) wraps via `KnowledgeGraph::from_arc`. Decouples code_tree
+// from the binding-ergonomic wrapper so this whole subtree moves
+// cleanly into kglite-core in G.3a.
+use crate::graph::dir_graph::DirGraph;
 use std::collections::{BTreeMap, HashMap};
 
 pub struct ModuleRecord {
@@ -1379,15 +1384,15 @@ fn defines_edges_df(edges: &[DefinesEdge]) -> HashMap<(String, String), DataFram
 pub fn load_into_graph(
     result: &ParseResult,
     project_info: Option<&ProjectInfo>,
-) -> Result<KnowledgeGraph, String> {
+) -> Result<std::sync::Arc<DirGraph>, String> {
     let verbose = std::env::var_os("KGLITE_CODE_TREE_VERBOSE").is_some();
     let mark = |t: std::time::Instant, label: &str| {
         if verbose {
             eprintln!("[timing]   {}: {:.3}s", label, t.elapsed().as_secs_f64());
         }
     };
-    let mut kg = KnowledgeGraph::new_empty();
-    let graph = get_graph_mut(&mut kg.inner);
+    let mut dir = DirGraph::new();
+    let graph = &mut dir;
     let t_start = std::time::Instant::now();
 
     // ── Project / Dependency / HAS_SOURCE (from manifest) ──────────────
@@ -2488,7 +2493,7 @@ pub fn load_into_graph(
         .map_err(py_err)?;
     }
     mark(t_proc, "procedures");
-    Ok(kg)
+    Ok(std::sync::Arc::new(dir))
 }
 
 impl Clone for super::other_edges::FfiExposesEdge {

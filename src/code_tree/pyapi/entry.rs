@@ -28,6 +28,7 @@ pub fn build(
             max_loc_per_file,
         )
     })
+    .map(KnowledgeGraph::from_arc)
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
@@ -102,5 +103,6 @@ pub fn repo_tree(
             max_loc_per_file,
         )
     })
+    .map(KnowledgeGraph::from_arc)
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

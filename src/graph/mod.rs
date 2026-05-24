@@ -216,12 +216,18 @@ pub enum SourceLookup {
 // `crate::datatypes::values::raw_string`)
 
 impl KnowledgeGraph {
-    /// Create a fresh in-memory KnowledgeGraph without going through PyO3.
-    /// Used by internal Rust modules (e.g. code_tree) that need to build a
-    /// graph from native data without holding the GIL.
-    pub(crate) fn new_empty() -> Self {
+    /// Wrap an `Arc<DirGraph>` in a `KnowledgeGraph` with default
+    /// binding-ergonomic state (no embedder, default temporal context,
+    /// no timeout, no row cap). Used by the pyapi `load()` pyfunction,
+    /// the `code_tree.build()` / `code_tree.repo_tree()` pyfunctions,
+    /// and the sibling Rust crates (kglite-bolt-server,
+    /// kglite-mcp-server) that consume `kglite::api::load_file ->
+    /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`
+    /// alongside their own state. Phase G.3-pre decoupled the
+    /// engine-side constructors from the binding-side wrapper.
+    pub fn from_arc(inner: Arc<DirGraph>) -> Self {
         KnowledgeGraph {
-            inner: Arc::new(DirGraph::new()),
+            inner,
             selection: CowSelection::new(),
             reports: OperationReports::new(),
             last_mutation_stats: None,

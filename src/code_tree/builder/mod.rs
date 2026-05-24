@@ -8,9 +8,14 @@ pub mod type_edges;
 
 use crate::code_tree::models::ParseResult;
 use crate::code_tree::parsers::{detect_languages, get_parser, language_for_path};
-use crate::graph::KnowledgeGraph;
+// Phase G.3-pre: builder + load both return `Arc<DirGraph>` so this
+// subtree moves into kglite-core cleanly. The pyapi callsite
+// (`code_tree.build()` pyfunction) wraps the result via
+// `KnowledgeGraph::from_arc`.
+use crate::graph::dir_graph::DirGraph;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Graph node label for a `ClassInfo`, keyed on its `kind` discriminator.
@@ -47,7 +52,7 @@ pub fn run_with_options(
     include_tests: bool,
     save_to: Option<&Path>,
     max_loc_per_file: Option<usize>,
-) -> Result<KnowledgeGraph, String> {
+) -> Result<Arc<DirGraph>, String> {
     let input = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
 
     let (project_root, mut project_info) = if input.is_file() {
@@ -309,7 +314,7 @@ fn finalize_and_load(
     project_info: Option<crate::code_tree::models::ProjectInfo>,
     verbose: bool,
     save_to: Option<&Path>,
-) -> Result<KnowledgeGraph, String> {
+) -> Result<Arc<DirGraph>, String> {
     if verbose {
         eprintln!(
             "Parsed: {} files, {} functions, {} classes, {} enums, {} interfaces, {} attributes, {} constants",
@@ -345,18 +350,17 @@ fn finalize_and_load(
         // steps, property column stores aren't materialised before
         // serialisation and only `id`/`title`/`type` survive the round-trip.
         let mut graph = graph;
-        crate::graph::io::file::prepare_save(&mut graph.inner);
-        std::sync::Arc::make_mut(&mut graph.inner).enable_columnar();
+        crate::graph::io::file::prepare_save(&mut graph);
+        std::sync::Arc::make_mut(&mut graph).enable_columnar();
         let dest_str = dest.to_string_lossy();
-        crate::graph::io::file::write_graph_v3(&graph.inner, &dest_str)
-            .map_err(|e| e.to_string())?;
+        crate::graph::io::file::write_graph_v3(&graph, &dest_str).map_err(|e| e.to_string())?;
         return Ok(graph);
     }
     Ok(graph)
 }
 
 /// Legacy entry — directory-only, used by the initial smoke test.
-pub fn run(src_dir: &Path, verbose: bool) -> Result<KnowledgeGraph, String> {
+pub fn run(src_dir: &Path, verbose: bool) -> Result<Arc<DirGraph>, String> {
     let mut combined = ParseResult::new();
     let languages = detect_languages(src_dir);
     if verbose {

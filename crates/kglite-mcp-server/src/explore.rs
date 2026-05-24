@@ -139,7 +139,7 @@ fn run(
                 include_source,
                 ..Default::default()
             };
-            kglite::api::explore_markdown(kg, query, &opts, &roots)
+            kglite::api::explore_markdown(kg.dir(), query, &opts, &roots)
         })
         .unwrap_or_else(|| NO_GRAPH.to_string())
 }

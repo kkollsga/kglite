@@ -41,8 +41,13 @@ impl GraphState {
     }
 
     pub fn load_kgl(&self, path: &Path) -> Result<()> {
-        let kg = load_file(&path.to_string_lossy())
+        // Phase G.3-pre: load_file now returns Arc<DirGraph>;
+        // wrap into KnowledgeGraph here to preserve ActiveGraph's
+        // existing shape (kg.set_embedder_native, kg.source_location,
+        // kg.cypher, etc. are still used downstream).
+        let dir = load_file(&path.to_string_lossy())
             .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))?;
+        let kg = KnowledgeGraph::from_arc(dir);
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
@@ -51,8 +56,10 @@ impl GraphState {
     }
 
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
-        let kg = kglite::api::build_code_tree(dir, false, true, None, None)
+        // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
+        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None)
             .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
+        let kg = KnowledgeGraph::from_arc(dir_arc);
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: None,

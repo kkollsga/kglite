@@ -123,6 +123,7 @@ impl crate::graph::KnowledgeGraph {
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     py.detach(|| load_file(&path))
+        .map(KnowledgeGraph::from_arc)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
 }
 

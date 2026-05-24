@@ -1552,7 +1552,10 @@ impl KnowledgeGraph {
             ..Default::default()
         };
         Ok(crate::graph::explore::explore_markdown(
-            self, query, &opts, &roots,
+            &self.inner,
+            query,
+            &opts,
+            &roots,
         ))
     }
 

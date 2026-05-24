@@ -21,16 +21,20 @@
 // One file format, one set of in-flight Value semantics.
 
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
-use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{
-    CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, CowSelection, DirGraph,
-    EmbeddingStore, IndexKey, PropertyStorage, SaveMetadata, SchemaDefinition,
-    SerdeDeserializeGuard, SerdeSerializeGuard, SpatialConfig, StringInterner,
-    StripPropertiesGuard, TemporalConfig,
+    CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, DirGraph, EmbeddingStore, IndexKey,
+    PropertyStorage, SaveMetadata, SchemaDefinition, SerdeDeserializeGuard, SerdeSerializeGuard,
+    SpatialConfig, StringInterner, StripPropertiesGuard, TemporalConfig,
 };
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::{GraphRead, GraphWrite};
-use crate::graph::{KnowledgeGraph, TemporalContext};
+// Phase G.3-pre: this module no longer constructs `KnowledgeGraph`
+// directly. `load_file`/`load_disk_dir`/`load_v4` return
+// `Arc<DirGraph>`; the binding callsites wrap that in their own
+// ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its own
+// `ActiveGraph`, future Go/TS → their binding's struct). Decouples
+// io from binding state so this whole subtree moves cleanly into
+// `kglite-core` in G.3a.
 use bincode::Options;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -1136,7 +1140,7 @@ pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
 /// Below this threshold, `std::fs::read()` is faster (avoids mmap syscall overhead).
 const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
 
-pub fn load_file(path: &str) -> io::Result<KnowledgeGraph> {
+pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     // If path is a directory, load as disk graph
     let p = std::path::Path::new(path);
     if p.is_dir() {
@@ -1202,7 +1206,7 @@ const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by 
      file.";
 
 /// Load a disk-mode graph from a directory.
-fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
+fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     use crate::graph::io::load_timing::{log_stage, stage_timer};
     use crate::graph::schema::GraphBackend;
 
@@ -1540,16 +1544,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<KnowledgeGraph> {
 
     log_stage("load_disk_dir_total", _load_t);
 
-    Ok(KnowledgeGraph {
-        inner: Arc::new(graph),
-        selection: CowSelection::new(),
-        reports: OperationReports::new(),
-        last_mutation_stats: None,
-        embedder: None,
-        temporal_context: TemporalContext::default(),
-        default_timeout_ms: None,
-        default_max_rows: None,
-    })
+    Ok(Arc::new(graph))
 }
 
 /// Load `columns/<type>/columns.zst` sidecars into `graph.column_stores`.
@@ -1667,7 +1662,7 @@ fn load_column_sidecars(
 /// magic bytes + Value enum gaining Node/Relationship/Path/List/Map
 /// variants (serde discriminants 9..=13). Old v3 files are rejected
 /// at the magic check before they reach this function.
-fn load_v4(buf: &[u8]) -> io::Result<KnowledgeGraph> {
+fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 12 {
         return Err(io::Error::other(
             "v4 file is truncated — header incomplete.",
@@ -1846,16 +1841,7 @@ fn load_v4(buf: &[u8]) -> io::Result<KnowledgeGraph> {
         }
     }
 
-    Ok(KnowledgeGraph {
-        inner: Arc::new(dir_graph),
-        selection: CowSelection::new(),
-        reports: OperationReports::new(),
-        last_mutation_stats: None,
-        embedder: None,
-        temporal_context: TemporalContext::default(),
-        default_timeout_ms: None,
-        default_max_rows: None,
-    })
+    Ok(Arc::new(dir_graph))
 }
 
 // ─── Embedding Export / Import ────────────────────────────────────────────
