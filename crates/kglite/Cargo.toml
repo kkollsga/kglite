@@ -1,0 +1,27 @@
+[package]
+# Temporary name during Phase G crate split. Renamed to `kglite` (the
+# pure-Rust core, polars-style) in G.4 when the root-crate workspace
+# member is moved into `crates/kglite-py/`. Sibling crates pick up the
+# rename at the same time.
+#
+# Until then this crate is empty; G.3 fills it with the files moved
+# out of `src/graph/`, `src/datatypes/`, `src/code_tree/`, and
+# `src/error.rs`.
+name = "kglite-core"
+version = "0.10.0"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+license = "MIT"
+description = "Pure-Rust core of the kglite knowledge graph engine. Wrapped by kglite-py (PyO3) for the Python wheel; embeddable directly from any Rust binary. No PyO3 in the dep tree."
+
+[lib]
+name = "kglite_core"
+# rustdoc auto-compilation of code blocks stays off, matching the
+# root crate. Examples in the eventual `crates/kglite/examples/`
+# (G.5) cover the embedder-side API surface; the doctest harness
+# isn't needed.
+doctest = false
+
+[dependencies]
+# Intentionally minimal during G.2 — real deps land alongside the
+# file moves in G.3a (petgraph, serde, etc. follow the source).

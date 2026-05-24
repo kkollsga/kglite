@@ -1863,6 +1863,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kglite-core"
+version = "0.10.0"
+
+[[package]]
 name = "kglite-mcp-server"
 version = "0.0.1"
 dependencies = [
