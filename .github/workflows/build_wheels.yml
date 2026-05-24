@@ -20,9 +20,14 @@ jobs:
       - name: Check version against PyPI
         id: check
         run: |
-          VERSION=$(grep -m 1 "version" Cargo.toml | cut -d '"' -f 2)
+          # The wheel version comes from the PyO3 wrapper crate
+          # (crates/kglite-py/Cargo.toml). G.4 made the workspace root
+          # virtual — pre-G.4 the root Cargo.toml had the version, so
+          # this grep used to target the root. Post-G.4 it must target
+          # the wheel crate explicitly.
+          VERSION=$(grep -m 1 '^version' crates/kglite-py/Cargo.toml | cut -d '"' -f 2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Cargo.toml version: $VERSION"
+          echo "kglite-py Cargo.toml version: $VERSION"
 
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/kglite/$VERSION/json")
           if [ "$HTTP_STATUS" = "200" ]; then

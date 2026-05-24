@@ -1,0 +1,183 @@
+name: Publish to crates.io
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  version-check:
+    name: Check if kglite version needs publishing
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish_kglite: ${{ steps.check.outputs.should_publish_kglite }}
+      should_publish_bolt: ${{ steps.check.outputs.should_publish_bolt }}
+      kglite_version: ${{ steps.check.outputs.kglite_version }}
+      bolt_version: ${{ steps.check.outputs.bolt_version }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check kglite + kglite-bolt-server versions against crates.io
+        id: check
+        run: |
+          # Source-of-truth version files (post-G.4):
+          KG_VERSION=$(grep -m 1 '^version' crates/kglite/Cargo.toml | cut -d '"' -f 2)
+          BS_VERSION=$(grep -m 1 '^version' crates/kglite-bolt-server/Cargo.toml | cut -d '"' -f 2)
+          echo "kglite_version=$KG_VERSION" >> $GITHUB_OUTPUT
+          echo "bolt_version=$BS_VERSION" >> $GITHUB_OUTPUT
+          echo "kglite Cargo.toml version:              $KG_VERSION"
+          echo "kglite-bolt-server Cargo.toml version:  $BS_VERSION"
+
+          # crates.io API: 200 if version exists, 404 otherwise.
+          KG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://crates.io/api/v1/crates/kglite/$KG_VERSION")
+          BS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://crates.io/api/v1/crates/kglite-bolt-server/$BS_VERSION")
+
+          if [ "$KG_STATUS" = "200" ]; then
+            echo "kglite $KG_VERSION already on crates.io — skipping kglite publish"
+            echo "should_publish_kglite=false" >> $GITHUB_OUTPUT
+          else
+            echo "kglite $KG_VERSION not on crates.io — will publish"
+            echo "should_publish_kglite=true" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$BS_STATUS" = "200" ]; then
+            echo "kglite-bolt-server $BS_VERSION already on crates.io — skipping bolt publish"
+            echo "should_publish_bolt=false" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-bolt-server $BS_VERSION not on crates.io — will publish"
+            echo "should_publish_bolt=true" >> $GITHUB_OUTPUT
+          fi
+
+  ci-gate:
+    name: Wait for CI + wheel build to pass
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # Same Rust + Python gates the wheel workflow waits for. If
+      # these fail, kglite-the-crate would ship in a state that
+      # would also break kglite-the-wheel — better to block.
+      - name: Wait for Rust checks
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Rust checks'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      - name: Wait for Python tests (3.10)
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python tests (py3.10)'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      - name: Wait for Python tests (3.12)
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python tests (py3.12)'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      - name: Wait for Python lint
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Python lint'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 15
+      # Wait for the per-OS wheel builds. Crates.io publishes are
+      # permanent — if the wheel matrix would break on a kglite
+      # change, we want to know BEFORE publishing kglite the crate.
+      - name: Wait for Linux wheel build
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Build wheel - ubuntu-latest - x86_64-unknown-linux-gnu'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,skipped
+      - name: Wait for macOS wheel build
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Build wheel - macos-latest - aarch64-apple-darwin'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,skipped
+      - name: Wait for Windows wheel build
+        uses: lewagon/wait-on-check-action@v1.7.0
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Build wheel - windows-latest - x86_64-pc-windows-msvc'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,skipped
+
+  publish:
+    name: Publish to crates.io
+    needs: [version-check, ci-gate]
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "publish-${{ needs.version-check.outputs.kglite_version }}"
+
+      # 1. Publish kglite (the core crate).
+      # `--locked` honours Cargo.lock for reproducibility.
+      # The workspace `[patch.crates-io]` (for the bzip2-rs git fork
+      # used by parallel-bz2) is stripped from the published manifest
+      # automatically — confirmed via `cargo publish --dry-run`.
+      - name: Publish kglite
+        if: needs.version-check.outputs.should_publish_kglite == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite --locked
+
+      # 2. Wait for crates.io's sparse index to surface the new
+      # version. Typical propagation is 30–60s but can stretch to
+      # several minutes under load. kglite-bolt-server depends on
+      # kglite being resolvable, so we must poll before stepping
+      # to step 3.
+      - name: Wait for crates.io index propagation
+        if: needs.version-check.outputs.should_publish_kglite == 'true' && needs.version-check.outputs.should_publish_bolt == 'true'
+        run: |
+          VERSION="${{ needs.version-check.outputs.kglite_version }}"
+          echo "Polling crates.io for kglite $VERSION..."
+          for i in $(seq 1 30); do
+            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://crates.io/api/v1/crates/kglite/$VERSION")
+            if [ "$HTTP" = "200" ]; then
+              echo "kglite $VERSION visible on crates.io (attempt $i)"
+              # Belt-and-braces: also confirm via the sparse index
+              # endpoint that cargo's resolver uses. The web API can
+              # see it slightly before the sparse index does.
+              cargo update -p kglite 2>&1 | head -5 || true
+              # Extra sleep so the sparse index settles for downstream
+              # cargo publish.
+              sleep 15
+              exit 0
+            fi
+            echo "Waiting for crates.io index... (attempt $i, HTTP=$HTTP)"
+            sleep 20
+          done
+          echo "Timed out waiting for crates.io index propagation after 10 min"
+          exit 1
+
+      # 3. Publish kglite-bolt-server. Skipped if its version is
+      # already on crates.io (bolt-server may bump independently of
+      # kglite).
+      - name: Publish kglite-bolt-server
+        if: needs.version-check.outputs.should_publish_bolt == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-bolt-server --locked
