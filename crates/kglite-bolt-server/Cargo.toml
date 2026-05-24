@@ -17,7 +17,11 @@ path = "src/main.rs"
 # for wheel builds) but keeps the lib compilable for cargo's binary
 # build. No `fastembed` here — Bolt server is a wire transport and
 # doesn't expose `text_score()`-style semantic search.
-kglite = { path = "../..", default-features = false }
+# Phase G.3a: depend on kglite-core directly (not the pyo3-wrapper
+# root crate) so this binary's dep tree has zero pyo3. The
+# `package = "kglite-core"` alias preserves the existing
+# `use kglite::api::*` imports in this crate's source.
+kglite = { package = "kglite-core", path = "../kglite", default-features = false }
 
 # Bolt v5.x protocol library. Implements PackStream framing, message
 # dispatch, session state machine, handshake. We implement BoltBackend

@@ -1,8 +1,31 @@
 // src/graph/mod.rs
+//
+// Root crate's graph module — re-exports the pure-Rust core's
+// `graph::*` subtree from `kglite-core` and keeps the PyO3 wrapper
+// concerns (KnowledgeGraph #[pyclass], pyapi/ submodule, pyo3
+// param-extract helpers) that only the wrapper crate needs.
+//
+// Post-G.3a: every engine subtree (algorithms, blueprint, core,
+// dir_graph, explore, features, introspection, io, mutation,
+// schema, session, storage) lives in `kglite_core::graph`. The
+// glob re-export below keeps every `crate::graph::X::Y` path in
+// pyapi/ resolving unchanged.
+pub use kglite_core::graph::*;
+
+// Mixed subtrees (have both core and pyo3 parts) — local module
+// declarations shadow the re-exported ones from kglite-core.
+pub mod embedder;
+pub mod languages;
+pub mod pyapi;
+
+pub use pyapi::transaction::Transaction;
+
 use crate::datatypes::py_out;
 use crate::datatypes::values::{FilterCondition, Value};
-use crate::graph::introspection::reporting::{OperationReport, OperationReports};
-use crate::graph::storage::GraphRead;
+use kglite_core::graph::introspection::reporting::{OperationReport, OperationReports};
+use kglite_core::graph::languages::cypher;
+use kglite_core::graph::schema::{CowSelection, DirGraph, PlanStep};
+use kglite_core::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -10,29 +33,10 @@ use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub mod algorithms;
-pub mod blueprint;
-pub mod core;
-pub mod dir_graph;
-pub mod embedder;
-pub mod explore;
-pub mod features;
-pub mod introspection;
-pub mod io;
-pub mod languages;
-pub mod mutation;
-pub mod schema;
-pub mod session;
-pub mod storage;
-
-pub mod pyapi;
-
-pub use pyapi::transaction::Transaction;
-
-use languages::cypher;
-use schema::{CowSelection, DirGraph, PlanStep};
-
-/// Embedding column data extracted from a DataFrame: `[(column_name, [(node_id, embedding)])]`
+// Shadow the kglite-core re-exports of these types with the local
+// pub(crate) versions that the pyapi closures construct directly.
+// (Same name, same underlying enum — just promotes the visibility
+// for local use without depending on kglite-core's pub visibility.)
 pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
 /// Extract `ConnectionDetail` from a Python `bool | list[str] | None` parameter.
@@ -166,51 +170,13 @@ pub struct KnowledgeGraph {
     pub(crate) default_max_rows: Option<usize>,
 }
 
-/// Temporal context for automatic date filtering on select/traverse/collect.
-/// Set via the `date()` method. Carried through clone (fluent API chaining).
-#[derive(Clone, Debug, Default)]
-pub(crate) enum TemporalContext {
-    /// Use today's date (default). Resolved at query time.
-    #[default]
-    Today,
-    /// Point-in-time: valid_from <= date AND (valid_to IS NULL OR valid_to >= date).
-    At(chrono::NaiveDate),
-    /// Range overlap: valid_from <= end AND (valid_to IS NULL OR valid_to >= start).
-    During(chrono::NaiveDate, chrono::NaiveDate),
-    /// No temporal filtering — show everything regardless of validity dates.
-    All,
-}
-
-impl TemporalContext {
-    fn is_all(&self) -> bool {
-        matches!(self, TemporalContext::All)
-    }
-}
-
-/// Resolved code-entity location returned by [`KnowledgeGraph::source_location`].
-/// All optional fields mirror what `code_tree` stores on the node — graphs
-/// built from non-code-tree sources may have fewer populated.
-#[derive(Debug, Clone)]
-pub struct SourceLocation {
-    pub type_name: String,
-    pub name: String,
-    pub qualified_name: String,
-    pub file_path: Option<String>,
-    pub line_number: Option<i64>,
-    pub end_line: Option<i64>,
-    pub signature: Option<String>,
-}
-
-/// Outcome of a [`KnowledgeGraph::source_location`] lookup.
-#[derive(Debug, Clone)]
-pub enum SourceLookup {
-    Found(SourceLocation),
-    /// Multiple code entities matched the given (name, node_type). The
-    /// payload lists each match's qualified_name so the caller can ask
-    /// the agent to disambiguate.
-    Ambiguous(Vec<String>),
-    NotFound,
-}
+// Post-G.3a: `TemporalContext`, `SourceLocation`, and `SourceLookup`
+// live in kglite-core and reach this module via the
+// `pub use kglite_core::graph::*;` re-export at the top of this
+// file. The previous local definitions were duplicates that
+// confused type inference (function signatures referenced the
+// kglite-core version while local construction sites used the
+// duplicate).
 
 // (formerly `fn value_to_string`; consolidated 0.9.53 into
 // `crate::datatypes::values::raw_string`)

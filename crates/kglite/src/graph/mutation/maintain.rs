@@ -667,7 +667,7 @@ pub(crate) fn detach_delete_nodes(
 /// Delete every node still marked `_provisional` — a stub vivified for
 /// an edge but never promoted by a real node row — along with all its
 /// incident edges. Returns `(nodes_purged, edges_removed)`.
-pub(crate) fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
+pub fn purge_provisional_nodes(graph: &mut DirGraph) -> (usize, usize) {
     let provisional_key = graph.interner.get_or_intern(PROVISIONAL_KEY);
     let mut to_delete: HashSet<NodeIndex> = HashSet::new();
     for node_idx in graph.graph.node_indices() {

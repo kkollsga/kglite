@@ -1,9 +1,6 @@
-//! Query-interface languages.
-//!
-//! Each language under `languages/` produces results by calling into the
-//! shared primitives in `crate::graph::core`. Languages are peers — a new
-//! language (SPARQL, GraphQL, custom DSL) slots in alongside `cypher` and
-//! `fluent` without disturbing either.
+//! Root crate's languages module — thin shim that re-exports
+//! kglite-core's pure-Rust `fluent` pipeline and overrides the
+//! `cypher` submodule to add the PyO3-side `py_convert` helpers.
+pub use kglite_core::graph::languages::fluent;
 
 pub mod cypher;
-pub mod fluent;

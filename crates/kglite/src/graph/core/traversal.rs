@@ -27,7 +27,7 @@ pub enum TemporalEdgeFilter {
 /// How polygon nodes should be spatially resolved.
 /// When set, overrides the default "location → centroid fallback" behavior.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum SpatialResolve {
+pub enum SpatialResolve {
     /// Use geometry centroid (ignoring location fields)
     Centroid,
     /// Use closest point on geometry boundary (for distance calculations)
@@ -37,7 +37,7 @@ pub(crate) enum SpatialResolve {
 }
 
 /// Parsed configuration from the Python `method=` parameter (str or dict).
-pub(crate) struct MethodConfig {
+pub struct MethodConfig {
     pub method_type: String,
     pub resolve: Option<SpatialResolve>,
     pub max_distance_m: Option<f64>,

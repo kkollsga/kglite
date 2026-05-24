@@ -1279,7 +1279,7 @@ impl KnowledgeGraph {
         // (routes to execute_read against &DirGraph via Arc snapshot).
         // The parser is cached so this second parse inside
         // session::execute is a hit, ~0 µs overhead.
-        let pre_parsed = cypher::parse_cypher(query)?;
+        let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mutation = cypher::is_mutation_query(&pre_parsed);
 
         // Read-only graph guard: reject mutations on a read-only kg.
@@ -1322,7 +1322,8 @@ impl KnowledgeGraph {
                 embedder: embedder_for_opts,
             };
 
-            let outcome = crate::graph::session::execute_mut(graph, query, &opts)?;
+            let outcome = crate::graph::session::execute_mut(graph, query, &opts)
+                .map_err(crate::error_py::kg_to_pyerr)?;
             let mut result = outcome.result;
             let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
 
@@ -1386,7 +1387,7 @@ impl KnowledgeGraph {
                 let mut result = outcome.result;
                 resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
                 Ok(result)
-            })?
+            }).map_err(crate::error_py::kg_to_pyerr)?
         };
         let elapsed_ms = query_started.elapsed().as_millis() as u64;
         // EXPLAIN: session::execute_read renders the plan into

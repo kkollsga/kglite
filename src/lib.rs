@@ -8,6 +8,16 @@
 // real benefit — error paths aren't hot. Standard pattern for crates
 // with a unified typed error.
 #![allow(clippy::result_large_err)]
+// Phase G.3a — root crate is now a PyO3 wrapper over kglite-core.
+// The local module shims (`graph/mod.rs`, `graph/languages/mod.rs`,
+// `graph/embedder/mod.rs`, `code_tree/mod.rs`, `datatypes/mod.rs`)
+// pull in kglite-core's content via `pub use kglite_core::*::*;`
+// glob re-exports + add the pyo3-only submodules. clippy flags
+// the legitimate shadowing pattern under
+// `hidden_glob_reexports`. The `unused_imports` allows the same
+// pattern in nested shims.
+#![allow(hidden_glob_reexports)]
+#![allow(unused_imports)]
 
 // mimalloc as the global allocator. samply profile of the N-Triples
 // build showed libsystem_malloc accounting for ~32% of loader-thread
@@ -21,17 +31,23 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use pyo3::prelude::*;
 mod code_tree;
 mod datatypes;
-mod error;
 mod error_py;
 mod graph;
 mod mcp_tools;
 mod sec;
 mod sodir;
 mod wikidata;
-use graph::io::file::load_file;
+
+// Post-G.3a: the root crate is the PyO3 wrapper crate that depends
+// on `kglite-core` for the engine. Re-export the core's `error`
+// module so existing `crate::error::*` paths in pyapi/, error_py.rs,
+// the datatypes shims, etc. resolve unchanged.
+pub use kglite_core::error;
+
 use graph::pyapi::blueprint::from_blueprint_rust;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
+use kglite_core::graph::io::file::load_file;
 
 /// Curated Rust-side façade for downstream binaries (notably
 /// `kglite-mcp-server`). This module is the **only** stable Rust API
@@ -115,7 +131,7 @@ pub mod api {
 /// gives downstream Rust binaries a stable handle to plug into the
 /// planner / executor surface in [`api::cypher`].
 impl crate::graph::KnowledgeGraph {
-    pub fn dir(&self) -> &std::sync::Arc<crate::graph::dir_graph::DirGraph> {
+    pub fn dir(&self) -> &std::sync::Arc<kglite_core::graph::dir_graph::DirGraph> {
         &self.inner
     }
 }
@@ -133,7 +149,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 /// aren't here will be rejected by `cypher(..., disabled_passes=[...])`.
 #[pyfunction]
 fn cypher_pass_names() -> Vec<String> {
-    graph::languages::cypher::planner::all_pass_names()
+    kglite_core::graph::languages::cypher::planner::all_pass_names()
 }
 
 #[pymodule]

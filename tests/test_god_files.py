@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Resolve the repo root relative to this test file (tests/ sits at the root).
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SRC_DIR = REPO_ROOT / "src"
+SRC_DIRS = [REPO_ROOT / "src", REPO_ROOT / "crates" / "kglite" / "src"]
 
 # Default cap. CLAUDE.md says compartmentalize aggressively; 3000 is a soft
 # upper bound — most files should be well under 1500.
@@ -37,7 +37,7 @@ ALLOWLIST: dict[str, int] = {
     # planner/fusion/<pass>.rs is on the deferred-refactor list
     # (Phase A.3 / 0.9.53 audit, Tier 2). Until that lands, freeze the
     # current size as the ceiling.
-    "src/graph/languages/cypher/planner/fusion.rs": 3050,
+    "crates/kglite/src/graph/languages/cypher/planner/fusion.rs": 3050,
 }
 
 
@@ -54,7 +54,10 @@ def test_no_new_god_files():
     """Fail if any .rs file under src/ exceeds 3000 LoC without an allowlist
     entry, or if an allowlisted file exceeds its pinned ceiling."""
     violations: list[str] = []
-    for path in sorted(SRC_DIR.rglob("*.rs")):
+    rs_files = []
+    for src_dir in SRC_DIRS:
+        rs_files.extend(src_dir.rglob("*.rs"))
+    for path in sorted(rs_files):
         loc = _count_loc(path)
         rel = _rel_path(path)
         ceiling = ALLOWLIST.get(rel, DEFAULT_LIMIT)

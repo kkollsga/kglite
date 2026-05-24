@@ -243,15 +243,10 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
     }
 }
 
-/// Transitional: keeps existing `?` and `.into()` call sites working
-/// until the post-Phase-G.3a state where KgError lives in kglite-core
-/// (at which point this impl is orphan-rule blocked). Removed when
-/// the move lands.
-impl From<RustKgError> for PyErr {
-    fn from(e: RustKgError) -> Self {
-        kg_to_pyerr(e)
-    }
-}
+// Post-G.3a: `impl From<RustKgError> for PyErr` would violate
+// Rust's orphan rule (both types foreign to this crate — KgError
+// lives in kglite-core, PyErr in pyo3). All call sites use
+// `kg_to_pyerr(...)` directly.
 
 // ─── Module registration ─────────────────────────────────────────────────────
 

@@ -26,9 +26,11 @@ python-extension = ["pyo3/extension-module"]
 # per-Python-version wheels alongside the bundled binary.
 abi3 = ["pyo3/abi3-py310"]
 # Rust-native embedder backend (BAAI/bge-m3 et al via fastembed-rs).
-# Enabled by `kglite-mcp-server` so the pure-Rust binary can support
-# `text_score()` semantic search without needing a Python embedder.
-fastembed = ["dep:fastembed"]
+# Post-G.3a: the fastembed adapter moved into kglite-core; this
+# feature now just propagates to enable kglite-core's matching
+# feature. The actual `dep:fastembed` lives in kglite-core's
+# Cargo.toml.
+fastembed = ["kglite-core/fastembed"]
 
 [lib]
 name = "kglite"
@@ -94,7 +96,9 @@ mcp-methods = { version = "0.3.39", default-features = false, features = ["serve
 # compile time. Keep `ort-download-binaries-native-tls` (prebuilt
 # ONNX Runtime binary — already not-compiled) and `hf-hub-native-tls`
 # (model downloads, system OpenSSL).
-fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+# Phase G.3a: the fastembed dep moved into kglite-core. Root
+# crate's `fastembed` feature now propagates to kglite-core's
+# fastembed feature; this entry is no longer needed in root.
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 # Required by the `PostActivateHook` signature in mcp-methods'

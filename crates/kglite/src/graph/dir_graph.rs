@@ -28,135 +28,132 @@ use std::sync::{Arc, RwLock};
 /// and optional embedding stores for vector similarity search.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
-    pub(crate) graph: GraphBackend,
+    pub graph: GraphBackend,
     /// Skipped during serialization — rebuilt from graph on load via `rebuild_type_indices()`.
     /// On disk graphs the base layer is mmap-backed via `type_indices.bin`;
     /// mutations land in an in-memory overlay.
     #[serde(skip)]
-    pub(crate) type_indices: TypeIndexStore,
+    pub type_indices: TypeIndexStore,
     /// Optional schema definition for validation
     #[serde(default)]
-    pub(crate) schema_definition: Option<SchemaDefinition>,
+    pub schema_definition: Option<SchemaDefinition>,
     /// Single-property indexes for fast lookups: (node_type, property) -> value -> [node_indices]
     /// Skipped during serialization — rebuilt from `property_index_keys` on load.
     #[serde(skip)]
-    pub(crate) property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
+    pub property_indices: HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>,
     /// Composite indexes for multi-field queries: (node_type, [properties]) -> composite_value -> [node_indices]
     /// Skipped during serialization — rebuilt from `composite_index_keys` on load.
     #[serde(skip)]
-    pub(crate) composite_indices:
-        HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
+    pub composite_indices: HashMap<CompositeIndexKey, HashMap<CompositeValue, Vec<NodeIndex>>>,
     /// Persisted list of property index keys so indexes can be rebuilt on load
     #[serde(default)]
-    pub(crate) property_index_keys: Vec<IndexKey>,
+    pub property_index_keys: Vec<IndexKey>,
     /// Persisted list of composite index keys so indexes can be rebuilt on load
     #[serde(default)]
-    pub(crate) composite_index_keys: Vec<CompositeIndexKey>,
+    pub composite_index_keys: Vec<CompositeIndexKey>,
     /// B-Tree range indexes for ordered lookups: (node_type, property) -> BTreeMap<Value, [NodeIndex]>
     /// Skipped during serialization — rebuilt from `range_index_keys` on load.
     #[serde(skip)]
-    pub(crate) range_indices: HashMap<IndexKey, std::collections::BTreeMap<Value, Vec<NodeIndex>>>,
+    pub range_indices: HashMap<IndexKey, std::collections::BTreeMap<Value, Vec<NodeIndex>>>,
     /// Persisted list of range index keys so indexes can be rebuilt on load
     #[serde(default)]
-    pub(crate) range_index_keys: Vec<IndexKey>,
+    pub range_index_keys: Vec<IndexKey>,
     /// Fast O(1) lookup by node ID: node_type -> TypeIdIndex
     /// Lazily built on first use for each node type, skipped during serialization.
     /// Uses compact u32 HashMap when all IDs are UniqueId (e.g., Wikidata mapped mode).
     /// On disk graphs the base layer is mmap-backed via `id_indices.bin`; mutations
     /// land in an in-memory overlay (see `storage/disk/id_index.rs`).
     #[serde(skip)]
-    pub(crate) id_indices: IdIndexStore,
+    pub id_indices: IdIndexStore,
     /// Fast O(1) lookup for connection types (interned). Populated on first edge access.
     #[serde(skip)]
-    pub(crate) connection_types: std::collections::HashSet<InternedKey>,
+    pub connection_types: std::collections::HashSet<InternedKey>,
     /// Node type metadata: node_type → { property_name → type_string }
     /// Replaces SchemaNode graph nodes — persisted via serde/bincode.
     #[serde(default)]
-    pub(crate) node_type_metadata: HashMap<String, HashMap<String, String>>,
+    pub node_type_metadata: HashMap<String, HashMap<String, String>>,
     /// Connection type metadata: connection_type → ConnectionTypeInfo
     /// Replaces SchemaNode graph nodes for connections — persisted via serde/bincode.
     #[serde(default)]
-    pub(crate) connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
+    pub connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
     /// Version and library info stamped at save time.
     /// Old files without this field deserialize to SaveMetadata::default() (format_version=0).
     #[serde(default)]
-    pub(crate) save_metadata: SaveMetadata,
+    pub save_metadata: SaveMetadata,
     /// Original ID field name per node type (e.g. "Person" → "npdid").
     /// Stored when the user-supplied unique_id_field differs from "id".
     /// Used for alias resolution: querying by original column name maps to the `id` field.
     #[serde(default)]
-    pub(crate) id_field_aliases: HashMap<String, String>,
+    pub id_field_aliases: HashMap<String, String>,
     /// Original title field name per node type (e.g. "Person" → "prospect_name").
     /// Stored when the user-supplied node_title_field differs from "title".
     /// Used for alias resolution: querying by original column name maps to the `title` field.
     #[serde(default)]
-    pub(crate) title_field_aliases: HashMap<String, String>,
+    pub title_field_aliases: HashMap<String, String>,
     /// Parent type for supporting node types: child_type → parent_type.
     /// If a type has an entry here, it is a "supporting" type that belongs to the parent.
     /// Types without an entry are "core" types (shown in describe() inventory).
     #[serde(default)]
-    pub(crate) parent_types: HashMap<String, String>,
+    pub parent_types: HashMap<String, String>,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
     #[serde(default = "default_auto_vacuum_threshold")]
-    pub(crate) auto_vacuum_threshold: Option<f64>,
+    pub auto_vacuum_threshold: Option<f64>,
     /// Spatial configuration per node type: type_name → SpatialConfig.
     /// Declares which properties hold lat/lon or WKT data for auto-resolution.
     #[serde(default)]
-    pub(crate) spatial_configs: HashMap<String, SpatialConfig>,
+    pub spatial_configs: HashMap<String, SpatialConfig>,
     /// Graph-level WKT geometry cache — persists across queries.
     /// Uses Arc<Geometry> to avoid cloning heavy geometry objects.
     /// RwLock allows concurrent reads from parallel row evaluation.
     #[serde(skip)]
-    pub(crate) wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
+    pub wkt_cache: Arc<RwLock<HashMap<String, Arc<geo::Geometry<f64>>>>>,
     /// Lazy edge-type count cache — avoids O(E) rescan for FusedCountEdgesByType.
     /// Invalidated on edge mutations (add/remove).
     #[serde(skip)]
-    pub(crate) edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
+    pub edge_type_counts_cache: Arc<RwLock<Option<HashMap<String, usize>>>>,
     /// Cached type connectivity: (source_type, connection_type, target_type) → count.
     /// Computed by `rebuild_caches()`, persisted in metadata, restored on load.
     /// Invalidated on edge mutations alongside edge_type_counts_cache.
     #[serde(skip)]
-    pub(crate) type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
+    pub type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
     /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
     /// Stored separately from NodeData.properties — invisible to normal node API.
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
-    pub(crate) embeddings: HashMap<(String, String), EmbeddingStore>,
+    pub embeddings: HashMap<(String, String), EmbeddingStore>,
     /// Timeseries configuration per node type: type_name → TimeseriesConfig.
     /// Declares composite key labels and known channels for auto-resolution.
     #[serde(default)]
-    pub(crate) timeseries_configs:
-        HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
+    pub timeseries_configs: HashMap<String, crate::graph::features::timeseries::TimeseriesConfig>,
     /// Per-node timeseries storage: NodeIndex.index() → NodeTimeseries.
     /// Stored separately from NodeData.properties (like embeddings).
     /// Persisted as a separate section in v2 .kgl files.
     #[serde(skip)]
-    pub(crate) timeseries_store: HashMap<usize, crate::graph::features::timeseries::NodeTimeseries>,
+    pub timeseries_store: HashMap<usize, crate::graph::features::timeseries::NodeTimeseries>,
     /// Temporal configuration per node type: type_name → TemporalConfig.
     /// Nodes of this type are auto-filtered by validity period in select().
     #[serde(default)]
-    pub(crate) temporal_node_configs: HashMap<String, TemporalConfig>,
+    pub temporal_node_configs: HashMap<String, TemporalConfig>,
     /// Temporal configurations per connection type: connection_type → Vec<TemporalConfig>.
     /// Multiple configs per type support shared connection type names across source types
     /// (e.g., HAS_LICENSEE used by Field, Licence, BusinessArrangement with different field names).
     /// Edges of this type are auto-filtered by validity period in traverse().
     #[serde(default)]
-    pub(crate) temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
+    pub temporal_edge_configs: HashMap<String, Vec<TemporalConfig>>,
     /// Per-type columnar property stores. When populated, nodes of these types
     /// use `PropertyStorage::Columnar` instead of `Compact`.
     /// Not persisted — rebuilt on load if columnar mode is enabled.
     #[serde(skip)]
-    pub(crate) column_stores:
-        HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>>,
+    pub column_stores: HashMap<String, Arc<crate::graph::storage::column_store::ColumnStore>>,
     /// Memory limit for columnar heap storage. If Some(n), `enable_columnar()`
     /// will spill columns to temp files when total heap_bytes exceeds n.
     #[serde(skip)]
-    pub(crate) memory_limit: Option<usize>,
+    pub memory_limit: Option<usize>,
     /// Directory for spill files. Defaults to std::env::temp_dir()/kglite_spill_<pid>.
     #[serde(skip)]
-    pub(crate) spill_dir: Option<std::path::PathBuf>,
+    pub spill_dir: Option<std::path::PathBuf>,
     /// Temp directories created during load or spill that should be cleaned up on drop.
     /// Uses Arc so clones share ownership — only the last clone cleans up.
     #[serde(skip)]
@@ -164,25 +161,25 @@ pub struct DirGraph {
     /// If true, Cypher mutations (CREATE, SET, DELETE, REMOVE, MERGE) are rejected
     /// and describe() omits mutation documentation.
     #[serde(skip)]
-    pub(crate) read_only: bool,
+    pub read_only: bool,
     /// If true, Cypher mutations (CREATE, SET, MERGE) are validated against
     /// the frozen schema (node_type_metadata + connection_type_metadata).
     /// Unlike read_only, mutations are still allowed — they just must conform.
     #[serde(skip)]
-    pub(crate) schema_locked: bool,
+    pub schema_locked: bool,
     /// Monotonically increasing version counter — incremented on every mutation.
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
-    pub(crate) version: u64,
+    pub version: u64,
     /// Property key interner: maps InternedKey(u64) → original string.
     /// Populated during ingestion (add_nodes, CREATE, SET) and deserialization.
     /// Skipped during serde — rebuilt on load by the InternedKey Deserialize impl.
     #[serde(skip)]
-    pub(crate) interner: StringInterner,
+    pub interner: StringInterner,
     /// Shared property schemas per node type: type_name → Arc<TypeSchema>.
     /// Populated during ingestion (add_nodes, CREATE) and compaction (load).
     #[serde(skip)]
-    pub(crate) type_schemas: HashMap<String, Arc<TypeSchema>>,
+    pub type_schemas: HashMap<String, Arc<TypeSchema>>,
 }
 
 pub(crate) fn default_auto_vacuum_threshold() -> Option<f64> {

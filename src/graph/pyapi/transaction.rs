@@ -164,7 +164,7 @@ impl Transaction {
         //
         // The pre-parse below is on the cached parser (~700ns hit)
         // so session::execute's own parse inside is free.
-        let pre_parsed = cypher::parse_cypher(query)?;
+        let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let is_mut = cypher::is_mutation_query(&pre_parsed);
 
         if is_mut && self.read_only {
@@ -207,7 +207,9 @@ impl Transaction {
                 .working
                 .as_mut()
                 .expect("invariant: materialized above");
-            crate::graph::session::execute_mut(working, query, &opts)?.result
+            crate::graph::session::execute_mut(working, query, &opts)
+                .map_err(crate::error_py::kg_to_pyerr)?
+                .result
         } else {
             let graph: &DirGraph = self
                 .working
@@ -219,7 +221,9 @@ impl Transaction {
                         "Transaction already committed or rolled back".to_string(),
                     ))
                 })?;
-            crate::graph::session::execute_read(graph, query, &opts)?.result
+            crate::graph::session::execute_read(graph, query, &opts)
+                .map_err(crate::error_py::kg_to_pyerr)?
+                .result
         };
 
         if pre_parsed.explain {

@@ -128,7 +128,7 @@ def test_enum_match_audit_still_holds():
 def test_recording_graph_symbol_exported():
     """`pub use recording::RecordingGraph;` stays in storage/mod.rs."""
 
-    mod_rs = (REPO_ROOT / "src" / "graph" / "storage" / "mod.rs").read_text()
+    mod_rs = (REPO_ROOT / "crates" / "kglite" / "src" / "graph" / "storage" / "mod.rs").read_text()
     assert "pub mod recording;" in mod_rs, (
         "`storage/mod.rs` lost the `pub mod recording;` declaration — "
         "downstream consumers (schema.rs) import `RecordingGraph` via this path."
