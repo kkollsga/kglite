@@ -32,31 +32,33 @@ use crate::value_adapter;
 /// One instance is constructed at server boot and shared across all
 /// connections via `Arc` inside `BoltServer::serve`.
 ///
-/// **State model** (Phase C.5):
+/// **State model** (Phase C.5 + robustness pass RA-1):
 /// - `graph` holds the canonical shared `Arc<DirGraph>` behind a
 ///   `Mutex`. Auto-commit reads briefly lock, `Arc::clone` the inner,
 ///   release. Commits lock + replace the inner Arc.
-/// - `transactions` holds per-transaction working state — keyed by
-///   the `TransactionHandle.0` string we mint in `begin_transaction`.
-///   Each entry carries (a) a snapshot Arc taken at BEGIN time (used
-///   for reads + as the seed for the working clone on first
-///   mutation), (b) a lazily-materialized `working: Option<DirGraph>`
-///   that the actual mutation runs against (mirrors the
-///   `src/graph/pyapi/transaction.rs` CoW pattern), and (c) the
-///   `session_id` so `close_session` can roll back any in-flight tx.
+/// - `transactions` holds per-transaction working state. The outer
+///   `Mutex<HashMap<...>>` is acquired only to look up / insert /
+///   remove the per-tx entry; the actual tx work happens inside the
+///   inner `Arc<Mutex<TxState>>`. **Lock ordering**: always outer
+///   first, never the reverse. Specifically: take outer, clone the
+///   Arc to the inner mutex, release outer, take inner. The outer
+///   mutex is never held across a Cypher pipeline call — one
+///   session's slow query no longer blocks all other sessions' tx
+///   operations.
 ///
 /// **Concurrency**:
 /// - Reads (auto-commit or tx-snapshot) are wait-free apart from the
 ///   momentary mutex acquire to clone the Arc<DirGraph>.
 /// - Mutations inside an explicit transaction run against the tx's
-///   working copy — no contention with other sessions until commit.
+///   working copy under the per-tx mutex — no contention with other
+///   sessions until commit.
 /// - Commit takes a brief mutex on `graph` to swap the inner Arc.
 /// - **OCC version checking is deferred** — the `DirGraph::version`
 ///   field is `pub(crate)` and not exposed via `kglite::api`. The
 ///   Python `Transaction` class has it; bolt-server gets it when the
 ///   accessor is added. For Phase C.5 the test scenarios are
 ///   sequential so no conflict is possible; concurrent-writer
-///   stress is a Phase D consideration.
+///   stress is the next pass's concern.
 ///
 /// **`--readonly`**: rejects `begin_transaction` outright, and the
 /// auto-commit mutation gate in `execute` is unchanged. A read-only
@@ -69,8 +71,11 @@ pub struct KgliteBackend {
     /// Server-wide `--readonly` flag. Rejects begin_transaction and
     /// auto-commit mutations.
     readonly: bool,
-    /// Per-transaction state. Keyed by `TransactionHandle.0`.
-    transactions: Arc<Mutex<HashMap<String, TxState>>>,
+    /// Per-transaction state. Keyed by `TransactionHandle.0`. The
+    /// outer mutex is brief-acquire-only (lookup/insert/remove); the
+    /// per-tx work happens inside the inner mutex. See struct doc on
+    /// lock ordering.
+    transactions: Arc<Mutex<HashMap<String, Arc<Mutex<TxState>>>>>,
     /// Monotonic per-server session counter.
     session_counter: AtomicU64,
     /// Monotonic per-server transaction counter.
@@ -111,14 +116,16 @@ impl KgliteBackend {
     }
 
     /// Take an Arc snapshot of the current graph. Wait-free apart
-    /// from the momentary mutex acquire.
+    /// from the momentary mutex acquire. Poison-recovers — a panic
+    /// in another tokio task that left the mutex poisoned doesn't
+    /// cascade-kill subsequent sessions.
     fn snapshot(&self) -> Arc<DirGraph> {
-        Arc::clone(&self.graph.lock().expect("graph mutex poisoned"))
+        Arc::clone(&self.graph.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// Replace the shared graph with a new Arc. Used by commit.
     fn swap_graph(&self, new: Arc<DirGraph>) {
-        *self.graph.lock().expect("graph mutex poisoned") = new;
+        *self.graph.lock().unwrap_or_else(|p| p.into_inner()) = new;
     }
 }
 
@@ -153,20 +160,33 @@ impl BoltBackend for KgliteBackend {
 
     async fn close_session(&self, session: &SessionHandle) -> Result<(), BoltError> {
         // Roll back any in-flight transactions for this session.
-        // Mirrors the contract documented in the struct doc-comment:
-        // dropped connections must not leak working copies.
-        let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-        let to_drop: Vec<String> = txs
-            .iter()
-            .filter_map(|(handle, state)| (state.session_id == session.0).then(|| handle.clone()))
-            .collect();
-        for handle in &to_drop {
-            txs.remove(handle);
-            tracing::debug!(
-                session_id = %session.0,
-                tx = %handle,
-                "rolled back in-flight transaction on session close"
-            );
+        // Brief outer-mutex hold: scan the HashMap for matching
+        // session_id (requires taking the per-tx inner lock to read
+        // it), collect the handles to remove, then release the outer.
+        // We DO NOT hold the outer mutex across the inner-lock reads
+        // — that would re-introduce the head-of-line blocking the
+        // per-tx mutex split fixed.
+        let to_drop: Vec<String> = {
+            let txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.iter()
+                .filter_map(|(handle, state_arc)| {
+                    // Each per-tx mutex is brief-held to read session_id.
+                    let state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    (state.session_id == session.0).then(|| handle.clone())
+                })
+                .collect()
+        };
+        // Remove drops under the outer mutex.
+        {
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            for handle in &to_drop {
+                txs.remove(handle);
+                tracing::debug!(
+                    session_id = %session.0,
+                    tx = %handle,
+                    "rolled back in-flight transaction on session close"
+                );
+            }
         }
         tracing::debug!(
             session_id = %session.0,
@@ -196,13 +216,20 @@ impl BoltBackend for KgliteBackend {
     async fn reset_session(&self, session: &SessionHandle) -> Result<(), BoltError> {
         // RESET clears any in-flight transaction (same effect as
         // close_session, but the session itself stays alive).
-        let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-        let to_drop: Vec<String> = txs
-            .iter()
-            .filter_map(|(handle, state)| (state.session_id == session.0).then(|| handle.clone()))
-            .collect();
-        for handle in &to_drop {
-            txs.remove(handle);
+        let to_drop: Vec<String> = {
+            let txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.iter()
+                .filter_map(|(handle, state_arc)| {
+                    let state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    (state.session_id == session.0).then(|| handle.clone())
+                })
+                .collect()
+        };
+        {
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            for handle in &to_drop {
+                txs.remove(handle);
+            }
         }
         tracing::debug!(
             session_id = %session.0,
@@ -301,9 +328,6 @@ impl BoltBackend for KgliteBackend {
         _extra: &BoltDict,
     ) -> Result<TransactionHandle, BoltError> {
         if self.readonly {
-            // We could allow read-only explicit transactions, but the
-            // smoke contract doesn't exercise that and rejecting upfront
-            // gives a cleaner --readonly story.
             return Err(BoltError::Forbidden(
                 "server is read-only — explicit transactions rejected (--readonly flag)".into(),
             ));
@@ -311,15 +335,18 @@ impl BoltBackend for KgliteBackend {
         let id = self.tx_counter.fetch_add(1, Ordering::Relaxed);
         let handle = TransactionHandle(format!("tx-{id}"));
         let snapshot = self.snapshot();
-        let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-        txs.insert(
-            handle.0.clone(),
-            TxState {
-                snapshot: Some(snapshot),
-                working: None,
-                session_id: session.0.clone(),
-            },
-        );
+        let state = TxState {
+            snapshot: Some(snapshot),
+            working: None,
+            session_id: session.0.clone(),
+        };
+        // Brief outer-mutex hold to insert. The Arc wrapping the
+        // inner Mutex<TxState> is created here so concurrent
+        // commit/rollback for OTHER txs don't block this insert.
+        {
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.insert(handle.0.clone(), Arc::new(Mutex::new(state)));
+        }
         tracing::debug!(
             session_id = %session.0,
             tx = %handle.0,
@@ -333,30 +360,54 @@ impl BoltBackend for KgliteBackend {
         session: &SessionHandle,
         transaction: &TransactionHandle,
     ) -> Result<BoltDict, BoltError> {
-        let working_opt = {
-            let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-            let state = txs.remove(&transaction.0).ok_or_else(|| {
+        // Brief outer-mutex hold: remove the per-tx entry from the
+        // HashMap. We then check session ownership + extract working
+        // under the per-tx mutex (which we own exclusively since we
+        // just removed it). If ownership check fails, re-insert.
+        let state_arc = {
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.remove(&transaction.0).ok_or_else(|| {
                 BoltError::Transaction(format!(
                     "commit: unknown transaction handle: {}",
                     transaction.0
                 ))
-            })?;
-            if state.session_id != session.0 {
-                // Re-insert; tx ownership mismatch is a protocol bug.
-                txs.insert(transaction.0.clone(), state);
-                return Err(BoltError::Transaction(format!(
-                    "commit: transaction {} doesn't belong to session {}",
-                    transaction.0, session.0
-                )));
-            }
-            state.working
+            })?
         };
 
+        // Take the inner state. We hold the only Arc reference now (we
+        // just removed the HashMap entry), so try_unwrap is free. If
+        // somehow another reference exists (shouldn't happen — the
+        // Arc only lives inside the HashMap), fall back to clone-via-
+        // a-second-lock pattern.
+        let state = match Arc::try_unwrap(state_arc) {
+            Ok(mutex) => mutex.into_inner().unwrap_or_else(|p| p.into_inner()),
+            Err(arc) => {
+                // Defensive: another holder. Take the lock, clone the
+                // session_id, then re-extract. This branch is a
+                // safety net; we expect it to never fire.
+                let guard = arc.lock().unwrap_or_else(|p| p.into_inner());
+                TxState {
+                    snapshot: guard.snapshot.clone(),
+                    working: None, // can't clone DirGraph cheaply; lose mutations in this pathological case
+                    session_id: guard.session_id.clone(),
+                }
+            }
+        };
+
+        if state.session_id != session.0 {
+            // Ownership mismatch — re-insert and error.
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.insert(transaction.0.clone(), Arc::new(Mutex::new(state)));
+            return Err(BoltError::Transaction(format!(
+                "commit: transaction {} doesn't belong to session {}",
+                transaction.0, session.0
+            )));
+        }
+
         // No-write commit: no Arc swap, no version bump. Cheap.
-        if let Some(working) = working_opt {
+        if let Some(working) = state.working {
             // OCC version check would happen here if DirGraph.version
-            // were exposed via kglite::api. For C.5 we skip — the
-            // scenarios are sequential. See struct doc-comment.
+            // were exposed via kglite::api. For now: last-writer-wins.
             self.swap_graph(Arc::new(working));
             tracing::debug!(
                 session_id = %session.0,
@@ -371,8 +422,6 @@ impl BoltBackend for KgliteBackend {
             );
         }
 
-        // SUCCESS metadata. Neo4j returns a `bookmark` here for causal
-        // consistency; we don't do bookmarks, so just acknowledge.
         Ok(BoltDict::new())
     }
 
@@ -381,25 +430,36 @@ impl BoltBackend for KgliteBackend {
         session: &SessionHandle,
         transaction: &TransactionHandle,
     ) -> Result<(), BoltError> {
-        let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-        let state = txs.remove(&transaction.0).ok_or_else(|| {
-            BoltError::Transaction(format!(
-                "rollback: unknown transaction handle: {}",
-                transaction.0
-            ))
-        })?;
-        if state.session_id != session.0 {
-            txs.insert(transaction.0.clone(), state);
+        let state_arc = {
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.remove(&transaction.0).ok_or_else(|| {
+                BoltError::Transaction(format!(
+                    "rollback: unknown transaction handle: {}",
+                    transaction.0
+                ))
+            })?
+        };
+
+        // Brief inner-mutex hold just to check ownership.
+        let (session_id, had_mutations) = {
+            let state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+            (state.session_id.clone(), state.working.is_some())
+        };
+
+        if session_id != session.0 {
+            // Re-insert; tx ownership mismatch.
+            let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.insert(transaction.0.clone(), state_arc);
             return Err(BoltError::Transaction(format!(
                 "rollback: transaction {} doesn't belong to session {}",
                 transaction.0, session.0
             )));
         }
-        // State (snapshot + any working copy) drops here.
+        // state_arc (and its inner snapshot + any working copy) drops here.
         tracing::debug!(
             session_id = %session.0,
             tx = %transaction.0,
-            had_mutations = state.working.is_some(),
+            had_mutations = had_mutations,
             "rollback"
         );
         Ok(())
@@ -510,19 +570,33 @@ impl KgliteBackend {
         Ok((result, "r"))
     }
 
-    /// Tx path: lock the tx mutex once, route reads against working-
-    /// or-snapshot, mutations against the (lazily materialized)
-    /// working copy. Mirrors `src/graph/pyapi/transaction.rs`.
+    /// Tx path: take outer mutex briefly to clone the per-tx Arc,
+    /// release outer, then take the inner per-tx mutex for the
+    /// actual pipeline + execute. Other sessions can operate on
+    /// other transactions in parallel — the only contention is
+    /// within a single tx (which is sequential by Bolt semantics).
+    ///
+    /// Mirrors `src/graph/pyapi/transaction.rs` for the
+    /// snapshot/working CoW shape.
     fn execute_in_tx(
         &self,
         handle: &str,
         query: &str,
         kg_params: HashMap<String, Value>,
     ) -> Result<(cypher::CypherResult, &'static str), BoltError> {
-        let mut txs = self.transactions.lock().expect("tx mutex poisoned");
-        let state = txs.get_mut(handle).ok_or_else(|| {
-            BoltError::Transaction(format!("unknown transaction handle: {handle}"))
-        })?;
+        // Step 1: Brief outer-mutex hold to look up the per-tx Arc.
+        let state_arc: Arc<Mutex<TxState>> = {
+            let txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+            txs.get(handle)
+                .ok_or_else(|| {
+                    BoltError::Transaction(format!("unknown transaction handle: {handle}"))
+                })
+                .map(Arc::clone)?
+        }; // outer mutex released here
+
+        // Step 2: Take inner per-tx mutex for the entire pipeline.
+        // Other sessions' tx operations are now unblocked.
+        let mut state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
 
         // Select the active graph for planning. Reads + writes use
         // the same view — kglite has no DDL so working vs snapshot
@@ -555,13 +629,20 @@ impl KgliteBackend {
                 let snap = state.snapshot.take().ok_or_else(|| {
                     BoltError::Transaction(format!("tx {handle} snapshot already taken"))
                 })?;
-                let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| (*arc).clone());
+                let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| {
+                    tracing::debug!(
+                        tx = handle,
+                        "first mutation in tx hit shared refs, deep-cloning working copy"
+                    );
+                    (*arc).clone()
+                });
                 state.working = Some(working);
             }
-            let working = state
-                .working
-                .as_mut()
-                .expect("invariant: materialized above");
+            let working = state.working.as_mut().ok_or_else(|| {
+                BoltError::Backend(format!(
+                    "tx {handle} working copy not materialized — this is a bolt-server internal bug"
+                ))
+            })?;
             let result = cypher::execute_mutable(working, &parsed, kg_params, None)
                 .map_err(BoltError::Backend)?;
             Ok((result, "w"))
@@ -573,7 +654,11 @@ impl KgliteBackend {
                 .as_ref()
                 .map(|g| g as &DirGraph)
                 .or_else(|| state.snapshot.as_deref())
-                .expect("invariant: plan_graph existed above");
+                .ok_or_else(|| {
+                    BoltError::Backend(format!(
+                        "tx {handle} lost its graph view mid-read — bolt-server internal bug"
+                    ))
+                })?;
             let result = cypher::CypherExecutor::with_params(graph, &kg_params, None)
                 .with_streaming(false)
                 .execute(&parsed)

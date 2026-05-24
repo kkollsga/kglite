@@ -78,6 +78,9 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
             // Bolt's BoltDate is also days-since-Unix-epoch.
             // `signed_duration_since` is unambiguous; the bare `-` op
             // resolves to the wrong impl in some chrono versions.
+            // SAFETY: 1970-01-01 is a valid Gregorian date — the only way
+            // `from_ymd_opt` returns None is on out-of-range/invalid input
+            // (year 0, month 13, day 32, etc.). This expect is infallible.
             let epoch =
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
             Ok(BoltValue::Date(BoltDate {
@@ -274,6 +277,9 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
 
         // ---- Temporal / spatial ----------------------------------------
         BoltValue::Date(d) => {
+            // SAFETY: 1970-01-01 is a valid Gregorian date — the only way
+            // `from_ymd_opt` returns None is on out-of-range/invalid input
+            // (year 0, month 13, day 32, etc.). This expect is infallible.
             let epoch =
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
             let date = epoch
