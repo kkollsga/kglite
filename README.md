@@ -2,6 +2,8 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/kglite)](https://pypi.org/project/kglite/)
 [![Python versions](https://img.shields.io/pypi/pyversions/kglite)](https://pypi.org/project/kglite/)
+[![crates.io](https://img.shields.io/crates/v/kglite)](https://crates.io/crates/kglite)
+[![docs.rs](https://img.shields.io/docsrs/kglite)](https://docs.rs/kglite)
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
@@ -11,6 +13,13 @@ point `kglite.code_tree.build(".")` at any source directory — your
 first queryable graph in seconds. It ships with a bundled MCP server,
 a `describe()` method that emits a system-prompt-shaped schema, and
 structural validators that compose with Cypher.
+
+> kglite is a **pure-Rust knowledge graph engine**
+> ([`crates/kglite`](https://github.com/kkollsga/kglite/tree/main/crates/kglite))
+> packaged for Python via `pip install kglite`. The Bolt-server and
+> MCP-server binaries are sibling Rust crates wrapping the same
+> engine. If you want kglite as a Rust library — without the Python
+> wheel in your build — see **[Use from Rust](#use-from-rust)** below.
 
 > ### Codebase → Claude
 >
@@ -30,7 +39,7 @@ structural validators that compose with Cypher.
 > returns a Cypher-queryable graph — Form 4 insider transactions,
 > 13F holdings, SC 13D stakes, DEF 14A board composition, 8-K events.
 > **→ [`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
-> · [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+> · [SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
 
 ## Use cases
 
@@ -43,7 +52,7 @@ parsed codebase.
   transactions (Form 4), institutional holdings (13F), activist
   stakes (SC 13D), board composition (DEF 14A), 8-K events — with
   XBRL financials and Exhibit 21 subsidiaries via `SEC.open`. **→
-  [SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+  [SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
 - 🏛️ **Domain knowledge for agents.** Legal precedents + citations,
   regulatory rules, medical ontologies, manufacturing BOMs, scientific
   catalogues — anything with structure becomes a queryable graph an
@@ -56,7 +65,7 @@ parsed codebase.
   in via `add_nodes(df, ...)` and `add_connections(df, ...)`. Layer a
   graph on top of your warehouse and the agent reasons over the
   relationships without you writing a server. **→
-  [Data Loading guide](https://kglite.readthedocs.io/en/latest/guides/data-loading.html).**
+  [Data Loading guide](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html).**
 - 🌐 **Public datasets.** `wikidata.open(path)` and `sodir.open(path)`
   handle the *fetch + build + cache* cycle. Mapped and disk storage
   query graphs that don't fit in RAM — a billion-edge Wikidata graph
@@ -67,13 +76,13 @@ parsed codebase.
   similarity with Cypher traversal — *"find court cases semantically
   similar to my fact pattern, then walk one hop to related
   precedents"* — hybrid retrieval in one query, no second vector DB.
-  **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html).**
+  **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
 - 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 13
   languages into Function / Class / Module / Route nodes with
   web-framework route detection (Flask, FastAPI, Django). See the
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
-  [Code analysis guide](https://kglite.readthedocs.io/en/latest/guides/code-tree.html).**
+  [Code analysis guide](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html).**
 
 ## Why Cypher?
 
@@ -103,6 +112,7 @@ questions traverse it.
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                  | manual             | manual             | via driver             |
 | **Bundled MCP server for LLM agents**      | ✅                                 | —                          | —                  | —                  | —                      |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                          | —                  | —                  | —                      |
+| **Embeddable in Rust** (no Python in build) | ✅ (`crates/kglite`)               | —                          | —                  | ✅                  | —                      |
 | **Codebase → graph parser**                | 13 languages, route detection     | —                          | —                  | —                  | —                      |
 | **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                          | toy graphs only    | —                  | —                      |
 | **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
@@ -123,7 +133,12 @@ server-mode Cypher and want the in-process driver for tests.
 ## Quick Start
 
 ```bash
+# Python (the headline distribution path)
 pip install kglite
+
+# Optional extras
+pip install 'kglite[embed]'      # fastembed + onnxruntime for text_score()
+pip install 'kglite[neo4j]'      # Neo4j Python driver for Bolt-server tests
 ```
 
 ```python
@@ -167,8 +182,8 @@ graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
 ```
 
-**→ [Getting Started guide](https://kglite.readthedocs.io/en/latest/getting-started.html) ·
-[Cypher reference](https://kglite.readthedocs.io/en/latest/guides/cypher.html) ·
+**→ [Getting Started guide](https://kglite.readthedocs.io/en/latest/python/getting-started.html) ·
+[Cypher reference](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html) ·
 [API reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html).**
 
 ## Serve it to an agent
@@ -206,7 +221,7 @@ tools:                                               # inline parameterised Cyph
 ```
 
 No fork required for most customisation. **→
-[MCP server guide](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html).**
+[MCP server guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html).**
 
 ### 3. Teach the agent with bundled skills
 
@@ -221,7 +236,7 @@ non-code graph never sees `read_code_source` methodology.
 
 Net effect: the agent comes pre-loaded with how to use your graph,
 rather than discovering it through trial-and-error. **→
-[AI Agents guide](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html).**
+[AI Agents guide](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html).**
 
 ## Bundled datasets
 
@@ -231,7 +246,7 @@ cycle, returns a `KnowledgeGraph` you can `cypher()` against, and
 respects a per-dataset cooldown so re-running just reloads the cached
 graph in seconds. KGLite is independent of the upstream
 organisations — see each module docstring for non-affiliation notes.
-**→ [Datasets guide](https://kglite.readthedocs.io/en/latest/guides/datasets.html).**
+**→ [Datasets guide](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html).**
 
 ### SEC EDGAR
 
@@ -273,7 +288,7 @@ mandatory (SEC returns 403 without it).
 
 Source data is public domain (US Govt work) — redistribute the built
 `.kgl` however you like. **→
-[SEC guide](https://kglite.readthedocs.io/en/latest/guides/sec.html).**
+[SEC guide](https://kglite.readthedocs.io/en/latest/python/guides/sec.html).**
 
 ### Wikidata
 
@@ -299,7 +314,7 @@ stratigraphy and 28 more node types from the public ArcGIS REST
 FeatureServer at [factmaps.sodir.no](https://factmaps.sodir.no/api/rest/services/DataService).
 Built in ~30 s on first run, cached after. Useful as a worked example
 of `complement_blueprint` (extend a baseline schema without touching
-the canonical types) — **→ [Datasets guide](https://kglite.readthedocs.io/en/latest/guides/datasets.html).**
+the canonical types) — **→ [Datasets guide](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html).**
 
 ## Recipes
 
@@ -320,7 +335,7 @@ graph.cypher("""
 ```
 
 Vector embeddings via `pip install 'kglite[embed]'` (adds fastembed +
-onnxruntime). **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html).**
+onnxruntime). **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
 
 ### Structural validators — surface data-integrity gaps
 
@@ -340,7 +355,7 @@ graph.cypher("""
 `missing_required_edge` and `missing_inbound_edge` validate the
 `(type, edge)` direction against the graph's actual schema and refuse
 to execute when misused. **→ Full procedure list in the
-[Cypher reference](https://kglite.readthedocs.io/en/latest/guides/cypher.html#structural-validator-call-procedures).**
+[Cypher reference](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html#structural-validator-call-procedures).**
 
 ### Graph algorithms
 
@@ -354,9 +369,63 @@ graph.cypher("""
 """)
 ```
 
-**→ [Graph algorithms guide](https://kglite.readthedocs.io/en/latest/guides/graph-algorithms.html) ·
-[Traversal patterns](https://kglite.readthedocs.io/en/latest/guides/traversal-hierarchy.html) ·
-[Recipes index](https://kglite.readthedocs.io/en/latest/guides/recipes.html).**
+**→ [Graph algorithms guide](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) ·
+[Traversal patterns](https://kglite.readthedocs.io/en/latest/python/guides/traversal-hierarchy.html) ·
+[Recipes index](https://kglite.readthedocs.io/en/latest/python/guides/recipes.html).**
+
+## Use from Rust
+
+The same engine is available as a pure-Rust crate — embed it in a
+Rust binary without the Python wheel in your build:
+
+```toml
+# Cargo.toml
+[dependencies]
+kglite = "0.10"
+```
+
+```rust
+use kglite::api::{load_file, session, Value};
+use std::collections::HashMap;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let graph = load_file("my_graph.kgl")?;     // same .kgl as Python writes
+    let params = HashMap::new();
+    let opts = session::ExecuteOptions {
+        params: &params, deadline: None, max_rows: None,
+        lazy_eligible: false, disabled_passes: None, embedder: None,
+    };
+    let outcome = session::execute_read(
+        &graph,
+        "MATCH (p:Person) RETURN p.name LIMIT 5",
+        &opts,
+    )?;
+    for row in &outcome.result.rows {
+        if let Some(Value::String(name)) = row.first() {
+            println!("{}", name);
+        }
+    }
+    Ok(())
+}
+```
+
+Zero PyO3 in the dependency tree:
+`cargo tree -p your-crate | grep pyo3` → empty.
+
+- **[Rust quickstart](https://kglite.readthedocs.io/en/latest/rust/index.html)**
+  — load + query + transaction examples.
+- **[Embedding guide](https://kglite.readthedocs.io/en/latest/rust/embedding.html)**
+  — workspace layout, the `kglite::api::*` surface, cgo / napi /
+  JNI sketches.
+- **[Session abstraction](https://kglite.readthedocs.io/en/latest/rust/session.html)**
+  — binding-implementer reference for the canonical Cypher pipeline.
+- **[API reference (docs.rs)](https://docs.rs/kglite)** — per-symbol Rust API docs.
+
+The Bolt server (`crates/kglite-bolt-server`) and the Rust MCP
+server (`crates/kglite-mcp-server`) are standalone binaries built
+on the same engine — see the
+[Operators guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html)
+for deployment.
 
 ## Examples
 
@@ -372,7 +441,7 @@ directory has runnable, self-contained artifacts:
 - **[`open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)**
   — annotated workspace-mode manifest for the github-clone-tracker
   pattern. Walked through in the
-  [workspace manifest example](https://kglite.readthedocs.io/en/latest/examples/manifest_workspace.html).
+  [workspace manifest example](https://kglite.readthedocs.io/en/latest/python/examples/manifest_workspace.html).
 - **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
   — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
   covering laws, regulations, court decisions with citation edges.
@@ -426,51 +495,52 @@ Quick reference. Each links into the appropriate guide.
 
 | Feature | Description |
 |---|---|
-| **[Cypher](https://kglite.readthedocs.io/en/latest/guides/cypher.html)** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
-| **[Semantic search](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html)** | Vector embeddings + `text_score()` for similarity ranking. Opt-in via `pip install 'kglite[embed]'`. |
+| **[Cypher](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html)** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
+| **[Semantic search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html)** | Vector embeddings + `text_score()` for similarity ranking. Opt-in via `pip install 'kglite[embed]'`. |
 | **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` |
-| **[Graph algorithms](https://kglite.readthedocs.io/en/latest/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |
+| **[Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |
 | **Structural validators** | 14 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, more — agent-discoverable integrity checks composable with Cypher |
-| **[Spatial](https://kglite.readthedocs.io/en/latest/guides/spatial.html)** | Coordinates, WKT geometry, distance + containment, `kg_knn` k-nearest-neighbour. Pragmatic primitives, not a full GIS stack. |
-| **[Timeseries](https://kglite.readthedocs.io/en/latest/guides/timeseries.html)** | Time-indexed values with `ts_*()` Cypher functions. For graphs whose nodes carry value-over-time series. |
-| **[Bulk loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html)** | `add_nodes` / `add_connections` for DataFrames |
-| **[Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html)** | Declarative CSV-to-graph loading via JSON config |
-| **[Import/Export](https://kglite.readthedocs.io/en/latest/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
-| **[AI integration](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
-| **[Code analysis](https://kglite.readthedocs.io/en/latest/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
+| **[Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html)** | Coordinates, WKT geometry, distance + containment, `kg_knn` k-nearest-neighbour. Pragmatic primitives, not a full GIS stack. |
+| **[Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html)** | Time-indexed values with `ts_*()` Cypher functions. For graphs whose nodes carry value-over-time series. |
+| **[Bulk loading](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html)** | `add_nodes` / `add_connections` for DataFrames |
+| **[Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html)** | Declarative CSV-to-graph loading via JSON config |
+| **[Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
+| **[AI integration](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
+| **[Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
 
 ## Documentation
 
-Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**:
+Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
+— five tracks by audience.
 
-**Getting started**
-- [Getting Started](https://kglite.readthedocs.io/en/latest/getting-started.html) — installation, first graph, core concepts
-- [Querying overview](https://kglite.readthedocs.io/en/latest/guides/querying.html) — Cypher vs fluent API, when to reach for which
-- [Recipes index](https://kglite.readthedocs.io/en/latest/guides/recipes.html) — copy-paste patterns for common shapes
+**[Python track](https://kglite.readthedocs.io/en/latest/python/index.html)** — `pip install kglite`
+- [Getting Started](https://kglite.readthedocs.io/en/latest/python/getting-started.html) — installation, first graph, core concepts
+- [Cypher Guide](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html) — MATCH, MERGE, mutations, parameters, validators
+- [Data Loading](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html) — DataFrames in, DataFrames out
+- [Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) — shortest path, PageRank, community detection
+- [Semantic Search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
+- [Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html) — `code_tree.build`, framework route detection
+- [Datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html) — SEC, Wikidata, Sodir wrappers
+- [MCP server config](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) — manifests, skills, extensions
+- [Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html) · [Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html) · [Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html) · [Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html) · [Traversal & hierarchy](https://kglite.readthedocs.io/en/latest/python/guides/traversal-hierarchy.html) · [AI Agents](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)
+- [Recipes index](https://kglite.readthedocs.io/en/latest/python/guides/recipes.html) — copy-paste patterns for common shapes
 
-**Querying**
-- [Cypher Guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html) — MATCH, MERGE, mutations, parameters, validators
-- [Traversal & hierarchy](https://kglite.readthedocs.io/en/latest/guides/traversal-hierarchy.html) — variable-length paths, tree walks
-- [Graph algorithms](https://kglite.readthedocs.io/en/latest/guides/graph-algorithms.html) — shortest path, PageRank, community detection
-- [Semantic Search](https://kglite.readthedocs.io/en/latest/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
+**[Rust track](https://kglite.readthedocs.io/en/latest/rust/index.html)** — `cargo add kglite`
+- [Rust quickstart](https://kglite.readthedocs.io/en/latest/rust/index.html) — load, query, transactions
+- [Embedding kglite](https://kglite.readthedocs.io/en/latest/rust/embedding.html) — surface tour, language-binding sketches
+- [Session abstraction](https://kglite.readthedocs.io/en/latest/rust/session.html) — pipeline + CoW transactions
+- [API manifest](https://kglite.readthedocs.io/en/latest/rust/api-reference.html) + [per-symbol docs.rs](https://docs.rs/kglite)
 
-**Loading data**
-- [Data Loading](https://kglite.readthedocs.io/en/latest/guides/data-loading.html) — DataFrames in, DataFrames out
-- [Blueprints](https://kglite.readthedocs.io/en/latest/guides/blueprints.html) — declarative CSV→graph via JSON config
-- [Datasets](https://kglite.readthedocs.io/en/latest/guides/datasets.html) — Wikidata + Sodir wrappers
-- [Code analysis](https://kglite.readthedocs.io/en/latest/guides/code-tree.html) — `code_tree.build`, framework route detection
-- [Import / Export](https://kglite.readthedocs.io/en/latest/guides/import-export.html) — `.kgl` snapshots, GraphML, CSV
+**[Operators](https://kglite.readthedocs.io/en/latest/operators/index.html)** — running the protocol servers
+- [Bolt server](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html) — Neo4j wire compat for cluster-aware drivers
 
-**Domain features**
-- [Spatial](https://kglite.readthedocs.io/en/latest/guides/spatial.html) — WKT geometry, lat/lon, k-nearest-neighbour
-- [Timeseries](https://kglite.readthedocs.io/en/latest/guides/timeseries.html) — time-indexed values, `ts_*()` functions
+**Reference** — cross-binding
+- [Cypher reference](https://kglite.readthedocs.io/en/latest/reference/cypher-reference.html) — the supported Cypher subset
+- [Fluent API reference](https://kglite.readthedocs.io/en/latest/reference/fluent-api.html) — programmatic graph construction
+- [Python API (auto)](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html) — auto-generated from stubs
 
-**Agent integration**
-- [AI Agents](https://kglite.readthedocs.io/en/latest/guides/ai-agents.html) — MCP server, `describe()`, agent prompts
-- [MCP server config](https://kglite.readthedocs.io/en/latest/guides/mcp-servers.html) — manifests, skills, extensions
-
-**Reference**
-- [API Reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html) — full auto-generated reference
+**[Concepts](https://kglite.readthedocs.io/en/latest/concepts/index.html)** — architecture + contributor docs
+- [Architecture](https://kglite.readthedocs.io/en/latest/concepts/architecture.html) · [Design decisions](https://kglite.readthedocs.io/en/latest/concepts/design-decisions.html) · [Cypher conformance](https://kglite.readthedocs.io/en/latest/concepts/cypher-conformance.html) · [Concurrency](https://kglite.readthedocs.io/en/latest/concepts/concurrency.html)
 
 ## Requirements
 
