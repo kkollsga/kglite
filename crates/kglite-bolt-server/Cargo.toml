@@ -1,10 +1,16 @@
 [package]
 name = "kglite-bolt-server"
-version = "0.0.1"
+version = "0.10.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Bolt v5.x protocol server for kglite knowledge graphs — pure-Rust single-binary frontend speaking the Neo4j wire protocol so the Neo4j driver ecosystem (Python/JS/Java/Go/.NET drivers, Cypher Shell, Neo4j Browser, BloodHound, LangChain Neo4jGraph) plugs in unchanged."
+readme = "README.md"
+repository = "https://github.com/kkollsga/kglite"
+homepage = "https://github.com/kkollsga/kglite"
+documentation = "https://kglite.readthedocs.io/en/latest/operators/bolt-server.html"
+keywords = ["bolt", "neo4j", "cypher", "knowledge-graph", "kglite"]
+categories = ["database", "command-line-utilities"]
 
 [[bin]]
 name = "kglite-bolt-server"
@@ -22,7 +28,11 @@ path = "src/main.rs"
 # bolt-server NEVER depends on — keeps pyo3 out of this binary's
 # dep tree (verified via `cargo tree -p kglite-bolt-server | grep
 # pyo3` → empty).
-kglite = { path = "../kglite", default-features = false }
+# Local dev uses the path dep; `cargo publish` strips path and falls
+# back to the version requirement (so this crate publishes against
+# the crates.io kglite). The version must be kept in sync with
+# `crates/kglite/Cargo.toml`'s package.version on each release.
+kglite = { version = "0.10", path = "../kglite", default-features = false }
 
 # Bolt v5.x protocol library. Implements PackStream framing, message
 # dispatch, session state machine, handshake. We implement BoltBackend

@@ -10,6 +10,12 @@ edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "Pure-Rust knowledge graph engine — Cypher pipeline, snapshot/working CoW transactions, columnar/mmap/disk storage backends, optional dataset loaders (SEC EDGAR, Sodir, Wikidata). PyO3 wrappers live in the sibling kglite-py crate (the Python wheel); embeddable directly from any Rust binary without PyO3 in the dep tree."
+readme = "README.md"
+repository = "https://github.com/kkollsga/kglite"
+homepage = "https://github.com/kkollsga/kglite"
+documentation = "https://docs.rs/kglite"
+keywords = ["graph", "knowledge-graph", "cypher", "petgraph", "database"]
+categories = ["database", "data-structures"]
 
 [lib]
 # `[lib] name = "kglite"` matches the `[package] name` so
@@ -21,12 +27,14 @@ description = "Pure-Rust knowledge graph engine — Cypher pipeline, snapshot/wo
 name = "kglite"
 doctest = false
 
-# Standalone perf microbench for the bz2 decoder. Run with
-# `cargo run -p kglite --bin bz2_bench --release -- <path>`.
+# Standalone perf microbench for the bz2 decoder. Requires the
+# `parallel-bz2` feature because it calls `bzip2_rs` directly. Run
+# with `cargo run -p kglite --bin bz2_bench --release --features
+# parallel-bz2 -- <path>`.
 [[bin]]
 name = "bz2_bench"
 path = "src/bin/bz2_bench.rs"
-required-features = []
+required-features = ["parallel-bz2"]
 
 [features]
 default = []
@@ -39,6 +47,28 @@ default = []
 # so the Rust-only deployment path supports `text_score()` semantic
 # search without a Python embedder.
 fastembed = ["dep:fastembed"]
+# Block-level parallel decoder for single-stream `.bz2` files (the
+# Wikidata `latest-truthy.nt.bz2` shape). Off by default because the
+# implementation depends on `bzip2-rs` with its `rayon` Cargo
+# feature — that feature is only available in the paolobarbolini
+# git fork (see the dep block below), not on the crates.io
+# `bzip2-rs = 0.1.x` release. With this feature off the loader
+# still parallelises multi-stream pbzip2-produced files; only the
+# single-stream block-level path falls back to sequential
+# `bzip2::read::MultiBzDecoder`. Wikidata-scale ingest is the only
+# workload that actually benefits — opt in if you're decompressing
+# > 50 GB single-stream files. The `bz2_bench` binary requires this
+# feature.
+# `bzip2-rs/rayon` is intentionally omitted here even though the
+# code path uses `bzip2_rs::RayonThreadPool`. Cargo's publish-time
+# manifest resolver checks that *every* feature can be enabled
+# against crates.io versions of every dep, and bzip2-rs 0.1.x on
+# crates.io has no `rayon` feature. Consumers who enable
+# `parallel-bz2` are expected to also pull a bzip2-rs version that
+# has the `rayon` feature, via their own `[patch.crates-io]`
+# pointing at the paolobarbolini fork (the workspace root does
+# this automatically for local development).
+parallel-bz2 = ["dep:bzip2-rs"]
 
 # Pre-packaged dataset loaders. Polars-io style: opt in to only the
 # loaders you actually use. Phase G.3a folded the standalone
@@ -58,6 +88,12 @@ sodir = [
 wikidata = [
     "dep:thiserror",
     "dep:reqwest",
+    # Wikidata's `latest-truthy.nt.bz2` is a single-stream bz2; the
+    # `parallel-bz2` feature enables block-level parallel decode
+    # (~10× faster on M-series). Users who enable `wikidata` are
+    # implicitly opting in to the bzip2-rs git-fork dep — see the
+    # `parallel-bz2` feature docs.
+    "parallel-bz2",
 ]
 
 [dependencies]
@@ -77,7 +113,17 @@ zstd = "0.13"
 memmap2 = "0.9"
 libc = "0.2"
 bzip2 = "0.6"
-bzip2-rs = { git = "https://github.com/paolobarbolini/bzip2-rs", rev = "2be7684b444987d6cc7b0b226bda7581be739e3c", features = ["rayon"] }
+# Optional — gated behind the `parallel-bz2` Cargo feature. The
+# `rayon` feature on bzip2-rs lives only on the paolobarbolini git
+# fork, not on crates.io `bzip2-rs = 0.1.x`. The
+# workspace-root `[patch.crates-io]` points local builds at the
+# fork so `parallel-bz2` works during development; on `cargo
+# publish` the patch isn't carried into the published manifest, so
+# crates.io consumers who enable `parallel-bz2` need to add a
+# matching `[patch.crates-io]` in their own workspace. Default-off
+# so the headline crates.io build resolves cleanly without needing
+# the patch.
+bzip2-rs = { version = "0.1", optional = true }
 tree-sitter = "0.26.8"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"

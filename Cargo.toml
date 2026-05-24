@@ -13,6 +13,19 @@ resolver = "2"
 # `crates/kglite-py/` (see `pyproject.toml`'s `[tool.maturin]
 # manifest-path`).
 
+# Local dev override — pulls the paolobarbolini bzip2-rs git fork
+# (which has `ParallelDecoderReader` + `ThreadPool` trait, neither
+# of which is in the crates.io 0.1.2 release) when any workspace
+# member resolves `bzip2-rs`. The patch is workspace-only and is
+# NOT carried into the published manifest by `cargo publish` —
+# crates.io consumers who enable `kglite/parallel-bz2` will need
+# their own equivalent `[patch.crates-io]` until upstream
+# bzip2-rs publishes a 0.2.x with these APIs. See
+# `crates/kglite/Cargo.toml`'s `parallel-bz2` feature for the
+# story.
+[patch.crates-io]
+bzip2-rs = { git = "https://github.com/paolobarbolini/bzip2-rs", rev = "2be7684b444987d6cc7b0b226bda7581be739e3c" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

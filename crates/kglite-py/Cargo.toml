@@ -10,6 +10,13 @@ description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust 
 readme = "../../README.md"
 repository = "https://github.com/kkollsga/kglite"
 license = "MIT"
+# NOT for crates.io. This crate is the source for the Python wheel
+# (built by maturin → `pip install kglite`). Rust embedders depend
+# on the sibling `kglite` crate directly (which is published to
+# crates.io). Publishing this would be redundant + confusing — the
+# wheel is the right artifact for Python users, and Rust users want
+# the no-pyo3 path.
+publish = false
 
 # `python-extension` toggles pyo3's extension-module feature so the
 # wheel build (via maturin) and the kglite-mcp-server binary build

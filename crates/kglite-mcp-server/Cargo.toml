@@ -1,10 +1,25 @@
 [package]
 name = "kglite-mcp-server"
-version = "0.0.1"
+version = "0.10.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
 description = "MCP server for kglite knowledge graphs — pure-Rust single-binary frontend for cypher_query / graph_overview / save_graph / read_code_source plus the generic source / GitHub surface from mcp-methods. No libpython link."
+readme = "README.md"
+repository = "https://github.com/kkollsga/kglite"
+homepage = "https://github.com/kkollsga/kglite"
+documentation = "https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html"
+keywords = ["mcp", "model-context-protocol", "knowledge-graph", "cypher", "kglite"]
+categories = ["database", "command-line-utilities"]
+# Not on crates.io YET. This crate depends on `kglite-py` (the
+# wheel-source crate, which is `publish = false`) because it still
+# uses `KnowledgeGraph::set_embedder_native` and `source_location`
+# methods that live on the PyO3 wrapper type. Tracked: lift those
+# methods into the core `kglite` crate, switch the dep to
+# `kglite = { path = "../kglite" }`, then drop this flag. Until
+# then the binary ships only via `cargo install --path` or the
+# Python wheel's console-script path.
+publish = false
 
 [[bin]]
 name = "kglite-mcp-server"

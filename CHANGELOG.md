@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — crates.io publish prep for the Rust crates
+
+The pure-Rust `kglite` core crate (and the standalone
+`kglite-bolt-server` binary) are now metadata-complete for
+publishing to [crates.io](https://crates.io).
+
+- **`crates/kglite/`** — added `readme = "README.md"`, `repository`,
+  `homepage`, `documentation = "https://docs.rs/kglite"`,
+  `keywords = ["graph", "knowledge-graph", "cypher", "petgraph",
+  "database"]`, `categories = ["database", "data-structures"]`.
+  New `crates/kglite/README.md` (~140 lines) tailored for the
+  crates.io audience.
+- **`crates/kglite-bolt-server/`** — same metadata pattern, with
+  Bolt/Neo4j-flavored keywords. Version bumped `0.0.1 → 0.10.1` to
+  align with the wheel's 0.10.x line. New
+  `crates/kglite-bolt-server/README.md`.
+- **`crates/kglite-mcp-server/`** — metadata + README written but
+  marked `publish = false` for now. The crate still depends on
+  `kglite-py` (for `KnowledgeGraph::set_embedder_native` /
+  `source_location` methods that live on the PyO3 wrapper type);
+  publishing must wait until those methods get lifted into the
+  core. Version bumped to 0.10.1 anyway for local consistency.
+- **`crates/kglite-py/`** — explicitly marked `publish = false`
+  with a comment explaining: the wheel is the right artifact for
+  Python users (`pip install kglite`), and Rust users want the
+  no-pyo3 path via the sibling `kglite` crate.
+
+`cargo publish -p kglite --dry-run` passes: 267 files, 5.1 MiB
+(1.1 MiB compressed). `cargo publish -p kglite-bolt-server
+--dry-run` succeeds once `kglite` is actually published (chicken-
+and-egg; the bolt server depends on the core crate that has to
+land first).
+
+#### parallel-bz2 decoupling
+
+In the process, the single-stream bz2 parallel-decode path was
+restructured so `cargo publish -p kglite` resolves cleanly
+against crates.io.
+
+Background: the path uses the paolobarbolini bzip2-rs git fork
+(adds `ParallelDecoderReader` + `ThreadPool` trait + a
+`RayonThreadPool` helper gated on the fork's `rayon` Cargo
+feature). The crates.io `bzip2-rs = 0.1.x` release has none of
+these — only the sequential `DecoderReader`. Cargo's publish-time
+manifest resolver requires every declared dep feature to be
+satisfiable against crates.io versions, which previously broke
+`cargo publish`.
+
+Fix:
+- New optional Cargo feature `kglite/parallel-bz2`. Default-off;
+  enables the optional `bzip2-rs` dep.
+- Implemented `bzip2_rs::ThreadPool` ourselves
+  (`graph::io::ntriples::parallel_bz2::KglRayonPool`) on top of
+  kglite's existing `rayon` dep instead of using
+  `bzip2_rs::RayonThreadPool`. Removes the requirement for the
+  fork's `rayon` cargo feature from the published manifest.
+- Workspace `[patch.crates-io]` pulls the fork during local
+  development. The patch is stripped on `cargo publish`; crates.io
+  consumers who enable `kglite/parallel-bz2` need their own
+  matching patch until upstream bzip2-rs publishes a 0.2.x with
+  these APIs.
+- Single-stream fallback when `parallel-bz2` is off is sequential
+  `bzip2::read::MultiBzDecoder`. Multi-stream pbzip2 parallelism
+  is unaffected.
+- The `wikidata` Cargo feature implies `parallel-bz2` (Wikidata
+  ingest is the workload that needs it).
+
+All 11 `parallel_bz2` unit tests pass on both feature-on and
+feature-off configurations. The `bz2_bench` binary requires
+`--features parallel-bz2`.
+
 ### Changed — Docs reorganized into two-track Python / Rust layout
 
 [kglite.readthedocs.io](https://kglite.readthedocs.io) now

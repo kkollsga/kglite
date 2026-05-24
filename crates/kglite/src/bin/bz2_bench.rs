@@ -19,6 +19,30 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
+/// Local `bzip2_rs::ThreadPool` impl on top of rayon. Mirrors
+/// `kglite::graph::io::ntriples::parallel_bz2::KglRayonPool` — we
+/// can't import that one (it's a private item in the lib) so we
+/// re-implement the 6-line shim here. Both exist because the
+/// `bzip2_rs::RayonThreadPool` helper requires the fork's `rayon`
+/// Cargo feature, which we can't depend on from a published
+/// manifest.
+#[derive(Debug)]
+struct RayonPool;
+
+impl bzip2_rs::ThreadPool for RayonPool {
+    fn spawn<F>(&self, func: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        rayon::spawn_fifo(func);
+    }
+
+    fn max_threads(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(rayon::current_num_threads())
+            .unwrap_or_else(|| std::num::NonZeroUsize::new(1).unwrap())
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -48,8 +72,7 @@ fn main() {
 
     let file = File::open(path).expect("open file");
     let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut decoder =
-        bzip2_rs::ParallelDecoderReader::new(reader, bzip2_rs::RayonThreadPool, preread_bytes);
+    let mut decoder = bzip2_rs::ParallelDecoderReader::new(reader, RayonPool, preread_bytes);
 
     let start = Instant::now();
     let mut buf = vec![0u8; 8 * 1024 * 1024];

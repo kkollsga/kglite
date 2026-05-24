@@ -306,7 +306,6 @@ version = "0.1.2"
 source = "git+https://github.com/paolobarbolini/bzip2-rs?rev=2be7684b444987d6cc7b0b226bda7581be739e3c#2be7684b444987d6cc7b0b226bda7581be739e3c"
 dependencies = [
  "crc32fast",
- "rayon-core",
  "tinyvec",
 ]
 
@@ -1892,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-bolt-server"
-version = "0.0.1"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1908,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-mcp-server"
-version = "0.0.1"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "bytes",

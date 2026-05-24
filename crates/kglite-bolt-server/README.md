@@ -1,40 +1,66 @@
 # kglite-bolt-server
 
-Bolt v5.x protocol server for [kglite](https://github.com/kkollsga/kglite)
-knowledge graphs. Pure-Rust single binary, no libpython link.
+[![crates.io](https://img.shields.io/crates/v/kglite-bolt-server)](https://crates.io/crates/kglite-bolt-server)
+[![License: MIT](https://img.shields.io/crates/l/kglite-bolt-server)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
-**Status: skeleton only (Phase B of [`bolt_implementation.md`](../../bolt_implementation.md)).**
-Compiles, binds a port, panics on first Bolt message. The 11 `BoltBackend`
-trait methods in `src/backend.rs` are wired up with `unimplemented!()`
-bodies tagged to the Phase C sub-phase that fills them in:
-
-| Method | Phase |
-|---|---|
-| `create_session` / `close_session` / `set_session_auth` / `configure_session` / `reset_session` / `get_server_info` | C.1 |
-| `execute` (read-only RUN + scalars) | C.2 → C.3 → C.4 |
-| `begin_transaction` / `commit` / `rollback` | C.5 |
-| `route` (single-server) | C.1 |
-
-The protocol seam (PackStream framing, message dispatch, session state
-machine, handshake, auth scheme parsing) is provided by the
-[`boltr`](https://crates.io/crates/boltr) crate; this server is the
-backend implementation.
-
-## Usage
+**Bolt v5.x protocol server for [kglite](https://crates.io/crates/kglite)
+knowledge graphs.** A pure-Rust single binary speaking the Neo4j
+wire protocol — the Neo4j driver ecosystem (Python / JS / Java /
+Go / .NET drivers, Cypher Shell, Neo4j Browser, BloodHound,
+LangChain's `Neo4jGraph`) plugs in unchanged.
 
 ```bash
-kglite-bolt-server --graph path/to/fixture.kgl \
-    --bind 127.0.0.1 --port 7687 \
-    [--readonly] \
-    [--auth none|basic --auth-user X --auth-pass Y]
+cargo install kglite-bolt-server
+
+kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 ```
 
-Any Neo4j driver (Python `neo4j`, Cypher Shell, BloodHound, LangChain's
-`Neo4jGraph`) can then point at `bolt://127.0.0.1:7687` and run Cypher
-against the loaded graph.
+Then point any Neo4j-aware client at `bolt://localhost:7687` and
+run Cypher against the loaded `.kgl` graph.
 
-## See also
+## Features (Phase F)
 
-- [`bolt_implementation.md`](../../bolt_implementation.md) — umbrella plan
-- [`crates/kglite-mcp-server/`](../kglite-mcp-server) — structural sibling
-  (MCP stdio protocol; same crate pattern)
+- **Bolt v5.x handshake + PackStream framing** (handshake versions
+  5.0 / 5.1 / 5.2 / 5.3 / 5.4 advertised).
+- **`neo4j://` routing URIs** via single-server routing table
+  (`--advertise-addr` for reverse-proxy deployments).
+- **TLS** via `--tls-cert` + `--tls-key` (drivers connect with
+  `bolt+s://` or `neo4j+s://`).
+- **`db.labels()` / `db.relationshipTypes()`** yield
+  Neo4j-conventional column names (`label`, `relationshipType`).
+- **Optimistic concurrency control** on commit — concurrent
+  writers whose snapshots become stale see
+  `Neo.ClientError.Transaction.ConflictDetected`. Retry on the
+  client side.
+- **Zero PyO3 in the binary** — no libpython link, no Python
+  runtime required. `cargo tree -p kglite-bolt-server | grep
+  pyo3` returns empty.
+
+## CLI
+
+```
+kglite-bolt-server [OPTIONS] --graph <PATH>
+
+Options:
+  --graph <PATH>               .kgl graph file to serve
+  --bind <ADDR>                Bind address [default: 127.0.0.1]
+  --port <PORT>                Port [default: 7687]
+  --readonly                   Reject mutations
+  --auth <USER:PASS>           Basic auth credentials
+  --idle-timeout <SECS>        Per-session idle timeout
+  --max-sessions <N>           Max concurrent sessions
+  --advertise-addr <HOST:PORT> Address advertised in routing table (for neo4j:// URIs)
+  --tls-cert <PATH>            PEM-encoded TLS certificate chain
+  --tls-key <PATH>             PEM-encoded TLS private key
+```
+
+## Documentation
+
+- **[Bolt server operator guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html)**
+  — deployment patterns, driver compatibility, OCC retry shape.
+- **[kglite Rust API](https://docs.rs/kglite)** — for embedders
+  who want the engine directly without the Bolt frontend.
+
+## License
+
+MIT — see [LICENSE](https://github.com/kkollsga/kglite/blob/main/LICENSE).

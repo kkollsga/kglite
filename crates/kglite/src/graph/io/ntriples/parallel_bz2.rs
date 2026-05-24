@@ -45,6 +45,31 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
+/// Local impl of `bzip2_rs::ThreadPool` that dispatches on rayon's
+/// global pool — equivalent to `bzip2_rs::RayonThreadPool` but
+/// doesn't require the `bzip2-rs/rayon` Cargo feature (which lives
+/// only on the paolobarbolini fork). Kglite already depends on
+/// `rayon`, so we use it directly. Only present when
+/// `parallel-bz2` is on.
+#[cfg(feature = "parallel-bz2")]
+#[derive(Debug)]
+struct KglRayonPool;
+
+#[cfg(feature = "parallel-bz2")]
+impl bzip2_rs::ThreadPool for KglRayonPool {
+    fn spawn<F>(&self, func: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        rayon::spawn_fifo(func);
+    }
+
+    fn max_threads(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(rayon::current_num_threads())
+            .unwrap_or_else(|| std::num::NonZeroUsize::new(1).unwrap())
+    }
+}
+
 /// Soft ceiling on bytes held in flight across workers and the
 /// channel. pbzip2 ties its in-flight count to a memory budget rather
 /// than a fixed slot count (`pbzip2.cpp:4356`); we follow the same
@@ -80,21 +105,33 @@ pub fn open(path: &Path) -> io::Result<Box<dyn Read + Send>> {
     }
 
     if offsets.len() == 1 {
-        // Single-stream path — block-level parallelism via bzip2-rs.
-        // The decoder scans the bitstream for the 48-bit block magic
-        // (`0x314159265359`), splits at block boundaries, and decodes
-        // blocks on rayon workers. `max_preread_len` caps the
-        // compressed bytes buffered ahead of the workers; the existing
-        // `DEFAULT_BUDGET_BYTES` (256 MiB) gives plenty of slack for
-        // ~900 KiB blocks at level 9 while staying bounded on
-        // pathological compression ratios.
+        // Single-stream path. With the `parallel-bz2` Cargo feature
+        // on, we use `bzip2_rs::ParallelDecoderReader` (from the
+        // paolobarbolini git fork) to scan the bitstream for 48-bit
+        // block magics (`0x314159265359`) and decode blocks on rayon
+        // workers — needed for Wikidata-scale single-stream `.bz2`.
+        // We implement `bzip2_rs::ThreadPool` ourselves against the
+        // kglite-local `rayon` dep instead of using
+        // `bzip2_rs::RayonThreadPool` (which is gated on the fork's
+        // own `rayon` Cargo feature — that feature doesn't exist on
+        // the crates.io `bzip2-rs = 0.1.x` release, and we need
+        // `cargo publish -p kglite` to resolve cleanly without the
+        // fork). Without the feature (the default), we fall back to
+        // sequential `bzip2::read::MultiBzDecoder`.
         let file = File::open(path)?;
         let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-        return Ok(Box::new(bzip2_rs::ParallelDecoderReader::new(
-            reader,
-            bzip2_rs::RayonThreadPool,
-            DEFAULT_BUDGET_BYTES,
-        )));
+        #[cfg(feature = "parallel-bz2")]
+        {
+            return Ok(Box::new(bzip2_rs::ParallelDecoderReader::new(
+                reader,
+                KglRayonPool,
+                DEFAULT_BUDGET_BYTES,
+            )));
+        }
+        #[cfg(not(feature = "parallel-bz2"))]
+        {
+            return Ok(Box::new(bzip2::read::MultiBzDecoder::new(reader)));
+        }
     }
 
     // Build (start, end) pairs.
