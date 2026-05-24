@@ -226,93 +226,40 @@ fn run_cypher_inner(
     params: std::collections::HashMap<String, Value>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
-    // Phase A.2 / C10 — parse_cypher now returns typed KgError (post-C2).
-    // Its Display impl already includes "Cypher syntax error at line X, col Y: ..."
-    // so we don't re-wrap with a "Cypher syntax error: " prefix.
-    let mut parsed = cypher::parse_cypher(query).map_err(|e| e.to_string())?;
-    let mut params = params;
+    // Phase E.3 — delegate to kglite::api::session for the canonical
+    // pipeline (parse → validate → rewrite_text_score (+embed) →
+    // optimize → mutation-gate → execute). The mcp-server still
+    // owns mutation policy (reject) + CSV output formatting.
 
-    // Schema validation — catches property typos in pattern literals
-    // (`{ttle: 'Alice'}` when only `title` exists on Person) before
-    // the executor commits to a scan. The agent UX win is "Unknown
-    // property `ttle` on type `Person` — did you mean `title`?" vs
-    // silently returning zero rows.
-    //
-    // Mirrors `src/graph/pyapi/kg_core.rs::cypher` which has used
-    // this pass since 0.9.x. The MCP and Bolt server crates picked
-    // it up together so all three downstream consumers behave
-    // identically.
-    cypher::validate_schema(&parsed, kg.dir()).map_err(|e| e.to_string())?;
-
-    let rewrite = cypher::rewrite_text_score(&mut parsed, &params)?;
-    if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
-        let model = kg
-            .embedder()
-            .ok_or_else(|| {
-                "text_score() requires a registered embedding model. \
-                 Configure `extensions.embedder:` in the manifest."
-                    .to_string()
-            })?
-            .clone();
-        model.load()?;
-        let texts: Vec<String> = rewrite
-            .texts_to_embed
-            .iter()
-            .map(|(_, t)| t.clone())
-            .collect();
-        let embeddings = model.embed(&texts);
-        model.unload();
-        let embeddings = embeddings?;
-        if embeddings.len() != texts.len() {
-            return Err(format!(
-                "text_score: model.embed() returned {} vectors for {} texts",
-                embeddings.len(),
-                texts.len()
-            ));
-        }
-        for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
-            let json = format!(
-                "[{}]",
-                embeddings[i]
-                    .iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            params.insert(param_name.clone(), Value::String(json));
-        }
-    }
-
-    cypher::planner::optimize_with_disabled(
-        &mut parsed,
-        kg.dir(),
-        &params,
-        cypher::planner::empty_disabled_set(),
-    );
-    cypher::mark_lazy_eligibility(&mut parsed);
-
-    let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
-
-    let result = if cypher::is_mutation_query(&parsed) {
-        // Mutation requires &mut DirGraph; the shim holds an
-        // Arc<DirGraph> snapshot via the KnowledgeGraph, so we cannot
-        // mutate it here without a write lock. The shim today only
-        // exposes mutating queries when explicitly invoked through
-        // `cypher_query`, and the surrounding RwLock<Option<ActiveGraph>>
-        // is held read-only across the call. For 0.9.18 we forbid
-        // mutations through the MCP tool surface — agents that need to
-        // edit the graph use a CLI shell instead.
+    // MCP rejects mutations regardless of read-only graph mode:
+    // mutation Cypher through the MCP surface is a deliberate policy
+    // restriction (agents should use the CLI for graph edits). Pre-
+    // parse to catch this cleanly before session::execute_read errors.
+    let pre_parsed = kglite::api::cypher::parse_cypher(query).map_err(|e| e.to_string())?;
+    if kglite::api::cypher::is_mutation_query(&pre_parsed) {
         return Err(
             "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE) is not allowed through \
              the MCP cypher_query tool. Use the kglite CLI for graph edits."
                 .to_string(),
         );
-    } else {
-        let executor = cypher::CypherExecutor::with_params(kg.dir(), &params, None);
-        executor
-            .execute(&parsed)
-            .map_err(|e| format!("Cypher execution error: {e}"))?
+    }
+    let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
+
+    let embedder = kg.embedder().cloned();
+    let opts = kglite::api::session::ExecuteOptions {
+        params: &params,
+        deadline: None,
+        max_rows: None,
+        // Eager rows — MCP output formatters (CSV / 15-row preview)
+        // need materialized results; we don't have a lazy
+        // materializer at this layer.
+        lazy_eligible: false,
+        disabled_passes: None,
+        embedder,
     };
+    let outcome = kglite::api::session::execute_read(kg.dir(), query, &opts)
+        .map_err(|e| format!("Cypher execution error: {e}"))?;
+    let result = outcome.result;
 
     if output_csv {
         let csv = result.to_csv();
