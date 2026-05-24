@@ -48,7 +48,7 @@ the wins are everyone's.
 |---|---|---|---|---|---|
 | **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
 | **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop | ✅ Shipped |
-| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | Pending |
+| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | C.1 ✅ Shipped · C.2–C.6 pending |
 | **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
@@ -288,18 +288,37 @@ section explaining the failing-by-design contract.
 
 Six plan loops. Each retires a slice of the 8 failing tests.
 
-### C.1 — Handshake + session lifecycle
+### C.1 — Handshake + session lifecycle — ✅ Shipped
 
-- TCP listener (`tokio::net::TcpListener`) bound to `--bind` + `--port`.
-- Bolt v5 handshake: magic preamble (`0x60 60 B0 17`), version
-  negotiation table, single-version response.
-- HELLO message parsing (PackStream-encoded client metadata).
-- LOGON (v5.1+) with `"none"` auth scheme.
-- RESET / GOODBYE / session teardown.
-- Per-connection task spawned via `tokio::spawn`.
+**Scope correction from boltr-internals exploration.** The bullets
+below described work boltr v0.2.0 already does for us: TCP listener
+(`BoltServer::serve` → `tokio::net::TcpListener::bind`), magic
+preamble + version negotiation (`server_handshake`), PackStream
+framing + message dispatch (`Connection::handle_message`), state
+machine (`ConnectionState`: Negotiation → Authentication → Ready
+→ Streaming → ...), per-connection task spawn (`tokio::spawn`),
+RESET / GOODBYE message handling. We don't write any of that.
 
-Retires: `test_bolt_handshake_and_verify_connectivity`. **Estimate
-~1 week.**
+**What we actually shipped** (~80-line diff in
+`crates/kglite-bolt-server/src/backend.rs`, ~1.5 hours):
+
+- 6 backend method bodies (out of 11): `create_session`,
+  `get_server_info`, `set_session_auth`, `close_session`,
+  `reset_session`, `configure_session`.
+- 1 tightened method: `route` returns
+  `BoltError::Protocol("connect with bolt:// not neo4j://")`
+  instead of `unimplemented!()`.
+- Added `session_counter: AtomicU64` to the `KgliteBackend`
+  struct for monotonic `bolt-{N}` session IDs.
+
+`set_session_auth` is currently a debug-log no-op — boltr only
+calls it when an `AuthValidator` is wired into the builder, which
+is Phase C.6's job.
+
+Retires: `test_bolt_handshake_and_verify_connectivity`. **Actual
+time: ~1.5 hours** (the original "~1 week" estimate pre-dated the
+boltr-internals exploration that revealed how much of the protocol
+the upstream crate already handles).
 
 ### C.2 — Read-only RUN / PULL with scalar values
 

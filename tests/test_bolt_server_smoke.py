@@ -160,12 +160,14 @@ def bolt_server(tmp_path):
 # ── The 8 tests — each xfail(strict=True), tagged to its retiring sub-phase ──
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.1 — handshake + session lifecycle")
 def test_bolt_handshake_and_verify_connectivity(bolt_server):
-    """Phase C.1: HELLO/LOGON/GOODBYE + a `verify_connectivity()` ping.
+    """Phase C.1 ✓: HELLO/LOGON/GOODBYE + a `verify_connectivity()` ping.
 
-    Today: backend.create_session panics on the first HELLO; driver
-    sees broken pipe and raises. xfail catches it.
+    The backend's `create_session` / `get_server_info` / `close_session`
+    + the auto-no-op `set_session_auth` (boltr skips it when no
+    `AuthValidator` is wired) are enough to satisfy the neo4j Python
+    driver's handshake. Driver opens a connection, sends HELLO + LOGON,
+    receives SUCCESS for both, sends GOODBYE, closes. No queries run.
     """
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         driver.verify_connectivity()

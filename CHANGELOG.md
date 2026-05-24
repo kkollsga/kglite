@@ -46,6 +46,40 @@ test contract, and the perf baseline that Phase C sub-phases will retire.
 This is **prep work**, not a feature release. No `Cargo.toml`
 version bump.
 
+### Internal — Bolt protocol C.1 (handshake + session lifecycle)
+
+First sub-phase of Phase C. The Bolt server is now *connectable* —
+the neo4j Python driver's `verify_connectivity()` runs end-to-end
+against `kglite-bolt-server`. Queries still panic per the strict-
+xfail contract; that's C.2 onward.
+
+- **`crates/kglite-bolt-server/src/backend.rs`**: replace 6 of the 11
+  `unimplemented!()` stubs:
+  - `create_session` — generates `bolt-{N}` handles via an
+    `AtomicU64` counter (no UUID dep needed; SessionManager only
+    needs uniqueness within one server process).
+  - `get_server_info` — returns honest `server: "kglite-bolt-server/{version}"`
+    + `bolt_agent` dict; boltr auto-injects `connection_id` + `hints`.
+  - `set_session_auth` — no-op (only called once C.6 wires an
+    `AuthValidator`; right now boltr handles LOGON SUCCESS itself).
+  - `close_session` / `reset_session` / `configure_session` — no-op
+    + debug log. No per-session state until C.5 brings transactions.
+  - `route` — tightened from `unimplemented!()` to a structured
+    `BoltError::Protocol` ("connect with `bolt://` not `neo4j://`")
+    so accidental routed-client connections fail cleanly instead of
+    panicking the connection task.
+- **Test contract**: the `xfail(strict=True)` decorator on
+  `test_bolt_handshake_and_verify_connectivity` is removed; the test
+  now PASSES. The other 7 stay XFAIL — they exercise RUN / BEGIN
+  which still trigger panicked `execute` / `begin_transaction`.
+  `pytest -m bolt -v` now reports `1 passed, 7 xfailed` (exit code 0).
+- **bolt_implementation.md**: Phase C row gains a C.1 ✅ sub-status.
+
+Server identity is honest, not Neo4j-mimicking. The `server` field
+reads `kglite-bolt-server/0.0.1`; if any Phase D ecosystem tool turns
+out to require a `Neo4j/<x.y>` prefix, we'll add a `--neo4j-compat`
+CLI flag then — pre-emptive lying isn't on the menu.
+
 ## [0.10.0] — Phase A (Bolt prep): Value variants + KgError + db.* procedures + audit
 
 The foundation for the Bolt protocol server (`ROADMAP.md` §1). Three
