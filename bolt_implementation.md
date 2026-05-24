@@ -1,11 +1,16 @@
 # Bolt protocol — implementation plan
 
-> Umbrella plan for [`ROADMAP.md`](ROADMAP.md) §1. The actual Bolt
-> implementation decomposes into four discrete phase-loops (A → B →
-> C → D) that are planned, implemented, and committed independently.
-> Each future plan loop opens by saying *"this is Phase X of
-> bolt_implementation.md"* and writes its detail plan against the
-> frame here.
+> Umbrella plan for [`ROADMAP.md`](ROADMAP.md) §1. The Bolt
+> implementation decomposes into discrete phase-loops (A → B → C →
+> robustness → E → D) that are planned, implemented, and committed
+> independently. Each future plan loop opens by saying *"this is
+> Phase X of bolt_implementation.md"* and writes its detail plan
+> against the frame here.
+>
+> **Status as of 2026-05-24.** Phases A, B, C (all 6 sub-phases),
+> and the robustness pass are ✅ shipped on `main` (unpushed). Phase
+> E (Session abstraction) is the next plan loop. Phase D (release
+> + reference clients) follows E.
 
 ## Vision
 
@@ -44,26 +49,31 @@ the wins are everyone's.
 
 ## Phase summary
 
-| Phase | Name | Output | Estimate | Plan-loop boundary | Status |
-|---|---|---|---|---|---|
-| **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks total across 3 sub-phases | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
-| **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | 1 plan loop | ✅ Shipped |
-| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the failing tests | ~3-4 weeks total across 6 sub-phases | 6 plan loops (C.1–C.6) | ✅ Shipped (all 8 smoke tests pass) |
-| **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | 1 plan loop | Pending |
+| Phase | Name | Output | Estimate (orig) | Actual | Plan-loop boundary | Status |
+|---|---|---|---|---|---|---|
+| **A** | Core preparations | Library-level changes that Bolt depends on but also benefit non-Bolt consumers (Value enum, error codes, db.* procedures) | ~2.5–3 weeks | shipped in 0.10.0 | 3 plan loops (A.1, A.2, A.3) | ✅ Shipped (0.10.0) |
+| **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | ~1 day | 1 plan loop | ✅ Shipped |
+| **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the 8 failing tests | ~3-4 weeks | ~6 hours (boltr did the protocol work) | 6 plan loops (C.1–C.6) | ✅ Shipped (8/8 smoke tests pass) |
+| **Robustness pass** | Production-grade hardening | Per-tx mutex split, mutex poison recovery, structured error gates, max-message-size, NaN/Inf rejection, string→typed-error heuristic, operator docs, lazy-RETURN bug fix; **242 tests** (was 8) including the 27-query differential corpus over the wire | (un-planned) | ~1 day | 1 plan loop | ✅ Shipped |
+| **E** | Session abstraction (standardization) | Extract `kglite::api::session::{Session, Transaction}` as the single canonical query surface; rewrite pyapi + mcp-server + bolt-server to wrap it; prepare foundation for future Go/TypeScript bindings | ~1-2 days, ~8 commits | — | 1 plan loop | **Next** |
+| **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | — | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
 
 ```
 A.1 (Value enum) ────┐
-A.2 (KgErrorCode) ───┼──→ B (skeleton + failing tests) ──→ C.1 → C.2 → C.3 → C.4 → C.5 → C.6 → D
-A.3 (db.* procs)  ───┘                                     (C.4 needs A.1; C.6 needs A.2 + A.3)
+A.2 (KgErrorCode) ───┼──→ B ──→ C.1 → C.2 → C.3 → C.4 → C.5 → C.6 → Robustness → E → D
+A.3 (db.* procs)  ───┘     (C.4 needs A.1; C.6 needs A.2 + A.3; E touches all 3 downstream
+                           consumers and gates D's release cleanliness)
 ```
 
-Total realistic wall-clock with focused work and CI iteration:
-**~7-9 weeks**. The ROADMAP §1 estimate said 3-5 weeks; that was
-optimistic about Phase A. The library-level elevation work is the
-correct thing to do and it adds real time — the per-phase shape
-keeps progress visible while the longer total bakes.
+Total realistic wall-clock so far: **~2 working days** for the
+bolt-server end-to-end (B + C + robustness). Plus the multi-week
+Phase A library work shipped earlier in 0.10.0. The original "~7-9
+week" estimate badly overcounted the protocol implementation
+because the upstream `boltr` crate does the wire framing,
+PackStream, session state machine, etc. Most of the visible work
+was test design + a few hundred lines of trait method bodies.
 
 ---
 
@@ -396,38 +406,229 @@ Retires: `test_bolt_return_node_yields_node_struct` +
 ~1.5 hours** (the A.1 work and the established `to_bolt` shape made
 this much faster than the original "~3-5 days" estimate).
 
-### C.5 — BEGIN / COMMIT / ROLLBACK + mutations
+### C.5 — BEGIN / COMMIT / ROLLBACK + `--readonly` — ✅ Shipped
 
-- Per-connection transaction state machine: `Ready → TxReady →
-  TxStreaming → Ready` etc.
-- BEGIN: clone the graph snapshot via `DirGraph::begin()`; bind to
-  the connection's tx state.
-- Write path: single-writer mutex around mutations (may elevate to
-  `KnowledgeGraph` per elevation candidate #4 if a second consumer
-  is visible by this point).
-- COMMIT: `Arc::make_mut` swap. ROLLBACK: drop the working clone.
-- `--read-only` CLI flag rejects mutations at server boot with a
-  Bolt FAILURE message.
+**What shipped** (~500-line diff in `backend.rs`, ~3 hours):
+
+- `KgliteBackend` storage restructured: `Arc<KnowledgeGraph>` →
+  `Arc<Mutex<Arc<DirGraph>>>` so commits can swap the inner Arc.
+- New `transactions: Arc<Mutex<HashMap<String, TxState>>>` map
+  (RA-1 of the robustness pass split this to per-tx mutexes).
+- `TxState` mirrors `src/graph/pyapi/transaction.rs` CoW shape:
+  `snapshot: Option<Arc<DirGraph>>` + `working: Option<DirGraph>`.
+  First mutation materializes working via `Arc::try_unwrap`-or-clone.
+- `begin_transaction` rejects under `--readonly`; mints `tx-{N}`
+  handle, snapshots the graph, stores.
+- `commit` swaps working into shared graph (no-op if no mutations).
+- `rollback` drops TxState.
+- `close_session` / `reset_session` roll back any in-flight tx for
+  the session.
+- SUCCESS metadata gains `stats` dict when `MutationStats` are set.
+- `--readonly` rejects begin_transaction outright + auto-commit
+  mutations with `BoltError::Forbidden` → `Neo.ClientError.Security.Forbidden`.
+
+OCC version checking deferred (`DirGraph::version` is `pub(crate)`;
+needs api exposure). Listed as one of the 7 known limitations
+([see below](#known-limitations-as-of-shipped-c6--robustness-pass)).
 
 Retires: `test_bolt_transaction_commit_and_rollback`,
-`test_bolt_rejects_writes_when_readonly`. **Estimate ~3-5 days.**
+`test_bolt_rejects_writes_when_readonly`. **Actual time ~3 hours.**
 
-### C.6 — Auth + error mapping + db.* pass-through
+### C.6 — Auth + typed FAILURE codes + db.* pass-through — ✅ Shipped
 
-**Depends on A.2 + A.3.**
+**What shipped** (~250 lines across 3 new/modified files, ~2 hours):
 
-- Auth: `"none"` (already in C.1) + `"basic"` (username/password
-  validated against CLI args or env var; no persistence).
-- Error mapping: lookup table from `KgErrorCode` (from A.2) to
-  Neo4j codespace strings (`Neo.ClientError.Statement.SyntaxError`,
-  etc.). FAILURE message includes the typed code + the human
-  message + position info.
-- `db.labels()` / `db.relationshipTypes()` / `db.indexes()` calls
-  pass straight through to the core procedures (from A.3) — Bolt
-  server is a thin transport.
+- **`crates/kglite-bolt-server/src/error_map.rs`** (new): typed
+  `kg_to_bolt(KgError) -> BoltError::Query { code, message }` with
+  a 16-arm mapping from `KgErrorCode` to `Neo.{Class}.{Category}.{Title}`
+  status codes. The robustness pass added a `string_to_bolt` helper
+  for the executor's String-returning paths (RB-3).
+- **`crates/kglite-bolt-server/src/auth.rs`** (new):
+  `BasicAuthValidator` impl of boltr's `AuthValidator` trait. Checks
+  scheme + principal + credentials against `--auth-user` /
+  `--auth-pass`. Rejects with `BoltError::Authentication` →
+  `Neo.ClientError.Security.Unauthorized`.
+- **`crates/kglite-bolt-server/src/main.rs`**: wires the validator
+  into `BoltServer::builder().auth(...)` when `--auth basic`.
+- **`db.*` procs**: confirmed to work via the standard Cypher CALL
+  pipeline — no bolt-server code needed; Phase A.3 routed the procs
+  through the executor and Phase C.2's `to_bolt` scalar arms handle
+  the result rows directly. **Caveat**: the procs yield `name`, not
+  Neo4j's `label` / `relationshipType` — one of the 7 limitations.
+- `kglite::api` exposes `{KgError, KgErrorCode}` for downstream
+  use (was internal-only).
 
-Retires: `test_bolt_returns_failure_on_parse_error`. **Estimate
-~2-3 days.**
+Retires: `test_bolt_returns_failure_on_parse_error`. **All 8 smoke
+tests now PASS.** Actual time ~2 hours.
+
+---
+
+## Robustness pass — ✅ Shipped
+
+After Phase C the bolt-server was contractually complete (8/8 smoke
+tests pass) but only happy-path verified. The robustness pass
+expanded test coverage from 8 → 242 tests, fixed 1 critical kglite-
+core bug + 1 critical concurrency bottleneck, and added 7
+hardening fixes informed by broad-probe testing.
+
+**Tests added** (`tests/test_bolt_server_*.py`):
+
+| File | Tests | Coverage |
+|---|---|---|
+| `test_bolt_server_correctness.py` | 59 | Value roundtrip (every BoltValue variant both directions), error paths (each KgErrorCode → Neo4j code), edge cases (empty/multi-stmt/very-long queries, unicode, NaN/Inf, deeply nested) |
+| `test_bolt_server_transactions.py` | 19 | Ports `test_transaction_bolt_patterns.py`'s 18 pyapi contracts to the Bolt wire (snapshot isolation, double-commit error, OCC pin, readonly enforcement, etc.) |
+| `test_bolt_server_concurrency.py` | 9 (opt-in via `-m bolt_stress`) | 16 concurrent readers, 8r+1w, 4 concurrent writers, session disconnect mid-PULL, RESET mid-tx, 100 sequential conns, 5s sustained load |
+| `test_bolt_server_robustness.py` | 16 | Raw garbage bytes, premature handshake disconnect, zero-byte scanners, null bytes in strings, deep predicate nesting, --help, missing graph, invalid port, --readonly enforcement |
+| `test_bolt_server_differential.py` | 124 (3 skipped) | Every entry in `DIFFERENTIAL_QUERIES` runs both via direct `cypher()` AND via Bolt; row sets must match. The strongest correctness gate. |
+
+**Bugs fixed:**
+
+- 🔴 **lazy-RETURN-returns-no-rows** (RA-4): `RETURN x AS y` queries
+  WITHOUT ORDER BY returned 0 rows from bolt-server because
+  `mark_lazy_eligibility` flagged the RETURN, executor populated
+  `result.lazy: Some(LazyResultDescriptor)` and left `result.rows`
+  empty. The bolt-server iterated `rows.iter()` → 0 records. The
+  ORDER BY-only smoke test (`test_bolt_run_returns_scalar_rows`)
+  worked because sort forces materialization. Fix: don't call
+  `mark_lazy_eligibility` in the bolt pipeline. Lazy materialization
+  helper lives in `src/graph/pyapi/result_view.rs`, isn't exposed
+  through `kglite::api` — boltr buffers PULL responses anyway so
+  eager materialization is the right shape for the wire.
+
+- 🔴 **per-tx mutex held across entire Cypher pipeline** (RA-1):
+  Global `transactions` mutex was acquired in `execute_in_tx` and
+  held during parse + plan + execute. One slow query blocked all
+  other sessions' tx operations (head-of-line). Fix: split to
+  `Arc<Mutex<HashMap<String, Arc<Mutex<TxState>>>>>` — outer mutex
+  brief-acquire-only for lookup; per-tx mutex for the actual work.
+
+**Hygiene fixes** (RA-2, RA-3, RB-1, RB-2, RB-3, RB-4):
+
+- Mutex poison recovery: `.lock().unwrap_or_else(|p| p.into_inner())`
+- Invariant `expect`s → structured `BoltError::Backend` errors
+- `--max-message-size` CLI flag (default 16 MiB)
+- Empty / multi-statement query gates → `BoltError::Protocol`
+- String error → typed Neo4j code heuristic (timeout / type
+  mismatch / constraint / etc.)
+- NaN / ±Infinity float parameters → `BoltError::Protocol`
+
+**Operator documentation:**
+[`docs/explanation/bolt-server.md`](docs/explanation/bolt-server.md)
+ships ~220 lines covering CLI reference, connection URLs, auth
+modes, tracing, known limitations, driver compatibility matrix,
+common error symptoms, and performance shape from the 6 Bolt-
+specific benchmarks in `tests/benchmarks/test_bench_bolt.py`.
+
+---
+
+## Known limitations as of shipped C.6 + robustness pass
+
+After all of the above, the bolt-server has 7 documented
+limitations vs a full Neo4j server. Triaged for Phase F (post-E):
+
+| # | Limitation | Triage |
+|---|---|---|
+| 1 | No OCC version checking on commit (last-writer-wins under concurrent writes) | **Fix in Phase F** (~1 hr) — expose `DirGraph::version` accessor + wire into commit. Real value: prevents silent data loss. |
+| 2 | No auto-commit mutations (must wrap in BEGIN/COMMIT) | **Keep** — drivers always wrap writes in BEGIN/COMMIT; supporting auto-commit adds surface for no real win. |
+| 3 | Single-graph only (no multi-database) | **Keep** — would require rethinking the backend's data model. |
+| 4 | No causal consistency / bookmarks | **Keep** — Neo4j cluster feature; doesn't apply to single-server. |
+| 5 | No `neo4j://` routing | **Fix in Phase F** (~2 hr) — return a single-server self-pointing routing table; cluster-aware drivers work. |
+| 6 | No TLS | **Optional Phase F** (~30 min) — boltr ships a `tls` feature; wire `--tls-cert` / `--tls-key` flags. Reverse proxy is the alternative. |
+| 7 | `db.labels()` / `db.relationshipTypes()` yield `name` not Neo4j's `label` / `relationshipType` | **Fix in Phase F** (~1 hr) — kglite-core change; aligns 3 downstream consumers (Python, MCP, Bolt) with Neo4j convention. |
+
+Total Phase F: ~5 hours for the must-do fixes (#1 + #5 + #7), plus
+optional ~30 min for TLS. Lands cleanly AFTER Phase E (which makes
+the OCC fix touch fewer files).
+
+---
+
+## Phase E — Session abstraction (standardization)
+
+**Why now.** kglite now has two production consumers of the same
+Cypher pipeline (Python `cypher()`, Bolt server `execute`) plus a
+third near-clone (`kglite-mcp-server::cypher_query`). The pipeline
+orchestration — parse → validate_schema → rewrite_text_score →
+optimize → mark_lazy_eligibility (or not) → mutation gate →
+executor — is duplicated three times. The transaction CoW pattern
+is duplicated twice. **This duplication has already cost us twice
+in this session**:
+
+1. `validate_schema` was missing from mcp-server + bolt-server until
+   user-flagged
+2. `mark_lazy_eligibility` was wrongly included in bolt-server,
+   causing the lazy-RETURN bug (T4 of the robustness pass surfaced
+   it)
+
+Adding future bindings (Go via cgo, TypeScript via napi, etc.)
+without fixing this would multiply the drift.
+
+**What changes.** Extract `kglite::api::session::{Session,
+Transaction}` as the **single canonical query/tx surface**:
+
+```rust
+pub mod session {
+    pub struct Session { /* Arc<Mutex<Arc<DirGraph>>> + readonly */ }
+    pub struct Transaction { /* snapshot/working CoW */ }
+
+    impl Session {
+        pub fn new(dir: DirGraph, readonly: bool) -> Self;
+        pub fn snapshot(&self) -> Arc<DirGraph>;
+
+        pub fn execute_read(&self, query: &str, params: &HashMap<String, Value>)
+            -> Result<CypherResult, KgError>;
+
+        pub fn begin(&self) -> Result<Transaction, KgError>;
+        pub fn execute_in_tx(&self, tx: &mut Transaction, query: &str,
+                              params: &HashMap<String, Value>)
+            -> Result<CypherResult, KgError>;
+        pub fn commit(&self, tx: Transaction) -> Result<CommitOutcome, KgError>;
+        pub fn rollback(&self, tx: Transaction);
+    }
+}
+```
+
+Pure-Rust, no PyO3, no async, no transport. The three consumers
+become thin wrappers:
+
+- **pyapi `Transaction` class**: PyO3 wrapper around
+  `session::Transaction`. Drops ~150 lines of CoW code.
+- **bolt-server `KgliteBackend`**: async glue + value_adapter +
+  error_map + per-tx mutex (concurrency state for many concurrent
+  sessions). Drops the pipeline orchestration entirely (~150 lines).
+- **mcp-server `cypher_query`**: tool router + GraphState. Drops
+  the pipeline (~50 lines).
+
+**Stays binding-specific** (correctly):
+
+- Wire encoding: PackStream for Bolt, PreProcessedValue for Python,
+  JSON for MCP
+- Transport: async TCP for Bolt, GIL release for Python, stdio for
+  MCP
+- Idiomatic error types: PyErr subclass, BoltError variant, JSON
+  error object
+
+**Beneficiaries.**
+
+- **Single source of truth** for the pipeline; future drift impossible
+- **Single source of truth** for the snapshot/working CoW; OCC
+  fix lands in one place
+- **Testable in pure Rust** without async or PyO3
+- **Future Go / TypeScript bindings** become thin cgo / napi wrappers
+  around `Session::execute_*` — the hard part is solved once
+
+**Tests.**
+
+- New `tests/test_session_api.rs` — pure-Rust unit tests for the
+  Session surface (~20 tests pinning the contract).
+- All ~3000+ Python tests + 242 bolt tests + bolt_stress + bolt
+  differential pass unchanged.
+
+**Gates.** Phase F (the 3 limitation fixes) lands cleanly after E.
+Phase D (conformance + release) wants E done so the release commits
+the standardized shape, not the duplicated one.
+
+**Estimate.** ~1-2 days, ~8 commits. Detail plan goes in a separate
+plan loop after this doc-update commit.
 
 ---
 
@@ -465,13 +666,25 @@ Three artifacts that prove ecosystem compatibility:
 
 ### Release boundary
 
-- Parent `Cargo.toml` version bump (next minor — likely `0.10.0`).
+- Parent `Cargo.toml` version bump (next minor — likely `0.11.0`
+  since 0.10.0 shipped Phase A and bumping for Bolt-actually-ships
+  is the contract).
 - `crates/kglite-bolt-server/Cargo.toml` bumps to `0.1.0` (first
   user-facing release).
-- Full CHANGELOG `[0.10.0]` block summarising the Bolt work.
+- Full CHANGELOG `[0.11.0]` block summarising B + C + robustness
+  pass + Phase E + Phase F (the 3 limitation fixes) + Phase D
+  itself.
 - `ROADMAP.md` §1 flipped to ✅ Shipped, sequencing table updated,
   this doc moves into an archive section (or is deleted, since the
   CHANGELOG carries the record).
+
+### Ordering note
+
+Phase D's release commit should include Phase E (session
+abstraction) and Phase F (the 3 limitation fixes from the
+robustness pass) in the same `[0.11.0]` block. Both land BEFORE
+D so the release ships a clean foundation, not a duplication-laden
+one.
 
 ---
 
