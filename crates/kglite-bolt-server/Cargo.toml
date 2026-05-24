@@ -1,0 +1,43 @@
+[package]
+name = "kglite-bolt-server"
+version = "0.0.1"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+license = "MIT"
+description = "Bolt v5.x protocol server for kglite knowledge graphs — pure-Rust single-binary frontend speaking the Neo4j wire protocol so the Neo4j driver ecosystem (Python/JS/Java/Go/.NET drivers, Cypher Shell, Neo4j Browser, BloodHound, LangChain Neo4jGraph) plugs in unchanged."
+
+[[bin]]
+name = "kglite-bolt-server"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse kglite's pure-Rust surface (kglite::api::*) — no libpython link
+# in the resulting binary. Mirrors the kglite-mcp-server pattern.
+# `default-features = false` skips the `abi3` toggle (which only matters
+# for wheel builds) but keeps the lib compilable for cargo's binary
+# build. No `fastembed` here — Bolt server is a wire transport and
+# doesn't expose `text_score()`-style semantic search.
+kglite = { path = "../..", default-features = false }
+
+# Bolt v5.x protocol library. Implements PackStream framing, message
+# dispatch, session state machine, handshake. We implement BoltBackend
+# (the 11-method seam in boltr::server::BoltBackend) and hand the
+# instance to BoltServer::builder(...).serve(addr).
+#
+# boltr v0.2.0 requires rust-version = "1.91.0". Local + CI toolchains
+# (rustc stable 1.95+) clear this comfortably. Phase B's plan calls out
+# the upstream-churn risk; we accept it because hand-rolling Bolt
+# framing for Phase B alone is not the right shape.
+boltr = "0.2"
+
+# Async trait sugar used by boltr's BoltBackend trait declaration.
+async-trait = "0.1"
+
+# Async runtime. Features match what boltr needs from tokio at runtime
+# plus what main.rs needs to register a SIGINT shutdown future.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
+
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"

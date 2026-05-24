@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal — Bolt protocol scaffolding (Phase B of `bolt_implementation.md`)
+
+Pre-implementation scaffolding for the Bolt v5.x wire-protocol server.
+No user-visible surface yet; this lands the crate skeleton, the failing-by-design
+test contract, and the perf baseline that Phase C sub-phases will retire.
+
+- **New crate `crates/kglite-bolt-server/`** with `clap` CLI (`--graph`,
+  `--bind`, `--port`, `--readonly`, `--auth`, `--idle-timeout`,
+  `--max-sessions`) and a `BoltBackend` impl whose 11 trait methods all
+  panic with `unimplemented!("phase C.X — ...")`. The binary boots,
+  loads a `.kgl` graph, binds a TCP port via `boltr::BoltServer::serve`,
+  and panics the per-connection task on the first real Bolt message.
+  Compiles green; the trait signatures pin the boltr v0.2.0 API
+  surface against kglite's `kglite::api::*` types.
+- **New `tests/test_bolt_server_smoke.py`** — 8 `xfail(strict=True)`
+  tests using the `neo4j` Python driver. Each is tagged with the
+  Phase C sub-phase that retires it (C.1 handshake, C.2 scalars,
+  C.3 parameters, C.4 Node/Rel, C.5 transactions/readonly, C.6 auth
+  + FAILURE mapping). Strict mode means accidentally fixing a test
+  out-of-phase turns XFAIL into XPASS → FAIL — the alert that the
+  decorator should be removed.
+- **New `pyproject.toml` marker `bolt`** — Bolt-protocol smoke tests
+  excluded from the default `pytest tests/` run via `addopts`; opt-in
+  via `pytest -m bolt`. Mirrors the existing `binary_size` /
+  `parity` pattern.
+- **New benchmarks `test_bench_return_node_10k` +
+  `test_bench_return_node_rel_node_100`** in
+  `tests/benchmarks/test_bench_core.py`. Cover the `Value::Node`
+  projection paths that Phase A.1 added and Phase C.4 will route
+  over Bolt PackStream. Baseline capture deferred to the next
+  release commit (Phase D, or whichever 0.10.x ships first) via
+  `make refresh-release-constants`.
+- **CI**: `cargo build --release` now also builds `-p kglite-bolt-server`,
+  the Python install line gains the `[neo4j]` extra, and a dedicated
+  `pytest -m bolt` step runs the failing contract on every push.
+
+This is **prep work**, not a feature release. No `Cargo.toml`
+version bump.
+
 ## [0.10.0] — Phase A (Bolt prep): Value variants + KgError + db.* procedures + audit
 
 The foundation for the Bolt protocol server (`ROADMAP.md` §1). Three

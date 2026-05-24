@@ -179,3 +179,71 @@ def test_bench_save_v3(benchmark, bench_graph_columnar, tmp_path):
         counter[0] += 1
 
     benchmark(save)
+
+
+# ---------------------------------------------------------------------------
+# Value::Node projection benchmarks (Phase A.1 → Phase C.4 Bolt consumer)
+# ---------------------------------------------------------------------------
+#
+# Phase A.1 (shipped in 0.10.0) added Value::Node / Relationship / Path / List
+# / Map variants. `RETURN n` no longer collapses to a title string — it
+# materializes a full {id, labels, properties} structure. The Bolt server
+# (Phase C.4) routes this over PackStream as a Node struct, so any
+# regression in projection cost shows up in both Python `cypher()` and Bolt
+# PULL.
+#
+# These benchmarks are the pre-Bolt baseline for that path. Captured to
+# `tests/benchmarks/baselines/<version>.json` on the next release commit
+# via `make refresh-release-constants`. Phase B itself doesn't ship a
+# release.
+
+
+@pytest.fixture
+def node_projection_graph():
+    """10k Person nodes + ~30k KNOWS edges — sized so projection cost
+    dominates over query planning."""
+    graph = KnowledgeGraph()
+    n = 10_000
+    nodes = pd.DataFrame(
+        {
+            "pid": list(range(n)),
+            "name": [f"P{i}" for i in range(n)],
+            "age": [20 + (i % 60) for i in range(n)],
+            "city": [f"city_{i % 100}" for i in range(n)],
+        }
+    )
+    graph.add_nodes(nodes, "Person", "pid", "name")
+
+    edges = pd.DataFrame(
+        {
+            "s": [i % n for i in range(3 * n)],
+            "d": [(i * 13 + 7) % n for i in range(3 * n)],
+        }
+    )
+    graph.add_connections(edges, "KNOWS", "Person", "s", "Person", "d")
+    return graph
+
+
+@pytest.mark.benchmark
+def test_bench_return_node_10k(benchmark, node_projection_graph):
+    """RETURN n over 10k nodes — eager Value::Node projection.
+
+    Drives the projection path shared between Python `cypher()` and the
+    Bolt server's RECORD emission (Phase C.4). Regressions here are
+    visible everywhere downstream of A.1.
+    """
+    benchmark(node_projection_graph.cypher, "MATCH (n:Person) RETURN n")
+
+
+@pytest.mark.benchmark
+def test_bench_return_node_rel_node_100(benchmark, node_projection_graph):
+    """Multi-binding projection: `a`, `r`, `b` LIMIT 100.
+
+    Exercises Node + Relationship + Node materialization in the same
+    record — the typical shape of a Bolt PULL response for graph
+    visualization clients (Neo4j Browser, BloodHound).
+    """
+    benchmark(
+        node_projection_graph.cypher,
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b LIMIT 100",
+    )

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/kglite-mcp-server", "crates/kglite-sec", "crates/kglite-sodir", "crates/kglite-wikidata"]
+members = [".", "crates/kglite-mcp-server", "crates/kglite-bolt-server", "crates/kglite-sec", "crates/kglite-sodir", "crates/kglite-wikidata"]
 resolver = "2"
 
 [package]

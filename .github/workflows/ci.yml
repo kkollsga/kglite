@@ -98,7 +98,7 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest pytest-cov pandas hypothesis
 
-      - name: Build and install extension (with [mcp] extras)
+      - name: Build and install extension (with [mcp] + [neo4j] extras)
         # 0.9.21+: install the [mcp] extras so the Python MCP server
         # integration tests in tests/test_mcp_server_python_entry.py
         # can run. Without these (mcp, pyyaml, aiohttp, fastembed,
@@ -107,24 +107,42 @@ jobs:
         # that exited immediately. The tests do also importorskip
         # gracefully, but installing the extras lets CI exercise the
         # real tool-surface baseline gate.
-        run: pip install -e .[mcp]
+        #
+        # 0.10.x+: [neo4j] extra is needed for the Bolt-protocol smoke
+        # tests in tests/test_bolt_server_smoke.py (Phase B contract —
+        # all 8 currently xfail-strict against the unimplemented backend).
+        run: pip install -e .[mcp,neo4j]
 
-      - name: Build kglite-mcp-server binary + kglite cdylib
+      - name: Build kglite-mcp-server + kglite-bolt-server binaries + kglite cdylib
         # 0.9.45+: kglite-mcp-server binary is needed by
         # tests/test_mcp_server_smoke.py, which is
         # `pytest.mark.skipif(not BINARY.exists())`. Without this step
         # the smoke test silently skips in CI — it's how the Rust
         # save_graph dispatch regression (0.9.20→0.9.44) went undetected.
         #
-        # `-p kglite` (in addition to mcp-server) explicitly forces the
-        # libkglite cdylib to build. Cargo only needs the rlib when
-        # kglite is consumed as a workspace dep, and may skip the
-        # cdylib to save time — but the binary_size gate below reads
-        # the cdylib's file size, so we must materialise it.
-        run: cargo build --release -p kglite-mcp-server -p kglite
+        # 0.10.x+: kglite-bolt-server binary built for the same reason —
+        # tests/test_bolt_server_smoke.py has the same skipif-not-exists
+        # gate. Phase C sub-phases will turn xfail → pass as they land;
+        # without the binary built here, that signal would be invisible.
+        #
+        # `-p kglite` (in addition to the server binaries) explicitly
+        # forces the libkglite cdylib to build. Cargo only needs the
+        # rlib when kglite is consumed as a workspace dep, and may skip
+        # the cdylib to save time — but the binary_size gate below
+        # reads the cdylib's file size, so we must materialise it.
+        run: cargo build --release -p kglite-mcp-server -p kglite-bolt-server -p kglite
 
       - name: Run Python tests
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
+
+      - name: Run Bolt smoke contract (failing-by-design until Phase C)
+        # Per `bolt_implementation.md` Phase B: all 8 tests are
+        # xfail(strict=True). This step exits 0 iff every test is XFAILED.
+        # If any unexpectedly PASSes (because a Phase C sub-phase landed),
+        # strict mode flips XFAIL → XPASS → FAILED — that's the alert to
+        # remove the decorator and let the test pass cleanly. See
+        # tests/test_bolt_server_smoke.py for the per-test phase mapping.
+        run: pytest tests/ -m bolt -v --tb=short
 
       - name: Run binary-size gate
         # The structural gates (god-file, unsafe-SAFETY, enum-match,
