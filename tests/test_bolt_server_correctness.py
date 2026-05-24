@@ -219,20 +219,72 @@ def test_error_basic_auth_correct_password(tmp_path, bolt_binary_path):
 
 
 def test_edge_empty_query(bolt_server):
-    """Empty query — the parser will error; surface as ClientError or DatabaseError.
-    (Pinning current behavior; RB-2 will tighten the error message.)"""
+    """Empty query — the neo4j driver itself rejects with ValueError
+    before the RUN message ever leaves the client (pre-server validation).
+    Whitespace-only goes to the server, where RB-2 catches it."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            with pytest.raises(Exception):
+            # Empty string — driver-side ValueError.
+            with pytest.raises((ValueError, neo4j.exceptions.ClientError)):
                 session.run("").consume()
+            # Whitespace-only — passes driver, server's RB-2 gate
+            # converts to a clean ClientError ("empty Cypher query").
+            with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
+                session.run("   \n\t  ").consume()
+            assert "empty" in str(exc_info.value).lower()
+
+
+def test_edge_multi_statement_query_rejected(bolt_server):
+    """Multi-statement query (semicolon separator) — RB-2 rejects
+    with a structured Protocol error pointing at "one statement per
+    RUN". Without this gate, kglite's parser would silently process
+    only the first statement."""
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            with pytest.raises(neo4j.exceptions.ClientError) as exc_info:
+                session.run("MATCH (n:Person) RETURN n.title; MATCH (m:Person) RETURN m.title").consume()
+            assert "multi-statement" in str(exc_info.value).lower() or "one" in str(exc_info.value).lower()
+
+
+def test_edge_trailing_semicolon_allowed(bolt_server):
+    """Trailing semicolon is a common driver convention — must NOT
+    trip the multi-statement gate."""
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            # kglite's parser may or may not accept the trailing
+            # semicolon; either outcome is fine, but it shouldn't
+            # trigger the RB-2 multi-statement gate (which has
+            # error message "multi-statement" / "one statement").
+            try:
+                result = session.run("MATCH (n:Person) RETURN count(n) AS c ; ")
+                count = result.single()["c"]
+                assert count == 4
+            except neo4j.exceptions.ClientError as e:
+                # Whatever error fires, it must NOT be the multi-
+                # statement rejection (trailing-semi is single-stmt).
+                msg = str(e).lower()
+                assert "multi-statement" not in msg
+
+
+def test_edge_semicolon_in_string_literal_not_split(bolt_server):
+    """A semicolon INSIDE a string literal must NOT trigger the
+    multi-statement gate (the gate's quote-aware scan handles this)."""
+    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+        with driver.session() as session:
+            # 'a;b' is one string literal containing a semicolon.
+            result = session.run("RETURN 'a;b' AS x")
+            assert result.single()["x"] == "a;b"
 
 
 def test_edge_whitespace_only_query(bolt_server):
-    """Whitespace-only query — same as empty."""
+    """Whitespace-only query — RB-2 gate catches and returns a
+    clean ClientError. (Covered above in test_edge_empty_query.)"""
+    # Kept for completeness; the assertion is identical to the
+    # whitespace-only branch in test_edge_empty_query.
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            with pytest.raises(Exception):
-                session.run("   \n\t  ").consume()
+            with pytest.raises(neo4j.exceptions.ClientError):
+                session.run("\t\t\t").consume()
 
 
 def test_edge_long_query_10kb(bolt_server):

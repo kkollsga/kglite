@@ -86,6 +86,14 @@ struct Cli {
     /// Maximum concurrent Bolt sessions.
     #[arg(long, default_value_t = 256)]
     max_sessions: usize,
+
+    /// Maximum size of a single Bolt message in bytes. Messages
+    /// exceeding this are rejected by boltr before they reach the
+    /// backend, protecting against memory exhaustion from
+    /// pathologically large queries. Default 16 MiB matches boltr's
+    /// internal default.
+    #[arg(long, value_name = "BYTES", default_value_t = 16 * 1024 * 1024)]
+    max_message_size: usize,
 }
 
 fn init_tracing() {
@@ -128,6 +136,7 @@ async fn main() -> Result<()> {
 
     let mut builder = BoltServer::builder(backend)
         .max_sessions(cli.max_sessions)
+        .max_message_size(cli.max_message_size)
         .shutdown(async {
             // Single SIGINT triggers graceful shutdown. Subsequent SIGINTs
             // bypass this and let tokio's default handler abort.

@@ -249,6 +249,37 @@ impl BoltBackend for KgliteBackend {
         _extra: &BoltDict,
         transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
+        // Input gates (Phase robustness RB-2). These produce clear
+        // Protocol/ClientError responses so users see actionable
+        // errors instead of opaque parser failures or silent partial
+        // execution.
+
+        // Empty or whitespace-only query.
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(BoltError::Protocol(
+                "empty Cypher query — RUN requires a non-empty statement".into(),
+            ));
+        }
+
+        // Multi-statement query. The kglite parser handles one Cypher
+        // statement per RUN; sending `MATCH ... ; MATCH ...` would
+        // silently parse only the first statement. Reject explicitly.
+        //
+        // The semicolon detection is a string-level heuristic: it can
+        // false-positive on a semicolon inside a string literal (rare
+        // and arguably worth a clearer error too). The substring
+        // approach matches how cypher-shell + most drivers signal
+        // multi-statement separation.
+        if _query_appears_multi_statement(trimmed) {
+            return Err(BoltError::Protocol(
+                "multi-statement queries not supported — send one Cypher \
+                 statement per RUN message (or open a transaction and \
+                 issue separate RUNs)"
+                    .into(),
+            ));
+        }
+
         // Decode params (C.3). Errors here are genuine client errors
         // (bad parameter type) → Protocol → ClientError.
         let kg_params: HashMap<String, Value> = parameters
@@ -498,6 +529,44 @@ impl BoltBackend for KgliteBackend {
                 .into(),
         ))
     }
+}
+
+/// Heuristic: does this query string contain a statement separator
+/// outside of any string literal? Used by the multi-statement gate
+/// in `execute()` (RB-2). Returns true on `MATCH (a) RETURN a; MATCH
+/// (b) RETURN b`. Does NOT false-positive on `RETURN 'a;b' AS s`.
+///
+/// The scan tracks the active quote (Cypher allows both `'` and `"`)
+/// and treats backslash as an escape. It does not handle block
+/// comments `/* ... */` — kglite's parser doesn't recognize those
+/// either, so a semicolon inside a comment would already be a parse
+/// error before reaching this function.
+fn _query_appears_multi_statement(query: &str) -> bool {
+    let mut in_quote: Option<char> = None;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, in_quote) {
+            ('\\', Some(_)) => {
+                // Skip the next char (escape inside a string).
+                let _ = chars.next();
+            }
+            ('\'', None) => in_quote = Some('\''),
+            ('"', None) => in_quote = Some('"'),
+            (c, Some(q)) if c == q => in_quote = None,
+            (';', None) => {
+                // Found a semicolon outside any string. If the rest
+                // of the query is just whitespace, it's a trailing
+                // semicolon — allow it (common driver convention).
+                let rest: String = chars.collect();
+                if !rest.trim().is_empty() {
+                    return true;
+                }
+                return false;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 impl KgliteBackend {
