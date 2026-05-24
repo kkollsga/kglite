@@ -49,8 +49,30 @@ def _run_read(driver, n_iterations: int, min_count: int = 4) -> tuple[int, list]
     return successes, errors
 
 
+def _is_occ_conflict(err: BaseException) -> bool:
+    """OCC conflicts surface via `kglite::api::session::Session::commit`
+    when another writer committed between this tx's BEGIN and COMMIT.
+    The bolt-server raises `BoltError::Transaction("Transaction
+    conflict: ...")`. The neo4j driver wraps that as `ClientError`
+    with the message tucked into `.message` (not `repr(e)`)."""
+    if not isinstance(err, neo4j.exceptions.ClientError):
+        return False
+    parts = [
+        str(err),
+        getattr(err, "message", "") or "",
+        " ".join(str(a) for a in (err.args or ())),
+    ]
+    blob = " ".join(parts).lower()
+    return "conflict" in blob or "transaction conflict" in blob
+
+
 def _run_write_tx(driver, ids: list[int]) -> tuple[int, list]:
-    """Worker: open a session, BEGIN, CREATE one node per id, COMMIT."""
+    """Worker: open a session, BEGIN, CREATE one node per id, COMMIT.
+
+    OCC conflicts are NOT returned in `errors` — they're expected
+    under concurrent writers (the contract is "retry, not panic").
+    Real errors (driver exceptions, server crashes, etc.) still are.
+    """
     errors: list[str] = []
     successes = 0
     try:
@@ -62,7 +84,8 @@ def _run_write_tx(driver, ids: list[int]) -> tuple[int, list]:
                 tx.commit()
                 successes = len(ids)
             except Exception as e:  # noqa: BLE001
-                errors.append(repr(e))
+                if not _is_occ_conflict(e):
+                    errors.append(repr(e))
                 try:
                     tx.rollback()
                 except Exception:
@@ -101,28 +124,29 @@ def test_8_readers_plus_1_writer(bolt_server):
 def test_4_concurrent_writers(bolt_server):
     """4 parallel transactions each create 5 nodes. Without per-tx
     mutex splitting (RA-1), these would serialize on the global
-    transactions mutex. The test asserts they complete and at
-    least ONE writer's results survive (last-writer-wins because
-    OCC version checking is deferred — see backend.rs)."""
+    transactions mutex. With OCC enforced (Phase E.4), losing
+    writers see ClientError("conflict") on commit — `_run_write_tx`
+    treats those as expected, not errors. At least ONE writer
+    survives because the winner of each conflict round commits
+    successfully."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
                 pool.submit(_run_write_tx, driver, list(range(4000 + i * 100, 4005 + i * 100))) for i in range(4)
             ]
+            total_successes = 0
             for f in as_completed(futures):
-                _, errs = f.result()
-                assert errs == [], f"errors: {errs[:3]}"
-        # Verify at least one writer's nodes survived. Because of
-        # last-writer-wins, we expect 5 nodes from ONE writer (not
-        # 20 from all of them).
+                successes, errs = f.result()
+                assert errs == [], f"non-conflict errors: {errs[:3]}"
+                total_successes += successes
+        # At least one writer's 5-node CREATE must have landed.
+        # Total surviving rows == total committed successes (each
+        # writer's set is disjoint via the id offset).
         with driver.session() as session:
             result = session.run("MATCH (n:Person) WHERE n.title STARTS WITH 'thr4' RETURN count(n) AS c")
             count = result.single()["c"]
-            # 5 is the typical case (last writer wins); 20 would
-            # mean OCC eventually lands and all serialize cleanly.
-            # We accept any positive count — at least one tx
-            # committed without error.
-            assert count >= 5, f"expected at least 5 surviving nodes, got {count}"
+            assert count == total_successes, f"surviving={count} vs successes={total_successes}"
+            assert count >= 5, f"no writer committed cleanly: {count}"
 
 
 def test_session_disconnect_mid_query(bolt_server):
@@ -225,6 +249,15 @@ def test_sustained_mixed_load_5_seconds(bolt_server):
                             op_counter[0] += 1
                         local_seq += 1
                     except Exception as e:  # noqa: BLE001
+                        # OCC conflicts are expected under contention;
+                        # we just loop and try again (the retry pattern
+                        # clients are meant to use).
+                        if _is_occ_conflict(e):
+                            try:
+                                tx.rollback()
+                            except Exception:
+                                pass
+                            continue
                         with errors_lock:
                             errors.append(repr(e))
                             return
@@ -265,10 +298,16 @@ def test_reset_during_transaction(bolt_server):
 
 def test_concurrent_sessions_creating_distinct_data(bolt_server):
     """8 sessions, each in its own tx, each creates 1 node with a
-    UNIQUE id. With OCC deferred, this means one wins and the
-    others' work is overwritten — but no SESSION should crash."""
+    UNIQUE id. With OCC enforced (Phase E.4), losers see a
+    ClientError("conflict") — those are expected (the writes are
+    *intent*, not committed) and filtered out by `_run_write_tx`.
+    No SESSION should hard-crash and at least one writer's row
+    must commit."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(_run_write_tx, driver, [9000 + i]) for i in range(8)]
-            errs = [e for f in as_completed(futures) for _, errs in [f.result()] for e in errs]
-            assert errs == [], f"errors: {errs[:3]}"
+            results = [f.result() for f in as_completed(futures)]
+        errs = [e for _, errs_list in results for e in errs_list]
+        assert errs == [], f"non-conflict errors: {errs[:3]}"
+        total_successes = sum(s for s, _ in results)
+        assert total_successes >= 1, "no writer committed cleanly"

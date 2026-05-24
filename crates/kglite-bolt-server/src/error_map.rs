@@ -65,53 +65,6 @@ fn neo4j_status_code(code: KgErrorCode) -> &'static str {
     }
 }
 
-/// Substring-based heuristic that maps a `String` error from the
-/// kglite Cypher executor (rewrite_text_score, CypherExecutor::execute,
-/// execute_mutable) onto a typed `BoltError::Query` with the right
-/// Neo4j status code.
-///
-/// Not every kglite error type travels as a typed `KgError` today —
-/// the executor returns `String`. This helper bridges the gap until
-/// kglite's executor is refactored to return `KgError` natively (a
-/// separate plan). Each heuristic is conservative: lowercase
-/// substring match against well-known phrases. On no match, falls
-/// back to `BoltError::Backend` (Neo.DatabaseError.General.UnknownError)
-/// which is the previous behavior — so this is a strict refinement.
-pub fn string_to_bolt(error_msg: String) -> BoltError {
-    let lower = error_msg.to_lowercase();
-    let code = if lower.contains("timeout") || lower.contains("timed out") {
-        Some("Neo.ClientError.Transaction.TransactionTimedOut")
-    } else if lower.contains("type mismatch")
-        || lower.contains("type error")
-        || lower.contains("typeerror")
-    {
-        Some("Neo.ClientError.Statement.TypeError")
-    } else if lower.contains("unknown parameter")
-        || lower.contains("missing parameter")
-        || lower.contains("parameter not found")
-        || lower.contains("expected parameter")
-    {
-        Some("Neo.ClientError.Statement.ParameterMissing")
-    } else if lower.contains("syntax error") {
-        // Some executor errors echo "syntax error" even though they
-        // come from non-parse phases. Map to SyntaxError anyway.
-        Some("Neo.ClientError.Statement.SyntaxError")
-    } else if lower.contains("constraint") {
-        Some("Neo.ClientError.Schema.ConstraintValidationFailed")
-    } else if lower.contains("unknown function") || lower.contains("undefined function") {
-        Some("Neo.ClientError.Procedure.ProcedureNotFound")
-    } else {
-        None
-    };
-    match code {
-        Some(c) => BoltError::Query {
-            code: c.into(),
-            message: error_msg,
-        },
-        None => BoltError::Backend(error_msg),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,59 +82,6 @@ mod tests {
                 assert_eq!(code, "Neo.ClientError.Statement.SyntaxError");
             }
             other => panic!("expected Query, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn string_to_bolt_matches_known_phrases() {
-        let cases = &[
-            (
-                "Query timed out after 1000 ms",
-                "Neo.ClientError.Transaction.TransactionTimedOut",
-            ),
-            (
-                "type mismatch: expected Integer, got String",
-                "Neo.ClientError.Statement.TypeError",
-            ),
-            ("TypeError on n.age", "Neo.ClientError.Statement.TypeError"),
-            (
-                "missing parameter $x",
-                "Neo.ClientError.Statement.ParameterMissing",
-            ),
-            (
-                "unknown parameter referenced: $y",
-                "Neo.ClientError.Statement.ParameterMissing",
-            ),
-            (
-                "syntax error at offset 42",
-                "Neo.ClientError.Statement.SyntaxError",
-            ),
-            (
-                "constraint violation: Person.id must be unique",
-                "Neo.ClientError.Schema.ConstraintValidationFailed",
-            ),
-            (
-                "Unknown function: foo()",
-                "Neo.ClientError.Procedure.ProcedureNotFound",
-            ),
-        ];
-        for (msg, expected_code) in cases {
-            let bolt = string_to_bolt((*msg).to_string());
-            match bolt {
-                BoltError::Query { code, .. } => {
-                    assert_eq!(code, *expected_code, "for msg {msg:?}")
-                }
-                other => panic!("expected Query for {msg:?}, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn string_to_bolt_unknown_falls_back_to_backend() {
-        let bolt = string_to_bolt("some unanticipated executor message".to_string());
-        match bolt {
-            BoltError::Backend(_) => {} // expected
-            other => panic!("expected Backend fallback, got {other:?}"),
         }
     }
 

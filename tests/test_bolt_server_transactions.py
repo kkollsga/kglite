@@ -16,9 +16,10 @@ The 18 contracts:
 7. Driver context manager auto-rollbacks on exception
 8. Read-only session/tx surface (NOTE: Neo4j driver doesn't have
    begin_read like kglite's pyapi; we test --readonly server)
-9. OCC conflict — two sessions both write, last-writer-wins
-   (pinned current behavior; OCC version checking deferred)
-10. Outside mutation during tx — pin current behavior (no conflict)
+9. OCC conflict — two sessions both write, second commit conflicts
+   (OCC version checking enforced via session::Session::commit; Phase E.4)
+10. Outside mutation during tx — pin current behavior (no conflict;
+    inner tx has no writes, NoWritesNoOp commit doesn't check version)
 11-14. Read-only --readonly rejects CREATE/SET/DELETE/MERGE
 15. Auto-commit: each session.run is independently visible
 16. Multi-statement partial mutation — kglite parser only accepts one
@@ -156,11 +157,12 @@ def test_readonly_server_rejects_explicit_transaction(bolt_server_readonly):
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_two_concurrent_commits_last_writer_wins(bolt_server):
-    """Two sessions both BEGIN, both CREATE, both COMMIT — the second
-    commit wins because OCC version checking is deferred (see
-    backend.rs struct doc). Pins the current behavior; an OCC-aware
-    follow-up would flip this to "second commit conflicts"."""
+def test_two_concurrent_commits_second_conflicts(bolt_server):
+    """Two sessions both BEGIN, both CREATE, both COMMIT — A wins; B's
+    commit conflicts because the shared graph version moved past B's
+    base_version when A committed. OCC is enforced via
+    `kglite::api::session::Session::commit(tx, check_occ=true)` (Phase
+    E.4, closes limitation #1 of 7)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session_a:
             with driver.session() as session_b:
@@ -169,15 +171,13 @@ def test_two_concurrent_commits_last_writer_wins(bolt_server):
                 tx_a.run("CREATE (:Person {id: 800, title: 'FromA'})")
                 tx_b.run("CREATE (:Person {id: 801, title: 'FromB'})")
                 tx_a.commit()
-                # Without OCC, the second commit succeeds and overwrites
-                # the first (it operates on a stale snapshot that
-                # doesn't include A's write).
-                tx_b.commit()
-            # Auto-commit reader sees one of the two — B's snapshot
-            # didn't have A, so post-commit only B's CREATE survives.
-            count = _count_people(session_a, "n.title IN ['FromA', 'FromB']")
-            # Pin current behavior: last-writer-wins → only B survives.
-            assert count == 1
+                # B's snapshot is stale; OCC rejects the swap.
+                with pytest.raises(neo4j.exceptions.ClientError) as excinfo:
+                    tx_b.commit()
+                assert "conflict" in str(excinfo.value).lower()
+            # Only A's CREATE survives.
+            assert _count_people(session_a, "n.title = 'FromA'") == 1
+            assert _count_people(session_a, "n.title = 'FromB'") == 0
 
 
 def test_outside_mutation_during_open_transaction(bolt_server):
