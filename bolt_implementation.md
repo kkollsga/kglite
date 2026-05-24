@@ -9,7 +9,11 @@
 >
 > **Status as of 2026-05-24.** Phases A, B, C (all 6 sub-phases),
 > and the robustness pass are ✅ shipped on `main` (unpushed). Phase
-> E (Session abstraction) is the next plan loop. Phase D (release
+> E (Session abstraction) is ✅ shipped — the pipeline + CoW + OCC
+> all live in `kglite::api::session`, used by pyapi + mcp-server +
+> bolt-server. Phase F (3 limitation fixes) is the next plan loop;
+> limitation #1 (OCC enforcement in bolt-server) is already closed
+> by E.4. Phase D (release
 > + reference clients) follows E.
 
 ## Vision
@@ -55,7 +59,7 @@ the wins are everyone's.
 | **B** | Pre-implementation test contract + perf baselines | `crates/kglite-bolt-server/` skeleton, failing `test_bolt_server_smoke.py`, perf baselines re-captured | ~2-3 days | ~1 day | 1 plan loop | ✅ Shipped |
 | **C** | Bolt interface implementation | The protocol code itself, in 6 sub-phases each retiring a slice of the 8 failing tests | ~3-4 weeks | ~6 hours (boltr did the protocol work) | 6 plan loops (C.1–C.6) | ✅ Shipped (8/8 smoke tests pass) |
 | **Robustness pass** | Production-grade hardening | Per-tx mutex split, mutex poison recovery, structured error gates, max-message-size, NaN/Inf rejection, string→typed-error heuristic, operator docs, lazy-RETURN bug fix; **242 tests** (was 8) including the 27-query differential corpus over the wire | (un-planned) | ~1 day | 1 plan loop | ✅ Shipped |
-| **E** | Session abstraction (standardization) | Extract `kglite::api::session::{Session, Transaction}` as the single canonical query surface; rewrite pyapi + mcp-server + bolt-server to wrap it; prepare foundation for future Go/TypeScript bindings | ~1-2 days, ~8 commits | — | 1 plan loop | **Next** |
+| **E** | Session abstraction (standardization) | Extract `kglite::api::session::{Session, Transaction}` as the single canonical query surface; rewrite pyapi + mcp-server + bolt-server to wrap it; prepare foundation for future Go/TypeScript bindings | ~1-2 days, ~8 commits | ~1 day, 6 commits | 1 plan loop | ✅ Shipped |
 | **D** | End-to-end test program + release | `scripts/bolt_conformance.py` + reference clients in `examples/` + version bump + ROADMAP ✅ Shipped flip | ~1 week | — | 1 plan loop | Pending |
 
 **Dependency arrows** (must land in this order):
@@ -542,7 +546,11 @@ the OCC fix touch fewer files).
 
 ---
 
-## Phase E — Session abstraction (standardization)
+## Phase E — Session abstraction (standardization) — ✅ Shipped
+
+> Implemented across commits E1–E4 + E6. ~1 day, ~6 commits. The
+> below is the original design + a "what shipped" coda; see
+> `docs/explanation/session.md` for the binding-implementer guide.
 
 **Why now.** kglite now has two production consumers of the same
 Cypher pipeline (Python `cypher()`, Bolt server `execute`) plus a
@@ -629,6 +637,52 @@ the standardized shape, not the duplicated one.
 
 **Estimate.** ~1-2 days, ~8 commits. Detail plan goes in a separate
 plan loop after this doc-update commit.
+
+### What shipped
+
+| Commit | Subject | Scope |
+|---|---|---|
+| E1 | `feat(api): introduce kglite::api::session module` | `Session`, `Transaction`, `CommitOutcome`, `ExecuteOptions`, `execute_read`, `execute_mut` + 13 unit tests. Pure addition. |
+| E2 | `refactor(pyapi): cypher() + Transaction delegate to session` | `kg_core::cypher` and `Transaction` class become thin wrappers; ~330 lines deleted. |
+| E3 | `refactor(mcp-server): cypher_query delegates to session` | `run_cypher_inner` becomes a thin wrapper; ~80 lines deleted. |
+| E4 | `refactor(bolt-server): backend delegates to session` | `KgliteBackend` wraps `Arc<Session>`; OCC enforcement enabled — closes limitation #1 of 7. ~325 lines deleted. |
+| E6 | `docs(api): session abstraction for binding implementers` | `docs/explanation/session.md`; CHANGELOG entry; this status flip. |
+
+E5 (lift `materialise_lazy_row` from pyapi to session) was
+explicitly optional in the plan and deferred — the lift requires
+moving `PreProcessedValue` helpers out of pyapi, no current
+consumer benefits (bolt-server is eager), and the deletion would
+mostly serve future bindings that don't yet exist.
+
+**Final API surface** (`src/lib.rs::api::session`):
+
+```rust
+pub use self::execute::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
+pub use self::transaction::{CommitOutcome, Session, Transaction};
+```
+
+The actual `ExecuteOptions` shape (slightly evolved from the design
+sketch — uses `Cow<HashMap<String, Value>>` for params so the
+text_score embedder can inject vectors without forcing a clone on
+the common case):
+
+```rust
+pub struct ExecuteOptions<'a> {
+    pub params: Cow<'a, HashMap<String, Value>>,
+    pub deadline: Option<Instant>,
+    pub max_rows: Option<usize>,
+    pub lazy_eligible: bool,
+    pub disabled_passes: Option<HashSet<String>>,
+    pub embedder: Option<Arc<dyn Embedder>>,
+}
+```
+
+`CommitOutcome` adds `NoWritesNoOp` for the read-only-or-no-writes
+fast path (avoids a needless Arc swap when the tx didn't mutate).
+
+Total: ~440 lines new (session module + ~150 lines docs), ~735
+lines deleted (across pyapi + mcp + bolt) — net ~295 line reduction
+plus the single-source-of-truth win.
 
 ---
 

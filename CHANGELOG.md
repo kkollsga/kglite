@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal — `kglite::api::session` standardization (Phase E of `bolt_implementation.md`)
+
+Single source of truth for the canonical Cypher pipeline and the
+snapshot/working CoW transaction model. The same orchestration
+previously lived in three places (pyapi `cypher()`, mcp-server
+`run_cypher_inner`, bolt-server `KgliteBackend`) and the CoW
+machinery in two — drift had already cost correctness twice in
+this sprint (`validate_schema` missing from mcp/bolt; bolt's lazy-
+RETURN bug from accidentally including `mark_lazy_eligibility`).
+Phase E extracts both into `kglite::api::session::*`, then rewrites
+all three consumers as thin wrappers.
+
+- **New module `src/graph/session/`** — `Session`, `Transaction`,
+  `CommitOutcome`, `ExecuteOptions`, `ExecuteOutcome`,
+  `execute_read`, `execute_mut`. Pure Rust, no PyO3, no async. 13
+  unit tests pin the contract (snapshot isolation, working CoW
+  materialization, OCC conflict detection, read-only enforcement,
+  no-writes commit fast path).
+- **OCC now enforced in bolt-server** (closes limitation #1 of the
+  7 captured during the C.5 robustness pass). Concurrent writers
+  whose snapshots become stale see
+  `ClientError("Transaction conflict: graph was modified by
+  another committer ... Retry the transaction.")` on commit. The
+  bolt-stress concurrency tests now use a retry-on-conflict
+  pattern that mirrors what real clients should do.
+- **pyapi, mcp-server, bolt-server consumers rewritten** to wrap
+  the session module. `kg_core::cypher` body shrank from ~280 to
+  ~80 lines; `Transaction.cypher` from ~150 to ~40; mcp's
+  `run_cypher_inner` from ~80 to ~30; bolt-server's backend
+  pipeline from ~325 to ~150. Net ~440 lines new (session +
+  docs), ~735 lines deleted across consumers.
+- **Foundation for future bindings**. A Go binding (cgo) or
+  TypeScript (napi) or JVM (JNI) is now a marshalling layer over
+  `session::execute_*` + `Session` / `Transaction` handles — the
+  pipeline + CoW + OCC are solved once.
+- **`docs/explanation/session.md`** — binding-implementer guide
+  covering the API surface, snapshot isolation guarantees, the
+  per-binding concurrency model, and a sketch of how to wrap from
+  cgo. Read this if you're integrating kglite into a new language
+  runtime or transport.
+
+No user-visible behavior change for the Python `cypher()` /
+`Transaction` surface (3013 tests pass unchanged). The bolt
+contract change — OCC-enforced commits returning ClientError on
+conflict — is intentional (the pre-E behavior was last-writer-wins
+with no warning, captured as limitation #1).
+
 ### Internal — Bolt protocol scaffolding (Phase B of `bolt_implementation.md`)
 
 Pre-implementation scaffolding for the Bolt v5.x wire-protocol server.
