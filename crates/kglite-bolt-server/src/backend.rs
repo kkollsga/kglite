@@ -24,7 +24,7 @@ use boltr::types::{BoltDict, BoltValue};
 
 use kglite::api::{cypher, DirGraph, Value};
 
-use crate::error_map::kg_to_bolt;
+use crate::error_map::{kg_to_bolt, string_to_bolt};
 use crate::value_adapter;
 
 /// Bolt backend wrapping a loaded kglite graph.
@@ -587,8 +587,7 @@ impl KgliteBackend {
         // ClientError with .code containing "Syntax".
         let mut parsed = cypher::parse_cypher(query).map_err(kg_to_bolt)?;
         cypher::validate_schema(&parsed, graph).map_err(|e| BoltError::Protocol(e.to_string()))?;
-        let rewrite =
-            cypher::rewrite_text_score(&mut parsed, kg_params).map_err(BoltError::Backend)?;
+        let rewrite = cypher::rewrite_text_score(&mut parsed, kg_params).map_err(string_to_bolt)?;
         if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
             return Err(BoltError::Backend(
                 "text_score() requires an embedder; not yet wired into \
@@ -646,7 +645,7 @@ impl KgliteBackend {
         let result = cypher::CypherExecutor::with_params(&snapshot, &kg_params, None)
             .with_streaming(false)
             .execute(&parsed)
-            .map_err(BoltError::Backend)?;
+            .map_err(string_to_bolt)?;
         Ok((result, "r"))
     }
 
@@ -724,7 +723,7 @@ impl KgliteBackend {
                 ))
             })?;
             let result = cypher::execute_mutable(working, &parsed, kg_params, None)
-                .map_err(BoltError::Backend)?;
+                .map_err(string_to_bolt)?;
             Ok((result, "w"))
         } else {
             // Read inside tx. Re-fetch the &DirGraph since the parse/
