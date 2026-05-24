@@ -1,9 +1,154 @@
 """Shared fixtures for kglite test suite."""
 
+from pathlib import Path
+import socket
+import subprocess
+import time
+
 import pandas as pd
 import pytest
 
 from kglite import KnowledgeGraph
+
+# ---------------------------------------------------------------------------
+# Bolt-server fixtures (shared across tests/test_bolt_server_*.py)
+# ---------------------------------------------------------------------------
+#
+# These helpers spawn the release-build `kglite-bolt-server` binary on an
+# ephemeral port and yield a `bolt://` URL for the neo4j Python driver. The
+# binary path is computed once at module import; tests that need it should
+# use the `bolt_server` (read-write) or `bolt_server_readonly` fixtures, or
+# call `_spawn_bolt_server`/`_teardown_bolt_server` directly for custom
+# scenarios.
+#
+# The fixtures gracefully skip if the binary isn't built — `make
+# build-bolt-server` (or `cargo build -p kglite-bolt-server --release`)
+# is the standard way to materialize it.
+
+_BOLT_BINARY = Path(__file__).resolve().parent.parent / "target" / "release" / "kglite-bolt-server"
+
+
+def _find_free_port() -> int:
+    """Bind to port 0, read the OS-assigned port, close.
+
+    Brief race window between close() and the spawned server's bind() —
+    a concurrent process could grab the port in between. Acceptable for
+    test isolation; the failure mode is a clean spawn-time error.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_for_listener(host: str, port: int, deadline_s: float = 10.0) -> None:
+    """Poll-connect a raw TCP socket until the listener answers."""
+    deadline = time.monotonic() + deadline_s
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except (ConnectionRefusedError, OSError) as e:
+            last_err = e
+            time.sleep(0.1)
+    raise RuntimeError(f"bolt server never started listening on {host}:{port}: {last_err}")
+
+
+def _build_bolt_fixture_graph(path: Path) -> None:
+    """Build the standard 4-Person/3-KNOWS fixture graph used by every
+    bolt smoke / correctness / transactions test. Save to ``path``."""
+    g = KnowledgeGraph()
+    nodes = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "title": ["Alice", "Bob", "Carol", "Dave"],
+            "city": ["Oslo", "Bergen", "Oslo", "Trondheim"],
+        }
+    )
+    g.add_nodes(nodes, "Person", "id", "title")
+    edges = pd.DataFrame({"src": [1, 2, 3], "dst": [2, 3, 4]})
+    g.add_connections(edges, "KNOWS", "Person", "src", "Person", "dst")
+    g.save(str(path))
+
+
+def _spawn_bolt_server(fixture_path: Path, readonly: bool = False, extra_args: list[str] | None = None):
+    """Spawn `kglite-bolt-server` on an ephemeral port; return (proc, url).
+    Caller is responsible for kill+wait on teardown via
+    `_teardown_bolt_server`. The `extra_args` list is appended verbatim
+    to the command line (e.g. ["--max-message-size", "1024"]).
+    """
+    port = _find_free_port()
+    cmd = [
+        str(_BOLT_BINARY),
+        "--graph",
+        str(fixture_path),
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if readonly:
+        cmd.append("--readonly")
+    if extra_args:
+        cmd.extend(extra_args)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    url = f"bolt://127.0.0.1:{port}"
+    try:
+        _wait_for_listener("127.0.0.1", port, deadline_s=10.0)
+    except Exception:
+        proc.kill()
+        stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else "<no stderr>"
+        raise RuntimeError(f"bolt server failed to start. stderr:\n{stderr}")
+    return proc, url
+
+
+def _teardown_bolt_server(proc) -> None:
+    proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.wait(timeout=2)
+
+
+def _bolt_binary_available() -> bool:
+    return _BOLT_BINARY.exists()
+
+
+@pytest.fixture
+def bolt_binary_path() -> Path:
+    """The expected path of the release-built kglite-bolt-server binary.
+    Tests that need it should skip if `_bolt_binary_available()` is False.
+    """
+    return _BOLT_BINARY
+
+
+@pytest.fixture
+def bolt_server(tmp_path):
+    """Spawn `kglite-bolt-server` on an ephemeral port; yield the URL.
+
+    Read-write mode — for `--readonly` testing see `bolt_server_readonly`.
+    Skips the test if the binary isn't built.
+    """
+    if not _bolt_binary_available():
+        pytest.skip(f"kglite-bolt-server binary not built (expected at {_BOLT_BINARY})")
+    fixture_path = tmp_path / "fixture.kgl"
+    _build_bolt_fixture_graph(fixture_path)
+    proc, url = _spawn_bolt_server(fixture_path, readonly=False)
+    yield url
+    _teardown_bolt_server(proc)
+
+
+@pytest.fixture
+def bolt_server_readonly(tmp_path):
+    """Spawn `kglite-bolt-server --readonly` on its own ephemeral port."""
+    if not _bolt_binary_available():
+        pytest.skip(f"kglite-bolt-server binary not built (expected at {_BOLT_BINARY})")
+    fixture_path = tmp_path / "fixture_ro.kgl"
+    _build_bolt_fixture_graph(fixture_path)
+    proc, url = _spawn_bolt_server(fixture_path, readonly=True)
+    yield url
+    _teardown_bolt_server(proc)
 
 
 @pytest.fixture
