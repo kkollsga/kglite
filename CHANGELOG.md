@@ -124,6 +124,74 @@ All three downstream Cypher consumers (Python `cypher()`, MCP
 validation. Bolt smoke contract still reports `3 passed, 5 xfailed`;
 MCP smoke still reports 32 passed.
 
+### Internal — Bolt protocol C.5 (BEGIN/COMMIT/ROLLBACK + --readonly)
+
+Fifth sub-phase of Phase C. Explicit transactions work end-to-end:
+`session.begin_transaction()` → `tx.run("CREATE ...")` →
+`tx.commit()` (or `tx.rollback()`). The `--readonly` CLI flag rejects
+mutations at both the auto-commit boundary and the begin_transaction
+boundary.
+
+- **`crates/kglite-bolt-server/src/backend.rs`**: significant
+  restructure of `KgliteBackend`:
+  - Storage changed from `Arc<KnowledgeGraph>` to
+    `Arc<Mutex<Arc<DirGraph>>>` — outer mutex allows commits to
+    swap the inner Arc; inner Arc allows readers to cheaply
+    snapshot via Arc::clone.
+  - New `transactions: Arc<Mutex<HashMap<String, TxState>>>` map
+    tracks per-transaction state.
+  - `TxState` mirrors `src/graph/pyapi/transaction.rs`'s
+    snapshot/working CoW shape: `snapshot: Option<Arc<DirGraph>>`
+    + `working: Option<DirGraph>`. First mutation materializes
+    working via `Arc::try_unwrap` (free when this tx holds the
+    only ref) or deep clone.
+  - `begin_transaction` snapshots the current Arc<DirGraph>, mints
+    a `tx-{N}` handle, stores TxState. Rejects under `--readonly`.
+  - `commit` swaps the working Arc into the backend's shared graph
+    (no-op if no mutations occurred — read-only-then-commit
+    transactions are cheap).
+  - `rollback` drops TxState (working copy discarded).
+  - `close_session` / `reset_session` roll back all in-flight
+    transactions for the session.
+- **Auto-commit mutations remain rejected** with a `BoltError::Backend`
+  error pointing at "wrap in BEGIN/COMMIT". Drivers always wrap
+  writes in explicit transactions in practice; adding auto-commit
+  mutations would broaden the surface for no real win.
+- **`--readonly` enforcement**: `begin_transaction` returns
+  `BoltError::Forbidden` ("server is read-only — explicit
+  transactions rejected"), which maps to
+  `Neo.ClientError.Security.Forbidden` on the wire → driver raises
+  `ClientError`. Auto-commit mutations also return `Forbidden` when
+  `--readonly` is on (vs `Backend` when it isn't).
+- **`execute` pipeline refactored** into `plan` + `execute_auto_commit`
+  + `execute_in_tx` helpers on `KgliteBackend`. Per-query mutex
+  hold is bounded; reads outside tx are wait-free apart from a
+  single Arc::clone.
+- **SUCCESS metadata**: now includes `stats` dict (nodes-created,
+  relationships-created, properties-set, etc.) when the result
+  carries `MutationStats`. Reads still emit `type: "r"`; mutations
+  emit `type: "w"`.
+- **OCC version checking deferred**. `DirGraph.version` is
+  `pub(crate)` and not exposed via `kglite::api`. The Python
+  `Transaction` class uses it; bolt-server gets it when the
+  accessor is added. For C.5 the test scenarios are sequential so
+  no conflict is possible; concurrent-writer stress is a Phase D
+  consideration.
+- **`kglite::api::cypher::CypherQuery`** newly exposed
+  (`src/lib.rs`) — bolt-server needs the type to write its
+  pipeline helper. The mcp-server and Python boundary already
+  use it via the internal path.
+- **`crates/kglite-bolt-server/src/main.rs`**: backend constructor
+  takes `DirGraph` (not `Arc<KnowledgeGraph>`); `Arc::try_unwrap`
+  on the loaded KG's inner Arc is free in the typical boot path.
+- **Test contract**: `xfail` removed from
+  `test_bolt_transaction_commit_and_rollback` and
+  `test_bolt_rejects_writes_when_readonly`. The latter test gains
+  a dedicated `bolt_server_readonly` fixture that spawns its own
+  `--readonly` server instance. `pytest -m bolt -v` now reports
+  `7 passed, 1 xfailed` (exit code 0). Only test #8 (parse-error
+  → ClientError mapping) remains — scoped to C.6.
+
 ### Internal — Bolt protocol C.4 (Node / Relationship / Path RETURN)
 
 Fourth sub-phase of Phase C. Cypher queries returning graph

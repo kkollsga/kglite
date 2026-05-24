@@ -114,47 +114,71 @@ def _wait_for_listener(host: str, port: int, deadline_s: float) -> None:
     raise RuntimeError(f"bolt server never started listening on {host}:{port}: {last_err}")
 
 
-@pytest.fixture
-def bolt_server(tmp_path):
-    """Spawn `kglite-bolt-server` on an ephemeral port; yield the URL.
-
-    Kills the subprocess on test exit. Captures stdout+stderr so a
-    spawn failure surfaces in the test report.
+def _spawn_bolt_server(fixture_path: Path, readonly: bool = False):
+    """Spawn `kglite-bolt-server` on an ephemeral port; return (proc, url).
+    Caller is responsible for kill+wait on teardown.
     """
-    fixture_path = tmp_path / "fixture.kgl"
-    _build_fixture_graph(fixture_path)
     port = _find_free_port()
-
-    proc = subprocess.Popen(
-        [
-            str(BINARY),
-            "--graph",
-            str(fixture_path),
-            "--bind",
-            "127.0.0.1",
-            "--port",
-            str(port),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    cmd = [
+        str(BINARY),
+        "--graph",
+        str(fixture_path),
+        "--bind",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if readonly:
+        cmd.append("--readonly")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     url = f"bolt://127.0.0.1:{port}"
-
     try:
         _wait_for_listener("127.0.0.1", port, deadline_s=10.0)
     except Exception:
         proc.kill()
         stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else "<no stderr>"
         raise RuntimeError(f"server failed to start. stderr:\n{stderr}")
+    return proc, url
 
-    yield url
 
+def _teardown_bolt_server(proc):
     proc.kill()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.terminate()
         proc.wait(timeout=2)
+
+
+@pytest.fixture
+def bolt_server(tmp_path):
+    """Spawn `kglite-bolt-server` on an ephemeral port; yield the URL.
+
+    Kills the subprocess on test exit. Captures stdout+stderr so a
+    spawn failure surfaces in the test report. Read-write mode — for
+    `--readonly` testing see `bolt_server_readonly`.
+    """
+    fixture_path = tmp_path / "fixture.kgl"
+    _build_fixture_graph(fixture_path)
+    proc, url = _spawn_bolt_server(fixture_path, readonly=False)
+    yield url
+    _teardown_bolt_server(proc)
+
+
+@pytest.fixture
+def bolt_server_readonly(tmp_path):
+    """Spawn `kglite-bolt-server --readonly` on its own ephemeral port.
+
+    Separate fixture from `bolt_server` because the test contract
+    explicitly requires the readonly path to be tested — test #7's
+    pytest.raises(ClientError) needs a server that actually rejects
+    mutations.
+    """
+    fixture_path = tmp_path / "fixture_ro.kgl"
+    _build_fixture_graph(fixture_path)
+    proc, url = _spawn_bolt_server(fixture_path, readonly=True)
+    yield url
+    _teardown_bolt_server(proc)
 
 
 # ── The 8 tests — each xfail(strict=True), tagged to its retiring sub-phase ──
@@ -220,9 +244,8 @@ def test_bolt_return_relationship_yields_rel_struct(bolt_server):
             assert rel.type == "KNOWS"
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.5 — BEGIN/COMMIT/ROLLBACK")
 def test_bolt_transaction_commit_and_rollback(bolt_server):
-    """Phase C.5: explicit `tx.run()` + `tx.commit()` / `tx.rollback()`."""
+    """Phase C.5 ✓: explicit `tx.run()` + `tx.commit()` / `tx.rollback()`."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             # Commit a mutation, verify it's visible.
@@ -240,19 +263,21 @@ def test_bolt_transaction_commit_and_rollback(bolt_server):
             assert after_rb == 0
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.5 — --readonly enforcement")
-def test_bolt_rejects_writes_when_readonly(bolt_server, tmp_path):
-    """Phase C.5: `--readonly` flag rejects mutations with a Bolt FAILURE.
+def test_bolt_rejects_writes_when_readonly(bolt_server_readonly):
+    """Phase C.5 ✓: `--readonly` flag rejects mutations with a Bolt FAILURE.
 
-    NOTE: this test currently uses the shared `bolt_server` fixture
-    which spawns without `--readonly`. Phase C.5 will adjust either this
-    test to spawn its own readonly instance, or the fixture to be
-    parametrized. The xfail covers either intermediate state.
+    Uses its own readonly fixture (the default `bolt_server` fixture is
+    read-write). The CREATE attempts — both auto-commit and explicit-tx —
+    should fail because the server is `--readonly`.
     """
-    with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
+    with neo4j.GraphDatabase.driver(bolt_server_readonly, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
+            # Auto-commit CREATE: rejected at the execute() boundary.
             with pytest.raises(neo4j.exceptions.ClientError):
                 session.run("CREATE (:Person {id: 999, title: 'Bad'})").consume()
+            # Explicit BEGIN: rejected at begin_transaction.
+            with pytest.raises(neo4j.exceptions.ClientError):
+                session.begin_transaction()
 
 
 @pytest.mark.xfail(strict=True, reason="retired by Phase C.6 — KgError → Bolt FAILURE mapping (needs A.2 ✓)")

@@ -113,7 +113,14 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", cli.graph.display()))?;
     tracing::info!("graph loaded; constructing Bolt server");
 
-    let backend = KgliteBackend::new(Arc::new(kg), cli.readonly);
+    // The backend stores the DirGraph behind its own Arc<Mutex<>> for the
+    // commit-swap pattern (Phase C.5). Unwrap the loaded KnowledgeGraph's
+    // inner Arc<DirGraph> — if no other refs (typical for fresh load),
+    // try_unwrap succeeds; otherwise we deep-clone (one-time cost at boot).
+    let dir_arc = kg.dir().clone();
+    drop(kg); // release the KnowledgeGraph wrapper's ref
+    let dir = Arc::try_unwrap(dir_arc).unwrap_or_else(|arc| (*arc).clone());
+    let backend = KgliteBackend::new(dir, cli.readonly);
 
     let addr = SocketAddr::new(cli.bind, cli.port);
 

@@ -69,6 +69,7 @@ pub mod api {
     /// these items; the Python boundary in
     /// `src/graph/pyapi/kg_core.rs::cypher` is the canonical example.
     pub mod cypher {
+        pub use crate::graph::languages::cypher::ast::CypherQuery;
         pub use crate::graph::languages::cypher::ast::OutputFormat;
         pub use crate::graph::languages::cypher::executor::write::execute_mutable;
         pub use crate::graph::languages::cypher::executor::CypherExecutor;
