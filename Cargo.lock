@@ -1807,9 +1807,7 @@ dependencies = [
  "geo",
  "geojson",
  "indexmap",
- "kglite-sec",
- "kglite-sodir",
- "kglite-wikidata",
+ "kglite-core",
  "libc",
  "mcp-methods",
  "memchr",
@@ -1865,6 +1863,56 @@ dependencies = [
 [[package]]
 name = "kglite-core"
 version = "0.10.0"
+dependencies = [
+ "aho-corasick",
+ "bincode",
+ "bzip2",
+ "bzip2-rs",
+ "chrono",
+ "csv",
+ "fastembed",
+ "flate2",
+ "geo",
+ "geojson",
+ "governor",
+ "indexmap",
+ "libc",
+ "memchr",
+ "memmap2",
+ "petgraph",
+ "quick-xml",
+ "rayon",
+ "regex",
+ "reqwest",
+ "roxmltree",
+ "rstar 0.12.2",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-dart",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-swift",
+ "tree-sitter-typescript",
+ "walkdir",
+ "wkt",
+ "zip",
+ "zstd",
+]
 
 [[package]]
 name = "kglite-mcp-server"
@@ -1885,50 +1933,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "kglite-sec"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "csv",
- "governor",
- "quick-xml",
- "rayon",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "zip",
-]
-
-[[package]]
-name = "kglite-sodir"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "csv",
- "governor",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "kglite-wikidata"
-version = "0.0.1"
-dependencies = [
- "chrono",
- "reqwest",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]

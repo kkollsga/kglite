@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 
-use kglite_wikidata::{WikidataError, Workdir};
+use kglite_core::datasets::wikidata::{WikidataError, Workdir};
 
 fn map_err(e: WikidataError) -> PyErr {
     match &e {
@@ -42,7 +42,11 @@ fn ensure_dump(
     let wd = Workdir::new(workdir);
     let rt = runtime()?;
     let (path, mtime) = rt
-        .block_on(kglite_wikidata::ensure_dump(&wd, cooldown_days, verbose))
+        .block_on(kglite_core::datasets::wikidata::ensure_dump(
+            &wd,
+            cooldown_days,
+            verbose,
+        ))
         .map_err(map_err)?;
     Ok((
         path.to_string_lossy().into_owned(),
@@ -56,7 +60,7 @@ fn ensure_dump(
 fn remote_last_modified() -> PyResult<Option<String>> {
     let rt = runtime()?;
     Ok(rt
-        .block_on(kglite_wikidata::remote_last_modified())
+        .block_on(kglite_core::datasets::wikidata::remote_last_modified())
         .map(|m| m.to_rfc3339()))
 }
 

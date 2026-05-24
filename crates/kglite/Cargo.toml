@@ -1,12 +1,8 @@
 [package]
 # Temporary name during Phase G crate split. Renamed to `kglite` (the
 # pure-Rust core, polars-style) in G.4 when the root-crate workspace
-# member is moved into `crates/kglite-py/`. Sibling crates pick up the
-# rename at the same time.
-#
-# Until then this crate is empty; G.3 fills it with the files moved
-# out of `src/graph/`, `src/datatypes/`, `src/code_tree/`, and
-# `src/error.rs`.
+# member is moved into `crates/kglite-py/`. Sibling crates pick up
+# the rename at the same time.
 name = "kglite-core"
 version = "0.10.0"
 edition = "2021"
@@ -17,11 +13,98 @@ description = "Pure-Rust core of the kglite knowledge graph engine. Wrapped by k
 [lib]
 name = "kglite_core"
 # rustdoc auto-compilation of code blocks stays off, matching the
-# root crate. Examples in the eventual `crates/kglite/examples/`
-# (G.5) cover the embedder-side API surface; the doctest harness
-# isn't needed.
+# root crate. Examples in `crates/kglite/examples/` (G.5) cover the
+# embedder-side API surface; the doctest harness isn't needed.
 doctest = false
 
+[features]
+default = []
+# Rust-native embedder backend behind the `fastembed` Cargo feature.
+# Downloads ONNX model weights on first use (cached at
+# `~/.cache/fastembed/`). Off by default — the Python wheel relies
+# on user-provided Python embedder classes via `PyEmbedderAdapter`,
+# and we don't want to pull a 100-200 MB ONNX runtime into every
+# wheel build. The `kglite-mcp-server` binary enables this feature
+# so the Rust-only deployment path supports `text_score()` semantic
+# search without a Python embedder.
+fastembed = ["dep:fastembed"]
+
+# Pre-packaged dataset loaders. Polars-io style: opt in to only the
+# loaders you actually use. Phase G.3a folded the standalone
+# `kglite-{sec,sodir,wikidata}` sibling crates into here.
+sec = [
+    "dep:thiserror",
+    "dep:reqwest",
+    "dep:governor",
+    "dep:zip",
+    "dep:quick-xml",
+]
+sodir = [
+    "dep:thiserror",
+    "dep:reqwest",
+    "dep:governor",
+]
+wikidata = [
+    "dep:thiserror",
+    "dep:reqwest",
+]
+
 [dependencies]
-# Intentionally minimal during G.2 — real deps land alongside the
-# file moves in G.3a (petgraph, serde, etc. follow the source).
+petgraph = { version = "0.8.3", features = ["serde-1"] }
+fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+bincode = "1.3"
+chrono = { version = "0.4.43", features = ["serde"] }
+geo = "0.33"
+rstar = "0.12"
+wkt = "0.14"
+regex = "1"
+rayon = "1.10"
+flate2 = "1"
+zstd = "0.13"
+memmap2 = "0.9"
+libc = "0.2"
+bzip2 = "0.6"
+bzip2-rs = { git = "https://github.com/paolobarbolini/bzip2-rs", rev = "2be7684b444987d6cc7b0b226bda7581be739e3c", features = ["rayon"] }
+tree-sitter = "0.26.8"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-c = "0.24.1"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-swift = "0.7.2"
+tree-sitter-php = "0.24.2"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25.0"
+tree-sitter-dart = "0.2.0"
+toml = "1.1.2"
+roxmltree = "0.21.1"
+walkdir = "2.5.0"
+tempfile = "3"
+aho-corasick = "1.1.4"
+memchr = "2"
+rustc-hash = "2"
+csv = "1.3"
+geojson = "0.24"
+indexmap = { version = "2", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+
+# ── Dataset loader deps (feature-gated, all `optional = true`) ──
+# Folded from the standalone `kglite-{sec,sodir,wikidata}` crates in
+# G.3a. Each is `optional = true` so users who don't enable the
+# `sec` / `sodir` / `wikidata` features get a build without these
+# in their dep tree.
+thiserror = { version = "1", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+governor = { version = "0.7", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.36", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

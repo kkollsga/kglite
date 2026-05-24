@@ -16,7 +16,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
-use kglite_sodir::{datasets_used_by_blueprint, deep_merge, fetch_all, SodirError, Workdir};
+use kglite_core::datasets::sodir::{
+    datasets_used_by_blueprint, deep_merge, fetch_all, SodirError, Workdir,
+};
 
 fn map_err(e: SodirError) -> PyErr {
     match &e {
@@ -133,7 +135,7 @@ fn graph_exists(workdir: String) -> PyResult<bool> {
 #[pyfunction]
 fn disk_graph_age_days(workdir: String) -> PyResult<Option<f64>> {
     let wd = Workdir::new(workdir);
-    Ok(kglite_sodir::index::file_mtime_age_days(
+    Ok(kglite_core::datasets::sodir::index::file_mtime_age_days(
         &wd.disk_graph_meta(),
     ))
 }

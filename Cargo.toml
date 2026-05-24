@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/kglite", "crates/kglite-mcp-server", "crates/kglite-bolt-server", "crates/kglite-sec", "crates/kglite-sodir", "crates/kglite-wikidata"]
+members = [".", "crates/kglite", "crates/kglite-mcp-server", "crates/kglite-bolt-server"]
 resolver = "2"
 
 [package]
@@ -149,15 +149,12 @@ mimalloc = { version = "0.1", default-features = false }
 csv = "1.3"
 geojson = "0.24"
 indexmap = { version = "2", features = ["serde"] }
-# SEC EDGAR loader — pure-Rust crate, no pyo3 inside it. Wrapped by
-# src/sec.rs which exposes the SEC.open() surface to Python.
-kglite-sec = { path = "crates/kglite-sec" }
-# Sodir FactMaps loader — pure-Rust crate, no pyo3 inside it. Wrapped
-# by src/sodir.rs which exposes the sodir.open() surface to Python.
-kglite-sodir = { path = "crates/kglite-sodir" }
-# Wikidata dump fetcher — pure-Rust crate, no pyo3 inside it. Wrapped
-# by src/wikidata.rs; the N-Triples graph build stays in this crate.
-kglite-wikidata = { path = "crates/kglite-wikidata" }
+# Phase G.3a: the SEC / Sodir / Wikidata loaders moved INTO
+# kglite-core as feature-gated modules (`datasets::{sec,sodir,wikidata}`).
+# Pull them in via the kglite-core dep below with the matching
+# feature flags. The standalone `kglite-sec` / `kglite-sodir` /
+# `kglite-wikidata` crates are gone.
+kglite-core = { path = "crates/kglite", features = ["sec", "sodir", "wikidata"] }
 # Async runtime needed by the SEC client. The rest of kglite is sync;
 # we instantiate a single-threaded runtime inside src/sec.rs for the
 # duration of each fetch/extract call so Python callers see a normal
