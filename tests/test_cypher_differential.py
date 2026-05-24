@@ -894,19 +894,19 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "db_labels_basic",
         "social_graph",
-        "CALL db.labels() YIELD name RETURN name ORDER BY name",
+        "CALL db.labels() YIELD label RETURN label ORDER BY name",
         None,
     ),
     (
         "db_relationship_types_basic",
         "social_graph",
-        "CALL db.relationshipTypes() YIELD name RETURN name ORDER BY name",
+        "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY name",
         None,
     ),
     (
         "db_labels_with_where_postfilter",
         "social_graph",
-        "CALL db.labels() YIELD name WITH name WHERE name STARTS WITH 'C' RETURN name ORDER BY name",
+        "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'C' RETURN label ORDER BY name",
         None,
     ),
 ]

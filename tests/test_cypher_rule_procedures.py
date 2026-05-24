@@ -592,22 +592,22 @@ class TestDbLabels:
     """CALL db.labels() — Neo4j-compatible node-type enumeration."""
 
     def test_returns_all_node_types(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
-        names = {r["name"] for r in rows}
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD label RETURN label"))
+        names = {r["label"] for r in rows}
         assert names == {"Person", "Company"}
 
     def test_alphabetical_order(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
-        names = [r["name"] for r in rows]
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD label RETURN label"))
+        names = [r["label"] for r in rows]
         assert names == sorted(names), "db.labels() must return labels in alphabetical order"
 
     def test_yield_alias(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name AS label RETURN label"))
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD label RETURN label"))
         assert {r["label"] for r in rows} == {"Person", "Company"}
 
     def test_empty_graph_returns_zero_rows(self):
         g = kglite.KnowledgeGraph()
-        rows = list(g.cypher("CALL db.labels() YIELD name RETURN name"))
+        rows = list(g.cypher("CALL db.labels() YIELD label RETURN label"))
         assert rows == []
 
     def test_invalid_yield_column_rejected(self, db_proc_graph):
@@ -617,47 +617,47 @@ class TestDbLabels:
     def test_post_create_visibility(self, db_proc_graph):
         """A node type added via CREATE must appear in db.labels() output."""
         db_proc_graph.cypher("CREATE (n:Product {id: 999, title: 'Widget'})")
-        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name RETURN name"))
-        names = {r["name"] for r in rows}
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD label RETURN label"))
+        names = {r["label"] for r in rows}
         assert "Product" in names
 
     def test_composes_with_where(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD name WHERE name STARTS WITH 'P' RETURN name"))
-        assert [r["name"] for r in rows] == ["Person"]
+        rows = list(db_proc_graph.cypher("CALL db.labels() YIELD label WHERE label STARTS WITH 'P' RETURN label"))
+        assert [r["label"] for r in rows] == ["Person"]
 
 
 class TestDbRelationshipTypes:
     """CALL db.relationshipTypes() — Neo4j-compatible edge-type enumeration."""
 
     def test_returns_all_relationship_types(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
-        names = {r["name"] for r in rows}
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
+        names = {r["relationshipType"] for r in rows}
         assert names == {"WORKS_AT", "CONSULTS_FOR"}
 
     def test_alphabetical_order(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
-        names = [r["name"] for r in rows]
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
+        names = [r["relationshipType"] for r in rows]
         assert names == sorted(names)
 
     def test_camel_case_procedure_name(self, db_proc_graph):
         """Procedure dispatch is case-insensitive on the name (Neo4j convention)."""
-        rows_camel = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
-        rows_lower = list(db_proc_graph.cypher("CALL db.relationshiptypes() YIELD name RETURN name"))
-        assert {r["name"] for r in rows_camel} == {r["name"] for r in rows_lower}
+        rows_camel = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
+        rows_lower = list(db_proc_graph.cypher("CALL db.relationshiptypes() YIELD relationshipType RETURN relationshipType"))
+        assert {r["relationshipType"] for r in rows_camel} == {r["relationshipType"] for r in rows_lower}
 
     def test_yield_alias(self, db_proc_graph):
-        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name AS rel RETURN rel"))
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType AS rel RETURN rel"))
         assert {r["rel"] for r in rows} == {"WORKS_AT", "CONSULTS_FOR"}
 
     def test_empty_graph_returns_zero_rows(self):
         g = kglite.KnowledgeGraph()
-        rows = list(g.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
+        rows = list(g.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
         assert rows == []
 
     def test_post_create_visibility(self, db_proc_graph):
         db_proc_graph.cypher("MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:FRIEND_OF]->(b)")
-        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD name RETURN name"))
-        names = {r["name"] for r in rows}
+        rows = list(db_proc_graph.cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"))
+        names = {r["relationshipType"] for r in rows}
         assert "FRIEND_OF" in names
 
     def test_invalid_yield_column_rejected(self, db_proc_graph):

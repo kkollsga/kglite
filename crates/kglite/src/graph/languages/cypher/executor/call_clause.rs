@@ -113,8 +113,13 @@ impl<'a> CypherExecutor<'a> {
             "kg_knn" => &["node", "distance_m"],
             "affected_tests" => &["test_file", "depth"],
             "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
-            // Phase A.3 — Neo4j-compatible schema introspection procedures.
-            "db.labels" | "db.relationshiptypes" => &["name"],
+            // Phase A.3 / Phase F (#7) — Neo4j-compatible schema
+            // introspection procedures. Yield column names match
+            // Neo4j's: db.labels() yields `label`, db.relationshipTypes()
+            // yields `relationshipType`. (Pre-Phase-F both yielded
+            // `name`; aliasing in the test fixtures was the workaround.)
+            "db.labels" => &["label"],
+            "db.relationshiptypes" => &["relationshipType"],
             "db.indexes" => &[
                 "name",
                 "type",
@@ -1110,22 +1115,23 @@ impl<'a> CypherExecutor<'a> {
 // Phase A.3 — shared helper for single-column name-yielding procedures.
 // ============================================================================
 
-/// Build `ResultRow`s for a procedure that yields a single string column.
-///
-/// Used by `db.labels()` and `db.relationshipTypes()` — both yield one
-/// row per name with a single `name` column. The YIELD validator
-/// guarantees only `name` reaches us, but we still honour the
-/// `YieldItem.alias` (e.g. `YIELD name AS label`).
+/// Build `ResultRow`s for a procedure that yields a single string
+/// column. Used by `db.labels()` (yield column: `label`) and
+/// `db.relationshipTypes()` (yield column: `relationshipType`) — both
+/// per the Neo4j convention. The YIELD validator already enforced the
+/// only-valid-yield-item rule, so we accept whatever name reaches us
+/// and project it under the YIELD alias.
 fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<ResultRow> {
     let mut rows = Vec::with_capacity(names.len());
     for name in names {
         let mut row = ResultRow::new();
         for item in yield_items {
             let alias = item.alias.as_deref().unwrap_or(&item.name);
-            if item.name == "name" {
-                row.projected
-                    .insert(alias.to_string(), Value::String(name.clone()));
-            }
+            // Single-column procedure: the validator already ensured
+            // `item.name` is the expected column. Project the value
+            // under the alias (or the column name if no AS clause).
+            row.projected
+                .insert(alias.to_string(), Value::String(name.clone()));
         }
         rows.push(row);
     }

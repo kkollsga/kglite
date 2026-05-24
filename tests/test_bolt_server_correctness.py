@@ -390,20 +390,22 @@ def test_edge_return_count_zero(bolt_server):
 
 def test_edge_call_db_labels(bolt_server):
     """`CALL db.labels()` — the Phase A.3 schema procs flow through Bolt
-    via the standard CALL pipeline (verified in C.6). Note: kglite's
-    procedure yields `name`, not Neo4j's `label` — this is a
-    documented divergence from the Neo4j surface."""
+    via the standard CALL pipeline. Phase F.1 aligned the yield
+    column with Neo4j's convention: `label` (was `name` pre-F)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            result = session.run("CALL db.labels() YIELD name RETURN name")
-            labels = sorted([record["name"] for record in result])
+            result = session.run("CALL db.labels() YIELD label RETURN label")
+            labels = sorted([record["label"] for record in result])
             assert "Person" in labels
 
 
 def test_edge_call_db_relationship_types(bolt_server):
-    """`CALL db.relationshipTypes()` — same as above. Yields `name`."""
+    """`CALL db.relationshipTypes()` — same as above. Phase F.1 yields
+    `relationshipType` (Neo4j convention; was `name` pre-F)."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
-            result = session.run("CALL db.relationshipTypes() YIELD name RETURN name")
-            types = sorted([record["name"] for record in result])
+            result = session.run(
+                "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
+            )
+            types = sorted([record["relationshipType"] for record in result])
             assert "KNOWS" in types

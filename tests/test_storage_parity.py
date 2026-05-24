@@ -213,9 +213,9 @@ def test_describe_shape_parity(graphs):
 
 def test_db_labels_parity(graphs):
     """CALL db.labels() must report the same node-type set across modes (A.3)."""
-    rows = {mode: _rows(graphs[mode].cypher("CALL db.labels() YIELD name RETURN name")) for mode in STORAGE_MODES}
+    rows = {mode: _rows(graphs[mode].cypher("CALL db.labels() YIELD label RETURN label")) for mode in STORAGE_MODES}
     ref = rows["memory"]
-    assert ref == [{"name": "Entity"}, {"name": "Topic"}], f"unexpected memory baseline: {ref}"
+    assert ref == [{"label": "Entity"}, {"label": "Topic"}], f"unexpected memory baseline: {ref}"
     for mode in ("mapped", "disk"):
         assert rows[mode] == ref, f"db.labels() {mode} diverged: {rows[mode]} vs {ref}"
 
@@ -223,10 +223,10 @@ def test_db_labels_parity(graphs):
 def test_db_relationship_types_parity(graphs):
     """CALL db.relationshipTypes() must report the same connection-type set across modes (A.3)."""
     rows = {
-        mode: _rows(graphs[mode].cypher("CALL db.relationshipTypes() YIELD name RETURN name")) for mode in STORAGE_MODES
+        mode: _rows(graphs[mode].cypher("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")) for mode in STORAGE_MODES
     }
     ref = rows["memory"]
-    assert ref == [{"name": "ABOUT"}, {"name": "RELATED"}], f"unexpected memory baseline: {ref}"
+    assert ref == [{"relationshipType": "ABOUT"}, {"relationshipType": "RELATED"}], f"unexpected memory baseline: {ref}"
     for mode in ("mapped", "disk"):
         assert rows[mode] == ref, f"db.relationshipTypes() {mode} diverged: {rows[mode]} vs {ref}"
 
