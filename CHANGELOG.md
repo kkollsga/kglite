@@ -46,7 +46,56 @@ test contract, and the perf baseline that Phase C sub-phases will retire.
 This is **prep work**, not a feature release. No `Cargo.toml`
 version bump.
 
-### Added — `kglite::api::cypher::validate_schema` exposed; both pure-Rust servers now run it
+### Added — `validate_schema` extended to CREATE/MERGE patterns + exposed in api
+
+Two changes folded into one user-visible improvement:
+
+**Fortification.** `src/graph/languages/cypher/planner/schema_check.rs`
+previously skipped CREATE and MERGE clauses (explicit `=> {}` arm),
+even though those clauses' pattern-literal property names are exactly
+the same "unambiguously a property name" shape that MATCH validates.
+Now extended:
+
+- `CREATE (:Person {ttle: 'Alice'})` — catches the typo with
+  "Unknown property 'ttle' on Person.<did_you_mean>".
+- `CREATE (a:Person {age: 30})-[:KNOWS]->(b:Person {agee: 25})` —
+  walks multi-element paths.
+- `MERGE (:Person {agee: 30})` — same path via `MergeClause.pattern`.
+- ON CREATE SET / ON MATCH SET still skip (use `SetItem`, deferred).
+
+Zero false positives preserved — same gate as the MATCH path:
+`validate_property` skips when the type has no declared metadata.
+Tests grew from 13 to 21.
+
+**Exposure.** User flagged a real gap: the Python boundary
+(`src/graph/pyapi/kg_core.rs`) has called `validate_schema` between
+parse and optimize since 0.9.x to catch property typos in pattern
+literals — but the pure-Rust `kglite-mcp-server` and (newly added)
+`kglite-bolt-server` were both missing the pass. The function was
+internal-only.
+
+- **`kglite::api::cypher::validate_schema`**: new `pub use` in
+  `src/lib.rs`.
+- **`crates/kglite-mcp-server/src/tools.rs`**: adds the call right
+  after `parse_cypher`. Error mapped to `String` (matches the
+  existing mcp-server error pipeline).
+- **`crates/kglite-bolt-server/src/backend.rs::execute`**: adds the
+  call as pipeline step 2 (renumbered the rest). Error mapped to
+  `BoltError::Protocol` (genuine client error — bad property name
+  → `Neo.ClientError.Request.Invalid` on the wire). Distinct from
+  the `BoltError::Backend`-mapped "feature pending" errors C.2/C.3
+  use for slices we haven't shipped yet.
+
+All four downstream Cypher consumers (Python `cypher()`, MCP
+`cypher_query`, Bolt `execute`, the `tests/test_schema.py` agent
+helper via `KnowledgeGraph.validate_schema()`) now share the same
+hardened pre-flight check.
+
+### Added — `kglite::api::cypher::validate_schema` exposed; both pure-Rust servers now run it (superseded)
+
+(See the section above; this entry kept as a pointer for git
+log archaeology — superseded by the fortification work that
+landed in the same commit.)
 
 User flagged a real gap: the Python boundary (`src/graph/pyapi/kg_core.rs`)
 has called `validate_schema` between parse and optimize since 0.9.x

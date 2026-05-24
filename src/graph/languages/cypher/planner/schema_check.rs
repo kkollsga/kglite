@@ -1,9 +1,16 @@
 //! Schema validation pass — runs after parse, before optimize.
 //!
-//! Catches unknown property references inside pattern-literal syntax
+//! Catches unknown property references inside **pattern-literal syntax**
 //! (`{prop: value}`) before the executor commits to a scan. These are
 //! unambiguously property names — a typo here can never be a virtual
 //! column or computed alias, so rejecting produces zero false positives.
+//!
+//! Covers:
+//! - `MATCH (n:T {prop: v})` and `OPTIONAL MATCH` (read patterns).
+//! - `EXISTS { MATCH (n:T {prop: v}) }` inside WHERE / AND / OR / NOT
+//!   subqueries.
+//! - **`CREATE (n:T {prop: v})`** and `CREATE`-style multi-element paths.
+//! - **`MERGE (n:T {prop: v})`** including the embedded `CREATE` shape.
 //!
 //! Deliberately *does not* validate:
 //! - Unknown node types in MATCH (`MATCH (n:Nonexistent)` legitimately
@@ -12,10 +19,21 @@
 //! - Property references in WHERE / RETURN expressions (virtual columns,
 //!   timeseries sub-nodes, aliases can be legitimate `n.prop` accesses
 //!   not present in `node_type_metadata`).
+//! - `SET n.prop = X` and `REMOVE n.prop` — SET may legitimately
+//!   introduce new properties depending on kglite's mutation policy;
+//!   REMOVE of a non-existent property is benign.
 //!
 //! Phase 3 will surface those as non-fatal warnings in `QueryDiagnostics`
 //! with "did you mean?" hints — the agent sees the signal without
 //! rejecting legitimate empty-result queries.
+//!
+//! ## Pipeline placement
+//!
+//! Called by three downstream Cypher consumers after `parse_cypher` and
+//! before the planner's `optimize_with_disabled`:
+//! - `src/graph/pyapi/kg_core.rs::cypher` (Python boundary)
+//! - `crates/kglite-mcp-server/src/tools.rs::cypher_query`
+//! - `crates/kglite-bolt-server/src/backend.rs::execute`
 
 use super::super::ast::*;
 use crate::graph::core::pattern_matching::{Pattern, PatternElement};
@@ -108,13 +126,42 @@ fn validate_clause(
             validate_query(&u.query, graph, &mut inner_vars)?;
         }
         Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) => {}
-        Clause::Create(_)
-        | Clause::Set(_)
-        | Clause::Delete(_)
-        | Clause::Remove(_)
-        | Clause::Merge(_)
-        | Clause::Call(_) => {}
+        Clause::Create(c) => {
+            for pattern in &c.patterns {
+                validate_create_pattern(pattern, graph, var_types)?;
+            }
+        }
+        Clause::Merge(m) => {
+            validate_create_pattern(&m.pattern, graph, var_types)?;
+            // MERGE's `ON CREATE SET` / `ON MATCH SET` use `SetItem`,
+            // which we intentionally skip — see the module doc-comment.
+        }
+        Clause::Set(_) | Clause::Delete(_) | Clause::Remove(_) | Clause::Call(_) => {}
         _ => {}
+    }
+    Ok(())
+}
+
+/// Validate a CREATE / MERGE pattern's node-pattern property names
+/// against the schema. Edge-pattern properties aren't validated —
+/// `connection_type_metadata` is keyed differently and edge schemas
+/// in kglite are looser; revisit if a real divergence shows up.
+fn validate_create_pattern(
+    pattern: &CreatePattern,
+    graph: &DirGraph,
+    var_types: &mut HashMap<String, String>,
+) -> Result<(), SchemaError> {
+    for element in &pattern.elements {
+        if let CreateElement::Node(np) = element {
+            if let Some(ref node_type) = np.label {
+                if let Some(ref var) = np.variable {
+                    var_types.insert(var.clone(), node_type.clone());
+                }
+                for (prop_name, _expr) in &np.properties {
+                    validate_property(node_type, prop_name, graph)?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -312,6 +359,78 @@ mod tests {
     fn tolerates_unknown_label_in_where_label_check() {
         let g = graph_with_schema();
         let q = parse_cypher("MATCH (n) WHERE n:person RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_property_in_create_pattern_literal() {
+        // CREATE typos slip through silently today: `CREATE (:Person {ttle: 'x'})`
+        // adds a node with a `ttle` property instead of `title`. Pre-flight
+        // validation surfaces the typo with a "did you mean?" hint.
+        let g = graph_with_schema();
+        let q = parse_cypher("CREATE (:Person {agee: 30})").unwrap();
+        let err = validate_schema(&q, &g).unwrap_err();
+        assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
+        assert!(err.message.contains("age"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn allows_known_property_in_create() {
+        let g = graph_with_schema();
+        let q = parse_cypher("CREATE (:Person {age: 30, email: 'a@b'})").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_property_in_create_multi_element_path() {
+        // CREATE (a:Person {age: 30})-[:KNOWS]->(b:Person {agee: 25})
+        // — typo on the second node.
+        let g = graph_with_schema();
+        let q =
+            parse_cypher("CREATE (a:Person {age: 30})-[:KNOWS]->(b:Person {agee: 25}) RETURN a, b")
+                .unwrap();
+        let err = validate_schema(&q, &g).unwrap_err();
+        assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
+    }
+
+    #[test]
+    fn rejects_unknown_property_in_merge_pattern_literal() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MERGE (n:Person {agee: 30}) RETURN n").unwrap();
+        let err = validate_schema(&q, &g).unwrap_err();
+        assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
+    }
+
+    #[test]
+    fn allows_known_property_in_merge() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MERGE (n:Person {email: 'a@b'}) RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn create_with_untyped_node_is_permissive() {
+        // CREATE (n {anything: 1}) — no label, no type metadata to
+        // check against. Permissive (matches MATCH behavior).
+        let g = graph_with_schema();
+        let q = parse_cypher("CREATE (n {anything_at_all: 1}) RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn create_on_unknown_node_type_is_permissive() {
+        // Symmetric with `tolerates_unknown_node_type` for MATCH —
+        // unknown labels are not rejected here either (consistent
+        // rule: only validate when metadata is declared).
+        let g = graph_with_schema();
+        let q = parse_cypher("CREATE (n:NewType {whatever: 1}) RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn create_builtin_field_is_allowed() {
+        let g = graph_with_schema();
+        let q = parse_cypher("CREATE (n:Person {id: 99, title: 'Eve'}) RETURN n").unwrap();
         assert!(validate_schema(&q, &g).is_ok());
     }
 
