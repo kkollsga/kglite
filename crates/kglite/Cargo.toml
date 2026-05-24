@@ -1,21 +1,32 @@
 [package]
-# Temporary name during Phase G crate split. Renamed to `kglite` (the
-# pure-Rust core, polars-style) in G.4 when the root-crate workspace
-# member is moved into `crates/kglite-py/`. Sibling crates pick up
-# the rename at the same time.
-name = "kglite-core"
+# Phase G.4 — pure-Rust core, polars-style. The Python wheel is
+# built by maturin from `crates/kglite-py/` (which depends on
+# this crate). Rust embedders depend on this crate directly:
+#   kglite = { path = "..." }  # pre-publish
+#   kglite = "0.11"            # post-crates.io-publish
+name = "kglite"
 version = "0.10.0"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
-description = "Pure-Rust core of the kglite knowledge graph engine. Wrapped by kglite-py (PyO3) for the Python wheel; embeddable directly from any Rust binary. No PyO3 in the dep tree."
+description = "Pure-Rust knowledge graph engine — Cypher pipeline, snapshot/working CoW transactions, columnar/mmap/disk storage backends, optional dataset loaders (SEC EDGAR, Sodir, Wikidata). PyO3 wrappers live in the sibling kglite-py crate (the Python wheel); embeddable directly from any Rust binary without PyO3 in the dep tree."
 
 [lib]
-name = "kglite_core"
-# rustdoc auto-compilation of code blocks stays off, matching the
-# root crate. Examples in `crates/kglite/examples/` (G.5) cover the
-# embedder-side API surface; the doctest harness isn't needed.
+# `[lib] name = "kglite"` makes the extern crate alias `kglite`
+# (matching the `[package] name`), so dependent crates do
+# `use kglite::api::*;` not `use kglite_core::*`. Cargo allows
+# kglite-py's cdylib to also be `name = "kglite"` because the two
+# artifact types (rlib here, cdylib in kglite-py) produce
+# distinct output filenames.
+name = "kglite"
 doctest = false
+
+# Standalone perf microbench for the bz2 decoder. Run with
+# `cargo run -p kglite --bin bz2_bench --release -- <path>`.
+[[bin]]
+name = "bz2_bench"
+path = "src/bin/bz2_bench.rs"
+required-features = []
 
 [features]
 default = []

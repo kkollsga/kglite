@@ -23,7 +23,13 @@ mcp-methods = { version = "0.3", default-features = false, features = ["server"]
 # support `text_score()` semantic search without a Python embedder.
 # `default-features = false` opts out of abi3 — irrelevant here since
 # we're not building a Python extension module.
-kglite = { path = "../..", default-features = false, features = ["fastembed"] }
+# Phase G.4: depend on kglite-py (the pyo3 wrapper) because
+# mcp-server still uses KnowledgeGraph methods like
+# `set_embedder_native` / `source_location` that live on the
+# pyo3 wrapper type. Pyo3 stays in this binary's dep tree —
+# follow-up to lift those methods into the core crate and
+# switch this dep to `kglite = { path = "../kglite" }` directly.
+kglite = { package = "kglite-py", path = "../kglite-py", default-features = false, features = ["fastembed"] }
 
 # rmcp re-export for the dynamic tool registration path.
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "schemars"] }

@@ -78,6 +78,18 @@ Changelog = "https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md"
 Issues = "https://github.com/kkollsga/kglite/issues"
 
 [tool.maturin]
+# Phase G.4 (polars-style split): the PyO3 wrapper crate moved to
+# crates/kglite-py/. `manifest-path` tells maturin where to find
+# the Cargo.toml whose [lib] cdylib produces the wheel's .so.
+# The Python source (`kglite/` package at the workspace root) is
+# unchanged.
+manifest-path = "crates/kglite-py/Cargo.toml"
+# `module-name = "kglite.kglite"` overrides maturin's default
+# (which would use kglite-py's `[lib] name = "kglite_py"` and
+# produce `kglite/kglite_py.abi3.so`). The Python package's
+# `from .kglite import *` reaches for `kglite.abi3.so`, so we
+# rename the wheel's extension to match.
+module-name = "kglite.kglite"
 # extension-module must be added via maturin features (not Cargo.toml default)
 # so `cargo test` can still link. abi3-py310 is in Cargo.toml since it affects
 # symbol visibility even outside maturin builds.

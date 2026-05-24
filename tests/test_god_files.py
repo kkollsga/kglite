@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Resolve the repo root relative to this test file (tests/ sits at the root).
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SRC_DIRS = [REPO_ROOT / "src", REPO_ROOT / "crates" / "kglite" / "src"]
+SRC_DIRS = [REPO_ROOT / "crates" / "kglite-py" / "src", REPO_ROOT / "crates" / "kglite" / "src"]
 
 # Default cap. CLAUDE.md says compartmentalize aggressively; 3000 is a soft
 # upper bound — most files should be well under 1500.

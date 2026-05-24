@@ -187,7 +187,7 @@ impl KnowledgeGraph {
     /// no timeout, no row cap). Used by the pyapi `load()` pyfunction,
     /// the `code_tree.build()` / `code_tree.repo_tree()` pyfunctions,
     /// and the sibling Rust crates (kglite-bolt-server,
-    /// kglite-mcp-server) that consume `kglite::api::load_file ->
+    /// kglite-mcp-server) that consume `kglite_core::api::load_file ->
     /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`
     /// alongside their own state. Phase G.3-pre decoupled the
     /// engine-side constructors from the binding-side wrapper.
@@ -540,7 +540,7 @@ impl KnowledgeGraph {
         Ok(dict.into())
     }
 
-    /// Pure-Rust counterpart of `source_one` for `kglite::api` consumers
+    /// Pure-Rust counterpart of `source_one` for `kglite_core::api` consumers
     /// (notably the kglite-mcp-server `read_code_source` tool). Returns
     /// an enum so callers can format ambiguous / not-found cases their
     /// own way without unpacking a PyDict.

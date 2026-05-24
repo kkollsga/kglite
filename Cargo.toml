@@ -1,182 +1,28 @@
 [workspace]
-members = [".", "crates/kglite", "crates/kglite-mcp-server", "crates/kglite-bolt-server"]
+members = [
+    "crates/kglite",
+    "crates/kglite-py",
+    "crates/kglite-mcp-server",
+    "crates/kglite-bolt-server",
+]
 resolver = "2"
 
-[package]
-name = "kglite"
-version = "0.10.0"
-edition = "2021"
-authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
-description = "A high-performance graph database with Python bindings written in Rust."
-readme = "README.md"
-repository = "https://github.com/kkollsga/kglite"
-license = "MIT"
-
-# `python-extension` toggles pyo3's extension-module feature so the
-# wheel build (via maturin) and the kglite-mcp-server binary build
-# (via plain cargo) can share the same kglite rlib. Maturin is wired
-# to enable it; cargo build leaves it off.
-[features]
-default = ["abi3"]
-python-extension = ["pyo3/extension-module"]
-# Single-cdylib-for-many-Pythons mode. On by default so existing
-# `cargo build` / `cargo install` / `maturin develop` flows behave
-# exactly as before. The wheel-build workflow disables this with
-# `--no-default-features --features python-extension` to produce
-# per-Python-version wheels alongside the bundled binary.
-abi3 = ["pyo3/abi3-py310"]
-# Rust-native embedder backend (BAAI/bge-m3 et al via fastembed-rs).
-# Post-G.3a: the fastembed adapter moved into kglite-core; this
-# feature now just propagates to enable kglite-core's matching
-# feature. The actual `dep:fastembed` lives in kglite-core's
-# Cargo.toml.
-fastembed = ["kglite-core/fastembed"]
-
-[lib]
-name = "kglite"
-crate-type = ["cdylib", "rlib"]
-# Disable rustdoc's auto-compilation of code blocks. The user-facing
-# `/// Example::` blocks throughout `src/graph/pyapi/*.rs` are Python
-# snippets rendered by Sphinx for the published Python API docs — they're
-# never valid Rust, so rustdoc's default doctest harness fails on every
-# single-quoted string. There's no Rust API surface that needs doctest
-# coverage here either; the `#[pyclass]` types are exercised through
-# Python tests.
-doctest = false
-
-# Standalone perf microbench for the bz2 decoder. Run with
-# `cargo run --bin bz2_bench --release -- <path>`.
-[[bin]]
-name = "bz2_bench"
-path = "src/bin/bz2_bench.rs"
-required-features = []
-
-[dependencies]
-# `abi3-py310` is feature-gated so the wheel-build can opt in/out:
-# - On (default-on via `abi3` feature): single cdylib for Python 3.10+.
-#   Used by users who do `cargo build` / `maturin develop` without the
-#   bundled-binary path, and by `make dev` for local development.
-# - Off (when bundling `kglite-mcp-server` into per-Python-version
-#   wheels): the wheel-build workflow disables this so each wheel is
-#   tagged for a single Python version, matching the bundled binary's
-#   libpython link. Without this gate, an abi3 wheel claiming
-#   compatibility with Python 3.10+ ships a binary linked against one
-#   specific libpython — a packaging lie that breaks on mismatched
-#   Python versions.
-pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
-petgraph = { version = "0.8.3", features = ["serde-1"] }
-# Generic MCP framework tools (ping, read_source, grep, list_source,
-# github_issues, github_api, workspace). 0.9.21+: depend on the
-# pure-Rust mcp-methods crate (split into a three-crate workspace in
-# 0.3.26) and expose its functions to Python via pyo3 wrappers in
-# `src/mcp_tools.rs`. The `server` feature pulls the framework half
-# (manifest parser + tool implementations) without any pyo3 dep —
-# matches what we already do in `crates/kglite-mcp-server`.
-#
-# 0.9.26+: switched from git+rev pin to crates.io now that
-# mcp-methods publishes there (first publish at 0.3.30). The library
-# source is functionally unchanged from 0.3.29's `71f7ba6`. Cargo.lock
-# locks the exact version for reproducible builds; `cargo update` is
-# where we choose to consume framework bumps. Plan to swap back to a
-# pinned rev only if a regression surfaces; plan to widen to `>= 0.4`
-# when that major bump lands and the API surface stabilises.
-mcp-methods = { version = "0.3.39", default-features = false, features = ["server"] }
-# Rust-native embedder backend behind the `fastembed` Cargo feature.
-# Downloads ONNX model weights on first use (cached at
-# `~/.cache/fastembed/`). Off by default — the Python wheel relies on
-# user-provided Python embedder classes via `PyEmbedderAdapter`, and
-# we don't want to pull a 100-200 MB ONNX runtime into every wheel
-# build. The `kglite-mcp-server` binary enables this feature so the
-# Rust-only deployment path supports `text_score()` semantic search
-# without a Python embedder.
-#
-# 0.9.19 perf: turn off `image-models` from fastembed's default
-# feature set — pulls in the heavy `image` crate (+jpeg/png/webp
-# decoders) for a code path we don't use. Saves ~3-4 min/wheel of
-# compile time. Keep `ort-download-binaries-native-tls` (prebuilt
-# ONNX Runtime binary — already not-compiled) and `hf-hub-native-tls`
-# (model downloads, system OpenSSL).
-# Phase G.3a: the fastembed dep moved into kglite-core. Root
-# crate's `fastembed` feature now propagates to kglite-core's
-# fastembed feature; this entry is no longer needed in root.
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-# Required by the `PostActivateHook` signature in mcp-methods'
-# Workspace API (`Arc<dyn Fn(...) -> anyhow::Result<()>>`). Used only
-# by the pyo3 wrappers in `src/mcp_tools.rs`; the rest of kglite is
-# anyhow-free.
-anyhow = "1"
-bincode = "1.3"
-chrono = { version = "0.4.43", features = ["serde"] }
-geo = "0.33"
-rstar = "0.12"
-wkt = "0.14"
-regex = "1"
-rayon = "1.10"
-flate2 = "1"
-zstd = "0.13"
-memmap2 = "0.9"
-# libc is already a transitive dep via memmap2; expose it directly so we
-# can call posix_fadvise / fcntl on file descriptors backing our mmaps —
-# needed by the streaming subgraph filter to actively evict source-side
-# page cache between phases.
-libc = "0.2"
-bzip2 = "0.6"
-# Pinned to git HEAD because crates.io 0.1.2 ships an older Cargo.toml
-# without the `rayon` feature flag (the feature exists on the v0.1.2 tag
-# itself but not in the published tarball). Drop the git dep and switch
-# to a regular version pin once 0.1.3+ is released.
-bzip2-rs = { git = "https://github.com/paolobarbolini/bzip2-rs", rev = "2be7684b444987d6cc7b0b226bda7581be739e3c", features = ["rayon"] }
-tree-sitter = "0.26.8"
-tree-sitter-python = "0.25.0"
-tree-sitter-rust = "0.24.2"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-go = "0.25.0"
-tree-sitter-java = "0.23.5"
-tree-sitter-c = "0.24.1"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-c-sharp = "0.23.5"
-tree-sitter-swift = "0.7.2"
-tree-sitter-php = "0.24.2"
-tree-sitter-html = "0.23.2"
-tree-sitter-css = "0.25.0"
-tree-sitter-dart = "0.2.0"
-toml = "1.1.2"
-roxmltree = "0.21.1"
-walkdir = "2.5.0"
-tempfile = "3"
-aho-corasick = "1.1.4"
-memchr = "2"
-rustc-hash = "2"
-mimalloc = { version = "0.1", default-features = false }
-csv = "1.3"
-geojson = "0.24"
-indexmap = { version = "2", features = ["serde"] }
-# Phase G.3a: the SEC / Sodir / Wikidata loaders moved INTO
-# kglite-core as feature-gated modules (`datasets::{sec,sodir,wikidata}`).
-# Pull them in via the kglite-core dep below with the matching
-# feature flags. The standalone `kglite-sec` / `kglite-sodir` /
-# `kglite-wikidata` crates are gone.
-kglite-core = { path = "crates/kglite", features = ["sec", "sodir", "wikidata"] }
-# Async runtime needed by the SEC client. The rest of kglite is sync;
-# we instantiate a single-threaded runtime inside src/sec.rs for the
-# duration of each fetch/extract call so Python callers see a normal
-# blocking function.
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-
-[dev-dependencies]
-tempfile = "3"
+# Phase G.4 — workspace root is now virtual (no `[package]`).
+# Polars-style layout: each crate has its own home under
+# `crates/`. The `kglite` Python wheel is built by maturin from
+# `crates/kglite-py/` (see `pyproject.toml`'s `[tool.maturin]
+# manifest-path`).
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# Same codegen as release but keeps line tables + symbols so samply /
-# `cargo flamegraph` / Instruments can attribute hot frames. Use with
-# `maturin develop --profile profiling` for Python-driven profiling, or
-# `cargo build --profile profiling --bin bz2_bench` for native binaries.
+# Same codegen as release but keeps line tables + symbols so samply
+# / `cargo flamegraph` / Instruments can attribute hot frames. Use
+# with `maturin develop --profile profiling` for Python-driven
+# profiling, or `cargo build --profile profiling --bin bz2_bench`
+# for native binaries.
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"

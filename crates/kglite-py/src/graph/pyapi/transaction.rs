@@ -152,7 +152,7 @@ impl Transaction {
         };
 
         // Phase E.2 — delegate pipeline orchestration to
-        // kglite::api::session. The pyapi Transaction keeps its
+        // kglite_core::api::session. The pyapi Transaction keeps its
         // own snapshot/working storage (so commit() can swap the
         // owner KG's Arc directly), but parse+validate+optimize+
         // execute now flows through the canonical session helpers.

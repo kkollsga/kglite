@@ -1796,74 +1796,6 @@ name = "kglite"
 version = "0.10.0"
 dependencies = [
  "aho-corasick",
- "anyhow",
- "bincode",
- "bzip2",
- "bzip2-rs",
- "chrono",
- "csv",
- "flate2",
- "geo",
- "geojson",
- "indexmap",
- "kglite-core",
- "libc",
- "mcp-methods",
- "memchr",
- "memmap2",
- "mimalloc",
- "petgraph",
- "pyo3",
- "rayon",
- "regex",
- "roxmltree",
- "rstar 0.12.2",
- "rustc-hash",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-dart",
- "tree-sitter-go",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-swift",
- "tree-sitter-typescript",
- "walkdir",
- "wkt",
- "zstd",
-]
-
-[[package]]
-name = "kglite-bolt-server"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "boltr",
- "chrono",
- "clap",
- "kglite-core",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "kglite-core"
-version = "0.10.0"
-dependencies = [
- "aho-corasick",
  "bincode",
  "bzip2",
  "bzip2-rs",
@@ -1914,6 +1846,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kglite-bolt-server"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "boltr",
+ "chrono",
+ "clap",
+ "kglite",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kglite-mcp-server"
 version = "0.0.1"
 dependencies = [
@@ -1923,7 +1870,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "kglite",
+ "kglite-py",
  "mcp-methods",
  "rmcp",
  "schemars",
@@ -1932,6 +1879,26 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "kglite-py"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "chrono",
+ "kglite",
+ "mcp-methods",
+ "mimalloc",
+ "petgraph",
+ "pyo3",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

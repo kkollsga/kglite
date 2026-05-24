@@ -54,7 +54,7 @@ use kglite_core::graph::io::file::load_file;
 /// kglite promises to keep — the underlying `pub mod graph` /
 /// `pub mod code_tree` are public for tooling but their internals can
 /// move between minor releases. New consumers should import from
-/// `kglite::api::*`; existing breakage there is a semver concern.
+/// `kglite_core::api::*`; existing breakage there is a semver concern.
 ///
 /// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
 /// independent — it stays as the wheel's primary surface.

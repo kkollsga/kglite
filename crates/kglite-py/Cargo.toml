@@ -1,0 +1,91 @@
+[package]
+# PyO3 wrapper crate. Built by maturin into the `kglite` wheel.
+# Pure-Rust engine lives in the sibling `kglite` crate (`crates/kglite/`).
+# Polars pattern: `polars` (core) + `py-polars` (wrapper).
+name = "kglite-py"
+version = "0.10.0"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."
+readme = "../../README.md"
+repository = "https://github.com/kkollsga/kglite"
+license = "MIT"
+
+# `python-extension` toggles pyo3's extension-module feature so the
+# wheel build (via maturin) and the kglite-mcp-server binary build
+# (via plain cargo) can share the same kglite-py rlib. Maturin is
+# wired to enable it; cargo build leaves it off.
+[features]
+default = ["abi3"]
+python-extension = ["pyo3/extension-module"]
+# Single-cdylib-for-many-Pythons mode. On by default so existing
+# `cargo build` / `cargo install` / `maturin develop` flows behave
+# exactly as before. The wheel-build workflow disables this with
+# `--no-default-features --features python-extension` to produce
+# per-Python-version wheels alongside the bundled binary.
+abi3 = ["pyo3/abi3-py310"]
+# Rust-native embedder backend (BAAI/bge-m3 et al via fastembed-rs).
+# Propagates to the kglite core crate's matching feature; the
+# actual `dep:fastembed` lives in `crates/kglite/Cargo.toml`.
+fastembed = ["kglite_core/fastembed"]
+
+[lib]
+# `name = "kglite_py"` avoids a workspace rlib filename collision
+# with the core crate's `libkglite.rlib`. The wheel's .so file
+# name is controlled by `pyproject.toml`'s `[tool.maturin]
+# module-name = "kglite.kglite"` so `kglite/__init__.py`'s
+# `from .kglite import *` continues to find the extension.
+name = "kglite_py"
+crate-type = ["cdylib", "rlib"]
+# Disable rustdoc's auto-compilation of code blocks. The user-facing
+# `/// Example::` blocks throughout `src/graph/pyapi/*.rs` are Python
+# snippets rendered by Sphinx for the published Python API docs — they're
+# never valid Rust, so rustdoc's default doctest harness fails on every
+# single-quoted string. There's no Rust API surface that needs doctest
+# coverage here either; the `#[pyclass]` types are exercised through
+# Python tests.
+doctest = false
+
+[dependencies]
+# `abi3-py310` is feature-gated so the wheel-build can opt in/out:
+# - On (default-on via `abi3` feature): single cdylib for Python 3.10+.
+# - Off (when bundling kglite-mcp-server into per-Python-version
+#   wheels): the wheel-build workflow disables this so each wheel is
+#   tagged for a single Python version.
+pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
+
+# Pure-Rust kglite engine. Phase G.3a moved the engine here; this
+# crate wraps it for the Python boundary.
+#
+# `package = "kglite", ... as "kglite_core"`: the dep is the
+# kglite engine crate, but we name it `kglite_core` inside this
+# crate's source to avoid an extern-crate collision with this
+# crate's own `[lib] name = "kglite"` (the cdylib that becomes
+# the wheel's `kglite.abi3.so`).
+kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata"] }
+
+# Generic MCP framework tools (ping, read_source, grep, list_source,
+# github_issues, github_api, workspace). 0.9.21+: depend on the
+# pure-Rust mcp-methods crate (split into a three-crate workspace
+# in 0.3.26) and expose its functions to Python via pyo3 wrappers
+# in `src/mcp_tools.rs`. The `server` feature pulls the framework
+# half (manifest parser + tool implementations) without any pyo3
+# dep.
+mcp-methods = { version = "0.3.39", default-features = false, features = ["server"] }
+
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+# Required by the `PostActivateHook` signature in mcp-methods'
+# Workspace API. Used only by the pyo3 wrappers in `src/mcp_tools.rs`.
+anyhow = "1"
+petgraph = { version = "0.8.3", features = ["serde-1"] }
+bincode = "1.3"
+chrono = { version = "0.4.43", features = ["serde"] }
+regex = "1"
+rayon = "1.10"
+mimalloc = { version = "0.1", default-features = false }
+# Async runtime needed by the SEC client wrapper at src/sec.rs.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
