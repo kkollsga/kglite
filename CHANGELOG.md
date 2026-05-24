@@ -46,6 +46,35 @@ test contract, and the perf baseline that Phase C sub-phases will retire.
 This is **prep work**, not a feature release. No `Cargo.toml`
 version bump.
 
+### Added — `kglite::api::cypher::validate_schema` exposed; both pure-Rust servers now run it
+
+User flagged a real gap: the Python boundary (`src/graph/pyapi/kg_core.rs`)
+has called `validate_schema` between parse and optimize since 0.9.x
+to catch property typos in pattern literals (`{ttle: 'Alice'}` when
+only `title` exists on `Person`) — so users see "Unknown property
+`ttle` on type `Person` — did you mean `title`?" instead of silently
+getting zero rows. The pure-Rust `kglite-mcp-server` and (newly
+added) `kglite-bolt-server` were both missing this pass.
+
+- **`kglite::api::cypher::validate_schema`**: new `pub use` in
+  `src/lib.rs` (was only reachable via the internal `crate::graph::
+  languages::cypher::*` path, which the api docs explicitly warn
+  downstream consumers away from).
+- **`crates/kglite-mcp-server/src/tools.rs`**: adds the call right
+  after `parse_cypher`. Error mapped to `String` (matches the
+  existing mcp-server error pipeline).
+- **`crates/kglite-bolt-server/src/backend.rs::execute`**: adds the
+  call as pipeline step 2 (renumbered the rest). Error mapped to
+  `BoltError::Protocol` (genuine client error — bad property name
+  → `Neo.ClientError.Request.Invalid` on the wire). Distinct from
+  the `BoltError::Backend`-mapped "feature pending" errors C.2/C.3
+  use for slices we haven't shipped yet.
+
+All three downstream Cypher consumers (Python `cypher()`, MCP
+`cypher_query`, Bolt `execute`) now behave identically wrt schema
+validation. Bolt smoke contract still reports `3 passed, 5 xfailed`;
+MCP smoke still reports 32 passed.
+
 ### Internal — Bolt protocol C.3 (parameter PackStream decoding)
 
 Third sub-phase of Phase C. The Bolt server now accepts parameterized

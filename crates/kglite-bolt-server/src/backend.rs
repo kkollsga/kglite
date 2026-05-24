@@ -188,7 +188,14 @@ impl BoltBackend for KgliteBackend {
         let mut parsed =
             cypher::parse_cypher(query).map_err(|e| BoltError::Backend(e.to_string()))?;
 
-        // 2. Rewrite text_score(). We don't load embeddings in the
+        // 2. Schema validation. Catches property typos in pattern
+        // literals (`{ttle: 'Alice'}` when only `title` exists on
+        // Person) before the executor commits to a scan. SchemaError
+        // is a genuine client problem (bad property name) — Protocol/
+        // ClientError mapping, not Backend/DatabaseError.
+        cypher::validate_schema(&parsed, dir).map_err(|e| BoltError::Protocol(e.to_string()))?;
+
+        // 3. Rewrite text_score(). We don't load embeddings in the
         // bolt-server today; if the user issues a text_score() query,
         // we'd need a registered embedder. Reject cleanly for now.
         let rewrite =
@@ -201,7 +208,7 @@ impl BoltBackend for KgliteBackend {
             ));
         }
 
-        // 3. Optimize (run all planner passes).
+        // 4. Optimize (run all planner passes).
         cypher::planner::optimize_with_disabled(
             &mut parsed,
             dir,
@@ -209,10 +216,10 @@ impl BoltBackend for KgliteBackend {
             cypher::planner::empty_disabled_set(),
         );
 
-        // 4. Mark lazy eligibility on RETURN clauses.
+        // 5. Mark lazy eligibility on RETURN clauses.
         cypher::mark_lazy_eligibility(&mut parsed);
 
-        // 5. Mutation gate. The read executor errors out on mutations;
+        // 6. Mutation gate. The read executor errors out on mutations;
         // surface a clear "Phase C.5 not shipped" message instead. The
         // BoltError::Backend → Neo.DatabaseError mapping means test #7
         // (pytest.raises(ClientError)) doesn't catch this, so XFAIL
@@ -226,7 +233,7 @@ impl BoltBackend for KgliteBackend {
             ));
         }
 
-        // 6. Execute. Force eager materialization (streaming=false) so
+        // 7. Execute. Force eager materialization (streaming=false) so
         // result.rows is always populated; the lazy-descriptor path is
         // a Phase D perf concern. boltr's PULL handler buffers anyway.
         let result = cypher::CypherExecutor::with_params(dir, &kg_params, None)
@@ -236,7 +243,7 @@ impl BoltBackend for KgliteBackend {
 
         let elapsed_ms = elapsed_start.elapsed().as_millis() as i64;
 
-        // 7. Convert rows → BoltRecords. Scalar arms succeed; Node /
+        // 8. Convert rows → BoltRecords. Scalar arms succeed; Node /
         // Relationship / Path return Err (Phase C.4 fills them in).
         // `.collect::<Result<_, _>>()` short-circuits on first failure.
         let records: Vec<BoltRecord> = result
@@ -250,7 +257,7 @@ impl BoltBackend for KgliteBackend {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // 8. Build the SUCCESS summary. The driver treats every key
+        // 9. Build the SUCCESS summary. The driver treats every key
         // as optional; `type: "r"` + `t_last` is the minimal useful
         // shape for ResultSummary metadata. Mutation stats / `type: "w"`
         // come with C.5.

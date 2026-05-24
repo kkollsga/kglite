@@ -70,6 +70,7 @@ pub mod api {
         pub use crate::graph::languages::cypher::parser::parse_cypher;
         pub use crate::graph::languages::cypher::planner;
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
+        pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::result::CypherResult;
     }

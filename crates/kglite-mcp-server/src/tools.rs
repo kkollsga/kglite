@@ -232,6 +232,18 @@ fn run_cypher_inner(
     let mut parsed = cypher::parse_cypher(query).map_err(|e| e.to_string())?;
     let mut params = params;
 
+    // Schema validation — catches property typos in pattern literals
+    // (`{ttle: 'Alice'}` when only `title` exists on Person) before
+    // the executor commits to a scan. The agent UX win is "Unknown
+    // property `ttle` on type `Person` — did you mean `title`?" vs
+    // silently returning zero rows.
+    //
+    // Mirrors `src/graph/pyapi/kg_core.rs::cypher` which has used
+    // this pass since 0.9.x. The MCP and Bolt server crates picked
+    // it up together so all three downstream consumers behave
+    // identically.
+    cypher::validate_schema(&parsed, kg.dir()).map_err(|e| e.to_string())?;
+
     let rewrite = cypher::rewrite_text_score(&mut parsed, &params)?;
     if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
         let model = kg
