@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal — Polars-style core split (Phase G of `bolt_implementation.md`)
+
+The Rust core moves out of the wheel crate into a pure-Rust
+sibling crate at `crates/kglite/` (currently package-named
+`kglite-core`; renamed to `kglite` in a follow-up commit). The
+PyO3 wrapper stays at the workspace root and now depends on the
+new core via `kglite-core = { path = "crates/kglite" }`.
+
+**Why** — Polars precedent: kglite's engine has always been pure
+Rust, but pyo3 was an unconditional dep of the only crate that
+held it. Rust embedders (anyone wanting kglite as a graph
+library without the Python wheel) inherited pyo3's build
+complexity. The split fixes that.
+
+**End-state verified by `cargo tree`:**
+- `cargo tree -p kglite-core | grep pyo3` → **empty** ✓
+- `cargo tree -p kglite-bolt-server | grep pyo3` → **empty** ✓ (switched to `kglite = { package = "kglite-core" }` direct dep)
+- `cargo tree -p kglite-mcp-server | grep pyo3` → still present (uses `KnowledgeGraph::source_location` etc. that live in the pyo3 wrapper; cleanup deferred)
+- `cargo tree -p kglite | grep pyo3` → present (this is the wheel — expected)
+
+**Highlights:**
+- **Dataset crates merged** — `crates/kglite-{sec,sodir,wikidata}/`
+  folded into `crates/kglite/src/datasets/{sec,sodir,wikidata}/`
+  behind features (`sec`, `sodir`, `wikidata`). Workspace down
+  from 7 → 4 members. Polars-io pattern: opt in to dataset
+  loaders only when you use them.
+- **117 KgError→PyErr sites converted** to use a
+  `kg_to_pyerr()` helper, fixing the orphan-rule violation that
+  would otherwise block the move (`impl From<KgError> for PyErr`
+  becomes invalid once KgError lives outside the wrapper crate).
+- **Visibility bumps on `DirGraph`** — ~23 `pub(crate)` fields
+  + 6 helpers (`resolve_node_property`, `MethodConfig`, etc.)
+  promoted to `pub` for cross-crate access. Pragmatic "wide
+  public" choice over a ~25-method accessor refactor; tracked
+  as a follow-up.
+- **Embedder examples + binding-implementer guide** —
+  `crates/kglite/examples/embedded_{basic,session,blueprint}.rs`
+  run cleanly with `cargo run -p kglite-core --example …`. New
+  `docs/explanation/embedding-kglite.md` walks through the
+  surface, the .kgl portability story, and sketches cgo / napi
+  / JNI wrappers for future bindings.
+- **`pip install kglite` unchanged for Python users.** Same
+  wheel, same Python API, same `kglite-mcp-server` console
+  script. The split is invisible from PyPI's side.
+
+**Verification (~12 minutes wall-clock):**
+- `cargo build --workspace --release` green (~3min)
+- `cargo run -p kglite-core --example embedded_session` works
+- `cargo run -p kglite-core --example embedded_blueprint` works
+- `pytest tests/` → 3013 + 1 skipped (unchanged)
+- `pytest tests/ -m bolt` → 233 + 3 skipped (unchanged)
+- `pytest tests/ -m bolt_stress` → 9 (unchanged)
+- `make lint` clean
+
 ### Internal — `kglite::api::session` standardization (Phase E of `bolt_implementation.md`)
 
 Single source of truth for the canonical Cypher pipeline and the
