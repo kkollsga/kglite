@@ -13,6 +13,7 @@
 //! against working/snapshot). [`execute_mut`] takes `&mut DirGraph`
 //! (in-tx writes against `Transaction::working_mut()`).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -114,7 +115,7 @@ pub fn execute_read(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let parsed = prepare(graph, query, opts)?;
+    let (parsed, params) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
 
     // EXPLAIN: render plan rows, skip execution.
@@ -136,7 +137,7 @@ pub fn execute_read(
         ));
     }
 
-    let result = cypher::CypherExecutor::with_params(graph, opts.params, opts.deadline)
+    let result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
         .with_max_rows(opts.max_rows)
         .with_streaming(opts.lazy_eligible)
         .execute(&parsed)
@@ -166,7 +167,7 @@ pub fn execute_mut(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let parsed = prepare(graph, query, opts)?;
+    let (parsed, params) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
 
     if parsed.explain {
@@ -180,14 +181,14 @@ pub fn execute_mut(
     }
 
     let result = if is_mutation {
-        cypher::execute_mutable(graph, &parsed, opts.params.clone(), opts.deadline).map_err(
-            |message| KgError::CypherExecution {
+        cypher::execute_mutable(graph, &parsed, params, opts.deadline).map_err(|message| {
+            KgError::CypherExecution {
                 message,
                 position: None,
-            },
-        )?
+            }
+        })?
     } else {
-        cypher::CypherExecutor::with_params(graph, opts.params, opts.deadline)
+        cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
             .with_max_rows(opts.max_rows)
             .with_streaming(opts.lazy_eligible)
             .execute(&parsed)
@@ -205,62 +206,59 @@ pub fn execute_mut(
     })
 }
 
-/// Shared preparation: parse → validate → rewrite_text_score →
-/// optimize → optional mark_lazy. Returns the parsed+optimized AST.
+/// Shared preparation: parse → validate → rewrite_text_score → embed
+/// (if needed) → optimize → optional mark_lazy. Returns the
+/// parsed+optimized AST + the (possibly-augmented-with-embeddings)
+/// param map.
+///
+/// The params map is borrowed from `opts.params` in the common case
+/// (no text_score). When text_score() is present, we clone-on-write
+/// to inject the embedding result vectors into the map — the
+/// returned `HashMap<String, Value>` is owned in that case.
+///
+/// **GIL note for binding implementers.** If `opts.embedder` is a
+/// Python-backed embedder (PyEmbedderAdapter), the binding MUST
+/// release the GIL before calling `execute_read`/`execute_mut`
+/// (Python's `py.detach`). The embed call inside this fn will then
+/// re-acquire the GIL briefly to invoke Python; if you forget to
+/// release first, it deadlocks.
 fn prepare(
     graph: &DirGraph,
     query: &str,
     opts: &ExecuteOptions<'_>,
-) -> Result<CypherQuery, KgError> {
+) -> Result<(CypherQuery, HashMap<String, Value>), KgError> {
     let mut parsed = cypher::parse_cypher(query)?;
 
     // Schema validation — property typos in pattern literals
     // (`{ttle: 'Alice'}`) get caught with a "did you mean?" hint.
     cypher::validate_schema(&parsed, graph).map_err(KgError::from)?;
 
-    // text_score() rewrite + embed. If the query uses text_score()
-    // we need an embedder; reject otherwise.
+    // text_score() rewrite. Scans for `text_score(...)` calls in the
+    // AST and rewrites them to `vector_score(...)`, collecting the
+    // texts to embed alongside.
     let rewrite = cypher::rewrite_text_score(&mut parsed, opts.params).map_err(|message| {
         KgError::CypherExecution {
             message,
             position: None,
         }
     })?;
-    if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
-        // text_score() requires the binding to embed the texts +
-        // inject the resulting vectors into the params map BEFORE
-        // calling session::execute_*. Phase E1 doesn't propagate
-        // a mutable params map; pyapi will keep its own embed loop
-        // wrapping the call (Python needs py.detach around it
-        // anyway). bolt-server + mcp-server don't wire text_score
-        // today; they get a clean error pointing at the limitation.
-        //
-        // TODO(future): take params by `&mut HashMap`, accept an
-        // optional embedder + inline the embed loop here so all
-        // bindings share it.
-        if opts.embedder.is_none() {
-            return Err(KgError::Argument(
-                "text_score() requires a registered embedder; \
-                 pass one via ExecuteOptions::embedder or call the \
-                 binding's higher-level cypher() entry point that \
-                 inlines the embed loop"
-                    .to_string(),
-            ));
-        }
-        return Err(KgError::CypherExecution {
-            message: "text_score() embed loop not yet wired through session::execute — \
-                      the embed step still lives in the binding (pyapi/kg_core.rs); \
-                      call the binding's cypher() entry point until E2 lifts it"
-                .to_string(),
-            position: None,
-        });
-    }
+
+    // If text_score(...) was used (and we're NOT in EXPLAIN mode —
+    // EXPLAIN renders plan rows without executing, so no embedding
+    // needed), run the embedder and inject the result vectors into
+    // the param map. Otherwise pass the caller's params through.
+    let params: Cow<'_, HashMap<String, Value>> =
+        if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
+            Cow::Owned(embed_into_params(opts, &rewrite)?)
+        } else {
+            Cow::Borrowed(opts.params)
+        };
 
     // Optimize. Empty disabled-set is the common case; avoid the
     // HashSet allocation when no passes are disabled.
     let disabled_default = cypher::planner::empty_disabled_set();
     let disabled_ref = opts.disabled_passes.unwrap_or(disabled_default);
-    cypher::planner::optimize_with_disabled(&mut parsed, graph, opts.params, disabled_ref);
+    cypher::planner::optimize_with_disabled(&mut parsed, graph, &params, disabled_ref);
 
     // Lazy marking — only when the caller asked for it. Without
     // this call, the executor materializes rows eagerly. With it,
@@ -271,5 +269,62 @@ fn prepare(
         cypher::mark_lazy_eligibility(&mut parsed);
     }
 
-    Ok(parsed)
+    Ok((parsed, params.into_owned()))
+}
+
+/// Run the embedder on collected texts; inject the JSON-encoded
+/// vectors into a clone of the param map. Caller-supplied params
+/// are not mutated. Returns the augmented map.
+fn embed_into_params(
+    opts: &ExecuteOptions<'_>,
+    rewrite: &cypher::planner::simplification::TextScoreRewrite,
+) -> Result<HashMap<String, Value>, KgError> {
+    let model = opts
+        .embedder
+        .as_ref()
+        .ok_or_else(|| KgError::CypherExecution {
+            message: "text_score() requires a registered embedding model. \
+                      Call g.set_embedder(model) first (Python) or pass an embedder \
+                      via ExecuteOptions::embedder (downstream Rust consumers)."
+                .to_string(),
+            position: None,
+        })?;
+    model.load().map_err(|message| KgError::CypherExecution {
+        message,
+        position: None,
+    })?;
+    let texts: Vec<String> = rewrite
+        .texts_to_embed
+        .iter()
+        .map(|(_, t)| t.clone())
+        .collect();
+    let embed_result = model.embed(&texts);
+    model.unload();
+    let embeddings: Vec<Vec<f32>> = embed_result.map_err(|message| KgError::CypherExecution {
+        message,
+        position: None,
+    })?;
+    if embeddings.len() != texts.len() {
+        return Err(KgError::CypherExecution {
+            message: format!(
+                "text_score: model.embed() returned {} vectors for {} texts",
+                embeddings.len(),
+                texts.len()
+            ),
+            position: None,
+        });
+    }
+    let mut params = opts.params.clone();
+    for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
+        let json = format!(
+            "[{}]",
+            embeddings[i]
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        params.insert(param_name.clone(), Value::String(json));
+    }
+    Ok(params)
 }

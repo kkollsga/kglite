@@ -5,7 +5,6 @@
 //! blocks at class-registration time, so the split is purely structural —
 //! no runtime impact.
 
-use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
 use crate::graph::introspection::{self, reporting::OperationReport};
 use crate::graph::io;
@@ -1248,28 +1247,8 @@ impl KnowledgeGraph {
             Some(ms) => Some(std::time::Instant::now() + std::time::Duration::from_millis(ms)),
         };
 
-        // Parse the Cypher query (no borrow needed).
-        // Phase A.2 / C2 — `?` flows the typed KgError through
-        // `From<KgError> for PyErr` (in src/error_py.rs), which picks
-        // the appropriate exception subclass (here CypherSyntaxError).
-        // Line/col preserved as struct fields on the Rust side; the
-        // message also includes them for human display.
-        let mut parsed = cypher::parse_cypher(query)?;
-
-        // Schema validation — catches unknown node/edge types and properties
-        // before any execution or scan. Runs in O(clauses) against in-memory
-        // metadata; skipped when the graph has no declared schema.
-        // Phase A.2 / C3 — SchemaError flows via From<SchemaError> for KgError
-        // and From<KgError> for PyErr, automatically raising kglite.SchemaError.
-        {
-            let this = slf.borrow();
-            cypher::validate_schema(&parsed, &this.inner).map_err(crate::error::KgError::from)?;
-        }
-
-        let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
-
-        // Convert params dict to HashMap<String, Value> (before optimize so pushdown can resolve params)
-        let mut param_map = if let Some(params_dict) = params {
+        // Decode params (PyDict → HashMap<String, Value>).
+        let param_map = if let Some(params_dict) = params {
             let mut map = std::collections::HashMap::new();
             for (key, val) in params_dict.iter() {
                 let key_str: String = key.extract()?;
@@ -1281,155 +1260,85 @@ impl KnowledgeGraph {
             std::collections::HashMap::new()
         };
 
-        // Rewrite text_score() → vector_score() and collect texts to embed.
-        // Phase A.2 / C3 — typed CypherExecutionError via the From boundary.
-        let rewrite = cypher::rewrite_text_score(&mut parsed, &param_map).map_err(|e| {
-            crate::error::KgError::CypherExecution {
-                message: e,
-                position: None,
-            }
-        })?;
-
-        // Embed collected query texts if any (skip for EXPLAIN)
-        if !rewrite.texts_to_embed.is_empty() && !parsed.explain {
-            let this = slf.borrow();
-            let model: std::sync::Arc<dyn crate::graph::embedder::Embedder> = match &this.embedder {
-                Some(m) => std::sync::Arc::clone(m),
-                None => {
-                    return Err(crate::error::KgError::CypherExecution {
-                        message: "text_score() requires a registered embedding model. \
-                             Call g.set_embedder(model) first."
-                            .to_string(),
-                        position: None,
-                    }
-                    .into())
-                }
-            };
-            model
-                .load()
-                .map_err(|e| crate::error::KgError::CypherExecution {
-                    message: e,
-                    position: None,
-                })?;
-
-            let texts: Vec<String> = rewrite
-                .texts_to_embed
-                .iter()
-                .map(|(_, t)| t.clone())
-                .collect();
-            // Release the GIL while the embedder runs — PyEmbedderAdapter
-            // will reacquire it inside its `embed`; FastEmbedAdapter
-            // doesn't need Python at all.
-            let embed_result = py.detach(|| model.embed(&texts));
-            model.unload();
-            let embeddings: Vec<Vec<f32>> =
-                embed_result.map_err(|e| crate::error::KgError::CypherExecution {
-                    message: e,
-                    position: None,
-                })?;
-
-            if embeddings.len() != texts.len() {
-                return Err(crate::error::KgError::CypherExecution {
-                    message: format!(
-                        "text_score: model.embed() returned {} vectors for {} texts",
-                        embeddings.len(),
-                        texts.len()
-                    ),
-                    position: None,
-                }
-                .into());
-            }
-
-            for (i, (param_name, _)) in rewrite.texts_to_embed.iter().enumerate() {
-                let json = format!(
-                    "[{}]",
-                    embeddings[i]
-                        .iter()
-                        .map(|f| f.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                param_map.insert(param_name.clone(), Value::String(json));
-            }
-        }
-
-        // Optimize (predicate pushdown, etc.) — needs shared borrow of graph.
-        // Hot path: when both kwargs are at defaults (the overwhelmingly
-        // common case), use the static empty-set reference and skip the
-        // HashSet allocation that build_disabled_passes would do.
+        // Build the planner's disabled-passes set. Hot path: when
+        // both kwargs are at defaults, use the static empty-set
+        // reference and skip the HashSet allocation.
         let disabled_owned: Option<std::collections::HashSet<String>> =
             if disable_optimizer || disabled_passes.is_some() {
                 Some(build_disabled_passes(disable_optimizer, disabled_passes)?)
             } else {
                 None
             };
-        {
-            let this = slf.borrow();
-            let disabled_ref: &std::collections::HashSet<String> = disabled_owned
-                .as_ref()
-                .unwrap_or_else(|| cypher::planner::empty_disabled_set());
-            cypher::planner::optimize_with_disabled(
-                &mut parsed,
-                &this.inner,
-                &param_map,
-                disabled_ref,
-            );
-        }
-        // Top-level-only lazy annotation. Must run AFTER optimize() (so the
-        // clause shape is final) and OUTSIDE the recursive nested-query
-        // pass (so UNION arms don't get marked).
-        cypher::mark_lazy_eligibility(&mut parsed);
 
-        // EXPLAIN: return structured query plan without executing
-        if parsed.explain {
-            let this = slf.borrow();
-            let result = cypher::generate_explain_result(&parsed, &this.inner);
-            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-            return Py::new(py, view).map(|v| v.into_any());
-        }
+        // Phase E.2: pre-parse to decide whether this is a mutation
+        // (routes to execute_mut against &mut DirGraph) or a read
+        // (routes to execute_read against &DirGraph via Arc snapshot).
+        // The parser is cached so this second parse inside
+        // session::execute is a hit, ~0 µs overhead.
+        let pre_parsed = cypher::parse_cypher(query)?;
+        let is_mutation = cypher::is_mutation_query(&pre_parsed);
 
-        if cypher::is_mutation_query(&parsed) {
-            // Read-only guard: reject mutations when read_only is enabled.
-            // Phase A.2 / C3 — typed CypherExecutionError.
-            {
-                let this = slf.borrow();
-                if this.inner.read_only {
-                    return Err(crate::error::KgError::CypherExecution {
-                        message:
-                            "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
-                             are disabled. Use kg.read_only(False) to re-enable mutations."
-                                .to_string(),
-                        position: None,
-                    }
-                    .into());
+        // Read-only graph guard: reject mutations on a read-only kg.
+        // (Separate from per-transaction read_only — this is a
+        // graph-wide flag set via kg.read_only(True).)
+        if is_mutation {
+            let this = slf.borrow();
+            if this.inner.read_only {
+                return Err(crate::error::KgError::CypherExecution {
+                    message: "Graph is in read-only mode — CREATE, SET, DELETE, REMOVE, and MERGE \
+                              are disabled. Use kg.read_only(False) to re-enable mutations."
+                        .to_string(),
+                    position: None,
                 }
+                .into());
             }
-            // Mutation path: needs exclusive borrow
+        }
+
+        let query_started = std::time::Instant::now();
+
+        if is_mutation {
+            // Mutation path: needs exclusive borrow of the graph.
             let mut this = slf.borrow_mut();
             let graph = get_graph_mut(&mut this.inner);
-            let mut result =
-                cypher::execute_mutable(graph, &parsed, param_map, deadline).map_err(|e| {
-                    crate::error::KgError::CypherExecution {
-                        message: e,
-                        position: None,
-                    }
-                })?;
-            // Auto-vacuum after deletions
+
+            // Embedder snapshot for text_score() — borrow ends before
+            // session::execute_mut so the embed call inside can grab
+            // the GIL again if needed.
+            let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> =
+                None; // mutations don't typically use text_score; skip the embedder snapshot
+
+            let opts = crate::graph::session::ExecuteOptions {
+                params: &param_map,
+                deadline,
+                max_rows: effective_max_rows,
+                lazy_eligible: streaming,
+                disabled_passes: disabled_owned.as_ref(),
+                embedder: embedder_for_opts,
+            };
+
+            let outcome = crate::graph::session::execute_mut(graph, query, &opts)?;
+            let mut result = outcome.result;
+            let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
+
+            if outcome.explain {
+                let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+                return Py::new(py, view).map(|v| v.into_any());
+            }
+
+            // Auto-vacuum + last-mutation stats — pyapi-specific
+            // post-mutation bookkeeping.
             if let Some(ref stats) = result.stats {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
                     && graph.check_auto_vacuum()
                 {
                     this.selection = schema::CowSelection::new();
                 }
-            }
-            // Store mutation stats
-            if let Some(ref stats) = result.stats {
                 this.last_mutation_stats = Some(stats.clone());
             }
-            // Resolve NodeRef values to node titles before Python conversion
+            // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);
-            // Convert to Python
-            if output_csv {
+
+            return if output_csv {
                 result.to_csv().into_py_any(py)
             } else if to_df {
                 let preprocessed = cypher::py_convert::preprocess_values_owned(result.rows);
@@ -1441,48 +1350,66 @@ impl KnowledgeGraph {
             } else {
                 let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
                 Py::new(py, view).map(|v| v.into_any())
-            }
-        } else {
-            // Read-only path: clone Arc, release borrow, then execute without GIL.
-            // Phase A.3 / 0.9.53 — Issue #3 partial fix: extended py.detach to
-            // also cover resolve_noderefs. The resolve step is pure Rust
-            // (touches the graph, not Python) but was previously running under
-            // the GIL after execute returned. For result sets with NodeRef
-            // values this reduces per-call GIL hold time and helps concurrent
-            // read scaling on multi-core systems.
-            let inner = {
-                let this = slf.borrow();
-                this.inner.clone()
             };
-            let query_started = std::time::Instant::now();
-            let result = {
-                let executor = cypher::CypherExecutor::with_params(&inner, &param_map, deadline)
-                    .with_max_rows(effective_max_rows)
-                    .with_streaming(streaming);
-                let inner_for_detach = std::sync::Arc::clone(&inner);
-                py.detach(move || {
-                    let mut result = executor.execute(&parsed)?;
-                    resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
-                    Ok::<_, String>(result)
-                })
-            }
-            .map_err(|e| crate::error::KgError::CypherExecution {
-                message: e,
-                position: None,
-            })?;
-            let elapsed_ms = query_started.elapsed().as_millis() as u64;
-            // `Some(0)` is the documented "disable deadline" escape hatch.
-            // Report it as "no deadline" (None) in diagnostics so the
-            // field reflects what actually applied at runtime.
-            let reported_timeout_ms = match effective_timeout {
-                Some(0) | None => None,
-                other => other,
+        }
+
+        // Read path: clone Arc for the shared snapshot, release the
+        // pyclass borrow, then route through session::execute_read
+        // inside py.detach so the GIL is free during parse / optimize
+        // / execute / resolve_noderefs.
+        let inner = {
+            let this = slf.borrow();
+            this.inner.clone()
+        };
+        let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> = {
+            let this = slf.borrow();
+            this.embedder.clone()
+        };
+        let result = {
+            let opts = crate::graph::session::ExecuteOptions {
+                params: &param_map,
+                deadline,
+                max_rows: effective_max_rows,
+                lazy_eligible: streaming,
+                disabled_passes: disabled_owned.as_ref(),
+                embedder: embedder_for_opts,
             };
-            let diagnostics = cypher::result::QueryDiagnostics {
-                elapsed_ms,
-                timed_out: false,
-                timeout_ms: reported_timeout_ms,
-            };
+            let inner_for_detach = std::sync::Arc::clone(&inner);
+            py.detach(move || -> Result<crate::graph::languages::cypher::result::CypherResult, crate::error::KgError> {
+                let outcome = crate::graph::session::execute_read(&inner_for_detach, query, &opts)?;
+                let mut result = outcome.result;
+                resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
+                Ok(result)
+            })?
+        };
+        let elapsed_ms = query_started.elapsed().as_millis() as u64;
+        // EXPLAIN: session::execute_read renders the plan into
+        // result.rows — wrap in ResultView and return.
+        // (Detect via lack of regular execution markers: explain
+        // results have specific column names; simpler to re-parse
+        // the flag from the cache.)
+        let output_csv = {
+            // Use the cache-hit pre_parsed AST for output_format /
+            // explain detection without re-parsing inside py.detach.
+            pre_parsed.output_format == cypher::OutputFormat::Csv
+        };
+        if pre_parsed.explain {
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+            return Py::new(py, view).map(|v| v.into_any());
+        }
+
+        // `Some(0)` is the documented "disable deadline" escape hatch.
+        // Report it as "no deadline" (None) in diagnostics.
+        let reported_timeout_ms = match effective_timeout {
+            Some(0) | None => None,
+            other => other,
+        };
+        let diagnostics = cypher::result::QueryDiagnostics {
+            elapsed_ms,
+            timed_out: false,
+            timeout_ms: reported_timeout_ms,
+        };
+        {
             let columns = result.columns;
             let stats = result.stats;
             let profile = result.profile;

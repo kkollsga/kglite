@@ -150,41 +150,22 @@ impl Transaction {
             None => HashMap::new(),
         };
 
-        // Phase A.3 / 0.9.53 — Issue #1 fix: deferred clone on begin().
+        // Phase E.2 — delegate pipeline orchestration to
+        // kglite::api::session. The pyapi Transaction keeps its
+        // own snapshot/working storage (so commit() can swap the
+        // owner KG's Arc directly), but parse+validate+optimize+
+        // execute now flows through the canonical session helpers.
         //
-        // The transaction starts in one of two states:
-        //   - read_only=true: snapshot=Some, working=None (forever)
-        //   - read_only=false: snapshot=Some, working=None (deferred state)
-        //                       OR snapshot=None, working=Some (after first
-        //                       mutation materialized the clone)
+        // Decision routing:
+        //   - is_mutation + read_only → reject
+        //   - is_mutation + RW → materialize working, execute_mut
+        //   - read → execute_read against current graph view
         //
-        // We parse + validate against whichever graph is currently active
-        // (snapshot OR working), then — only if a mutation needs to land
-        // — materialize the working copy lazily. Read-only-then-commit
-        // transactions never pay the clone cost.
-        let active_graph: &DirGraph = self
-            .working
-            .as_ref()
-            .map(|g| g as &DirGraph)
-            .or(self.snapshot.as_deref())
-            .ok_or_else(|| -> PyErr {
-                crate::error::KgError::Argument(
-                    "Transaction already committed or rolled back".to_string(),
-                )
-                .into()
-            })?;
+        // The pre-parse below is on the cached parser (~700ns hit)
+        // so session::execute's own parse inside is free.
+        let pre_parsed = cypher::parse_cypher(query)?;
+        let is_mut = cypher::is_mutation_query(&pre_parsed);
 
-        let mut parsed = cypher::parse_cypher(query)?;
-        cypher::validate_schema(&parsed, active_graph).map_err(crate::error::KgError::from)?;
-        cypher::optimize(&mut parsed, active_graph, &param_map);
-
-        if parsed.explain {
-            let result = cypher::generate_explain_result(&parsed, active_graph);
-            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
-            return Py::new(py, view).map(|v| v.into_any());
-        }
-
-        let is_mut = cypher::is_mutation_query(&parsed);
         if is_mut && self.read_only {
             return Err(crate::error::KgError::Argument(
                 "Read-only transaction does not support mutations \
@@ -194,7 +175,18 @@ impl Transaction {
             .into());
         }
 
-        let output_csv = parsed.output_format == cypher::OutputFormat::Csv;
+        let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
+        let opts = crate::graph::session::ExecuteOptions {
+            params: &param_map,
+            deadline,
+            max_rows: None,
+            // Transactions historically went through the eager path
+            // (mark_lazy off, streaming off) — no lazy materializer
+            // is wired through the tx ResultView. Preserve that.
+            lazy_eligible: false,
+            disabled_passes: None,
+            embedder: None,
+        };
 
         let result = if is_mut {
             // Materialize the working copy on first mutation. Arc::try_unwrap
@@ -214,31 +206,26 @@ impl Transaction {
                 .working
                 .as_mut()
                 .expect("invariant: materialized above");
-            cypher::execute_mutable(working, &parsed, param_map, deadline).map_err(|e| {
-                crate::error::KgError::CypherExecution {
-                    message: e,
-                    position: None,
-                }
-            })?
+            crate::graph::session::execute_mut(working, query, &opts)?.result
         } else {
-            // Read path: route to whichever graph is active. We already
-            // grabbed `active_graph` above but the borrow ended at parse;
-            // re-acquire to satisfy the borrow checker.
             let graph: &DirGraph = self
                 .working
                 .as_ref()
                 .map(|g| g as &DirGraph)
                 .or(self.snapshot.as_deref())
-                .expect("invariant: active_graph existed above");
-            let executor = cypher::CypherExecutor::with_params(graph, &param_map, deadline);
-            executor
-                .execute(&parsed)
-                .map_err(|e| crate::error::KgError::CypherExecution {
-                    message: e,
-                    position: None,
-                })?
+                .ok_or_else(|| -> PyErr {
+                    crate::error::KgError::Argument(
+                        "Transaction already committed or rolled back".to_string(),
+                    )
+                    .into()
+                })?;
+            crate::graph::session::execute_read(graph, query, &opts)?.result
         };
 
+        if pre_parsed.explain {
+            let view = crate::graph::pyapi::result_view::ResultView::from_cypher_result(result);
+            return Py::new(py, view).map(|v| v.into_any());
+        }
         if output_csv {
             result.to_csv().into_py_any(py)
         } else if to_df {
