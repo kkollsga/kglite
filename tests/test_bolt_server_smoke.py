@@ -182,9 +182,8 @@ def test_bolt_run_returns_scalar_rows(bolt_server):
     assert names == ["Alice", "Bob", "Carol", "Dave"]
 
 
-@pytest.mark.xfail(strict=True, reason="retired by Phase C.3 — parameter PackStream decoding")
 def test_bolt_run_supports_parameters(bolt_server):
-    """Phase C.3: RUN with `$param` map decoded from PackStream."""
+    """Phase C.3 ✓: RUN with `$param` map decoded from PackStream."""
     with neo4j.GraphDatabase.driver(bolt_server, auth=("neo4j", "password")) as driver:
         with driver.session() as session:
             result = session.run(

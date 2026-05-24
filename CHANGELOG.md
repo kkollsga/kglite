@@ -46,6 +46,34 @@ test contract, and the perf baseline that Phase C sub-phases will retire.
 This is **prep work**, not a feature release. No `Cargo.toml`
 version bump.
 
+### Internal — Bolt protocol C.3 (parameter PackStream decoding)
+
+Third sub-phase of Phase C. The Bolt server now accepts parameterized
+queries — `session.run("MATCH (n:Person {city: $c}) RETURN n.title", c="Oslo")`
+works against a `bolt://` driver.
+
+- **`crates/kglite-bolt-server/src/value_adapter.rs::from_bolt`**:
+  replaces the `unimplemented!()` stub. Scalar arms
+  (Null/Bool/Integer/Float/String) + recursive List/Dict + temporal
+  (Date → `Value::DateTime` via epoch arithmetic) + Duration + Point2D
+  (SRID 4326 only). Non-representable inbound types surface as
+  `BoltError::Protocol` (which maps to `Neo.ClientError.Request.Invalid`
+  on the wire — these are genuine client errors, distinct from the
+  `BoltError::Backend` / `Neo.DatabaseError.*` "feature pending"
+  pattern that C.2 established).
+- **`crates/kglite-bolt-server/src/backend.rs::execute`**: the
+  empty-params gate is gone; parameters now flow through
+  `value_adapter::from_bolt` into the executor's `&kg_params` map.
+- **Rejected inbound types** (each with a structured error message):
+  Bytes (no kglite `Value` variant), Time/LocalTime/DateTime/
+  DateTimeZoneId/LocalDateTime (kglite has date-only precision —
+  Phase A.1 deferred time precision), Point3D (kglite is 2D only),
+  Node/Relationship/Path/UnboundRelationship (drivers shouldn't pass
+  these as params anyway).
+- **Test contract**: `xfail` removed from
+  `test_bolt_run_supports_parameters`; `pytest -m bolt -v` now
+  reports `3 passed, 5 xfailed` (exit code 0).
+
 ### Internal — Bolt protocol C.2 (read-only RUN/PULL with scalar values)
 
 Second sub-phase of Phase C. The Bolt server now runs real Cypher

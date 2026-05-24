@@ -1,12 +1,12 @@
 //! `BoltBackend` implementation for kglite.
 //!
-//! Phase C.1 (handshake + session lifecycle) + C.2 (read-only RUN/PULL
-//! with scalar values) shipped: `create_session` / `get_server_info` /
+//! Phase C.1 + C.2 + C.3 shipped: `create_session` / `get_server_info` /
 //! `set_session_auth` / `close_session` / `reset_session` /
 //! `configure_session` are real, `route` returns a clean structured
-//! error, and `execute` runs the full kglite Cypher pipeline for
-//! scalar-returning read queries with no parameters and no explicit
-//! transaction. The transaction trio (`begin_transaction` / `commit` /
+//! error, `execute` runs the full kglite Cypher pipeline for
+//! scalar-returning read queries (with or without parameters), and
+//! parameter PackStream decoding via `value_adapter::from_bolt` is
+//! wired. The transaction trio (`begin_transaction` / `commit` /
 //! `rollback`) remains `unimplemented!("phase C.5 — ...")`. The smoke
 //! tests in `tests/test_bolt_server_smoke.py` are `xfail(strict=True)`
 //! against the still-stubbed slices.
@@ -167,17 +167,15 @@ impl BoltBackend for KgliteBackend {
             ));
         }
 
-        // Phase C.3 wires parameter PackStream decoding via
-        // `value_adapter::from_bolt`. For C.2 we reject non-empty
-        // parameters with a clean error; test #2 sends no params so
-        // it passes; test #3 raises ClientError and stays XFAIL.
-        let kg_params: HashMap<String, Value> = if parameters.is_empty() {
-            HashMap::new()
-        } else {
-            return Err(BoltError::Backend(
-                "Cypher parameters not yet supported — Phase C.3".into(),
-            ));
-        };
+        // Phase C.3: decode BoltValue parameters into kglite Values.
+        // Non-representable inbound types (Bytes, time-of-day, Point3D,
+        // graph structures) surface as BoltError::Protocol from
+        // from_bolt, mapping to Neo.ClientError.Request.Invalid — these
+        // are genuine client errors (bad parameter type).
+        let kg_params: HashMap<String, Value> = parameters
+            .iter()
+            .map(|(k, v)| value_adapter::from_bolt(v).map(|kv| (k.clone(), kv)))
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
         // Mirror the canonical kglite Cypher pipeline from
         // `src/graph/pyapi/kg_core.rs::cypher`. The mcp-server crate

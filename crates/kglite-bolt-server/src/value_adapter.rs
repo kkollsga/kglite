@@ -1,12 +1,12 @@
 //! `kglite::api::Value` ↔ `boltr::types::BoltValue` adapter.
 //!
-//! Phase C.2 status: `to_bolt`'s scalar arms (Null/Bool/Int/UniqueId/Float/
-//! String + recursive List/Map + DateTime/Duration/Point) are real. The
-//! graph-structure arms (Node/Relationship/Path) return a structured
-//! `Err(BoltError::Backend(...))` until Phase C.4 fills them in — they
-//! must NOT panic mid-connection, or the tokio task aborts and the
-//! client sees a dropped connection instead of a clean Bolt FAILURE.
-//! `from_bolt` remains stubbed for Phase C.3.
+//! Phase C.2 + C.3 status: BOTH directions are real for scalars +
+//! collections + temporal/spatial. `to_bolt`'s graph-structure arms
+//! (Node/Relationship/Path) return `Err(BoltError::Backend(...))` until
+//! Phase C.4. `from_bolt` rejects inbound Node/Rel/Path (drivers don't
+//! pass those as parameters), inbound time-of-day variants (kglite has
+//! date-only precision today), inbound Bytes (no Value variant), and
+//! inbound Point3D (kglite has only Point2D).
 //!
 //! # Mapping table (the implementer's spec)
 //!
@@ -120,13 +120,105 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
 
 /// Bolt → kglite. Called by `execute`'s parameter decoding (Phase C.3).
 ///
-/// Returns `BoltError::Protocol` on inbound graph-structure variants
-/// (drivers never pass `Node`/`Relationship`/`Path` as parameters).
-#[allow(dead_code)] // wired in Phase C.3 (parameter PackStream decoding)
-pub fn from_bolt(_value: &BoltValue) -> Result<Value, BoltError> {
-    unimplemented!(
-        "phase C.3 — scalar parameters (Null/Bool/Int/Float/String/List/Dict) \
-         + temporal/spatial; reject inbound Node/Relationship/Path with \
-         BoltError::Protocol"
-    )
+/// Returns `BoltError::Protocol` on inbound variants that don't make
+/// sense in a parameter context: graph structures (Node/Relationship/
+/// Path — drivers never pass these), time-of-day temporals (kglite has
+/// date-only precision today), Bytes (no `Value` variant), or Point3D
+/// (kglite has only 2D points).
+pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
+    match value {
+        // ---- Scalars -----------------------------------------------------
+        BoltValue::Null => Ok(Value::Null),
+        BoltValue::Boolean(b) => Ok(Value::Boolean(*b)),
+        BoltValue::Integer(n) => Ok(Value::Int64(*n)),
+        BoltValue::Float(f) => Ok(Value::Float64(*f)),
+        BoltValue::String(s) => Ok(Value::String(s.clone())),
+
+        // ---- Recursive containers ---------------------------------------
+        BoltValue::List(items) => items
+            .iter()
+            .map(from_bolt)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::List),
+        BoltValue::Dict(entries) => entries
+            .iter()
+            .map(|(k, v)| from_bolt(v).map(|kv| (k.clone(), kv)))
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()
+            .map(Value::Map),
+
+        // ---- Temporal / spatial ----------------------------------------
+        BoltValue::Date(d) => {
+            let epoch =
+                chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
+            let date = epoch
+                .checked_add_signed(chrono::Duration::days(d.days))
+                .ok_or_else(|| {
+                    BoltError::Protocol(format!(
+                        "Bolt Date out of range for kglite NaiveDate: days={}",
+                        d.days
+                    ))
+                })?;
+            Ok(Value::DateTime(date))
+        }
+        BoltValue::Duration(d) => Ok(Value::Duration {
+            months: i32::try_from(d.months).map_err(|_| {
+                BoltError::Protocol(format!(
+                    "Bolt Duration.months out of i32 range: {}",
+                    d.months
+                ))
+            })?,
+            days: i32::try_from(d.days).map_err(|_| {
+                BoltError::Protocol(format!("Bolt Duration.days out of i32 range: {}", d.days))
+            })?,
+            seconds: d.seconds,
+            // kglite's `Value::Duration` carries second precision; if the
+            // driver sent sub-second nanoseconds we silently truncate
+            // them. The asymmetry is documented in the mapping table.
+        }),
+        BoltValue::Point2D(p) => {
+            // SRID 4326 is WGS84 (geographic lat/lon). Other SRIDs (e.g.
+            // 7203 for Cartesian) aren't representable as kglite's
+            // `Point { lat, lon }`.
+            if p.srid != 4326 {
+                return Err(BoltError::Protocol(format!(
+                    "Bolt Point2D with SRID {} not supported — kglite \
+                     only represents WGS84 lat/lon (SRID 4326)",
+                    p.srid
+                )));
+            }
+            // Bolt convention: x=longitude, y=latitude.
+            Ok(Value::Point { lat: p.y, lon: p.x })
+        }
+
+        // ---- Variants kglite can't represent ----------------------------
+        BoltValue::Bytes(_) => Err(BoltError::Protocol(
+            "Bolt Bytes parameter not supported — kglite has no byte-string Value variant".into(),
+        )),
+        BoltValue::Time(_)
+        | BoltValue::LocalTime(_)
+        | BoltValue::DateTime(_)
+        | BoltValue::DateTimeZoneId(_)
+        | BoltValue::LocalDateTime(_) => Err(BoltError::Protocol(
+            "Bolt time-of-day / timestamp parameters not yet supported — kglite's \
+             Value::DateTime is date-only (Phase A.1 deferred time precision)"
+                .into(),
+        )),
+        BoltValue::Point3D(_) => Err(BoltError::Protocol(
+            "Bolt Point3D parameter not supported — kglite represents only 2D points".into(),
+        )),
+
+        // ---- Inbound graph structures (drivers don't pass these) -------
+        BoltValue::Node(_) | BoltValue::Relationship(_) | BoltValue::Path(_) => {
+            Err(BoltError::Protocol(
+                "Bolt Node/Relationship/Path is not a valid parameter type — \
+                 drivers should serialize property values instead"
+                    .into(),
+            ))
+        }
+        BoltValue::UnboundRelationship(_) => Err(BoltError::Protocol(
+            "Bolt UnboundRelationship only appears inside Path structures — \
+             cannot be a standalone parameter"
+                .into(),
+        )),
+    }
 }
