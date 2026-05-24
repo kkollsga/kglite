@@ -211,6 +211,26 @@ impl Default for DirGraph {
 }
 
 impl DirGraph {
+    /// Current monotonic version counter. Incremented on every
+    /// mutation (via the kglite mutation paths). Used for optimistic
+    /// concurrency control (OCC) by [`crate::graph::session`] and
+    /// downstream consumers (the Python `Transaction` class, the
+    /// `kglite-bolt-server` per-tx commit path).
+    ///
+    /// Exposed via `kglite::api::DirGraph::version` since Phase E;
+    /// previously the field was `pub(crate)` only.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Set the version directly. Used by [`crate::graph::session::Session::commit`]
+    /// to bump the working DirGraph's version on commit-swap. Not
+    /// for general use — mutation paths bump version through their
+    /// own mechanisms.
+    pub fn set_version(&mut self, v: u64) {
+        self.version = v;
+    }
+
     pub fn new() -> Self {
         DirGraph {
             graph: GraphBackend::new(),

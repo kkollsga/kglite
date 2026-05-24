@@ -72,11 +72,19 @@ pub mod api {
     /// parse → rewrite_text_score → optimize → execute pipeline using
     /// these items; the Python boundary in
     /// `src/graph/pyapi/kg_core.rs::cypher` is the canonical example.
+    ///
+    /// **For new consumers, prefer [`session`]** — it bundles the
+    /// canonical pipeline + transaction CoW into a single surface
+    /// so future drift between bindings is impossible. This raw
+    /// `cypher` re-export stays public for callers that need to
+    /// reach into specific passes (planner introspection,
+    /// custom-disabled-pass sets, etc.).
     pub mod cypher {
         pub use crate::graph::languages::cypher::ast::CypherQuery;
         pub use crate::graph::languages::cypher::ast::OutputFormat;
         pub use crate::graph::languages::cypher::executor::write::execute_mutable;
         pub use crate::graph::languages::cypher::executor::CypherExecutor;
+        pub use crate::graph::languages::cypher::generate_explain_result;
         pub use crate::graph::languages::cypher::is_mutation_query;
         pub use crate::graph::languages::cypher::parser::parse_cypher;
         pub use crate::graph::languages::cypher::planner;
@@ -84,6 +92,21 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::result::CypherResult;
+    }
+
+    /// Canonical query + transaction surface. Single source of truth
+    /// for the Cypher pipeline (parse → validate → rewrite → optimize
+    /// → execute) and the snapshot/working CoW transaction model.
+    /// All bindings (pyapi, mcp-server, bolt-server, future Go/TS/JVM)
+    /// wrap this module's types and free functions.
+    ///
+    /// See `docs/explanation/session.md` for the operator-facing
+    /// guide and `bolt_implementation.md` Phase E for the rationale.
+    pub mod session {
+        pub use crate::graph::session::{
+            execute_mut, execute_read, CommitOutcome, ExecuteOptions, ExecuteOutcome, Session,
+            Transaction,
+        };
     }
 }
 

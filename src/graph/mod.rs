@@ -22,6 +22,7 @@ pub mod io;
 pub mod languages;
 pub mod mutation;
 pub mod schema;
+pub mod session;
 pub mod storage;
 
 pub mod pyapi;
