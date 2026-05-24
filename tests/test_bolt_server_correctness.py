@@ -449,3 +449,71 @@ def test_neo4j_scheme_routing_readonly_session(bolt_server):
         with driver.session(default_access_mode=neo4j.READ_ACCESS) as session:
             result = session.run("MATCH (n) RETURN count(n) AS c")
             assert result.single()["c"] >= 0
+
+
+def test_tls_self_signed_works(tmp_path, bolt_binary_path):
+    """Phase F #6: --tls-cert / --tls-key wraps the listener in
+    TLS. A driver connecting via `bolt+ssc://` (self-signed
+    certificate; +ssc = "ssl, skip cert verification") completes
+    the handshake and runs queries. Skips if the binary isn't built."""
+    if not bolt_binary_path.exists():
+        pytest.skip("bolt-server binary not built")
+
+    # Generate a self-signed cert with the cryptography library if
+    # available; otherwise skip.
+    pytest.importorskip("cryptography")
+    import datetime as _dt
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_dt.datetime.now(_dt.timezone.utc))
+        .not_valid_after(_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+
+    from tests.conftest import _build_bolt_fixture_graph, _spawn_bolt_server, _teardown_bolt_server
+
+    fixture_path = tmp_path / "tls.kgl"
+    _build_bolt_fixture_graph(fixture_path)
+    proc, url = _spawn_bolt_server(
+        fixture_path,
+        extra_args=["--tls-cert", str(cert_path), "--tls-key", str(key_path)],
+    )
+    try:
+        # `+ssc` = SSL Self-Signed: encryption on, certificate chain not verified.
+        # Suitable for tests + dev; production should use a properly-signed cert.
+        tls_url = url.replace("bolt://", "bolt+ssc://", 1)
+        with neo4j.GraphDatabase.driver(tls_url, auth=("neo4j", "password")) as driver:
+            driver.verify_connectivity()
+            with driver.session() as session:
+                count = session.run("MATCH (n:Person) RETURN count(n) AS c").single()["c"]
+                assert count > 0
+    finally:
+        _teardown_bolt_server(proc)

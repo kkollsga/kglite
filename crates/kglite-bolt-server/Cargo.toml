@@ -33,7 +33,13 @@ kglite = { path = "../kglite", default-features = false }
 # (rustc stable 1.95+) clear this comfortably. Phase B's plan calls out
 # the upstream-churn risk; we accept it because hand-rolling Bolt
 # framing for Phase B alone is not the right shape.
-boltr = "0.2"
+boltr = { version = "0.2", features = ["tls"] }
+
+# Phase F #6: rustls crypto provider for boltr's TLS support.
+# boltr enables tokio-rustls but doesn't pick a crypto provider —
+# we install `ring` at startup (see main.rs). `ring` is the more
+# battle-tested option; `aws-lc-rs` is the alternative.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Async trait sugar used by boltr's BoltBackend trait declaration.
 async-trait = "0.1"

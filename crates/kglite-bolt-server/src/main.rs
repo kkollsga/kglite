@@ -104,6 +104,18 @@ struct Cli {
     /// or fronted by a reverse proxy.
     #[arg(long, value_name = "HOST:PORT")]
     advertise_addr: Option<String>,
+
+    /// Path to a PEM-encoded TLS certificate (Phase F #6).
+    /// When set, the server speaks TLS-wrapped Bolt on the bound
+    /// port. Drivers connect with `bolt+s://` or `neo4j+s://`.
+    /// Both --tls-cert and --tls-key must be present together.
+    #[arg(long, value_name = "PATH", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to the PEM-encoded private key matching `--tls-cert`.
+    /// See `--tls-cert` for the wire-scheme details.
+    #[arg(long, value_name = "PATH", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
 }
 
 fn init_tracing() {
@@ -163,6 +175,30 @@ async fn main() -> Result<()> {
 
     if let Some(secs) = cli.idle_timeout {
         builder = builder.idle_timeout(Duration::from_secs(secs));
+    }
+
+    // Phase F #6: TLS support. When --tls-cert + --tls-key are set,
+    // wrap the listener in TLS so drivers can connect via bolt+s://
+    // or neo4j+s://. The cert/key are read once at startup; reload
+    // requires a restart. For HA setups the typical pattern is a
+    // reverse proxy (nginx, Caddy) terminating TLS instead.
+    if let (Some(cert_path), Some(key_path)) = (cli.tls_cert.as_ref(), cli.tls_key.as_ref()) {
+        // rustls 0.23+ requires a process-wide crypto provider.
+        // Install `ring` once at startup; ignore the result —
+        // duplicate installation is benign (only the first wins).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert_pem = std::fs::read(cert_path)
+            .with_context(|| format!("reading TLS cert {}", cert_path.display()))?;
+        let key_pem = std::fs::read(key_path)
+            .with_context(|| format!("reading TLS key {}", key_path.display()))?;
+        let tls_config = boltr::server::TlsConfig::from_pem(&cert_pem, &key_pem)
+            .map_err(|e| anyhow::anyhow!("invalid TLS cert/key: {}", e))?;
+        builder = builder.tls(tls_config);
+        tracing::info!(
+            cert = %cert_path.display(),
+            key = %key_path.display(),
+            "TLS enabled — clients must connect via bolt+s:// or neo4j+s://"
+        );
     }
 
     // Phase C.6: wire `--auth basic` to a BasicAuthValidator. `--auth
