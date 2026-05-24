@@ -7,7 +7,7 @@
 //! SODIR_LIVE_TEST=1 cargo test -p kglite-sodir --test test_fetch_live
 //! ```
 
-use kglite_core::datasets::sodir::{fetch, ArcGISClient};
+use kglite::datasets::sodir::{fetch, ArcGISClient};
 
 #[tokio::test]
 async fn fetch_quadrant_live() {

@@ -208,10 +208,10 @@ server, one driver, fresh 10k-Person + 30k-KNOWS graph:
 
 ## See also
 
-- [`docs/explanation/transactions.md`](transactions.md) — how the
+- [`docs/python/transactions.md`](transactions.md) — how the
   Python `Transaction` class works, including the OCC + CoW pattern
   that bolt-server mirrors.
-- [`docs/explanation/concurrency.md`](concurrency.md) — the
+- [`docs/concepts/concurrency.md`](concurrency.md) — the
   underlying `Arc<DirGraph>` + GIL-release model.
 - [`bolt_implementation.md`](../../bolt_implementation.md) — Phase
   plan and status, including the boltr v0.2 dependency rationale.

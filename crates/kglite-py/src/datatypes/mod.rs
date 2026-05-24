@@ -1,5 +1,5 @@
 //! Root crate's datatypes module — re-exports the pure-Rust core
-//! from `kglite-core` and adds the PyO3 conversion helpers
+//! from the kglite engine crate and adds the PyO3 conversion helpers
 //! (`py_in`, `py_out`, `type_conversions`) that only the wrapper
 //! crate needs.
 //!

@@ -5,10 +5,10 @@
 //!
 //! ```bash
 //! # From the workspace root, against any kgl in your environment:
-//! cargo run -p kglite-core --example embedded_basic -- path/to/graph.kgl
+//! cargo run -p kglite --example embedded_basic -- path/to/graph.kgl
 //!
 //! # Verify the dep tree is pyo3-free:
-//! cargo tree -p kglite-core --example embedded_basic | grep pyo3
+//! cargo tree -p kglite --example embedded_basic | grep pyo3
 //! # → (empty)
 //! ```
 //!
@@ -17,7 +17,7 @@
 //! the engine's portable contract; it travels across any kglite
 //! binding.
 
-use kglite_core::api::{load_file, session, Value};
+use kglite::api::{load_file, session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

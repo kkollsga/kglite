@@ -1,9 +1,9 @@
 [package]
-# Phase G.4 — pure-Rust core, polars-style. The Python wheel is
-# built by maturin from `crates/kglite-py/` (which depends on
-# this crate). Rust embedders depend on this crate directly:
+# Pure-Rust core, polars-style. The Python wheel is built by
+# maturin from `crates/kglite-py/` (which depends on this crate).
+# Rust embedders depend on this crate directly:
 #   kglite = { path = "..." }  # pre-publish
-#   kglite = "0.11"            # post-crates.io-publish
+#   kglite = "0.10"            # post-crates.io-publish
 name = "kglite"
 version = "0.10.0"
 edition = "2021"
@@ -12,12 +12,12 @@ license = "MIT"
 description = "Pure-Rust knowledge graph engine — Cypher pipeline, snapshot/working CoW transactions, columnar/mmap/disk storage backends, optional dataset loaders (SEC EDGAR, Sodir, Wikidata). PyO3 wrappers live in the sibling kglite-py crate (the Python wheel); embeddable directly from any Rust binary without PyO3 in the dep tree."
 
 [lib]
-# `[lib] name = "kglite"` makes the extern crate alias `kglite`
-# (matching the `[package] name`), so dependent crates do
-# `use kglite::api::*;` not `use kglite_core::*`. Cargo allows
-# kglite-py's cdylib to also be `name = "kglite"` because the two
-# artifact types (rlib here, cdylib in kglite-py) produce
-# distinct output filenames.
+# `[lib] name = "kglite"` matches the `[package] name` so
+# dependent crates do the natural `use kglite::api::*`. The
+# kglite-py wrapper uses `[lib] name = "kglite_py"` to avoid
+# producing the same rlib filename as this crate (they're different
+# artifact types — rlib here, cdylib over there — but cargo still
+# requires distinct filenames).
 name = "kglite"
 doctest = false
 

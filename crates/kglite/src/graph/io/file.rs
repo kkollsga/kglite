@@ -28,13 +28,12 @@ use crate::graph::schema::{
 };
 use crate::graph::storage::column_store::ColumnStore;
 use crate::graph::storage::{GraphRead, GraphWrite};
-// Phase G.3-pre: this module no longer constructs `KnowledgeGraph`
-// directly. `load_file`/`load_disk_dir`/`load_v4` return
+// This module no longer constructs `KnowledgeGraph` directly.
+// `load_file` / `load_disk_dir` / `load_v4` return
 // `Arc<DirGraph>`; the binding callsites wrap that in their own
-// ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its own
-// `ActiveGraph`, future Go/TS → their binding's struct). Decouples
-// io from binding state so this whole subtree moves cleanly into
-// `kglite-core` in G.3a.
+// ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its
+// own `ActiveGraph`, future Go/TS → their binding's struct).
+// Keeps io decoupled from binding state.
 use bincode::Options;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;

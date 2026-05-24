@@ -1,4 +1,4 @@
-//! Datatypes shared across the kglite-core engine.
+//! Datatypes shared across the kglite engine.
 //!
 //! The PyO3 conversion helpers (`py_in`, `py_out`,
 //! `type_conversions`) live in the kglite-py wrapper crate — they

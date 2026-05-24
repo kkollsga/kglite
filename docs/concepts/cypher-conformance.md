@@ -111,7 +111,7 @@ stand out.
 ## Why this isn't in the test suite
 
 Per the test-suite-fortification design (see
-`docs/explanation/design-decisions.md` — Test gates section, *if added*):
+`docs/concepts/design-decisions.md` — Test gates section, *if added*):
 the project's stated principle is that the regular test run depends
 only on what `pip install -e .[mcp]` provides. Wiring Neo4j into the
 suite would mean:

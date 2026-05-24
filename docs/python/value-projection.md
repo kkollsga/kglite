@@ -222,10 +222,10 @@ explicitly.
 
 - `bolt_implementation.md` — Phase A.1 plan + the broader Bolt
   implementation roadmap.
-- `docs/explanation/multi-label-rationale.md` — why `labels()` returns
+- `docs/concepts/multi-label-rationale.md` — why `labels()` returns
   a single-element list today (single-label model), and what changes
   when ROADMAP §5 (multi-label nodes) lands.
-- `docs/explanation/design-decisions.md` — the "why" behind the
+- `docs/concepts/design-decisions.md` — the "why" behind the
   embedded design, single-label nodes, and the LLM-agent surface.
 - `tests/test_value_variants.py` — the canonical pinning suite for
   every shape this doc describes. When in doubt, search this file.

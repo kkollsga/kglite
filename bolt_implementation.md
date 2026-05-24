@@ -538,7 +538,7 @@ limitations vs a full Neo4j server. Triaged for Phase F (post-E):
 | 4 | No causal consistency / bookmarks | **Keep** — Neo4j cluster feature; doesn't apply to single-server. |
 | 5 | No `neo4j://` routing | **Fix in Phase F** (~2 hr) — return a single-server self-pointing routing table; cluster-aware drivers work. |
 | 6 | No TLS | **Optional Phase F** (~30 min) — boltr ships a `tls` feature; wire `--tls-cert` / `--tls-key` flags. Reverse proxy is the alternative. |
-| 7 | `db.labels()` / `db.relationshipTypes()` yield `name` not Neo4j's `label` / `relationshipType` | **Fix in Phase F** (~1 hr) — kglite-core change; aligns 3 downstream consumers (Python, MCP, Bolt) with Neo4j convention. |
+| 7 | `db.labels()` / `db.relationshipTypes()` yield `name` not Neo4j's `label` / `relationshipType` | **Fix in Phase F** (~1 hr) — kglite engine change; aligns 3 downstream consumers (Python, MCP, Bolt) with Neo4j convention. |
 
 Total Phase F: ~5 hours for the must-do fixes (#1 + #5 + #7), plus
 optional ~30 min for TLS. Lands cleanly AFTER Phase E (which makes

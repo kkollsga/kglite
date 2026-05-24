@@ -13,32 +13,32 @@ pattern as polars / pydantic-core / many published pyo3 projects:
 
 | Crate | Purpose | Has PyO3? |
 |---|---|---|
-| `kglite-core` (`crates/kglite/`) | Pure-Rust engine. Publishable on crates.io. | **No** |
-| `kglite-py` (workspace root, will move to `crates/kglite-py/` in G.4) | PyO3 wrapper. Built by maturin into the wheel. | Yes |
-| `kglite-bolt-server` (`crates/kglite-bolt-server/`) | Bolt v5.x protocol binary. Wraps kglite-core. | No |
-| `kglite-mcp-server` (`crates/kglite-mcp-server/`) | MCP protocol binary. Wraps kglite-core (presently via root crate; cleanup pending). | No |
+| `kglite` (`crates/kglite/`) | Pure-Rust engine. Publishable on crates.io. | **No** |
+| `kglite-py` (`crates/kglite-py/`) | PyO3 wrapper. Built by maturin into the `kglite` Python wheel. | Yes |
+| `kglite-bolt-server` (`crates/kglite-bolt-server/`) | Bolt v5.x protocol binary. Wraps the kglite engine directly. | No |
+| `kglite-mcp-server` (`crates/kglite-mcp-server/`) | MCP protocol binary. Currently depends on `kglite-py` for a few `KnowledgeGraph` methods; follow-up to switch to direct engine dep. | (yes for now) |
 
 The end-state design that any future binding (Go via cgo,
 TypeScript via napi, JVM via JNI) follows: a sibling crate that
-depends on `kglite-core` and adapts its API to the target
-language's idioms. No changes to the core are required.
+depends on the `kglite` engine and adapts its API to the target
+language's idioms. No changes to the engine are required.
 
 ## Quick start
 
-Add `kglite-core` (eventually published as `kglite`) to your `Cargo.toml`:
+Add `kglite` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-# Pre-publish: path dependency from within the workspace.
-kglite-core = { path = "../kglite/crates/kglite" }
+# Pre-crates.io-publish: path dependency from within the workspace.
+kglite = { path = "../kglite/crates/kglite" }
 # Post-publish: crates.io coordinate.
-# kglite = "0.11"
+# kglite = "0.10"
 ```
 
 Then load a `.kgl` file written by any kglite binding and query it:
 
 ```rust
-use kglite_core::api::{load_file, session, Value};
+use kglite::api::{load_file, session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,17 +88,17 @@ via `build_code_tree`).
 
 ## The stable API surface
 
-`kglite_core::api::*` is the curated surface that gets semver
-guarantees. Everything else (`kglite_core::graph::*`,
-`kglite_core::datatypes::*`, etc.) is an implementation detail
+`kglite::api::*` is the curated surface that gets semver
+guarantees. Everything else (`kglite::graph::*`,
+`kglite::datatypes::*`, etc.) is an implementation detail
 that may move between minor releases.
 
 ### Engine types
 
 ```rust
-use kglite_core::api::{DirGraph, Value, KgError, KgErrorCode};
-use kglite_core::api::{NodeValue, PathValue, RelValue};
-use kglite_core::api::Embedder;
+use kglite::api::{DirGraph, Value, KgError, KgErrorCode};
+use kglite::api::{NodeValue, PathValue, RelValue};
+use kglite::api::Embedder;
 ```
 
 - **`DirGraph`** — the in-memory graph. Built from blueprint,
@@ -112,15 +112,15 @@ use kglite_core::api::Embedder;
   function can return. Map to your binding's error idiom at the
   boundary.
 - **`Embedder`** trait — pluggable text-embedding backend. Bind
-  via `kglite_core::api::FastEmbedAdapter` (with the
+  via `kglite::api::FastEmbedAdapter` (with the
   `fastembed` feature) or implement your own.
 
 ### Cypher pipeline
 
 ```rust
-use kglite_core::api::cypher::{parse_cypher, CypherExecutor, validate_schema};
-use kglite_core::api::cypher::{is_mutation_query, generate_explain_result};
-use kglite_core::api::cypher::{mark_lazy_eligibility, rewrite_text_score, planner};
+use kglite::api::cypher::{parse_cypher, CypherExecutor, validate_schema};
+use kglite::api::cypher::{is_mutation_query, generate_explain_result};
+use kglite::api::cypher::{mark_lazy_eligibility, rewrite_text_score, planner};
 ```
 
 Use these if you're building a custom Cypher pipeline (e.g. a
@@ -130,8 +130,8 @@ pipeline, **use `session` instead**.
 ### Session (canonical query + transaction surface)
 
 ```rust
-use kglite_core::api::session::{Session, Transaction, CommitOutcome};
-use kglite_core::api::session::{ExecuteOptions, execute_read, execute_mut};
+use kglite::api::session::{Session, Transaction, CommitOutcome};
+use kglite::api::session::{ExecuteOptions, execute_read, execute_mut};
 ```
 
 This is the "single source of truth" added in Phase E. All
@@ -149,19 +149,19 @@ snapshot/working CoW + OCC live here exactly once.
   ConflictDetected { current_version, base_version }}` — what
   your binding maps to its consumer-facing error type.
 
-See `docs/explanation/session.md` for the full session
+See `docs/rust/session.md` for the full session
 abstraction guide.
 
 ### Dataset loaders (feature-gated)
 
 ```toml
-kglite-core = { features = ["sec", "sodir", "wikidata"] }
+kglite = { features = ["sec", "sodir", "wikidata"] }
 ```
 
 ```rust
-use kglite_core::datasets::sec::{SecClient, fetch_quarterly_master_idx};
-use kglite_core::datasets::sodir::{ArcGISClient, fetch_all};
-use kglite_core::datasets::wikidata::{ensure_dump};
+use kglite::datasets::sec::{SecClient, fetch_quarterly_master_idx};
+use kglite::datasets::sodir::{ArcGISClient, fetch_all};
+use kglite::datasets::wikidata::{ensure_dump};
 ```
 
 Each loader is opt-in via its Cargo feature so you only pay for
@@ -192,8 +192,8 @@ A `.kgl` written by any kglite binding loads cleanly in any
 other:
 
 - Python `kg.save("graph.kgl")` → Bolt server reads via
-  `kglite_core::api::load_file(path)`
-- Rust embedder `kglite_core::api::save_graph(&mut arc, path)`
+  `kglite::api::load_file(path)`
+- Rust embedder `kglite::api::save_graph(&mut arc, path)`
   → Python loads via `kglite.load("graph.kgl")`
 - Future Go binding writes → TypeScript binding reads, etc.
 
@@ -206,24 +206,24 @@ The format does NOT bundle binding-ergonomic state (Python's
 selection cache, default timeouts, etc.). Each binding sets
 those fresh on load.
 
-## Wrapping kglite-core in a new language
+## Wrapping the kglite engine in a new language
 
 The path for a new language binding (Go, TypeScript, JVM) is:
 
 1. **Create a new sibling crate** — `crates/kglite-go/`, or
    wherever your binding's natural home is.
-2. **Depend on kglite-core** — `kglite-core = { path =
-   "../kglite", features = ["sec", "sodir"] }` (opt in to the
-   datasets you need).
+2. **Depend on kglite** — `kglite = { path = "../kglite",
+   features = ["sec", "sodir"] }` (opt in to the datasets you
+   need).
 3. **Author your bridge** — cgo / napi / JNI handles that
-   marshal between your language's types and `kglite_core::api::*`.
+   marshal between your language's types and `kglite::api::*`.
 4. **Wrap the binding-ergonomic state** in your language's
    idiomatic style. (For Go: a `Graph` struct holding `*C.DirGraph`
    + a metrics/logger; for TS: a `Graph` class wrapping
    `napi::Reference` + a Promise-returning API.)
 
 The hard part — the Cypher pipeline, the CoW transaction model,
-the OCC commit — is solved once, in `kglite-core::api::session`.
+the OCC commit — is solved once, in `kglite::api::session`.
 Each binding only owns the marshalling layer.
 
 ### cgo sketch (Go)
@@ -263,7 +263,7 @@ func (g *Graph) Cypher(query string) (*ResultSet, error) {
 ```
 
 This would wrap a `kglite-c` crate (Phase H follow-up) that
-exposes `kglite_core::api::session::execute_read` etc. through a
+exposes `kglite::api::session::execute_read` etc. through a
 C ABI. The bridge is mechanical; no new core development.
 
 ### napi sketch (TypeScript)
@@ -276,8 +276,8 @@ const result = await executeRead(graph, 'MATCH (n) RETURN count(n)');
 console.log(result.rows[0][0]); // node count
 ```
 
-Same pattern: a `kglite-napi` crate wraps `kglite-core` for the
-napi runtime; the TS API is a thin handle + Promise wrapper.
+Same pattern: a `kglite-napi` crate wraps `kglite` for the napi
+runtime; the TS API is a thin handle + Promise wrapper.
 
 ### JNI sketch (Java / Kotlin)
 
@@ -295,11 +295,11 @@ Same pattern: a `kglite-jni` crate; Java API thin wrapper.
 
 | Item | Stability |
 |---|---|
-| `kglite_core::api::*` | **Semver-stable** within a minor. Breaking changes are announced + version-bumped. |
-| `kglite_core::datasets::{sec,sodir,wikidata}::*` (feature-gated) | Stable — these were standalone published crates pre-G.3a; their API surface is preserved post-merge. |
-| `kglite_core::error::*` | Stable (KgError variants may grow but won't be removed without a major bump). |
-| `kglite_core::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
-| `kglite_core::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |
+| `kglite::api::*` | **Semver-stable** within a minor. Breaking changes are announced + version-bumped. |
+| `kglite::datasets::{sec,sodir,wikidata}::*` (feature-gated) | Stable — these were standalone published crates pre-G.3a; their API surface is preserved post-merge. |
+| `kglite::error::*` | Stable (KgError variants may grow but won't be removed without a major bump). |
+| `kglite::graph::*` (raw module path) | **Internal**. Subject to reorganization. Always go through `api::*` re-exports. |
+| `kglite::datatypes::*` (raw module path) | Internal — use `api::{Value, NodeValue, PathValue, RelValue}`. |
 | Any `pub(crate)` item promoted to `pub` for visibility (Phase G.3a) | **Unstable** — these were opened up for the wrapper crate's needs. Subject to retraction once accessor methods are designed. |
 
 If you depend on something outside `api::*`, you're on your own
@@ -307,11 +307,11 @@ for minor-version compatibility.
 
 ## See also
 
-- `docs/explanation/session.md` — full session/transaction
+- `docs/rust/session.md` — full session/transaction
   abstraction reference (Phase E).
-- `docs/explanation/transactions.md` — Python-API-flavored
+- `docs/python/transactions.md` — Python-API-flavored
   transaction guide.
-- `docs/explanation/bolt-server.md` — Bolt server operator guide
+- `docs/operators/bolt-server.md` — Bolt server operator guide
   (an example of a sibling-crate binding).
 - `CYPHER.md` — Cypher language reference.
 - `bolt_implementation.md` — Phase E + Phase G design docs.

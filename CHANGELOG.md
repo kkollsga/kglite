@@ -7,13 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Docs reorganized into two-track Python / Rust layout
+
+[kglite.readthedocs.io](https://kglite.readthedocs.io) now
+groups content by audience instead of by document type. The
+existing `docs/explanation/` is gone; everything moved to one
+of five top-level tracks:
+
+| Track | What's there | Audience |
+|---|---|---|
+| `docs/python/` | `getting-started`, `core-concepts`, `transactions`, `error-handling`, `value-projection`, all of `guides/`, `examples/`, `migrations/` | Wheel users (`pip install kglite`) |
+| `docs/rust/` | `index` (Rust quickstart), `embedding`, `session`, `api-reference` | Rust embedders depending on the `kglite` crate directly |
+| `docs/operators/` | `bolt-server` | Operators deploying `kglite-bolt-server` or `kglite-mcp-server` |
+| `docs/concepts/` | `architecture`, `design-decisions`, `concurrency`, `cypher-conformance`, `multi-label-rationale`, `adding-a-storage-backend`, `adding-a-query-language` | Contributors, curious users wondering "why is it built this way" |
+| `docs/reference/` | `cypher-reference`, `fluent-api`, auto-generated Python API (unchanged location) | Cross-binding reference |
+
+`docs/index.md` rewrites as a track selector (one entry per
+track) and the per-track `index.md` files act as navigators
+into their own contents.
+
+**URL breakage warning.** Bookmarks of the form
+`kglite.readthedocs.io/en/latest/explanation/<X>.html` no longer
+resolve. The new paths are:
+
+| Old path | New path |
+|---|---|
+| `/explanation/transactions` | `/python/transactions` |
+| `/explanation/error-handling` | `/python/error-handling` |
+| `/explanation/value-projection` | `/python/value-projection` |
+| `/explanation/embedding-kglite` | `/rust/embedding` |
+| `/explanation/session` | `/rust/session` |
+| `/explanation/bolt-server` | `/operators/bolt-server` |
+| `/explanation/architecture` | `/concepts/architecture` |
+| `/explanation/design-decisions` | `/concepts/design-decisions` |
+| `/explanation/concurrency` | `/concepts/concurrency` |
+| `/explanation/cypher-conformance` | `/concepts/cypher-conformance` |
+| `/explanation/multi-label-rationale` | `/concepts/multi-label-rationale` |
+| `/getting-started` | `/python/getting-started` |
+| `/core-concepts` | `/python/core-concepts` |
+| `/guides/<X>` | `/python/guides/<X>` |
+| `/examples/<X>` | `/python/examples/<X>` |
+| `/migrations/<X>` | `/python/migrations/<X>` |
+| `/adding-a-storage-backend` | `/concepts/adding-a-storage-backend` |
+| `/adding-a-query-language` | `/concepts/adding-a-query-language` |
+
+ReadTheDocs per-path redirects will be configured via the RTD
+admin UI post-deploy to keep stale bookmarks working.
+
+All file moves used `git mv` for blame/history preservation. The
+Sphinx build (with `-W` warnings-as-errors at warning gates
+that already cleared in CI) is green; pytest 3013+1, bolt 236+3,
+and `make lint` are unaffected.
+
+### Fixed — Stale `kglite-core` / `kglite_core` references after the G.4 rename
+
+G.4 renamed the core crate from `kglite-core` to `kglite` but
+the in-flight G.5 work (examples + embedder doc) was authored
+before that rename and never updated. This swept up the
+leftovers:
+
+- **`crates/kglite/examples/embedded_{basic,session,blueprint}.rs`**
+  and **`crates/kglite/tests/datasets_{sec_idx_parser,sec_fetch_live,sodir_fetch_live}.rs`**
+  — `kglite_core::*` imports and `cargo run -p kglite-core`
+  doc-comment invocations updated to `kglite::*` / `-p kglite`.
+  Examples now compile (`cargo build -p kglite --release
+  --examples`) and run; the `embedded_session` OCC sequence
+  correctly rejects Transaction B with `ConflictDetected`.
+- **In-code module doc comments** in
+  `crates/kglite/src/{lib,datatypes/mod,graph/io/file,graph/languages/cypher/mod,code_tree/mod,code_tree/builder/mod,code_tree/builder/load}.rs`
+  no longer describe the crate as "kglite-core" or "Currently
+  named `kglite-core` to avoid a workspace conflict" (the
+  conflict was resolved by the rename — that paragraph was
+  historical noise).
+- **`crates/kglite-py/src/**`** — clarifying comments on the
+  `kglite_core = { package = "kglite", ... }` dep alias (the
+  alias dodges the extern-crate collision with kglite-py's
+  own `[lib] name = "kglite_py"`; the engine itself is the
+  `kglite` crate).
+- **`ROADMAP.md`** + **`bolt_implementation.md`** updated to
+  reference `kglite::api::*` (the post-G.4 surface) rather than
+  the historical `kglite_core::*`.
+
+CHANGELOG entries for the Phase G journey itself are preserved
+unchanged with an upstream "Note on naming" caveat — the
+references to `kglite-core` in those entries describe the
+journey faithfully.
+
 ### Internal — Polars-style core split (Phase G of `bolt_implementation.md`)
 
+> **Note on naming.** The first commits of Phase G used the
+> temporary package name `kglite-core` to avoid a workspace
+> conflict with the then-existing root `kglite` crate. The G.4
+> commit (`5eecf51`) renamed it to `kglite` and relocated the
+> pyo3 wrapper to `crates/kglite-py/`. The references to
+> `kglite-core` below describe the journey faithfully; the
+> end-state crate is named `kglite` everywhere now.
+
 The Rust core moves out of the wheel crate into a pure-Rust
-sibling crate at `crates/kglite/` (currently package-named
-`kglite-core`; renamed to `kglite` in a follow-up commit). The
-PyO3 wrapper stays at the workspace root and now depends on the
-new core via `kglite-core = { path = "crates/kglite" }`.
+sibling crate at `crates/kglite/` (initially package-named
+`kglite-core`, renamed to `kglite` in G.4). The PyO3 wrapper
+sits at `crates/kglite-py/` and depends on the core via
+`kglite = { path = "../kglite", ... }`.
 
 **Why** — Polars precedent: kglite's engine has always been pure
 Rust, but pyo3 was an unconditional dep of the only crate that

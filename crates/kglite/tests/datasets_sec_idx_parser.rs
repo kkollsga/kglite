@@ -5,7 +5,7 @@
 //! types with slashes, single-digit form types, multiple filings per
 //! CIK). Keep that file's edge cases in sync with this test.
 
-use kglite_core::datasets::sec::{parse_master_idx, FilingEntry, ParseError};
+use kglite::datasets::sec::{parse_master_idx, FilingEntry, ParseError};
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::PathBuf;

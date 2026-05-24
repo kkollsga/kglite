@@ -7,7 +7,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use kglite_core::datasets::sec::{
+use kglite::datasets::sec::{
     fetch_company_tickers, fetch_quarterly_master_idx, parse_master_idx, FetchMode, SecClient,
     Workdir, YearRange,
 };

@@ -215,7 +215,7 @@ pyo3::create_exception!(
 ///
 /// This is the canonical conversion at the PyO3 boundary. Post-Phase
 /// G.3a the `impl From<KgError> for PyErr` form is orphan-rule
-/// blocked (KgError lives in kglite-core, PyErr in pyo3, neither
+/// blocked (KgError lives in the kglite engine, PyErr in pyo3, neither
 /// local to this crate), so callers explicitly route through this
 /// function via `Err(kg_to_pyerr(KgError::Foo(...)))` or
 /// `.map_err(kg_to_pyerr)?`.
@@ -245,7 +245,7 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
 
 // Post-G.3a: `impl From<RustKgError> for PyErr` would violate
 // Rust's orphan rule (both types foreign to this crate — KgError
-// lives in kglite-core, PyErr in pyo3). All call sites use
+// lives in the kglite engine, PyErr in pyo3). All call sites use
 // `kg_to_pyerr(...)` directly.
 
 // ─── Module registration ─────────────────────────────────────────────────────

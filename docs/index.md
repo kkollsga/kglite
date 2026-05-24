@@ -5,6 +5,11 @@ graph that runs inside your Python process — load data, query with
 Cypher, hand the graph to an agent via the bundled MCP server. No
 server to run, no infrastructure to manage, one `.kgl` file to ship.
 
+The engine is a pure-Rust crate (`kglite`); the wheel
+(`pip install kglite`) is a PyO3 wrapper around it. Bolt and MCP
+protocol servers are standalone Rust binaries that wrap the same
+engine. The `.kgl` file format is portable across all bindings.
+
 ```{rubric} Cypher first
 ```
 
@@ -20,58 +25,56 @@ in; once it's in, you query with Cypher.
 | LLM-agent surface | Bundled MCP server + `describe()` schema for system prompts |
 | Cypher subset, honest semantics | Querying + mutations + `text_score()` for semantic search |
 | In-memory by default | Mapped + disk modes for Wikidata-scale; in-memory is the design centre |
-| Single-label nodes | Each node has exactly one type — see [design decisions](explanation/design-decisions.md) |
+| Single-label nodes | Each node has exactly one type — see [design decisions](concepts/design-decisions.md) |
 | One-file persistence | `.kgl` snapshots — copy, share, reload elsewhere |
+| Rust-embeddable | Pure-Rust core; embed without PyO3 — see [Rust track](rust/index.md) |
 
-See [`ROADMAP.md`](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md) for what's next (Bolt protocol, multi-language bindings).
+See [`ROADMAP.md`](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md) for what's next.
 
-**Requirements:** Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+```{rubric} Pick your track
+```
 
-```bash
-pip install kglite
+- **[Python guide](python/index.md)** — `pip install kglite`, then
+  `import kglite`. The headline track; covers data loading, Cypher,
+  the MCP server, datasets, agents.
+- **[Rust guide](rust/index.md)** — embed the engine in a Rust
+  binary (`cargo add kglite`). For graph-as-a-library use cases
+  without the Python wheel.
+- **[Operators](operators/index.md)** — running the Bolt server
+  (Neo4j wire compat for cluster-aware drivers).
+- **[Reference](reference/cypher-reference.md)** — Cypher subset
+  reference + fluent API reference + auto-generated Python API.
+- **[Concepts](concepts/architecture.md)** — architecture +
+  design decisions + contributor docs.
+
+```{toctree}
+:maxdepth: 2
+:caption: Python guide
+:hidden:
+
+python/index
 ```
 
 ```{toctree}
 :maxdepth: 2
-:caption: Tutorials
+:caption: Rust guide
+:hidden:
 
-getting-started
+rust/index
 ```
 
 ```{toctree}
-:maxdepth: 2
-:caption: How-to Guides
+:maxdepth: 1
+:caption: Operators
+:hidden:
 
-guides/index
-guides/data-loading
-guides/cypher
-guides/mcp-servers
-guides/datasets
-guides/blueprints
-guides/querying
-guides/traversal-hierarchy
-guides/semantic-search
-guides/spatial
-guides/timeseries
-guides/graph-algorithms
-guides/import-export
-guides/ai-agents
-guides/code-tree
-guides/recipes
-```
-
-```{toctree}
-:maxdepth: 2
-:caption: Explanation
-
-core-concepts
-explanation/architecture
-explanation/design-decisions
+operators/index
 ```
 
 ```{toctree}
 :maxdepth: 2
 :caption: Reference
+:hidden:
 
 reference/cypher-reference
 reference/fluent-api
@@ -80,12 +83,17 @@ autoapi/index
 
 ```{toctree}
 :maxdepth: 1
+:caption: Concepts
+:hidden:
+
+concepts/index
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Project
+:hidden:
 
 contributing
-adding-a-storage-backend
-adding-a-query-language
 changelog
-migrations/mcp-0.6-to-0.9
-migrations/mcp-pre-0.9.20
 ```

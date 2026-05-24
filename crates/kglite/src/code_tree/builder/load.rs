@@ -10,11 +10,10 @@ use crate::code_tree::models::{
 };
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
 use crate::graph::mutation::maintain;
-// Phase G.3-pre: build a `DirGraph` directly instead of constructing
-// a `KnowledgeGraph` wrapper. The pyapi callsite (`code_tree.build`
-// pyfunction) wraps via `KnowledgeGraph::from_arc`. Decouples code_tree
-// from the binding-ergonomic wrapper so this whole subtree moves
-// cleanly into kglite-core in G.3a.
+// Build a `DirGraph` directly instead of the binding-flavored
+// `KnowledgeGraph` wrapper — keeps code_tree engine-only. The
+// pyapi callsite (`code_tree.build` pyfunction) wraps via
+// `KnowledgeGraph::from_arc` at the Python boundary.
 use crate::graph::dir_graph::DirGraph;
 use std::collections::{BTreeMap, HashMap};
 

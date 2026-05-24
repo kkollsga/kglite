@@ -8,10 +8,10 @@ pub mod type_edges;
 
 use crate::code_tree::models::ParseResult;
 use crate::code_tree::parsers::{detect_languages, get_parser, language_for_path};
-// Phase G.3-pre: builder + load both return `Arc<DirGraph>` so this
-// subtree moves into kglite-core cleanly. The pyapi callsite
-// (`code_tree.build()` pyfunction) wraps the result via
-// `KnowledgeGraph::from_arc`.
+// builder + load both return `Arc<DirGraph>` (not the pyapi
+// `KnowledgeGraph` wrapper) so this subtree stays engine-only.
+// The pyapi callsite (`code_tree.build()` pyfunction) wraps the
+// result via `KnowledgeGraph::from_arc`.
 use crate::graph::dir_graph::DirGraph;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

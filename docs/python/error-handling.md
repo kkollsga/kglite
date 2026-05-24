@@ -182,5 +182,5 @@ If you see `kglite.InternalError` in production, file a bug — the
   covering hierarchy, cross-mode behaviour, diagnostic quality).
 - `bolt_implementation.md` Phase C.6 — Bolt FAILURE-code mapping
   (consumes the table shape sketched above).
-- `docs/explanation/value-projection.md` — Phase A.1 companion;
+- `docs/python/value-projection.md` — Phase A.1 companion;
   shape-and-value answer to A.2's error-and-type answer.

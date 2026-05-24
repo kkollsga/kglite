@@ -8,10 +8,12 @@
 // real benefit — error paths aren't hot. Standard pattern for crates
 // with a unified typed error.
 #![allow(clippy::result_large_err)]
-// Phase G.3a — root crate is now a PyO3 wrapper over kglite-core.
-// The local module shims (`graph/mod.rs`, `graph/languages/mod.rs`,
+// kglite-py is the PyO3 wrapper over the kglite engine crate
+// (aliased as `kglite_core` in this crate's source — see
+// Cargo.toml for the `package = "kglite"` indirection). The
+// local module shims (`graph/mod.rs`, `graph/languages/mod.rs`,
 // `graph/embedder/mod.rs`, `code_tree/mod.rs`, `datatypes/mod.rs`)
-// pull in kglite-core's content via `pub use kglite_core::*::*;`
+// pull in the engine's content via `pub use kglite_core::*::*;`
 // glob re-exports + add the pyo3-only submodules. clippy flags
 // the legitimate shadowing pattern under
 // `hidden_glob_reexports`. The `unused_imports` allows the same
@@ -38,10 +40,10 @@ mod sec;
 mod sodir;
 mod wikidata;
 
-// Post-G.3a: the root crate is the PyO3 wrapper crate that depends
-// on `kglite-core` for the engine. Re-export the core's `error`
-// module so existing `crate::error::*` paths in pyapi/, error_py.rs,
-// the datatypes shims, etc. resolve unchanged.
+// The pyo3 wrapper depends on the kglite engine for everything
+// non-Python. Re-export the engine's `error` module so existing
+// `crate::error::*` paths in pyapi/, error_py.rs, the datatypes
+// shims, etc. resolve unchanged.
 pub use kglite_core::error;
 
 use graph::pyapi::blueprint::from_blueprint_rust;
@@ -50,11 +52,13 @@ use graph::{KnowledgeGraph, Transaction};
 use kglite_core::graph::io::file::load_file;
 
 /// Curated Rust-side façade for downstream binaries (notably
-/// `kglite-mcp-server`). This module is the **only** stable Rust API
-/// kglite promises to keep — the underlying `pub mod graph` /
-/// `pub mod code_tree` are public for tooling but their internals can
-/// move between minor releases. New consumers should import from
-/// `kglite_core::api::*`; existing breakage there is a semver concern.
+/// `kglite-mcp-server`). This module is the **only** stable Rust
+/// API the kglite-py wrapper promises to keep — the underlying
+/// `pub mod graph` / `pub mod code_tree` are public for tooling
+/// but their internals can move between minor releases. New
+/// consumers should import from `kglite::api::*` (or
+/// `kglite_core::api::*` from inside this crate's source, where
+/// the dep is aliased); breakage there is a semver concern.
 ///
 /// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
 /// independent — it stays as the wheel's primary surface.

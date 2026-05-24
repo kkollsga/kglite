@@ -1,5 +1,5 @@
 // crates/kglite/src/graph/languages/cypher/mod.rs
-// Cypher query language implementation for kglite-core
+// Cypher query language implementation for the kglite engine.
 //
 // Architecture:
 //   Query String -> Tokenizer -> Parser -> AST -> Planner -> Executor -> Result

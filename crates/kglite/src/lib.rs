@@ -1,24 +1,21 @@
-//! kglite-core — pure-Rust core of the kglite knowledge graph engine.
+//! kglite — pure-Rust knowledge graph engine.
 //!
-//! ## Phase G crate split
-//!
-//! Currently named `kglite-core` to avoid a workspace name conflict
-//! with the existing root crate `kglite`. G.4 will rename this to
-//! `kglite` once the root crate is relocated to `crates/kglite-py/`.
-//! End-state matches the polars convention: `crates/kglite/` is the
-//! pure-Rust core publishable on crates.io; `crates/kglite-py/` is
-//! the PyO3 wrapper that maturin builds into the wheel.
+//! Cypher pipeline, snapshot/working CoW transactions, columnar /
+//! mmap / disk storage backends, optional dataset loaders
+//! (SEC EDGAR, Sodir, Wikidata). The Python wheel
+//! (`pip install kglite`) is built by the sibling `kglite-py`
+//! crate; the Bolt and MCP protocol servers are separate
+//! workspace binaries.
 //!
 //! ## Public API
 //!
-//! Downstream Rust consumers (kglite-py for the Python wheel,
-//! kglite-bolt-server, kglite-mcp-server, future Go/TypeScript/JVM
-//! bindings) should depend on items in the curated [`api`] module —
-//! those are the items that get semver guarantees. Anything else is
-//! an implementation detail.
+//! Downstream Rust consumers (the Python wheel, the bolt and
+//! mcp server binaries, future Go/TypeScript/JVM bindings)
+//! should depend on the curated [`api`] module — those items
+//! get semver guarantees. Anything else is an implementation
+//! detail.
 //!
-//! See `docs/explanation/embedding-kglite.md` (G.5) for the embedder
-//! guide.
+//! See `docs/rust/embedding.md` for the embedder guide.
 
 // Phase A.2 / C2 — crate-wide allow for clippy::result_large_err.
 // `KgError` is intentionally rich (16 variants spanning Cypher /

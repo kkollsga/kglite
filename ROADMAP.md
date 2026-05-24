@@ -147,8 +147,9 @@ Rust core unchanged.
 
 **Effort.** 1-2 weeks once Bolt lands (or independent of it).
 
-**Depends on.** A stable Rust API at `kglite_core::*` (currently
-intertwined with PyO3 in places; small refactor required).
+**Depends on.** A stable Rust API at `kglite::api::*`. Phase G
+(2026-05-24) shipped this; the pyo3-free pure-Rust core is the
+crate that future bindings wrap.
 
 ---
 

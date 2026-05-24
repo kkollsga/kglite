@@ -14,8 +14,8 @@
 )]
 //! Code-tree: parse polyglot codebases into KGLite knowledge graphs.
 //!
-//! Tree-sitter grammars are compiled into the kglite-core extension —
-//! no optional dependencies.
+//! Tree-sitter grammars are compiled into the kglite crate's
+//! extension surface — no optional dependencies.
 //!
 //! Entry points:
 //! - [`builder::run_with_options`] — parse a directory or
@@ -24,8 +24,8 @@
 //! - [`repo::clone_and_build`] — shallow-clone a GitHub repo and
 //!   build, returns `Arc<DirGraph>`
 //!
-//! The PyO3 wrapper crate (`kglite-py`, currently workspace root)
-//! exposes these as `kglite.code_tree.build` etc.
+//! The PyO3 wrapper crate (`kglite-py`) exposes these as
+//! `kglite.code_tree.build` etc.
 
 pub mod builder;
 pub mod manifest;

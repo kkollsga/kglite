@@ -9,15 +9,15 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run -p kglite-core --example embedded_session
+//! cargo run -p kglite --example embedded_session
 //! ```
 
-use kglite_core::api::session::{CommitOutcome, ExecuteOptions, Session};
-use kglite_core::api::DirGraph;
+use kglite::api::session::{CommitOutcome, ExecuteOptions, Session};
+use kglite::api::DirGraph;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn opts<'a>(params: &'a HashMap<String, kglite_core::api::Value>) -> ExecuteOptions<'a> {
+fn opts<'a>(params: &'a HashMap<String, kglite::api::Value>) -> ExecuteOptions<'a> {
     ExecuteOptions {
         params,
         deadline: None,
@@ -30,12 +30,12 @@ fn opts<'a>(params: &'a HashMap<String, kglite_core::api::Value>) -> ExecuteOpti
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = Arc::new(Session::new(DirGraph::new()));
-    let params: HashMap<String, kglite_core::api::Value> = HashMap::new();
+    let params: HashMap<String, kglite::api::Value> = HashMap::new();
 
     // ── Tx A: begin, create a node ────────────────────────────────
     let mut tx_a = session.begin();
     let working_a = tx_a.working_mut()?;
-    kglite_core::api::session::execute_mut(
+    kglite::api::session::execute_mut(
         working_a,
         "CREATE (:Person {id: 1, name: 'Alice'})",
         &opts(&params),
@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Tx B: begin (sees pre-A snapshot), create a different node ─
     let mut tx_b = session.begin();
     let working_b = tx_b.working_mut()?;
-    kglite_core::api::session::execute_mut(
+    kglite::api::session::execute_mut(
         working_b,
         "CREATE (:Person {id: 2, name: 'Bob'})",
         &opts(&params),
@@ -79,14 +79,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Verify final state: only Alice landed ─────────────────────
     let snap = session.snapshot();
-    let outcome = kglite_core::api::session::execute_read(
+    let outcome = kglite::api::session::execute_read(
         &snap,
         "MATCH (p:Person) RETURN p.name AS name ORDER BY p.id",
         &opts(&params),
     )?;
     println!("\nFinal graph:");
     for row in &outcome.result.rows {
-        if let Some(kglite_core::api::Value::String(s)) = row.first() {
+        if let Some(kglite::api::Value::String(s)) = row.first() {
             println!("  - {}", s);
         }
     }

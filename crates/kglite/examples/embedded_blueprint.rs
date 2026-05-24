@@ -8,10 +8,10 @@
 //! Run with:
 //!
 //! ```bash
-//! cargo run -p kglite-core --example embedded_blueprint
+//! cargo run -p kglite --example embedded_blueprint
 //! ```
 
-use kglite_core::api::{build_code_tree, session, Value};
+use kglite::api::{build_code_tree, session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

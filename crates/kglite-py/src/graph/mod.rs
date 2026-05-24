@@ -1,19 +1,23 @@
 // src/graph/mod.rs
 //
-// Root crate's graph module — re-exports the pure-Rust core's
-// `graph::*` subtree from `kglite-core` and keeps the PyO3 wrapper
-// concerns (KnowledgeGraph #[pyclass], pyapi/ submodule, pyo3
-// param-extract helpers) that only the wrapper crate needs.
+// kglite-py's graph module — re-exports the engine's `graph::*`
+// subtree from the sibling `kglite` crate (imported here as
+// `kglite_core` via a `package = "kglite"` dep alias in
+// Cargo.toml; the alias dodges the extern-crate collision with
+// this crate's own `[lib] name = "kglite_py"`). Adds the PyO3
+// wrapper concerns (KnowledgeGraph #[pyclass], pyapi/ submodule,
+// pyo3 param-extract helpers) that only the wrapper crate needs.
 //
-// Post-G.3a: every engine subtree (algorithms, blueprint, core,
-// dir_graph, explore, features, introspection, io, mutation,
-// schema, session, storage) lives in `kglite_core::graph`. The
-// glob re-export below keeps every `crate::graph::X::Y` path in
+// Every engine subtree (algorithms, blueprint, core, dir_graph,
+// explore, features, introspection, io, mutation, schema,
+// session, storage) lives in `kglite_core::graph` — the glob
+// re-export below keeps every `crate::graph::X::Y` path in
 // pyapi/ resolving unchanged.
 pub use kglite_core::graph::*;
 
-// Mixed subtrees (have both core and pyo3 parts) — local module
-// declarations shadow the re-exported ones from kglite-core.
+// Mixed subtrees (have both engine and pyo3 parts) — local
+// module declarations shadow the re-exported ones from the
+// kglite engine crate.
 pub mod embedder;
 pub mod languages;
 pub mod pyapi;
@@ -33,10 +37,10 @@ use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-// Shadow the kglite-core re-exports of these types with the local
+// Shadow the engine's re-exports of these types with the local
 // pub(crate) versions that the pyapi closures construct directly.
 // (Same name, same underlying enum — just promotes the visibility
-// for local use without depending on kglite-core's pub visibility.)
+// for local use without depending on the engine's pub visibility.)
 pub(crate) type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
 /// Extract `ConnectionDetail` from a Python `bool | list[str] | None` parameter.
@@ -170,13 +174,14 @@ pub struct KnowledgeGraph {
     pub(crate) default_max_rows: Option<usize>,
 }
 
-// Post-G.3a: `TemporalContext`, `SourceLocation`, and `SourceLookup`
-// live in kglite-core and reach this module via the
+// `TemporalContext`, `SourceLocation`, and `SourceLookup` live
+// in the kglite engine crate and reach this module via the
 // `pub use kglite_core::graph::*;` re-export at the top of this
-// file. The previous local definitions were duplicates that
-// confused type inference (function signatures referenced the
-// kglite-core version while local construction sites used the
-// duplicate).
+// file (`kglite_core` is the local dep alias for the engine —
+// see Cargo.toml). The previous local definitions were
+// duplicates that confused type inference (function signatures
+// referenced the engine version while local construction sites
+// used the duplicate).
 
 // (formerly `fn value_to_string`; consolidated 0.9.53 into
 // `crate::datatypes::values::raw_string`)
