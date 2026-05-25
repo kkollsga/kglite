@@ -168,6 +168,35 @@ landed or definitively dropped.
 - **Estimated effort.** ~200-300 LOC of Python (S-M), no Rust
   changes needed. The skill file is already in place.
 
+### SEC dispatch execution loop lift
+
+- **What it is.** The Python wrapper's `_dispatch_per_filing_fetches`
+  has two halves: planning (read `processed/filing_index.csv`, filter
+  by company / year / form, group by bucket) and execution (for each
+  active bucket, call the appropriate batch fetcher: form4/form3/form5
+  → ownership batch; form13f → 13F batch; form8k/sc13d/sc13g/def14a/
+  form144 → generic filing batch; form10k → exhibit21 batch; +
+  optional company-facts XBRL batch keyed on distinct CIKs). The
+  **planning** half was lifted to `kglite::api::datasets::sec::
+  prepare_dispatch_plan` in 2026-05-25. The **execution** half stays
+  in the wheel for now.
+- **Why deferred now.** Execution wraps the wheel's PyO3
+  `_sec_internal.fetch_*_batch` functions (each with bucket-specific
+  signature + progress-callback shape). A core-lifted version would
+  loop the plan, call the per-filing `fetch_*_filing` functions
+  directly, and emit progress through a trait-bound callback. The API
+  design — especially progress callback shape — benefits from a real
+  second binding hitting the rough edges. Doing it now is speculative.
+- **When to revisit.** When the first non-Python SEC binding lands
+  (a Go binding, or a CLI tool), or when the wheel's batch-fetcher
+  zoo (form4_batch, 13f_batch, filing_batch, exhibit21_batch,
+  company_facts_batch) needs maintenance that would benefit from
+  consolidation.
+- **Estimated effort.** ~200 LOC of Rust + ~40 LOC of PyO3 + ~80 LOC
+  of wrapper churn. The planning lift (already done) is the
+  foundation — the execution lift consumes the `DispatchPlan` it
+  produces.
+
 ### Lazy-load embedder in the Rust MCP server
 
 - **What it is.** The Python MCP server's embedder lazy-loads the

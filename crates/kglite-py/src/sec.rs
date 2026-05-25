@@ -27,8 +27,9 @@ use pyo3::wrap_pyfunction;
 
 use kglite_core::datasets::sec::{
     all_buckets, fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
-    fetch_quarterly_master_idx, fetch_submissions_bulk, parse_tickers_json, resolve_fetch_buckets,
-    run_all, SecClient, SecError, SliceSpec, Workdir, YearRange,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, parse_tickers_json, prepare_dispatch_plan,
+    resolve_fetch_buckets, run_all, DispatchScope, SecClient, SecError, SliceSpec, Workdir,
+    YearRange,
 };
 
 // Workdir args cross the PyO3 boundary as `String`, not `PathBuf` —
@@ -583,6 +584,47 @@ fn all_buckets_py() -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// Read `processed/filing_index.csv`, apply company / year / form
+/// filters, group by per-filing-fetcher bucket. Returns a dict keyed
+/// by bucket name (`"form4"`, `"form13f"`, etc.) whose values are
+/// lists of `(cik, accession, primary_document)` tuples ready for
+/// the wheel's `fetch_*_batch` calls. Lifted from the wheel's
+/// `_dispatch_per_filing_fetches` (the planning half) in the
+/// 2026-05-25 binding prep — execution stays in Python because each
+/// binding wires its own batch fetchers.
+/// `{bucket_name: [(cik, accession_dashed, primary_document)]}` —
+/// the materialised plan shape, factored out to satisfy clippy's
+/// `type_complexity` lint.
+type DispatchPlanByName = std::collections::HashMap<String, Vec<(u64, String, String)>>;
+
+#[pyfunction]
+#[pyo3(signature = (workdir, *, companies=None, year_lo, year_hi))]
+fn prepare_dispatch_plan_py(
+    workdir: String,
+    companies: Option<Vec<u64>>,
+    year_lo: u16,
+    year_hi: u16,
+) -> PyResult<DispatchPlanByName> {
+    let wd = Workdir::new(workdir);
+    let scope = DispatchScope {
+        companies,
+        year_lo,
+        year_hi,
+    };
+    let plan = prepare_dispatch_plan(&wd, &scope).map_err(map_err)?;
+    let mut out = std::collections::HashMap::new();
+    for (bucket, tasks) in plan.by_bucket {
+        out.insert(
+            bucket.as_str().to_string(),
+            tasks
+                .into_iter()
+                .map(|t| (t.cik, t.accession_dashed, t.primary_document))
+                .collect(),
+        );
+    }
+    Ok(out)
+}
+
 fn map_err(e: SecError) -> PyErr {
     match &e {
         SecError::Io(_) => PyIOError::new_err(format!("{e}")),
@@ -615,6 +657,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolve_fetch_buckets_py, &m)?)?;
     m.add_function(wrap_pyfunction!(parse_tickers_json_py, &m)?)?;
     m.add_function(wrap_pyfunction!(all_buckets_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_dispatch_plan_py, &m)?)?;
     parent.add_submodule(&m)?;
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?;

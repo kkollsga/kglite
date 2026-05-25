@@ -21,6 +21,7 @@ pub mod blocking;
 pub mod buckets;
 pub mod catalog;
 pub mod client;
+pub mod dispatch;
 pub mod error;
 pub mod extract;
 pub mod fetch;
@@ -40,6 +41,7 @@ pub use buckets::{
     all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
 };
 pub use client::{FetchMode, SecClient};
+pub use dispatch::{prepare_dispatch_plan, DispatchPlan, DispatchScope, FilingTask};
 pub use error::{Result, SecError};
 pub use extract::{run_all, ExtractReport, Provenance, Sinks};
 pub use fetch::{

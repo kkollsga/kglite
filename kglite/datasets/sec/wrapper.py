@@ -148,17 +148,8 @@ def _dispatch_per_filing_fetches(
     Returns a per-bucket {bucket: (downloaded, skipped)} dict for
     verbose logging.
     """
-    import csv
-
     out: dict[str, tuple[int, int]] = {}
     if detailed <= 0:
-        return out
-
-    # 0.9.46 F1: per-filing dispatcher reads filing_index.csv (a thin
-    # build artifact written by the orchestrator's identity pre-pass)
-    # instead of the now-removed filing.csv.
-    filing_csv = workdir / "processed" / "filing_index.csv"
-    if not filing_csv.is_file():
         return out
 
     if year_range is not None:
@@ -166,36 +157,29 @@ def _dispatch_per_filing_fetches(
     else:
         hi = current_year
         lo = max(current_year - detailed + 1, 1993)
-    cik_set: Optional[set[int]] = set(companies) if companies else None
 
+    # Plan the per-filing dispatch in core: read filing_index.csv,
+    # apply CIK / year filters, group by form bucket. Lifted in the
+    # 2026-05-25 binding prep so every binding shares the planning
+    # rules; only the execution loop below stays per-binding (because
+    # each binding wires its own batch fetchers around the core
+    # single-filing functions).
+    plan = _sec_internal.prepare_dispatch_plan_py(
+        str(workdir),
+        companies=companies,
+        year_lo=lo,
+        year_hi=hi,
+    )
+    if not plan:
+        # Cold workdir (no filing_index.csv yet) or scope filtered
+        # everything out — nothing to fetch.
+        return out
+    # Materialise as the {bucket: [tasks]} dict the execution loop
+    # below expects, with empty defaults for inactive buckets so the
+    # `if "X" in active and buckets["X"]` guards keep working.
     buckets: dict[str, list[tuple[int, str, str]]] = {k: [] for k in _FORM_BUCKETS}
-    with filing_csv.open() as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                row_cik = int(row["cik"])
-            except (KeyError, ValueError):
-                continue
-            if cik_set is not None and row_cik not in cik_set:
-                continue
-            filed_date = row.get("filed_date", "")
-            if len(filed_date) < 4:
-                continue
-            try:
-                year = int(filed_date[:4])
-            except ValueError:
-                continue
-            if year < lo or year > hi:
-                continue
-            form_type = row.get("form_type", "")
-            primary = row.get("primary_document", "")
-            accession = row.get("accession_number", "")
-            if not accession:
-                continue
-            for bucket_name, bucket_forms in _FORM_BUCKETS.items():
-                if form_type in bucket_forms:
-                    buckets[bucket_name].append((row_cik, accession, primary))
-                    break
+    for bucket_name, tasks in plan.items():
+        buckets[bucket_name] = tasks
 
     # Resolve the per-filing fetch scope. `form_types=None` → the lean
     # default (insider ownership + 8-K); an explicit list maps to its

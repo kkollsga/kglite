@@ -176,6 +176,15 @@ pub mod api {
             pub use crate::datasets::sec::{
                 all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
             };
+            // Per-filing dispatch planning — reads filing_index.csv,
+            // applies company / year / form-type filters, groups by
+            // bucket. Every binding then drives its own execution
+            // loop over the plan. Lifted from the wheel's
+            // `_dispatch_per_filing_fetches` (CSV-reading + filtering
+            // + grouping half) in the 2026-05-25 binding prep.
+            pub use crate::datasets::sec::{
+                prepare_dispatch_plan, DispatchPlan, DispatchScope, FilingTask,
+            };
             // SEC company_tickers.json parser — turns the published
             // JSON into a `TICKER → CIK` HashMap for bindings that
             // accept string tickers from their users.
