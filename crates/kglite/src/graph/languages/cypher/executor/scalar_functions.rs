@@ -422,6 +422,45 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Null)
             }
+            // shortest_path_length(a, b) → undirected BFS hop count
+            // between two bound node variables. Real query: "how many
+            // hops from A to B" without materializing the full path.
+            // Wraps `graph_algorithms::shortest_path_cost` (already
+            // public for the wheel's `.shortest_path_length()` method)
+            // so every binding reaches it through Cypher.
+            //
+            // Returns Null if either argument isn't a bound node
+            // variable, or if the nodes are not connected. Returns 0
+            // for self-loops (a == b).
+            //
+            // 2026-05-25 broad-scan lift, Batch 4.
+            "shortest_path_length" => {
+                if args.len() != 2 {
+                    return Err("shortest_path_length() requires 2 node-variable args: \
+                         shortest_path_length(a, b)"
+                        .into());
+                }
+                let (a_var, b_var) = match (&args[0], &args[1]) {
+                    (Expression::Variable(a), Expression::Variable(b)) => (a, b),
+                    _ => {
+                        return Err("shortest_path_length() args must be bound node variables \
+                             (e.g. MATCH (a),(b) RETURN shortest_path_length(a, b))"
+                            .into());
+                    }
+                };
+                let a_idx = row.node_bindings.get(a_var);
+                let b_idx = row.node_bindings.get(b_var);
+                let (Some(&src), Some(&tgt)) = (a_idx, b_idx) else {
+                    return Ok(Value::Null);
+                };
+                let cost = crate::graph::algorithms::graph_algorithms::shortest_path_cost(
+                    self.graph, src, tgt,
+                );
+                match cost {
+                    Some(n) => Ok(Value::Int64(n as i64)),
+                    None => Ok(Value::Null),
+                }
+            }
             "labels" => {
                 // labels(n) returns the list of node labels.
                 //
