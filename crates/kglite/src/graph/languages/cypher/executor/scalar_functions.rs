@@ -195,6 +195,110 @@ impl<'a> CypherExecutor<'a> {
                     _ => Err("duration.between() arguments must be datetime values".into()),
                 }
             }
+            // Temporal arithmetic (2026-05-25 broad-scan lift).
+            // Real use case: "events scheduled in the next N days":
+            //   MATCH (e:Event) WHERE e.date <= add_days(date(), 30)
+            // Date math via chrono — NaiveDate handles month/year
+            // arithmetic correctly (Feb 28 + 1 year = Feb 28; Jan 31
+            // + 1 month = Feb 28/29 depending on leap year).
+            "add_days" => {
+                if args.len() != 2 {
+                    return Err("add_days() requires 2 args: add_days(date, n_days)".into());
+                }
+                let d = self.evaluate_expression(&args[0], row)?;
+                let n = self.evaluate_expression(&args[1], row)?;
+                match (&d, &n) {
+                    (Value::DateTime(date), Value::Int64(n)) => {
+                        match date.checked_add_signed(chrono::Duration::days(*n)) {
+                            Some(out) => Ok(Value::DateTime(out)),
+                            None => Ok(Value::Null),
+                        }
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err("add_days() expects (date, integer)".into()),
+                }
+            }
+            "add_months" => {
+                if args.len() != 2 {
+                    return Err("add_months() requires 2 args: add_months(date, n_months)".into());
+                }
+                let d = self.evaluate_expression(&args[0], row)?;
+                let n = self.evaluate_expression(&args[1], row)?;
+                match (&d, &n) {
+                    (Value::DateTime(date), Value::Int64(n)) => {
+                        let result = if *n >= 0 {
+                            date.checked_add_months(chrono::Months::new(*n as u32))
+                        } else {
+                            date.checked_sub_months(chrono::Months::new((-*n) as u32))
+                        };
+                        match result {
+                            Some(out) => Ok(Value::DateTime(out)),
+                            None => Ok(Value::Null),
+                        }
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err("add_months() expects (date, integer)".into()),
+                }
+            }
+            "add_years" => {
+                if args.len() != 2 {
+                    return Err("add_years() requires 2 args: add_years(date, n_years)".into());
+                }
+                let d = self.evaluate_expression(&args[0], row)?;
+                let n = self.evaluate_expression(&args[1], row)?;
+                match (&d, &n) {
+                    (Value::DateTime(date), Value::Int64(n)) => {
+                        // 12 months per year — chrono's Months handles
+                        // leap-year edge case (Feb 29 + 1 year → Feb 28).
+                        let months_delta = n.saturating_mul(12);
+                        let result = if months_delta >= 0 {
+                            date.checked_add_months(chrono::Months::new(months_delta as u32))
+                        } else {
+                            date.checked_sub_months(chrono::Months::new((-months_delta) as u32))
+                        };
+                        match result {
+                            Some(out) => Ok(Value::DateTime(out)),
+                            None => Ok(Value::Null),
+                        }
+                    }
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => Err("add_years() expects (date, integer)".into()),
+                }
+            }
+            // date_truncate(date, 'unit') — round down to the start of
+            // a calendar period. Real use case: group analytics by
+            // week/month: `RETURN date_truncate(e.ts, 'month'), count(e)`.
+            "date_truncate" => {
+                use chrono::{Datelike, NaiveDate};
+                if args.len() != 2 {
+                    return Err(
+                        "date_truncate() requires 2 args: date_truncate(date, 'year'|'month'|'week'|'day')".into()
+                    );
+                }
+                let d = self.evaluate_expression(&args[0], row)?;
+                let unit = self.evaluate_expression(&args[1], row)?;
+                let (date, unit_str) = match (&d, &unit) {
+                    (Value::DateTime(date), Value::String(u)) => (*date, u.as_str()),
+                    (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                    _ => return Err("date_truncate() expects (date, string)".into()),
+                };
+                let truncated = match unit_str {
+                    "year" | "years" => NaiveDate::from_ymd_opt(date.year(), 1, 1),
+                    "month" | "months" => NaiveDate::from_ymd_opt(date.year(), date.month(), 1),
+                    "week" | "weeks" => {
+                        // ISO week starts Monday. Subtract weekday-1 days.
+                        let dow = date.weekday().num_days_from_monday() as i64;
+                        date.checked_sub_signed(chrono::Duration::days(dow))
+                    }
+                    "day" | "days" => Some(date),
+                    other => {
+                        return Err(format!(
+                            "date_truncate() unit must be year/month/week/day, got '{other}'"
+                        ));
+                    }
+                };
+                Ok(truncated.map(Value::DateTime).unwrap_or(Value::Null))
+            }
             "size" => {
                 // Phase A.1 / C2 — native Value::List fast path;
                 // string fallback stays for legacy collect-as-JSON
