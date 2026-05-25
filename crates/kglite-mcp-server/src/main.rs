@@ -559,6 +559,7 @@ fn build_embedder_from_manifest(
         .and_then(|v| v.as_str())
         .unwrap_or("fastembed");
     match backend {
+        #[cfg(feature = "fastembed")]
         "fastembed" => {
             let model = obj.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
                 anyhow::anyhow!("extensions.embedder.model is required for the fastembed backend")
@@ -568,9 +569,18 @@ fn build_embedder_from_manifest(
             tracing::info!(model, backend, "registered Rust-native embedder");
             Ok(Some(Arc::new(adapter)))
         }
+        #[cfg(not(feature = "fastembed"))]
+        "fastembed" => anyhow::bail!(
+            "extensions.embedder.backend = \"fastembed\" requires this binary \
+             to be built with the `fastembed` feature enabled. Rebuild with: \
+             `cargo install kglite-mcp-server --features fastembed`. The \
+             default build excludes fastembed because its ort-sys dependency \
+             has a flaky upstream binary download — opt in only when you need \
+             text_score() semantic search."
+        ),
         other => anyhow::bail!(
             "extensions.embedder.backend = {other:?} is not supported. \
-             Known: fastembed."
+             Known: fastembed (requires --features fastembed at install time)."
         ),
     }
 }
