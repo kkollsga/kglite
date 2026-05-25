@@ -7,98 +7,180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.10.2] — 2026-05-25 — Dataset-wrapper preparation for future-language bindings (boundary principle landed)
 
-- **Dataset wrapping preparation** for future-language bindings.
-  Three changes together so that a future Go / JS / JVM binding
-  doesn't have to re-implement code the Python wheel had to.
-  - `kglite::api::datasets::*::{*_blocking}` — sync-runtime
-    wrappers for every async `fetch_*` entry point (Wikidata,
-    Sodir, SEC). Each spins up a single-thread tokio runtime via
-    the new `kglite::datasets::blocking::run` helper and returns
-    the sync result. Bindings without their own async runtime
-    use these; bindings with one drive the async variants
-    directly.
-  - `kglite::api::datasets::sec::{SecFormBucket, ALL_BUCKETS,
-    LEAN_FETCH_BUCKETS, resolve_fetch_buckets, all_buckets}` —
-    the SEC form-type → per-filing-fetcher bucket mapping is now
-    canonical in core. The Python wheel's `_FORM_BUCKETS` table
-    is sourced from Rust at import time
-    (`_sec_internal.all_buckets_py()`); the dispatch table is no
-    longer duplicated across bindings.
-  - `kglite::api::datasets::sec::parse_tickers_json` — parses
-    SEC's `company_tickers.json` into a `TICKER → CIK` HashMap.
-    Lifted from the wheel's `_resolve_companies` helper. Every
-    binding accepting string tickers from users now goes through
-    the same JSON-walk.
-  10 new unit tests for the SEC helpers; 4-call sanity test for
-  the wheel's round-trip path verified end-to-end.
+Single release theme: get `kglite` core ready to host future
+non-Python bindings (Go via cgo, JS via napi, JVM via JNI, etc.)
+without each one re-implementing the same orchestration glue the
+Python wheel had to write.
 
-- `kglite::api::datasets::{sec, sodir, wikidata}` — dataset fetch
-  + extract building blocks now reachable through the curated
-  stable API. Each submodule is feature-gated (matches the
-  existing `sec` / `sodir` / `wikidata` Cargo features) and
+The work is anchored by a new explicit **boundary principle** in
+`CLAUDE.md` (Architecture section):
+
+> A wrapper only contains code that is specific to its environment
+> and cannot be used by any other sibling wrapper. Anything two or
+> more wrappers would write identically belongs in `kglite::api`.
+
+Applied in both directions: lift wheel-side code to core when any
+binding would write it identically; demote core code back to a
+wrapper when only that wrapper can use it. Eight commits totalling
+~2,300 lines of net change in service of one goal.
+
+### Added — `kglite::api` surface
+
+- **`kglite::api::blueprint`** — pure-Rust blueprint loader +
+  builder is now part of the curated stable API. Re-exports
+  `build`, `load_blueprint_file`, `Blueprint`, `Settings`,
+  `NodeSpec`, `Connections`, `FkEdge`, `JunctionEdge`, `TimeKey`,
+  `TimeseriesSpec`, `ComputeOp`, `CalendarLink`, `AggregateEdge`,
+  `BuildReport`, `FlatSpec`. The Python wheel's `from_blueprint`
+  has always been a thin wrapper around these — now any binding
+  can call them directly without going through PyO3.
+
+- **`kglite::api::datasets::{sec, sodir, wikidata}`** — dataset
+  fetch + extract building blocks now reachable through the
+  curated stable API. Each submodule is feature-gated (matches
+  the existing `sec` / `sodir` / `wikidata` Cargo features) and
   re-exports the same surface the Python wheel uses via
   `_sec_internal` / `_sodir_internal` / `_wikidata_internal`:
   workdir + storage-mode types, error + `Result` aliases, the
   HTTP client, the async `fetch_*` entry points, and (for SEC)
-  the extract pipeline + size-prediction helpers. Future Go /
-  JS / JVM bindings now consume the same items through the
-  stable api namespace. Lifecycle orchestration (cache short-
-  circuit, mode selection, retry budgets) stays in each
-  binding's wrapper — the Python wheel's wrappers at
-  `kglite/datasets/*/wrapper.py` are the reference
+  the extract pipeline + size-prediction helpers. Lifecycle
+  orchestration (cache short-circuit, mode selection, retry
+  budgets) stays in each binding's wrapper — the Python wheel's
+  wrappers at `kglite/datasets/*/wrapper.py` are the reference
   implementation.
-- `kglite::api::blueprint` — pure-Rust blueprint loader + builder is
-  now part of the curated stable API. Re-exports `build`,
-  `load_blueprint_file`, `Blueprint`, `Settings`, `NodeSpec`,
-  `Connections`, `FkEdge`, `JunctionEdge`, `TimeKey`,
-  `TimeseriesSpec`, `ComputeOp`, `CalendarLink`, `AggregateEdge`,
-  `BuildReport`, and `FlatSpec`. The Python wheel's `from_blueprint`
-  has always been a thin wrapper around these — now any binding
-  (Go, JS, JVM, …) can call them directly without going through
-  PyO3.
+
+- **Sync wrappers for every async `fetch_*` entry point** —
+  `kglite::api::datasets::*::*_blocking` for Wikidata, Sodir, SEC
+  (13 functions total). Each spins up a single-thread tokio
+  runtime via the new `kglite::datasets::blocking::run` helper.
+  Bindings with their own async runtime drive the async variants;
+  bindings without one use the blocking variants and let core
+  manage the runtime per call.
+
+- **`kglite::api::datasets::sec` — generic helpers lifted from
+  the wheel**:
+  - `SecFormBucket`, `ALL_BUCKETS`, `LEAN_FETCH_BUCKETS`,
+    `resolve_fetch_buckets`, `all_buckets` — the SEC form-type →
+    per-filing-fetcher bucket mapping is now canonical in core.
+    The Python wheel's `_FORM_BUCKETS` table is sourced from
+    Rust at import time.
+  - `parse_tickers_json` — parses SEC's `company_tickers.json`
+    into a `TICKER → CIK` HashMap. Lifted from the wheel's
+    `_resolve_companies` helper.
+  - `prepare_dispatch_plan` + `DispatchScope` + `DispatchPlan`
+    + `FilingTask` — read `processed/filing_index.csv`, apply
+    company / year / form filters, group by bucket. The
+    planning half of the wheel's
+    `_dispatch_per_filing_fetches` is now in core; execution
+    half stays in the wrapper for now (see
+    `docs/internal/consider-for-future.md`).
+
+- **`kglite::api::datasets::wikidata::{decide, CacheDecision,
+  FreshnessInputs}`** + 3 helpers — the disk-cache freshness
+  decision tree (force-rebuild flag → graph age → remote HEAD
+  probe → cooldown comparison). 5 outcomes (`Build`, `Load`,
+  `Rebuild`) with human-readable reason strings so bindings
+  don't re-derive the comparisons for verbose prints. Lifted
+  from `kglite/datasets/wikidata.py::open`.
+
+### Changed — `kglite::api` discipline
+
+- **`infer_selection_node_type` demoted** from `kglite::api`
+  re-exports. Identified by the reverse audit (see Docs below)
+  as taking `&CowSelection` — a type only the wheel uses
+  externally, so no other binding could meaningfully call this.
+  Stays `pub` in `crates/kglite/src/graph/handle.rs` so the
+  wheel reaches it via `kglite_core::graph::handle::
+  infer_selection_node_type`. When Selection gets lifted to a
+  stable api type, both should move together.
+
+- `discover_property_keys_from_data` doc comment rewritten to
+  remove Python-flavored language ("DataFrame-style exporters"
+  → "any row-oriented exporter (CSV, Parquet, DataFrame,
+  JSON-lines)"). No code change; the function signature is
+  generic so the doc shouldn't have claimed otherwise.
 
 ### Docs
 
-- `docs/rust/implementing-a-binding.md` — deep-dive companion to
-  `embedding.md` and `session.md` for anyone publishing a new-
-  language binding (Go via cgo, JS via napi, JVM via JNI, …).
-  Covers the bridge-layer choice (Rust direct vs language FFI
-  vs the Phase H C ABI aspiration), the full `KgErrorCode`
-  mapping table with recommended idioms per language family, an
-  Embedder trait implementation walkthrough with an OpenAI-API-
-  backed example, blueprint / `.kgl` / code_tree / dataset
-  loading patterns, the binding-side cookbook (process cache,
-  lazy materialization, value conversion, progress callbacks),
-  and a cross-binding portability checklist. References the
-  three existing reference implementations (`kglite-py`,
-  `kglite-bolt-server`, `kglite-mcp-server`) as the canonical
-  worked examples for every pattern.
-- `docs/internal/api-audit-2026-05-25.md` — Phase 1 audit of the
-  `kglite::api` surface ahead of the canonical binding-implementer
-  guide. Inventories the 29 + 2-submod current surface, classifies
-  every `#[pymethods]` gap (Class A/B/C/D), and ranks a top-10
-  punchlist of api hygiene work to do before lifting dataset
-  lifecycles to core.
-- `docs/internal/consider-for-future.md` — parking lot for work
-  that's been deliberately deferred from current scope (the full
-  dataset-lifecycle lift, retiring the Python MCP server, etc.).
-  Captures what / why-deferred / when-to-revisit / effort for
-  each item so scope decisions don't get rediscovered as
-  surprises later.
-- `docs/internal/mcp-server-parity-2026-05-25.md` — Phase 4
+- **`CLAUDE.md`** — boundary principle now formalised under
+  Architecture (see "The boundary principle (north star for
+  wrappers vs core)"). Applies in both directions; concrete
+  examples; cross-references the binding-implementer guide.
+
+- **`docs/rust/implementing-a-binding.md`** — deep-dive companion
+  to `embedding.md` and `session.md` for anyone publishing a new-
+  language binding. Covers the bridge-layer choice (Rust direct
+  vs language FFI vs the Phase H C ABI aspiration), the full
+  `KgErrorCode` mapping table with recommended idioms per
+  language family, an Embedder trait implementation walkthrough
+  with an OpenAI-API-backed example, blueprint / `.kgl` /
+  code_tree / dataset loading patterns, the binding-side
+  cookbook (process cache, lazy materialization, value
+  conversion, progress callbacks), and a cross-binding
+  portability checklist. References the three existing
+  reference implementations (`kglite-py`, `kglite-bolt-server`,
+  `kglite-mcp-server`) as the canonical worked examples. New
+  "Wrapping a dataset for your binding" chapter opens with the
+  boundary rule and walks the six-step lifecycle common to all
+  three datasets.
+
+- **`docs/internal/api-audit-2026-05-25.md`** — Phase 1 audit of
+  the `kglite::api` surface ahead of the binding-implementer
+  guide. Inventories the 29 + 2-submod current surface,
+  classifies every `#[pymethods]` gap (Class A/B/C/D), and
+  ranks a top-10 punchlist.
+
+- **`docs/internal/mcp-server-parity-2026-05-25.md`** — Phase 4
   feature-parity audit between the Python MCP server
   (`kglite/mcp_server/`, 3548 LOC) and the Rust MCP server
-  (`crates/kglite-mcp-server/`, 1974 LOC). Both ship; neither is
-  being retired. The audit catalogues all 13 tools, all 6 modes,
-  CLI surface, skills, embedder support, network protocols,
-  logging, and error handling side-by-side. Result: 12 of 13
-  tools are at full parity; the one tool gap is `explore`
-  (Rust-native, Python lacks). Two "should converge"
-  recommendations added to `consider-for-future.md`; the rest of
-  the divergences are acceptable design intent. Includes an
-  audience map for which server to pick for which deployment.
+  (`crates/kglite-mcp-server/`, 1974 LOC). Both ship; neither
+  is being retired. 12 of 13 tools at full parity; the one tool
+  gap is `explore` (Rust-native, Python lacks). Two "should
+  converge" items deferred to `consider-for-future.md`; the
+  rest are acceptable design intent. Includes an audience map
+  for which server to pick for which deployment.
+
+- **`docs/internal/reverse-audit-2026-05-25.md`** — applies the
+  boundary principle in reverse: which `kglite::api::*` items
+  actually only one wrapper can use? Method, findings,
+  decision rule for future api additions. One demotion
+  (`infer_selection_node_type`), one doc-only cleanup
+  (`discover_property_keys_from_data`); the other 9 audited
+  items had generic signatures and stayed.
+
+- **`docs/internal/consider-for-future.md`** — parking-lot
+  pattern for work that's been deliberately deferred. Covers
+  the full dataset-lifecycle lift, retiring the Python MCP
+  server, `from_blueprint` lift, SEC ticker resolution lift,
+  Wikidata process cache, Selection fluent-API lift, graph
+  algorithms, result streaming, the Phase 1 audit's items 2-10,
+  the SEC dispatch execution loop lift, porting `explore` to
+  Python MCP, lazy-load embedder in Rust MCP. Each entry has
+  what / why-deferred / when-to-revisit / effort.
+
+### Internal
+
+- New Rust module `crates/kglite/src/datasets/blocking.rs`
+  (shared `tokio::runtime::block_on` helper for sync bindings).
+- New Rust modules `crates/kglite/src/datasets/sec/{blocking,
+  buckets, tickers, dispatch}.rs` housing the lifted SEC
+  helpers + 27 new unit tests covering all variant cases.
+- New Rust module `crates/kglite/src/datasets/wikidata/
+  freshness.rs` with 6 unit tests covering the decision tree.
+- Python wrappers (`kglite/datasets/{sec/wrapper.py,
+  wikidata.py}`) updated to delegate to the lifted core
+  helpers instead of carrying their own copies. Net ~80 LOC of
+  Python deleted; net ~700 LOC of core code added (more than a
+  1:1 trade because the core versions carry doc + tests).
+
+### Removed — none.
+
+No public API removals. Items demoted from `kglite::api` stay
+reachable through deeper paths (`kglite_core::graph::handle::*`,
+etc.) — the demotion is a stability claim adjustment, not a code
+removal.
 
 ## [0.10.1] — 2026-05-25 — Polars-style crate split (Phase G), Bolt Phase F driver-compat fixes, two-track docs, crates.io publish (kglite + kglite-bolt-server + kglite-mcp-server)
 
