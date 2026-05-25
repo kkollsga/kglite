@@ -14,6 +14,12 @@ use kglite_c::{
     kglite_load_file, kglite_session_execute_read, kglite_session_free, kglite_session_new,
     KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
 };
+
+#[cfg(feature = "fastembed")]
+use kglite_c::{
+    kglite_embedder_fastembed_new, kglite_embedder_free, kglite_session_set_embedder,
+    KgliteEmbedder,
+};
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
 
@@ -164,4 +170,94 @@ fn params_json_round_trip() {
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
+}
+
+// ───────────────────────── embedder ─────────────────────────────────
+
+#[cfg(feature = "fastembed")]
+#[test]
+fn fastembed_factory_rejects_unknown_model() {
+    let model = CString::new("definitely-not-a-real-model").unwrap();
+    let mut embedder: *mut KgliteEmbedder = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_embedder_fastembed_new(model.as_ptr(), &mut embedder as *mut _, &mut err as *mut _)
+    };
+    assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+    assert!(embedder.is_null());
+    assert!(!err.is_null());
+    unsafe { kglite_free_string(err) };
+}
+
+#[cfg(feature = "fastembed")]
+#[test]
+fn set_embedder_with_null_args_returns_null_pointer() {
+    let rc = unsafe { kglite_session_set_embedder(std::ptr::null_mut(), std::ptr::null()) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+}
+
+#[cfg(feature = "fastembed")]
+#[test]
+fn embedder_free_is_null_safe() {
+    unsafe { kglite_embedder_free(std::ptr::null_mut()) };
+}
+
+// ───────────────────────── Sodir dataset ────────────────────────────
+
+#[cfg(feature = "sodir")]
+#[test]
+fn sodir_fetch_with_bad_json_returns_invalid_argument() {
+    use kglite_c::kglite_datasets_sodir_fetch_all;
+    let workdir = CString::new("/tmp/kglite_c_sodir_integration_bad").unwrap();
+    let bad = CString::new("not-a-json-array").unwrap();
+    let mut out_report: *const c_char = std::ptr::null();
+    let mut out_err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_datasets_sodir_fetch_all(
+            workdir.as_ptr(),
+            bad.as_ptr(),
+            7,
+            30,
+            10,
+            &mut out_report as *mut _,
+            &mut out_err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+    assert!(out_report.is_null());
+}
+
+#[cfg(feature = "sodir")]
+#[test]
+fn sodir_fetch_empty_datasets_succeeds_with_empty_report() {
+    use kglite_c::kglite_datasets_sodir_fetch_all;
+    use std::fs;
+
+    // Empty datasets array → no fetches → succeeds with default report.
+    let workdir_path = std::env::temp_dir().join("kglite_c_sodir_empty");
+    let _ = fs::remove_dir_all(&workdir_path); // start clean
+    let workdir = CString::new(workdir_path.to_str().unwrap()).unwrap();
+    let datasets = CString::new("[]").unwrap();
+    let mut out_report: *const c_char = std::ptr::null();
+    let mut out_err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_datasets_sodir_fetch_all(
+            workdir.as_ptr(),
+            datasets.as_ptr(),
+            7,
+            30,
+            10,
+            &mut out_report as *mut _,
+            &mut out_err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!out_report.is_null());
+    let report_str = unsafe { CStr::from_ptr(out_report).to_str().unwrap() };
+    // Report is a JSON object with refresh + preprocess.
+    let parsed: serde_json::Value = serde_json::from_str(report_str).unwrap();
+    assert!(parsed["refresh"].is_object());
+    assert!(parsed["preprocess"].is_object());
+    unsafe { kglite_free_string(out_report) };
+    let _ = fs::remove_dir_all(&workdir_path);
 }

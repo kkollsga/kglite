@@ -35,6 +35,8 @@
 // ours to wrap up in `unsafe { ... }` for clippy's sake.
 
 pub mod abi;
+pub mod datasets;
+pub mod embedder;
 pub mod graph;
 pub mod result;
 pub mod session;
@@ -46,6 +48,13 @@ pub mod strings;
 // flat structure here keeps the generated header tidy and easier
 // for binding authors to navigate.
 pub use abi::*;
+// `datasets::*` is empty when no dataset feature is enabled — the
+// inner submodules are all `#[cfg(feature = "<loader>")]`. Allow
+// the wildcard re-export to be unused when the feature set is
+// minimal.
+#[allow(unused_imports)]
+pub use datasets::*;
+pub use embedder::*;
 pub use graph::*;
 pub use result::*;
 pub use session::*;

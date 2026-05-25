@@ -11,9 +11,10 @@ use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::param::json_value_to_kglite_value;
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
-use kglite::api::Value;
+use kglite::api::{Embedder, Value};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
+use std::sync::Arc;
 
 /// Opaque handle for a session. See [`KgliteGraph`](crate::KgliteGraph)
 /// for the rationale on the empty `#[repr(C)]` facade pattern.
@@ -26,16 +27,29 @@ pub struct KgliteSession {
 /// Private state backing a [`KgliteSession`] handle.
 pub(crate) struct SessionState {
     pub(crate) inner: Session,
+    /// Optional embedder attached to this session. When set, every
+    /// execute_read / execute_mut call passes the embedder into
+    /// `ExecuteOptions` so `text_score()` and friends work.
+    /// Attached via
+    /// [`kglite_session_set_embedder`](crate::kglite_session_set_embedder).
+    pub(crate) embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl SessionState {
     fn into_handle(session: Session) -> *mut KgliteSession {
-        let boxed = Box::new(SessionState { inner: session });
+        let boxed = Box::new(SessionState {
+            inner: session,
+            embedder: None,
+        });
         Box::into_raw(boxed).cast::<KgliteSession>()
     }
 
-    unsafe fn from_handle<'a>(handle: *const KgliteSession) -> &'a SessionState {
+    pub(crate) unsafe fn from_handle<'a>(handle: *const KgliteSession) -> &'a SessionState {
         unsafe { &*handle.cast::<SessionState>() }
+    }
+
+    pub(crate) unsafe fn from_handle_mut<'a>(handle: *mut KgliteSession) -> &'a mut SessionState {
+        unsafe { &mut *handle.cast::<SessionState>() }
     }
 
     unsafe fn free_handle(handle: *mut KgliteSession) {
@@ -134,7 +148,8 @@ pub unsafe extern "C" fn kglite_session_execute_read(
 
     let session_state = unsafe { SessionState::from_handle(session) };
     let snapshot = session_state.inner.snapshot();
-    let opts = ExecuteOptions::eager(&params);
+    let mut opts = ExecuteOptions::eager(&params);
+    opts.embedder = session_state.embedder.clone();
 
     match execute_read(&snapshot, query_str, &opts) {
         Ok(outcome) => {
@@ -200,7 +215,8 @@ pub unsafe extern "C" fn kglite_session_execute_mut(
     // borrow `&SessionState` here and rely on Session's internal
     // Mutex for the commit-swap.
     let session_state = unsafe { SessionState::from_handle(session) };
-    let opts = ExecuteOptions::eager(&params);
+    let mut opts = ExecuteOptions::eager(&params);
+    opts.embedder = session_state.embedder.clone();
 
     // Mirror the bolt-server execute_in_tx pattern: begin →
     // working_mut → execute_mut → commit. The Transaction's

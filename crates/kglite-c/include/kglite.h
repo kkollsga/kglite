@@ -71,6 +71,25 @@ typedef struct KgliteAbiVersion {
 } KgliteAbiVersion;
 
 /**
+ * Opaque handle for an embedder. See
+ * [`KgliteGraph`](crate::KgliteGraph) for the rationale on the
+ * empty `#[repr(C)]` facade pattern — cbindgen renders only a
+ * forward declaration; the actual state lives in
+ * [`EmbedderState`].
+ */
+typedef struct KgliteEmbedder {
+  uint8_t _opaque[0];
+} KgliteEmbedder;
+
+/**
+ * Opaque handle for a session. See [`KgliteGraph`](crate::KgliteGraph)
+ * for the rationale on the empty `#[repr(C)]` facade pattern.
+ */
+typedef struct KgliteSession {
+  uint8_t _opaque[0];
+} KgliteSession;
+
+/**
  * Opaque handle for a knowledge graph. The C-side caller only
  * ever sees `KgliteGraph*`; allocation, deallocation, and field
  * access happen inside `kglite-c`.
@@ -96,14 +115,6 @@ typedef struct KgliteCypherResult {
 } KgliteCypherResult;
 
 /**
- * Opaque handle for a session. See [`KgliteGraph`](crate::KgliteGraph)
- * for the rationale on the empty `#[repr(C)]` facade pattern.
- */
-typedef struct KgliteSession {
-  uint8_t _opaque[0];
-} KgliteSession;
-
-/**
  * Return the C ABI version this library was built against.
  * Bindings should call this on startup and refuse to proceed if
  * the major version doesn't match what they were compiled
@@ -126,6 +137,168 @@ typedef struct KgliteSession {
  * ```
  */
  struct KgliteAbiVersion kglite_abi_version(void);
+
+#if defined(KGLITE_FEATURE_SODIR)
+/**
+ * Fetch all Sodir (Norwegian Continental Shelf) datasets the
+ * caller asks for. Sync wrapper around the engine's
+ * [`fetch_all_blocking`] entry point — spins up a single-thread
+ * tokio runtime per call, fetches missing/stale CSVs from the
+ * ArcGIS FactMaps REST API, applies preprocessing (FK fixups),
+ * returns a report.
+ *
+ * # Arguments
+ *
+ * - `workdir_path` (in, borrowed): directory under which CSVs
+ *   land. Layout: `<root>/csv/<dataset>.csv`,
+ *   `<root>/index.json`. Created on first use; subsequent
+ *   calls reuse the layout.
+ * - `datasets_json` (in, borrowed): JSON array of dataset
+ *   stem names the caller wants — e.g.
+ *   `["field", "wellbore_exploration", "production_profile"]`.
+ *   Must not be null. Pass `"[]"` for no datasets.
+ * - `index_cooldown_days` (in): how long the workdir's
+ *   `index.json` is trusted before re-probing the catalog.
+ *   Wheel default: 7.
+ * - `dataset_cooldown_days` (in): how long an already-fetched
+ *   CSV is trusted before re-fetching. Wheel default: 30.
+ * - `concurrency` (in): max parallel HTTP fetches. Wheel
+ *   default: 10.
+ * - `out_report_json` (out, owned): on success, set to a
+ *   JSON object string with the report fields. Caller must
+ *   free via [`kglite_free_string`](crate::kglite_free_string).
+ *   Shape:
+ *   ```json
+ *   {
+ *     "refresh": {
+ *       "fetched": ["..."],
+ *       "unchanged": ["..."],
+ *       "user_supplied": ["..."],
+ *       "cached": ["..."],
+ *       "unfetchable": ["..."],
+ *       "errors": [["stem", "message"], ...]
+ *     },
+ *     "preprocess": {
+ *       "petreg_licence_pk": null | <int>,
+ *       "seismic_progress_fk": null | <int>,
+ *       "chrono_parent_fk": null | <int>,
+ *       "announced_block_fk": null | <int>
+ *     }
+ *   }
+ *   ```
+ * - `out_error_msg` (out, owned, may be null): on failure,
+ *   set to an owned error message string. Caller must free
+ *   via [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Errors
+ *
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — required pointer is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — input string isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `datasets_json` isn't a
+ *   JSON array of strings
+ * - `KGLITE_STATUS_CODE_FILE_IO` — workdir creation or CSV write failed
+ * - `KGLITE_STATUS_CODE_INTERNAL` — REST API call failed, tokio
+ *   runtime build failed, or other engine-level error
+ *
+ * # Safety
+ *
+ * `workdir_path` and `datasets_json` must be null-terminated
+ * UTF-8 strings. `out_report_json` must be a valid writable
+ * pointer to a `*const c_char` slot.
+ */
+
+KgliteStatusCode kglite_datasets_sodir_fetch_all(const char *workdir_path,
+                                                 const char *datasets_json,
+                                                 int64_t index_cooldown_days,
+                                                 int64_t dataset_cooldown_days,
+                                                 uintptr_t concurrency,
+                                                 const char **out_report_json,
+                                                 const char **out_error_msg);
+#endif
+
+/**
+ * Free an embedder handle. Idempotent on null.
+ *
+ * # Safety
+ *
+ * `embedder` must be either null or a valid pointer previously
+ * returned by a `kglite_embedder_*_new` factory and not yet
+ * freed. Calling twice on the same pointer is UB.
+ *
+ * **Do NOT free** an embedder that has been handed to
+ * [`kglite_session_set_embedder`] — the session retains a clone
+ * of the inner Arc; you may free your handle after the call to
+ * set_embedder (the Arc keeps the embedder alive until the
+ * session drops). For symmetry with other handles, the safest
+ * pattern is: factory → set_embedder → free_embedder. Once the
+ * Arc is shared, the original handle is no longer special.
+ */
+ void kglite_embedder_free(struct KgliteEmbedder *embedder);
+
+/**
+ * Attach an embedder to a session. The session retains a clone
+ * of the embedder's inner `Arc`, so subsequent
+ * [`kglite_session_execute_read`](crate::kglite_session_execute_read)
+ * calls have access to `text_score()` and other embedder-backed
+ * Cypher functions.
+ *
+ * The caller may free the embedder handle after this call
+ * returns — the `Arc` clone keeps the underlying embedder
+ * alive for the session's lifetime.
+ *
+ * # Safety
+ *
+ * `session` and `embedder` must be valid handles previously
+ * returned by `kglite_session_new` and a `kglite_embedder_*_new`
+ * factory respectively, neither yet freed.
+ */
+
+KgliteStatusCode kglite_session_set_embedder(struct KgliteSession *session,
+                                             const struct KgliteEmbedder *embedder);
+
+#if defined(KGLITE_FEATURE_FASTEMBED)
+/**
+ * Construct a fastembed-rs-backed embedder.
+ *
+ * fastembed-rs downloads ONNX model weights on first
+ * `embed()` call (cached at `~/.cache/fastembed/`). The factory
+ * does NOT block on download — model name validation only. The
+ * first Cypher query using `text_score()` triggers the download.
+ *
+ * # Arguments
+ *
+ * - `model_name` (in, borrowed): a known fastembed model name,
+ *   e.g. `"BAAI/bge-m3"`, `"sentence-transformers/all-MiniLM-L6-v2"`.
+ *   See fastembed-rs's TextEmbedding::list_supported_models() for
+ *   the full list.
+ * - `out_embedder` (out, owned): on success, set to an embedder
+ *   handle. Caller must free via [`kglite_embedder_free`] (or
+ *   transfer ownership via [`kglite_session_set_embedder`]).
+ * - `out_error_msg` (out, owned, may be null): on failure, set to
+ *   an owned error string.
+ *
+ * # Errors
+ *
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — required pointer is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `model_name` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `model_name` isn't a known
+ *   fastembed model
+ *
+ * # Feature gate
+ *
+ * Available only when `kglite-c` is built with the `fastembed`
+ * Cargo feature.
+ *
+ * # Safety
+ *
+ * `model_name` must be a null-terminated UTF-8 string.
+ * `out_embedder` must be a valid writable pointer.
+ */
+
+KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
+                                               struct KgliteEmbedder **out_embedder,
+                                               const char **out_error_msg);
+#endif
 
 /**
  * Load a knowledge graph from disk. Accepts `.kgl` files
