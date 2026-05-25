@@ -114,6 +114,50 @@ impl KgErrorCode {
         }
     }
 
+    /// Canonical HTTP status code for this error, for REST / gRPC
+    /// bindings. Routes client mistakes to 4xx and server-side
+    /// failures to 5xx so consumers can decide retry behaviour at
+    /// the protocol layer.
+    ///
+    /// - `CypherSyntax`, `CypherTypeMismatch`, `InvalidArgument`,
+    ///   `MissingArgument` → 400 Bad Request
+    /// - `NodeNotFound`, `ConnectionNotFound`, `PropertyNotFound`,
+    ///   `FileNotFound` → 404 Not Found
+    /// - `CypherTimeout` → 408 Request Timeout
+    /// - `Schema`, `Validation`, `Expr` → 422 Unprocessable Entity
+    /// - `CypherExecution`, `FileFormat`, `FileIo`, `Internal` →
+    ///   500 Internal Server Error
+    ///
+    /// Lifted as a companion to [`Self::neo4j_status_code`] in
+    /// 2026-05-25 so the same dispatch idea is available for
+    /// HTTP-shaped bindings (REST servers, gRPC services bridging
+    /// to HTTP). Bindings still wrap the code in their own response
+    /// shape; only the code itself is shared.
+    pub fn http_status_code(&self) -> u16 {
+        match self {
+            // 4xx — client mistakes
+            KgErrorCode::CypherSyntax
+            | KgErrorCode::CypherTypeMismatch
+            | KgErrorCode::InvalidArgument
+            | KgErrorCode::MissingArgument => 400,
+
+            KgErrorCode::NodeNotFound
+            | KgErrorCode::ConnectionNotFound
+            | KgErrorCode::PropertyNotFound
+            | KgErrorCode::FileNotFound => 404,
+
+            KgErrorCode::CypherTimeout => 408,
+
+            KgErrorCode::Schema | KgErrorCode::Validation | KgErrorCode::Expr => 422,
+
+            // 5xx — server-side
+            KgErrorCode::CypherExecution
+            | KgErrorCode::FileFormat
+            | KgErrorCode::FileIo
+            | KgErrorCode::Internal => 500,
+        }
+    }
+
     /// Canonical Neo4j Bolt status code for this error code, of the
     /// shape `Neo.{Class}.{Category}.{Title}`. The Bolt protocol
     /// wraps these in a `FAILURE` response and drivers route by the
@@ -545,5 +589,65 @@ mod tests {
         let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let kg: KgError = io.into();
         assert_eq!(kg.code(), KgErrorCode::FileIo);
+    }
+
+    #[test]
+    fn http_status_code_categorises_correctly() {
+        // 4xx — client errors
+        assert_eq!(KgErrorCode::CypherSyntax.http_status_code(), 400);
+        assert_eq!(KgErrorCode::CypherTypeMismatch.http_status_code(), 400);
+        assert_eq!(KgErrorCode::InvalidArgument.http_status_code(), 400);
+        assert_eq!(KgErrorCode::MissingArgument.http_status_code(), 400);
+
+        // 404 — not found
+        assert_eq!(KgErrorCode::NodeNotFound.http_status_code(), 404);
+        assert_eq!(KgErrorCode::ConnectionNotFound.http_status_code(), 404);
+        assert_eq!(KgErrorCode::PropertyNotFound.http_status_code(), 404);
+        assert_eq!(KgErrorCode::FileNotFound.http_status_code(), 404);
+
+        // 408 — timeout
+        assert_eq!(KgErrorCode::CypherTimeout.http_status_code(), 408);
+
+        // 422 — validation
+        assert_eq!(KgErrorCode::Schema.http_status_code(), 422);
+        assert_eq!(KgErrorCode::Validation.http_status_code(), 422);
+        assert_eq!(KgErrorCode::Expr.http_status_code(), 422);
+
+        // 5xx — server-side
+        assert_eq!(KgErrorCode::CypherExecution.http_status_code(), 500);
+        assert_eq!(KgErrorCode::FileFormat.http_status_code(), 500);
+        assert_eq!(KgErrorCode::FileIo.http_status_code(), 500);
+        assert_eq!(KgErrorCode::Internal.http_status_code(), 500);
+    }
+
+    #[test]
+    fn every_error_code_has_an_http_status() {
+        // Smoke test that we exhaustively cover every variant (no
+        // panic / unreachable). If a new variant is added, this test
+        // will fail to compile because the match is exhaustive.
+        for code in [
+            KgErrorCode::CypherSyntax,
+            KgErrorCode::CypherTimeout,
+            KgErrorCode::CypherExecution,
+            KgErrorCode::CypherTypeMismatch,
+            KgErrorCode::Schema,
+            KgErrorCode::Validation,
+            KgErrorCode::Expr,
+            KgErrorCode::NodeNotFound,
+            KgErrorCode::ConnectionNotFound,
+            KgErrorCode::PropertyNotFound,
+            KgErrorCode::FileNotFound,
+            KgErrorCode::FileFormat,
+            KgErrorCode::FileIo,
+            KgErrorCode::InvalidArgument,
+            KgErrorCode::MissingArgument,
+            KgErrorCode::Internal,
+        ] {
+            let code_val = code.http_status_code();
+            assert!(
+                (400..=599).contains(&code_val),
+                "code {code:?} mapped to non-4xx-5xx http status: {code_val}"
+            );
+        }
     }
 }

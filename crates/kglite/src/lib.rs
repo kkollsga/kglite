@@ -46,6 +46,7 @@ pub mod datasets;
 pub mod datatypes;
 pub mod error;
 pub mod graph;
+pub mod param;
 
 /// Curated stable Rust API. Downstream consumers should depend on
 /// items here, not on the underlying module structure (which may
@@ -89,6 +90,15 @@ pub mod api {
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
     pub use crate::graph::io::file::{load_file, save_graph};
     pub use crate::graph::{SourceLocation, SourceLookup};
+
+    /// Parameter-shape helpers for bindings — wire-shaped values
+    /// (JSON / protobuf-map / etc.) → `kglite::api::Value`. Future
+    /// REST / gRPC bindings shouldn't re-implement the JSON
+    /// dispatch each time; this re-export hands them the canonical
+    /// converter.
+    pub mod param {
+        pub use crate::param::json_value_to_kglite_value;
+    }
 
     /// Blueprint loader + builder — declarative graph construction
     /// from a YAML/JSON spec + a directory of CSVs. The wheel's

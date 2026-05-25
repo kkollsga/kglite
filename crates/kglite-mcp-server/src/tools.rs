@@ -234,26 +234,12 @@ impl GraphState {
 
 /// Convert a `serde_json::Value` into a Cypher param `Value`. Mirrors
 /// the Python boundary's `py_value_to_value` for the JSON subset.
+///
+/// As of the 2026-05-25 binding-framework lift this is a 1-line
+/// delegate to `kglite::api::param::json_value_to_kglite_value`,
+/// which any REST/gRPC binding can call directly.
 fn json_to_value(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Boolean(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int64(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float64(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        // Arrays and objects flow through as JSON-serialised strings; the
-        // Cypher engine doesn't have a first-class list/map Value variant
-        // at the param boundary, so this matches the existing behaviour
-        // for non-scalar JSON inputs from MCP tool calls.
-        other => Value::String(other.to_string()),
-    }
+    kglite::api::param::json_value_to_kglite_value(v)
 }
 
 /// Run a Cypher query against the given KnowledgeGraph snapshot. Picks
