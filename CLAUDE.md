@@ -133,8 +133,166 @@ get demoted rigorously (don't keep speculatively). The boundary
 between the two is the *signature* of the lifted thing — generic
 core types in, generic core types out.
 
+### Four explicit goals for the binding framework
+
+The principle + postures above exist in service of four goals for
+future-language wrappers. Any api shape decision should be
+checked against all four:
+
+1. **Quick + easy** — A new wrapper is small (target: Rust-side
+   wrapper < 1000 LOC of glue; non-Rust wrapper < 1500 LOC total
+   of FFI shim + language-native idioms). A new binding author
+   sets up a "hello, query a graph" example in under a day.
+
+2. **Standardized** — Users switching between wrappers see the
+   same data model (`Value` variants, error categories), the same
+   query language (Cypher), and the same lifecycle vocabulary
+   (`open` / `save` / `from_blueprint`). The look-and-feel of
+   binding-specific idioms differs (Python's PyDict vs Go's map vs
+   JVM's HashMap), but the *concepts* match across wrappers.
+
+3. **Centrally maintained** — When we add a feature in core, every
+   binding gets it without per-wrapper code changes — either
+   automatically (a new Cypher function reaches all bindings via
+   `cypher_query`) or via a single pin-bump (a new api function
+   becomes available after the binding's next dependency update).
+   We don't have to ship N PRs across N bindings for one feature.
+
+4. **Flexible** — The interface shape doesn't restrict us from
+   adding crucial functionality later. We can ship a new Value
+   variant, a new ExecuteOptions field, a new Cypher function, a
+   new dataset, without breaking existing bindings or forcing
+   them to fork. Non-breaking additions are the dominant change
+   mode.
+
+Score every proposed lift against these four. Anything that fails
+two or more is the wrong shape; redesign or skip.
+
+### Two-tier standardization architecture
+
+Different binding types reach kglite through different layers:
+
+| Binding type | Standardization layer | Examples |
+|---|---|---|
+| **Rust-side wrappers** | `kglite::api::*` — Rust types, traits, functions | `kglite-py` (PyO3); future `kglite-grpc-server`, `kglite-rest-server` |
+| **Non-Rust wrappers** | C ABI — `extern "C" fn` over `kglite::api::*` | Future Go (cgo), JavaScript (napi), JVM (JNI), .NET |
+
+**A "framework helper" in `kglite::api::*` is reachable only by
+Rust-side wrappers.** Non-Rust wrappers won't see a `ParamUnmarshaller`
+trait or a `GraphHandle` struct directly — they see a C function
+signature. For *those* bindings, the standardization is the C ABI
+shape itself.
+
+**Phase H — the `kglite-c` crate — is a committed workstream**,
+not an aspirational future. Without it the binding-framework goals
+above can't actually be met for non-Rust languages (no matter how
+clean `kglite::api::*` is, Go and JVM consumers can't read Rust
+traits). The phased plan:
+
+1. **H.1 — C ABI design.** Settle on the wrapping conventions
+   (opaque-handle pattern for `DirGraph`, owned-string-out for
+   results, error-out-param + non-zero return code, no Rust
+   types in signatures). Document in `docs/rust/c-abi.md`.
+
+2. **H.2 — `kglite-c` skeleton crate.** New workspace member.
+   Wraps the highest-leverage `kglite::api::*` entry points first:
+   `load_file`, `save_graph`, `execute_read`, `execute_mut`,
+   `KgErrorCode` accessors. Uses `cbindgen` to emit
+   `include/kglite.h` at build time. CI publishes the header as a
+   release artifact.
+
+3. **H.3 — datasets + embedder C ABI.** Second wave: the dataset
+   fetch entries (with `*_blocking` companions), embedder
+   registration, blueprint build.
+
+4. **H.4 — proof-of-concept consumer.** A ~500-LOC Go binding
+   built against `kglite-c` that exercises load → query →
+   save. Validates the C ABI surface is enough for a real wrapper.
+
+5. **H.5 — release coordination.** `kglite-c` ships on crates.io
+   alongside `kglite`, header published on GitHub releases. The
+   `implementing-a-binding.md` guide is rewritten with cgo / napi /
+   JNI worked examples calling the real C ABI (not the current
+   sketches).
+
+The boundary-principle posture above (active-design + cypher-first +
+use-case-checked) applies to the Rust `api::*` surface AND the C
+ABI we expose through it. Same rules: per-query features go via
+Cypher (no C ABI exposure needed — bindings call
+`kglite_execute_cypher(...)`); lifecycle/error/embedder go via
+direct C functions; tailored-to-one-language shapes never appear
+in the C ABI.
+
+### The runtime model — core is sync, bindings own async
+
+`kglite::api::session::execute_read` / `execute_mut` are
+**synchronous**. The Cypher pipeline runs to completion on the
+calling thread. Async fetchers (`fetch_*` in `kglite::api::datasets::*`)
+have `*_blocking` companions for callers without a tokio runtime.
+
+This is deliberate. Each binding chooses its own async/threading
+model on top:
+
+- Python wheel: releases the GIL via `py.detach()` for parallel readers
+- Bolt server: drives the sync pipeline from a `tokio::task::spawn_blocking`
+- MCP server: same; runs on tokio but `execute_read` itself is sync
+- Future Go binding: goroutines wrapping the sync C ABI
+- Future JS binding: napi async with `.spawn_blocking` equivalent
+- Future JVM binding: thread pool + sync JNI calls
+
+Never force tokio on a binding. If we make the canonical Cypher
+entry async, Go/JVM bindings either drag a tokio runtime into their
+language's runtime (painful) or fork the function. Sync-by-default
+is the cross-language-friendly choice.
+
+### What's INTENTIONALLY per-binding (the negative space)
+
+These are deliberately NOT in `kglite::api::*`. They're per-binding
+because each one has language-idiom or protocol-shape concerns:
+
+| Concern | Where it lives | Why |
+|---|---|---|
+| Value ↔ native type marshalling | Each binding's `value_adapter` / `py_in` / etc. | `PyDict` / `BoltValue` / protobuf / `js::Object` are language-specific |
+| Error formatting / wrapping into protocol types | Each binding's `error_*` module | `PyErr`, `BoltError`, `tonic::Status`, etc. |
+| Wire format (JSON / CSV / BoltValue / protobuf / Arrow) | Each binding's `result_format` / serializer | Each protocol has its preferred encoding |
+| Display protocols (`__repr__`, `Debug`, JSON debug) | Each binding's `_repr_*` | Language-specific protocols |
+| Tool registration mechanism | Each binding's `tools::register` / manifest YAML / route table | Protocol-specific (MCP tool YAML, REST route registration, gRPC `Service` impl) |
+| Result iteration style (eager / lazy / streaming) | Each binding's `ResultView` / `ResultStream` / iterator | Protocol-shape-specific; Python supports lazy, Bolt streams, MCP is eager |
+| Async / threading model | Each binding | See "runtime model" above |
+| CLI / config-file parsing | Each binding's own | mcp-server uses clap + YAML manifest; bolt-server uses clap + flags; wheel uses argparse; a future Go binding would use Go's `flag` or `cobra` |
+| Logging / observability | Each binding's native logger | Rust binaries → `tracing`; Python → stdlib `logging`; Go would use `slog`; JVM would use `slf4j`. Don't unify — each ecosystem has its own conventions. |
+| Lifecycle / teardown semantics | Each binding's native idiom | Python → `__del__` + context managers (`with`); Rust → `Drop`; JVM → finalizers + try-with-resources; JS → explicit `.close()`. Different cleanup contracts per language. |
+
+If you find yourself wanting to "unify" any of these, that's a
+yellow flag. They're per-binding *by design* — unifying forces all
+bindings into one language's idiom or one protocol's shape.
+
+### Worked examples from the 2026-05-25 sweep
+
+To anchor the abstract rules:
+
+**Lifts that PASSED the use-case + cypher-first tests** (shipped or
+queued):
+- `parse_with_mutation_check` — direct api, every binding's pipeline-bootstrap pattern
+- `ExecuteOptions::eager` — direct api, factory for the conservative-defaults shape
+- `KgErrorCode::neo4j_status_code` — direct api, every Neo4j-wire-compatible binding shares
+- `add_days` / `add_months` / `add_years` / `date_truncate` — Cypher fns, real "events in next N days" query
+- `shortest_path_length` — Cypher fn, real "how many hops" query
+- `mode(x)` — Cypher aggregation, real "most common value per group" query
+- `db.property_stats` / `db.property_uniqueness` / `db.graph_stats` — Cypher procedures, real schema-introspection queries
+
+**Lifts that FAILED the tests** (dropped):
+- `wkt_is_valid` — only honest use cases (pre-CREATE validation, audit) belong at load time
+- `wkt_type` — fights mixed-geometry-types data smell
+- `lpad`, `rpad` — display formatting is binding concern
+- `quartile`, `decile` — syntactic sugar over `percentile_cont`
+- Standalone `cosine_similarity` — already inside `vector_score`
+- `GraphHandle` struct — too generic to add value; each binding's state genuinely differs
+- `ParamUnmarshaller` trait — Rust-side trait that non-Rust bindings can't see; helps only future Rust-side wrappers (not yet)
+- `QueryContext` — `temporal_context` is wheel-only today
+
 See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
-your binding" for the worked example, and
+your binding" for the worked dataset example, and
 `docs/internal/reverse-audit-2026-05-25.md` for the audit
 methodology with worked-example classifications.
 
