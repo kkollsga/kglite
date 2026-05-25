@@ -29,13 +29,19 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "kglite-py Cargo.toml version: $VERSION"
 
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/kglite/$VERSION/json")
-          if [ "$HTTP_STATUS" = "200" ]; then
-            echo "Version $VERSION already exists on PyPI — skipping build"
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-          else
-            echo "Version $VERSION not on PyPI — will build and publish"
+          # HTTP 404 is the only "publish this version" signal —
+          # 200 means it's already there, anything else (403, 5xx)
+          # means we can't tell, fail safe to don't-publish. Mirrors
+          # the same logic in publish_crates.yml's version-check.
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -A "kglite-ci/0.10.1 (https://github.com/kkollsga/kglite)" \
+            "https://pypi.org/pypi/kglite/$VERSION/json")
+          if [ "$HTTP_STATUS" = "404" ]; then
+            echo "Version $VERSION not on PyPI (HTTP 404) — will build and publish"
             echo "should_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version $VERSION already on PyPI or unverifiable (HTTP $HTTP_STATUS) — skipping build"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
           fi
 
   ci-gate:

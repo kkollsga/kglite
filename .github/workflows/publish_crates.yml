@@ -35,36 +35,49 @@ jobs:
           echo "kglite-bolt-server Cargo.toml version:  $BS_VERSION"
           echo "kglite-mcp-server Cargo.toml version:   $MS_VERSION"
 
-          # crates.io API: 200 if version exists, 404 otherwise.
+          # crates.io API: 200 if version exists, 404 if not, 403 if
+          # rate-limited or User-Agent missing. We use HTTP 404 as the
+          # only "publish" signal — anything else (200, 403, 5xx)
+          # means "already exists or I can't tell, skip to be safe".
+          # Without this guard, a rate-limit 403 would be treated as
+          # "not 200 → not published → publish" and `cargo publish`
+          # would error with "crate X@Y already exists on crates.io
+          # index" because it actually IS already there.
+          #
+          # The User-Agent header is required by crates.io's API
+          # policy — anonymous requests can get rejected with 403
+          # even before hitting the rate limit. UA must include a
+          # contact email per crates.io's docs.
+          UA="kglite-ci/0.10.1 (https://github.com/kkollsga/kglite)"
           KG_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://crates.io/api/v1/crates/kglite/$KG_VERSION")
+            -A "$UA" "https://crates.io/api/v1/crates/kglite/$KG_VERSION")
           BS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://crates.io/api/v1/crates/kglite-bolt-server/$BS_VERSION")
+            -A "$UA" "https://crates.io/api/v1/crates/kglite-bolt-server/$BS_VERSION")
           MS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://crates.io/api/v1/crates/kglite-mcp-server/$MS_VERSION")
+            -A "$UA" "https://crates.io/api/v1/crates/kglite-mcp-server/$MS_VERSION")
 
-          if [ "$KG_STATUS" = "200" ]; then
-            echo "kglite $KG_VERSION already on crates.io — skipping kglite publish"
-            echo "should_publish_kglite=false" >> $GITHUB_OUTPUT
-          else
-            echo "kglite $KG_VERSION not on crates.io — will publish"
+          if [ "$KG_STATUS" = "404" ]; then
+            echo "kglite $KG_VERSION not on crates.io (HTTP 404) — will publish"
             echo "should_publish_kglite=true" >> $GITHUB_OUTPUT
+          else
+            echo "kglite $KG_VERSION already on crates.io or unverifiable (HTTP $KG_STATUS) — skipping publish"
+            echo "should_publish_kglite=false" >> $GITHUB_OUTPUT
           fi
 
-          if [ "$BS_STATUS" = "200" ]; then
-            echo "kglite-bolt-server $BS_VERSION already on crates.io — skipping bolt publish"
-            echo "should_publish_bolt=false" >> $GITHUB_OUTPUT
-          else
-            echo "kglite-bolt-server $BS_VERSION not on crates.io — will publish"
+          if [ "$BS_STATUS" = "404" ]; then
+            echo "kglite-bolt-server $BS_VERSION not on crates.io (HTTP 404) — will publish"
             echo "should_publish_bolt=true" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-bolt-server $BS_VERSION already on crates.io or unverifiable (HTTP $BS_STATUS) — skipping publish"
+            echo "should_publish_bolt=false" >> $GITHUB_OUTPUT
           fi
 
-          if [ "$MS_STATUS" = "200" ]; then
-            echo "kglite-mcp-server $MS_VERSION already on crates.io — skipping mcp publish"
-            echo "should_publish_mcp=false" >> $GITHUB_OUTPUT
-          else
-            echo "kglite-mcp-server $MS_VERSION not on crates.io — will publish"
+          if [ "$MS_STATUS" = "404" ]; then
+            echo "kglite-mcp-server $MS_VERSION not on crates.io (HTTP 404) — will publish"
             echo "should_publish_mcp=true" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-mcp-server $MS_VERSION already on crates.io or unverifiable (HTTP $MS_STATUS) — skipping publish"
+            echo "should_publish_mcp=false" >> $GITHUB_OUTPUT
           fi
 
   ci-gate:
