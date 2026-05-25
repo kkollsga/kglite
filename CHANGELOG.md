@@ -21,12 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
+- `docs/rust/implementing-a-binding.md` — deep-dive companion to
+  `embedding.md` and `session.md` for anyone publishing a new-
+  language binding (Go via cgo, JS via napi, JVM via JNI, …).
+  Covers the bridge-layer choice (Rust direct vs language FFI
+  vs the Phase H C ABI aspiration), the full `KgErrorCode`
+  mapping table with recommended idioms per language family, an
+  Embedder trait implementation walkthrough with an OpenAI-API-
+  backed example, blueprint / `.kgl` / code_tree / dataset
+  loading patterns, the binding-side cookbook (process cache,
+  lazy materialization, value conversion, progress callbacks),
+  and a cross-binding portability checklist. References the
+  three existing reference implementations (`kglite-py`,
+  `kglite-bolt-server`, `kglite-mcp-server`) as the canonical
+  worked examples for every pattern.
 - `docs/internal/api-audit-2026-05-25.md` — Phase 1 audit of the
   `kglite::api` surface ahead of the canonical binding-implementer
   guide. Inventories the 29 + 2-submod current surface, classifies
   every `#[pymethods]` gap (Class A/B/C/D), and ranks a top-10
   punchlist of api hygiene work to do before lifting dataset
   lifecycles to core.
+- `docs/internal/consider-for-future.md` — parking lot for work
+  that's been deliberately deferred from current scope (the full
+  dataset-lifecycle lift, retiring the Python MCP server, etc.).
+  Captures what / why-deferred / when-to-revisit / effort for
+  each item so scope decisions don't get rediscovered as
+  surprises later.
 
 ## [0.10.1] — 2026-05-25 — Polars-style crate split (Phase G), Bolt Phase F driver-compat fixes, two-track docs, crates.io publish (kglite + kglite-bolt-server + kglite-mcp-server)
 

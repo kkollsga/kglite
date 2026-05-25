@@ -136,6 +136,11 @@ embedded_basic | grep pyo3` returns empty.
 - **[Session abstraction](session.md)** — binding-implementer
   reference for the canonical Cypher pipeline + CoW transaction
   model.
+- **[Implementing a binding](implementing-a-binding.md)** —
+  deep-dive companion to `embedding.md` for anyone publishing a
+  new-language binding: bridge-layer choice, full `KgErrorCode`
+  mapping table, Embedder trait walkthrough, dataset-wrapping
+  patterns, binding-side cookbook.
 - **[API reference](api-reference.md)** — manifest of the stable
   `kglite::api::*` items + semver guarantees. Full per-symbol
   docs (post-publish) at [docs.rs/kglite](https://docs.rs/kglite).
@@ -148,5 +153,6 @@ embedded_basic | grep pyo3` returns empty.
 
 embedding
 session
+implementing-a-binding
 api-reference
 ```
