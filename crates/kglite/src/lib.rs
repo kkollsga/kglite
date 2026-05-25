@@ -79,6 +79,19 @@ pub mod api {
     pub use crate::graph::io::file::{load_file, save_graph};
     pub use crate::graph::{SourceLocation, SourceLookup};
 
+    /// Blueprint loader + builder — declarative graph construction
+    /// from a YAML/JSON spec + a directory of CSVs. The wheel's
+    /// `from_blueprint` is a thin ergonomics wrapper around
+    /// [`load_blueprint_file`] + [`build`]; future bindings (Go,
+    /// JS, JVM, …) call these directly.
+    pub mod blueprint {
+        pub use crate::graph::blueprint::build::{build, BuildReport, FlatSpec};
+        pub use crate::graph::blueprint::schema::{
+            load_blueprint_file, AggregateEdge, Blueprint, CalendarLink, ComputeOp, Connections,
+            FkEdge, JunctionEdge, NodeSpec, Settings, TimeKey, TimeseriesSpec,
+        };
+    }
+
     /// Cypher parser + planner + executor primitives. Downstream
     /// consumers can build their own custom Cypher pipelines using
     /// these items; for the canonical pipeline see [`session`].

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `kglite::api::blueprint` — pure-Rust blueprint loader + builder is
+  now part of the curated stable API. Re-exports `build`,
+  `load_blueprint_file`, `Blueprint`, `Settings`, `NodeSpec`,
+  `Connections`, `FkEdge`, `JunctionEdge`, `TimeKey`,
+  `TimeseriesSpec`, `ComputeOp`, `CalendarLink`, `AggregateEdge`,
+  `BuildReport`, and `FlatSpec`. The Python wheel's `from_blueprint`
+  has always been a thin wrapper around these — now any binding
+  (Go, JS, JVM, …) can call them directly without going through
+  PyO3.
+
+### Docs
+
+- `docs/internal/api-audit-2026-05-25.md` — Phase 1 audit of the
+  `kglite::api` surface ahead of the canonical binding-implementer
+  guide. Inventories the 29 + 2-submod current surface, classifies
+  every `#[pymethods]` gap (Class A/B/C/D), and ranks a top-10
+  punchlist of api hygiene work to do before lifting dataset
+  lifecycles to core.
+
 ## [0.10.1] — 2026-05-25 — Polars-style crate split (Phase G), Bolt Phase F driver-compat fixes, two-track docs, crates.io publish (kglite + kglite-bolt-server + kglite-mcp-server)
 
 The headline of 0.10.1 is the **polars-style core split**: kglite is
