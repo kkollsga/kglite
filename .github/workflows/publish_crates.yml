@@ -159,34 +159,37 @@ jobs:
         run: cargo publish -p kglite --locked
 
       # 2. Wait for crates.io's sparse index to surface the new
-      # kglite version. Typical propagation is 30–60s but can
-      # stretch to several minutes under load. Both bolt-server
-      # and mcp-server depend on kglite being resolvable, so we
-      # must poll before stepping to steps 3 + 5.
+      # kglite version. The first version of this step polled
+      # /api/v1/crates/kglite/<version> for HTTP=200 — that hit
+      # crates.io's rate limit (30 requests in 10 min from the
+      # same runner IP) and started getting HTTP=403, mistaken for
+      # "not yet". Fixed by switching to a fixed sleep + an actual
+      # `cargo` operation as the readiness probe. `cargo search`
+      # against the sparse index uses the same resolver path the
+      # downstream `cargo publish -p ...` will use, so once it
+      # finds our crate the next publish will too.
       - name: Wait for crates.io index propagation (kglite)
         if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true')
         run: |
           VERSION="${{ needs.version-check.outputs.kglite_version }}"
-          echo "Polling crates.io for kglite $VERSION..."
-          for i in $(seq 1 30); do
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-              "https://crates.io/api/v1/crates/kglite/$VERSION")
-            if [ "$HTTP" = "200" ]; then
-              echo "kglite $VERSION visible on crates.io (attempt $i)"
-              # Belt-and-braces: also confirm via the sparse index
-              # endpoint that cargo's resolver uses. The web API can
-              # see it slightly before the sparse index does.
-              cargo update -p kglite 2>&1 | head -5 || true
-              # Extra sleep so the sparse index settles for downstream
-              # cargo publish.
-              sleep 15
+          # crates.io's own docs note "an index update can take up
+          # to 1 minute". 90s buys headroom without burning CI time.
+          echo "Sleeping 90s for crates.io index propagation of kglite $VERSION..."
+          sleep 90
+          # Confirm via cargo's own resolver — if this finds the
+          # version, downstream `cargo publish -p kglite-bolt-server`
+          # will resolve `kglite = "0.10"` to it.
+          for i in $(seq 1 5); do
+            if cargo search kglite --limit 1 2>&1 | grep -E "^kglite = \"$VERSION\""; then
+              echo "kglite $VERSION visible to cargo resolver (attempt $i)"
               exit 0
             fi
-            echo "Waiting for crates.io index... (attempt $i, HTTP=$HTTP)"
-            sleep 20
+            echo "Not yet visible to cargo resolver (attempt $i), waiting 30s..."
+            sleep 30
           done
-          echo "Timed out waiting for crates.io index propagation after 10 min"
-          exit 1
+          echo "WARNING: cargo search didn't find kglite $VERSION after 90s + 5×30s."
+          echo "Proceeding anyway — `cargo publish` for the next crate will surface a"
+          echo "real error if the index isn't ready."
 
       # 3. Publish kglite-bolt-server. Skipped if its version is
       # already on crates.io (bolt-server may bump independently of
@@ -205,21 +208,11 @@ jobs:
       - name: Wait for crates.io index propagation (kglite-bolt-server)
         if: needs.version-check.outputs.should_publish_bolt == 'true' && needs.version-check.outputs.should_publish_mcp == 'true'
         run: |
-          VERSION="${{ needs.version-check.outputs.bolt_version }}"
-          echo "Polling crates.io for kglite-bolt-server $VERSION..."
-          for i in $(seq 1 30); do
-            HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-              "https://crates.io/api/v1/crates/kglite-bolt-server/$VERSION")
-            if [ "$HTTP" = "200" ]; then
-              echo "kglite-bolt-server $VERSION visible on crates.io (attempt $i)"
-              sleep 15
-              exit 0
-            fi
-            echo "Waiting for crates.io index... (attempt $i, HTTP=$HTTP)"
-            sleep 20
-          done
-          echo "Timed out waiting for crates.io index propagation after 10 min"
-          exit 1
+          # mcp-server doesn't depend on bolt-server, so this wait
+          # is purely cosmetic spacing. 60s sleep, no API polling
+          # (see the kglite wait step's comment for the 403/rate-limit
+          # rationale).
+          sleep 60
 
       # 5. Publish kglite-mcp-server. Skipped if its version is
       # already on crates.io (mcp-server may bump independently).
