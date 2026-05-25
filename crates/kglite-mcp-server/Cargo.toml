@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
 homepage = "https://github.com/kkollsga/kglite"
 documentation = "https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html"
-keywords = ["mcp", "model-context-protocol", "knowledge-graph", "cypher", "kglite"]
+keywords = ["mcp", "knowledge-graph", "cypher", "kglite", "graph"]
 categories = ["database", "command-line-utilities"]
 
 [[bin]]
