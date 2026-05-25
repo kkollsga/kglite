@@ -217,6 +217,16 @@ pub mod api {
             // Mirror config constants — bindings can read these to
             // tell users what file they'll end up with.
             pub use crate::datasets::wikidata::{DUMP_FILE, DUMP_URL};
+            // Cache-freshness decision tree — every binding's
+            // `open()` flow asks the same questions; the decision
+            // lives in core, but each binding handles the outcome
+            // (verbose prints, process-local cache hits, etc.) in
+            // its own idiom. Lifted from `kglite/datasets/wikidata.py`
+            // in the 2026-05-25 dataset-wrapper prep.
+            pub use crate::datasets::wikidata::{
+                age_days, decide, file_mtime_utc, read_remote_mtime_from_source_meta,
+                CacheDecision, FreshnessInputs,
+            };
         }
     }
 }

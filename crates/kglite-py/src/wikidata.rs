@@ -14,7 +14,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 
-use kglite_core::datasets::wikidata::{WikidataError, Workdir};
+use chrono::DateTime;
+use std::path::Path;
+
+use kglite_core::datasets::wikidata::{
+    decide as decide_freshness, CacheDecision, FreshnessInputs, WikidataError, Workdir,
+};
 
 fn map_err(e: WikidataError) -> PyErr {
     match &e {
@@ -64,10 +69,57 @@ fn remote_last_modified() -> PyResult<Option<String>> {
         .map(|m| m.to_rfc3339()))
 }
 
+/// Run the cache-freshness decision tree. Returns
+/// `(action, reason)` where `action` is one of `"build"`, `"load"`,
+/// `"rebuild"`. Lifted from the Python wrapper's `open()` body so
+/// every binding shares the same comparisons.
+#[pyfunction]
+#[pyo3(signature = (
+    *,
+    force_rebuild,
+    graph_meta_path,
+    source_meta_path,
+    cooldown_days,
+    remote_mtime_iso=None,
+))]
+fn decide_cache_freshness(
+    force_rebuild: bool,
+    graph_meta_path: &str,
+    source_meta_path: &str,
+    cooldown_days: i64,
+    remote_mtime_iso: Option<&str>,
+) -> PyResult<(&'static str, String)> {
+    let remote_mtime = match remote_mtime_iso {
+        None => None,
+        Some(iso) => Some(
+            DateTime::parse_from_rfc3339(iso)
+                .map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "invalid remote_mtime_iso: {e}"
+                    ))
+                })?
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+    let decision = decide_freshness(FreshnessInputs {
+        force_rebuild,
+        graph_meta_path: Path::new(graph_meta_path),
+        source_meta_path: Path::new(source_meta_path),
+        cooldown_days,
+        remote_mtime,
+    });
+    Ok(match decision {
+        CacheDecision::Build { reason } => ("build", reason.to_string()),
+        CacheDecision::Load { reason } => ("load", reason),
+        CacheDecision::Rebuild { reason } => ("rebuild", reason),
+    })
+}
+
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "_wikidata_internal")?;
     m.add_function(wrap_pyfunction!(ensure_dump, &m)?)?;
     m.add_function(wrap_pyfunction!(remote_last_modified, &m)?)?;
+    m.add_function(wrap_pyfunction!(decide_cache_freshness, &m)?)?;
     parent.add_submodule(&m)?;
     let sys = py.import("sys")?;
     sys.getattr("modules")?

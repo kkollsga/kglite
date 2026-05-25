@@ -22,6 +22,39 @@ make lint                    # fmt + clippy + ruff format/check + mypy stubtest;
 - **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs.
 - **Introspection** (`src/graph/introspection/`): `describe()` XML schema for agents.
 
+### The boundary principle (north star for wrappers vs core)
+
+When deciding where a piece of code belongs:
+
+> **A wrapper only contains code that is specific to its environment
+> and cannot be used by any other sibling wrapper. Anything two or
+> more wrappers would write identically belongs in `kglite::api`.**
+
+Concrete examples:
+
+- PyO3 marshalling (`#[pyfunction]`, `Py<PyAny>`, NumPy/Pandas
+  conversion) → Python wrapper (`crates/kglite-py/`). A Go binding
+  doesn't use any of it.
+- `tqdm` progress display, `_PROCESS_CACHE` dict for Jupyter rerun-
+  cell ergonomics → Python wrapper. Go uses channels, JS uses a
+  module-level `Map`.
+- SEC form-string → bucket mapping, ticker JSON parser, cache-
+  freshness decision tree, blocking/async runtime bridge → core
+  (`kglite::api::*`). Every binding asks the same questions the
+  same way.
+
+The principle applies in both directions:
+
+- Going from wrapper → core: if you find yourself writing logic in
+  a wrapper that another binding would copy verbatim, stop and
+  file a core lift.
+- Going from core → wrapper: if `kglite::api::*` carries code that
+  only one wrapper's runtime / idiom / ergonomics would use, push
+  it down into that wrapper.
+
+See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
+your binding" for the worked example.
+
 ## In-memory is the core product
 
 Three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed columns), `Disk` (CSR + mmap). The disk modes are addons for large-graph exploration (Wikidata-scale). When optimisation conflicts arise, **in-memory wins** — never regress in-memory perf to protect disk safety. Add disk-specific workarounds gated on storage mode or graph size instead.

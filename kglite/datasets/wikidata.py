@@ -105,37 +105,30 @@ def open(  # noqa: A001  (intentional `open` shadow, module-scoped)
                 print(f"  Wikidata graph at {graph_dir} already loaded in this process. Reusing.")
             return cached[0]
 
-    if force_rebuild and graph_dir.exists():
+    # Probe the remote dump once (or skip if we're forcing a rebuild —
+    # the freshness decision short-circuits before needing it).
+    remote_mtime_iso = None if force_rebuild else _wikidata_internal.remote_last_modified()
+    action, reason = _wikidata_internal.decide_cache_freshness(
+        force_rebuild=force_rebuild,
+        graph_meta_path=str(graph_meta),
+        source_meta_path=str(source_meta),
+        cooldown_days=cooldown_days,
+        remote_mtime_iso=remote_mtime_iso,
+    )
+    if action == "build" and reason == "force_rebuild" and graph_dir.exists():
         import shutil
 
         if verbose:
             print(f"  force_rebuild=True — deleting cached graph at {graph_dir}.")
         shutil.rmtree(graph_dir)
         _PROCESS_CACHE.pop(cache_key, None)
-    elif graph_meta.exists():
-        graph_age = _age_days(_file_mtime_utc(graph_meta))
-        if graph_age < cooldown_days:
-            if verbose:
-                print(
-                    f"  Wikidata graph at {graph_dir} is {graph_age:.1f}d old (< {cooldown_days}d cooldown). Loading."
-                )
-            return _load_cached(graph_dir, graph_meta, cache_key)
-
-        # Cooldown elapsed — is the remote dump newer than this build?
-        embedded_mtime = _read_source_mtime(source_meta)
-        remote_mtime = _remote_last_modified()
-        if remote_mtime is None:
-            if verbose:
-                print(f"  Remote unreachable. Loading existing graph (built from {embedded_mtime}).")
-            return _load_cached(graph_dir, graph_meta, cache_key)
-        if embedded_mtime is None or remote_mtime > embedded_mtime:
-            if verbose:
-                print(f"  Remote dump newer than the cached graph ({embedded_mtime}). Rebuilding.")
-            # fall through to rebuild
-        else:
-            if verbose:
-                print("  Remote dump unchanged since last build. Loading existing graph.")
-            return _load_cached(graph_dir, graph_meta, cache_key)
+    elif action == "load":
+        if verbose:
+            print(f"  Wikidata graph at {graph_dir}: {reason}. Loading.")
+        return _load_cached(graph_dir, graph_meta, cache_key)
+    elif action == "rebuild" and verbose:
+        print(f"  Rebuilding Wikidata graph at {graph_dir}: {reason}.")
+    # `action == "build"` (no cache) falls through to the build path below.
 
     dump_path, dump_mtime = _ensure_dump(workdir, cooldown_days, verbose)
     g = _build_graph(workdir, dump_path, dump_mtime, languages, entity_limit_millions, verbose, progress)
@@ -175,11 +168,6 @@ def _ensure_dump(workdir: Path, cooldown_days: int, verbose: bool) -> tuple[Path
     path_str, mtime_iso = _wikidata_internal.ensure_dump(str(workdir), cooldown_days=cooldown_days, verbose=verbose)
     mtime = datetime.fromisoformat(mtime_iso) if mtime_iso else None
     return Path(path_str), mtime
-
-
-def _remote_last_modified() -> datetime | None:
-    iso = _wikidata_internal.remote_last_modified()
-    return datetime.fromisoformat(iso) if iso else None
 
 
 def _load_cached(
@@ -275,24 +263,15 @@ def _write_source_meta(
     path.write_text(json.dumps(payload, indent=2))
 
 
-def _read_source_mtime(path: Path) -> datetime | None:
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text())
-        iso = data.get("remote_last_modified_iso") or data.get("source_mtime_iso")
-        return datetime.fromisoformat(iso) if iso else None
-    except (json.JSONDecodeError, ValueError, OSError):
-        return None
-
-
 def _file_mtime_utc(path: Path) -> datetime | None:
+    """Local file mtime helper for source-metadata stamping only.
+
+    The cache-freshness decision tree's equivalent now lives in
+    ``kglite::api::datasets::wikidata::file_mtime_utc`` (lifted in
+    the 2026-05-25 binding prep); this Python copy is kept narrowly
+    for `_write_source_meta`'s build-time stamping, which is
+    Python-specific verbose-print formatting and stays here.
+    """
     if not path.exists():
         return None
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-
-
-def _age_days(when: datetime | None) -> float:
-    if when is None:
-        return float("inf")
-    return (datetime.now(timezone.utc) - when).total_seconds() / 86400
