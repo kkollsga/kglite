@@ -448,26 +448,34 @@ async fn main() -> Result<()> {
     // so it stays out of prompts/list when the active graph isn't a
     // code-tree (legal-corpus / o&g / etc. deployments).
     if let Some(m) = manifest.as_ref() {
+        // Skill `.md` bodies live at `crates/kglite-mcp-server/skills/`
+        // — copies of the wheel's `kglite/mcp_server/skills/`. The
+        // duplication exists because `cargo publish` only packages
+        // files inside the crate dir; `include_str!` with paths
+        // pointing outside (`../../../kglite/...`) breaks the publish
+        // verify step. Tracked: consolidate into a single canonical
+        // location with both sides reading via path; for now, keep
+        // the two copies in sync manually when editing.
         let registry_result = SkillRegistry::new()
             .add_bundled(BundledSkill {
                 name: "cypher_query",
-                body: include_str!("../../../kglite/mcp_server/skills/cypher_query.md"),
+                body: include_str!("../skills/cypher_query.md"),
             })
             .add_bundled(BundledSkill {
                 name: "graph_overview",
-                body: include_str!("../../../kglite/mcp_server/skills/graph_overview.md"),
+                body: include_str!("../skills/graph_overview.md"),
             })
             .add_bundled(BundledSkill {
                 name: "save_graph",
-                body: include_str!("../../../kglite/mcp_server/skills/save_graph.md"),
+                body: include_str!("../skills/save_graph.md"),
             })
             .add_bundled(BundledSkill {
                 name: "read_code_source",
-                body: include_str!("../../../kglite/mcp_server/skills/read_code_source.md"),
+                body: include_str!("../skills/read_code_source.md"),
             })
             .add_bundled(BundledSkill {
                 name: "explore",
-                body: include_str!("../../../kglite/mcp_server/skills/explore.md"),
+                body: include_str!("../skills/explore.md"),
             })
             .merge_framework_defaults()
             .auto_detect_project_layer(&m.yaml_path)
