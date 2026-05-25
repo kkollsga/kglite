@@ -29,45 +29,30 @@
 //! their own unmapped extensions).
 
 use boltr::error::BoltError;
-use kglite::api::{KgError, KgErrorCode};
+use kglite::api::KgError;
 
 /// Map a [`KgError`] to a [`BoltError::Query`] with the right
 /// `Neo.{Class}.{Category}.{Title}` code. boltr's
 /// `BoltError::to_failure_metadata` passes the code+message through
 /// to the wire FAILURE response, where the driver routes by class
 /// prefix (ClientError vs DatabaseError vs TransientError).
+///
+/// The Neo4j status-code dispatch table itself lives on
+/// [`kglite::api::KgErrorCode::neo4j_status_code`] (lifted from
+/// this module in 2026-05-25 so any future Neo4j-wire-compatible
+/// binding shares the canonical mapping). This wrapper just bolts
+/// the code into the protocol-level `BoltError::Query` shape.
 pub fn kg_to_bolt(err: KgError) -> BoltError {
-    let code = neo4j_status_code(err.code());
     BoltError::Query {
-        code: code.into(),
+        code: err.code().neo4j_status_code().into(),
         message: err.to_string(),
-    }
-}
-
-/// Canonical Neo4j status code for a kglite error code.
-fn neo4j_status_code(code: KgErrorCode) -> &'static str {
-    match code {
-        KgErrorCode::CypherSyntax => "Neo.ClientError.Statement.SyntaxError",
-        KgErrorCode::CypherTimeout => "Neo.ClientError.Transaction.TransactionTimedOut",
-        KgErrorCode::CypherTypeMismatch => "Neo.ClientError.Statement.TypeError",
-        KgErrorCode::CypherExecution => "Neo.DatabaseError.Statement.ExecutionFailed",
-        KgErrorCode::Schema => "Neo.ClientError.Schema.ConstraintValidationFailed",
-        KgErrorCode::Validation | KgErrorCode::Expr => "Neo.ClientError.Statement.ArgumentError",
-        KgErrorCode::NodeNotFound
-        | KgErrorCode::ConnectionNotFound
-        | KgErrorCode::PropertyNotFound => "Neo.ClientError.Statement.EntityNotFound",
-        KgErrorCode::InvalidArgument => "Neo.ClientError.Statement.ArgumentError",
-        KgErrorCode::MissingArgument => "Neo.ClientError.Statement.ParameterMissing",
-        KgErrorCode::FileNotFound
-        | KgErrorCode::FileFormat
-        | KgErrorCode::FileIo
-        | KgErrorCode::Internal => "Neo.DatabaseError.General.UnknownError",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kglite::api::KgErrorCode;
 
     #[test]
     fn syntax_error_maps_to_neo_clienterror_statement_syntaxerror() {
@@ -105,7 +90,7 @@ mod tests {
             KgErrorCode::MissingArgument,
             KgErrorCode::Internal,
         ] {
-            let s = neo4j_status_code(code);
+            let s = code.neo4j_status_code();
             assert!(
                 s.starts_with("Neo."),
                 "code {:?} mapped to non-Neo.* string: {}",

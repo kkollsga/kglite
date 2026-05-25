@@ -70,7 +70,28 @@ impl<'a> ExecuteOptions<'a> {
     /// every consumer that doesn't have a lazy materializer), no
     /// deadline, no max_rows, no disabled passes, no embedder.
     /// Caller is expected to override at least `params`.
+    ///
+    /// Same as [`Self::eager`] — the two are synonyms. `new` is
+    /// kept for Rust-convention API discovery; `eager` is the
+    /// intent-named factory call-sites prefer.
     pub fn new(params: &'a HashMap<String, Value>) -> Self {
+        Self::eager(params)
+    }
+
+    /// Eager-execution defaults — the safe default for any binding
+    /// that doesn't have a lazy result materializer.
+    ///
+    /// This is the constructor non-Python bindings should reach for:
+    /// `lazy_eligible: false`, no deadline, no max_rows, no disabled
+    /// passes, no embedder. Override individual fields after
+    /// construction if needed (deadline for timeouts, embedder when
+    /// `text_score()` queries are expected).
+    ///
+    /// Lifted in 2026-05-25 to give the call-site the intent-named
+    /// shape — previously mcp-server / bolt-server constructed the
+    /// struct manually with identical defaults; now they call
+    /// `ExecuteOptions::eager(params)` for self-documenting code.
+    pub fn eager(params: &'a HashMap<String, Value>) -> Self {
         Self {
             params,
             deadline: None,

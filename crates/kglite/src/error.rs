@@ -113,6 +113,39 @@ impl KgErrorCode {
             KgErrorCode::Internal => "Internal",
         }
     }
+
+    /// Canonical Neo4j Bolt status code for this error code, of the
+    /// shape `Neo.{Class}.{Category}.{Title}`. The Bolt protocol
+    /// wraps these in a `FAILURE` response and drivers route by the
+    /// class prefix (`ClientError` vs `DatabaseError` vs
+    /// `TransientError`).
+    ///
+    /// Lifted from `kglite-bolt-server` so any future Neo4j-wire-
+    /// compatible binding (Go driver, Java driver alternative, custom
+    /// proxy) gets the canonical mapping without re-deriving the
+    /// table. Bindings still own the wrapping in their own error
+    /// type — only the code string is shared.
+    pub fn neo4j_status_code(&self) -> &'static str {
+        match self {
+            KgErrorCode::CypherSyntax => "Neo.ClientError.Statement.SyntaxError",
+            KgErrorCode::CypherTimeout => "Neo.ClientError.Transaction.TransactionTimedOut",
+            KgErrorCode::CypherTypeMismatch => "Neo.ClientError.Statement.TypeError",
+            KgErrorCode::CypherExecution => "Neo.DatabaseError.Statement.ExecutionFailed",
+            KgErrorCode::Schema => "Neo.ClientError.Schema.ConstraintValidationFailed",
+            KgErrorCode::Validation | KgErrorCode::Expr => {
+                "Neo.ClientError.Statement.ArgumentError"
+            }
+            KgErrorCode::NodeNotFound
+            | KgErrorCode::ConnectionNotFound
+            | KgErrorCode::PropertyNotFound => "Neo.ClientError.Statement.EntityNotFound",
+            KgErrorCode::InvalidArgument => "Neo.ClientError.Statement.ArgumentError",
+            KgErrorCode::MissingArgument => "Neo.ClientError.Statement.ParameterMissing",
+            KgErrorCode::FileNotFound
+            | KgErrorCode::FileFormat
+            | KgErrorCode::FileIo
+            | KgErrorCode::Internal => "Neo.DatabaseError.General.UnknownError",
+        }
+    }
 }
 
 impl fmt::Display for KgErrorCode {

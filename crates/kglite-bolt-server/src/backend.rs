@@ -632,14 +632,14 @@ impl KgliteBackend {
         &self,
         kg_params: &'a HashMap<String, Value>,
     ) -> kglite::api::session::ExecuteOptions<'a> {
-        kglite::api::session::ExecuteOptions {
-            params: kg_params,
-            deadline: None,
-            max_rows: None,
-            lazy_eligible: false,
-            disabled_passes: None,
-            embedder: None, // bolt-server doesn't wire text_score; rejected at session level
-        }
+        // Eager rows — bolt-server materializes every result into
+        // BoltRecords before handing back to boltr; no lazy
+        // materializer at this layer.
+        //
+        // `text_score()` isn't wired here either (embedder = None
+        // in the defaults); text-score queries are rejected at the
+        // session level.
+        kglite::api::session::ExecuteOptions::eager(kg_params)
     }
 
     /// Auto-commit path: take a snapshot, delegate to
@@ -655,8 +655,10 @@ impl KgliteBackend {
         // reject auto-commit mutations with a Bolt-specific error
         // message before session::execute_read rejects with a
         // generic one). The parse is cached.
-        let pre_parsed = cypher::parse_cypher(query).map_err(kg_to_bolt)?;
-        if cypher::is_mutation_query(&pre_parsed) {
+        // Parse result not used after the mutation check; the
+        // executor's parse_cache hit makes the second parse free.
+        let (_, is_mutation) = cypher::parse_with_mutation_check(query).map_err(kg_to_bolt)?;
+        if is_mutation {
             if self.readonly {
                 return Err(BoltError::Forbidden(
                     "server is read-only — mutations rejected (--readonly flag)".into(),
@@ -710,8 +712,9 @@ impl KgliteBackend {
         })?;
 
         // Pre-parse for read/mut routing.
-        let pre_parsed = cypher::parse_cypher(query).map_err(kg_to_bolt)?;
-        let is_mutation = cypher::is_mutation_query(&pre_parsed);
+        // Parse result not used after the mutation check; the
+        // executor's parse_cache hit makes the second parse free.
+        let (_, is_mutation) = cypher::parse_with_mutation_check(query).map_err(kg_to_bolt)?;
 
         if is_mutation && self.readonly {
             // Shouldn't happen — we reject begin_transaction under

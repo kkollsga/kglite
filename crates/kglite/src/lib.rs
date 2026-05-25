@@ -113,6 +113,7 @@ pub mod api {
         pub use crate::graph::languages::cypher::executor::CypherExecutor;
         pub use crate::graph::languages::cypher::generate_explain_result;
         pub use crate::graph::languages::cypher::is_mutation_query;
+        pub use crate::graph::languages::cypher::parse_with_mutation_check;
         pub use crate::graph::languages::cypher::parser::parse_cypher;
         pub use crate::graph::languages::cypher::planner;
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;

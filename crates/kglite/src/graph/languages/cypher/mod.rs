@@ -76,6 +76,32 @@ fn collect_node_types(m: &MatchClause) -> Vec<String> {
     types
 }
 
+/// Parse a query and classify whether it mutates the graph. Returns
+/// `(parsed, is_mutation)`. Convenience for the "every binding
+/// pre-parses to check mutation status before applying its
+/// per-binding policy" pattern.
+///
+/// Each binding still owns its policy:
+/// - MCP server rejects all mutations on the `cypher_query` tool
+/// - Bolt server rejects auto-commit mutations + reject any mutation
+///   when `--readonly` is set
+/// - Python wheel allows mutations unless the graph is `read_only`
+///
+/// What's shared is the SEQUENCE: parse, classify, then decide. This
+/// helper bundles those two steps so call-sites become one line plus
+/// the policy check.
+///
+/// Lifted from `kglite-bolt-server::backend.rs` +
+/// `kglite-mcp-server::tools.rs` in 2026-05-25 — both wrote the same
+/// `parse_cypher() + is_mutation_query()` pair identically.
+pub fn parse_with_mutation_check(
+    query: &str,
+) -> Result<(ast::CypherQuery, bool), crate::error::KgError> {
+    let parsed = parse_cypher(query)?;
+    let is_mutation = is_mutation_query(&parsed);
+    Ok((parsed, is_mutation))
+}
+
 /// Generate a structured query plan as a CypherResult with columns
 /// [step, operation, estimated_rows].
 pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result::CypherResult {

@@ -275,8 +275,9 @@ fn run_cypher_inner(
     // mutation Cypher through the MCP surface is a deliberate policy
     // restriction (agents should use the CLI for graph edits). Pre-
     // parse to catch this cleanly before session::execute_read errors.
-    let pre_parsed = kglite::api::cypher::parse_cypher(query).map_err(|e| e.to_string())?;
-    if kglite::api::cypher::is_mutation_query(&pre_parsed) {
+    let (pre_parsed, is_mutation) =
+        kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
+    if is_mutation {
         return Err(
             "mutation Cypher (CREATE/SET/DELETE/REMOVE/MERGE) is not allowed through \
              the MCP cypher_query tool. Use the kglite CLI for graph edits."
@@ -285,18 +286,12 @@ fn run_cypher_inner(
     }
     let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
 
-    let embedder = kg.embedder().cloned();
-    let opts = kglite::api::session::ExecuteOptions {
-        params: &params,
-        deadline: None,
-        max_rows: None,
-        // Eager rows — MCP output formatters (CSV / 15-row preview)
-        // need materialized results; we don't have a lazy
-        // materializer at this layer.
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder,
-    };
+    // Eager rows — MCP output formatters (CSV / 15-row preview)
+    // need materialized results; no lazy materializer at this layer.
+    // Embedder is plumbed when the active graph has one wired (for
+    // `text_score()` queries); otherwise None.
+    let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
+    opts.embedder = kg.embedder().cloned();
     let outcome = kglite::api::session::execute_read(kg.dir(), query, &opts)
         .map_err(|e| format!("Cypher execution error: {e}"))?;
     let result = outcome.result;
