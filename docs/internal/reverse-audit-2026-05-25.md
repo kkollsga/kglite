@@ -17,10 +17,55 @@ This audit runs the **reverse**: which `kglite::api::*` items
 actually only one wrapper can use, and so don't belong in the
 stable api?
 
-## Method
+## Method — strict posture
 
-For each item re-exported through `kglite::api::*`, count and
-classify its non-`crates/kglite/` callers:
+**Default-suspicious of items in core.** The burden of proof is on
+*keeping* an item in `kglite::api::*`, not on removing it. The
+question to ask of every item is:
+
+> Is this code **tailored for one specific binding's environment**?
+> If I were writing this from scratch for a Go binding (or JS, or
+> JVM, …), would I write it differently — or would I write the
+> same thing?
+
+If "tailored for one binding" → demote. Even if the logic looks
+generic at a glance, check the *interface*:
+
+- Does it take a type that's a specific binding's idiom?
+  (`Bound<PyAny>` is Python; `BoltValue` is Bolt; `&CowSelection`
+  is currently wheel-only.)
+- Does its input shape encode a binding's input convention?
+  ("Accept either a string OR a duck-typed `.wkt` attr" is a
+  Python idiom; Go would take `string`; JVM would take a
+  `Geometry` interface.)
+- Does its OUTPUT shape match one binding's display protocol?
+  (`__repr__`-style formatting → tailored for Python.)
+
+Consumer count is NOT the test. We ship one major wrapper today;
+of course most items have one consumer. The question is whether
+the item's *shape* would generalize when a second binding shows up.
+
+### Worked examples
+
+| Item | Single Python consumer? | Tailored for Python? | Verdict |
+|---|---|---|---|
+| `infer_selection_node_type(&CowSelection, …)` | Yes | Yes — `CowSelection` is wheel-only | Demoted ✓ |
+| `discover_property_keys_from_data(&[(&str, &NodeData)], &StringInterner)` | Yes | No — signature is `Path`-like core types | Stays |
+| `extract_wkt(obj: &Bound<PyAny>)` | Yes | Yes — input is "string OR `.wkt` attr" Python duck-type | Would be a downgrade if it were in core; correctly already in `kglite-py` |
+| `make_dir_graph_mut(&mut Arc<DirGraph>) -> &mut DirGraph` | Yes | No — canonical CoW pattern, any binding identical | Stays |
+
+The 1st and 3rd both have a single consumer today; only the 1st
+has a wheel-tailored signature. That's the difference.
+
+### How to run it
+
+For each item in `kglite::api::*`, read the signature and ask the
+question above. Consumer count is a secondary signal, useful only
+to spot suspicious items faster.
+
+### How to run the test
+
+For each item re-exported through `kglite::api::*`:
 
 ```bash
 for sym in <api item>; do
@@ -30,16 +75,10 @@ for sym in <api item>; do
 done
 ```
 
-An item is a candidate for **demotion** (move out of api) when:
-
-1. Only one wrapper crate uses it (today), AND
-2. The item depends on a type or shape that no other binding could
-   meaningfully use (e.g. it takes a wheel-only PyClass or a
-   wheel-internal `CowSelection`).
-
-An item is **not** a candidate just because only one wrapper uses
-it today — if a future binding could call it the same way, it
-stays in api.
+Then for each signature, ask: does it mention a type that only the
+current consumer's environment provides? If yes → demote. If no
+(signature is `&Path`, `&str`, `&DirGraph`, etc. — all core types)
+→ stays in api even if only one consumer today.
 
 ## Findings
 

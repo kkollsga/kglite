@@ -43,17 +43,100 @@ Concrete examples:
   (`kglite::api::*`). Every binding asks the same questions the
   same way.
 
-The principle applies in both directions:
+The principle applies in both directions, with **different
+postures for each**:
 
-- Going from wrapper → core: if you find yourself writing logic in
-  a wrapper that another binding would copy verbatim, stop and
-  file a core lift.
-- Going from core → wrapper: if `kglite::api::*` carries code that
-  only one wrapper's runtime / idiom / ergonomics would use, push
-  it down into that wrapper.
+### Wrapper → core (the LIFT direction): active-design posture, cypher-first, use-case-checked
+
+We are actively designing the api surface for future bindings (Go
+via cgo, JS via napi, JVM via JNI, …). Default-generous about
+lifting generic-and-useful capabilities — don't wait for a second
+binding to discover the gap, file a request, and wait for us to
+ship it. The cost of speculative-but-useful lifts is small; the
+cost of not-lifting is that every new binding author hits "wait, I
+have to reinvent this from the wheel" on day one.
+
+**But "generic" isn't enough — test the use case.** Before lifting
+any helper or proposing any new Cypher function/procedure, ask:
+*who would actually call this, and in what query / workflow?* If
+the only honest answers are "validation that should happen at load
+time anyway" or "type introspection that fights a data-modeling
+smell" or "syntactic sugar over an existing function" — drop it.
+Generic-and-pointless adds api surface to maintain without
+delivering value.
+
+Concrete use-case test examples (worked through 2026-05-25):
+
+- `wkt_is_valid` as a Cypher function — DROPPED. The only honest
+  use cases (pre-CREATE validation, find-malformed-data audit) are
+  better addressed at load time where Rust-level `parse_wkt` is
+  already directly callable.
+- `add_days(date, n)` — KEPT. Real query: "events scheduled in
+  the next 30 days": `WHERE e.date <= add_days(date(), 30)`.
+- `shortest_path_length(a, b)` — KEPT. Real query: "how many hops
+  from X to Y" without materializing the path.
+- `quartile(x)` aggregation — DROPPED. Syntactic sugar over
+  existing `percentile_cont(x, 0.25)`; no extra value.
+
+**But: lift to the right surface.** kglite has two surfaces that
+bindings reach:
+
+1. **Cypher (the universal per-query surface).** Every wrapper
+   exposes a `cypher_query` tool/method. New Cypher functions and
+   procedures are reached automatically by every binding through
+   that one entry point — no per-wrapper wiring required.
+2. **Direct Rust api (the bootstrap / lifecycle / error surface).**
+   Items in `kglite::api::*` that bindings call directly during
+   open / build / save / error-mapping / embedder-registration.
+
+Cypher-first is the default for any per-query feature: WKT helpers,
+date/time helpers, string formatters, graph algorithms, statistics,
+aggregations. A new binding running `cypher_query("WHERE
+wkt_within(geom, $box)")` gets WKT for free. Wiring those as direct
+Rust helpers (`kglite::api::geometry::validate_wkt`) forces every
+binding to expose them through their own FFI layer.
+
+Direct Rust api is for things Cypher can't express:
+
+- The Cypher pipeline itself (`session::execute_*`, `cypher::parse_*`)
+- Lifecycle: `load_file`, `save_graph`, `from_blueprint`
+- Error types and codes (errors fire before/after Cypher)
+- Embedder registration (bindings hand kglite an `Arc<dyn Embedder>`)
+- Storage backend configuration
+- Dataset loaders (the fetched data isn't a graph yet)
+
+When in doubt, ask: "is this a per-query feature or a setup/error
+concern?" Per-query → Cypher function or procedure. Setup/error →
+direct Rust api.
+
+### Core → wrapper (the DOWNGRADE direction): strict posture
+
+Default-suspicious of items in `kglite::api::*`. Burden of proof
+is on *keeping* an item, not on removing it. The question to ask
+of every item is: "Is this *tailored for one specific binding's
+environment*? If I were writing it for a Go binding from scratch,
+would I write the same thing — or differently?" If "differently"
+→ demote.
+
+Consumer count is **not** the test (we ship one major wrapper
+today, of course most items have one consumer). The test is the
+*shape*: does the signature take a wrapper-specific type
+(`Bound<PyAny>`, `BoltValue`, `&CowSelection`) or encode a
+wrapper's input idiom (duck-typed Python objects, language-
+specific display conventions)? If yes → tailored, demote.
+
+### Combined: lift generously, demote rigorously
+
+The two postures sound contradictory but aren't. Generic-and-useful
+logic lifts proactively (don't wait); tailored-to-one-binding shapes
+get demoted rigorously (don't keep speculatively). The boundary
+between the two is the *signature* of the lifted thing — generic
+core types in, generic core types out.
 
 See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
-your binding" for the worked example.
+your binding" for the worked example, and
+`docs/internal/reverse-audit-2026-05-25.md` for the audit
+methodology with worked-example classifications.
 
 ## In-memory is the core product
 
