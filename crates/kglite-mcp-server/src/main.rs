@@ -15,7 +15,8 @@
 //! - bare — framework + manifest tools only.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -220,6 +221,14 @@ async fn main() -> Result<()> {
 
     let graph_state = GraphState::new();
 
+    // Shared "active root" slot for local-workspace mode. Populated
+    // by the post-activate hook on each `set_root_dir`; read by the
+    // watch callback to scope rebuilds. Stays `None` until the first
+    // `set_root_dir` (the boot-time activate is intentionally
+    // deferred — see `Mode::LocalWorkspace` arm below for why).
+    // Other modes never write to it.
+    let local_active_root: Arc<RwLock<Option<PathBuf>>> = Arc::new(RwLock::new(None));
+
     // Mode-specific bindings: source roots, workspace handle, initial graph build.
     match &mode {
         Mode::Graph { path } => {
@@ -271,8 +280,41 @@ async fn main() -> Result<()> {
             options = options.with_workspace(ws);
         }
         Mode::LocalWorkspace { root, .. } => {
+            // Operator inbox 2026-05-25: with a wide `workspace.root`
+            // (the documented "lateral swap" pattern,
+            // e.g. `/Volumes/EksternalHome/Koding` ≈ 360k files), the
+            // mcp-methods `Workspace::open_local(root, hook)` fires
+            // `hook(workspace.root, ...)` synchronously inside the
+            // open. The hook here calls `gs.build_code_tree(root)`
+            // which parses every source file under the wide root
+            // before returning — blowing past Claude Desktop's 60s
+            // MCP `initialize` window. The user sees only
+            // "Could not attach to MCP server."
+            //
+            // Fix: defer the very first hook invocation (the boot-
+            // time activate). The first `set_root_dir(path)` becomes
+            // the first real activate; we build the code-tree for
+            // exactly the one repo the operator picked. Boot returns
+            // in ms. mcp-methods unchanged.
+            //
+            // Active root is also captured in a shared RwLock so the
+            // watch callback (later in this fn) can scope its
+            // rebuilds.
             let gs = graph_state.clone();
+            let initial_activate_seen = Arc::new(AtomicBool::new(false));
+            let initial_flag = initial_activate_seen.clone();
+            let active_root_for_hook = local_active_root.clone();
             let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
+                if !initial_flag.swap(true, Ordering::SeqCst) {
+                    tracing::info!(
+                        root = %path.display(),
+                        "deferring local-workspace code_tree build until first set_root_dir"
+                    );
+                    return Ok(());
+                }
+                if let Ok(mut guard) = active_root_for_hook.write() {
+                    *guard = Some(path.to_path_buf());
+                }
                 tracing::info!(repo = name, "code_tree::build on local-workspace activate");
                 gs.build_code_tree(path)
             });
@@ -425,10 +467,35 @@ async fn main() -> Result<()> {
             maybe_watch(Some(dir), Some(cb))?
         }
         Mode::LocalWorkspace { root, watch: true } => {
-            let canon = root.clone();
+            // Hand mcp-methods the wide `workspace.root` to monitor —
+            // FSEvents/inotify only emit events for files inside the
+            // subtree, so watching wide is cheap. Filtering happens
+            // in the callback.
+            //
+            // Operator inbox 2026-05-25: pre-fix this captured
+            // `workspace.root` and rebuilt the entire wide tree on
+            // every event (build storm on any `cargo build` /
+            // editor save anywhere in the sandbox). Fix: read the
+            // shared `local_active_root` (populated by the
+            // post-activate hook above on each `set_root_dir`),
+            // skip when nothing changed under the active root,
+            // rebuild against the active root only.
             let gs = graph_state.clone();
-            let cb: watch::ChangeHandler = Arc::new(move |_paths| {
-                if let Err(e) = gs.build_code_tree(&canon) {
+            let active_root_for_watch = local_active_root.clone();
+            let cb: watch::ChangeHandler = Arc::new(move |paths| {
+                let active = match active_root_for_watch.read() {
+                    Ok(g) => g.clone(),
+                    Err(_) => return,
+                };
+                let Some(active) = active else {
+                    // No `set_root_dir` yet; nothing to rebuild.
+                    return;
+                };
+                let any_under_active = paths.iter().any(|p| p.starts_with(&active));
+                if !any_under_active {
+                    return;
+                }
+                if let Err(e) = gs.build_code_tree(&active) {
                     tracing::warn!(error = %e, "code_tree rebuild failed (local workspace)");
                 }
             });

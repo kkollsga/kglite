@@ -167,6 +167,15 @@ async def _async_main(args: argparse.Namespace) -> None:
     graph_state = GraphState()
     workspace: Workspace | None = None
 
+    # Local-workspace active-root slot. Populated by the
+    # `_post_activate` hook each time `set_root_dir(path)` fires;
+    # read by the watch callback in `local_workspace + watch:true`
+    # mode so rebuilds target the active repo (not the wide
+    # `workspace.root` sandbox). Stays `None` until the first
+    # `set_root_dir` — the watch callback then no-ops, matching the
+    # boot-time deferral. List-cell idiom so the closures can mutate.
+    active_root_holder: list[Path | None] = [None]
+
     # Mode-specific binding.
     if mode["kind"] == "graph":
         graph_state.load_kgl(mode["path"])
@@ -180,14 +189,16 @@ async def _async_main(args: argparse.Namespace) -> None:
             kind="local",
             stale_after_days=args.stale_after_days,
         )
-        # 0.9.28: local-workspace mode binds the workspace root as the
-        # active root at construction (see mcp-methods workspace.rs
-        # open_local), but the post-activate hook is registered AFTER
-        # construction so the initial active-binding doesn't fire it.
-        # Build the code-tree explicitly at boot so the first
-        # cypher_query (before any set_root_dir) sees a populated graph
-        # — matches watch mode's boot-time build.
-        graph_state.build_code_tree(mode["path"])
+        # Operator inbox 2026-05-25: the explicit boot-time
+        # `build_code_tree(workspace.root)` was a 0.9.28 stop-gap to
+        # ensure cypher_query had something to query before any
+        # set_root_dir. For wide `workspace.root` (the documented
+        # lateral-swap pattern, e.g. ~360k files), it blocks MCP
+        # `initialize` past Claude Desktop's 60s timeout — operator
+        # sees only "Could not attach to MCP server." Drop the
+        # eager build; first `set_root_dir(path)` becomes the first
+        # build (via the `_post_activate` hook wired below).
+        # Bare local-workspace boot now returns in ms.
 
     if embedder_adapter is not None:
         graph_state.bind_embedder(embedder_adapter)
@@ -203,10 +214,19 @@ async def _async_main(args: argparse.Namespace) -> None:
             lambda: graph_state.build_code_tree(mode["path"]),
         )
     elif mode["kind"] == "local_workspace" and manifest and manifest.workspace and manifest.workspace.watch:
-        watch_handle = watch_start(
-            mode["path"],
-            lambda: graph_state.build_code_tree(mode["path"]),
-        )
+        # Operator inbox 2026-05-25: previously
+        # `lambda: graph_state.build_code_tree(mode["path"])` — i.e.
+        # always rebuilt the wide sandbox on every FS event (every
+        # cargo build, editor save, etc. anywhere under it). Now:
+        # rebuild only the active repo (= last `set_root_dir`
+        # target), no-op until something has been set.
+        def _local_workspace_rebuild() -> None:
+            active = active_root_holder[0]
+            if active is None:
+                return
+            graph_state.build_code_tree(active)
+
+        watch_handle = watch_start(mode["path"], _local_workspace_rebuild)
     _ = watch_handle  # keep alive until process exit
 
     # Build the MCP server.
@@ -217,6 +237,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         csv_http_cfg=csv_http_cfg,
         workspace=workspace,
         preprocessor=preprocessor,
+        active_root_holder=active_root_holder,
     )
 
     # Serve.
@@ -505,6 +526,7 @@ def _build_server(
     csv_http_cfg: Any,
     workspace: Any,
     preprocessor: Any = None,
+    active_root_holder: list[Path | None] | None = None,
 ) -> Any:
     """Construct the mcp.Server and register all tools."""
     from mcp import types
@@ -659,6 +681,13 @@ def _build_server(
             # passes path first (mcp_tools.rs::DeferredPyHook::invoke),
             # which matches mcp-methods' Rust hook contract.
             target = Path(repo_path)
+            # Operator inbox 2026-05-25: stash the active root so the
+            # local-workspace watch callback (in `_run`) can scope its
+            # rebuilds. Before this, the watch callback always
+            # rebuilt `workspace.root` (the wide sandbox) on every
+            # FS event.
+            if active_root_holder is not None:
+                active_root_holder[0] = target
             graph_state.build_code_tree(target)
             source_roots[:] = [target]
 
