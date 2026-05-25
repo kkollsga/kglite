@@ -79,9 +79,23 @@ kglite = { features = ["sec", "sodir", "wikidata"] }
 
 | Feature | Module | What it loads |
 |---|---|---|
-| `sec` | `kglite::datasets::sec` | SEC EDGAR filings (quarterly index, bulk submissions, Form 4 / 13F, Exhibit 21, 8-K). |
-| `sodir` | `kglite::datasets::sodir` | Norwegian Continental Shelf petroleum data (Sodir FactMaps REST). |
-| `wikidata` | `kglite::datasets::wikidata` | Wikimedia `latest-truthy.nt.bz2` dump fetcher (resumable). |
+| `sec` | `kglite::api::datasets::sec` | SEC EDGAR filings (quarterly index, bulk submissions, Form 4 / 13F, Exhibit 21, 8-K). |
+| `sodir` | `kglite::api::datasets::sodir` | Norwegian Continental Shelf petroleum data (Sodir FactMaps REST). |
+| `wikidata` | `kglite::api::datasets::wikidata` | Wikimedia `latest-truthy.nt.bz2` dump fetcher (resumable). |
+
+Each submodule re-exports the same surface the Python wheel uses
+via `_sec_internal` / `_sodir_internal` / `_wikidata_internal`:
+workdir + storage-mode types, error + Result aliases, the HTTP
+client, the async fetch entry points, and (for SEC) the extract
+pipeline + size-prediction helpers. All `fetch_*` entries are
+`async` — bindings need a tokio runtime to drive them.
+
+**Lifecycle orchestration (cache short-circuit, mode selection,
+retry budgets) is NOT in core.** Each binding wraps the building
+blocks in its own language idiom; the Python wheel's wrappers
+(`kglite/datasets/*/wrapper.py`) are the reference implementation.
+See [`implementing-a-binding.md`](implementing-a-binding.md) →
+"Wrapping a dataset for your binding".
 
 Polars-io style: opt in only to what you use.
 

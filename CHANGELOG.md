@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `kglite::api::datasets::{sec, sodir, wikidata}` — dataset fetch
+  + extract building blocks now reachable through the curated
+  stable API. Each submodule is feature-gated (matches the
+  existing `sec` / `sodir` / `wikidata` Cargo features) and
+  re-exports the same surface the Python wheel uses via
+  `_sec_internal` / `_sodir_internal` / `_wikidata_internal`:
+  workdir + storage-mode types, error + `Result` aliases, the
+  HTTP client, the async `fetch_*` entry points, and (for SEC)
+  the extract pipeline + size-prediction helpers. Future Go /
+  JS / JVM bindings now consume the same items through the
+  stable api namespace. Lifecycle orchestration (cache short-
+  circuit, mode selection, retry budgets) stays in each
+  binding's wrapper — the Python wheel's wrappers at
+  `kglite/datasets/*/wrapper.py` are the reference
+  implementation.
 - `kglite::api::blueprint` — pure-Rust blueprint loader + builder is
   now part of the curated stable API. Re-exports `build`,
   `load_blueprint_file`, `Blueprint`, `Settings`, `NodeSpec`,

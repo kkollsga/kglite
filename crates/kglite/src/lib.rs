@@ -119,4 +119,79 @@ pub mod api {
             ExecuteOutcome, Session, Transaction,
         };
     }
+
+    /// Dataset fetch + extract building blocks for bindings that
+    /// want to wrap SEC EDGAR, Sodir (Norwegian Continental Shelf),
+    /// or Wikidata. Each submodule re-exports the same surface the
+    /// Python wheel uses today via `_sec_internal` / `_sodir_internal`
+    /// / `_wikidata_internal`; future Go / JS / JVM bindings consume
+    /// the same items here through the stable api namespace.
+    ///
+    /// **Lifecycle orchestration is NOT in core.** The "fetch what's
+    /// missing, build if cache is stale, return a ready-to-query
+    /// graph" loop lives in each binding's wrapper (the Python
+    /// wheel's wrappers at `kglite/datasets/*/wrapper.py` are the
+    /// reference implementation). The engine ships the building
+    /// blocks; bindings compose them in their own language idiom.
+    /// See `docs/rust/implementing-a-binding.md` → "Wrapping a
+    /// dataset for your binding" for the pattern.
+    ///
+    /// **All `fetch_*` entry points are `async`.** Bindings need a
+    /// tokio runtime to drive them. The Python wheel builds one
+    /// per call via `pyo3-async-runtimes`; a Rust binary can spin
+    /// one up via `tokio::runtime::Builder`.
+    pub mod datasets {
+        /// SEC EDGAR — quarterly filings index, bulk submissions
+        /// archive, per-form fetchers (Form 3/4/5, 13F, 8-K, SC 13D/G,
+        /// DEF 14A, Form 144, Exhibit 21, XBRL company facts).
+        #[cfg(feature = "sec")]
+        pub mod sec {
+            // Workdir layout + storage mode picker
+            pub use crate::datasets::sec::{
+                pick_storage_mode, predict_graph_size_gb, SliceSpec, StorageMode, Workdir,
+                YearRange,
+            };
+            // Error type + the crate's Result alias
+            pub use crate::datasets::sec::{Result, SecError};
+            // HTTP client + fetch entry points (all async)
+            pub use crate::datasets::sec::{
+                fetch_13f_info_table, fetch_company_facts, fetch_company_submission,
+                fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
+                fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk, FetchMode,
+                SecClient,
+            };
+            // Extract pipeline (parses raw/ → processed/ CSVs)
+            pub use crate::datasets::sec::{run_all, ExtractReport};
+        }
+
+        /// Sodir — Norwegian Continental Shelf petroleum data
+        /// (fields, wells, prospects, licences, …) via the
+        /// ArcGIS FactMaps REST API.
+        #[cfg(feature = "sodir")]
+        pub mod sodir {
+            pub use crate::datasets::sodir::ArcGISClient;
+            pub use crate::datasets::sodir::{Result, SodirError};
+            pub use crate::datasets::sodir::{StorageMode, Workdir};
+            // Single async fetch entry — pulls all referenced datasets
+            // into csv/, applies preprocessing, returns the report.
+            pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
+            // Blueprint utilities the wheel composes with from_blueprint
+            pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};
+        }
+
+        /// Wikidata — resumable download of the
+        /// `latest-truthy.nt.bz2` RDF dump. Building the graph from
+        /// the dump is a separate concern (the wheel uses
+        /// `KnowledgeGraph::load_ntriples`); this surface is the
+        /// dump-management half only.
+        #[cfg(feature = "wikidata")]
+        pub mod wikidata {
+            pub use crate::datasets::wikidata::Workdir;
+            pub use crate::datasets::wikidata::{ensure_dump, remote_last_modified};
+            pub use crate::datasets::wikidata::{Result, WikidataError};
+            // Mirror config constants — bindings can read these to
+            // tell users what file they'll end up with.
+            pub use crate::datasets::wikidata::{DUMP_FILE, DUMP_URL};
+        }
+    }
 }

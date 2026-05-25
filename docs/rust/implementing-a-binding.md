@@ -295,11 +295,33 @@ to answer "what functions call X" queries about a codebase.
 kglite = { version = "0.10", features = ["sec", "sodir", "wikidata"] }
 ```
 
-Each loader is opt-in. The building blocks are exposed (HTTP
-clients, batch fetchers, extract orchestration); the full lifecycle
-orchestration (cache management, mode selection, retry policies)
-lives in each binding's wrapper. See the next section for the
-pattern.
+Each loader is opt-in via its Cargo feature; the building blocks
+land in `kglite::api::datasets::{sec, sodir, wikidata}`:
+
+```rust
+use kglite::api::datasets::sec::{
+    SecClient, Workdir, YearRange,
+    fetch_quarterly_master_idx, fetch_submissions_bulk,
+    run_all, SliceSpec, predict_graph_size_gb, pick_storage_mode,
+};
+
+let wd = Workdir::new("/tmp/sec");
+let client = SecClient::new("YourBinding/1.0 contact@example.com")?;
+
+// All fetch_* entries are async — driven from a tokio runtime
+// you manage in your binding.
+fetch_quarterly_master_idx(
+    &client, &wd, YearRange::new(2020, 2024), /*current_year*/ 2024, /*current_quarter*/ 4,
+).await?;
+
+// Plan storage mode from a size estimate:
+let gb = predict_graph_size_gb(5, 0, None, true, true, true);
+let mode = pick_storage_mode(gb);  // "memory" | "mapped" | "disk"
+```
+
+The full lifecycle orchestration (cache management, mode selection,
+retry policies, ticker resolution) lives in each binding's wrapper.
+See the next section for the pattern.
 
 ## Wrapping a dataset for your binding
 
@@ -485,11 +507,6 @@ your specific binding:
 - **Phase H — a `kglite-c` crate** exposing the engine through a
   stable C ABI. Unlocks bindings in any FFI-capable language
   without each one rolling its own `extern "C"` layer.
-- **`kglite::api::datasets`** — re-export the per-dataset
-  fetch/extract/build primitives through the stable surface
-  (today they're at `kglite::datasets::*`, semantically stable
-  but not formally in `api::*`). Tracked as Phase 3 of the
-  current prep work.
 - **Selection / fluent-API in core.** Today's wheel exposes a
   fluent `select() / where() / sort()` builder; unclear how much
   of the builder lives in core vs. the PyO3 layer. Punted unless
