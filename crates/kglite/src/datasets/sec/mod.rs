@@ -17,6 +17,8 @@
 //!   └── parsers     (pure: bytes in → typed records out, no I/O)    [phase 1+]
 //! ```
 
+pub mod blocking;
+pub mod buckets;
 pub mod catalog;
 pub mod client;
 pub mod error;
@@ -26,7 +28,17 @@ pub mod layout;
 pub mod parsers;
 pub mod planning;
 pub mod slicing;
+pub mod tickers;
 
+pub use blocking::{
+    fetch_13f_info_table_blocking, fetch_company_facts_blocking, fetch_company_submission_blocking,
+    fetch_company_tickers_blocking, fetch_exhibit21_attachment_blocking,
+    fetch_filing_primary_doc_blocking, fetch_form4_filing_blocking,
+    fetch_quarterly_master_idx_blocking, fetch_submissions_bulk_blocking,
+};
+pub use buckets::{
+    all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
+};
 pub use client::{FetchMode, SecClient};
 pub use error::{Result, SecError};
 pub use extract::{run_all, ExtractReport, Provenance, Sinks};
@@ -47,3 +59,4 @@ pub use parsers::submissions::{
 };
 pub use planning::{pick_storage_mode, predict_graph_size_gb};
 pub use slicing::SliceSpec;
+pub use tickers::parse_tickers_json;

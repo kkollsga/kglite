@@ -160,6 +160,26 @@ pub mod api {
                 fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk, FetchMode,
                 SecClient,
             };
+            // Sync wrappers (single-thread tokio runtime per call).
+            // For bindings that don't manage their own async runtime.
+            pub use crate::datasets::sec::{
+                fetch_13f_info_table_blocking, fetch_company_facts_blocking,
+                fetch_company_submission_blocking, fetch_company_tickers_blocking,
+                fetch_exhibit21_attachment_blocking, fetch_filing_primary_doc_blocking,
+                fetch_form4_filing_blocking, fetch_quarterly_master_idx_blocking,
+                fetch_submissions_bulk_blocking,
+            };
+            // Form-type → per-filing-fetcher bucket mapping. Lifts
+            // the wheel's `_FORM_BUCKETS` + `_resolve_fetch_buckets`
+            // into core so every binding gets the same form-string
+            // table without re-implementing it.
+            pub use crate::datasets::sec::{
+                all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
+            };
+            // SEC company_tickers.json parser — turns the published
+            // JSON into a `TICKER → CIK` HashMap for bindings that
+            // accept string tickers from their users.
+            pub use crate::datasets::sec::parse_tickers_json;
             // Extract pipeline (parses raw/ → processed/ CSVs)
             pub use crate::datasets::sec::{run_all, ExtractReport};
         }
@@ -174,7 +194,9 @@ pub mod api {
             pub use crate::datasets::sodir::{StorageMode, Workdir};
             // Single async fetch entry — pulls all referenced datasets
             // into csv/, applies preprocessing, returns the report.
-            pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
+            // The `*_blocking` variant for bindings without an async
+            // runtime spins up a single-thread tokio runtime per call.
+            pub use crate::datasets::sodir::{fetch_all, fetch_all_blocking, FetchAllReport};
             // Blueprint utilities the wheel composes with from_blueprint
             pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};
         }
@@ -187,7 +209,10 @@ pub mod api {
         #[cfg(feature = "wikidata")]
         pub mod wikidata {
             pub use crate::datasets::wikidata::Workdir;
-            pub use crate::datasets::wikidata::{ensure_dump, remote_last_modified};
+            pub use crate::datasets::wikidata::{
+                ensure_dump, ensure_dump_blocking, remote_last_modified,
+                remote_last_modified_blocking,
+            };
             pub use crate::datasets::wikidata::{Result, WikidataError};
             // Mirror config constants — bindings can read these to
             // tell users what file they'll end up with.

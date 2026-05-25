@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dataset wrapping preparation** for future-language bindings.
+  Three changes together so that a future Go / JS / JVM binding
+  doesn't have to re-implement code the Python wheel had to.
+  - `kglite::api::datasets::*::{*_blocking}` — sync-runtime
+    wrappers for every async `fetch_*` entry point (Wikidata,
+    Sodir, SEC). Each spins up a single-thread tokio runtime via
+    the new `kglite::datasets::blocking::run` helper and returns
+    the sync result. Bindings without their own async runtime
+    use these; bindings with one drive the async variants
+    directly.
+  - `kglite::api::datasets::sec::{SecFormBucket, ALL_BUCKETS,
+    LEAN_FETCH_BUCKETS, resolve_fetch_buckets, all_buckets}` —
+    the SEC form-type → per-filing-fetcher bucket mapping is now
+    canonical in core. The Python wheel's `_FORM_BUCKETS` table
+    is sourced from Rust at import time
+    (`_sec_internal.all_buckets_py()`); the dispatch table is no
+    longer duplicated across bindings.
+  - `kglite::api::datasets::sec::parse_tickers_json` — parses
+    SEC's `company_tickers.json` into a `TICKER → CIK` HashMap.
+    Lifted from the wheel's `_resolve_companies` helper. Every
+    binding accepting string tickers from users now goes through
+    the same JSON-walk.
+  10 new unit tests for the SEC helpers; 4-call sanity test for
+  the wheel's round-trip path verified end-to-end.
+
 - `kglite::api::datasets::{sec, sodir, wikidata}` — dataset fetch
   + extract building blocks now reachable through the curated
   stable API. Each submodule is feature-gated (matches the

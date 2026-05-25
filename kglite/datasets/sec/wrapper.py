@@ -41,52 +41,24 @@ def _current_year_quarter() -> tuple[int, int]:
     return today.year, ((today.month - 1) // 3) + 1
 
 
-# Form type strings observed in filing.csv. SEC's master.idx and
-# submissions.zip use slightly different spellings (e.g.
-# 'SCHEDULE 13D' vs 'SC 13D'); we accept both. Per-source buckets
-# drive `_dispatch_per_filing_fetches` below.
-_FORM_BUCKETS: dict[str, tuple[str, ...]] = {
-    "form4": ("4", "4/A"),
-    # 0.9.46 F6: Form 3 and Form 5 reuse the Form 4 XML schema +
-    # fetcher (`fetch_form4_batch` writes any ownership XML).
-    "form3": ("3", "3/A"),
-    "form5": ("5", "5/A"),
-    "form144": ("144", "144/A"),
-    "form13f": ("13F-HR", "13F-HR/A"),
-    "form8k": ("8-K", "8-K/A"),
-    "sc13d": ("SC 13D", "SC 13D/A", "SCHEDULE 13D", "SCHEDULE 13D/A"),
-    "sc13g": ("SC 13G", "SC 13G/A", "SCHEDULE 13G", "SCHEDULE 13G/A"),
-    "def14a": ("DEF 14A", "DEFA14A", "PRE 14A"),
-    "form10k": ("10-K", "10-K/A"),  # source filings for Exhibit 21 attachments
-}
-
-# The lean default per-filing fetch scope: insider ownership + 8-K
-# cover pages. Heavy payloads — 13F info tables, SC 13D/G, DEF 14A,
-# Form 144, Exhibit 21, XBRL company-facts — are opt-in: name the form
-# in `form_types`, or set the matching `include_*` flag.
-_LEAN_FETCH_BUCKETS: tuple[str, ...] = ("form3", "form4", "form5", "form8k")
+# Snapshot of the canonical bucket → form-strings table, sourced from
+# `kglite::api::datasets::sec::all_buckets` at import time. The wheel
+# materialises it once for the dispatch loop's local iteration; the
+# source of truth lives in Rust so every binding agrees on the table.
+_FORM_BUCKETS: dict[str, tuple[str, ...]] = {name: tuple(forms) for name, forms in _sec_internal.all_buckets_py()}
 
 
 def _resolve_fetch_buckets(form_types: Optional[list[str]], verbose: bool) -> set[str]:
     """Map requested SEC form strings to per-filing fetch buckets.
 
-    ``form_types=None`` selects the lean default scope
-    (``_LEAN_FETCH_BUCKETS``). An explicit list is mapped form-by-form;
-    strings with no per-filing fetcher are reported and dropped.
+    Thin delegate to ``_sec_internal.resolve_fetch_buckets_py``, which
+    in turn calls ``kglite::api::datasets::sec::resolve_fetch_buckets``
+    (the canonical mapping, shared with every other future binding).
     """
-    if form_types is None:
-        return set(_LEAN_FETCH_BUCKETS)
-    active: set[str] = set()
-    unmatched: list[str] = []
-    for ft in form_types:
-        bucket = next((b for b, forms in _FORM_BUCKETS.items() if ft in forms), None)
-        if bucket is None:
-            unmatched.append(ft)
-        else:
-            active.add(bucket)
+    active, unmatched = _sec_internal.resolve_fetch_buckets_py(form_types)
     if unmatched and verbose:
         print(f"[SEC] note: form_types {unmatched!r} have no per-filing fetcher — not downloaded.")
-    return active
+    return set(active)
 
 
 class _PhaseProgress:
@@ -411,15 +383,9 @@ def _resolve_companies(
         with urllib.request.urlopen(req, timeout=30) as resp:
             tickers_path.write_bytes(resp.read())
 
-    raw_map = json.loads(tickers_path.read_text())
-    # company_tickers.json shape:
-    #   {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
-    ticker_to_cik: dict[str, int] = {}
-    for entry in raw_map.values():
-        t = str(entry.get("ticker", "")).upper()
-        cik = entry.get("cik_str")
-        if t and isinstance(cik, int):
-            ticker_to_cik[t] = cik
+    # Parse via the core helper (single source of truth — every binding
+    # gets the same `TICKER → CIK` map shape). Lifted in 0.10.2 prep.
+    ticker_to_cik = _sec_internal.parse_tickers_json_py(tickers_path.read_text())
 
     resolved: list[int] = []
     unknown: list[str] = []

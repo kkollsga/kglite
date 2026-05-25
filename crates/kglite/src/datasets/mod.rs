@@ -20,6 +20,12 @@
 //! (`crates/kglite-{sec,sodir,wikidata}`) into here as part of the
 //! polars-style core consolidation.
 
+// Shared blocking-runtime adapter (see `blocking::run`). Gated on the
+// presence of at least one dataset feature so it doesn't pull a
+// tokio runtime into builds that don't use any dataset loaders.
+#[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
+pub mod blocking;
+
 #[cfg(feature = "sec")]
 pub mod sec;
 

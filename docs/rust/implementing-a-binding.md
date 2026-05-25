@@ -325,39 +325,112 @@ See the next section for the pattern.
 
 ## Wrapping a dataset for your binding
 
-The three dataset loaders (SEC EDGAR, Sodir, Wikidata) each ship as
-a set of building blocks in `kglite::datasets::*`. The lifecycle
-orchestration — "fetch what's missing, build if cache is stale,
-return a ready-to-query graph" — is **not** in the engine. It lives
-in each binding's wrapper layer.
+### The boundary rule
 
-**Reference implementation:** the Python wheel's wrappers at
-`kglite/datasets/sec/wrapper.py` (779 lines), `wrapper.py`
-(279 lines), `kglite/datasets/wikidata.py` (298 lines). Each
-follows the same structure:
+Before any code: there is one rule about where things go.
+
+> **A wrapper only contains code that is specific to its environment
+> and cannot be used by any other sibling wrapper.** Anything that
+> two or more wrappers would write identically belongs in
+> `kglite::api::*`.
+
+That rule is the lens for every decision below. PyO3 marshalling
+goes in the Python wrapper because no Go binding would use it. A
+JSON parser for SEC's `company_tickers.json` goes in core because
+every binding parses the same JSON. A `tqdm` progress display goes
+in the Python wrapper because Go uses channels and JS uses event
+emitters for the same purpose. The cache-freshness check ("is the
+local dump older than the remote one") goes in core because every
+binding asks the same question the same way.
+
+If you find yourself writing logic in a wrapper that another
+binding would copy verbatim, stop and file it as a core lift.
+
+### The shared lifecycle shape
+
+The three reference wrappers (`kglite/datasets/sec/wrapper.py`,
+`kglite/datasets/sodir/wrapper.py`, `kglite/datasets/wikidata.py`)
+all follow the same six-step lifecycle, even though their per-step
+implementations differ:
 
 1. **Workdir layout** — decide where raw / processed / built files
-   live on disk.
-2. **Cache short-circuit** — if a fresh build exists, load and
-   return early.
-3. **Fetch** — call the engine's `fetch_*` functions for whatever's
-   missing.
+   live on disk. Each dataset has a `Workdir` type in core
+   (`kglite::api::datasets::sec::Workdir`, etc.) — your binding
+   wraps it.
+2. **Cache short-circuit** — if a fresh build exists for the
+   requested storage mode, load and return early without
+   re-fetching. The freshness rules live in core (Wikidata: mtime
+   + remote HEAD probe; Sodir: cooldown_days; SEC: presence of
+   `graph/{mode}/`); your binding decides only when to bypass via
+   a `force_rebuild` flag.
+3. **Fetch** — call the engine's `fetch_*` functions for whatever
+   raw payloads are missing. All `fetch_*` entries are async; if
+   your binding doesn't manage a tokio runtime, use the
+   `*_blocking` variants in core (they spin up a single-thread
+   runtime per call).
 4. **Extract / preprocess** — for SEC, call `run_all`; for Sodir,
-   call `fetch_all`; for Wikidata, the dump is the processed form.
-5. **Build** — call `from_blueprint` for SEC/Sodir, or
-   `load_ntriples` for Wikidata.
-6. **Cache + return** — save the built graph, return the handle.
+   `fetch_all` does fetch + preprocess in one shot; for Wikidata,
+   the dump is the processed form (no separate extract).
+5. **Build** — for SEC + Sodir, call `kglite::api::blueprint::build`
+   on the loaded blueprint; for Wikidata, call
+   `KnowledgeGraph::load_ntriples` on the dump.
+6. **Cache + return** — save the built graph (`save_graph`),
+   stamp build-time metadata into the graph dir, return the handle.
 
-A Go binding wrapping SEC would have the same six steps, ~150
-lines of Go calling into the same Rust building blocks. The
-business logic (form-type bucketing, cooldown decisions, retry
-budgets) is identical across languages; only the surrounding
-ergonomics (Jupyter process cache, tqdm progress bars,
-language-native filesystem APIs) differ.
+### Reference implementations
 
-The audit at `docs/internal/api-audit-2026-05-25.md` documents
-which building blocks are in `kglite::api::*` today and which need
-re-exporting. Phase 3 of the prep work is closing those gaps.
+- **SEC** (largest, most complex): `kglite/datasets/sec/wrapper.py`
+  (~600 LOC after the 2026-05-25 lifts). Three-tier cache
+  (`raw/` → `processed/` → `graph/{mode}/`). Three storage modes
+  (memory / mapped / disk). Per-form-type dispatch reads
+  `processed/filing_index.csv` and groups filings into buckets via
+  `kglite::api::datasets::sec::resolve_fetch_buckets` (which uses
+  the canonical `_FORM_BUCKETS` table in core, NOT a wrapper-side
+  copy). Ticker resolution uses
+  `kglite::api::datasets::sec::parse_tickers_json`.
+- **Sodir** (medium): `kglite/datasets/sodir/wrapper.py` (~280 LOC).
+  Two-tier cache (`csv/` + `graph/`). Two modes (memory / disk).
+  Blueprint with optional user complement file persisted in workdir.
+- **Wikidata** (smallest): `kglite/datasets/wikidata.py` (~300 LOC).
+  Single-file dump cache. Process-local cache for Jupyter rerun-
+  cell ergonomics — that part stays in the Python wrapper because
+  it's Python-specific (Go would use `sync.Map`, JS a module-level
+  `Map`, etc.).
+
+### A Go binding wrapping SEC would have…
+
+The same six lifecycle steps, ~150 LOC of Go calling into the
+same Rust building blocks. The form-type bucketing is the
+canonical table in `kglite::api::datasets::sec::all_buckets`
+(materialized once at binding-load time); the ticker parser is
+`kglite::api::datasets::sec::parse_tickers_json`. Your Go
+binding's contribution is the Go-idiomatic ergonomics around them:
+
+- `kglite::api::Workdir::new(p)` wrapped in your binding's
+  `kglite.OpenSEC(p, opts)` constructor
+- A progress event channel (`chan ProgressEvent`) instead of tqdm
+- Go-native error wrapping (`fmt.Errorf("sec fetch: %w", err)`)
+  around the `KgError` you receive
+- `sync.Map` for any process-local caching equivalent to Python's
+  `_PROCESS_CACHE` (Wikidata)
+- cgo / napi / JNI marshalling of `Workdir`, `SecClient`, etc.
+  across the FFI boundary
+
+What you **don't** write: the form-type table, the ticker JSON
+parser, the cache-freshness rules, the cooldown semantics, the
+HTTP rate-limit token bucket (built into `SecClient` /
+`ArcGISClient` / `WikidataClient`), the resumable download logic,
+the blueprint loader, the build pipeline, the Cypher pipeline.
+All of those live in `kglite::api::*` and are shared across every
+binding.
+
+### The audit history
+
+- `docs/internal/api-audit-2026-05-25.md` — the original survey of
+  the `kglite::api` surface vs the wheel's PyO3 methods.
+- `docs/internal/consider-for-future.md` — items deliberately
+  deferred from current scope per the boundary rule; revisit when
+  a second binding lands or when the duplication becomes evident.
 
 ## Binding-side patterns cookbook
 

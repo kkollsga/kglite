@@ -26,9 +26,9 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
 use kglite_core::datasets::sec::{
-    fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
-    fetch_quarterly_master_idx, fetch_submissions_bulk, run_all, SecClient, SecError, SliceSpec,
-    Workdir, YearRange,
+    all_buckets, fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
+    fetch_quarterly_master_idx, fetch_submissions_bulk, parse_tickers_json, resolve_fetch_buckets,
+    run_all, SecClient, SecError, SliceSpec, Workdir, YearRange,
 };
 
 // Workdir args cross the PyO3 boundary as `String`, not `PathBuf` —
@@ -533,6 +533,56 @@ fn graph_exists(workdir: String, mode: &str) -> PyResult<bool> {
     Ok(Workdir::new(workdir).graph_exists(m))
 }
 
+// ───────────────────────── lifted helpers (0.10.2 prep) ─────────────────────────
+
+/// Resolve a Python `form_types` list to per-filing fetch bucket names
+/// + the list of form strings with no matching bucket. Thin wrapper
+/// around `kglite_core::datasets::sec::resolve_fetch_buckets` so the
+/// wheel's `_resolve_fetch_buckets` doesn't have to carry the
+/// `_FORM_BUCKETS` table — every binding now shares the core mapping.
+#[pyfunction]
+#[pyo3(signature = (form_types=None))]
+fn resolve_fetch_buckets_py(form_types: Option<Vec<String>>) -> (Vec<String>, Vec<String>) {
+    let borrowed: Option<Vec<&str>> = form_types
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
+    let (buckets, unmatched) = resolve_fetch_buckets(borrowed.as_deref());
+    (
+        buckets
+            .into_iter()
+            .map(|b| b.as_str().to_string())
+            .collect(),
+        unmatched,
+    )
+}
+
+/// Parse SEC's `company_tickers.json` payload into a `TICKER → CIK`
+/// dict. Wrapper around `kglite_core::datasets::sec::parse_tickers_json`
+/// — the wheel's `_resolve_companies` calls this to avoid re-implementing
+/// the JSON-shape walk that every binding would otherwise duplicate.
+#[pyfunction]
+fn parse_tickers_json_py(json: &str) -> PyResult<std::collections::HashMap<String, u64>> {
+    parse_tickers_json(json)
+        .map_err(|e| PyValueError::new_err(format!("invalid tickers JSON: {e}")))
+}
+
+/// Snapshot the full bucket-name → matching-form-strings table.
+/// Called once at wheel import time so the dispatch loop can iterate
+/// the table without per-filing FFI overhead — but the source of
+/// truth stays in `kglite_core`.
+#[pyfunction]
+fn all_buckets_py() -> Vec<(String, Vec<String>)> {
+    all_buckets()
+        .into_iter()
+        .map(|(name, forms)| {
+            (
+                name.to_string(),
+                forms.into_iter().map(str::to_string).collect(),
+            )
+        })
+        .collect()
+}
+
 fn map_err(e: SecError) -> PyErr {
     match &e {
         SecError::Io(_) => PyIOError::new_err(format!("{e}")),
@@ -559,6 +609,12 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     // Graph location helpers
     m.add_function(wrap_pyfunction!(graph_dir, &m)?)?;
     m.add_function(wrap_pyfunction!(graph_exists, &m)?)?;
+    // Lifted helpers (form bucketing + ticker JSON parser) — core-side
+    // single source of truth; the wheel now delegates to these instead
+    // of carrying its own copies.
+    m.add_function(wrap_pyfunction!(resolve_fetch_buckets_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(parse_tickers_json_py, &m)?)?;
+    m.add_function(wrap_pyfunction!(all_buckets_py, &m)?)?;
     parent.add_submodule(&m)?;
     let sys = py.import("sys")?;
     let modules = sys.getattr("modules")?;
