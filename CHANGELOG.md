@@ -62,6 +62,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Captures what / why-deferred / when-to-revisit / effort for
   each item so scope decisions don't get rediscovered as
   surprises later.
+- `docs/internal/mcp-server-parity-2026-05-25.md` — Phase 4
+  feature-parity audit between the Python MCP server
+  (`kglite/mcp_server/`, 3548 LOC) and the Rust MCP server
+  (`crates/kglite-mcp-server/`, 1974 LOC). Both ship; neither is
+  being retired. The audit catalogues all 13 tools, all 6 modes,
+  CLI surface, skills, embedder support, network protocols,
+  logging, and error handling side-by-side. Result: 12 of 13
+  tools are at full parity; the one tool gap is `explore`
+  (Rust-native, Python lacks). Two "should converge"
+  recommendations added to `consider-for-future.md`; the rest of
+  the divergences are acceptable design intent. Includes an
+  audience map for which server to pick for which deployment.
 
 ## [0.10.1] — 2026-05-25 — Polars-style crate split (Phase G), Bolt Phase F driver-compat fixes, two-track docs, crates.io publish (kglite + kglite-bolt-server + kglite-mcp-server)
 

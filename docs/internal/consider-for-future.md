@@ -147,6 +147,48 @@ landed or definitively dropped.
 - **When to revisit.** First time a binding hits an OOM on a
   large Cypher result. Then it's urgent.
 
+### Port the `explore` tool to the Python MCP server
+
+- **What it is.** The Rust MCP server exposes an `explore(query,
+  max_entities, max_depth, include_source)` tool that does lexical
+  FTS + 2-hop neighborhood traversal and returns a markdown report.
+  The underlying engine call is `kglite::api::explore_markdown`,
+  already exposed through the Python wheel. The Python MCP server
+  has the bundled skill file (`kglite/mcp_server/skills/explore.md`)
+  but no tool implementation; the skill is gated by
+  `applies_when: tool_registered: explore` so it doesn't surface.
+- **Why deferred now.** Surfaced by the 2026-05-25 MCP parity audit
+  as the one real cross-server tool divergence. Port is ~80 LOC of
+  Python (wrapper + registration), small but not zero — the user
+  guidance for this session was audit-and-document, not implement.
+- **When to revisit.** Two signals: (1) a Python wheel user
+  explicitly asks for it, or (2) we're about to write any other
+  feature in the Python MCP server and can fold this in to the
+  same commit.
+- **Estimated effort.** ~200-300 LOC of Python (S-M), no Rust
+  changes needed. The skill file is already in place.
+
+### Lazy-load embedder in the Rust MCP server
+
+- **What it is.** The Python MCP server's embedder lazy-loads the
+  ONNX model on first `embed()` call and unloads it after a
+  configurable cooldown (default 900s), freeing ~1 GB of resident
+  memory for servers that hit `text_score()` infrequently. The
+  Rust server loads at boot and keeps the model resident for the
+  lifetime of the process.
+- **Why deferred now.** Conditional on `ort-sys` (the ONNX runtime
+  Rust crate) supporting explicit session lifecycle control —
+  needs verification before scoping. The 0.10.1 release loop also
+  documented that `ort-sys` has flaky upstream CDN downloads
+  (`feedback_crates_io_publish_gotchas.md` item #1), so any work
+  here will also need a stability story for the CI build.
+- **When to revisit.** When an operator running the Rust MCP
+  server complains about memory footprint, OR when `ort-sys` ships
+  a clearly-supported session-drop API. First step is a 30-min
+  spike to verify the `ort-sys` surface.
+- **Estimated effort.** Medium if `ort-sys` supports it (~80 LOC
+  + tests). Stop and document the limitation if it doesn't.
+
 ### Phase 1 audit top-10 punchlist (items 2-10)
 
 - **What it is.** 9 remaining items on the audit's punchlist
