@@ -1,0 +1,51 @@
+[package]
+name = "kglite-c"
+version = "0.10.2"
+edition = "2021"
+authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
+license = "MIT"
+description = "C ABI for kglite — stable extern \"C\" surface over the kglite engine so non-Rust bindings (Go via cgo, JavaScript via napi, JVM via JNI, .NET via P/Invoke, …) consume a single C header rather than re-implementing wrappers in their host language. The Rust types (DirGraph, Session, CypherResult, KgErrorCode) live in the sibling `kglite` crate; this crate is glue."
+readme = "README.md"
+repository = "https://github.com/kkollsga/kglite"
+homepage = "https://github.com/kkollsga/kglite"
+documentation = "https://docs.rs/kglite-c"
+keywords = ["c-abi", "ffi", "knowledge-graph", "cypher", "kglite"]
+categories = ["external-ffi-bindings", "database"]
+
+[lib]
+# Both forms shipped so consumers can link statically (`libkglite_c.a`,
+# embed in a Go binary via cgo + `// #cgo LDFLAGS: -lkglite_c`) or
+# dynamically (`libkglite_c.so` / `.dylib` / `.dll`).
+crate-type = ["cdylib", "staticlib", "rlib"]
+name = "kglite_c"
+doctest = false
+
+[features]
+# Mirror kglite's feature shape. Off by default.
+default = []
+fastembed = ["kglite/fastembed"]
+sec = ["kglite/sec"]
+sodir = ["kglite/sodir"]
+wikidata = ["kglite/wikidata"]
+
+[dependencies]
+# The engine itself. `default-features = false` matches the
+# kglite-bolt-server / kglite-mcp-server pattern — features are
+# opted into here per the [features] block above. Path dep for
+# workspace builds; `cargo publish` strips the path and falls back
+# to the version requirement.
+kglite = { version = "0.10", path = "../kglite", default-features = false }
+
+# Serde stack — needed to serialize Value to JSON at the C
+# boundary (the design doc fixes JSON-at-boundary for nested
+# value types in §7).
+serde = "1"
+serde_json = "1"
+
+[build-dependencies]
+# cbindgen generates `include/kglite.h` at build time from this
+# crate's #[no_mangle] extern "C" functions and #[repr(C)] types.
+# H.2 ships with the generated header committed under
+# `include/kglite.h` and CI verifies the committed copy matches
+# fresh-cbindgen output.
+cbindgen = "0.27"
