@@ -128,6 +128,19 @@ impl<'a> CypherExecutor<'a> {
                 "properties",
                 "state",
             ],
+            // 2026-05-25 broad-scan, Batch 6 — schema introspection
+            // procedures. graph_stats: per-graph summary; property_*:
+            // per-(label, property) statistics. Use case: an agent
+            // running `graph_overview` wants to know "how many nodes
+            // total, how big is each label" before crafting a query.
+            "db.graph_stats" => &[
+                "node_count",
+                "edge_count",
+                "label_count",
+                "relationship_type_count",
+            ],
+            "db.property_stats" => &["value_count", "null_count", "distinct_count"],
+            "db.property_uniqueness" => &["is_unique", "violation_count", "distinct_count"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -566,6 +579,89 @@ impl<'a> CypherExecutor<'a> {
                         self.graph,
                     );
                 indexes_to_rows(&infos, &clause.yield_items)
+            }
+            // 2026-05-25 Batch 6 — graph + property introspection.
+            //
+            // db.graph_stats() yields one row with the top-level
+            // counts (node_count, edge_count, label_count,
+            // relationship_type_count). Useful for an agent's first
+            // "what's in this graph?" query.
+            "db.graph_stats" => {
+                let node_count = self.graph.graph.node_count() as i64;
+                let edge_count = self.graph.graph.edge_count() as i64;
+                let label_count =
+                    crate::graph::introspection::schema_overview::collect_labels(self.graph).len()
+                        as i64;
+                let rel_type_count =
+                    crate::graph::introspection::schema_overview::collect_relationship_types(
+                        self.graph,
+                    )
+                    .len() as i64;
+                let mut row = ResultRow::new();
+                for item in &clause.yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    let value = match item.name.as_str() {
+                        "node_count" => Value::Int64(node_count),
+                        "edge_count" => Value::Int64(edge_count),
+                        "label_count" => Value::Int64(label_count),
+                        "relationship_type_count" => Value::Int64(rel_type_count),
+                        _ => continue,
+                    };
+                    row.projected.insert(alias.to_string(), value);
+                }
+                vec![row]
+            }
+            // db.property_stats(node_type, property) → one row with
+            // value_count (non-null occurrences), null_count, and
+            // distinct_count. Helps agents understand cardinality
+            // before writing GROUP BY or selectivity-sensitive queries.
+            "db.property_stats" => {
+                let node_type = call_param_string(&params, "node_type")
+                    .ok_or("db.property_stats() requires a `node_type` string param")?;
+                let prop_name = call_param_string(&params, "property")
+                    .ok_or("db.property_stats() requires a `property` string param")?;
+                let (value_count, null_count, distinct_count) =
+                    compute_property_stats(self.graph, &node_type, &prop_name);
+                let mut row = ResultRow::new();
+                for item in &clause.yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    let value = match item.name.as_str() {
+                        "value_count" => Value::Int64(value_count),
+                        "null_count" => Value::Int64(null_count),
+                        "distinct_count" => Value::Int64(distinct_count),
+                        _ => continue,
+                    };
+                    row.projected.insert(alias.to_string(), value);
+                }
+                vec![row]
+            }
+            // db.property_uniqueness(node_type, property) → is the
+            // property a candidate unique-index column? Yields
+            // is_unique (true ⟺ distinct_count == value_count),
+            // violation_count (value_count − distinct_count), and
+            // distinct_count. Common pre-flight before declaring a
+            // constraint.
+            "db.property_uniqueness" => {
+                let node_type = call_param_string(&params, "node_type")
+                    .ok_or("db.property_uniqueness() requires a `node_type` string param")?;
+                let prop_name = call_param_string(&params, "property")
+                    .ok_or("db.property_uniqueness() requires a `property` string param")?;
+                let (value_count, _null_count, distinct_count) =
+                    compute_property_stats(self.graph, &node_type, &prop_name);
+                let violation_count = value_count.saturating_sub(distinct_count);
+                let is_unique = violation_count == 0 && value_count > 0;
+                let mut row = ResultRow::new();
+                for item in &clause.yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    let value = match item.name.as_str() {
+                        "is_unique" => Value::Boolean(is_unique),
+                        "violation_count" => Value::Int64(violation_count),
+                        "distinct_count" => Value::Int64(distinct_count),
+                        _ => continue,
+                    };
+                    row.projected.insert(alias.to_string(), value);
+                }
+                vec![row]
             }
             _ => unreachable!(),
         };
@@ -1175,4 +1271,43 @@ fn indexes_to_rows(
         rows.push(row);
     }
     rows
+}
+
+/// Compute (value_count, null_count, distinct_count) for a
+/// (node_type, property) pair. Used by `db.property_stats` and
+/// `db.property_uniqueness`.
+///
+/// - `value_count`: non-null occurrences across all nodes of `node_type`.
+/// - `null_count`: nodes where the property is absent or Null.
+/// - `distinct_count`: distinct non-null values (uses canonical Debug
+///   repr as the dedup key — same convention as `mode()`).
+///
+/// Returns (0, 0, 0) if the node type is unknown.
+fn compute_property_stats(
+    graph: &crate::graph::dir_graph::DirGraph,
+    node_type: &str,
+    prop_name: &str,
+) -> (i64, i64, i64) {
+    use std::collections::HashSet;
+    let Some(indices) = graph.type_indices.get(node_type) else {
+        return (0, 0, 0);
+    };
+    let mut value_count: i64 = 0;
+    let mut null_count: i64 = 0;
+    let mut seen = HashSet::new();
+    for node_idx in indices.iter() {
+        let Some(node) = graph.graph.node_weight(node_idx) else {
+            continue;
+        };
+        match node.get_field_ref(prop_name) {
+            Some(v) if !matches!(*v, crate::datatypes::values::Value::Null) => {
+                value_count += 1;
+                seen.insert(format!("{v:?}"));
+            }
+            _ => {
+                null_count += 1;
+            }
+        }
+    }
+    (value_count, null_count, seen.len() as i64)
 }

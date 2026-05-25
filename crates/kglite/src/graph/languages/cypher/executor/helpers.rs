@@ -982,6 +982,15 @@ pub(super) fn call_param_string_list(
     })
 }
 
+/// Look up a required string CALL param. Returns `None` if the param
+/// is absent or non-string; callers turn `None` into an error.
+pub(super) fn call_param_string(params: &HashMap<String, Value>, key: &str) -> Option<String> {
+    params.get(key).and_then(|v| match v {
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
 /// CALL procedure helper: look up a YIELD column's user-facing alias
 /// (returns the alias if `YIELD name AS alias` was used, or the bare
 /// column name when no alias). Returns `None` if the column wasn't
