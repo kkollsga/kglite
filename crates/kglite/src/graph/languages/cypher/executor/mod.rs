@@ -1112,6 +1112,7 @@ pub mod expression;
 pub mod helpers;
 pub mod match_clause;
 pub mod refresh_stats;
+pub mod regex_cache;
 pub mod return_clause;
 pub mod rule_procedures;
 pub mod scalar_functions;

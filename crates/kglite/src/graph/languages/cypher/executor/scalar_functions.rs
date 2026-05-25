@@ -790,6 +790,58 @@ impl<'a> CypherExecutor<'a> {
                 }
                 Ok(Value::Boolean(false))
             }
+            // Regex matching (2026-05-25 broad-scan lift, Batch 3).
+            // Real use case: server-side pattern filtering on large
+            // graphs — `MATCH (n) WHERE text_match_regex(n.name,
+            // '^[A-Z]{2}\\d+$') RETURN n` filters in-graph instead of
+            // shipping rows to the client. Pattern compilation cached
+            // via `super::regex_cache::get_or_compile`.
+            //
+            // Flag syntax: third arg is a Rust-regex flag string
+            // (`i` case-insensitive, `m` multiline, `s` dot-matches-
+            // newline, `x` ignore-whitespace, `U` ungreedy). Internally
+            // we prepend `(?<flags>)` to the pattern. Equivalent to
+            // writing the flags inline in the pattern string.
+            "text_match_regex" => {
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(
+                        "text_match_regex() requires 2 or 3 args: (text, pattern[, flags])".into(),
+                    );
+                }
+                let text = self.evaluate_expression(&args[0], row)?;
+                let pattern = self.evaluate_expression(&args[1], row)?;
+                let flags: Option<String> = if args.len() == 3 {
+                    match self.evaluate_expression(&args[2], row)? {
+                        Value::String(s) => Some(s),
+                        Value::Null => None,
+                        _ => return Err("text_match_regex() flags must be a string".into()),
+                    }
+                } else {
+                    None
+                };
+                let (text_str, pattern_str) = match (&text, &pattern) {
+                    (Value::String(t), Value::String(p)) => (t.as_str(), p.as_str()),
+                    (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                    _ => {
+                        return Err("text_match_regex() expects (string, string[, string])".into());
+                    }
+                };
+                let effective_pattern = if let Some(f) = &flags {
+                    for c in f.chars() {
+                        if !"imsxU".contains(c) {
+                            return Err(format!(
+                                "text_match_regex() unknown flag '{c}'; valid: i, m, s, x, U"
+                            ));
+                        }
+                    }
+                    format!("(?{f}){pattern_str}")
+                } else {
+                    pattern_str.to_string()
+                };
+                let re = super::regex_cache::get_or_compile(&effective_pattern)
+                    .map_err(|e| format!("text_match_regex() invalid pattern: {e}"))?;
+                Ok(Value::Boolean(re.is_match(text_str)))
+            }
             // ── String functions ──────────────────────────────────
             "split" => {
                 if args.len() != 2 {
