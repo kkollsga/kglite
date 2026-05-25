@@ -95,7 +95,11 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 
 Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
 
-**NEVER push — the user pushes manually.** Version source of truth: `Cargo.toml` line 3.
+**Pushing requires explicit, in-the-moment approval.** Default is *don't push*. The user runs `git push` manually unless they tell you, *in the same turn you'd run it*, to push for them — e.g. "go ahead and push now", "push it", "yes, push". Approval is one-shot: it covers exactly that one `git push` invocation and does not carry across to any later commit, amend, or branch. After the push (whether you ran it or they did) the slate is clean — the next push needs fresh approval.
+
+Conversational phrasing from earlier in the session ("ship it", "looks good", "you may push", "we're ready") **does not** carry over to a later moment, even within the same turn if other actions intervene. When in doubt, prepare the commit, stop, and ask. The cost of a re-prompt is small; an unapproved push to `main` is not.
+
+Version source of truth: `Cargo.toml` line 3 (post-G.4: `crates/kglite-py/Cargo.toml` for the wheel version, `crates/kglite/Cargo.toml` for the engine — both should match at release time).
 
 ### One version bump per push
 
