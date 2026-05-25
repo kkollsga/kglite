@@ -48,12 +48,15 @@ pub mod strings;
 // flat structure here keeps the generated header tidy and easier
 // for binding authors to navigate.
 pub use abi::*;
-// `datasets::*` is empty when no dataset feature is enabled — the
-// inner submodules are all `#[cfg(feature = "<loader>")]`. Allow
-// the wildcard re-export to be unused when the feature set is
-// minimal.
-#[allow(unused_imports)]
-pub use datasets::*;
+// Datasets — each loader sits behind its own feature; re-exported
+// at the crate root so cbindgen picks the C functions up at the
+// flat namespace level.
+#[cfg(feature = "sec")]
+pub use datasets::sec::*;
+#[cfg(feature = "sodir")]
+pub use datasets::sodir::*;
+#[cfg(feature = "wikidata")]
+pub use datasets::wikidata::*;
 pub use embedder::*;
 pub use graph::*;
 pub use result::*;

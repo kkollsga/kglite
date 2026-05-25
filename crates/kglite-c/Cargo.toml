@@ -26,7 +26,7 @@ default = []
 fastembed = ["kglite/fastembed"]
 sec = ["kglite/sec"]
 sodir = ["kglite/sodir"]
-wikidata = ["kglite/wikidata"]
+wikidata = ["kglite/wikidata", "dep:chrono"]
 
 [dependencies]
 # The engine itself. `default-features = false` matches the
@@ -39,8 +39,13 @@ kglite = { version = "0.10", path = "../kglite", default-features = false }
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested
 # value types in §7).
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Only used by the wikidata feature for RFC 3339 parsing on
+# the `remote_mtime_iso` argument to the cache-decide entry point.
+# Optional to avoid pulling chrono into builds that don't need it.
+chrono = { version = "0.4.43", default-features = false, optional = true }
 
 [build-dependencies]
 # cbindgen generates `include/kglite.h` at build time from this

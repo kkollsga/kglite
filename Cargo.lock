@@ -1935,6 +1935,7 @@ name = "kglite-c"
 version = "0.10.2"
 dependencies = [
  "cbindgen",
+ "chrono",
  "kglite",
  "serde",
  "serde_json",

@@ -70,6 +70,17 @@ typedef struct KgliteAbiVersion {
   uint32_t patch;
 } KgliteAbiVersion;
 
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Opaque handle for a SEC HTTP client (rate-limited, user-agent
+ * validating). See [`KgliteGraph`](crate::KgliteGraph) for the
+ * rationale on the empty `#[repr(C)]` facade pattern.
+ */
+typedef struct KgliteSecClient {
+  uint8_t _opaque[0];
+} KgliteSecClient;
+#endif
+
 /**
  * Opaque handle for an embedder. See
  * [`KgliteGraph`](crate::KgliteGraph) for the rationale on the
@@ -214,6 +225,368 @@ KgliteStatusCode kglite_datasets_sodir_fetch_all(const char *workdir_path,
                                                  uintptr_t concurrency,
                                                  const char **out_report_json,
                                                  const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Construct a SEC HTTP client. The `user_agent` is mandatory and
+ * must be non-empty — SEC's fair-access policy requires a
+ * descriptive identifier with contact info (e.g.
+ * `"Acme Corp research@example.com"`).
+ *
+ * # Arguments
+ *
+ * - `user_agent` (in, borrowed): UTF-8 string, non-empty after trim.
+ * - `out_client` (out, owned): on success, set to a client handle.
+ *   Caller must free via [`kglite_datasets_sec_client_free`].
+ * - `out_error_msg` (out, owned, may be null): on failure, set to
+ *   an error message string.
+ *
+ * # Errors
+ *
+ * - `KGLITE_STATUS_CODE_NULL_POINTER` — required pointer is null
+ * - `KGLITE_STATUS_CODE_INVALID_UTF8` — `user_agent` isn't valid UTF-8
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `user_agent` is empty
+ *   after trim
+ *
+ * # Safety
+ *
+ * `user_agent` must be null-terminated UTF-8.
+ * `out_client` must be a valid writable pointer.
+ */
+
+KgliteStatusCode kglite_datasets_sec_client_new(const char *user_agent,
+                                                struct KgliteSecClient **out_client,
+                                                const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Free a SEC client handle. Idempotent on null.
+ *
+ * # Safety
+ *
+ * `client` must be either null or a valid pointer previously
+ * returned by [`kglite_datasets_sec_client_new`].
+ */
+ void kglite_datasets_sec_client_free(struct KgliteSecClient *client);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Fetch the quarterly `master.idx` files covering a year range,
+ * landing them in `<workdir>/raw/master_idx/`. Returns counts of
+ * files written and files skipped (already present).
+ *
+ * # Arguments
+ *
+ * - `client` (in, borrowed): SEC HTTP client.
+ * - `workdir_path` (in, borrowed): root for the layout.
+ * - `year_start`, `year_end` (in): inclusive year range. EDGAR's
+ *   earliest quarter is 1993 Q3; quarters before that are skipped.
+ * - `current_year`, `current_quarter` (in): the "now" reference
+ *   so the fetcher knows to skip future quarters. Callers
+ *   typically pass the system clock's year + (month/3 + 1).
+ * - `out_pair_json` (out, owned): on success, set to a 2-element
+ *   JSON array `[fetched_count, skipped_count]`.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Safety
+ *
+ * `client` and the string args must be valid. `out_pair_json`
+ * must be a valid writable pointer.
+ */
+
+KgliteStatusCode kglite_datasets_sec_fetch_quarterly_master_idx(const struct KgliteSecClient *client,
+                                                                const char *workdir_path,
+                                                                uint16_t year_start,
+                                                                uint16_t year_end,
+                                                                uint16_t current_year,
+                                                                uint8_t current_quarter,
+                                                                const char **out_pair_json,
+                                                                const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Fetch the bulk-download `submissions.zip` (all companies' filing
+ * metadata in one archive). Lands at
+ * `<workdir>/raw/bulk/submissions.zip`. Returns `true` if a fresh
+ * download landed (mtime older than `staleness_hours`, or
+ * `force_refetch`), `false` if the existing file was reused.
+ *
+ * # Arguments
+ *
+ * - `client` (in, borrowed).
+ * - `workdir_path` (in, borrowed).
+ * - `staleness_hours` (in): how stale the cached zip can be before
+ *   re-fetching. SEC publishes nightly so 24 is a reasonable default.
+ * - `force_refetch` (in): non-zero forces re-download regardless of
+ *   staleness.
+ * - `out_fetched` (out): set to 1 if downloaded fresh, 0 if reused.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Safety
+ *
+ * `client` and `workdir_path` must be valid. `out_fetched` must be
+ * a valid writable pointer.
+ */
+
+KgliteStatusCode kglite_datasets_sec_fetch_submissions_bulk(const struct KgliteSecClient *client,
+                                                            const char *workdir_path,
+                                                            uint64_t staleness_hours,
+                                                            uint8_t force_refetch,
+                                                            uint8_t *out_fetched,
+                                                            const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Fetch the `company_tickers.json` mapping (TICKER → CIK).
+ * Lands at `<workdir>/raw/company_tickers.json`. Returns `true`
+ * if a fresh download landed.
+ *
+ * # Safety
+ *
+ * Same shape as [`kglite_datasets_sec_fetch_submissions_bulk`].
+ */
+
+KgliteStatusCode kglite_datasets_sec_fetch_company_tickers(const struct KgliteSecClient *client,
+                                                           const char *workdir_path,
+                                                           uint8_t force_refetch,
+                                                           uint8_t *out_fetched,
+                                                           const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Fetch the XBRL `companyfacts/CIK<cik>.json` file (a single
+ * company's full XBRL fact history). Lands at
+ * `<workdir>/raw/company_facts/CIK<cik>.json`. Returns `true` if
+ * a fresh download landed.
+ *
+ * # Arguments
+ *
+ * - `client`, `workdir_path`: see other fetchers.
+ * - `cik` (in): the company's CIK as an integer (no zero-padding).
+ * - `force_refetch` (in): non-zero forces re-download.
+ *
+ * # Safety
+ *
+ * Same shape as the other fetchers.
+ */
+
+KgliteStatusCode kglite_datasets_sec_fetch_company_facts(const struct KgliteSecClient *client,
+                                                         const char *workdir_path,
+                                                         uint64_t cik,
+                                                         uint8_t force_refetch,
+                                                         uint8_t *out_fetched,
+                                                         const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Resolve a list of user-supplied form-type strings into the
+ * per-filing-fetcher buckets needed to cover them, plus a list of
+ * unrecognized form types the caller should warn about.
+ *
+ * Pure-CPU — no I/O, no client. Mirrors
+ * `kglite::api::datasets::sec::resolve_fetch_buckets`.
+ *
+ * # Arguments
+ *
+ * - `form_types_json` (in, borrowed): JSON array of form-type strings
+ *   (e.g. `["10-K", "4", "13F-HR"]`), or the literal `"null"`
+ *   for "use the lean default set".
+ * - `out_active_json` (out, owned): JSON array of bucket name
+ *   strings, e.g. `["form4", "13f"]`.
+ * - `out_unmatched_json` (out, owned): JSON array of strings that
+ *   didn't match any bucket.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Errors
+ *
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `form_types_json` isn't
+ *   a JSON array of strings (or null).
+ *
+ * # Safety
+ *
+ * All input strings must be null-terminated UTF-8.
+ */
+
+KgliteStatusCode kglite_datasets_sec_resolve_fetch_buckets(const char *form_types_json,
+                                                           const char **out_active_json,
+                                                           const char **out_unmatched_json,
+                                                           const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Parse SEC's `company_tickers.json` shape into a TICKER → CIK
+ * map. Pure-CPU, no I/O. Returns the map as JSON object string.
+ *
+ * # Arguments
+ *
+ * - `tickers_json` (in, borrowed): the raw JSON from SEC's published
+ *   `company_tickers.json`.
+ * - `out_map_json` (out, owned): JSON object `{"AAPL": 320193, ...}`.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Errors
+ *
+ * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `tickers_json` isn't
+ *   valid JSON.
+ *
+ * # Safety
+ *
+ * `tickers_json` must be null-terminated UTF-8.
+ */
+
+KgliteStatusCode kglite_datasets_sec_parse_tickers_json(const char *tickers_json,
+                                                        const char **out_map_json,
+                                                        const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_SEC)
+/**
+ * Run the SEC extract pipeline — reads `<workdir>/raw/` (the
+ * downloaded artifacts) and produces `<workdir>/processed/`
+ * CSVs (`company.csv`, `filing_index.csv`, `form4_transaction.csv`,
+ * `holding.csv`, etc.).
+ *
+ * # Arguments
+ *
+ * - `workdir_path` (in, borrowed).
+ * - `slice_json` (in, borrowed, may be null): JSON object with
+ *   optional filters:
+ *   ```json
+ *   {
+ *     "cik_list":   [320193, 789019],
+ *     "form_types": ["10-K", "10-Q"],
+ *     "year_range": [2020, 2024]
+ *   }
+ *   ```
+ *   Any missing / null field means "no restriction on that axis".
+ *   Pass null or `"{}"` for fully unrestricted.
+ * - `force` (in): non-zero re-runs even when the
+ *   `<workdir>/processed/holding.csv` sentinel says we already
+ *   extracted.
+ * - `out_report_json` (out, owned): JSON object with extract
+ *   stats. Caller frees via `kglite_free_string`.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Safety
+ *
+ * `workdir_path` and (if non-null) `slice_json` must be
+ * null-terminated UTF-8.
+ */
+
+KgliteStatusCode kglite_datasets_sec_run_all(const char *workdir_path,
+                                             const char *slice_json,
+                                             uint8_t force,
+                                             const char **out_report_json,
+                                             const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_WIKIDATA)
+/**
+ * Ensure the Wikidata `latest-truthy.nt.bz2` dump is present
+ * under `<workdir>/cache/`. Resumable: a partially-downloaded
+ * file gets continued via HTTP `Range` requests. Cooldown:
+ * fully-present files within `cooldown_days` of their mtime
+ * skip the re-fetch entirely.
+ *
+ * # Arguments
+ *
+ * - `workdir_path` (in, borrowed): root for the workdir layout.
+ * - `cooldown_days` (in): how stale the cached dump can be before
+ *   re-fetching. Wheel default: 7.
+ * - `verbose` (in): non-zero turns on the engine's progress
+ *   logging.
+ * - `out_dump_path` (out, owned): JSON-encoded path string to the
+ *   downloaded dump (e.g. `"\"<workdir>/cache/latest-truthy.nt.bz2\""`).
+ *   We JSON-encode the path because filesystem paths can contain
+ *   characters that need escaping in some downstream consumers.
+ * - `out_remote_mtime_iso` (out, owned, may be null): if the
+ *   server returned a `Last-Modified` header, the ISO 8601
+ *   timestamp string. Set to null if the probe failed.
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Safety
+ *
+ * `workdir_path` must be null-terminated UTF-8. The out-pointers
+ * must be valid writable slots.
+ */
+
+KgliteStatusCode kglite_datasets_wikidata_ensure_dump(const char *workdir_path,
+                                                      int64_t cooldown_days,
+                                                      uint8_t verbose,
+                                                      const char **out_dump_path,
+                                                      const char **out_remote_mtime_iso,
+                                                      const char **out_error_msg);
+#endif
+
+#if defined(KGLITE_FEATURE_WIKIDATA)
+/**
+ * Sync HEAD-request probe for the dump's `Last-Modified` header.
+ * Returns the timestamp as RFC 3339 / ISO 8601 string, or null if
+ * the probe failed (network down, server returned no header,
+ * etc.).
+ *
+ * # Arguments
+ *
+ * - `out_iso` (out, owned, may be null): ISO 8601 string on
+ *   success; null on probe failure. Caller frees via
+ *   [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Safety
+ *
+ * `out_iso` must be a valid writable pointer.
+ */
+ KgliteStatusCode kglite_datasets_wikidata_remote_last_modified(const char **out_iso);
+#endif
+
+#if defined(KGLITE_FEATURE_WIKIDATA)
+/**
+ * Run the cache-freshness decision tree. Pure-CPU; the only I/O
+ * is the file-mtime stat that the engine's `decide()` performs
+ * internally on the two meta-paths. Returns a JSON object:
+ *
+ * ```json
+ * {"decision": "build" | "load" | "rebuild", "reason": "..." }
+ * ```
+ *
+ * # Arguments
+ *
+ * - `force_rebuild` (in): non-zero → always `Build("force_rebuild")`.
+ * - `graph_meta_path` (in, borrowed): path to
+ *   `<graph_dir>/disk_graph_meta.json`. Missing file →
+ *   `Build("no_cache")`.
+ * - `source_meta_path` (in, borrowed): path to
+ *   `<graph_dir>/wikidata_source.json`. May be missing on graphs
+ *   built before source-meta stamping landed.
+ * - `cooldown_days` (in): graphs younger than this skip the
+ *   remote probe.
+ * - `remote_mtime_iso` (in, borrowed, may be null): RFC 3339 /
+ *   ISO 8601 timestamp from a prior call to
+ *   [`kglite_datasets_wikidata_remote_last_modified`]. Null →
+ *   probe was skipped or failed.
+ * - `out_decision_json` (out, owned).
+ * - `out_error_msg` (out, owned, may be null).
+ *
+ * # Safety
+ *
+ * All input strings must be null-terminated UTF-8.
+ * `out_decision_json` must be a valid writable pointer.
+ */
+
+KgliteStatusCode kglite_datasets_wikidata_decide_cache(uint8_t force_rebuild,
+                                                       const char *graph_meta_path,
+                                                       const char *source_meta_path,
+                                                       int64_t cooldown_days,
+                                                       const char *remote_mtime_iso,
+                                                       const char **out_decision_json,
+                                                       const char **out_error_msg);
 #endif
 
 /**
