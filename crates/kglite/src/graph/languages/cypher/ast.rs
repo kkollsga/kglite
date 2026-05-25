@@ -765,6 +765,7 @@ pub fn is_aggregate_expression(expr: &Expression) -> bool {
                     | "variance"
                     | "var_samp"
                     | "median"
+                    | "mode"
                     | "percentile_cont"
                     | "percentile_disc"
             ) {

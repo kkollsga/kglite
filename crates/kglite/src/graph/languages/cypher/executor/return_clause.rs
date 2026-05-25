@@ -649,6 +649,54 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Float64(m))
                     }
                 }
+                // mode(x) — most frequent value per group. Real query:
+                // "most common city per country":
+                //   MATCH (p:Person) RETURN p.country, mode(p.city)
+                //
+                // Works on any Value type (strings, ints, floats,
+                // dates). Nulls are skipped (don't count toward
+                // frequency). Ties: returns the first-seen winner
+                // (stable across runs because Cypher result iteration
+                // is deterministic). Empty group → Null.
+                //
+                // 2026-05-25 broad-scan lift, Batch 5.
+                "mode" => {
+                    use std::collections::HashMap;
+                    // Key = canonical string repr of the value (Debug
+                    // distinguishes Int(1) from String("1")); first
+                    // Value seen for that key is the returned winner
+                    // on tie (insertion-order tiebreak).
+                    let mut counts: HashMap<String, (Value, u64)> = HashMap::new();
+                    let mut seen_distinct = std::collections::HashSet::new();
+                    for row in rows {
+                        let val = self.evaluate_expression(&args[0], row)?;
+                        if matches!(val, Value::Null) {
+                            continue;
+                        }
+                        let key = format!("{:?}", val);
+                        if *distinct && !seen_distinct.insert(key.clone()) {
+                            continue;
+                        }
+                        let entry = counts.entry(key).or_insert_with(|| (val.clone(), 0));
+                        entry.1 += 1;
+                    }
+                    // Find the key with max count; on tie, the first
+                    // seen wins. HashMap iteration order is non-
+                    // deterministic in Rust, so we sort by (count
+                    // desc, value debug ascending) for stable output.
+                    let winner = counts
+                        .into_values()
+                        .max_by(|a, b| {
+                            a.1.cmp(&b.1).then_with(|| {
+                                // Stable tiebreak: lexicographic on
+                                // the Debug repr (deterministic).
+                                format!("{:?}", b.0).cmp(&format!("{:?}", a.0))
+                            })
+                        })
+                        .map(|(v, _)| v)
+                        .unwrap_or(Value::Null);
+                    Ok(winner)
+                }
                 "percentile_cont" => {
                     if args.len() != 2 {
                         return Err(
