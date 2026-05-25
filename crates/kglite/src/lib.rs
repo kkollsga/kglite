@@ -52,6 +52,12 @@ pub mod graph;
 /// move between minor releases).
 pub mod api {
     pub use crate::code_tree::builder::run_with_options as build_code_tree;
+    /// Map a file path to its `code_tree` language identifier, or
+    /// `None` if no parser handles the file. Bindings use this to
+    /// decide whether a filesystem event is graph-relevant — only
+    /// changes to files this returns `Some` for can change what
+    /// `build_code_tree` produces.
+    pub use crate::code_tree::parsers::language_for_path;
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
     pub use crate::datatypes::Value;
     pub use crate::error::{KgError, KgErrorCode};

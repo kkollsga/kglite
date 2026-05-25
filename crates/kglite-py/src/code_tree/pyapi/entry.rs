@@ -4,9 +4,18 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::graph::KnowledgeGraph;
+
+/// Map a file path to its `code_tree` language identifier, or `None`
+/// if no parser handles the file. Used by the MCP watch callback to
+/// decide whether a filesystem event is graph-relevant. Wraps
+/// `kglite::api::language_for_path` for the Python side.
+#[pyfunction]
+pub fn language_for_path(path: &str) -> Option<&'static str> {
+    kglite_core::api::language_for_path(Path::new(path))
+}
 
 /// Parse a directory into a KnowledgeGraph.
 #[pyfunction]

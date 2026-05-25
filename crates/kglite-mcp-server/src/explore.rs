@@ -131,6 +131,10 @@ fn run(
         .map(std::path::PathBuf::from)
         .collect();
 
+    // Lazy rebuild: if the watcher tagged the graph dirty since the
+    // last call, rebuild now before exploring.
+    state.ensure_code_tree_fresh();
+
     state
         .with_kg(|kg| {
             let opts = kglite::api::ExploreOptions {

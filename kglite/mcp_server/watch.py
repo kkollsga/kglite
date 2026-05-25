@@ -17,15 +17,28 @@ from kglite import _mcp_internal
 log = logging.getLogger("kglite.mcp_server.watch")
 
 
-def start(dir_path: Path, on_change: Callable[[], None], debounce_seconds: float = 0.5) -> Any:
-    """Watch `dir_path` recursively; call `on_change()` after each
-    debounce window. Returns a `WatchHandle` whose `.stop()` tears
-    the watcher down — caller must keep a reference (the handle's
-    Drop in Rust is what unregisters the watcher)."""
+def start(
+    dir_path: Path,
+    on_change: Callable[[list[str]], None],
+    debounce_seconds: float = 0.5,
+) -> Any:
+    """Watch `dir_path` recursively; call `on_change(paths)` after
+    each debounce window. `paths` is the list of changed file paths
+    (post-debounce) — the caller can filter to only fire its actual
+    work on graph-relevant subsets (e.g. via
+    `kglite._kglite_code_tree.language_for_path`).
 
-    def _dispatch(_paths: list[str]) -> None:
+    Returns a `WatchHandle` whose `.stop()` tears the watcher down
+    — caller must keep a reference (the handle's Drop in Rust is
+    what unregisters the watcher).
+
+    2026-05-25: signature changed to pass paths through; previously
+    `on_change()` was no-arg and the wrapper discarded paths.
+    """
+
+    def _dispatch(paths: list[str]) -> None:
         try:
-            on_change()
+            on_change(paths)
         except Exception as e:
             log.warning("watch on_change handler raised: %s", e)
 

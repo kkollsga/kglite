@@ -459,10 +459,21 @@ async fn main() -> Result<()> {
         Mode::Watch { dir } => {
             let canon = dir.canonicalize()?;
             let gs = graph_state.clone();
-            let cb: watch::ChangeHandler = Arc::new(move |_paths| {
-                if let Err(e) = gs.build_code_tree(&canon) {
-                    tracing::warn!(error = %e, "code_tree rebuild failed");
+            let cb: watch::ChangeHandler = Arc::new(move |paths| {
+                // Skip when no changed path is a file code_tree parses
+                // — a `cargo build` / `npm install` storm of `.rlib` /
+                // `node_modules/` events would otherwise needlessly
+                // tag a rebuild. Cheap predicate (just an ext lookup).
+                let any_code = paths
+                    .iter()
+                    .any(|p| kglite::api::language_for_path(p).is_some());
+                if !any_code {
+                    return;
                 }
+                // Tag for rebuild — the actual work happens on the
+                // next MCP tool call via ensure_code_tree_fresh.
+                // Cheap: no rebuild on the watcher thread, ms-scale.
+                gs.tag_code_tree_dirty(canon.clone());
             });
             maybe_watch(Some(dir), Some(cb))?
         }
@@ -491,13 +502,20 @@ async fn main() -> Result<()> {
                     // No `set_root_dir` yet; nothing to rebuild.
                     return;
                 };
-                let any_under_active = paths.iter().any(|p| p.starts_with(&active));
-                if !any_under_active {
+                // Two-stage filter: (1) inside the active root,
+                // (2) is a code file `code_tree` would parse. The
+                // second filter skips `cargo build` /
+                // `node_modules/` storms that otherwise tag a
+                // rebuild for changes the parser doesn't see.
+                let any_under_active_and_code = paths
+                    .iter()
+                    .any(|p| p.starts_with(&active) && kglite::api::language_for_path(p).is_some());
+                if !any_under_active_and_code {
                     return;
                 }
-                if let Err(e) = gs.build_code_tree(&active) {
-                    tracing::warn!(error = %e, "code_tree rebuild failed (local workspace)");
-                }
+                // Tag for rebuild; the actual rebuild fires on the
+                // next MCP tool call (ensure_code_tree_fresh).
+                gs.tag_code_tree_dirty(active.clone());
             });
             maybe_watch(Some(root), Some(cb))?
         }

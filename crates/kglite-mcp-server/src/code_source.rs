@@ -130,6 +130,10 @@ fn run(
     };
     let node_type = args.get("node_type").and_then(|v| v.as_str());
 
+    // Lazy rebuild: if the watcher tagged the graph dirty since the
+    // last call, rebuild now before resolving the qualified name.
+    state.ensure_code_tree_fresh();
+
     let lookup = match state.source_lookup(qname, node_type) {
         Ok(loc) => loc,
         Err(e) => return format!("read_code_source: {e}"),

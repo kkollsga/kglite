@@ -28,6 +28,13 @@ const NO_GRAPH: &str =
 #[derive(Clone, Default)]
 pub struct GraphState {
     inner: Arc<RwLock<Option<ActiveGraph>>>,
+    /// Deferred-rebuild slot. The watcher tags the active root here
+    /// (cheap, microseconds — sets the slot, drops the lock); each
+    /// MCP tool entry calls [`ensure_code_tree_fresh`] which atomically
+    /// `take()`s the slot and rebuilds. Pattern: do the actual work
+    /// lazily, never on the watcher thread. N FS events between two
+    /// tool calls → 1 rebuild (the slot just holds the latest target).
+    pending_rebuild: Arc<RwLock<Option<std::path::PathBuf>>>,
 }
 
 struct ActiveGraph {
@@ -38,6 +45,32 @@ struct ActiveGraph {
 impl GraphState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Tag a directory as needing rebuild. Called from the watch
+    /// callback; non-blocking (a single lock-protected pointer write).
+    /// The actual rebuild happens lazily on the next tool call via
+    /// [`ensure_code_tree_fresh`].
+    pub fn tag_code_tree_dirty(&self, target: std::path::PathBuf) {
+        tracing::debug!(target = %target.display(), "code_tree tagged for rebuild");
+        *self.pending_rebuild.write().unwrap() = Some(target);
+    }
+
+    /// Rebuild the code-tree if the watcher tagged it dirty since the
+    /// last call. Called by each MCP tool entry that reads the graph
+    /// (cypher_query / graph_overview / save_graph / read_code_source
+    /// / explore). No-op when nothing's pending.
+    ///
+    /// On rebuild failure, logs + clears the flag. Next FS change
+    /// re-tags. (Avoids tight rebuild loops if the source dir is
+    /// permanently broken.)
+    pub fn ensure_code_tree_fresh(&self) {
+        let target = self.pending_rebuild.write().unwrap().take();
+        let Some(target) = target else { return };
+        tracing::info!(target = %target.display(), "rebuilding code_tree (lazy, FS changed)");
+        if let Err(e) = self.build_code_tree(&target) {
+            tracing::warn!(error = %e, "lazy code_tree rebuild failed");
+        }
     }
 
     pub fn load_kgl(&self, path: &Path) -> Result<()> {
@@ -444,6 +477,9 @@ pub fn register(
     };
     server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
         let csv = csv.clone();
+        // Lazy rebuild: if the watcher tagged the graph dirty
+        // since the last call, rebuild now before serving the query.
+        s.ensure_code_tree_fresh();
         s.with_active(|g| run_cypher_tool(g, &args.query, csv.as_deref()))
     });
     let s = state.clone();
@@ -463,6 +499,7 @@ pub fn register(
                     wipe_temp_dir(dir);
                 }
             }
+            s.ensure_code_tree_fresh();
             s.with_active(|g| run_overview(g, &args))
         },
     );
@@ -471,7 +508,10 @@ pub fn register(
         server.register_typed_tool::<SaveGraphArgs, _>(
             "save_graph",
             "Persist the active graph to its source .kgl file (single-graph mode only).",
-            move |_| s.with_active(run_save),
+            move |_| {
+                s.ensure_code_tree_fresh();
+                s.with_active(run_save)
+            },
         );
     }
 }

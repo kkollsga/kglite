@@ -15,6 +15,7 @@ shapes, status messages, and 15-row inline cap. Differences:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import threading
 from typing import Any
@@ -23,6 +24,8 @@ import kglite
 from kglite.mcp_server.csv_http import CsvHttpConfig, write_csv
 from kglite.mcp_server.preprocessor import Preprocessor
 from kglite.mcp_server.preprocessor import apply as apply_preprocessor
+
+log = logging.getLogger("kglite.mcp_server.tools")
 
 NO_GRAPH = "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo')."
 
@@ -44,6 +47,40 @@ class GraphState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._active: ActiveGraph | None = None
+        # Deferred-rebuild slot. The watch callback tags the directory
+        # it would rebuild here (cheap — just a pointer write under
+        # the lock). Each MCP tool entry calls
+        # `ensure_code_tree_fresh()` which atomically takes the slot
+        # and rebuilds. N FS events between two MCP calls collapse to
+        # one rebuild (slot just holds the latest target).
+        self._pending_rebuild: Path | None = None
+
+    def tag_code_tree_dirty(self, target: Path) -> None:
+        """Tag `target` for rebuild on the next MCP tool call.
+        Non-blocking: just sets the slot under the lock."""
+        log.debug("code_tree tagged for rebuild: %s", target)
+        with self._lock:
+            self._pending_rebuild = target
+
+    def ensure_code_tree_fresh(self) -> None:
+        """Rebuild the code-tree if the watcher tagged it dirty since
+        the last call. Called by each MCP tool entry that reads the
+        graph. No-op when nothing's pending.
+
+        On rebuild failure, logs + clears the slot. The next FS change
+        re-tags. (Avoids tight rebuild loops if the source dir is
+        permanently broken.)
+        """
+        with self._lock:
+            target = self._pending_rebuild
+            self._pending_rebuild = None
+        if target is None:
+            return
+        log.info("rebuilding code_tree (lazy, FS changed): %s", target)
+        try:
+            self.build_code_tree(target)
+        except Exception as e:  # noqa: BLE001
+            log.warning("lazy code_tree rebuild failed: %s", e)
 
     def load_kgl(self, path: Path) -> None:
         graph = kglite.load(str(path))

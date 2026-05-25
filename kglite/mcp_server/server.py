@@ -206,25 +206,46 @@ async def _async_main(args: argparse.Namespace) -> None:
     # Boot summary to stderr (MCP stdio uses stdout for protocol).
     _print_boot_summary(mode, manifest, graph_state)
 
-    # Wire the watcher if applicable.
+    # Wire the watcher if applicable. `on_change` now receives the
+    # changed paths so the callback can skip rebuilds for events
+    # that aren't graph-relevant (a `cargo build` storm changes
+    # `target/...` but no `.rs` files; an `npm install` storm
+    # changes `node_modules/...` only; etc.).
+    from kglite import _kglite_code_tree
+
+    def _any_code_file(paths: list[str]) -> bool:
+        return any(_kglite_code_tree.language_for_path(p) is not None for p in paths)
+
     watch_handle: Any = None
     if mode["kind"] == "watch":
-        watch_handle = watch_start(
-            mode["path"],
-            lambda: graph_state.build_code_tree(mode["path"]),
-        )
+
+        def _watch_rebuild(paths: list[str]) -> None:
+            # Tag for rebuild; the actual rebuild fires on the next
+            # MCP tool call via ensure_code_tree_fresh.
+            if not _any_code_file(paths):
+                return
+            graph_state.tag_code_tree_dirty(mode["path"])
+
+        watch_handle = watch_start(mode["path"], _watch_rebuild)
     elif mode["kind"] == "local_workspace" and manifest and manifest.workspace and manifest.workspace.watch:
         # Operator inbox 2026-05-25: previously
         # `lambda: graph_state.build_code_tree(mode["path"])` — i.e.
         # always rebuilt the wide sandbox on every FS event (every
         # cargo build, editor save, etc. anywhere under it). Now:
-        # rebuild only the active repo (= last `set_root_dir`
-        # target), no-op until something has been set.
-        def _local_workspace_rebuild() -> None:
+        # two-stage filter — only rebuild when at least one changed
+        # path is (a) inside the active repo AND (b) a file
+        # code_tree actually parses. No-op when no set_root_dir has
+        # fired yet.
+        def _local_workspace_rebuild(paths: list[str]) -> None:
+            # Tag for rebuild; the actual rebuild fires on the next
+            # MCP tool call via ensure_code_tree_fresh.
             active = active_root_holder[0]
             if active is None:
                 return
-            graph_state.build_code_tree(active)
+            active_str = str(active)
+            if not any(p.startswith(active_str) and _kglite_code_tree.language_for_path(p) is not None for p in paths):
+                return
+            graph_state.tag_code_tree_dirty(active)
 
         watch_handle = watch_start(mode["path"], _local_workspace_rebuild)
     _ = watch_handle  # keep alive until process exit
@@ -959,6 +980,11 @@ def _build_server(
                     text=f"Error: tool {name!r} is hidden by manifest configuration.",
                 )
             ]
+        # Lazy rebuild gate: every graph-touching tool checks whether
+        # the watcher tagged a rebuild since the last call. Cheap
+        # (single lock-acquire + None check) when nothing's pending.
+        if name in {"cypher_query", "graph_overview", "save_graph", "read_code_source"}:
+            graph_state.ensure_code_tree_fresh()
         if name == "cypher_query":
             body = run_cypher(
                 graph_state,

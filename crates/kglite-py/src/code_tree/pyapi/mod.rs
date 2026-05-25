@@ -11,6 +11,7 @@ pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(entry::build, &m)?)?;
     m.add_function(wrap_pyfunction!(entry::read_manifest, &m)?)?;
     m.add_function(wrap_pyfunction!(entry::repo_tree, &m)?)?;
+    m.add_function(wrap_pyfunction!(entry::language_for_path, &m)?)?;
     parent.add_submodule(&m)?;
     // Register the submodule in sys.modules so `from kglite._kglite_code_tree import ...` works.
     py.import("sys")?
