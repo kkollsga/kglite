@@ -427,6 +427,17 @@ on the same engine — see the
 [Operators guide](https://kglite.readthedocs.io/en/latest/operators/bolt-server.html)
 for deployment.
 
+For **non-Rust language bindings** (Go via cgo, JavaScript via napi,
+JVM via JNI, .NET via P/Invoke), the
+[`crates/kglite-c`](https://github.com/kkollsga/kglite/tree/main/crates/kglite-c)
+crate exposes the engine through a stable C ABI — 30 `extern "C"`
+functions covering lifecycle / Cypher / datasets / embedder, plus a
+cbindgen-generated `kglite.h`. See
+[`docs/rust/c-abi.md`](https://kglite.readthedocs.io/en/latest/rust/c-abi.html)
+for the design and
+[`docs/rust/implementing-a-binding.md`](https://kglite.readthedocs.io/en/latest/rust/implementing-a-binding.html)
+for cgo / napi / JNI worked examples.
+
 ## Examples
 
 The [`examples/`](https://github.com/kkollsga/kglite/tree/main/examples)

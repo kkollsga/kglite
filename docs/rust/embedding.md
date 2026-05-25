@@ -226,70 +226,49 @@ The hard part — the Cypher pipeline, the CoW transaction model,
 the OCC commit — is solved once, in `kglite::api::session`.
 Each binding only owns the marshalling layer.
 
-### cgo sketch (Go)
+### Non-Rust bindings via the C ABI
+
+The `kglite-c` crate (`crates/kglite-c/`) is the canonical entry
+point for non-Rust language bindings — Go via cgo, JavaScript via
+napi, JVM via JNI, .NET via P/Invoke. It exposes
+`kglite::api::*` through 30 `extern "C"` functions plus a
+cbindgen-generated `kglite.h` header.
+
+A minimal cgo binding looks like this:
 
 ```go
 package kglite
 
 /*
 #cgo LDFLAGS: -lkglite_c
+#include <stdlib.h>
 #include "kglite.h"
 */
 import "C"
-import "runtime"
 
-type Graph struct {
-    h *C.KgliteDirGraph
-}
+import "unsafe"
 
-func Load(path string) (*Graph, error) {
-    cPath := C.CString(path)
-    defer C.free(unsafe.Pointer(cPath))
-    h := C.kglite_load_file(cPath)
-    if h == nil {
-        return nil, errors.New("load failed")
+type Graph struct{ h *C.KgliteGraph }
+
+func LoadFile(path string) (*Graph, error) {
+    cpath := C.CString(path)
+    defer C.free(unsafe.Pointer(cpath))
+    var g *C.KgliteGraph
+    var errMsg *C.char
+    rc := C.kglite_load_file(cpath, &g, &errMsg)
+    if rc != C.KGLITE_STATUS_CODE_OK {
+        defer C.kglite_free_string(errMsg)
+        return nil, errors.New(C.GoString(errMsg))
     }
-    g := &Graph{h: h}
-    runtime.SetFinalizer(g, func(g *Graph) { C.kglite_dir_graph_drop(g.h) })
-    return g, nil
-}
-
-func (g *Graph) Cypher(query string) (*ResultSet, error) {
-    cQuery := C.CString(query)
-    defer C.free(unsafe.Pointer(cQuery))
-    res := C.kglite_session_execute_read(g.h, cQuery)
-    return resultSetFromC(res), nil
+    return &Graph{h: g}, nil
 }
 ```
 
-This would wrap a `kglite-c` crate (Phase H follow-up) that
-exposes `kglite::api::session::execute_read` etc. through a
-C ABI. The bridge is mechanical; no new core development.
-
-### napi sketch (TypeScript)
-
-```typescript
-import { loadFile, executeRead } from './kglite-napi';
-
-const graph = loadFile('graph.kgl');
-const result = await executeRead(graph, 'MATCH (n) RETURN count(n)');
-console.log(result.rows[0][0]); // node count
-```
-
-Same pattern: a `kglite-napi` crate wraps `kglite` for the napi
-runtime; the TS API is a thin handle + Promise wrapper.
-
-### JNI sketch (Java / Kotlin)
-
-```java
-import io.kglite.Graph;
-
-Graph g = Graph.load("graph.kgl");
-ResultSet rs = g.cypher("MATCH (n) RETURN count(n)");
-System.out.println(rs.getInt(0, 0));
-```
-
-Same pattern: a `kglite-jni` crate; Java API thin wrapper.
+For the full cgo / napi / JNI worked examples, the C ABI design
+conventions, and the binding-author cookbook, see
+[implementing-a-binding.md](implementing-a-binding.md) and
+[c-abi.md](c-abi.md). The bridge is mechanical; no new core
+development needed per binding.
 
 ## What's stable vs internal
 

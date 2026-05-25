@@ -174,54 +174,57 @@ Different binding types reach kglite through different layers:
 
 | Binding type | Standardization layer | Examples |
 |---|---|---|
-| **Rust-side wrappers** | `kglite::api::*` — Rust types, traits, functions | `kglite-py` (PyO3); future `kglite-grpc-server`, `kglite-rest-server` |
-| **Non-Rust wrappers** | C ABI — `extern "C" fn` over `kglite::api::*` | Future Go (cgo), JavaScript (napi), JVM (JNI), .NET |
+| **Rust-side wrappers** | `kglite::api::*` — Rust types, traits, functions | `kglite-py` (PyO3), `kglite-bolt-server`, `kglite-mcp-server`; future `kglite-grpc-server`, `kglite-rest-server` |
+| **Non-Rust wrappers** | C ABI — `extern "C" fn` over `kglite::api::*` (the `kglite-c` crate) | Future Go (cgo), JavaScript (napi), JVM (JNI), .NET (P/Invoke) |
 
 **A "framework helper" in `kglite::api::*` is reachable only by
 Rust-side wrappers.** Non-Rust wrappers won't see a `ParamUnmarshaller`
 trait or a `GraphHandle` struct directly — they see a C function
-signature. For *those* bindings, the standardization is the C ABI
-shape itself.
+signature in `kglite.h`. For *those* bindings, the standardization
+is the C ABI shape itself.
 
-**Phase H — the `kglite-c` crate — is a committed workstream**,
-not an aspirational future. Without it the binding-framework goals
-above can't actually be met for non-Rust languages (no matter how
-clean `kglite::api::*` is, Go and JVM consumers can't read Rust
-traits). The phased plan:
+**Phase H — the `kglite-c` crate — shipped in 0.10.3.** What landed
+across H.1–H.5:
 
-1. **H.1 — C ABI design.** Settle on the wrapping conventions
-   (opaque-handle pattern for `DirGraph`, owned-string-out for
-   results, error-out-param + non-zero return code, no Rust
-   types in signatures). Document in `docs/rust/c-abi.md`.
+1. **H.1 — C ABI design** (`docs/rust/c-abi.md`). Conventions:
+   `kglite_*` naming, opaque-handle pattern (empty `#[repr(C)]`
+   facade + private `XState` sidecar), errno-style errors mapping
+   1:1 to `KgErrorCode`, owned out-strings freed via a single
+   `kglite_free_string`, JSON-at-boundary for nested `Value`
+   shapes, sync-only ABI (bindings own their own async).
 
-2. **H.2 — `kglite-c` skeleton crate.** New workspace member.
-   Wraps the highest-leverage `kglite::api::*` entry points first:
-   `load_file`, `save_graph`, `execute_read`, `execute_mut`,
-   `KgErrorCode` accessors. Uses `cbindgen` to emit
-   `include/kglite.h` at build time. CI publishes the header as a
-   release artifact.
+2. **H.2 — `kglite-c` skeleton + cbindgen.** Workspace member at
+   `crates/kglite-c/`. Top-12 entry points: lifecycle / session /
+   Cypher / result accessors / error introspection / ABI version.
+   cbindgen runs in `build.rs` and writes
+   `include/kglite.h`.
 
-3. **H.3 — datasets + embedder C ABI.** Second wave: the dataset
-   fetch entries (with `*_blocking` companions), embedder
-   registration, blueprint build.
+3. **H.3 — Sodir + embedder ABI.** First dataset wrapper +
+   fastembed factory + `kglite_session_set_embedder`. Locked in
+   the feature-gating convention (cbindgen `[defines]` maps
+   `feature = X` to `KGLITE_FEATURE_X` preprocessor define).
 
-4. **H.4 — proof-of-concept consumer.** A ~500-LOC Go binding
-   built against `kglite-c` that exercises load → query →
-   save. Validates the C ABI surface is enough for a real wrapper.
+4. **H.3a — SEC + Wikidata ABI.** Completed the dataset surface
+   symmetrically. Total surface: 30 `extern "C"` functions, 6
+   opaque-handle types, 952-line generated header.
 
-5. **H.5 — release coordination.** `kglite-c` ships on crates.io
-   alongside `kglite`, header published on GitHub releases. The
-   `implementing-a-binding.md` guide is rewritten with cgo / napi /
-   JNI worked examples calling the real C ABI (not the current
-   sketches).
+5. **H.5 — release coordination.** Header-drift CI gate (fresh
+   cbindgen run vs committed header). `publish_crates.yml`
+   extended with a 4th publish step. `implementing-a-binding.md`
+   rewritten with cgo / napi / JNI worked examples.
+
+H.4 (Go PoC consumer) was **deferred** — the first real non-Rust
+binding author validates the surface better than a synthetic
+500-LOC sketch. The cgo / napi / JNI examples in
+`implementing-a-binding.md` give them a starting point.
 
 The boundary-principle posture above (active-design + cypher-first +
 use-case-checked) applies to the Rust `api::*` surface AND the C
 ABI we expose through it. Same rules: per-query features go via
 Cypher (no C ABI exposure needed — bindings call
-`kglite_execute_cypher(...)`); lifecycle/error/embedder go via
-direct C functions; tailored-to-one-language shapes never appear
-in the C ABI.
+`kglite_session_execute_read(...)`); lifecycle/error/embedder go
+via direct C functions; tailored-to-one-language shapes never
+appear in the C ABI.
 
 ### The runtime model — core is sync, bindings own async
 

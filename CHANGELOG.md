@@ -7,6 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-05-25 — `kglite-c` C ABI ships; Phase B api lifts
+
+Single release theme: every shipped capability of `kglite` is now
+reachable from any language with FFI through a stable C ABI. The
+new `crates/kglite-c/` workspace member exposes `kglite::api::*`
+through `extern "C"` functions plus a cbindgen-generated header.
+Future Go / JS / JVM / .NET bindings link against
+`libkglite_c.{so,dylib,dll}` and include the shipped `kglite.h`
+instead of re-implementing wrappers in their host language.
+
+Companion to the boundary principle codified in 0.10.2: that
+release made `kglite::api::*` rich enough to support future
+bindings from Rust; this release adds the C ABI layer that makes
+those bindings reach kglite without compiling Rust at all.
+
+### Added — new crate `kglite-c`
+
+New publishable workspace member at `crates/kglite-c/`. Exposes
+30 `extern "C"` functions covering the full lifecycle / Cypher
+pipeline / dataset / embedder surface. Stable C ABI with
+`kglite_` naming convention, opaque-handle types
+(`KgliteGraph` / `KgliteSession` / `KgliteCypherResult` /
+`KgliteEmbedder` / `KgliteSecClient`), errno-style errors mapping
+1:1 to `KgErrorCode`, and feature gating via
+`KGLITE_FEATURE_*` preprocessor defines.
+
+- **Lifecycle**: `kglite_load_file`, `kglite_save_graph`,
+  `kglite_graph_free`.
+- **Session**: `kglite_session_new`, `kglite_session_execute_read`,
+  `kglite_session_execute_mut`, `kglite_session_free`,
+  `kglite_session_set_embedder`.
+- **Result accessors**: `kglite_cypher_result_columns_json`,
+  `kglite_cypher_result_rows_json`,
+  `kglite_cypher_result_row_count`,
+  `kglite_cypher_result_free`. JSON-at-boundary for nested
+  `Value` shapes — callers parse with their language's stdlib.
+- **Error introspection**: `kglite_status_code_name`,
+  `kglite_status_code_neo4j_status`,
+  `kglite_status_code_http_status` (wrap the api-level lifts).
+- **Datasets** (feature-gated): Sodir (`kglite_datasets_sodir_fetch_all`),
+  SEC EDGAR (`_sec_client_new`, `_fetch_quarterly_master_idx`,
+  `_fetch_submissions_bulk`, `_fetch_company_tickers`,
+  `_fetch_company_facts`, `_resolve_fetch_buckets`,
+  `_parse_tickers_json`, `_run_all`, `_client_free`), Wikidata
+  (`_ensure_dump`, `_remote_last_modified`, `_decide_cache`).
+- **Embedder** (feature-gated): `kglite_embedder_fastembed_new`,
+  `kglite_session_set_embedder`, `kglite_embedder_free`.
+- **String teardown**: single `kglite_free_string` for every
+  owned out-string the library returns.
+- **ABI version**: `kglite_abi_version()` returns `{major: 0,
+  minor: 10, patch: 3}` for binding startup checks.
+
+`crate-type = ["cdylib", "staticlib", "rlib"]` — consumers can
+link statically (Go cgo's `#cgo LDFLAGS: -lkglite_c`) or
+dynamically (`libkglite_c.{so,dylib,dll}`). cbindgen runs in
+`build.rs` and writes `crates/kglite-c/include/kglite.h` (952
+lines, committed; CI verifies the committed copy matches a fresh
+cbindgen run).
+
+### Added — `KgErrorCode::http_status_code()` (Phase B)
+
+Companion to `KgErrorCode::neo4j_status_code()` (added in 0.10.2).
+Maps each error variant to its canonical HTTP status code:
+
+```rust
+let kg_err: KgError = /* … */;
+let http_status: u16 = kg_err.code().http_status_code();
+// 400 for CypherSyntax/InvalidArgument/etc., 404 for NodeNotFound,
+// 408 for CypherTimeout, 422 for Schema/Validation/Expr, 500 for
+// CypherExecution/FileIo/Internal.
+```
+
+Future REST / gRPC bindings call this rather than re-deciding "is
+node-not-found a 404 or a 422?" per binding.
+
+### Added — `kglite::api::param::json_value_to_kglite_value` (Phase B)
+
+New module `crates/kglite/src/param/mod.rs` with the canonical
+JSON-to-Value converter. Lifted from
+`kglite-mcp-server::tools::json_to_value` (a private helper the
+mcp server had been carrying since first ship); the mcp server
+now delegates to the core function in one line. Future REST /
+gRPC / OpenAPI bindings reach for the same canonical converter
+rather than each re-implementing the JSON-shaped boundary.
+
+### Added — design + binding docs
+
+- **`docs/rust/c-abi.md`** (581 lines) — the C ABI design
+  conventions: naming, opaque-handle pattern, errno-style errors,
+  JSON-at-boundary, sync-only ABI, versioning. Source of truth
+  for the `kglite-c` surface and the reference for binding
+  authors.
+- **`docs/rust/implementing-a-binding.md`** — Option 3 rewritten
+  with real cgo / napi / JNI worked examples calling the shipped
+  C ABI (was sketches against an unbuilt aspiration). The
+  "Phase H aspiration" framing is gone; kglite-c is real.
+
+### Added — CI
+
+- **Header drift gate** in `.github/workflows/ci.yml` (new
+  `kglite-c` job): clippy + tests with default features, clippy +
+  tests with `sec,sodir,wikidata` features, plus a cbindgen
+  regen-and-diff check that fails CI if the committed
+  `include/kglite.h` doesn't match what a fresh cbindgen run
+  would produce. Catches both forgotten regens and hand-edits.
+- **Publish workflow** extended with a 4th publish step
+  (`kglite-c`) following the same pattern as bolt-server /
+  mcp-server. Version-check job reads kglite-c's Cargo.toml +
+  probes crates.io; publish runs after kglite has propagated.
+
+### Changed — internal
+
+- `crates/kglite-c/src/datasets.rs` (single-file) →
+  `crates/kglite-c/src/datasets/{mod,sodir,sec,wikidata}.rs`
+  (directory). Per-loader files keep each at ~250-650 LOC.
+- `SessionState` in `kglite-c` gained an
+  `embedder: Option<Arc<dyn Embedder>>` slot; execute_read /
+  execute_mut clone it into `ExecuteOptions` per call so
+  `text_score()` works through the C ABI.
+
+### Test stats
+
+  cargo test -p kglite-c                                       # 4 + 4 default
+  cargo test -p kglite-c --features sec,sodir,wikidata --lib   # 29 unit
+  cargo test -p kglite-c --features sec,sodir,wikidata         # 9 integration
+  cargo test -p kglite-c --features sec,sodir,wikidata,fastembed
+                                                                # 38 total
+
+Full workspace `make lint` and `pytest tests/` remain green.
+
 ## [0.10.2] — 2026-05-25 — Dataset-wrapper preparation for future-language bindings (boundary principle landed)
 
 Single release theme: get `kglite` core ready to host future

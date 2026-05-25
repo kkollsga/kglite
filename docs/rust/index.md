@@ -140,7 +140,12 @@ embedded_basic | grep pyo3` returns empty.
   deep-dive companion to `embedding.md` for anyone publishing a
   new-language binding: bridge-layer choice, full `KgErrorCode`
   mapping table, Embedder trait walkthrough, dataset-wrapping
-  patterns, binding-side cookbook.
+  patterns, binding-side cookbook. Includes cgo / napi / JNI
+  worked examples calling the shipped C ABI.
+- **[C ABI (`kglite-c`)](c-abi.md)** — the design conventions for
+  the C ABI crate that non-Rust bindings (Go, JS, JVM, .NET, …)
+  consume. Naming rules, opaque-handle pattern, errno-style
+  errors, JSON-at-boundary, sync-only ABI, versioning.
 - **[API reference](api-reference.md)** — manifest of the stable
   `kglite::api::*` items + semver guarantees. Full per-symbol
   docs (post-publish) at [docs.rs/kglite](https://docs.rs/kglite).
@@ -154,5 +159,6 @@ embedded_basic | grep pyo3` returns empty.
 embedding
 session
 implementing-a-binding
+c-abi
 api-reference
 ```

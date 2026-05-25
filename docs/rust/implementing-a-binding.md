@@ -79,42 +79,246 @@ For the smaller-bridge approach (just the engine, no ergonomics) the
 crate is more like 1k lines — see the `cgo sketch` in
 [embedding.md](embedding.md#cgo-sketch-go).
 
-### Option 3 — A C ABI middle crate (the Phase H aspiration)
+### Option 3 — Use the `kglite-c` crate (the canonical non-Rust path)
 
-Both options above tie you to Rust. A future `kglite-c` crate would
-expose `kglite::api::*` through stable C function signatures. Any
-language with FFI (which is "every language") could then bind to
-kglite without writing Rust.
+`crates/kglite-c/` exposes `kglite::api::*` through a stable C ABI.
+Every language with FFI (Go, JavaScript, JVM, .NET, …) can bind to
+kglite through a single C header without writing Rust.
 
-```c
-// kglite.h (illustrative — does not exist yet)
-typedef struct KgliteDirGraph KgliteDirGraph;
-typedef struct KgliteSession  KgliteSession;
-typedef struct KgliteResult   KgliteResult;
+The conventions are fixed in [`c-abi.md`](c-abi.md); the short
+version:
 
-KgliteDirGraph* kglite_load_file(const char* path);
-void kglite_dir_graph_drop(KgliteDirGraph* g);
+- `kglite_` prefix on every function.
+- Opaque-handle pattern: `KgliteGraph*` / `KgliteSession*` /
+  `KgliteCypherResult*` / `KgliteEmbedder*` / `KgliteSecClient*`.
+- Errno-style errors: every fallible function returns
+  `KgliteStatusCode` (0 = OK) with out-parameters for both the
+  result handle and an owned error-message string. 16 status
+  variants map 1:1 to `KgErrorCode`; three are C-ABI-specific
+  (`KGLITE_STATUS_CODE_INVALID_UTF8`, `_NULL_POINTER`, `_OUT_OF_MEMORY`).
+- Memory: caller frees every `*mut T` handle via the type's
+  `kglite_<type>_free`; every owned out-string via the single
+  `kglite_free_string`.
+- Sync-only: bindings own their async/threading. Async dataset
+  fetchers expose `*_blocking` companions.
+- JSON-at-boundary: parameters in, rows out, dataset reports out —
+  all as JSON strings. Caller parses with their language's stdlib
+  JSON facility.
 
-KgliteResult* kglite_session_execute_read(
-    KgliteSession* s, const char* query, const KgliteExecuteOptions* opts);
+#### Setup
+
+```toml
+# Cargo.toml of an in-Rust consumer
+[dependencies]
+kglite-c = "0.10"     # cdylib + staticlib + rlib
 ```
 
-This is Phase H on the roadmap. Until it lands, you have three real
-choices:
+For non-Rust consumers, link against `libkglite_c.{so,dylib,dll}`
+and include the header that ships at
+`crates/kglite-c/include/kglite.h`. CI publishes the header as a
+release artifact alongside the precompiled shared libraries.
+
+#### Worked example — cgo (Go)
+
+```go
+package kglite
+
+/*
+#cgo LDFLAGS: -lkglite_c
+#include <stdlib.h>
+#include "kglite.h"
+*/
+import "C"
+
+import (
+    "encoding/json"
+    "errors"
+    "fmt"
+    "unsafe"
+)
+
+type Graph struct {
+    handle *C.KgliteGraph
+}
+
+func LoadFile(path string) (*Graph, error) {
+    cpath := C.CString(path)
+    defer C.free(unsafe.Pointer(cpath))
+
+    var graph *C.KgliteGraph
+    var errMsg *C.char
+    rc := C.kglite_load_file(cpath, &graph, &errMsg)
+    if rc != C.KGLITE_STATUS_CODE_OK {
+        defer C.kglite_free_string(errMsg)
+        return nil, fmt.Errorf("load_file: %s", C.GoString(errMsg))
+    }
+    return &Graph{handle: graph}, nil
+}
+
+func (g *Graph) Close() {
+    C.kglite_graph_free(g.handle)
+    g.handle = nil
+}
+
+type Session struct {
+    handle *C.KgliteSession
+}
+
+func (g *Graph) NewSession() (*Session, error) {
+    var sess *C.KgliteSession
+    rc := C.kglite_session_new(g.handle, &sess)
+    if rc != C.KGLITE_STATUS_CODE_OK {
+        return nil, errors.New("session_new failed")
+    }
+    // Graph ownership moved into the session.
+    g.handle = nil
+    return &Session{handle: sess}, nil
+}
+
+func (s *Session) Cypher(query string, params map[string]any) ([]map[string]any, error) {
+    cquery := C.CString(query)
+    defer C.free(unsafe.Pointer(cquery))
+
+    var cparams *C.char
+    if params != nil {
+        paramJSON, _ := json.Marshal(params)
+        cparams = C.CString(string(paramJSON))
+        defer C.free(unsafe.Pointer(cparams))
+    }
+
+    var result *C.KgliteCypherResult
+    var errMsg *C.char
+    rc := C.kglite_session_execute_read(s.handle, cquery, cparams, &result, &errMsg)
+    if rc != C.KGLITE_STATUS_CODE_OK {
+        defer C.kglite_free_string(errMsg)
+        return nil, fmt.Errorf("execute_read: %s", C.GoString(errMsg))
+    }
+    defer C.kglite_cypher_result_free(result)
+
+    rowsJSON := C.kglite_cypher_result_rows_json(result)
+    defer C.kglite_free_string(rowsJSON)
+
+    var rows []map[string]any
+    if err := json.Unmarshal([]byte(C.GoString(rowsJSON)), &rows); err != nil {
+        return nil, err
+    }
+    return rows, nil
+}
+```
+
+#### Worked example — napi-rs (Node.js)
+
+```rust
+// crates/kglite-js/src/lib.rs (in a hypothetical kglite-js crate)
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use std::ffi::CString;
+
+#[napi]
+pub struct Graph {
+    inner: *mut kglite_c::KgliteGraph,
+}
+
+#[napi]
+impl Graph {
+    #[napi(factory)]
+    pub fn load_file(path: String) -> Result<Self> {
+        let c_path = CString::new(path).map_err(|e| Error::from_reason(e.to_string()))?;
+        let mut graph: *mut kglite_c::KgliteGraph = std::ptr::null_mut();
+        let mut err_msg: *const std::ffi::c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_c::kglite_load_file(
+                c_path.as_ptr(),
+                &mut graph as *mut _,
+                &mut err_msg as *mut _,
+            )
+        };
+        if rc != kglite_c::KgliteStatusCode::Ok {
+            let msg = unsafe { std::ffi::CStr::from_ptr(err_msg) }.to_string_lossy().to_string();
+            unsafe { kglite_c::kglite_free_string(err_msg) };
+            return Err(Error::from_reason(msg));
+        }
+        Ok(Self { inner: graph })
+    }
+
+    // ... session / cypher methods follow the same shape ...
+}
+
+impl Drop for Graph {
+    fn drop(&mut self) {
+        if !self.inner.is_null() {
+            unsafe { kglite_c::kglite_graph_free(self.inner) };
+        }
+    }
+}
+```
+
+A pure-JS consumer (no Rust at all) can link against
+`libkglite_c.so` via `ffi-napi` or `koffi`, calling the C
+functions directly with the same shapes.
+
+#### Worked example — JNI (JVM)
+
+```java
+// Java / Kotlin / Scala — through a JNI shim crate. The shim
+// is ~500 LOC of jni-rs glue similar to the cgo shape above.
+
+public class Graph implements AutoCloseable {
+    private long handle;  // opaque *mut KgliteGraph
+
+    public static Graph loadFile(String path) {
+        return new Graph(KgliteJni.loadFile(path));
+    }
+
+    public Session newSession() {
+        return new Session(KgliteJni.sessionNew(handle));
+        // handle is moved into session; do not close graph after this.
+    }
+
+    @Override
+    public void close() {
+        if (handle != 0) {
+            KgliteJni.graphFree(handle);
+            handle = 0;
+        }
+    }
+}
+```
+
+The JNI native crate would call `kglite_c::kglite_*` functions
+through `jni-rs` bindings, mapping the JVM `long` handles to
+`*mut KgliteX` round-trip casts. Cypher result rows come back as
+JSON; the Java side parses with Jackson / Gson / `JsonParser`.
+
+#### What kglite-c hands you (v1 surface)
+
+- **Lifecycle**: `load_file`, `save_graph`, `graph_free`.
+- **Session**: `session_new`, `session_execute_read`,
+  `session_execute_mut`, `session_free`. Plus `session_set_embedder`.
+- **Result**: `cypher_result_columns_json`, `cypher_result_rows_json`,
+  `cypher_result_row_count`, `cypher_result_free`.
+- **Error introspection**: `status_code_name`,
+  `status_code_neo4j_status`, `status_code_http_status`.
+- **Datasets**: per-loader fetchers + extract pipelines for SEC
+  EDGAR, Sodir, Wikidata (each feature-gated behind a `KGLITE_FEATURE_*`
+  preprocessor define).
+- **Embedder**: `embedder_fastembed_new` (feature-gated),
+  `embedder_free`, `session_set_embedder`.
+- **ABI version**: `kglite_abi_version()` for startup checks.
+
+That's ~30 C functions total. Phase H added the surface in three
+sub-phases (H.2 skeleton, H.3 Sodir + embedder, H.3a SEC +
+Wikidata); future iterations can extend with per-filing fetchers
+or user-supplied embedder callbacks as bindings ask.
+
+#### Alternatives if kglite-c doesn't fit
 
 - **Use the existing PyO3 wrapper indirectly** (your binding calls
   Python which calls kglite — slow and weird, but works today).
-- **Roll your own C ABI** in your binding crate. ~200 lines of
-  `extern "C"` wrappers. Brittle (no shared maintenance) but
-  unblocks you.
 - **Use the network protocols.** If your binding is HTTP/RPC-shaped,
   the Bolt server or MCP server are already canonical wire formats —
   your "binding" becomes a Bolt/MCP client in your target language,
-  zero Rust code required.
-
-The honest recommendation: if Phase H matters for your work, file
-an issue. Two non-Rust bindings asking for it is what pulls it
-forward on the roadmap.
+  zero compiled code required.
 
 ## Error mapping
 

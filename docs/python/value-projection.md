@@ -196,9 +196,15 @@ Bolt PackStream analogue. For other targets:
   `Node` / `Relationship` / `Path` → either a `Struct` column or a
   JSON-string fallback (the agent ecosystem expects dict-shaped output;
   the structured form is preferred where the target supports it).
-- **C ABI** (ROADMAP §3): expose the variants as a tagged-union C
-  struct; `Box<NodeValue>` becomes a pointer + length pair, lists
-  become arrays with explicit length.
+- **C ABI** (`kglite-c`, shipped 0.10.3): Cypher result rows
+  serialize as JSON-string blobs via
+  `kglite_cypher_result_rows_json`. Each binding parses the JSON
+  with its language's stdlib (Go's `encoding/json`, JS's
+  `JSON.parse`, etc.) — same row-shape rules apply. A future v2
+  may add a tagged-union accessor for performance-critical
+  row-by-row consumption; the JSON-at-boundary path is fine for
+  the common-case query sizes. See
+  [`docs/rust/c-abi.md`](../rust/c-abi.md) §7.
 
 The `Value::type_name() -> &'static str` method (added in C7a, at
 `src/datatypes/values.rs`) returns the canonical PascalCase variant

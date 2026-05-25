@@ -48,6 +48,65 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+  kglite-c:
+    name: kglite-c (C ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-kglite-c-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-kglite-c-
+
+      # Build + lint + test with every dataset feature on. fastembed
+      # is off here because it pulls a ~200 MB ONNX runtime we don't
+      # want on every CI run; the default-feature build below
+      # verifies the no-fastembed path stays compilable.
+      - name: Clippy (sec + sodir + wikidata)
+        run: cargo clippy -p kglite-c --all-targets --features sec,sodir,wikidata -- -D warnings
+
+      - name: Tests (sec + sodir + wikidata)
+        run: cargo test -p kglite-c --features sec,sodir,wikidata
+
+      # Default-feature build — what consumers get without opting
+      # into any dataset / embedder feature. Keeps the no-extras
+      # path honest.
+      - name: Clippy (default features)
+        run: cargo clippy -p kglite-c --all-targets -- -D warnings
+
+      - name: Tests (default features)
+        run: cargo test -p kglite-c
+
+      # Header-drift gate — cbindgen runs in build.rs and writes
+      # include/kglite.h. We commit that file (binding consumers
+      # point at it directly without rebuilding kglite-c). CI must
+      # verify the committed copy matches a fresh cbindgen run, or
+      # any Go / JS / JVM binding compiled against the wrong header
+      # silently mismatches the library.
+      - name: Header drift gate (cbindgen vs committed)
+        run: |
+          # Force a clean regen by removing the header, building
+          # with all features on (the union surface), and diffing
+          # against the committed copy.
+          rm -f crates/kglite-c/include/kglite.h
+          touch crates/kglite-c/build.rs
+          cargo build -p kglite-c --features sec,sodir,wikidata,fastembed
+          git diff --exit-code -- crates/kglite-c/include/kglite.h || {
+            echo "::error::Committed include/kglite.h is out of date — re-run 'cargo build -p kglite-c --features sec,sodir,wikidata,fastembed' and commit the result."
+            exit 1
+          }
+
   python-lint:
     name: Python lint
     runs-on: ubuntu-latest

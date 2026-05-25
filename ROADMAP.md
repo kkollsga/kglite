@@ -153,23 +153,34 @@ crate that future bindings wrap.
 
 ---
 
-### §3 — C ABI + headers
+### §3 — C ABI + headers — ✅ SHIPPED in 0.10.3
 
-**Why.** Foundation for every non-Python, non-Node binding. Languages
-without first-class Rust FFI (Java, Go, C#, Ruby) all bind through C.
-Currently kglite has a C-shaped surface buried under PyO3; surfacing it
-deliberately + producing `kglite.h` via cbindgen makes the door open.
+**Outcome.** `crates/kglite-c` exposes 30 `extern "C"` functions
+covering lifecycle / Cypher / datasets / embedder, with a
+cbindgen-generated `crates/kglite-c/include/kglite.h` committed
+in-tree. Naming convention: `kglite_*` prefix, opaque-handle
+types (`KgliteGraph` / `KgliteSession` / `KgliteCypherResult` /
+`KgliteEmbedder` / `KgliteSecClient`), errno-style errors mapping
+1:1 to `KgErrorCode`, JSON-at-boundary for nested value shapes.
+Feature gating via `KGLITE_FEATURE_*` preprocessor defines.
+`crate-type = ["cdylib", "staticlib", "rlib"]` — consumers link
+statically (Go cgo) or dynamically.
 
-**Scope.** `crates/kglite-capi` exposing the GraphRead/GraphWrite
-subset, Cypher run + result iteration, save/load. Header generated
-into `target/include/kglite.h` for downstream linking. CI builds it
-across the matrix.
+CI has a header-drift gate (fresh cbindgen run vs committed copy)
+plus all-feature clippy + tests. The publish workflow ships
+`kglite-c` to crates.io alongside `kglite` / `kglite-bolt-server`
+/ `kglite-mcp-server`.
 
-**Out of scope.** A full GraphIQ-style C++ wrapper. Stay minimal.
+See [`docs/rust/c-abi.md`](docs/rust/c-abi.md) for the design
+conventions and
+[`docs/rust/implementing-a-binding.md`](docs/rust/implementing-a-binding.md)
+for cgo / napi / JNI worked examples.
 
-**Effort.** 1-2 weeks. Mostly mechanical.
+What's NOT shipped: per-filing SEC fetchers (`fetch_form4_filing`,
+`fetch_13f_info_table`, etc.) and a user-supplied embedder
+callback pattern. Both deferred — additive when a binding asks.
 
-**Depends on.** §2's Rust-API stabilisation makes this easier.
+**Depends on.** §2 (Rust-API stabilisation) — also done.
 
 ---
 
@@ -262,17 +273,21 @@ faster path for inside-process use.
 infra tools, Kubernetes operators). DAWGS driver makes us a drop-in
 storage backend for SpecterOps's stack specifically.
 
-**Scope.** Cgo binding via the §3 C ABI. Once that exists, a DAWGS
-driver is a focused 2-3 week project. Lives in
-`crates/kglite-dawgs` (Go module, separate go.mod, vendored Rust .so).
+**Scope.** Cgo binding via the §3 C ABI (shipped — `crates/kglite-c`).
+Sibling repo `kkollsga/kglite-go`, separate go.mod, pre-built
+`libkglite_c.{so,dylib,dll}` artifacts via GitHub releases. Tiered
+ambition: minimum-viable (~600 LOC, 2-3 days) → production-ready
+(~1500-2000 LOC, 1-2 weeks) → "proper" idiomatic library (3-4 weeks).
+A DAWGS driver layers on top of the Go binding.
 
 **Out of scope.** Making KGLite a drop-in for every Go graph project —
 DAWGS-specific is the right scope until pull from elsewhere appears.
 
-**Effort.** 1-2 weeks for binding, 2-3 weeks for the DAWGS driver.
+**Effort.** 1-2 weeks for production-ready binding, 2-3 weeks for the
+DAWGS driver.
 
-**Depends on.** §3 (C ABI) and §1 (Bolt is the alternative path for
-BloodHound and most consumers).
+**Depends on.** §3 (C ABI) — ✅ done. §1 (Bolt) is the alternative
+path for BloodHound and most consumers.
 
 ---
 

@@ -16,24 +16,29 @@ jobs:
       should_publish_kglite: ${{ steps.check.outputs.should_publish_kglite }}
       should_publish_bolt: ${{ steps.check.outputs.should_publish_bolt }}
       should_publish_mcp: ${{ steps.check.outputs.should_publish_mcp }}
+      should_publish_c: ${{ steps.check.outputs.should_publish_c }}
       kglite_version: ${{ steps.check.outputs.kglite_version }}
       bolt_version: ${{ steps.check.outputs.bolt_version }}
       mcp_version: ${{ steps.check.outputs.mcp_version }}
+      c_version: ${{ steps.check.outputs.c_version }}
     steps:
       - uses: actions/checkout@v6
-      - name: Check kglite + kglite-bolt-server + kglite-mcp-server versions against crates.io
+      - name: Check kglite + kglite-bolt-server + kglite-mcp-server + kglite-c versions against crates.io
         id: check
         run: |
           # Source-of-truth version files (post-G.4):
           KG_VERSION=$(grep -m 1 '^version' crates/kglite/Cargo.toml | cut -d '"' -f 2)
           BS_VERSION=$(grep -m 1 '^version' crates/kglite-bolt-server/Cargo.toml | cut -d '"' -f 2)
           MS_VERSION=$(grep -m 1 '^version' crates/kglite-mcp-server/Cargo.toml | cut -d '"' -f 2)
+          C_VERSION=$(grep -m 1 '^version' crates/kglite-c/Cargo.toml | cut -d '"' -f 2)
           echo "kglite_version=$KG_VERSION" >> $GITHUB_OUTPUT
           echo "bolt_version=$BS_VERSION" >> $GITHUB_OUTPUT
           echo "mcp_version=$MS_VERSION" >> $GITHUB_OUTPUT
+          echo "c_version=$C_VERSION" >> $GITHUB_OUTPUT
           echo "kglite Cargo.toml version:              $KG_VERSION"
           echo "kglite-bolt-server Cargo.toml version:  $BS_VERSION"
           echo "kglite-mcp-server Cargo.toml version:   $MS_VERSION"
+          echo "kglite-c Cargo.toml version:            $C_VERSION"
 
           # crates.io API: 200 if version exists, 404 if not, 403 if
           # rate-limited or User-Agent missing. We use HTTP 404 as the
@@ -55,6 +60,8 @@ jobs:
             -A "$UA" "https://crates.io/api/v1/crates/kglite-bolt-server/$BS_VERSION")
           MS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -A "$UA" "https://crates.io/api/v1/crates/kglite-mcp-server/$MS_VERSION")
+          C_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -A "$UA" "https://crates.io/api/v1/crates/kglite-c/$C_VERSION")
 
           if [ "$KG_STATUS" = "404" ]; then
             echo "kglite $KG_VERSION not on crates.io (HTTP 404) — will publish"
@@ -80,10 +87,18 @@ jobs:
             echo "should_publish_mcp=false" >> $GITHUB_OUTPUT
           fi
 
+          if [ "$C_STATUS" = "404" ]; then
+            echo "kglite-c $C_VERSION not on crates.io (HTTP 404) — will publish"
+            echo "should_publish_c=true" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-c $C_VERSION already on crates.io or unverifiable (HTTP $C_STATUS) — skipping publish"
+            echo "should_publish_c=false" >> $GITHUB_OUTPUT
+          fi
+
   ci-gate:
     name: Wait for CI + wheel build to pass
     needs: [version-check]
-    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true'
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true'
     runs-on: ubuntu-latest
     steps:
       # Same Rust + Python gates the wheel workflow waits for. If
@@ -142,7 +157,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [version-check, ci-gate]
-    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true'
+    if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -176,7 +191,7 @@ jobs:
       # downstream `cargo publish -p ...` will use, so once it
       # finds our crate the next publish will too.
       - name: Wait for crates.io index propagation (kglite)
-        if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true')
+        if: needs.version-check.outputs.should_publish_kglite == 'true' && (needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true')
         run: |
           VERSION="${{ needs.version-check.outputs.kglite_version }}"
           # crates.io's own docs note "an index update can take up
@@ -230,3 +245,24 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p kglite-mcp-server --locked
+
+      # 6. (Optional) Wait before publishing kglite-c. Like the
+      # bolt → mcp wait above, this is cosmetic spacing — kglite-c
+      # only depends on `kglite`, not on bolt-server or mcp-server.
+      # Only fires when BOTH mcp and c are publishing this run.
+      - name: Wait for crates.io index propagation (kglite-mcp-server)
+        if: needs.version-check.outputs.should_publish_mcp == 'true' && needs.version-check.outputs.should_publish_c == 'true'
+        run: sleep 60
+
+      # 7. Publish kglite-c (C ABI crate for non-Rust bindings).
+      # Skipped if its version is already on crates.io. The cdylib +
+      # staticlib artifacts are NOT published here — crates.io
+      # publishes the source crate; consumers run `cargo build` to
+      # produce the shared library. CI release artifacts (precompiled
+      # .so / .dylib / .dll + include/kglite.h) ship via the
+      # release workflow separately.
+      - name: Publish kglite-c
+        if: needs.version-check.outputs.should_publish_c == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p kglite-c --locked

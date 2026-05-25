@@ -4,7 +4,38 @@ After the 2026-05-25 broad scan + binding-framework audit + agent re-scan
 against the upgraded North Star (CLAUDE.md, committed in `0e8edad`), this
 doc captures the phased plan to execute the findings.
 
-## Status snapshot
+## Status (as of release 0.10.3)
+
+**Plan complete except H.4.** All four phases shipped into the
+`release(0.10.3)` commit (5a8e069). H.4 (Go PoC consumer) was
+deliberately deferred — the first real non-Rust binding author
+validates the surface better than a synthetic 500-LOC sketch.
+
+| Phase | Status | Commits |
+|---|---|---|
+| **Boundary principle in CLAUDE.md** | ✅ shipped | `0e8edad`, `08c1836` |
+| **A.1 — `text_match_regex`** | ✅ shipped | `dcbc198` |
+| **A.2 — `shortest_path_length`** | ✅ shipped | `8832eca` |
+| **A.3 — `mode(x)` aggregation** | ✅ shipped | `3fa0c0c` |
+| **A.4 — `db.*` schema procedures** | ✅ shipped | `22e22c5` |
+| **B — `http_status_code` + `json_value_to_kglite_value`** | ✅ shipped | `e4955fa` |
+| **H.1 — C ABI design doc** | ✅ shipped | `3fc651a` |
+| **H.2 — `kglite-c` skeleton + cbindgen** | ✅ shipped | `61e800a` |
+| **H.3 — Sodir + embedder ABI** | ✅ shipped | `b8f75f8` |
+| **H.3a — SEC + Wikidata ABI** | ✅ shipped | `61f335e` |
+| **H.4 — Go PoC consumer** | ⏸ deferred | — |
+| **H.5 — release coordination** | ✅ shipped | `5a8e069` |
+
+The document below is preserved as a historical artifact of the
+plan. For the up-to-date status of the C ABI surface, see
+[`docs/rust/c-abi.md`](../rust/c-abi.md) and the
+[`[0.10.3]` CHANGELOG entry](../../CHANGELOG.md).
+
+---
+
+## Original plan snapshot
+
+(Preserved verbatim from the planning session — outdated as of 0.10.3.)
 
 - **Boundary principle in CLAUDE.md**: expanded with 4 explicit goals,
   two-tier architecture, runtime model, negative-space table,
