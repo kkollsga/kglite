@@ -95,9 +95,19 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 
 Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
 
-**Pushing requires explicit, in-the-moment approval.** Default is *don't push*. The user runs `git push` manually unless they tell you, *in the same turn you'd run it*, to push for them — e.g. "go ahead and push now", "push it", "yes, push". Approval is one-shot: it covers exactly that one `git push` invocation and does not carry across to any later commit, amend, or branch. After the push (whether you ran it or they did) the slate is clean — the next push needs fresh approval.
+**Pushing requires explicit, in-the-moment approval.** Default is *don't push*. The user runs `git push` manually unless they tell you, *in the same turn you'd run it*, to push for them — e.g. "go ahead and push now", "push it", "yes, push". Approval is one-shot: it covers exactly that one `git push` invocation and does not carry across to any later commit, amend, or branch.
 
-Conversational phrasing from earlier in the session ("ship it", "looks good", "you may push", "we're ready") **does not** carry over to a later moment, even within the same turn if other actions intervene. When in doubt, prepare the commit, stop, and ask. The cost of a re-prompt is small; an unapproved push to `main` is not.
+**Exception — the CI fix-and-push loop.** When an approved push triggers CI that fails, and you diagnose the failure as a bug in shipped code or test/CI infra (not a feature gap), you may push subsequent `fix(...)` / `ci(...)` commits *for that same loop* without re-asking, until CI on the most recent push is fully green. This covers the common case where the first push surfaces a flaky dep / missing fixture / linter-only issue and you'd otherwise need to ping the user every iteration just to type "push" again.
+
+The exception **stops applying** the moment any of these are true:
+- All required workflows on the latest push reach `conclusion: success` → loop converged, fresh approval needed for the next push
+- A fix would change the release shape (new version, new feature, scope expansion, removal of declared functionality) → ask, don't push
+- More than ~3 fix-and-push iterations happen on the same loop without progress → likely a deeper problem, surface it and ask
+- The user pivots the conversation away from the CI loop → context shift means fresh approval needed
+
+The loop's pushes are still subject to the same rigor as any release push (lint clean, tests green, dry-runs pass before pushing). The exception removes the "ask first" step, not the "build with care" step.
+
+Conversational phrasing from earlier in the session ("ship it", "looks good", "you may push", "we're ready") **does not** carry over to a later moment outside the fix-and-push loop, even within the same turn if other actions intervene. When in doubt, prepare the commit, stop, and ask. The cost of a re-prompt is small; an unapproved push to `main` is not.
 
 Version source of truth: `Cargo.toml` line 3 (post-G.4: `crates/kglite-py/Cargo.toml` for the wheel version, `crates/kglite/Cargo.toml` for the engine — both should match at release time).
 
