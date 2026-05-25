@@ -107,27 +107,21 @@ jobs:
       # Wait for the per-OS wheel builds. Crates.io publishes are
       # permanent — if the wheel matrix would break on a kglite
       # change, we want to know BEFORE publishing kglite the crate.
-      - name: Wait for Linux wheel build
+      #
+      # `check-regexp` (not `check-name`) so the wait also matches
+      # the UNRENDERED matrix template name `Build wheel - ${{...}}`
+      # that appears when the wheels workflow is skipped entirely
+      # (e.g. the wheel version is already on PyPI, so the version-
+      # check job decides not to run). Without the regexp, wait-on-
+      # check-action exits with "The requested check was never run
+      # against this ref, exiting..." because the rendered per-matrix
+      # names (e.g. `Build wheel - ubuntu-latest - x86_64-...`) only
+      # exist when the workflow actually ran.
+      - name: Wait for wheel build matrix
         uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
-          check-name: 'Build wheel - ubuntu-latest - x86_64-unknown-linux-gnu'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 30
-          allowed-conclusions: success,skipped
-      - name: Wait for macOS wheel build
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Build wheel - macos-latest - aarch64-apple-darwin'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 30
-          allowed-conclusions: success,skipped
-      - name: Wait for Windows wheel build
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Build wheel - windows-latest - x86_64-pc-windows-msvc'
+          check-regexp: '^Build wheel - .*$'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 30
           allowed-conclusions: success,skipped
