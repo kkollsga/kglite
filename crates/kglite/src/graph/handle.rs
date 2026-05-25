@@ -144,9 +144,16 @@ pub fn resolve_code_entity(
 
 /// Infer the node type of the current (latest level) selection by
 /// sampling the first node. Returns `None` if the selection is empty
-/// or the node disappeared. Used by introspection helpers that need
-/// to know "what kind of nodes did we just collect" without forcing
-/// the caller to track it. Lifted from kglite-py in 0.10.1.
+/// or the node disappeared.
+///
+/// **Not re-exported through `kglite::api`** — it takes a
+/// `&CowSelection`, which is currently only used externally by the
+/// Python wheel's fluent-API surface. A future binding cannot
+/// meaningfully call this without first lifting the `Selection`
+/// concept to be a stable api type. When that happens, both should
+/// move to api together. The wheel reaches this directly via
+/// `kglite_core::graph::handle::infer_selection_node_type` for now
+/// (see `crates/kglite-py/src/graph/mod.rs`).
 pub fn infer_selection_node_type(
     selection: &crate::graph::schema::CowSelection,
     dir: &Arc<DirGraph>,
@@ -160,9 +167,12 @@ pub fn infer_selection_node_type(
 }
 
 /// Discover all unique property keys across a slice of typed nodes.
-/// Returns sorted, de-duplicated key names. Used by DataFrame-style
-/// exporters that need a stable column-name set without scanning the
-/// entire graph schema. Lifted from kglite-py in 0.10.1.
+/// Returns sorted, de-duplicated key names — useful for any
+/// row-oriented exporter (CSV, Parquet, DataFrame, JSON-lines) that
+/// needs a stable column-name set without scanning the entire graph
+/// schema. The function takes only core types (`NodeData`,
+/// `StringInterner`) so every binding's table-export path can call
+/// it directly.
 pub fn discover_property_keys_from_data(
     nodes: &[(&str, &crate::graph::schema::NodeData)],
     interner: &crate::graph::schema::StringInterner,

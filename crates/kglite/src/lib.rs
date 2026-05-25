@@ -66,9 +66,14 @@ pub mod api {
     // backing it. The wheel crate (`kglite-py`) defines its own,
     // Python-flavored `KnowledgeGraph` separately — same name,
     // different audience (`pip install kglite` users), polars-style.
+    //
+    // `infer_selection_node_type` is NOT re-exported here: it depends
+    // on `CowSelection`, a wheel-only-external-consumer type. When
+    // the Selection concept gets lifted to a stable api type, both
+    // should land in api together. The wheel reaches the function
+    // directly via `kglite_core::graph::handle::infer_selection_node_type`.
     pub use crate::graph::handle::{
-        discover_property_keys_from_data, infer_selection_node_type, source_location,
-        KnowledgeGraph,
+        discover_property_keys_from_data, source_location, KnowledgeGraph,
     };
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
     pub use crate::graph::dir_graph::make_dir_graph_mut;
