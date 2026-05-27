@@ -524,7 +524,7 @@ impl<'a> CypherExecutor<'a> {
                         // (hour/minute/second) return 0. Promoting to
                         // NaiveDateTime is a separate refactor (touches
                         // 200+ Value-match sites + storage format); see
-                        // 0.9.0-readiness.md §3 for the deferred subtlety.
+                        // archive/0.9.0-readiness.md §3 for the deferred subtlety.
                         use chrono::Datelike;
                         match property.as_str() {
                             "year" => Ok(Value::Int64(date.year() as i64)),

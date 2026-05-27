@@ -33,7 +33,7 @@ def datetime_graph():
     "2023-04-15T10:30:45" don't ingest cleanly today and would require
     promoting Value::DateTime → NaiveDateTime (200+ Value-match sites
     + storage format change). Deferred from §3 v1; tracked in
-    0.9.0-readiness.md §3."""
+    dev-documentation/archive/0.9.0-readiness.md §3 (local-only)."""
     g = kglite.KnowledgeGraph()
     df = pd.DataFrame(
         [

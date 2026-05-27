@@ -295,9 +295,10 @@ queued):
 - `QueryContext` — `temporal_context` is wheel-only today
 
 See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
-your binding" for the worked dataset example, and
-`docs/internal/reverse-audit-2026-05-25.md` for the audit
-methodology with worked-example classifications.
+your binding" for the worked dataset example. (The reverse-audit
+methodology — strict posture, test the signature not the
+consumer count — is recorded in the maintainer's local audit
+under `dev-documentation/audits/`.)
 
 ## In-memory is the core product
 

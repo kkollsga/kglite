@@ -630,11 +630,11 @@ binding.
 
 ### The audit history
 
-- `docs/internal/api-audit-2026-05-25.md` — the original survey of
-  the `kglite::api` surface vs the wheel's PyO3 methods.
-- `docs/internal/consider-for-future.md` — items deliberately
-  deferred from current scope per the boundary rule; revisit when
-  a second binding lands or when the duplication becomes evident.
+The `kglite::api` surface was sized against the wheel's PyO3 methods
+in May 2026 (the binding-framework sprint that produced 0.10.0
+through 0.10.3). The current shape reflects which items every
+binding would write identically vs which are tailored to one
+environment.
 
 ## Binding-side patterns cookbook
 
@@ -795,10 +795,9 @@ your specific binding:
   centrality, community detection — what's implemented internally
   vs. aspirational needs verification (audit punchlist item #8).
 
-If you build a binding and discover a real gap, the audit doc
-(`docs/internal/api-audit-2026-05-25.md`) is the right place to
-read the prior survey; the punchlist there is what we're working
-through.
+If you build a binding and discover a real gap, file an issue —
+that's the right signal for promoting an item from the maintainer's
+deferred-items list into actual work.
 
 ## See also
 

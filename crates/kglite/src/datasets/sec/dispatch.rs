@@ -11,9 +11,8 @@
 //!
 //! Lifted from the Python wrapper's
 //! `_dispatch_per_filing_fetches` in the 2026-05-25 binding prep.
-//! The execution half stays in the wrapper for now (see
-//! `docs/internal/consider-for-future.md` → "SEC dispatch execution
-//! lift" for the deferred follow-up).
+//! The execution half stays in the wrapper for now; lifting it is
+//! tracked in the maintainer's deferred-items list.
 
 use std::collections::HashMap;
 

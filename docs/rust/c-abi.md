@@ -9,8 +9,7 @@ C ABI rather than directly against `kglite::api::*` Rust items. This
 doc fixes the design conventions before implementation so the
 shape doesn't drift.
 
-The companion plan (`docs/internal/binding-framework-phased-plan-2026-05-25.md`)
-runs Phase H in 5 sub-phases:
+Phase H ran in 5 sub-phases:
 
 | Sub-phase | What |
 |---|---|
@@ -572,10 +571,7 @@ Total Phase H: ~1.5-2 weeks of focused work.
 
 ## Companion docs
 
-- `docs/internal/binding-framework-phased-plan-2026-05-25.md` —
-  the overall phased plan
-- `docs/rust/implementing-a-binding.md` — guide for binding authors
-  (will be rewritten in H.5 with real cgo / napi / JNI examples
-  against the shipped C ABI)
+- `docs/rust/implementing-a-binding.md` — guide for binding authors,
+  with cgo / napi / JNI examples calling the shipped C ABI
 - `CLAUDE.md` "boundary principle" section — the design rules
   these conventions emerge from

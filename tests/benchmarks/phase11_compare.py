@@ -6,8 +6,8 @@ disk +15 %) per the Phase 11 plan.
 
 Usage:
     python tests/benchmarks/phase11_compare.py \
-        dev-documentation/phase_artifacts/phase11_v0_7_17.json \
-        dev-documentation/phase_artifacts/phase11_main.json \
+        dev-documentation/archive/phase_artifacts/phase11_v0_7_17.json \
+        dev-documentation/archive/phase_artifacts/phase11_main.json \
         > /tmp/phase11_delta.md
 """
 
