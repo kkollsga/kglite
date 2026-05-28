@@ -1045,6 +1045,19 @@ fn try_match_merge_pattern(
 
                 let label = node_pat.label.as_deref().unwrap_or("Node");
 
+                // The id/property/composite indexes and `type_indices` are
+                // keyed by PRIMARY type. If `label` also occurs as a
+                // secondary label on some node, those structures miss the
+                // secondary-labelled candidates and would falsely report
+                // "no match" → MERGE creates a duplicate. In that case skip
+                // the index short-circuits and scan the full primary∪secondary
+                // candidate set (`nodes_with_label`). The common case (label
+                // has no secondary occurrences) keeps every index fast path.
+                let label_has_secondary = graph.has_secondary_labels
+                    && graph
+                        .secondary_label_index
+                        .contains_key(&crate::graph::schema::InternedKey::from_str(label));
+
                 // Evaluate expected properties
                 let expected_props: Vec<(&str, Value)> = node_pat
                     .properties
@@ -1081,56 +1094,32 @@ fn try_match_merge_pattern(
                 };
 
                 // --- Index-accelerated matching ---
-
-                // 1. If pattern contains "id" property, use O(1) id_index lookup
-                if let Some((_, id_value)) = expected_props.iter().find(|(k, _)| *k == "id") {
-                    if let Some(idx) = graph.lookup_by_id_readonly(label, id_value) {
-                        // ID matched — verify remaining properties (if any)
-                        if expected_props.len() == 1 || node_matches_all(idx, &expected_props) {
-                            return Ok(Some(build_result(idx)));
-                        }
-                    }
-                    return Ok(None);
-                }
-
-                // 2. Single non-id property: try property index
-                if expected_props.len() == 1 {
-                    let (key, ref value) = expected_props[0];
-                    // Map name/title aliases to the stored field name
-                    let index_key = if key == "name" || key == "title" {
-                        "title"
-                    } else {
-                        key
-                    };
-                    if let Some(candidates) = graph.lookup_by_index(label, index_key, value) {
-                        for &idx in &candidates {
-                            if node_matches_all(idx, &expected_props) {
+                // Indexes are keyed by primary type; skip them entirely when
+                // `label` has secondary occurrences (their early `return
+                // Ok(None)` would falsely report "no match" for a node
+                // labelled `:label` only secondarily).
+                if !label_has_secondary {
+                    // 1. If pattern contains "id" property, use O(1) id_index lookup
+                    if let Some((_, id_value)) = expected_props.iter().find(|(k, _)| *k == "id") {
+                        if let Some(idx) = graph.lookup_by_id_readonly(label, id_value) {
+                            // ID matched — verify remaining properties (if any)
+                            if expected_props.len() == 1 || node_matches_all(idx, &expected_props) {
                                 return Ok(Some(build_result(idx)));
                             }
                         }
                         return Ok(None);
                     }
-                    // No index — fall through to linear scan
-                }
 
-                // 3. Multi-property: try composite index
-                if expected_props.len() >= 2 {
-                    // Build sorted key/value arrays for composite lookup
-                    // (exclude id/name/title which use special storage)
-                    let mut indexable: Vec<(&str, &Value)> = expected_props
-                        .iter()
-                        .filter(|(k, _)| *k != "id" && *k != "name" && *k != "title")
-                        .map(|(k, v)| (*k, v))
-                        .collect();
-                    if indexable.len() >= 2 {
-                        indexable.sort_by(|a, b| a.0.cmp(b.0));
-                        let names: Vec<String> =
-                            indexable.iter().map(|(k, _)| k.to_string()).collect();
-                        let values: Vec<Value> =
-                            indexable.iter().map(|(_, v)| (*v).clone()).collect();
-                        if let Some(candidates) =
-                            graph.lookup_by_composite_index(label, &names, &values)
-                        {
+                    // 2. Single non-id property: try property index
+                    if expected_props.len() == 1 {
+                        let (key, ref value) = expected_props[0];
+                        // Map name/title aliases to the stored field name
+                        let index_key = if key == "name" || key == "title" {
+                            "title"
+                        } else {
+                            key
+                        };
+                        if let Some(candidates) = graph.lookup_by_index(label, index_key, value) {
                             for &idx in &candidates {
                                 if node_matches_all(idx, &expected_props) {
                                     return Ok(Some(build_result(idx)));
@@ -1138,15 +1127,45 @@ fn try_match_merge_pattern(
                             }
                             return Ok(None);
                         }
+                        // No index — fall through to linear scan
+                    }
+
+                    // 3. Multi-property: try composite index
+                    if expected_props.len() >= 2 {
+                        // Build sorted key/value arrays for composite lookup
+                        // (exclude id/name/title which use special storage)
+                        let mut indexable: Vec<(&str, &Value)> = expected_props
+                            .iter()
+                            .filter(|(k, _)| *k != "id" && *k != "name" && *k != "title")
+                            .map(|(k, v)| (*k, v))
+                            .collect();
+                        if indexable.len() >= 2 {
+                            indexable.sort_by(|a, b| a.0.cmp(b.0));
+                            let names: Vec<String> =
+                                indexable.iter().map(|(k, _)| k.to_string()).collect();
+                            let values: Vec<Value> =
+                                indexable.iter().map(|(_, v)| (*v).clone()).collect();
+                            if let Some(candidates) =
+                                graph.lookup_by_composite_index(label, &names, &values)
+                            {
+                                for &idx in &candidates {
+                                    if node_matches_all(idx, &expected_props) {
+                                        return Ok(Some(build_result(idx)));
+                                    }
+                                }
+                                return Ok(None);
+                            }
+                        }
                     }
                 }
 
-                // 4. Fall back to linear scan (no index covers the pattern)
-                if let Some(type_nodes) = graph.type_indices.get(label) {
-                    for idx in type_nodes.iter() {
-                        if node_matches_all(idx, &expected_props) {
-                            return Ok(Some(build_result(idx)));
-                        }
+                // 4. Fall back to linear scan (no index covers the pattern, or
+                // `label` has secondary occurrences). `nodes_with_label` unions
+                // primary + secondary candidates (and is the identical
+                // `type_indices` clone when no secondary labels exist).
+                for idx in graph.nodes_with_label(label) {
+                    if node_matches_all(idx, &expected_props) {
+                        return Ok(Some(build_result(idx)));
                     }
                 }
                 Ok(None)

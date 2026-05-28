@@ -64,6 +64,11 @@ impl TransientEqIndex {
             return None;
         }
         let np = extract_single_node_pattern(pattern)?;
+        // Multi-label patterns (`MATCH (n:A:B)`) need a label intersection
+        // the single-property eq-index can't express — fall to the matcher.
+        if !np.extra_labels.is_empty() {
+            return None;
+        }
         let node_type = np.node_type.as_deref()?.to_string();
         let bind_var = np.variable.as_deref()?.to_string();
         let props = np.properties.as_ref()?;
@@ -83,12 +88,14 @@ impl TransientEqIndex {
         if graph.has_any_index(&node_type, property) {
             return None;
         }
-        let nodes = graph.type_indices.get(&node_type)?;
+        // Union primary + secondary candidates (identical to a
+        // `type_indices` clone on single-label graphs).
+        let nodes = graph.nodes_with_label(&node_type);
         if nodes.is_empty() {
             return None;
         }
         let mut by_value: HashMap<Value, Vec<NodeIndex>> = HashMap::with_capacity(nodes.len());
-        for idx in nodes.iter() {
+        for idx in nodes {
             if let Some(node) = graph.graph.node_weight(idx) {
                 let val = resolve_node_property(node, property, graph);
                 if !matches!(val, Value::Null) {
