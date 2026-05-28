@@ -158,7 +158,7 @@ pub(super) fn fuse_anchored_edge_count(query: &mut CypherQuery, graph: &DirGraph
     );
 }
 
-pub(super) fn fuse_count_short_circuits(query: &mut CypherQuery) {
+pub(super) fn fuse_count_short_circuits(query: &mut CypherQuery, has_secondary_labels: bool) {
     use crate::graph::core::pattern_matching::EdgeDirection;
 
     if query.clauses.len() < 2 {
@@ -208,6 +208,16 @@ pub(super) fn fuse_count_short_circuits(query: &mut CypherQuery) {
             return;
         }
 
+        // Multi-label patterns (`MATCH (n:A:B) RETURN count(n)`) require an
+        // intersection across the labels, which the O(1) type-bucket count
+        // can't express. Bail to the full matcher, which AND-intersects via
+        // `node_labels`. (Single-label secondary counts ARE handled — the
+        // FusedCountTypedNode executor unions the primary + secondary
+        // buckets for `node_type`.)
+        if !node.extra_labels.is_empty() {
+            return;
+        }
+
         let node_var = node.variable.as_deref();
 
         // Typed node count: MATCH (n:Type) RETURN count(n)
@@ -244,7 +254,8 @@ pub(super) fn fuse_count_short_circuits(query: &mut CypherQuery) {
 
         if return_clause.items.len() == 2 {
             // Two items: one must be n.type / labels(n), the other count(var) / count(*)
-            let (type_idx, count_idx) = identify_type_count_pair(&return_clause.items, node_var);
+            let (type_idx, count_idx) =
+                identify_type_count_pair(&return_clause.items, node_var, has_secondary_labels);
             if let Some((ti, ci)) = type_idx.zip(count_idx) {
                 let type_alias = return_item_column_name(&return_clause.items[ti]);
                 let count_alias = return_item_column_name(&return_clause.items[ci]);
@@ -365,6 +376,7 @@ pub(super) fn is_count_of_var_or_star(expr: &Expression, node_var: Option<&str>)
 pub(super) fn identify_type_count_pair(
     items: &[ReturnItem],
     node_var: Option<&str>,
+    has_secondary_labels: bool,
 ) -> (Option<usize>, Option<usize>) {
     let mut type_idx = None;
     let mut count_idx = None;
@@ -372,30 +384,43 @@ pub(super) fn identify_type_count_pair(
     for (i, item) in items.iter().enumerate() {
         if is_count_of_var_or_star(&item.expression, node_var) {
             count_idx = Some(i);
-        } else if is_node_type_accessor(&item.expression, node_var) {
+        } else if is_primary_type_accessor(&item.expression, node_var)
+            || (!has_secondary_labels && is_labels_call(&item.expression, node_var))
+        {
             type_idx = Some(i);
         }
     }
     (type_idx, count_idx)
 }
 
-/// Check if expression is `n.type`, `n.node_type`, `n.label`, or `labels(n)`.
-pub(super) fn is_node_type_accessor(expr: &Expression, node_var: Option<&str>) -> bool {
+/// Check if expression is `n.type`, `n.node_type`, or `n.label` — a scalar
+/// accessor for the node's *primary* type. Every node has exactly one, so
+/// `FusedCountByType` (which counts per primary-type bucket) is always
+/// correct for these, regardless of secondary labels.
+pub(super) fn is_primary_type_accessor(expr: &Expression, node_var: Option<&str>) -> bool {
     match expr {
         Expression::PropertyAccess { variable, property } => {
             let is_type_prop = matches!(property.as_str(), "type" | "node_type" | "label");
             is_type_prop && node_var.is_some_and(|nv| variable == nv)
         }
-        Expression::FunctionCall { name, args, .. } => {
-            if name == "labels" && args.len() == 1 {
-                if let Expression::Variable(v) = &args[0] {
-                    return node_var.is_some_and(|nv| v == nv);
-                }
-            }
-            false
-        }
         _ => false,
     }
+}
+
+/// Check if expression is `labels(n)`. Grouping by `labels(n)` is only
+/// equivalent to grouping by primary type when no node carries a secondary
+/// label — otherwise a multi-labelled node forms its own label-set group
+/// that the per-primary-type `FusedCountByType` count can't express. Callers
+/// must gate this on `!has_secondary_labels`.
+pub(super) fn is_labels_call(expr: &Expression, node_var: Option<&str>) -> bool {
+    if let Expression::FunctionCall { name, args, .. } = expr {
+        if name == "labels" && args.len() == 1 {
+            if let Expression::Variable(v) = &args[0] {
+                return node_var.is_some_and(|nv| v == nv);
+            }
+        }
+    }
+    false
 }
 
 /// For `RETURN type(r), count(*)` — identify edge type function and count.

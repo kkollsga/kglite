@@ -5,8 +5,8 @@ use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
 use crate::graph::core::pattern_matching::{
-    EdgeDirection, MatchBinding, Pattern, PatternElement, PatternExecutor, PatternMatch,
-    PropertyMatcher,
+    EdgeDirection, MatchBinding, NodePattern, Pattern, PatternElement, PatternExecutor,
+    PatternMatch, PropertyMatcher,
 };
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
@@ -1873,6 +1873,37 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
+    /// Candidate node indices for a fused single-node scan, multi-label
+    /// aware. Mirrors `PatternExecutor::find_matching_nodes`'s
+    /// `needs_secondary_path`: unions the primary type bucket with the
+    /// secondary-label index for the node type, then AND-intersects any
+    /// extra labels (`MATCH (n:A:B)`). A `None` node type yields a full
+    /// node scan. The choke-point API (`DirGraph::add_node_label`) forbids
+    /// a node holding the same key as both primary and secondary, so the
+    /// union is duplicate-free.
+    ///
+    /// Without this, the fused scan paths would miss secondary-only-labelled
+    /// nodes (`MATCH (n:SecLabel)`) and over-include when extra labels are
+    /// meant to narrow the match (`MATCH (n:Type:SecLabel)`).
+    fn fused_scan_candidates(&self, node_pattern: &NodePattern) -> Vec<NodeIndex> {
+        let Some(nt) = node_pattern.node_type.as_deref() else {
+            return self.graph.graph.node_indices().collect();
+        };
+        let candidates = self.graph.nodes_with_label(nt);
+        if node_pattern.extra_labels.is_empty() {
+            return candidates;
+        }
+        let extra_keys: Vec<InternedKey> = node_pattern
+            .extra_labels
+            .iter()
+            .map(|s| InternedKey::from_str(s))
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|&idx| extra_keys.iter().all(|&k| self.graph.node_has_label(idx, k)))
+            .collect()
+    }
+
     /// Fused MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)
     /// Single-pass node scan: iterates nodes directly, evaluates group keys
     /// and aggregates without creating intermediate ResultRows.
@@ -1891,21 +1922,9 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("FusedNodeScanAggregate: expected node pattern".into()),
         };
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
-        let node_type = node_pattern.node_type.as_deref();
 
-        // Get candidate node indices
-        let node_indices: Vec<petgraph::graph::NodeIndex> = if let Some(nt) = node_type {
-            if let Some(indices) = self.graph.type_indices.get(nt) {
-                indices.to_vec()
-            } else {
-                Vec::new()
-            }
-        } else {
-            {
-                let g = &self.graph.graph;
-                g.node_indices().collect()
-            }
-        };
+        // Get candidate node indices (multi-label aware).
+        let node_indices = self.fused_scan_candidates(node_pattern);
 
         // Classify RETURN items into group keys and aggregates
         let mut group_key_indices = Vec::new();
@@ -2231,21 +2250,9 @@ impl<'a> CypherExecutor<'a> {
             _ => return Err("FusedNodeScanTopK: expected node pattern".into()),
         };
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
-        let node_type = node_pattern.node_type.as_deref();
 
-        // Get candidate node indices
-        let node_indices: Vec<petgraph::graph::NodeIndex> = if let Some(nt) = node_type {
-            if let Some(indices) = self.graph.type_indices.get(nt) {
-                indices.to_vec()
-            } else {
-                Vec::new()
-            }
-        } else {
-            {
-                let g = &self.graph.graph;
-                g.node_indices().collect()
-            }
-        };
+        // Get candidate node indices (multi-label aware).
+        let node_indices = self.fused_scan_candidates(node_pattern);
 
         // Pattern property filter
         let pattern_executor = if node_pattern.properties.is_some() {

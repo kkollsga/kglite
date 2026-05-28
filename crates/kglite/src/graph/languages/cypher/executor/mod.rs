@@ -587,12 +587,29 @@ impl<'a> CypherExecutor<'a> {
                 })
             }
             Clause::FusedCountTypedNode { node_type, alias } => {
-                let count = self
+                // Count nodes carrying `node_type` as EITHER their primary
+                // type or a secondary label. The choke-point API
+                // (`DirGraph::add_node_label`) forbids a node holding the
+                // same key as both primary and secondary, so the two buckets
+                // are disjoint and sum without double-counting. Multi-label
+                // patterns (`:A:B`) never reach here — the fusion pass bails
+                // on extra labels, leaving the intersection to the matcher.
+                let primary = self
                     .graph
                     .type_indices
                     .get(node_type.as_str())
-                    .map(|v| v.len() as i64)
+                    .map(|v| v.len())
                     .unwrap_or(0);
+                let secondary = if self.graph.has_secondary_labels {
+                    self.graph
+                        .secondary_label_index
+                        .get(&InternedKey::from_str(node_type))
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let count = (primary + secondary) as i64;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
                 Ok(ResultSet {

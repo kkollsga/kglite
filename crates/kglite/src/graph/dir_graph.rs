@@ -1510,6 +1510,52 @@ impl DirGraph {
         labels
     }
 
+    /// All nodes carrying `label` as EITHER their primary type or a
+    /// secondary label — the canonical "candidates for `MATCH (n:label)`"
+    /// set. This is the single source of truth that every label-based
+    /// candidate-selection site should route through, mirroring
+    /// `PatternExecutor::find_matching_nodes`'s `needs_secondary_path`.
+    ///
+    /// Single-label fast path: when no node anywhere carries a secondary
+    /// label, this returns exactly `type_indices[label].to_vec()` — byte
+    /// for byte what every primary-only call site produced before
+    /// multi-label existed, so single-label performance is unchanged.
+    ///
+    /// The choke-point API (`add_node_label`) forbids a node holding the
+    /// same key as both primary and secondary, so the union is
+    /// duplicate-free.
+    pub fn nodes_with_label(&self, label: &str) -> Vec<NodeIndex> {
+        let mut out = self
+            .type_indices
+            .get(label)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        if self.has_secondary_labels {
+            if let Some(secondary) = self
+                .secondary_label_index
+                .get(&InternedKey::from_str(label))
+            {
+                out.extend(secondary.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// True if `idx` carries `key` as its primary type or a secondary
+    /// label. Membership test companion to `nodes_with_label` for sites
+    /// that filter an existing candidate set rather than enumerate one.
+    pub fn node_has_label(&self, idx: NodeIndex, key: InternedKey) -> bool {
+        use crate::graph::storage::GraphRead;
+        if GraphRead::node_type_of(&self.graph, idx) == Some(key) {
+            return true;
+        }
+        self.has_secondary_labels
+            && self
+                .secondary_label_index
+                .get(&key)
+                .is_some_and(|bucket| bucket.contains(&idx))
+    }
+
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
     /// Called after deserialization to convert the transient Map storage to dense slot-vec.
     /// Builds TypeSchemas per node type and stores them in `self.type_schemas`.
@@ -2718,5 +2764,57 @@ mod multi_label_tests {
 
         let labels = g.node_labels(idx);
         assert_eq!(labels, vec![person, reviewer]);
+    }
+
+    #[test]
+    fn nodes_with_label_single_label_fast_path() {
+        // With no secondary labels anywhere, nodes_with_label must
+        // return exactly type_indices[label] — the byte-identical
+        // result every primary-only call site produced pre-multi-label.
+        let mut g = DirGraph::new();
+        let a = add_node(&mut g, "a", "Person");
+        let b = add_node(&mut g, "b", "Person");
+        add_node(&mut g, "w", "Widget");
+
+        assert!(!g.has_secondary_labels);
+        assert_eq!(g.nodes_with_label("Person"), vec![a, b]);
+        assert_eq!(g.nodes_with_label("Widget").len(), 1);
+        assert!(g.nodes_with_label("Absent").is_empty());
+    }
+
+    #[test]
+    fn nodes_with_label_unions_primary_and_secondary() {
+        let mut g = DirGraph::new();
+        let a = add_node(&mut g, "a", "Person"); // primary Person, + VIP
+        let b = add_node(&mut g, "b", "Person"); // primary Person only
+        let w = add_node(&mut g, "w", "Widget"); // primary Widget, + VIP
+        let vip = g.interner.get_or_intern("VIP");
+        g.add_node_label(a, vip);
+        g.add_node_label(w, vip);
+
+        // Primary lookups still include their primary-typed nodes.
+        let persons = g.nodes_with_label("Person");
+        assert_eq!(persons, vec![a, b]);
+
+        // :VIP is a secondary-only label — union pulls from both buckets.
+        let mut vips = g.nodes_with_label("VIP");
+        vips.sort();
+        let mut expected = vec![a, w];
+        expected.sort();
+        assert_eq!(vips, expected);
+    }
+
+    #[test]
+    fn node_has_label_primary_secondary_and_absent() {
+        let mut g = DirGraph::new();
+        let a = add_node(&mut g, "a", "Person");
+        let person = g.interner.get_or_intern("Person");
+        let vip = g.interner.get_or_intern("VIP");
+        let ghost = g.interner.get_or_intern("Ghost");
+        g.add_node_label(a, vip);
+
+        assert!(g.node_has_label(a, person)); // primary
+        assert!(g.node_has_label(a, vip)); // secondary
+        assert!(!g.node_has_label(a, ghost)); // absent
     }
 }
