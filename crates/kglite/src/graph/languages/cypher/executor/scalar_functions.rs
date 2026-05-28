@@ -465,12 +465,17 @@ impl<'a> CypherExecutor<'a> {
                 // labels(n) returns the list of node labels: primary
                 // first, then secondaries in insertion order.
                 //
-                // Multi-label arrived in 0.10.5 (Track C). The Track C
-                // swap-point comment that lived here for a year is now
-                // reality.
+                // Routes through `DirGraph::node_labels`, which reads
+                // secondaries from `secondary_label_index` (the
+                // canonical source maintained by the choke-point label
+                // API). This works uniformly across all three
+                // backends, including disk — where the backend
+                // `node_labels_of` would only see the primary because
+                // disk-materialised NodeData carries empty
+                // extra_labels.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
-                        let keys = self.graph.graph.node_labels_of(idx);
+                        let keys = self.graph.node_labels(idx);
                         if !keys.is_empty() {
                             let labels: Vec<Value> = keys
                                 .iter()
