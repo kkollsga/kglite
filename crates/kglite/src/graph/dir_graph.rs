@@ -1588,6 +1588,8 @@ impl DirGraph {
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);
+        let mut new_secondary: HashMap<InternedKey, Vec<NodeIndex>> = HashMap::new();
+        let mut has_secondary = false;
 
         let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for node_idx in node_indices {
@@ -1599,6 +1601,14 @@ impl DirGraph {
                 .entry(type_str)
                 .or_insert_with(|| Vec::with_capacity(avg_per_type))
                 .push(node_idx);
+
+            // Rebuild secondary_label_index from NodeData.extra_labels
+            if !node.extra_labels.is_empty() {
+                has_secondary = true;
+                for &key in &node.extra_labels {
+                    new_secondary.entry(key).or_default().push(node_idx);
+                }
+            }
 
             // Convert Map → Compact
             if let PropertyStorage::Map(_) = &node.properties {
@@ -1620,6 +1630,8 @@ impl DirGraph {
 
         self.type_indices.replace_with(new_type_indices);
         self.type_schemas = arc_schemas;
+        self.secondary_label_index = new_secondary;
+        self.has_secondary_labels = has_secondary;
     }
 
     /// Convert the graph to disk-backed storage mode.

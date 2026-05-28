@@ -449,6 +449,15 @@ fn create_node(
     // Ensure type metadata exists for this type (consistent with Python add_nodes API)
     ensure_type_metadata(graph, &label, node_idx);
 
+    // Apply secondary labels from `CREATE (n:A:B:C)` patterns. The
+    // first label is the primary type (set via NodeData::new_compact
+    // above); the rest are added through the choke-point API so the
+    // secondary_label_index stays in sync.
+    for extra in &node_pat.extra_labels {
+        let key = graph.interner.get_or_intern(extra);
+        graph.add_node_label(node_idx, key);
+    }
+
     stats.nodes_created += 1;
 
     Ok(node_idx)
@@ -695,10 +704,13 @@ fn execute_set(
                     }
                 }
                 SetItem::Label { variable, label } => {
-                    return Err(format!(
-                        "SET label (SET {}:{}) is not yet supported",
-                        variable, label
-                    ));
+                    let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
+                        format!("Variable '{}' not bound to a node in SET", variable)
+                    })?;
+                    let key = graph.interner.get_or_intern(label);
+                    if graph.add_node_label(node_idx, key) {
+                        stats.properties_set += 1;
+                    }
                 }
             }
         }
@@ -888,10 +900,13 @@ fn execute_remove(
                     }
                 }
                 RemoveItem::Label { variable, label } => {
-                    return Err(format!(
-                        "REMOVE label (REMOVE {}:{}) is not supported — kglite uses single node_type",
-                        variable, label
-                    ));
+                    let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
+                        format!("Variable '{}' not bound to a node in REMOVE", variable)
+                    })?;
+                    let key = graph.interner.get_or_intern(label);
+                    if graph.remove_node_label(node_idx, key)? {
+                        stats.properties_removed += 1;
+                    }
                 }
             }
         }

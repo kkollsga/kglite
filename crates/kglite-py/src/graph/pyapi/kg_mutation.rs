@@ -911,6 +911,111 @@ impl KnowledgeGraph {
         self.inner.get_node_types()
     }
 
+    /// Add a secondary label to a batch of nodes by id.
+    ///
+    /// Secondary labels are queryable via Cypher (`MATCH (n:Label)`)
+    /// and surfaced by `labels(n)`. The primary type (set by
+    /// `add_nodes(node_type=...)`) is immutable via this API — to
+    /// retype a node, use `SET n.type = 'NewType'`.
+    ///
+    /// Args:
+    ///     node_type: Primary type of the nodes to label.
+    ///     ids: List of node ids (the unique_id_field values).
+    ///     label: Secondary label to add.
+    ///
+    /// Returns:
+    ///     dict with ``labelled`` (count of nodes the label was newly
+    ///     added to) and ``skipped`` (ids that don't exist as
+    ///     ``node_type`` nodes). Idempotent — re-adding a label that's
+    ///     already present is counted in ``skipped``.
+    fn add_label(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        ids: &Bound<'_, PyList>,
+        label: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let g = Arc::make_mut(&mut self.inner);
+        if !g.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
+        g.build_id_index(node_type);
+        let key = g.interner.get_or_intern(label);
+        let mut labelled = 0usize;
+        let mut skipped = 0usize;
+        for item in ids.iter() {
+            let id_val = py_in::py_value_to_value(&item)?;
+            match g.lookup_by_id(node_type, &id_val) {
+                Some(idx) => {
+                    if g.add_node_label(idx, key) {
+                        labelled += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                None => skipped += 1,
+            }
+        }
+        let result = PyDict::new(py);
+        result.set_item("labelled", labelled)?;
+        result.set_item("skipped", skipped)?;
+        Ok(result.into())
+    }
+
+    /// Remove a secondary label from a batch of nodes by id.
+    ///
+    /// Errors if `label` is the primary type — use `SET n.type` to
+    /// retype a node.
+    ///
+    /// Args:
+    ///     node_type: Primary type of the nodes.
+    ///     ids: List of node ids.
+    ///     label: Secondary label to remove.
+    ///
+    /// Returns:
+    ///     dict with ``removed`` (count of nodes the label was
+    ///     actually removed from) and ``skipped`` (ids that don't
+    ///     exist, or didn't have the label).
+    fn remove_label(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        ids: &Bound<'_, PyList>,
+        label: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let g = Arc::make_mut(&mut self.inner);
+        if !g.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
+        g.build_id_index(node_type);
+        let key = g.interner.get_or_intern(label);
+        let mut removed = 0usize;
+        let mut skipped = 0usize;
+        for item in ids.iter() {
+            let id_val = py_in::py_value_to_value(&item)?;
+            match g.lookup_by_id(node_type, &id_val) {
+                Some(idx) => match g.remove_node_label(idx, key) {
+                    Ok(true) => removed += 1,
+                    Ok(false) => skipped += 1,
+                    Err(e) => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
+                    }
+                },
+                None => skipped += 1,
+            }
+        }
+        let result = PyDict::new(py);
+        result.set_item("removed", removed)?;
+        result.set_item("skipped", skipped)?;
+        Ok(result.into())
+    }
+
     /// Add multiple node types at once from a list of node specifications.
     ///
     /// This enables bulk loading of nodes from data sources that provide

@@ -654,6 +654,11 @@ pub enum CreateElement {
 pub struct CreateNodePattern {
     pub variable: Option<String>,
     pub label: Option<String>,
+    /// Additional labels from Cypher multi-label CREATE syntax like
+    /// `(n:Person:Director)`. The first label lives in `label`
+    /// (becomes the primary type); these are added as secondaries
+    /// via `DirGraph::add_node_label`.
+    pub extra_labels: Vec<String>,
     pub properties: Vec<(String, Expression)>,
 }
 

@@ -269,10 +269,12 @@ impl CypherParser {
     }
 
     /// Parse a node in a CREATE pattern: (var:Label {key: expr, ...})
+    /// Also handles multi-label: `(var:Primary:Extra1:Extra2 {…})`.
     pub(super) fn parse_create_node(&mut self) -> Result<CreateNodePattern, String> {
         self.expect(&CypherToken::LParen)?;
         let mut variable = None;
         let mut label = None;
+        let mut extra_labels: Vec<String> = Vec::new();
         let mut properties = Vec::new();
 
         // Parse optional variable name
@@ -285,7 +287,7 @@ impl CypherParser {
             }
         }
 
-        // Parse optional :Label
+        // Parse :Primary[:Extra1:Extra2:…]
         if self.check(&CypherToken::Colon) {
             self.advance();
             if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
@@ -293,6 +295,15 @@ impl CypherParser {
                 label = Some(name);
             } else {
                 return Err("Expected label name after ':'".to_string());
+            }
+            while self.check(&CypherToken::Colon) {
+                self.advance();
+                if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
+                    self.advance();
+                    extra_labels.push(name);
+                } else {
+                    return Err("Expected label name after ':'".to_string());
+                }
             }
         }
 
@@ -305,6 +316,7 @@ impl CypherParser {
         Ok(CreateNodePattern {
             variable,
             label,
+            extra_labels,
             properties,
         })
     }
@@ -460,21 +472,28 @@ impl CypherParser {
                     expression,
                 });
             } else if self.check(&CypherToken::Colon) {
-                // Label assignment: var:Label
-                self.advance();
-                let label = match self.peek().cloned() {
-                    Some(CypherToken::Identifier(name)) => {
-                        self.advance();
-                        name
+                // Label assignment: var:Label[:More:...]
+                // Multi-label syntax expands into one SetItem::Label
+                // per label, mirroring Neo4j semantics.
+                loop {
+                    self.advance(); // consume :
+                    let label = match self.peek().cloned() {
+                        Some(CypherToken::Identifier(name)) => {
+                            self.advance();
+                            name
+                        }
+                        other => {
+                            return Err(format!("Expected label name after ':', got {:?}", other));
+                        }
+                    };
+                    items.push(SetItem::Label {
+                        variable: var_name.clone(),
+                        label,
+                    });
+                    if !self.check(&CypherToken::Colon) {
+                        break;
                     }
-                    other => {
-                        return Err(format!("Expected label name after ':', got {:?}", other));
-                    }
-                };
-                items.push(SetItem::Label {
-                    variable: var_name,
-                    label,
-                });
+                }
             } else {
                 return Err("Expected '.' or ':' after variable name in SET".to_string());
             }
@@ -567,24 +586,29 @@ impl CypherParser {
                     property: prop_name,
                 });
             } else if self.check(&CypherToken::Colon) {
-                // Label removal: var:Label
-                self.advance(); // consume :
-                let label = match self.peek().cloned() {
-                    Some(CypherToken::Identifier(name)) => {
-                        self.advance();
-                        name
+                // Label removal: var:Label[:More:...]
+                loop {
+                    self.advance(); // consume :
+                    let label = match self.peek().cloned() {
+                        Some(CypherToken::Identifier(name)) => {
+                            self.advance();
+                            name
+                        }
+                        other => {
+                            return Err(format!(
+                                "Expected label name after ':' in REMOVE, got {:?}",
+                                other
+                            ));
+                        }
+                    };
+                    items.push(RemoveItem::Label {
+                        variable: var_name.clone(),
+                        label,
+                    });
+                    if !self.check(&CypherToken::Colon) {
+                        break;
                     }
-                    other => {
-                        return Err(format!(
-                            "Expected label name after ':' in REMOVE, got {:?}",
-                            other
-                        ));
-                    }
-                };
-                items.push(RemoveItem::Label {
-                    variable: var_name,
-                    label,
-                });
+                }
             } else {
                 return Err("Expected '.' or ':' after variable name in REMOVE".to_string());
             }

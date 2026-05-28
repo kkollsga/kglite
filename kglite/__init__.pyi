@@ -559,6 +559,57 @@ class KnowledgeGraph:
         """List of node type names present in the graph."""
         ...
 
+    def add_label(
+        self,
+        node_type: str,
+        ids: list[Any],
+        label: str,
+    ) -> dict[str, int]:
+        """Add a secondary label to a batch of nodes by id.
+
+        Secondary labels are queryable via Cypher (``MATCH (n:Label)``)
+        and surfaced by ``labels(n)``. The primary type (set via
+        ``add_nodes(node_type=...)``) is immutable — to retype a node,
+        use ``SET n.type = 'NewType'``.
+
+        Args:
+            node_type: Primary type of the nodes.
+            ids: Node ids (the ``unique_id_field`` values).
+            label: Secondary label to add.
+
+        Returns:
+            Dict with ``labelled`` (newly added) and ``skipped``
+            (unknown ids, or label already present).
+
+        Example::
+
+            graph.add_label('Agent', ['ag_001', 'ag_002'], 'Reviewer')
+            graph.cypher('MATCH (a:Reviewer) RETURN a.id').to_list()
+        """
+        ...
+
+    def remove_label(
+        self,
+        node_type: str,
+        ids: list[Any],
+        label: str,
+    ) -> dict[str, int]:
+        """Remove a secondary label from a batch of nodes by id.
+
+        Errors if ``label`` is the primary type — use ``SET n.type``
+        to retype a node instead.
+
+        Args:
+            node_type: Primary type of the nodes.
+            ids: Node ids.
+            label: Secondary label to remove.
+
+        Returns:
+            Dict with ``removed`` and ``skipped`` (unknown ids, or
+            label not present on the node).
+        """
+        ...
+
     @property
     def last_mutation_stats(self) -> Optional[dict[str, int]]:
         """Mutation statistics from the last Cypher mutation query.
