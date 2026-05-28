@@ -6,21 +6,459 @@
 //! no runtime impact.
 
 use crate::datatypes::py_in;
-use crate::datatypes::values::Value;
-use crate::graph::introspection::reporting::{OperationReport, OperationReports};
+use crate::datatypes::values::{DataFrame, Value};
+use crate::graph::introspection::reporting::{
+    NodeOperationReport, OperationReport, OperationReports,
+};
 use crate::graph::languages::cypher;
 use crate::graph::schema::{self, CowSelection, DirGraph};
 use crate::graph::storage::GraphRead;
 use crate::graph::{
     get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
-    parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, KnowledgeGraph,
-    TemporalContext, TimeSpec,
+    parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
+    KnowledgeGraph, TemporalContext, TimeSpec,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ─── add_nodes phase helpers ────────────────────────────────────────────────
+//
+// `add_nodes` is the most-touched user-facing function in the project. It
+// runs eight independent phases over its inputs (parse config → extract
+// embeddings → convert DataFrame → apply batch → register feature configs
+// → store embeddings → apply timeseries → finalize). Each phase is a
+// private free function below; the pymethod itself is a thin orchestrator.
+
+struct InlineConfig {
+    ts_config: Option<InlineTimeseriesConfig>,
+    embedding_columns: Vec<String>,
+    column_list: Vec<String>,
+}
+
+fn parse_inline_config<'py>(
+    data: &Bound<'py, PyAny>,
+    unique_id_field: &str,
+    node_title_field: Option<&str>,
+    columns: Option<&Bound<'py, PyList>>,
+    skip_columns: Option<&Bound<'py, PyList>>,
+    column_types: Option<&Bound<'py, PyDict>>,
+    timeseries: Option<&Bound<'py, PyDict>>,
+) -> PyResult<InlineConfig> {
+    let ts_config = timeseries.map(parse_inline_timeseries).transpose()?;
+
+    let mut embedding_columns: Vec<String> = Vec::new();
+    if let Some(type_dict) = column_types {
+        for (key, value) in type_dict.iter() {
+            let col_name: String = key.extract()?;
+            let type_str: String = value.extract()?;
+            if type_str.to_lowercase() == "embedding" {
+                embedding_columns.push(col_name);
+            }
+        }
+    }
+
+    let df_cols = data.getattr("columns")?;
+    let all_columns: Vec<String> = df_cols.extract()?;
+
+    let mut default_cols = vec![unique_id_field];
+    if let Some(title_field) = node_title_field {
+        default_cols.push(title_field);
+    }
+
+    let mut column_list = py_in::ensure_columns(
+        &all_columns,
+        &default_cols,
+        columns,
+        skip_columns,
+        Some(false),
+    )?;
+    if !embedding_columns.is_empty() {
+        column_list.retain(|c| !embedding_columns.contains(c));
+    }
+    if let Some(ref ts_cfg) = ts_config {
+        let ts_cols = ts_cfg.all_columns();
+        column_list.retain(|c| !ts_cols.contains(c));
+    }
+
+    Ok(InlineConfig {
+        ts_config,
+        embedding_columns,
+        column_list,
+    })
+}
+
+fn extract_embedding_pairs<'py>(
+    data: &Bound<'py, PyAny>,
+    unique_id_field: &str,
+    embedding_columns: &[String],
+) -> PyResult<EmbeddingColumnData> {
+    if embedding_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id_series = data.get_item(unique_id_field)?;
+    let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+    let mut result = Vec::with_capacity(embedding_columns.len());
+
+    for emb_col in embedding_columns {
+        let series = data.get_item(emb_col)?;
+        let mut pairs = Vec::with_capacity(nrows);
+        for i in 0..nrows {
+            let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
+            let emb_val: Vec<f32> = series.get_item(i)?.extract()?;
+            pairs.push((id_val, emb_val));
+        }
+        result.push((emb_col.clone(), pairs));
+    }
+    Ok(result)
+}
+
+struct ConvertedFrame {
+    df: DataFrame,
+    spatial_cfg: Option<schema::SpatialConfig>,
+    temporal_cfg: Option<schema::TemporalConfig>,
+}
+
+fn convert_dataframe<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    unique_id_field: &str,
+    column_list: &[String],
+    ts_config: Option<&InlineTimeseriesConfig>,
+    column_types: Option<&Bound<'py, PyDict>>,
+    nullable_int_downcast: bool,
+) -> PyResult<ConvertedFrame> {
+    let (spatial_cfg, cleaned_after_spatial) = match column_types {
+        Some(type_dict) => {
+            let (cfg, cleaned) = parse_spatial_column_types(py, type_dict)?;
+            (cfg, Some(cleaned))
+        }
+        None => (None, None),
+    };
+
+    let (temporal_cfg, cleaned_types) = match cleaned_after_spatial.as_ref() {
+        Some(cleaned) => {
+            let (tcfg, final_cleaned) = parse_temporal_column_types(py, cleaned.bind(py))?;
+            (tcfg, Some(final_cleaned))
+        }
+        None => (None, cleaned_after_spatial),
+    };
+
+    let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
+    // When timeseries is present, deduplicate rows (keep first per unique_id) for static props.
+    let data_for_nodes: std::borrow::Cow<'_, Bound<'py, PyAny>> = if ts_config.is_some() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("subset", vec![unique_id_field])?;
+        kwargs.set_item("keep", "first")?;
+        let deduped = data.call_method("drop_duplicates", (), Some(&kwargs))?;
+        std::borrow::Cow::Owned(deduped)
+    } else {
+        std::borrow::Cow::Borrowed(data)
+    };
+
+    let df = py_in::pandas_to_dataframe_with_options(
+        &data_for_nodes,
+        std::slice::from_ref(&unique_id_field.to_string()),
+        column_list,
+        effective_types.as_ref(),
+        nullable_int_downcast,
+    )?;
+
+    Ok(ConvertedFrame {
+        df,
+        spatial_cfg,
+        temporal_cfg,
+    })
+}
+
+fn apply_node_batch(
+    graph: &mut DirGraph,
+    df: DataFrame,
+    node_type: &str,
+    unique_id_field: String,
+    node_title_field: Option<String>,
+    conflict_handling: Option<String>,
+) -> PyResult<NodeOperationReport> {
+    crate::graph::mutation::maintain::add_nodes(
+        graph,
+        df,
+        node_type.to_string(),
+        unique_id_field,
+        node_title_field,
+        conflict_handling,
+    )
+    .map_err(|e: String| -> PyErr {
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+    })
+}
+
+fn register_feature_configs(
+    graph: &mut DirGraph,
+    node_type: &str,
+    spatial_cfg: Option<schema::SpatialConfig>,
+    temporal_cfg: Option<schema::TemporalConfig>,
+) {
+    if let Some(cfg) = spatial_cfg {
+        graph.spatial_configs.insert(node_type.to_string(), cfg);
+    }
+    if let Some(cfg) = temporal_cfg {
+        graph
+            .temporal_node_configs
+            .insert(node_type.to_string(), cfg);
+    }
+}
+
+fn store_extracted_embeddings(
+    graph: &mut DirGraph,
+    node_type: &str,
+    embedding_data: &EmbeddingColumnData,
+) {
+    if embedding_data.is_empty() {
+        return;
+    }
+    graph.build_id_index(node_type);
+    for (emb_col, pairs) in embedding_data {
+        let dimension = pairs.first().map(|(_, v)| v.len()).unwrap_or(0);
+        if dimension == 0 {
+            continue;
+        }
+        let store_key = if emb_col.ends_with("_emb") {
+            emb_col.clone()
+        } else {
+            format!("{}_emb", emb_col)
+        };
+        let mut store = schema::EmbeddingStore::new(dimension);
+        store.data.reserve(pairs.len() * dimension);
+        for (id_val, vec) in pairs {
+            if vec.len() != dimension {
+                continue;
+            }
+            if let Some(node_idx) = graph.lookup_by_id(node_type, id_val) {
+                store.set_embedding(node_idx.index(), vec);
+            }
+        }
+        if store.len() > 0 {
+            graph
+                .embeddings
+                .insert((node_type.to_string(), store_key), store);
+        }
+    }
+}
+
+fn apply_timeseries<'py>(
+    py: Python<'py>,
+    graph: &mut DirGraph,
+    node_type: &str,
+    data: &Bound<'py, PyAny>,
+    fk_field: &str,
+    ts_cfg: InlineTimeseriesConfig,
+) -> PyResult<()> {
+    let n_rows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+    if n_rows == 0 {
+        return Ok(());
+    }
+
+    let fk_col: Vec<Py<PyAny>> = data.get_item(fk_field)?.call_method0("tolist")?.extract()?;
+
+    let time_keys: Vec<chrono::NaiveDate> = match &ts_cfg.time {
+        TimeSpec::StringColumn(col_name) => {
+            let raw: Vec<String> = data
+                .get_item(col_name)?
+                .call_method1("astype", ("str",))?
+                .call_method0("tolist")?
+                .extract()?;
+            raw.iter()
+                .map(|s| crate::graph::features::timeseries::parse_date_query(s).map(|(d, _)| d))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e: String| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?
+        }
+        TimeSpec::SeparateColumns(col_names) => {
+            let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(col_names.len());
+            for cn in col_names {
+                let col: Vec<i64> = data.get_item(cn)?.call_method0("tolist")?.extract()?;
+                int_cols.push(col);
+            }
+            (0..n_rows)
+                .map(|i| {
+                    let year = int_cols[0][i] as i32;
+                    let month = if int_cols.len() > 1 {
+                        int_cols[1][i] as u32
+                    } else {
+                        1
+                    };
+                    let day = if int_cols.len() > 2 {
+                        int_cols[2][i] as u32
+                    } else {
+                        1
+                    };
+                    crate::graph::features::timeseries::date_from_ymd(year, month, day)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e: String| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?
+        }
+    };
+
+    let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
+        crate::graph::features::timeseries::validate_resolution(r).map_err(
+            |e: String| -> PyErr {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+            },
+        )?;
+        r.clone()
+    } else {
+        match &ts_cfg.time {
+            TimeSpec::SeparateColumns(cols) => match cols.len() {
+                1 => "year".to_string(),
+                2 => "month".to_string(),
+                _ => "day".to_string(),
+            },
+            TimeSpec::StringColumn(_) => "month".to_string(),
+        }
+    };
+
+    let mut value_cols: Vec<(String, Vec<f64>)> = Vec::with_capacity(ts_cfg.channels.len());
+    for ch_name in &ts_cfg.channels {
+        let col: Vec<f64> = data.get_item(ch_name)?.call_method0("tolist")?.extract()?;
+        value_cols.push((ch_name.clone(), col));
+    }
+
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, fk_val) in fk_col.iter().enumerate() {
+        let key = fk_val.bind(py).str()?.to_string();
+        groups.entry(key).or_default().push(i);
+    }
+
+    graph.build_id_index(node_type);
+
+    let mut ts_nodes_loaded = 0usize;
+    for (fk_str, row_indices) in &groups {
+        let node_idx = {
+            let id_str = Value::String(fk_str.clone());
+            if let Some(idx) = graph.lookup_by_id_normalized(node_type, &id_str) {
+                idx
+            } else if let Ok(n) = fk_str.parse::<i64>() {
+                let id_int = Value::Int64(n);
+                if let Some(idx) = graph.lookup_by_id_normalized(node_type, &id_int) {
+                    idx
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        };
+
+        let mut sorted = row_indices.clone();
+        sorted.sort_by(|&a, &b| time_keys[a].cmp(&time_keys[b]));
+
+        let keys: Vec<chrono::NaiveDate> = sorted.iter().map(|&i| time_keys[i]).collect();
+        let channels: HashMap<String, Vec<f64>> = value_cols
+            .iter()
+            .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
+            .collect();
+
+        graph.timeseries_store.insert(
+            node_idx.index(),
+            crate::graph::features::timeseries::NodeTimeseries { keys, channels },
+        );
+        ts_nodes_loaded += 1;
+    }
+
+    let existing = graph.timeseries_configs.get(node_type);
+    let mut merged_channels = existing.map(|c| c.channels.clone()).unwrap_or_default();
+    for ch in &ts_cfg.channels {
+        if !merged_channels.contains(ch) {
+            merged_channels.push(ch.clone());
+        }
+    }
+    let mut merged_units = existing.map(|c| c.units.clone()).unwrap_or_default();
+    for (k, v) in ts_cfg.units {
+        merged_units.insert(k, v);
+    }
+    let bin_type = existing.and_then(|c| c.bin_type.clone());
+
+    graph.timeseries_configs.insert(
+        node_type.to_string(),
+        crate::graph::features::timeseries::TimeseriesConfig {
+            resolution: resolved_resolution,
+            channels: merged_channels,
+            units: merged_units,
+            bin_type,
+        },
+    );
+
+    if ts_nodes_loaded == 0 && !groups.is_empty() {
+        let msg = std::ffi::CString::new(format!(
+            "add_nodes: timeseries data found for {} groups but no matching nodes were created",
+            groups.len()
+        ))
+        .unwrap_or_default();
+        let _ = PyErr::warn(
+            py,
+            py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+            msg.as_c_str(),
+            1,
+        );
+    }
+
+    Ok(())
+}
+
+fn build_node_report_dict<'py>(
+    py: Python<'py>,
+    result: &NodeOperationReport,
+) -> PyResult<Py<PyAny>> {
+    let report_dict = PyDict::new(py);
+    report_dict.set_item("operation", &result.operation_type)?;
+    report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
+    report_dict.set_item("nodes_created", result.nodes_created)?;
+    report_dict.set_item("nodes_updated", result.nodes_updated)?;
+    report_dict.set_item("nodes_skipped", result.nodes_skipped)?;
+    report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
+
+    let has_errors = !result.errors.is_empty() || result.nodes_skipped > 0;
+    if !result.errors.is_empty() {
+        report_dict.set_item("errors", &result.errors)?;
+    }
+    report_dict.set_item("has_errors", has_errors)?;
+
+    // Emit a Python warning whenever the report carries any skips or
+    // errors. Silent skips on bulk loads were a recurring footgun —
+    // surface them at warn level so the user sees them without needing
+    // to inspect last_report().
+    if has_errors {
+        let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
+        let detail = if result.errors.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", result.errors.join("; "))
+        };
+        let msg = if result.nodes_skipped > 0 {
+            format!(
+                "add_nodes: {} of {} rows skipped.{}",
+                result.nodes_skipped, total, detail
+            )
+        } else {
+            format!("add_nodes: completed with errors.{}", detail)
+        };
+        let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+        let _ = PyErr::warn(
+            py,
+            py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+            cmsg.as_c_str(),
+            1,
+        );
+    }
+
+    Ok(report_dict.into())
+}
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -112,405 +550,55 @@ impl KnowledgeGraph {
         timeseries: Option<&Bound<'_, PyDict>>,
         nullable_int_downcast: bool,
     ) -> PyResult<Py<PyAny>> {
-        // Parse inline timeseries config (if provided)
-        let ts_config = timeseries.map(|d| parse_inline_timeseries(d)).transpose()?;
-        // Detect embedding columns from column_types before DataFrame conversion
-        let mut embedding_columns: Vec<String> = Vec::new();
-        if let Some(type_dict) = column_types {
-            for (key, value) in type_dict.iter() {
-                let col_name: String = key.extract()?;
-                let type_str: String = value.extract()?;
-                if type_str.to_lowercase() == "embedding" {
-                    embedding_columns.push(col_name);
-                }
-            }
-        }
-
-        // Get all columns from the dataframe
-        let df_cols = data.getattr("columns")?;
-        let all_columns: Vec<String> = df_cols.extract()?;
-
-        // Create default columns array
-        let mut default_cols = vec![unique_id_field.as_str()];
-        if let Some(ref title_field) = node_title_field {
-            default_cols.push(title_field);
-        }
-
-        // Use enforce_columns=false for add_nodes
-        let enforce_columns = Some(false);
-
-        // Get the filtered columns
-        let mut column_list = py_in::ensure_columns(
-            &all_columns,
-            &default_cols,
+        let py = data.py();
+        let parsed = parse_inline_config(
+            data,
+            &unique_id_field,
+            node_title_field.as_deref(),
             columns,
             skip_columns,
-            enforce_columns,
+            column_types,
+            timeseries,
         )?;
-
-        // Remove embedding columns from the regular column list
-        if !embedding_columns.is_empty() {
-            column_list.retain(|c| !embedding_columns.contains(c));
-        }
-
-        // Remove timeseries columns (time + channel cols) from the regular column list
-        if let Some(ref ts_cfg) = ts_config {
-            let ts_cols = ts_cfg.all_columns();
-            column_list.retain(|c| !ts_cols.contains(c));
-        }
-
-        // Extract embedding data before DataFrame conversion
-        let embedding_data: EmbeddingColumnData = if !embedding_columns.is_empty() {
-            let id_series = data.get_item(&unique_id_field)?;
-            let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
-            let mut result = Vec::new();
-
-            for emb_col in &embedding_columns {
-                let series = data.get_item(emb_col)?;
-                let mut pairs = Vec::with_capacity(nrows);
-
-                for i in 0..nrows {
-                    let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
-                    let emb_val: Vec<f32> = series.get_item(i)?.extract()?;
-                    pairs.push((id_val, emb_val));
-                }
-
-                result.push((emb_col.clone(), pairs));
-            }
-
-            result
-        } else {
-            Vec::new()
-        };
-
-        // Parse spatial column_types entries and produce a cleaned dict
-        let py = data.py();
-        let (spatial_cfg, cleaned_types) = if let Some(type_dict) = column_types {
-            let (cfg, cleaned) = parse_spatial_column_types(py, type_dict)?;
-            (cfg, Some(cleaned))
-        } else {
-            (None, None)
-        };
-
-        // Parse temporal column_types (validFrom/validTo → datetime)
-        let (temporal_cfg, cleaned_types) = if let Some(ref cleaned) = cleaned_types {
-            let (tcfg, final_cleaned) = parse_temporal_column_types(py, cleaned.bind(py))?;
-            (tcfg, Some(final_cleaned))
-        } else {
-            (None, cleaned_types)
-        };
-
-        // Use cleaned column_types for DataFrame conversion (spatial+temporal types replaced with natural types)
-        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
-
-        // When timeseries is present, deduplicate rows (keep first per unique_id) for static props
-        let data_for_nodes: std::borrow::Cow<'_, Bound<'_, PyAny>> = if ts_config.is_some() {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("subset", vec![&unique_id_field])?;
-            kwargs.set_item("keep", "first")?;
-            let deduped = data.call_method("drop_duplicates", (), Some(&kwargs))?;
-            std::borrow::Cow::Owned(deduped)
-        } else {
-            std::borrow::Cow::Borrowed(data)
-        };
-
-        let df_result = py_in::pandas_to_dataframe_with_options(
-            &data_for_nodes,
-            std::slice::from_ref(&unique_id_field),
-            &column_list,
-            effective_types.as_ref(),
+        let embedding_data =
+            extract_embedding_pairs(data, &unique_id_field, &parsed.embedding_columns)?;
+        let converted = convert_dataframe(
+            py,
+            data,
+            &unique_id_field,
+            &parsed.column_list,
+            parsed.ts_config.as_ref(),
+            column_types,
             nullable_int_downcast,
         )?;
 
         let graph = get_graph_mut(&mut self.inner);
-
-        let uid_field_clone = unique_id_field.clone();
-        let result = crate::graph::mutation::maintain::add_nodes(
+        let result = apply_node_batch(
             graph,
-            df_result,
-            node_type.clone(),
-            unique_id_field,
+            converted.df,
+            &node_type,
+            unique_id_field.clone(),
             node_title_field,
             conflict_handling,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        // Merge spatial config into graph
-        if let Some(cfg) = spatial_cfg {
-            graph.spatial_configs.insert(node_type.clone(), cfg);
-        }
-
-        // Merge temporal config into graph
-        if let Some(cfg) = temporal_cfg {
-            graph.temporal_node_configs.insert(node_type.clone(), cfg);
-        }
-
-        // Store embeddings for the created nodes
-        if !embedding_data.is_empty() {
-            graph.build_id_index(&node_type);
-            for (emb_col, pairs) in &embedding_data {
-                let dimension = pairs.first().map(|(_, v)| v.len()).unwrap_or(0);
-                if dimension == 0 {
-                    continue;
-                }
-
-                let store_key = if emb_col.ends_with("_emb") {
-                    emb_col.clone()
-                } else {
-                    format!("{}_emb", emb_col)
-                };
-
-                let mut store = schema::EmbeddingStore::new(dimension);
-                store.data.reserve(pairs.len() * dimension);
-                for (id_val, vec) in pairs {
-                    if vec.len() != dimension {
-                        continue; // skip mismatched dimensions
-                    }
-                    if let Some(node_idx) = graph.lookup_by_id(&node_type, id_val) {
-                        store.set_embedding(node_idx.index(), vec);
-                    }
-                }
-                if store.len() > 0 {
-                    graph
-                        .embeddings
-                        .insert((node_type.clone(), store_key), store);
-                }
-            }
-        }
-
-        // Process inline timeseries from the ORIGINAL DataFrame
-        if let Some(ts_cfg) = ts_config {
-            let n_rows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
-            if n_rows > 0 {
-                // Read FK column (same as unique_id_field)
-                let fk_col: Vec<Py<PyAny>> = data
-                    .get_item(&uid_field_clone)?
-                    .call_method0("tolist")?
-                    .extract()?;
-
-                // Read time keys as NaiveDate
-                let time_keys: Vec<chrono::NaiveDate> = match &ts_cfg.time {
-                    TimeSpec::StringColumn(col_name) => {
-                        let raw: Vec<String> = data
-                            .get_item(col_name)?
-                            .call_method1("astype", ("str",))?
-                            .call_method0("tolist")?
-                            .extract()?;
-                        raw.iter()
-                            .map(|s| {
-                                crate::graph::features::timeseries::parse_date_query(s)
-                                    .map(|(d, _)| d)
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|e: String| -> PyErr {
-                                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                            })?
-                    }
-                    TimeSpec::SeparateColumns(col_names) => {
-                        let mut int_cols: Vec<Vec<i64>> = Vec::with_capacity(col_names.len());
-                        for cn in col_names {
-                            let col: Vec<i64> =
-                                data.get_item(cn)?.call_method0("tolist")?.extract()?;
-                            int_cols.push(col);
-                        }
-                        (0..n_rows)
-                            .map(|i| {
-                                let year = int_cols[0][i] as i32;
-                                let month = if int_cols.len() > 1 {
-                                    int_cols[1][i] as u32
-                                } else {
-                                    1
-                                };
-                                let day = if int_cols.len() > 2 {
-                                    int_cols[2][i] as u32
-                                } else {
-                                    1
-                                };
-                                crate::graph::features::timeseries::date_from_ymd(year, month, day)
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|e: String| -> PyErr {
-                                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                            })?
-                    }
-                };
-
-                // Resolve resolution
-                let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
-                    crate::graph::features::timeseries::validate_resolution(r).map_err(
-                        |e: String| -> PyErr {
-                            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                        },
-                    )?;
-                    r.clone()
-                } else {
-                    // Auto-detect from time spec
-                    match &ts_cfg.time {
-                        TimeSpec::SeparateColumns(cols) => match cols.len() {
-                            1 => "year".to_string(),
-                            2 => "month".to_string(),
-                            _ => "day".to_string(),
-                        },
-                        TimeSpec::StringColumn(_) => "month".to_string(),
-                    }
-                };
-
-                // Read channel columns
-                let mut value_cols: Vec<(String, Vec<f64>)> =
-                    Vec::with_capacity(ts_cfg.channels.len());
-                for ch_name in &ts_cfg.channels {
-                    let col: Vec<f64> =
-                        data.get_item(ch_name)?.call_method0("tolist")?.extract()?;
-                    value_cols.push((ch_name.clone(), col));
-                }
-
-                // Group row indices by FK value
-                let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-                for (i, fk_val) in fk_col.iter().enumerate() {
-                    let key = fk_val.bind(py).str()?.to_string();
-                    groups.entry(key).or_default().push(i);
-                }
-
-                graph.build_id_index(&node_type);
-
-                let mut ts_nodes_loaded = 0usize;
-                for (fk_str, row_indices) in &groups {
-                    // Look up node by FK value (try string, then int)
-                    let node_idx = {
-                        let id_str = Value::String(fk_str.clone());
-                        if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_str) {
-                            idx
-                        } else if let Ok(n) = fk_str.parse::<i64>() {
-                            let id_int = Value::Int64(n);
-                            if let Some(idx) = graph.lookup_by_id_normalized(&node_type, &id_int) {
-                                idx
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    };
-
-                    // Sort by time key
-                    let mut sorted = row_indices.clone();
-                    sorted.sort_by(|&a, &b| time_keys[a].cmp(&time_keys[b]));
-
-                    // Build NodeTimeseries with NaiveDate keys
-                    let keys: Vec<chrono::NaiveDate> =
-                        sorted.iter().map(|&i| time_keys[i]).collect();
-                    let channels: HashMap<String, Vec<f64>> = value_cols
-                        .iter()
-                        .map(|(name, col)| (name.clone(), sorted.iter().map(|&i| col[i]).collect()))
-                        .collect();
-
-                    graph.timeseries_store.insert(
-                        node_idx.index(),
-                        crate::graph::features::timeseries::NodeTimeseries { keys, channels },
-                    );
-                    ts_nodes_loaded += 1;
-                }
-
-                // Update TimeseriesConfig (merge with any existing)
-                let existing = graph.timeseries_configs.get(&node_type);
-                let mut merged_channels = existing.map(|c| c.channels.clone()).unwrap_or_default();
-                for ch in &ts_cfg.channels {
-                    if !merged_channels.contains(ch) {
-                        merged_channels.push(ch.clone());
-                    }
-                }
-                let mut merged_units = existing.map(|c| c.units.clone()).unwrap_or_default();
-                for (k, v) in ts_cfg.units {
-                    merged_units.insert(k, v);
-                }
-                let bin_type = existing.and_then(|c| c.bin_type.clone());
-
-                graph.timeseries_configs.insert(
-                    node_type.clone(),
-                    crate::graph::features::timeseries::TimeseriesConfig {
-                        resolution: resolved_resolution,
-                        channels: merged_channels,
-                        units: merged_units,
-                        bin_type,
-                    },
-                );
-
-                // Log timeseries loading info
-                if ts_nodes_loaded == 0 && !groups.is_empty() {
-                    let msg = std::ffi::CString::new(format!(
-                        "add_nodes: timeseries data found for {} groups but no matching nodes were created",
-                        groups.len()
-                    ))
-                    .unwrap_or_default();
-                    let _ = PyErr::warn(
-                        py,
-                        py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
-                        msg.as_c_str(),
-                        1,
-                    );
-                }
-            }
+        )?;
+        register_feature_configs(
+            graph,
+            &node_type,
+            converted.spatial_cfg,
+            converted.temporal_cfg,
+        );
+        store_extracted_embeddings(graph, &node_type, &embedding_data);
+        if let Some(ts_cfg) = parsed.ts_config {
+            apply_timeseries(py, graph, &node_type, data, &unique_id_field, ts_cfg)?;
         }
 
         self.selection.clear();
-
-        // Disk mode: sync column stores to DiskGraph after batch processing
         if graph.graph.is_disk() {
             graph.sync_disk_column_stores();
         }
-
-        // Store the report
         self.add_report(OperationReport::NodeOperation(result.clone()));
 
-        // Convert the report to a Python dictionary
-        Python::attach(|py| {
-            let report_dict = PyDict::new(py);
-            report_dict.set_item("operation", &result.operation_type)?;
-            report_dict.set_item("timestamp", result.timestamp.to_rfc3339())?;
-            report_dict.set_item("nodes_created", result.nodes_created)?;
-            report_dict.set_item("nodes_updated", result.nodes_updated)?;
-            report_dict.set_item("nodes_skipped", result.nodes_skipped)?;
-            report_dict.set_item("processing_time_ms", result.processing_time_ms)?;
-
-            // has_errors is true when there are errors OR rows were skipped
-            let has_errors = !result.errors.is_empty() || result.nodes_skipped > 0;
-            if !result.errors.is_empty() {
-                report_dict.set_item("errors", &result.errors)?;
-            }
-            report_dict.set_item("has_errors", has_errors)?;
-
-            // Emit a Python warning whenever the report carries any
-            // skips or errors. Silent skips on bulk loads were a
-            // recurring footgun — surface them at warn level so the
-            // user sees them without needing to inspect last_report().
-            if has_errors {
-                let total = result.nodes_created + result.nodes_updated + result.nodes_skipped;
-                let detail = if result.errors.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", result.errors.join("; "))
-                };
-                let msg = if result.nodes_skipped > 0 {
-                    format!(
-                        "add_nodes: {} of {} rows skipped.{}",
-                        result.nodes_skipped, total, detail
-                    )
-                } else {
-                    format!("add_nodes: completed with errors.{}", detail)
-                };
-                let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
-                let _ = PyErr::warn(
-                    py,
-                    py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
-                    cmsg.as_c_str(),
-                    1,
-                );
-            }
-
-            Ok(report_dict.into())
-        })
+        Python::attach(|py| build_node_report_dict(py, &result))
     }
 
     /// Add connections (edges) between existing nodes.
