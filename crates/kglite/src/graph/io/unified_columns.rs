@@ -257,6 +257,7 @@ pub fn write_unified_columns(
                     offsets,
                     data,
                     nulls,
+                    ..
                 } => {
                     // The mega-file layout convention: offsets has
                     // `row_count` u64 entries (cumulative ends).
@@ -434,6 +435,7 @@ fn extract_id_column(store: &ColumnStore) -> (bool, Vec<u8>, Vec<u8>, Vec<u8>, V
             offsets,
             data,
             nulls,
+            ..
         }) => {
             let row_count = nulls.len();
             let off_bytes = offsets.as_raw_bytes();
@@ -476,6 +478,7 @@ fn extract_title_column(store: &ColumnStore) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
             offsets,
             data,
             nulls,
+            ..
         }) => {
             let row_count = nulls.len();
             let off_bytes = offsets.as_raw_bytes();

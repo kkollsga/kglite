@@ -49,10 +49,14 @@ pub enum TypedColumn {
         nulls: MmapOrVec<u8>,
     },
     /// Offset-based string storage: `offsets[i]..offsets[i+1]` is the byte range in `data`.
+    /// Updates land in `relocated` instead of mutating `offsets`/`data` — rewriting
+    /// `offsets[i+1]` corrupts the start of row `i+1`. `write_to` folds the overlay
+    /// back into the canonical (offsets, data) layout on save.
     Str {
         offsets: MmapOrVec<u64>,
         data: MmapBytes,
         nulls: MmapOrVec<u8>,
+        relocated: HashMap<u32, String>,
     },
     /// Fallback for heterogeneous columns — stores boxed Values directly.
     /// Cannot be mmap'd, but preserves correctness.
@@ -102,6 +106,7 @@ impl TypedColumn {
                 },
                 data: MmapBytes::new(),
                 nulls: MmapOrVec::new(),
+                relocated: HashMap::new(),
             },
             _ => TypedColumn::Mixed { data: Vec::new() },
         }
@@ -175,6 +180,7 @@ impl TypedColumn {
                     offsets,
                     data,
                     nulls,
+                    ..
                 },
                 Value::String(s),
             ) => {
@@ -254,12 +260,16 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                relocated,
             } => {
                 if idx >= nulls.len() {
                     return None;
                 }
                 if nulls.get(idx) != 0 {
                     return None;
+                }
+                if let Some(s) = relocated.get(&row) {
+                    return Some(Value::String(s.clone()));
                 }
                 let start = offsets.get(idx) as usize;
                 let end = offsets.get(idx + 1) as usize;
@@ -288,9 +298,13 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                relocated,
             } => {
                 if idx >= nulls.len() || nulls.get(idx) != 0 {
                     return None;
+                }
+                if let Some(s) = relocated.get(&row) {
+                    return Some(s.as_str());
                 }
                 let start = offsets.get(idx) as usize;
                 let end = offsets.get(idx + 1) as usize;
@@ -386,34 +400,29 @@ impl TypedColumn {
             }
             (
                 TypedColumn::Str {
-                    offsets,
-                    data,
-                    nulls,
+                    nulls, relocated, ..
                 },
                 Value::String(s),
             ) => {
                 if idx >= nulls.len() {
                     return Err(());
                 }
-                // Append new string data (old data becomes a hole — compacted on save)
-                let new_start = data.len() as u64;
-                data.extend(s.as_bytes());
-                offsets.set(idx, new_start);
-                // Shift idx+1 offset to new end
-                offsets.set(idx + 1, data.len() as u64);
+                // Park the new value in the relocated overlay. Mutating
+                // `offsets[idx+1]` in place corrupts row idx+1's start —
+                // see write_to for the on-save compaction.
+                relocated.insert(row, s.clone());
                 nulls.set(idx, 0);
             }
-            (TypedColumn::Str { offsets, nulls, .. }, Value::Null) => {
+            (
+                TypedColumn::Str {
+                    nulls, relocated, ..
+                },
+                Value::Null,
+            ) => {
                 if idx >= nulls.len() {
                     return Err(());
                 }
-                let last = if !offsets.is_empty() {
-                    offsets.get(offsets.len() - 1)
-                } else {
-                    0
-                };
-                offsets.set(idx, last);
-                offsets.set(idx + 1, last);
+                relocated.remove(&row);
                 nulls.set(idx, 1);
             }
             (TypedColumn::Mixed { data }, value) => {
@@ -457,7 +466,11 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
-            } => offsets.heap_bytes() + data.heap_bytes() + nulls.heap_bytes(),
+                relocated,
+            } => {
+                let relocated_bytes: usize = relocated.values().map(|s| s.capacity()).sum();
+                offsets.heap_bytes() + data.heap_bytes() + nulls.heap_bytes() + relocated_bytes
+            }
             TypedColumn::Mixed { data } => data.len() * std::mem::size_of::<Value>(),
         }
     }
@@ -490,6 +503,7 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                ..
             } => {
                 offsets.materialize_to_file(&base_dir.join(format!("{col_name}.off")))?;
                 data.materialize_to_file(&base_dir.join(format!("{col_name}.str")))?;
@@ -538,6 +552,7 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                ..
             } => {
                 record(offsets.flush_and_release_pages());
                 record(data.flush_and_release_pages());
@@ -579,6 +594,7 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                ..
             } => {
                 offsets.materialize_to_heap();
                 data.materialize_to_heap();
@@ -617,10 +633,40 @@ impl TypedColumn {
                 offsets,
                 data,
                 nulls,
+                relocated,
             } => {
-                offsets.write_to(writer)?;
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                if relocated.is_empty() {
+                    // Fast path: no overlay, write raw buffers.
+                    offsets.write_to(writer)?;
+                    data.write_to(writer)?;
+                    nulls.write_to(writer)?;
+                } else {
+                    // Fold the relocated overlay back into a fresh
+                    // offsets+data layout. The on-disk format expects
+                    // N+1 offsets + concatenated data + N null bytes.
+                    let n = nulls.len();
+                    let mut new_offsets: Vec<u64> = Vec::with_capacity(n + 1);
+                    let mut new_data: Vec<u8> = Vec::new();
+                    new_offsets.push(0);
+                    for row in 0..n {
+                        if nulls.get(row) == 0 {
+                            let bytes: Vec<u8> = if let Some(s) = relocated.get(&(row as u32)) {
+                                s.as_bytes().to_vec()
+                            } else {
+                                let start = offsets.get(row) as usize;
+                                let end = offsets.get(row + 1) as usize;
+                                data.slice(start, end).to_vec()
+                            };
+                            new_data.extend_from_slice(&bytes);
+                        }
+                        new_offsets.push(new_data.len() as u64);
+                    }
+                    for off in &new_offsets {
+                        writer.write_all(&off.to_le_bytes())?;
+                    }
+                    writer.write_all(&new_data)?;
+                    nulls.write_to(writer)?;
+                }
             }
             TypedColumn::Mixed { data } => {
                 let encoded = bincode::serialize(data)
@@ -1019,6 +1065,7 @@ impl ColumnStore {
             },
             data: MmapBytes::new(),
             nulls: MmapOrVec::new(),
+            relocated: HashMap::new(),
         });
         if col.push(value).is_err() {
             // Type mismatch — demote to Mixed
@@ -2147,6 +2194,7 @@ impl ColumnStore {
                     offsets,
                     data,
                     nulls,
+                    relocated: HashMap::new(),
                 })
             }
             _ => {

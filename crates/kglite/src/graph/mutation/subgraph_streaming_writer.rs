@@ -876,6 +876,7 @@ impl ColumnWriter {
                     offsets,
                     data,
                     nulls,
+                    relocated: std::collections::HashMap::new(),
                 })
             }
             ColumnWriter::Mixed { values } => {
