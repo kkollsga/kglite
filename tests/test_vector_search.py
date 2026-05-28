@@ -1678,3 +1678,38 @@ class TestEmbeddingDiagnostics:
         assert rows[0]["status"] == "embeddable"
         assert rows[0]["nodes_with_property"] == 2
         assert rows[0]["nodes_embedded"] == 0
+
+
+class TestVectorSearchPropertiesAfterReload:
+    """Regression (kglite-docs 2026-05-28): vector_search dropped all
+    non-core properties after save+load. property_iter() yields nothing
+    for PropertyStorage::Columnar (the post-reload variant)."""
+
+    def test_full_properties_returned_after_reload(self, graph_with_embeddings, tmp_path):
+        graph = graph_with_embeddings
+        save_path = str(tmp_path / "round_trip.kgl")
+        graph.save(save_path)
+
+        loaded = kglite.load(save_path)
+        results = loaded.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3)
+        assert len(results) == 3
+
+        top = results[0]
+        # Core fields are present in both pre- and post-reload outputs.
+        assert {"id", "title", "type", "score"}.issubset(top.keys())
+        # The kglite-docs bug: these non-core fields used to disappear.
+        assert "category" in top, f"missing 'category' in {top.keys()}"
+        assert "summary" in top, f"missing 'summary' in {top.keys()}"
+        # Sanity: values round-trip.
+        assert top["id"] == 1
+        assert top["category"] == "politics"
+        assert top["summary"] == "alpha text"
+
+    def test_to_df_full_columns_after_reload(self, graph_with_embeddings, tmp_path):
+        graph = graph_with_embeddings
+        save_path = str(tmp_path / "round_trip_df.kgl")
+        graph.save(save_path)
+
+        loaded = kglite.load(save_path)
+        df = loaded.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3, to_df=True)
+        assert {"id", "title", "type", "score", "category", "summary"}.issubset(df.columns)

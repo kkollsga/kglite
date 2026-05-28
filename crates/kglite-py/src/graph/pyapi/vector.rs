@@ -222,8 +222,11 @@ impl KnowledgeGraph {
                         let _ = dict.set_item("title", py_out::value_to_py(py, &node.title()).ok());
                         let _ = dict.set_item("type", node.node_type_str(&self.inner.interner));
                         let _ = dict.set_item("score", r.score);
-                        for (k, v) in node.property_iter(&self.inner.interner) {
-                            let _ = dict.set_item(k, py_out::value_to_py(py, v).ok());
+                        // properties_cloned reads from PropertyStorage::Columnar
+                        // (the post-reload variant); property_iter yields
+                        // nothing for that variant.
+                        for (k, v) in node.properties_cloned(&self.inner.interner) {
+                            let _ = dict.set_item(k, py_out::value_to_py(py, &v).ok());
                         }
                         dict.into()
                     })
@@ -243,8 +246,11 @@ impl KnowledgeGraph {
                 dict.set_item("title", py_out::value_to_py(py, &node.title())?)?;
                 dict.set_item("type", node.node_type_str(&self.inner.interner))?;
                 dict.set_item("score", r.score)?;
-                for (k, v) in node.property_iter(&self.inner.interner) {
-                    dict.set_item(k, py_out::value_to_py(py, v)?)?;
+                // properties_cloned reads from PropertyStorage::Columnar
+                // (the post-reload variant); property_iter yields nothing
+                // for that variant.
+                for (k, v) in node.properties_cloned(&self.inner.interner) {
+                    dict.set_item(k, py_out::value_to_py(py, &v)?)?;
                 }
                 py_list.append(dict)?;
             }
