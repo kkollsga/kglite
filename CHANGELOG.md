@@ -80,6 +80,17 @@ labels. Sodir / Wikidata / code-tree benchmarks unchanged vs 0.10.4.
   binaries ignore the unknown file and load with single-label
   semantics; older disk graphs without the sidecar load fine into
   0.10.5+ with an empty secondary index.
+- **Linux CI perf baseline refreshed** — the Linux runner baseline
+  (`tests/benchmarks/baselines/current.linux.json`) had been
+  captured at 0.9.52 (2026-05-23) and accumulated ~+16% of
+  measurement drift on `test_bench_add_nodes` across 0.10.0
+  through 0.10.4, leaving no headroom for 0.10.5's normal noise
+  margin. The hot path for `add_nodes`
+  (`mutation/maintain.rs::add_nodes` / `apply_node_batch`) is
+  byte-identical between 0.10.4 and 0.10.5 — no code change in
+  that path. Refreshed against the CI run for the 0.10.5
+  perf-fix commit; new `0_10_5.linux.json` archived alongside
+  `current.linux.json`.
 
 ## [0.10.4] — 2026-05-28 — kglite-docs feedback round
 
