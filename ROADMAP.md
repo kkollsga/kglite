@@ -204,31 +204,17 @@ constructor that accepts both `kglite://` (embedded) and `bolt://`
 
 ---
 
-### §5 — Multi-label nodes (Track C from the rationale doc)
+### §5 — Multi-label nodes — ✅ shipped 0.10.5 (Track C)
 
-**Why.** A real openCypher engine needs multi-label. BloodHound,
-Wikidata-style "X is a Human AND a Politician", and Bolt-using
-consumers all assume it. `docs/explanation/multi-label-rationale.md`
-documents the current single-label design choice and what a future
-implementation would look like.
+The classification-as-label use case (agent role taxonomies,
+status-as-label, cross-type predicates) landed in 0.10.5. Each
+node now has a primary type (immutable, drives columnar storage)
+plus optional secondary labels via `SET n:Label` / `CREATE
+(n:A:B)` / `g.add_label(...)`. `MATCH (n:A:B)` AND-intersects.
 
-**Scope.** Per the rationale doc's "stepping-stone" path: add
-`Value::List` first (independently valuable), then
-`NodeData.secondary_labels: SmallVec<InternedKey>` + a graph-level
-`has_secondary` flag so single-label graphs cost nothing. Keep primary
-as the columnar grouping key (no schema union). Reference: mrmagooey's
-`multi-label` fork branch already prototypes most of this on an older
-kglite — worth porting forward.
-
-**Out of scope.** Restructuring v3 columnar layout.
-
-**Effort.** 3-4 weeks. The rationale doc estimates XL; the additive
-stepping-stone path keeps it tractable.
-
-**Depends on.** Decision to commit (currently deferred — see the
-rationale doc). The Bolt work (§1) may force the decision: if
-Bolt-attached tools break on single-label nodes, multi-label moves
-from "nice to have" to "required for §1 to be useful."
+See `docs/concepts/multi-label-rationale.md` for the full design
+note (now a "what landed" reference). Triggered by `kglite-docs`
+2026-05-28.
 
 ---
 

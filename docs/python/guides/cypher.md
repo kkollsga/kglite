@@ -189,6 +189,53 @@ For one-shot relationships (a `Person` works at one `Company` —
 attributes belong on the edge), the at-most-one constraint is
 exactly what you want and reification adds noise.
 
+## Multi-label nodes
+
+A node has a **primary type** (set at creation, immutable via
+label mutation) plus optional **secondary labels** added through
+Cypher or the `add_label` pymethod. The primary type drives the
+columnar storage layout; secondaries are a parallel index. Match
+either kind transparently:
+
+```cypher
+CREATE (a:Agent:LLM:Reviewer {id: 'strict-1', model: 'sonnet'})
+
+MATCH (n:Reviewer) RETURN n              -- secondary-only is fine
+MATCH (n:Agent:Reviewer) RETURN n        -- AND-intersect across labels
+MATCH (n) WHERE 'Reviewer' IN labels(n)  -- equivalent
+```
+
+Add or remove labels on existing nodes:
+
+```cypher
+MATCH (a:Agent {id: $id}) SET a:Verified            -- add one
+MATCH (a:Agent {id: $id}) SET a:Verified:Reviewer    -- add several
+MATCH (a:Agent {id: $id}) REMOVE a:Verified         -- remove one
+```
+
+The primary label is immutable through `SET`/`REMOVE`. To
+retype a node, use the type property:
+
+```cypher
+MATCH (n:Article {id: $id}) SET n.type = 'BlogPost'
+```
+
+From Python, the same surface is available without Cypher:
+
+```python
+g.add_nodes(df, 'Agent', 'id', 'name', labels=['Reviewer'])
+g.add_label('Agent', ['agent-7'], 'OnCall')
+g.remove_label('Agent', ['agent-7'], 'OnCall')
+```
+
+### Use multi-label or subtype edges?
+
+| If you want… | Use… |
+|---|---|
+| Classification tags (`Reviewer`, `Verified`, `Disputed`) | Multi-label |
+| Hierarchy with shared properties (`Method` *is a* `Callable`) | Subtype edge `(:Method)-[:KIND_OF]->(:Callable)` |
+| Per-application provenance | Reified `Tagging` node (see section above) |
+
 ## Count Subqueries
 
 `count { ... }` evaluates an inline pattern and returns the number
@@ -224,14 +271,15 @@ graph.cypher("""
 | Category | Supported |
 |----------|-----------|
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN` |
-| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
+| **Patterns** | Node `(n:Type)`, multi-label `(n:Type:Role)` (AND-intersect), relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern }`, `EXISTS(( pattern ))` |
 | **Subqueries** | `count{ pattern }` (degree / filtered neighbour counts), `EXISTS{ pattern }` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `type`, `id`, `labels`, `coalesce`, `count`, `sum`, `avg`, `min`, `max`, `collect`, `std`, `text_score` |
 | **Spatial** | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter`, `latitude`, `longitude` |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args |
 | **CALL procedures** | Graph algorithms (`pagerank`, `betweenness`, `degree`, `closeness`, `louvain`, `label_propagation`, `connected_components`, `cluster`); structural validators (`orphan_node`, `self_loop`, `cycle_2step`, `missing_required_edge`, `missing_inbound_edge`, `duplicate_title`); code-tree (`affected_tests` for transitive test impact); planner (`refresh_stats` for cardinality cache refresh); `list_procedures` to enumerate. Map-syntax parameters: `CALL pagerank({damping_factor: 0.85})` |
-| **Not supported** | `FOREACH`, variable-length path filters, `SET n:Label` (label mutation), multi-label |
+| **Label mutation** | `SET n:Label`, `SET n:A:B` (multi), `REMOVE n:Label`, `CREATE (n:A:B)`; primary label is immutable via these — use `SET n.type = 'NewType'` to retype |
+| **Not supported** | `FOREACH`, variable-length path filters |
 
 ## Structural-validator CALL procedures
 

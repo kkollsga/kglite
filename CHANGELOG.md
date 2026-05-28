@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] — 2026-05-28 — multi-label nodes (Track C)
+
+A node can now wear multiple labels: a primary type (set at
+creation, immutable via label mutation) plus an optional list of
+secondary labels added through Cypher or the new
+`add_label` / `remove_label` pymethods. Triggered by
+`kglite-docs`'s 2026-05-28 feature request — agent role taxonomies
+(`(:Agent:LLM:Reviewer)`), lifecycle status as label
+(`(:Chunk:NeedsOcr)`), cross-type predicates (`MATCH (n:Disputed)`).
+
+Non-breaking by construction. Single-label workloads pay zero
+overhead — a `has_secondary_labels: bool` graph-level flag
+short-circuits every label-keyed read when no node uses secondary
+labels. Sodir / Wikidata / code-tree benchmarks unchanged vs 0.10.4.
+
+### Added
+
+- **Multi-label CREATE syntax** — `CREATE (n:Person:Director
+  {name: 'Alice'})` stores `Person` as the primary type and
+  `Director` as a secondary label.
+- **`SET n:Label` and `REMOVE n:Label`** — add or remove
+  secondary labels on existing nodes. Multi-colon syntax
+  (`SET n:A:B`) parses as multiple items. `REMOVE n:Primary`
+  errors with a clear message (use `SET n.type = 'NewType'` to
+  retype).
+- **`MATCH (n:A:B)`** — AND-intersect across labels. Returns
+  nodes that wear every listed label.
+- **`labels(n)` returns the full list** — `[primary, ...secondaries]`
+  in insertion order. The single-element behavior since 0.9.52
+  was the forward-compat placeholder.
+- **`g.add_label(node_type, ids, label)`** and
+  **`g.remove_label(node_type, ids, label)`** — direct pymethods
+  for batch label mutation by id. Returns `{labelled / removed,
+  skipped}`. Idempotent.
+- **`add_nodes(..., labels=['X'])`** — new kwarg applies a uniform
+  set of secondary labels to every row in the batch.
+- **`GraphRead::node_labels_of(idx) -> Vec<InternedKey>`** — new
+  trait method returning `[primary, ...extras]`. Default impl
+  emits a 1-element vec; Memory + Mapped backends override to
+  emit the full list.
+
+### Changed
+
+- **`NodeData` gains an `extra_labels: Vec<InternedKey>` field**
+  (`#[serde(default)]`). Existing 0.10.4 `.kgl` saves deserialize
+  with empty Vec — fully back-compat. The `.kgl` v3 golden hash
+  shifted as a result (refreshed at this release; prior digest
+  preserved in `ACCEPTABLE_DIGESTS`).
+- **`DirGraph` gains `secondary_label_index` + `has_secondary_labels`**
+  — both `#[serde(skip)]`, rebuilt on load from
+  `NodeData.extra_labels`.
+- **`graph_overview(cypher=True)` updated** — the "Multi-label
+  nodes" limitation note now documents the new syntax instead of
+  flagging it as unsupported.
+
+### Internal
+
+- **Single-choke-point label-mutation API** on `DirGraph`:
+  `add_node_label` / `remove_node_label` / `node_labels`. Every
+  mutation site (Cypher executor, pymethods) routes through these
+  so `extra_labels` and `secondary_label_index` can never drift
+  apart.
+
 ## [0.10.4] — 2026-05-28 — kglite-docs feedback round
 
 A downstream library author (`kglite-docs`) sent a 280-line bug
