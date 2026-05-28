@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Multi-label read paths now consult secondary labels everywhere.**
+  0.10.5 shipped secondary labels but only the slow matcher path was
+  taught about them — the optimiser's fused fast-paths and several
+  candidate-selection sites still assumed `type_indices[T]` was *all*
+  nodes labelled `:T`, so on a multi-label graph they over/under-counted.
+  Reported by `kglite-docs`: `MATCH (n:Item:Pending) RETURN count(n)`
+  over-reported after `remove_label`. (The secondary-label index itself
+  was never stale — the bug was entirely read-side, so no data is
+  corrupted and existing `.kgl` files read correctly once upgraded.)
+  Fixed across:
+  - `count(n)` of a typed/secondary label (`FusedCountTypedNode`),
+    single-pass scan + top-K aggregation, and `labels(n)` grouping.
+  - Edge-expansion endpoint filtering — `MATCH (a:Person)-[:KNOWS]->(b:VIP)`
+    returned nothing when `:VIP` was a secondary label.
+  - The `n:Label` / `WHERE n:Label` predicate, `MERGE (n:Label {...})`
+    (no longer creates a duplicate when matching a secondary-labelled
+    node), and the transient equality index.
+  - Aggregate and spatial-join fusions that can't express the
+    secondary-label union now bail to the correct general path when the
+    graph has secondary labels (single-label graphs keep every fast-path).
+- **Node deletion evicts secondary labels.** `DETACH DELETE` (and
+  provisional purge) now remove the deleted node from the secondary-label
+  index instead of leaving a dangling entry that over-counted
+  `MATCH (n:SecLabel)`. Loading a graph saved by 0.10.5 after such a
+  delete is self-healed (dangling indices are dropped on load).
+
+### Added
+
+- **`select(node_type, ..., include_secondary=True)`** (fluent) — select
+  nodes carrying `node_type` as a primary *or* secondary label, the
+  fluent equivalent of Cypher `MATCH (n:node_type)`. Default `False`
+  preserves primary-type-only selection.
+
 ## [0.10.5] — 2026-05-28 — multi-label nodes (Track C)
 
 A node can now wear multiple labels: a primary type (set at
