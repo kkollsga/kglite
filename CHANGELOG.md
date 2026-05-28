@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-05-28 — kglite-docs feedback round
+
+A downstream library author (`kglite-docs`) sent a 280-line bug
+report identifying one silent data-loss bug, one storage panic,
+one reload regression, and a small cluster of API papercuts.
+This release fixes all of them, ships a new `add_embeddings`
+API to make incremental ingest first-class, and folds the
+audit-flagged `add_nodes` refactor in on the way through.
+
+### Fixed
+
+- **`set_embeddings` silently dropped embeddings after `add_nodes`
+  on a loaded graph.** `BatchProcessor` wrote new ids into
+  `id_indices` incrementally, creating a partial entry that
+  subsequent `build_id_index` calls trusted as complete. The 50-LOC
+  `load() → add_nodes(one row) → set_embeddings(merged)` repro from
+  `kglite-docs` now reports `skipped: 0` instead of `skipped: N`.
+- **Updating a String property on a columnar-backed node panicked
+  with `slice index starts at N but ends at M` (N > M).** Mutating
+  `offsets[idx+1]` in `TypedColumn::Str::set` corrupted the start
+  of row `idx+1`. String updates now park in a relocated overlay;
+  the canonical buffers are rebuilt on save.
+- **`vector_search` dropped non-core properties after `save()` +
+  `load()`.** Switched to `properties_cloned()` (which handles
+  `PropertyStorage::Columnar`) on both result-materialization
+  paths.
+
+### Added
+
+- **`add_embeddings(node_type, text_column, dict)`** — upserts into
+  an existing embedding store instead of replacing it. Sidesteps
+  the read-merge-write workflow that triggered the silent-drop
+  bug. Behaves like `set_embeddings` on first call;
+  `store_created` in the return dict tells callers which mode ran.
+- **`embedding_diagnostics()` rows carry a `length_stats` dict** —
+  `mean_length`, `max_length`, `distinct_count`, `distinct_ratio`.
+  Callers can filter out short-string and fully-unique columns
+  themselves rather than getting every String property reported
+  uniformly as `embeddable`.
+
+### Changed
+
+- **`set_embedder(None)` now unbinds** the currently-registered
+  embedder instead of raising `AttributeError`. Symmetric with
+  `set_embedder(model)`.
+- **`describe()` docstring** explicitly notes there is no `limit`
+  kwarg — `sample_truncate` is the modern name.
+
+### Documentation
+
+- **Cypher guide** expanded with a new "Why semantic search in
+  Cypher matters" subsection covering vector ranking + structural
+  filters + graph traversal in one query, with worked examples
+  for the kglite-docs document-corpus use case.
+- **Cypher guide** new "Edge provenance via reified nodes" section
+  explaining when to model relationships as reified `Tagging`
+  nodes to recover per-application provenance (and when the
+  at-most-one-edge constraint is the right shape).
+
+### Internal
+
+- **`add_nodes` refactored** into eight per-phase private helpers
+  (`parse_inline_config`, `extract_embedding_pairs`,
+  `convert_dataframe`, `apply_node_batch`,
+  `register_feature_configs`, `store_extracted_embeddings`,
+  `apply_timeseries`, `build_node_report_dict`). Addresses the
+  2026-05-27 codebase-health audit's Hotspot 2; the
+  `set_embeddings` fix above lands at the clean seam exposed by
+  the refactor.
+
 ## [0.10.3] — 2026-05-25 — `kglite-c` C ABI ships; Phase B api lifts
 
 Single release theme: every shipped capability of `kglite` is now

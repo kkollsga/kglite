@@ -14,7 +14,7 @@ pub struct KgliteAbiVersion {
 
 const ABI_MAJOR: u32 = 0;
 const ABI_MINOR: u32 = 10;
-const ABI_PATCH: u32 = 3;
+const ABI_PATCH: u32 = 4;
 
 /// Return the C ABI version this library was built against.
 /// Bindings should call this on startup and refuse to proceed if

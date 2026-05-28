@@ -482,9 +482,7 @@ impl KnowledgeGraph {
                 };
                 for (key, value) in node.properties_cloned(&self.inner.interner) {
                     if let Value::String(s) = value {
-                        let entry = by_key
-                            .entry((type_name.clone(), key))
-                            .or_default();
+                        let entry = by_key.entry((type_name.clone(), key)).or_default();
                         let len = s.len();
                         entry.nodes_with_property += 1;
                         entry.total_length += len;
