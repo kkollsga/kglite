@@ -147,6 +147,113 @@ impl KnowledgeGraph {
         Ok(result.into())
     }
 
+    /// Add or update embeddings for nodes of the given type without
+    /// discarding the existing store.
+    ///
+    /// Differs from ``set_embeddings`` (which replaces the store) by
+    /// upserting entries into an existing ``(node_type, "{text_column}_emb")``
+    /// store. If no store exists yet, behaves like ``set_embeddings`` —
+    /// the first call creates one; subsequent calls extend it.
+    ///
+    /// Use this for incremental ingest workflows where multiple
+    /// ``add_nodes`` + embedding batches need to coexist without a
+    /// read-merge-write cycle through the user's process.
+    ///
+    /// Args:
+    ///     node_type: The node type (e.g. 'Article')
+    ///     text_column: Source column name (e.g. 'summary'). Stored as '{text_column}_emb'.
+    ///     embeddings: Dict mapping node IDs to embedding vectors (list of floats).
+    ///
+    /// Returns:
+    ///     dict: {'embeddings_stored': int, 'dimension': int, 'skipped': int, 'store_created': bool}
+    #[pyo3(signature = (node_type, text_column, embeddings, metric=None))]
+    fn add_embeddings(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        text_column: &str,
+        embeddings: &Bound<'_, PyDict>,
+        metric: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let g = Arc::make_mut(&mut self.inner);
+        let embedding_property = format!("{}_emb", text_column);
+
+        if !g.type_indices.contains_key(node_type) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Node type '{}' does not exist in the graph",
+                node_type
+            )));
+        }
+
+        g.build_id_index(node_type);
+
+        let store_key = (node_type.to_string(), embedding_property);
+        let store_existed = g.embeddings.contains_key(&store_key);
+
+        // Snapshot the existing dimension/metric, if any, so we can
+        // validate incoming vectors against the live store's shape.
+        let existing_dim = g.embeddings.get(&store_key).map(|s| s.dimension);
+
+        let mut entries: Vec<(NodeIndex, Vec<f32>)> = Vec::new();
+        let mut skipped = 0usize;
+        let mut dim_seen: Option<usize> = existing_dim;
+
+        for (key, value) in embeddings.iter() {
+            let id = py_in::py_value_to_value(&key)?;
+            let node_idx = match g.lookup_by_id(node_type, &id) {
+                Some(idx) => idx,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let vec: Vec<f32> = value.extract()?;
+            match dim_seen {
+                None => dim_seen = Some(vec.len()),
+                Some(d) => {
+                    if vec.len() != d {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Inconsistent embedding dimension: store has {} but got {}",
+                            d,
+                            vec.len()
+                        )));
+                    }
+                }
+            }
+            entries.push((node_idx, vec));
+        }
+
+        let dim = match dim_seen {
+            Some(d) => d,
+            None => {
+                let result = PyDict::new(py);
+                result.set_item("embeddings_stored", 0)?;
+                result.set_item("dimension", 0)?;
+                result.set_item("skipped", skipped)?;
+                result.set_item("store_created", false)?;
+                return Ok(result.into());
+            }
+        };
+
+        let store = g
+            .embeddings
+            .entry(store_key.clone())
+            .or_insert_with(|| match metric {
+                Some(m) => schema::EmbeddingStore::with_metric(dim, m),
+                None => schema::EmbeddingStore::new(dim),
+            });
+        for (node_idx, vec) in &entries {
+            store.set_embedding(node_idx.index(), vec);
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("embeddings_stored", store.len())?;
+        result.set_item("dimension", dim)?;
+        result.set_item("skipped", skipped)?;
+        result.set_item("store_created", !store_existed)?;
+        Ok(result.into())
+    }
+
     /// Vector similarity search within the current selection.
     ///
     /// Args:
@@ -292,6 +399,19 @@ impl KnowledgeGraph {
     ///   the current graph has the underlying property — the symptom
     ///   ``import_embeddings()`` warns about when keys mismatch.
     ///
+    /// Each row also carries a ``length_stats`` dict so callers can
+    /// filter on string-length distribution + cardinality before
+    /// committing to embed a column. ISO timestamps, status enums, and
+    /// fully-unique identifiers are surfaced with the same status but
+    /// distinguishable by their ``length_stats``:
+    ///
+    /// - ``mean_length`` / ``max_length``: average and max byte length of
+    ///   non-null values. Sub-20-byte means usually indicate flags,
+    ///   timestamps, or short codes (poor embedding candidates).
+    /// - ``distinct_count``: number of unique values seen.
+    /// - ``distinct_ratio``: ``distinct_count / value_count``. A ratio
+    ///   of 1.0 means every value is unique (likely an identifier).
+    ///
     /// Args:
     ///     node_type: Optional. When set, only that node type is scanned.
     ///         When ``None``, every type in the graph is scanned (may be
@@ -303,7 +423,7 @@ impl KnowledgeGraph {
     ///     ``embedding_key`` (= ``f"{text_column}_emb"``),
     ///     ``nodes_with_property``, ``nodes_embedded``,
     ///     ``dimension`` (or ``None``), ``metric`` (or ``None``),
-    ///     and ``status``.
+    ///     ``status``, and ``length_stats``.
     #[pyo3(signature = (node_type=None))]
     fn embedding_diagnostics(
         &self,
@@ -311,6 +431,7 @@ impl KnowledgeGraph {
         node_type: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         use crate::datatypes::values::Value;
+        use std::collections::HashSet;
 
         // Validate the filter type up front so unknown types fail loudly
         // instead of silently returning an empty list.
@@ -323,9 +444,14 @@ impl KnowledgeGraph {
             }
         }
 
-        // (node_type, text_column) → (nodes_with_property, optional store).
-        // BTreeMap keeps the output deterministic (sorted by type then column).
-        type Stats<'a> = (usize, Option<&'a schema::EmbeddingStore>);
+        #[derive(Default)]
+        struct Stats<'a> {
+            nodes_with_property: usize,
+            total_length: usize,
+            max_length: usize,
+            distinct: HashSet<String>,
+            store: Option<&'a schema::EmbeddingStore>,
+        }
         let mut by_key: std::collections::BTreeMap<(String, String), Stats<'_>> =
             std::collections::BTreeMap::new();
 
@@ -355,11 +481,17 @@ impl KnowledgeGraph {
                     None => continue,
                 };
                 for (key, value) in node.properties_cloned(&self.inner.interner) {
-                    if matches!(value, Value::String(_)) {
+                    if let Value::String(s) = value {
                         let entry = by_key
                             .entry((type_name.clone(), key))
-                            .or_insert((0usize, None));
-                        entry.0 += 1;
+                            .or_default();
+                        let len = s.len();
+                        entry.nodes_with_property += 1;
+                        entry.total_length += len;
+                        if len > entry.max_length {
+                            entry.max_length = len;
+                        }
+                        entry.distinct.insert(s);
                     }
                 }
             }
@@ -381,41 +513,43 @@ impl KnowledgeGraph {
                 .to_string();
             let entry = by_key
                 .entry((store_type.clone(), text_column.clone()))
-                .or_insert((0usize, None));
-            entry.1 = Some(store);
+                .or_default();
+            entry.store = Some(store);
             // Treat builtin columns as universally present so we don't
             // mis-flag a `title_emb` store as a store_orphan.
-            if matches!(text_column.as_str(), "id" | "title" | "type") && entry.0 == 0 {
+            if matches!(text_column.as_str(), "id" | "title" | "type")
+                && entry.nodes_with_property == 0
+            {
                 if let Some(type_indices) = self.inner.type_indices.get(store_type) {
-                    entry.0 = type_indices.len();
+                    entry.nodes_with_property = type_indices.len();
                 }
             }
         }
 
         let py_list = PyList::empty(py);
-        for ((type_name, text_column), (nodes_with_property, store)) in by_key {
+        for ((type_name, text_column), stats) in by_key {
             // Drop entries that ended up with no signal at all (no
             // property, no store) — they happen when a non-string slot
             // shows up via the schema scan path.
-            if nodes_with_property == 0 && store.is_none() {
+            if stats.nodes_with_property == 0 && stats.store.is_none() {
                 continue;
             }
             let dict = PyDict::new(py);
             dict.set_item("node_type", &type_name)?;
             dict.set_item("text_column", &text_column)?;
             dict.set_item("embedding_key", format!("{}_emb", text_column))?;
-            dict.set_item("nodes_with_property", nodes_with_property)?;
-            let nodes_embedded = store.map(|s| s.len()).unwrap_or(0);
+            dict.set_item("nodes_with_property", stats.nodes_with_property)?;
+            let nodes_embedded = stats.store.map(|s| s.len()).unwrap_or(0);
             dict.set_item("nodes_embedded", nodes_embedded)?;
-            let status = if store.is_none() {
+            let status = if stats.store.is_none() {
                 "embeddable"
-            } else if nodes_with_property == 0 {
+            } else if stats.nodes_with_property == 0 {
                 "store_orphan"
             } else {
                 "embedded"
             };
             dict.set_item("status", status)?;
-            match store {
+            match stats.store {
                 Some(s) => {
                     dict.set_item("dimension", s.dimension)?;
                     dict.set_item(
@@ -428,6 +562,29 @@ impl KnowledgeGraph {
                     dict.set_item("metric", py.None())?;
                 }
             }
+
+            // length_stats: the heuristic data callers need to filter
+            // out short-string columns (timestamps, enums) and
+            // fully-unique columns (identifiers) before declaring a
+            // candidate worth embedding.
+            let length_stats = PyDict::new(py);
+            let distinct_count = stats.distinct.len();
+            let mean_length = if stats.nodes_with_property > 0 {
+                stats.total_length as f64 / stats.nodes_with_property as f64
+            } else {
+                0.0
+            };
+            let distinct_ratio = if stats.nodes_with_property > 0 {
+                distinct_count as f64 / stats.nodes_with_property as f64
+            } else {
+                0.0
+            };
+            length_stats.set_item("mean_length", mean_length)?;
+            length_stats.set_item("max_length", stats.max_length)?;
+            length_stats.set_item("distinct_count", distinct_count)?;
+            length_stats.set_item("distinct_ratio", distinct_ratio)?;
+            dict.set_item("length_stats", length_stats)?;
+
             py_list.append(dict)?;
         }
 
@@ -689,17 +846,24 @@ impl KnowledgeGraph {
     // Text-Level Embedding API
     // ========================================================================
 
-    /// Register an embedding model on the graph.
+    /// Register or unbind an embedding model on the graph.
+    ///
+    /// Pass a model object to register; pass ``None`` to unbind the
+    /// currently-registered embedder.
     ///
     /// The model must have:
     /// - ``dimension: int`` — the embedding vector size
     /// - ``embed(texts: list[str]) -> list[list[float]]`` — batch embedding method
     ///
-    /// After calling this, ``embed_texts()`` and ``search_text()`` use the
+    /// After registering, ``embed_texts()`` and ``search_text()`` use the
     /// registered model automatically.  The model is **not** serialized —
     /// call ``set_embedder()`` again after ``load()``.
     #[pyo3(signature = (model,))]
-    fn set_embedder(&mut self, py: Python<'_>, model: Py<PyAny>) -> PyResult<()> {
+    fn set_embedder(&mut self, py: Python<'_>, model: Option<Py<PyAny>>) -> PyResult<()> {
+        let Some(model) = model else {
+            self.embedder = None;
+            return Ok(());
+        };
         let bound = model.bind(py);
         bound.getattr("dimension").map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
@@ -709,12 +873,6 @@ impl KnowledgeGraph {
         bound.getattr("embed").map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyAttributeError, _>("model must have an 'embed' method")
         })?;
-        // 0.9.18: wrap the user's Python embedder in PyEmbedderAdapter
-        // so the rest of kglite (cypher engine, embed_texts,
-        // search_text) calls through the generic Embedder trait. The
-        // adapter holds the Py<PyAny> and acquires the GIL inside its
-        // trait methods — same semantics as the pre-0.9.18 direct
-        // `Py<PyAny>` path.
         let adapter = crate::graph::embedder::py_adapter::PyEmbedderAdapter::new(py, model)?;
         self.embedder = Some(Arc::new(adapter));
         Ok(())

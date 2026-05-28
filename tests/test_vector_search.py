@@ -1713,3 +1713,113 @@ class TestVectorSearchPropertiesAfterReload:
         loaded = kglite.load(save_path)
         df = loaded.select("Article").vector_search("summary", [1.0, 0.0, 0.0], top_k=3, to_df=True)
         assert {"id", "title", "type", "score", "category", "summary"}.issubset(df.columns)
+
+
+class TestAddEmbeddings:
+    """add_embeddings appends to an existing store without read-merge-write."""
+
+    def test_add_embeddings_creates_store_on_first_call(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2, 3], "title": ["A", "B", "C"], "summary": ["a", "b", "c"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        result = graph.add_embeddings(
+            "Article",
+            "summary",
+            {1: [0.1, 0.2], 2: [0.3, 0.4]},
+        )
+        assert result["embeddings_stored"] == 2
+        assert result["dimension"] == 2
+        assert result["skipped"] == 0
+        assert result["store_created"] is True
+
+    def test_add_embeddings_extends_existing_store(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2, 3], "title": ["A", "B", "C"], "summary": ["a", "b", "c"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embeddings("Article", "summary", {1: [0.1, 0.2]})
+        result = graph.add_embeddings("Article", "summary", {2: [0.3, 0.4], 3: [0.5, 0.6]})
+        assert result["embeddings_stored"] == 3
+        assert result["store_created"] is False
+        # Original entry still present.
+        all_embs = graph.embeddings("Article", "summary")
+        assert all_embs[1] == pytest.approx([0.1, 0.2])
+        assert all_embs[2] == pytest.approx([0.3, 0.4])
+
+    def test_add_embeddings_dim_mismatch_rejected(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "summary": ["a", "b"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        graph.set_embeddings("Article", "summary", {1: [0.1, 0.2]})
+        with pytest.raises(ValueError, match="Inconsistent embedding dimension"):
+            graph.add_embeddings("Article", "summary", {2: [0.3, 0.4, 0.5]})
+
+    def test_add_embeddings_skips_unknown_ids(self):
+        graph = kglite.KnowledgeGraph()
+        df = pd.DataFrame({"id": [1, 2], "title": ["A", "B"], "summary": ["a", "b"]})
+        graph.add_nodes(df, "Article", "id", "title")
+        result = graph.add_embeddings(
+            "Article",
+            "summary",
+            {1: [0.1, 0.2], 99: [0.3, 0.4]},
+        )
+        assert result["embeddings_stored"] == 1
+        assert result["skipped"] == 1
+
+
+class TestSetEmbedderUnbind:
+    """set_embedder(None) unbinds without raising."""
+
+    def test_set_embedder_accepts_none_when_unbound(self):
+        g = kglite.KnowledgeGraph()
+        # No-op: unbind when nothing was bound. Must not raise.
+        g.set_embedder(None)
+
+    def test_set_embedder_none_after_registering(self):
+        class FakeEmbedder:
+            dimension = 3
+
+            def embed(self, texts):
+                return [[0.0, 0.0, 0.0] for _ in texts]
+
+        g = kglite.KnowledgeGraph()
+        g.set_embedder(FakeEmbedder())
+        g.set_embedder(None)  # must not raise
+
+
+class TestEmbeddingDiagnosticsLengthStats:
+    """embedding_diagnostics now exposes length_stats so callers can
+    filter candidate columns by length distribution + cardinality."""
+
+    def test_length_stats_fields_present(self):
+        g = kglite.KnowledgeGraph()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3, 4],
+                "title": ["A", "B", "C", "D"],
+                "body": [
+                    "long-enough paragraph one",
+                    "another long-enough paragraph",
+                    "third entry with detail",
+                    "fourth long-enough entry",
+                ],
+                "status": ["new", "new", "done", "new"],
+            }
+        )
+        g.add_nodes(df, "Note", "id", "title")
+        diag = g.embedding_diagnostics(node_type="Note")
+        body_row = next(d for d in diag if d["text_column"] == "body")
+        status_row = next(d for d in diag if d["text_column"] == "status")
+
+        for row in (body_row, status_row):
+            stats = row["length_stats"]
+            assert set(stats.keys()) == {"mean_length", "max_length", "distinct_count", "distinct_ratio"}
+
+        # body: long strings, mostly distinct.
+        assert body_row["length_stats"]["mean_length"] >= 20
+        assert body_row["length_stats"]["distinct_count"] == 4
+        assert body_row["length_stats"]["distinct_ratio"] == pytest.approx(1.0)
+
+        # status: short strings, low cardinality.
+        assert status_row["length_stats"]["mean_length"] < 5
+        assert status_row["length_stats"]["distinct_count"] == 2
+        assert status_row["length_stats"]["distinct_ratio"] == pytest.approx(0.5)

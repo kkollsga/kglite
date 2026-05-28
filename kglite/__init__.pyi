@@ -3771,7 +3771,8 @@ class KnowledgeGraph:
         embeddings: dict[Any, list[float]],
         metric: Optional[str] = None,
     ) -> dict[str, int]:
-        """Store embeddings for nodes of the given type.
+        """Store embeddings for nodes of the given type. Replaces any
+        existing store for ``(node_type, "{text_column}_emb")``.
 
         Embeddings are stored separately from regular node properties and are
         invisible to ``collect()``, ``to_df()``, and other property-based APIs.
@@ -3779,6 +3780,9 @@ class KnowledgeGraph:
 
         Validates that ``text_column`` exists as a property on the node type
         (builtins ``id``, ``title``, ``type`` are always accepted).
+
+        For incremental ingest where you want to add to an existing store
+        without a read-merge-write round-trip, use :meth:`add_embeddings`.
 
         Args:
             node_type: The node type (e.g. ``'Article'``).
@@ -3790,6 +3794,39 @@ class KnowledgeGraph:
 
         Returns:
             Dict with ``embeddings_stored``, ``dimension``, and ``skipped``.
+        """
+        ...
+
+    def add_embeddings(
+        self,
+        node_type: str,
+        text_column: str,
+        embeddings: dict[Any, list[float]],
+        metric: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Add or update embeddings without discarding the existing store.
+
+        Differs from :meth:`set_embeddings` (which replaces the store) by
+        upserting entries into an existing
+        ``(node_type, "{text_column}_emb")`` store. If no store exists
+        yet, behaves like ``set_embeddings`` — the first call creates
+        one; subsequent calls extend it.
+
+        Use this for incremental ingest workflows where multiple
+        ``add_nodes`` + embedding batches need to coexist without a
+        read-merge-write cycle through the user's process.
+
+        Args:
+            node_type: The node type (e.g. ``'Article'``).
+            text_column: Source text column name (e.g. ``'summary'``).
+            embeddings: Dict mapping node IDs to embedding vectors.
+            metric: Only used when the store doesn't exist yet. Ignored
+                otherwise (the existing store's metric is preserved).
+
+        Returns:
+            Dict with ``embeddings_stored`` (total in store after the
+            upsert), ``dimension``, ``skipped`` (unknown ids), and
+            ``store_created`` (``True`` iff this call created the store).
         """
         ...
 
@@ -3849,8 +3886,17 @@ class KnowledgeGraph:
           graph has the underlying property — the symptom
           ``import_embeddings()`` warns about when keys mismatch.
 
-        Use this after a ``UserWarning`` from ``import_embeddings()`` to
-        see *which* stores were dropped or partially mapped.
+        Each row also carries a ``length_stats`` dict so callers can
+        filter on string-length distribution + cardinality before
+        committing to embed a column. ISO timestamps, status enums, and
+        fully-unique identifiers show up with ``status="embeddable"``
+        but their ``length_stats`` distinguishes them from real
+        candidates::
+
+            # keep columns averaging ≥ 20 chars and not fully-unique
+            candidates = [d for d in g.embedding_diagnostics()
+                          if d["length_stats"]["mean_length"] >= 20
+                          and d["length_stats"]["distinct_ratio"] < 1.0]
 
         Args:
             node_type: Optional filter. When set, only that node type is
@@ -3862,7 +3908,9 @@ class KnowledgeGraph:
             ``embedding_key`` (= ``f"{text_column}_emb"``),
             ``nodes_with_property``, ``nodes_embedded``,
             ``dimension`` (or ``None``), ``metric`` (or ``None``),
-            and ``status``.
+            ``status``, and ``length_stats`` with
+            ``mean_length`` / ``max_length`` / ``distinct_count`` /
+            ``distinct_ratio``.
         """
         ...
 
@@ -3962,10 +4010,13 @@ class KnowledgeGraph:
         """
         ...
 
-    def set_embedder(self, model: EmbeddingModel) -> None:
-        """Register an embedding model on the graph.
+    def set_embedder(self, model: Optional[EmbeddingModel]) -> None:
+        """Register or unbind an embedding model on the graph.
 
-        After calling this, ``embed_texts()`` and ``search_text()`` use the
+        Pass a model object to register; pass ``None`` to unbind the
+        currently-registered embedder.
+
+        After registering, ``embed_texts()`` and ``search_text()`` use the
         registered model automatically.  The model is **not** serialized —
         call ``set_embedder()`` again after deserializing.
 
@@ -3974,11 +4025,12 @@ class KnowledgeGraph:
 
         Args:
             model: An embedding model with ``dimension`` and ``embed()`` — see
-                :class:`EmbeddingModel`.
+                :class:`EmbeddingModel`. Or ``None`` to unbind.
 
         Example::
 
             g.set_embedder(my_model)
+            g.set_embedder(None)  # unbind
         """
         ...
 

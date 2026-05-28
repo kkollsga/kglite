@@ -1512,6 +1512,11 @@ impl KnowledgeGraph {
     /// useful when you want full titles in an LLM prompt and have
     /// context-window budget for it.
     ///
+    /// There is no ``limit`` kwarg. Older tutorials sometimes show
+    /// ``describe(limit=N)`` — that's not a supported signature; use
+    /// ``sample_truncate`` for string-value clipping, or filter
+    /// ``types=[...]`` to narrow the inventory.
+    ///
     /// When `type_search`, `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
     #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None, sample_truncate=Some(40)))]
     #[allow(clippy::too_many_arguments)]
