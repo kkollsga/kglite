@@ -1420,12 +1420,6 @@ pub struct NodeData {
     pub id: Value,
     pub title: Value,
     pub node_type: InternedKey,
-    /// Secondary labels (beyond the primary `node_type`) — populated by
-    /// Cypher `SET n:Label` / `CREATE (n:A:B)` / `g.add_label(...)`.
-    /// Empty for the single-label hot path. Old saves deserialize as
-    /// empty Vec via `#[serde(default)]`.
-    #[serde(default)]
-    pub extra_labels: Vec<InternedKey>,
     pub(crate) properties: PropertyStorage,
 }
 
@@ -1451,7 +1445,6 @@ impl NodeData {
             id,
             title,
             node_type: type_key,
-            extra_labels: Vec::new(),
             properties: PropertyStorage::Map(interned_props),
         }
     }
@@ -1474,7 +1467,6 @@ impl NodeData {
             id,
             title,
             node_type: type_key,
-            extra_labels: Vec::new(),
             properties: PropertyStorage::from_compact(pairs, schema),
         }
     }
@@ -1491,7 +1483,6 @@ impl NodeData {
             id,
             title,
             node_type,
-            extra_labels: Vec::new(),
             properties: PropertyStorage::from_compact(properties, schema),
         }
     }
@@ -1508,7 +1499,6 @@ impl NodeData {
             id,
             title,
             node_type,
-            extra_labels: Vec::new(),
             properties: PropertyStorage::Map(map),
         }
     }

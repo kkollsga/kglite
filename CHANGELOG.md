@@ -50,15 +50,14 @@ labels. Sodir / Wikidata / code-tree benchmarks unchanged vs 0.10.4.
 
 ### Changed
 
-- **`NodeData` gains an `extra_labels: Vec<InternedKey>` field.**
-  The wire format shifted — bincode is positional and treats the
-  new field as required. **Pre-0.10.5 `.kgl` files do not load
-  into 0.10.5** (loader returns `FileIo`). Rebuild the graph
-  with `kglite >= 0.10.5` to migrate. The `.kgl` v3 golden hash
-  refreshed at this release; prior digest preserved in
-  `ACCEPTABLE_DIGESTS` for bisection only. Matches the precedent
-  set by the v3 → v4 break in 0.10.0 — patch releases that touch
-  `NodeData` bincode layout require a re-save.
+- **`DirGraph.secondary_label_index` is the canonical store** for
+  secondary labels (it was already the runtime fast-path index;
+  now it's also the persistence source of truth). `NodeData`
+  layout is unchanged from 0.10.4 — pre-0.10.5 `.kgl` files load
+  cleanly. Secondary labels persist via a new optional section
+  in the `.kgl` v4 envelope (in-memory backend) and via the
+  `secondary_labels.bin.zst` sidecar in the disk-graph directory.
+  Single-label graphs skip both — zero extra bytes.
 - **`DirGraph` gains `secondary_label_index` + `has_secondary_labels`**
   — both `#[serde(skip)]`, rebuilt on load from
   `NodeData.extra_labels`.

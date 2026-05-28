@@ -1403,8 +1403,6 @@ impl DirGraph {
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);
-        let mut new_secondary: HashMap<InternedKey, Vec<NodeIndex>> = HashMap::new();
-        let mut has_secondary = false;
         for node_idx in self.graph.node_indices() {
             if let Some(node) = self.graph.node_weight(node_idx) {
                 let type_str = node.node_type_str(&self.interner).to_string();
@@ -1412,44 +1410,43 @@ impl DirGraph {
                     .entry(type_str)
                     .or_insert_with(|| Vec::with_capacity(avg_per_type))
                     .push(node_idx);
-                if !node.extra_labels.is_empty() {
-                    has_secondary = true;
-                    for &key in &node.extra_labels {
-                        new_secondary.entry(key).or_default().push(node_idx);
-                    }
-                }
             }
         }
         self.type_indices.replace_with(new_type_indices);
-        self.secondary_label_index = new_secondary;
-        self.has_secondary_labels = has_secondary;
+        // `secondary_label_index` is *not* rebuilt from node data — it's
+        // the canonical store, populated either by the choke-point API
+        // during the session or by the load path (the disk sidecar /
+        // the in-memory .kgl section).
     }
 
     /// Add a secondary label to a node. Choke-point API for label
-    /// mutations — keeps `NodeData.extra_labels` and
-    /// `secondary_label_index` in sync.
+    /// mutations — every mutation site routes through here so the
+    /// `secondary_label_index` stays canonical across all three
+    /// backends. NodeData itself never carries extra labels; the
+    /// inverted index is the single source of truth.
     ///
     /// Returns `true` if the label was added, `false` if it was already
     /// present (idempotent) or equal to the primary type.
     pub fn add_node_label(&mut self, idx: NodeIndex, label: InternedKey) -> bool {
-        let Some(node) = self.graph.node_weight_mut(idx) else {
-            return false;
+        use crate::graph::storage::GraphRead;
+        let primary = match GraphRead::node_type_of(&self.graph, idx) {
+            Some(k) => k,
+            None => return false,
         };
-        if node.node_type == label || node.extra_labels.contains(&label) {
+        if primary == label {
             return false;
         }
-        node.extra_labels.push(label);
+        let bucket = self.secondary_label_index.entry(label).or_default();
+        if bucket.contains(&idx) {
+            return false;
+        }
+        bucket.push(idx);
         self.has_secondary_labels = true;
-        self.secondary_label_index
-            .entry(label)
-            .or_default()
-            .push(idx);
         true
     }
 
     /// Remove a secondary label from a node. Choke-point API for label
-    /// mutations — keeps `NodeData.extra_labels` and
-    /// `secondary_label_index` in sync.
+    /// mutations.
     ///
     /// Returns `Ok(true)` if removed, `Ok(false)` if the node never had
     /// the label, `Err(...)` if `label` is the primary type (use
@@ -1459,29 +1456,28 @@ impl DirGraph {
         idx: NodeIndex,
         label: InternedKey,
     ) -> Result<bool, String> {
-        let Some(node) = self.graph.node_weight_mut(idx) else {
+        use crate::graph::storage::GraphRead;
+        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
             return Ok(false);
         };
-        if node.node_type == label {
+        if primary == label {
             return Err(
                 "Cannot remove a node's primary label via REMOVE n:Label; use \
                  SET n.type = 'NewType' to retype."
                     .to_string(),
             );
         }
-        let before = node.extra_labels.len();
-        node.extra_labels.retain(|&k| k != label);
-        let removed = node.extra_labels.len() < before;
-        if removed {
-            if let Some(bucket) = self.secondary_label_index.get_mut(&label) {
-                bucket.retain(|&i| i != idx);
-                if bucket.is_empty() {
-                    self.secondary_label_index.remove(&label);
-                }
-            }
-            if self.secondary_label_index.is_empty() {
-                self.has_secondary_labels = false;
-            }
+        let Some(bucket) = self.secondary_label_index.get_mut(&label) else {
+            return Ok(false);
+        };
+        let before = bucket.len();
+        bucket.retain(|&i| i != idx);
+        let removed = bucket.len() < before;
+        if removed && bucket.is_empty() {
+            self.secondary_label_index.remove(&label);
+        }
+        if self.secondary_label_index.is_empty() {
+            self.has_secondary_labels = false;
         }
         Ok(removed)
     }
@@ -1602,8 +1598,6 @@ impl DirGraph {
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);
-        let mut new_secondary: HashMap<InternedKey, Vec<NodeIndex>> = HashMap::new();
-        let mut has_secondary = false;
 
         let node_indices: Vec<NodeIndex> = self.graph.node_indices().collect();
         for node_idx in node_indices {
@@ -1615,14 +1609,6 @@ impl DirGraph {
                 .entry(type_str)
                 .or_insert_with(|| Vec::with_capacity(avg_per_type))
                 .push(node_idx);
-
-            // Rebuild secondary_label_index from NodeData.extra_labels
-            if !node.extra_labels.is_empty() {
-                has_secondary = true;
-                for &key in &node.extra_labels {
-                    new_secondary.entry(key).or_default().push(node_idx);
-                }
-            }
 
             // Convert Map → Compact
             if let PropertyStorage::Map(_) = &node.properties {
@@ -1644,8 +1630,9 @@ impl DirGraph {
 
         self.type_indices.replace_with(new_type_indices);
         self.type_schemas = arc_schemas;
-        self.secondary_label_index = new_secondary;
-        self.has_secondary_labels = has_secondary;
+        // `secondary_label_index` is *not* rebuilt here — it's the
+        // canonical store, populated by the load path (the disk
+        // sidecar or the in-memory `.kgl` section).
     }
 
     /// Convert the graph to disk-backed storage mode.
@@ -2691,33 +2678,45 @@ mod multi_label_tests {
     }
 
     #[test]
-    fn rebuild_repopulates_secondary_index_from_node_data() {
+    fn rebuild_does_not_clobber_secondary_index() {
+        // After 0.10.5's perf fix, NodeData no longer carries
+        // extra_labels — `secondary_label_index` is the canonical
+        // store. `rebuild_type_indices` rebuilds only type_indices
+        // and leaves the secondary index intact (it's repopulated by
+        // the load path via the disk sidecar / .kgl section).
         let mut g = DirGraph::new();
         let idx = add_node(&mut g, "n1", "Person");
         let reviewer = g.interner.get_or_intern("Reviewer");
         g.add_node_label(idx, reviewer);
 
-        // Drop the index entries; rebuild should restore them from
-        // NodeData.extra_labels.
-        g.secondary_label_index.clear();
-        g.has_secondary_labels = false;
+        let before = g.secondary_label_index.clone();
+        let before_flag = g.has_secondary_labels;
 
         g.rebuild_type_indices();
 
-        assert!(g.has_secondary_labels);
-        assert_eq!(g.secondary_label_index[&reviewer], vec![idx]);
+        // Secondary index is untouched.
+        assert_eq!(g.secondary_label_index, before);
+        assert_eq!(g.has_secondary_labels, before_flag);
+        // Primary type_indices is rebuilt correctly.
+        assert_eq!(
+            g.type_indices.get("Person").map(|s| s.iter().collect()),
+            Some(vec![idx])
+        );
     }
 
     #[test]
-    fn graph_read_node_labels_of_returns_primary_plus_extras() {
-        use crate::graph::storage::GraphRead;
+    fn dir_graph_node_labels_returns_primary_plus_extras() {
+        // The canonical path for "all labels of node X" is
+        // `DirGraph::node_labels` (which scans `secondary_label_index`).
+        // Backend trait `node_labels_of` returns only the primary
+        // type and is no longer the authoritative source.
         let mut g = DirGraph::new();
         let idx = add_node(&mut g, "n1", "Person");
         let reviewer = g.interner.get_or_intern("Reviewer");
         let person = g.interner.get_or_intern("Person");
         g.add_node_label(idx, reviewer);
 
-        let labels = g.graph.node_labels_of(idx);
+        let labels = g.node_labels(idx);
         assert_eq!(labels, vec![person, reviewer]);
     }
 }

@@ -83,16 +83,12 @@ macro_rules! impl_heap_graph_read {
                 self.inner().node_weight(idx).map(|nd| nd.node_type)
             }
 
-            #[inline]
-            fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
-                let Some(nd) = self.inner().node_weight(idx) else {
-                    return Vec::new();
-                };
-                let mut labels = Vec::with_capacity(1 + nd.extra_labels.len());
-                labels.push(nd.node_type);
-                labels.extend(nd.extra_labels.iter().copied());
-                labels
-            }
+            // NodeData no longer carries extra_labels — secondary
+            // labels live in `DirGraph.secondary_label_index` (the
+            // canonical store). Backend `node_labels_of` returns only
+            // the primary; callers that need the full label list go
+            // through `DirGraph::node_labels`, which has access to the
+            // inverted index.
 
             #[inline]
             fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
@@ -371,16 +367,10 @@ impl GraphRead for MappedGraph {
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         self.inner().node_weight(idx).map(|nd| nd.node_type)
     }
-    #[inline]
-    fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
-        let Some(nd) = self.inner().node_weight(idx) else {
-            return Vec::new();
-        };
-        let mut labels = Vec::with_capacity(1 + nd.extra_labels.len());
-        labels.push(nd.node_type);
-        labels.extend(nd.extra_labels.iter().copied());
-        labels
-    }
+    // node_labels_of falls back to the default trait impl (returns the
+    // primary type only). The full label list comes from
+    // `DirGraph::node_labels`, which consults `secondary_label_index`.
+
     #[inline]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         self.inner().node_weight(idx)

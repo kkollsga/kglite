@@ -157,6 +157,12 @@ pub(crate) struct FileMetadata {
     /// v3: compressed size of timeseries section (0 if none).
     #[serde(default)]
     timeseries_compressed_size: u64,
+    /// 0.10.5: compressed size of secondary-label-index section (0 if
+    /// none). Persists `DirGraph.secondary_label_index` for in-memory
+    /// graphs. Disk graphs use the parallel `secondary_labels.bin.zst`
+    /// sidecar. Older `.kgl` files default to 0 (no section to read).
+    #[serde(default)]
+    secondary_labels_compressed_size: u64,
     /// Cached edge type counts (connection_type → count).
     /// Persisted from warm cache on save, restored to cache on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +206,7 @@ impl FileMetadata {
             column_sections: Vec::new(),
             embeddings_compressed_size: 0,
             timeseries_compressed_size: 0,
+            secondary_labels_compressed_size: 0,
             // Persist edge type counts if cache is warm (no O(E) scan if cold)
             edge_type_counts: if graph.has_edge_type_counts_cache() {
                 Some(graph.get_edge_type_counts())
@@ -930,63 +937,65 @@ pub(crate) fn read_type_connectivity_bin(
     Ok(Some(triples))
 }
 
-/// Writer for `secondary_labels.bin.zst`. Idempotent — no-op if the
-/// graph has no secondary labels (single-label disk graphs cost
-/// zero extra bytes). Called from `DirGraph::save_disk`.
-pub(crate) fn write_secondary_labels_bin(
-    dir: &std::path::Path,
-    graph: &DirGraph,
-) -> Result<(), String> {
+/// Encode `DirGraph.secondary_label_index` into a self-describing
+/// byte payload. Returns `None` if the graph has no secondary
+/// labels — callers skip writing the section entirely, keeping
+/// single-label graphs zero-cost.
+///
+/// Labels are stored as length-prefixed UTF-8 strings (not raw
+/// InternedKey u64s) because secondary-only labels aren't carried
+/// by any other persisted structure — the load-side interner
+/// wouldn't recognise the key otherwise. Strings are intern-cheap
+/// (one string per label, not per node).
+///
+/// Layout (uncompressed):
+///   [0..8]    magic (`b"KGLSLBL1"`)
+///   [8..12]   version (`1u32` LE)
+///   [12..16]  num_labels (u32 LE)
+///   For each label:
+///     4 B   name_len (u32 LE)
+///     name_len B   UTF-8 label name
+///     4 B   num_nodes (u32 LE)
+///     4*N B node indices (raw `NodeIndex::index() as u32` LE)
+///
+/// Used by both the disk sidecar (`secondary_labels.bin.zst`) and
+/// the in-memory `.kgl` v4 envelope's secondary-labels section.
+fn encode_secondary_label_index(graph: &DirGraph) -> Option<Vec<u8>> {
     if !graph.has_secondary_labels || graph.secondary_label_index.is_empty() {
-        return Ok(());
+        return None;
     }
     let n = graph.secondary_label_index.len() as u32;
-    // Header + per-label minimum (12 bytes) + payload (4 bytes per node).
-    let est_capacity = 16
-        + graph
-            .secondary_label_index
-            .values()
-            .map(|v| 12 + v.len() * 4)
-            .sum::<usize>();
-    let mut payload: Vec<u8> = Vec::with_capacity(est_capacity);
+    let mut payload: Vec<u8> = Vec::new();
     payload.extend_from_slice(SECONDARY_LABELS_MAGIC);
     payload.extend_from_slice(&SECONDARY_LABELS_VERSION.to_le_bytes());
     payload.extend_from_slice(&n.to_le_bytes());
-    // Deterministic order: sort by raw u64 key so byte layout is
-    // stable across saves of the same logical state.
+    // Deterministic order: sort by label name (string) so byte
+    // layout is stable across saves of the same logical state.
     let mut entries: Vec<(
         &crate::graph::schema::InternedKey,
         &Vec<petgraph::graph::NodeIndex>,
     )> = graph.secondary_label_index.iter().collect();
-    entries.sort_by_key(|(k, _)| k.as_u64());
+    entries.sort_by_key(|(k, _)| graph.interner.resolve(**k).to_string());
     for (key, nodes) in entries {
-        payload.extend_from_slice(&key.as_u64().to_le_bytes());
+        let name = graph.interner.resolve(*key);
+        let name_bytes = name.as_bytes();
+        payload.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(name_bytes);
         payload.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
         for idx in nodes {
             payload.extend_from_slice(&(idx.index() as u32).to_le_bytes());
         }
     }
-    let compressed = zstd::encode_all(payload.as_slice(), 3)
-        .map_err(|e| format!("secondary_labels compression failed: {}", e))?;
-    std::fs::write(dir.join("secondary_labels.bin.zst"), compressed)
-        .map_err(|e| format!("Failed to write secondary_labels.bin.zst: {}", e))?;
-    Ok(())
+    Some(payload)
 }
 
-/// Reader for `secondary_labels.bin.zst`. Populates
-/// `graph.secondary_label_index` + `has_secondary_labels` in place.
-/// Returns `Ok(false)` if the file is absent or has an unrecognised
-/// magic/version tag (graceful — older saves don't have it).
-pub(crate) fn read_secondary_labels_bin(
-    dir: &std::path::Path,
-    graph: &mut DirGraph,
-) -> io::Result<bool> {
-    let path = dir.join("secondary_labels.bin.zst");
-    if !path.exists() {
-        return Ok(false);
-    }
-    let compressed = std::fs::read(&path)?;
-    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+/// Decode a `secondary_label_index` payload into the graph in
+/// place. Interns each label name through the graph's live
+/// interner — so even labels that exist *only* as secondaries
+/// (no node has them as primary type) round-trip correctly.
+/// Returns `Ok(false)` if the header doesn't match (graceful —
+/// older saves don't have the section).
+fn decode_secondary_label_index(payload: &[u8], graph: &mut DirGraph) -> io::Result<bool> {
     if payload.len() < 16 || &payload[..8] != SECONDARY_LABELS_MAGIC {
         return Ok(false);
     }
@@ -999,31 +1008,34 @@ pub(crate) fn read_secondary_labels_bin(
     let mut index: HashMap<crate::graph::schema::InternedKey, Vec<petgraph::graph::NodeIndex>> =
         HashMap::with_capacity(n);
     for _ in 0..n {
-        if payload.len() < cursor + 12 {
+        if payload.len() < cursor + 4 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "secondary_labels.bin.zst is truncated",
+                "secondary_labels payload truncated (name len)",
             ));
         }
-        let key_u64 = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-        cursor += 8;
+        let name_len = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if payload.len() < cursor + name_len + 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secondary_labels payload truncated (name bytes)",
+            ));
+        }
+        let name = std::str::from_utf8(&payload[cursor..cursor + name_len])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_string();
+        cursor += name_len;
         let num_nodes =
             u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
         if payload.len() < cursor + num_nodes * 4 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "secondary_labels.bin.zst is truncated (node list)",
+                "secondary_labels payload truncated (node list)",
             ));
         }
-        let key = crate::graph::schema::InternedKey::from_u64(key_u64);
-        // Silently skip keys whose interner entry didn't survive
-        // (covers truly-corrupted input; the interner is loaded
-        // before this file on the disk-load path).
-        if graph.interner.try_resolve(key).is_none() {
-            cursor += num_nodes * 4;
-            continue;
-        }
+        let key = graph.interner.get_or_intern(&name);
         let mut nodes = Vec::with_capacity(num_nodes);
         for _ in 0..num_nodes {
             let raw = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap());
@@ -1037,6 +1049,38 @@ pub(crate) fn read_secondary_labels_bin(
         graph.has_secondary_labels = true;
     }
     Ok(true)
+}
+
+/// Disk-mode writer for `secondary_labels.bin.zst`. No-op if the
+/// graph has no secondary labels.
+pub(crate) fn write_secondary_labels_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    let Some(payload) = encode_secondary_label_index(graph) else {
+        return Ok(());
+    };
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("secondary_labels compression failed: {}", e))?;
+    std::fs::write(dir.join("secondary_labels.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write secondary_labels.bin.zst: {}", e))?;
+    Ok(())
+}
+
+/// Disk-mode reader for `secondary_labels.bin.zst`. Returns
+/// `Ok(false)` if the file is absent (graceful — older disk graphs
+/// don't have it).
+pub(crate) fn read_secondary_labels_bin(
+    dir: &std::path::Path,
+    graph: &mut DirGraph,
+) -> io::Result<bool> {
+    let path = dir.join("secondary_labels.bin.zst");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let compressed = std::fs::read(&path)?;
+    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    decode_secondary_label_index(&payload, graph)
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -1172,6 +1216,15 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
         None
     };
 
+    // 4b. Compress secondary-label index if any. Hand-rolled binary
+    // format (encode_secondary_label_index) — InternedKey doesn't
+    // derive serde, and the same layout is reused by the disk
+    // sidecar (`secondary_labels.bin.zst`).
+    let secondary_labels_compressed = match encode_secondary_label_index(graph) {
+        Some(payload) => Some(zstd_compress(&payload)?),
+        None => None,
+    };
+
     // 5. Build metadata (common fields from graph, then fill in section sizes)
     let mut metadata = FileMetadata::from_graph(graph);
     metadata.topology_compressed_size = topology_compressed.len() as u64;
@@ -1181,6 +1234,10 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
         .map(|b| b.len() as u64)
         .unwrap_or(0);
     metadata.timeseries_compressed_size = timeseries_compressed
+        .as_ref()
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    metadata.secondary_labels_compressed_size = secondary_labels_compressed
         .as_ref()
         .map(|b| b.len() as u64)
         .unwrap_or(0);
@@ -1223,6 +1280,12 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
     // Timeseries section
     if let Some(ts_data) = &timeseries_compressed {
         writer.write_all(ts_data)?;
+    }
+
+    // Secondary-label-index section (0.10.5+). Single-label graphs
+    // skip this entirely (encode returned None).
+    if let Some(sl_data) = &secondary_labels_compressed {
+        writer.write_all(sl_data)?;
     }
 
     writer.flush()?;
@@ -1846,6 +1909,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     let column_sections = metadata.column_sections.clone();
     let embeddings_compressed_size = metadata.embeddings_compressed_size;
     let timeseries_compressed_size = metadata.timeseries_compressed_size;
+    let secondary_labels_compressed_size = metadata.secondary_labels_compressed_size;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
@@ -1973,6 +2037,19 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
             let ts_raw = zstd_decompress(ts_compressed)?;
             let ts_store: HashMap<usize, NodeTimeseries> = bincode_deser(&ts_raw)?;
             dir_graph.timeseries_store = ts_store;
+            section_offset = ts_end;
+        }
+    }
+
+    // Load secondary-label-index section if present (0.10.5+). The
+    // interner is fully populated by this point, so InternedKey →
+    // String resolution works.
+    if secondary_labels_compressed_size > 0 {
+        let sl_end = section_offset + secondary_labels_compressed_size as usize;
+        if buf.len() >= sl_end {
+            let sl_compressed = &buf[section_offset..sl_end];
+            let sl_raw = zstd_decompress(sl_compressed)?;
+            decode_secondary_label_index(&sl_raw, &mut dir_graph)?;
         }
     }
 

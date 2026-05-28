@@ -823,7 +823,6 @@ pub fn save_subset_streaming_disk(
                 id: Value::Null,
                 title: Value::Null,
                 node_type: type_key,
-                extra_labels: Vec::new(),
                 properties: PropertyStorage::Columnar {
                     store: Arc::clone(&placeholder_arc),
                     row_id: dest_row_id,
