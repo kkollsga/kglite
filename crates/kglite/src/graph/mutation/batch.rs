@@ -214,8 +214,6 @@ impl BatchProcessor {
 
         // Process pre-interned creates (fast path — no string interning needed)
         for creation in self.creates_interned.drain(..) {
-            let id_for_index = creation.id.clone();
-            let node_type_for_index = creation.node_type.clone();
             let type_key = graph.interner.get_or_intern(&creation.node_type);
 
             let mut node_data = if mapped {
@@ -317,10 +315,13 @@ impl BatchProcessor {
                 .type_indices
                 .entry_or_default(creation.node_type)
                 .push(node_idx);
-            graph
-                .id_indices
-                .entry_or_default(node_type_for_index)
-                .insert(id_for_index, node_idx);
+            // id_indices is intentionally NOT updated incrementally here.
+            // Writing into entry_or_default before any prior `build_id_index`
+            // call would create a partial entry that subsequent lookups
+            // would trust as complete (build_id_index short-circuits when
+            // an entry exists). Leave id_indices alone; `maintain::add_nodes`
+            // invalidates the type's entry at return time so the next
+            // lookup rebuilds from `type_indices` (the source of truth).
             stats.creates += 1;
         }
 

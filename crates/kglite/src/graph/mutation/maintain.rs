@@ -234,6 +234,12 @@ pub fn add_nodes(
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
 
+    // Invalidate the type's id_index. The batch added rows to type_indices
+    // but no longer touches id_indices, so any pre-existing entry is now
+    // missing the freshly-added ids. Dropping the entry forces the next
+    // `build_id_index` (or `lookup_by_id`) to rebuild from type_indices.
+    graph.id_indices.remove(&node_type);
+
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
 
