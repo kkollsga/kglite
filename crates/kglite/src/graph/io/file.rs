@@ -1044,6 +1044,16 @@ fn decode_secondary_label_index(payload: &[u8], graph: &mut DirGraph) -> io::Res
         }
         index.insert(key, nodes);
     }
+    // Heal dangling indices. A graph saved by a version that deleted a
+    // labelled node without evicting it from this index (pre-0.10.6) carries
+    // stale NodeIndex entries pointing at now-absent nodes. NodeData does not
+    // carry the labels (this index is canonical), so we can't rebuild — but
+    // we can drop indices whose node is gone, mirroring the live-node retain
+    // pattern used elsewhere. Nodes are fully loaded before this runs.
+    for bucket in index.values_mut() {
+        bucket.retain(|idx| graph.graph.node_weight(*idx).is_some());
+    }
+    index.retain(|_, bucket| !bucket.is_empty());
     if !index.is_empty() {
         graph.secondary_label_index = index;
         graph.has_secondary_labels = true;

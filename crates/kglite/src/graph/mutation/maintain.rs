@@ -580,9 +580,9 @@ fn vivify_stubs(graph: &mut DirGraph, node_type: &str, ids: &[Value]) -> Result<
 }
 
 /// DETACH-delete a set of nodes: remove every incident edge, then the
-/// nodes, then clean the type / id / property / composite indexes.
-/// Shared by the Cypher DETACH DELETE executor and `purge_provisional`.
-/// Returns `(nodes_deleted, edges_removed)`.
+/// nodes, then clean the type / id / property / composite / secondary-label
+/// indexes. Shared by the Cypher DETACH DELETE executor and
+/// `purge_provisional`. Returns `(nodes_deleted, edges_removed)`.
 ///
 /// Clearing `connection_types` matters on disk graphs: the lazy
 /// `has_connection_type` cache would otherwise report a still-live
@@ -664,6 +664,23 @@ pub(crate) fn detach_delete_nodes(
                     indices.retain(|idx| !nodes_to_delete.contains(idx));
                 }
             }
+        }
+    }
+
+    // Secondary-label index is keyed by label (not primary type), so a
+    // deleted node may sit in any bucket — evict outside the per-type loop.
+    // Without this, the StableDiGraph keeps the deleted NodeIndex live in
+    // the index, so `MATCH (n:SecLabel) RETURN count(n)` (and the load path)
+    // would over-count tombstoned nodes.
+    if graph.has_secondary_labels {
+        graph
+            .secondary_label_index
+            .retain(|_, bucket| {
+                bucket.retain(|idx| !nodes_to_delete.contains(idx));
+                !bucket.is_empty()
+            });
+        if graph.secondary_label_index.is_empty() {
+            graph.has_secondary_labels = false;
         }
     }
 
