@@ -492,6 +492,37 @@ pub fn process_nodes(
 }
 
 // Optimized public interface functions
+/// Seed a fresh selection level with every node carrying `label` as its
+/// primary type OR a secondary label (`DirGraph::nodes_with_label`) — the
+/// label-aware counterpart to the `type`-equals fast path in `filter_nodes`.
+/// Backs the fluent `select(..., include_secondary=True)` entry point.
+///
+/// On a single-label graph this selects exactly the same nodes as the
+/// primary `type == label` filter, so it is a strict additive extension.
+/// Chained `.filter()`/`.where()` operate on the seeded set as usual.
+pub fn filter_nodes_by_label(
+    graph: &DirGraph,
+    selection: &mut CurrentSelection,
+    label: &str,
+    sort_fields: Option<Vec<(String, bool)>>,
+    max_nodes: Option<usize>,
+) -> Result<(), String> {
+    let current_index = selection.get_level_count().saturating_sub(1);
+    let level = selection
+        .get_level_mut(current_index)
+        .ok_or_else(|| "No active selection level".to_string())?;
+
+    let candidates = graph.nodes_with_label(label);
+    let processed = process_nodes(graph, candidates, None, sort_fields.as_ref(), max_nodes);
+    if !processed.is_empty() {
+        level.add_selection(None, processed);
+    }
+    level.operations.push(SelectionOperation::Custom(format!(
+        "select(:{label}, include_secondary=True)"
+    )));
+    Ok(())
+}
+
 pub fn filter_nodes(
     graph: &DirGraph,
     selection: &mut CurrentSelection,

@@ -684,7 +684,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
 
     // Selection & filtering
     xml.push_str("  <group name=\"selection\">\n");
-    xml.push_str("    <method sig=\"select(type, sort=None, limit=None)\">Select all nodes of a type. Returns lazy selection.</method>\n");
+    xml.push_str("    <method sig=\"select(type, sort=None, limit=None, include_secondary=False)\">Select all nodes of a type. include_secondary=True also selects nodes carrying type as a secondary label. Returns lazy selection.</method>\n");
     xml.push_str("    <method sig=\"where({prop: value})\">Filter by property: exact, comparison (&gt;,&lt;,&gt;=,&lt;=), string (contains, starts_with, ends_with, regex), in, is_null, is_not_null, negated variants.</method>\n");
     xml.push_str(
         "    <method sig=\"where_any([{...}, {...}])\">OR logic across condition sets.</method>\n",
@@ -880,7 +880,7 @@ pub(super) fn write_fluent_topic_selection(xml: &mut String) {
     xml.push_str("  <selection>\n");
     xml.push_str("    <desc>Select and filter nodes using method chaining. All filter methods return a new lazy selection.</desc>\n");
     xml.push_str("    <methods>\n");
-    xml.push_str("      <m sig=\"select(type, sort=None, limit=None)\">Start a selection on a node type.</m>\n");
+    xml.push_str("      <m sig=\"select(type, sort=None, limit=None, include_secondary=False)\">Start a selection on a node type. include_secondary=True also includes nodes carrying type as a secondary label.</m>\n");
     xml.push_str("      <m sig=\"where({prop: value})\">Exact match, comparison (&gt;, &lt;, &gt;=, &lt;=), string predicates (contains, starts_with, ends_with, regex), in-list, null checks, negated variants (not_in, not_contains).</m>\n");
     xml.push_str("      <m sig=\"where_any([{...}, {...}])\">OR logic: keep nodes matching any condition set.</m>\n");
     xml.push_str("      <m sig=\"where_connected(conn_type, direction='any')\">Keep only nodes that have a specific connection.</m>\n");

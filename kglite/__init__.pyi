@@ -824,6 +824,7 @@ class KnowledgeGraph:
         sort: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
         temporal: Optional[bool] = None,
+        include_secondary: bool = False,
     ) -> KnowledgeGraph:
         """Select all nodes of a given type.
 
@@ -837,6 +838,12 @@ class KnowledgeGraph:
             limit: Limit the number of selected nodes.
             temporal: Override temporal filtering. ``None`` = auto (filter if configured),
                 ``False`` = disable, ``True`` = require (error if not configured).
+            include_secondary: When ``True``, also select nodes that carry
+                ``node_type`` as a *secondary* label (added via ``add_label()``),
+                not only nodes whose primary type is ``node_type`` — the fluent
+                equivalent of Cypher ``MATCH (n:node_type)``. Default ``False``
+                preserves primary-type-only selection. On a graph with no
+                secondary labels the two are identical.
 
         Returns:
             A new KnowledgeGraph with the filtered selection.

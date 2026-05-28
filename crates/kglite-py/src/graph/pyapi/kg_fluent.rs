@@ -112,30 +112,29 @@ impl KnowledgeGraph {
         Ok(new_kg)
     }
 
-    #[pyo3(signature = (node_type, sort=None, limit=None, temporal=None))]
+    #[pyo3(signature = (node_type, sort=None, limit=None, temporal=None, include_secondary=false))]
     fn select(
         &mut self,
         node_type: String,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
         temporal: Option<bool>,
+        include_secondary: bool,
     ) -> PyResult<Self> {
         let mut new_kg = self.clone();
 
-        // Record plan step: estimate based on type index
-        let estimated = self
-            .inner
-            .type_indices
-            .get(&node_type)
-            .map(|v| v.len())
-            .unwrap_or(0);
+        // Record plan step: estimate based on the candidate set. When
+        // include_secondary, the count is primary ∪ secondary.
+        let estimated = if include_secondary {
+            self.inner.nodes_with_label(&node_type).len()
+        } else {
+            self.inner
+                .type_indices
+                .get(&node_type)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        };
         new_kg.selection.clear_execution_plan(); // Start fresh plan
-
-        let mut conditions = HashMap::new();
-        conditions.insert(
-            "type".to_string(),
-            FilterCondition::Equals(Value::String(node_type.clone())),
-        );
 
         let sort_fields = if let Some(spec) = sort {
             match spec.extract::<String>() {
@@ -146,16 +145,37 @@ impl KnowledgeGraph {
             None
         };
 
-        crate::graph::core::filtering::filter_nodes(
-            &self.inner,
-            &mut new_kg.selection,
-            conditions,
-            sort_fields,
-            limit,
-        )
-        .map_err(|e: String| -> PyErr {
+        let to_pyerr = |e: String| -> PyErr {
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
+        };
+
+        if include_secondary {
+            // Seed from nodes carrying `node_type` as primary OR secondary
+            // label. On a single-label graph this is identical to the
+            // primary `type == node_type` filter below.
+            crate::graph::core::filtering::filter_nodes_by_label(
+                &self.inner,
+                &mut new_kg.selection,
+                &node_type,
+                sort_fields,
+                limit,
+            )
+            .map_err(to_pyerr)?;
+        } else {
+            let mut conditions = HashMap::new();
+            conditions.insert(
+                "type".to_string(),
+                FilterCondition::Equals(Value::String(node_type.clone())),
+            );
+            crate::graph::core::filtering::filter_nodes(
+                &self.inner,
+                &mut new_kg.selection,
+                conditions,
+                sort_fields,
+                limit,
+            )
+            .map_err(to_pyerr)?;
+        }
 
         // Apply temporal filtering if configured and not disabled
         if temporal != Some(false) && !self.temporal_context.is_all() {
