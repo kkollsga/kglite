@@ -246,6 +246,131 @@ def test_save_load_preserves_secondary_labels(g, tmp_path: Path):
     assert [r["name"] for r in director_rows] == ["Alice"]
 
 
+def test_disk_save_load_preserves_secondary_labels(tmp_path: Path):
+    """Disk mode: secondary labels persist across save+load via the
+    `secondary_labels.bin.zst` sidecar added in 0.10.5."""
+    import pandas as pd
+
+    disk_dir = tmp_path / "disk_orig"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.add_nodes(
+        pd.DataFrame({"id": ["a", "b", "c"], "name": ["A", "B", "C"]}),
+        "Agent",
+        "id",
+        "name",
+        labels=["Reviewer"],
+    )
+    g.cypher("MATCH (n:Agent {id:'a'}) SET n:Verified:Senior")
+    g.add_label("Agent", ["c"], "OnCall")
+
+    save_dir = tmp_path / "disk_saved"
+    g.save(str(save_dir))
+
+    loaded = kglite.load(str(save_dir))
+
+    # MATCH by every secondary label survives the round-trip.
+    rows = loaded.cypher("MATCH (n:Reviewer) RETURN n.id AS id ORDER BY id").to_list()
+    assert [r["id"] for r in rows] == ["a", "b", "c"]
+    rows = loaded.cypher("MATCH (n:Verified) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["a"]
+    rows = loaded.cypher("MATCH (n:Senior) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["a"]
+    rows = loaded.cypher("MATCH (n:OnCall) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["c"]
+    # AND-intersect across labels also round-trips.
+    rows = loaded.cypher("MATCH (n:Agent:Reviewer:Verified) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["a"]
+    # labels() returns the full set.
+    rows = loaded.cypher("MATCH (n:Agent) RETURN labels(n) AS labels ORDER BY n.id").to_list()
+    by_id = {i: set(r["labels"]) for i, r in zip(("a", "b", "c"), rows)}
+    assert by_id["a"] == {"Agent", "Reviewer", "Verified", "Senior"}
+    assert by_id["b"] == {"Agent", "Reviewer"}
+    assert by_id["c"] == {"Agent", "Reviewer", "OnCall"}
+
+
+def test_disk_save_load_no_secondaries_no_sidecar(tmp_path: Path):
+    """Single-label disk graphs must not write the sidecar (zero-cost
+    invariant for the kglite-docs / Sodir / Wikidata workloads that
+    don't use multi-label)."""
+    import pandas as pd
+
+    disk_dir = tmp_path / "disk_orig_single"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.add_nodes(
+        pd.DataFrame({"id": ["a", "b"], "name": ["A", "B"]}),
+        "Agent",
+        "id",
+        "name",
+    )
+
+    save_dir = tmp_path / "disk_saved_single"
+    g.save(str(save_dir))
+
+    sidecar = save_dir / "secondary_labels.bin.zst"
+    assert not sidecar.exists(), (
+        f"secondary_labels.bin.zst should not be written for single-label disk graphs (found at {sidecar})"
+    )
+
+    loaded = kglite.load(str(save_dir))
+    rows = loaded.cypher("MATCH (n:Agent) RETURN labels(n) AS labels ORDER BY n.id").to_list()
+    for r in rows:
+        assert r["labels"] == ["Agent"]
+
+
+def test_disk_in_session_labels_and_match(tmp_path: Path):
+    """Disk mode: in-session multi-label works regardless of
+    persistence (confirms the in-session truth comes from the
+    secondary_label_index, not from on-disk NodeData)."""
+    import pandas as pd
+
+    disk_dir = tmp_path / "disk_kg"
+    g = kglite.KnowledgeGraph(storage="disk", path=str(disk_dir))
+    g.add_nodes(
+        pd.DataFrame({"id": ["a", "b"], "name": ["A", "B"]}),
+        "Agent",
+        "id",
+        "name",
+        labels=["Reviewer"],
+    )
+    # In-session: MATCH and labels() both find the secondary.
+    rows = g.cypher("MATCH (n:Reviewer) RETURN n.id AS id ORDER BY id").to_list()
+    assert [r["id"] for r in rows] == ["a", "b"]
+    rows = g.cypher("MATCH (n:Agent) RETURN labels(n) AS labels ORDER BY n.id").to_list()
+    for r in rows:
+        assert set(r["labels"]) == {"Agent", "Reviewer"}
+    # SET / add_label / REMOVE all work in-session on disk.
+    g.cypher("MATCH (n:Agent {id:'a'}) SET n:Verified")
+    rows = g.cypher("MATCH (n:Verified) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["a"]
+    g.add_label("Agent", ["b"], "OnCall")
+    rows = g.cypher("MATCH (n:OnCall) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["b"]
+
+
+def test_mapped_full_multi_label(tmp_path: Path):
+    """Mapped mode: every multi-label flow works end-to-end including
+    save+load."""
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph(storage="mapped")
+    g.add_nodes(
+        pd.DataFrame({"id": ["a", "b"], "name": ["A", "B"]}),
+        "Agent",
+        "id",
+        "name",
+        labels=["Reviewer"],
+    )
+    g.cypher("MATCH (n:Agent {id:'a'}) SET n:Verified")
+    save_path = tmp_path / "mapped.kgl"
+    g.save(str(save_path))
+    loaded = kglite.load(str(save_path))
+    rows = loaded.cypher("MATCH (n:Verified) RETURN n.id AS id").to_list()
+    assert [r["id"] for r in rows] == ["a"]
+    rows = loaded.cypher("MATCH (n:Agent) RETURN labels(n) AS labels ORDER BY n.id").to_list()
+    assert set(rows[0]["labels"]) == {"Agent", "Reviewer", "Verified"}
+    assert set(rows[1]["labels"]) == {"Agent", "Reviewer"}
+
+
 def test_single_label_save_load_unchanged(g, tmp_path: Path):
     """Graphs without secondary labels should save/load identically to
     0.10.4 (modulo the wire-format shift; the digest already accounted

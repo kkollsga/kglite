@@ -48,6 +48,25 @@ To retype a node, set the `type` property: `SET n.type =
 'NewType'`. Removing the primary label via `REMOVE n:Primary`
 errors deliberately.
 
+## Backend coverage
+
+All three storage backends support multi-label end-to-end,
+including `save()` + `load()` round-trips:
+
+| Backend | In-session reads + writes | `save()` + `load()` |
+|---|---|---|
+| `KnowledgeGraph()` (memory, default) | ✅ | ✅ |
+| `storage="mapped"` | ✅ | ✅ |
+| `storage="disk"` | ✅ | ✅ via `secondary_labels.bin.zst` sidecar |
+
+The disk backend's columnar layout has no per-row slot for
+`NodeData.extra_labels`, so the inverted
+`DirGraph.secondary_label_index` is persisted as a zstd-compressed
+sidecar in the disk-graph directory. Single-label disk graphs
+skip the write entirely (zero bytes). Reads consult
+`DirGraph::node_labels` (which routes through the inverted
+index), giving uniform semantics across all three backends.
+
 ## Performance
 
 Single-label workloads pay zero overhead. The `has_secondary_labels`

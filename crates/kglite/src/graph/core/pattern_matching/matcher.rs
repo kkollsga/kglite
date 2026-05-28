@@ -583,7 +583,7 @@ impl<'a> PatternExecutor<'a> {
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     if let Some(ref node_type) = pattern.node_type {
                         let primary_key = InternedKey::from_str(node_type);
-                        let labels = self.graph.graph.node_labels_of(idx);
+                        let labels = self.graph.node_labels(idx);
                         if !labels.contains(&primary_key) {
                             return Ok(vec![]);
                         }
@@ -672,7 +672,7 @@ impl<'a> PatternExecutor<'a> {
                         self.check_scan_deadline()?;
                     }
                     if filter_extras {
-                        let labels = self.graph.graph.node_labels_of(idx);
+                        let labels = self.graph.node_labels(idx);
                         if !extra_keys.iter().all(|k| labels.contains(k)) {
                             continue;
                         }
@@ -686,7 +686,7 @@ impl<'a> PatternExecutor<'a> {
                 let out = candidates
                     .into_iter()
                     .filter(|&idx| {
-                        let labels = self.graph.graph.node_labels_of(idx);
+                        let labels = self.graph.node_labels(idx);
                         extra_keys.iter().all(|k| labels.contains(k))
                     })
                     .collect();

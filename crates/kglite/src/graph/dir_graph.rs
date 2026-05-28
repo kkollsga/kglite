@@ -1490,13 +1490,27 @@ impl DirGraph {
     /// empty Vec if the node is missing. Consumers that only need the
     /// primary type should keep using `GraphRead::node_type_of` (one
     /// InternedKey lookup, no allocation).
+    ///
+    /// Reads secondaries from `secondary_label_index` (the canonical
+    /// source maintained by the choke-point API) rather than from
+    /// `NodeData.extra_labels`. This works uniformly across backends:
+    /// in-memory + mapped have both in sync; on disk, `NodeData` is
+    /// materialised from a transient arena that doesn't carry the
+    /// extras, but the inverted index does.
     pub fn node_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
-        let Some(node) = self.graph.node_weight(idx) else {
+        use crate::graph::storage::GraphRead;
+        let Some(primary) = GraphRead::node_type_of(&self.graph, idx) else {
             return Vec::new();
         };
-        let mut labels = Vec::with_capacity(1 + node.extra_labels.len());
-        labels.push(node.node_type);
-        labels.extend(node.extra_labels.iter().copied());
+        if !self.has_secondary_labels {
+            return vec![primary];
+        }
+        let mut labels = vec![primary];
+        for (&key, bucket) in &self.secondary_label_index {
+            if bucket.contains(&idx) {
+                labels.push(key);
+            }
+        }
         labels
     }
 
@@ -1804,6 +1818,11 @@ impl DirGraph {
         // parses in milliseconds.
         crate::graph::io::file::write_node_type_metadata_bin(dir, self)?;
         crate::graph::io::file::write_connection_type_metadata_bin(dir, self)?;
+        // Secondary labels — disk's columnar layout has no slot for
+        // NodeData.extra_labels, so we persist the inverted index as
+        // a sidecar. Skipped when the graph has no secondaries
+        // (single-label disk graphs pay zero extra bytes).
+        crate::graph::io::file::write_secondary_labels_bin(dir, self)?;
         let mut meta = crate::graph::io::file::build_disk_metadata(self);
         crate::graph::io::file::strip_type_connectivity(&mut meta);
         crate::graph::io::file::strip_heavy_metadata(&mut meta);

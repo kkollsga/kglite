@@ -811,6 +811,26 @@ pub(crate) fn read_id_indices_bin(
 const TYPE_CONN_MAGIC: &[u8; 8] = b"KGLTCN1\0";
 const TYPE_CONN_VERSION: u32 = 1;
 
+// secondary_labels.bin.zst format. Persists DirGraph.secondary_label_index
+// for disk-backed graphs. Memory + mapped backends carry secondaries
+// inline on NodeData via bincode; disk's columnar layout has no
+// per-row label slot, so we need this sidecar.
+//
+// Payload layout (zstd-compressed):
+//   [0..8]   magic = b"KGLSLBL1"
+//   [8..12]  version = 1u32 LE
+//   [12..16] num_labels (u32 LE)
+//   For each label:
+//     [..8]  label_key (u64 LE, raw InternedKey)
+//     [..4]  num_nodes (u32 LE)
+//     [..]   num_nodes × NodeIndex (u32 LE each)
+//
+// Resolution: `label_key` is `InternedKey::as_u64()`; the load path
+// resolves it via `graph.interner.try_resolve`. Missing interner
+// entries are silently skipped (covers truly-corrupted input).
+const SECONDARY_LABELS_MAGIC: &[u8; 8] = b"KGLSLBL1";
+const SECONDARY_LABELS_VERSION: u32 = 1;
+
 /// Writer for `type_connectivity.bin.zst`. Idempotent — no-op if the
 /// cache is empty. Called from `DirGraph::save_disk` after
 /// `metadata.json` is emitted.
@@ -908,6 +928,115 @@ pub(crate) fn read_type_connectivity_bin(
         // before this file, so this only trips on truly corrupted input.
     }
     Ok(Some(triples))
+}
+
+/// Writer for `secondary_labels.bin.zst`. Idempotent — no-op if the
+/// graph has no secondary labels (single-label disk graphs cost
+/// zero extra bytes). Called from `DirGraph::save_disk`.
+pub(crate) fn write_secondary_labels_bin(
+    dir: &std::path::Path,
+    graph: &DirGraph,
+) -> Result<(), String> {
+    if !graph.has_secondary_labels || graph.secondary_label_index.is_empty() {
+        return Ok(());
+    }
+    let n = graph.secondary_label_index.len() as u32;
+    // Header + per-label minimum (12 bytes) + payload (4 bytes per node).
+    let est_capacity = 16
+        + graph
+            .secondary_label_index
+            .values()
+            .map(|v| 12 + v.len() * 4)
+            .sum::<usize>();
+    let mut payload: Vec<u8> = Vec::with_capacity(est_capacity);
+    payload.extend_from_slice(SECONDARY_LABELS_MAGIC);
+    payload.extend_from_slice(&SECONDARY_LABELS_VERSION.to_le_bytes());
+    payload.extend_from_slice(&n.to_le_bytes());
+    // Deterministic order: sort by raw u64 key so byte layout is
+    // stable across saves of the same logical state.
+    let mut entries: Vec<(
+        &crate::graph::schema::InternedKey,
+        &Vec<petgraph::graph::NodeIndex>,
+    )> = graph.secondary_label_index.iter().collect();
+    entries.sort_by_key(|(k, _)| k.as_u64());
+    for (key, nodes) in entries {
+        payload.extend_from_slice(&key.as_u64().to_le_bytes());
+        payload.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+        for idx in nodes {
+            payload.extend_from_slice(&(idx.index() as u32).to_le_bytes());
+        }
+    }
+    let compressed = zstd::encode_all(payload.as_slice(), 3)
+        .map_err(|e| format!("secondary_labels compression failed: {}", e))?;
+    std::fs::write(dir.join("secondary_labels.bin.zst"), compressed)
+        .map_err(|e| format!("Failed to write secondary_labels.bin.zst: {}", e))?;
+    Ok(())
+}
+
+/// Reader for `secondary_labels.bin.zst`. Populates
+/// `graph.secondary_label_index` + `has_secondary_labels` in place.
+/// Returns `Ok(false)` if the file is absent or has an unrecognised
+/// magic/version tag (graceful — older saves don't have it).
+pub(crate) fn read_secondary_labels_bin(
+    dir: &std::path::Path,
+    graph: &mut DirGraph,
+) -> io::Result<bool> {
+    let path = dir.join("secondary_labels.bin.zst");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let compressed = std::fs::read(&path)?;
+    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    if payload.len() < 16 || &payload[..8] != SECONDARY_LABELS_MAGIC {
+        return Ok(false);
+    }
+    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    if version != SECONDARY_LABELS_VERSION {
+        return Ok(false);
+    }
+    let n = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    let mut cursor = 16usize;
+    let mut index: HashMap<crate::graph::schema::InternedKey, Vec<petgraph::graph::NodeIndex>> =
+        HashMap::with_capacity(n);
+    for _ in 0..n {
+        if payload.len() < cursor + 12 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secondary_labels.bin.zst is truncated",
+            ));
+        }
+        let key_u64 = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let num_nodes =
+            u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        if payload.len() < cursor + num_nodes * 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secondary_labels.bin.zst is truncated (node list)",
+            ));
+        }
+        let key = crate::graph::schema::InternedKey::from_u64(key_u64);
+        // Silently skip keys whose interner entry didn't survive
+        // (covers truly-corrupted input; the interner is loaded
+        // before this file on the disk-load path).
+        if graph.interner.try_resolve(key).is_none() {
+            cursor += num_nodes * 4;
+            continue;
+        }
+        let mut nodes = Vec::with_capacity(num_nodes);
+        for _ in 0..num_nodes {
+            let raw = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            nodes.push(petgraph::graph::NodeIndex::new(raw as usize));
+        }
+        index.insert(key, nodes);
+    }
+    if !index.is_empty() {
+        graph.secondary_label_index = index;
+        graph.has_secondary_labels = true;
+    }
+    Ok(true)
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -1529,6 +1658,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             }
         }
     }
+
+    // Load secondary labels sidecar if present (0.10.5+). Disk's
+    // columnar layout has no slot for NodeData.extra_labels, so the
+    // sidecar carries the inverted index. Older disk graphs (0.10.4
+    // and earlier) won't have this file — that's the graceful single-
+    // label degrade path.
+    let _ = read_secondary_labels_bin(dir, &mut graph);
 
     // Backfill the connection_types O(1)-lookup cache from the loaded
     // metadata. The v3 / file loader does this at line 1606 of read_v3;

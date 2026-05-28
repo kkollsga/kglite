@@ -69,6 +69,14 @@ labels. Sodir / Wikidata / code-tree benchmarks unchanged vs 0.10.4.
   mutation site (Cypher executor, pymethods) routes through these
   so `extra_labels` and `secondary_label_index` can never drift
   apart.
+- **`secondary_labels.bin.zst` disk sidecar** — the disk backend's
+  columnar layout has no slot for `NodeData.extra_labels`, so the
+  inverted index is persisted as a separate zstd-compressed file
+  in the disk graph directory. Single-label disk graphs skip the
+  write entirely (zero bytes, zero cost). Older 0.10.4 disk
+  binaries ignore the unknown file and load with single-label
+  semantics; older disk graphs without the sidecar load fine into
+  0.10.5+ with an empty secondary index.
 
 ## [0.10.4] — 2026-05-28 — kglite-docs feedback round
 
