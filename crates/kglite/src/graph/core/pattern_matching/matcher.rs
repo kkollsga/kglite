@@ -569,14 +569,32 @@ impl<'a> PatternExecutor<'a> {
 
     /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
+        // Multi-label aware: when the pattern carries secondary labels
+        // OR the graph has secondary labels in play, take a slower
+        // union path that consults both `type_indices` (primary) and
+        // `secondary_label_index`. Single-label graphs hit the
+        // unchanged hot path.
+        let needs_secondary_path = !pattern.extra_labels.is_empty()
+            || (pattern.node_type.is_some() && self.graph.has_secondary_labels);
+
         // If variable is pre-bound, return only that node (if it matches filters)
         if let Some(ref var) = pattern.variable {
             if let Some(&idx) = self.pre_bindings.get(var) {
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     if let Some(ref node_type) = pattern.node_type {
-                        if node.node_type != InternedKey::from_str(node_type) {
+                        let primary_key = InternedKey::from_str(node_type);
+                        let labels = self.graph.graph.node_labels_of(idx);
+                        if !labels.contains(&primary_key) {
                             return Ok(vec![]);
                         }
+                        for extra in &pattern.extra_labels {
+                            let key = InternedKey::from_str(extra);
+                            if !labels.contains(&key) {
+                                return Ok(vec![]);
+                            }
+                        }
+                        // Suppress unused-binding warning when no extras.
+                        let _ = node;
                     }
                     if let Some(ref props) = pattern.properties {
                         if !self.node_matches_properties(idx, props) {
@@ -590,45 +608,91 @@ impl<'a> PatternExecutor<'a> {
         }
 
         if let Some(ref node_type) = pattern.node_type {
-            // Try property index acceleration when we have both type and properties
-            if let Some(ref props) = pattern.properties {
-                if let Some(indexed) = self.try_index_lookup(node_type, props) {
-                    return Ok(indexed);
-                }
-                // Cross-type global-index fast path for typed patterns.
-                // When a per-type index doesn't exist but a cross-type
-                // global index does (the common shape on Wikidata-scale
-                // disk graphs), consult it and filter the handful of
-                // hits by node_type. `{title: 'X'}` on a type with 13M
-                // rows drops from a full-type scan (10-14s) to the
-                // number of global matches × one type-check per match
-                // (microseconds).
-                if let Some(indexed) = self.try_global_index_lookup_typed(node_type, props) {
-                    return Ok(indexed);
+            // Try property index acceleration when we have both type and properties.
+            // Skip the shortcuts when we need the secondary-label path —
+            // property_indices is keyed by primary type, so it misses
+            // multi-labelled nodes whose secondary is the queried label.
+            if !needs_secondary_path {
+                if let Some(ref props) = pattern.properties {
+                    if let Some(indexed) = self.try_index_lookup(node_type, props) {
+                        return Ok(indexed);
+                    }
+                    if let Some(indexed) = self.try_global_index_lookup_typed(node_type, props) {
+                        return Ok(indexed);
+                    }
                 }
             }
-            // Use type index
-            let type_nodes = match self.graph.type_indices.get(node_type) {
-                Some(indices) => indices,
-                None => return Ok(vec![]),
+
+            // Gather candidates: primary type_indices ∪ secondary_label_index.
+            // The choke-point API forbids primary==secondary on the same
+            // node, so the union has no duplicates.
+            let candidates: Vec<NodeIndex> = if needs_secondary_path {
+                let primary = self
+                    .graph
+                    .type_indices
+                    .get(node_type)
+                    .map(|v| v.to_vec())
+                    .unwrap_or_default();
+                let key = InternedKey::from_str(node_type);
+                let secondary = self
+                    .graph
+                    .secondary_label_index
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                if primary.is_empty() && secondary.is_empty() {
+                    return Ok(vec![]);
+                }
+                let mut out = primary;
+                out.extend(secondary);
+                out
+            } else {
+                match self.graph.type_indices.get(node_type) {
+                    Some(indices) => indices.to_vec(),
+                    None => return Ok(vec![]),
+                }
             };
+
+            // AND-intersect extra labels (Cypher `MATCH (n:A:B:C)` semantics).
+            let filter_extras = !pattern.extra_labels.is_empty();
+            let extra_keys: Vec<InternedKey> = if filter_extras {
+                pattern
+                    .extra_labels
+                    .iter()
+                    .map(|s| InternedKey::from_str(s))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             if let Some(ref props) = pattern.properties {
-                // Manual scan so we can poll the deadline. A raw
-                // `.filter().collect()` over 13M rows is ≥ the default
-                // 10s timeout on an external-drive-backed graph and
-                // would never observe cancellation without polling.
                 let mut out = Vec::new();
-                for (i, idx) in type_nodes.iter().enumerate() {
+                for (i, idx) in candidates.iter().copied().enumerate() {
                     if i & 0xFFF == 0 {
                         self.check_scan_deadline()?;
+                    }
+                    if filter_extras {
+                        let labels = self.graph.graph.node_labels_of(idx);
+                        if !extra_keys.iter().all(|k| labels.contains(k)) {
+                            continue;
+                        }
                     }
                     if self.node_matches_properties(idx, props) {
                         out.push(idx);
                     }
                 }
                 Ok(out)
+            } else if filter_extras {
+                let out = candidates
+                    .into_iter()
+                    .filter(|&idx| {
+                        let labels = self.graph.graph.node_labels_of(idx);
+                        extra_keys.iter().all(|k| labels.contains(k))
+                    })
+                    .collect();
+                Ok(out)
             } else {
-                Ok(type_nodes.to_vec())
+                Ok(candidates)
             }
         } else if let Some(ref props) = pattern.properties {
             // Fast path: untyped node with {id: X} — cross-type id lookup.

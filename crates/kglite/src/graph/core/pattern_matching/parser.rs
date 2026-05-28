@@ -338,6 +338,7 @@ impl Parser {
 
         let mut variable = None;
         let mut node_type = None;
+        let mut extra_labels: Vec<String> = Vec::new();
         let mut properties = None;
 
         // Check what comes next
@@ -346,7 +347,7 @@ impl Parser {
                 // Empty node pattern: ()
             }
             Some(Token::Colon) => {
-                // No variable, just type: (:Type)
+                // No variable, just type: (:Type) or (:A:B:...)
                 self.advance(); // consume :
                 if let Some(Token::Identifier(name)) = self.advance().cloned() {
                     node_type = Some(name);
@@ -381,6 +382,19 @@ impl Parser {
             _ => {}
         }
 
+        // Multi-label suffix: `:A:B:C` collects any extras after the
+        // first label. The executor AND-intersects across all labels.
+        while let Some(Token::Colon) = self.peek() {
+            self.advance(); // consume :
+            if let Some(Token::Identifier(name)) = self.advance().cloned() {
+                extra_labels.push(name);
+            } else {
+                return Err(
+                    "Expected node label name after ':'. Example: (n:Person:Manager)".to_string(),
+                );
+            }
+        }
+
         // Check for properties
         if let Some(Token::LBrace) = self.peek() {
             properties = Some(self.parse_properties()?);
@@ -391,6 +405,7 @@ impl Parser {
         Ok(NodePattern {
             variable,
             node_type,
+            extra_labels,
             properties,
         })
     }
@@ -703,6 +718,38 @@ mod tests {
         if let PatternElement::Node(np) = &pattern.elements[0] {
             assert_eq!(np.variable, Some("p".to_string()));
             assert_eq!(np.node_type, Some("Person".to_string()));
+        } else {
+            panic!("Expected node pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_label_node() {
+        let pattern = parse_pattern("(a:Person:Director)").unwrap();
+        if let PatternElement::Node(np) = &pattern.elements[0] {
+            assert_eq!(np.node_type, Some("Person".to_string()));
+            assert_eq!(np.extra_labels, vec!["Director".to_string()]);
+        } else {
+            panic!("Expected node pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_three_labels() {
+        let pattern = parse_pattern("(n:Animal:Pet:Dog)").unwrap();
+        if let PatternElement::Node(np) = &pattern.elements[0] {
+            assert_eq!(np.node_type, Some("Animal".to_string()));
+            assert_eq!(np.extra_labels, vec!["Pet".to_string(), "Dog".to_string()]);
+        } else {
+            panic!("Expected node pattern");
+        }
+    }
+
+    #[test]
+    fn test_parse_single_label_has_empty_extras() {
+        let pattern = parse_pattern("(p:Person)").unwrap();
+        if let PatternElement::Node(np) = &pattern.elements[0] {
+            assert!(np.extra_labels.is_empty());
         } else {
             panic!("Expected node pattern");
         }

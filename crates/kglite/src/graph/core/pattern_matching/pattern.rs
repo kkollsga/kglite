@@ -25,10 +25,19 @@ pub enum PatternElement {
 }
 
 /// Pattern for matching nodes: (var:Type {prop: value})
+///
+/// `node_type` holds the primary (first) label — every existing
+/// consumer reads through this field. `extra_labels` holds any
+/// additional labels from Cypher-standard `(n:A:B:C)` syntax; the
+/// executor AND-intersects them against `node_type` candidates.
+/// Empty for single-label patterns (the hot path).
 #[derive(Debug, Clone)]
 pub struct NodePattern {
     pub variable: Option<String>,
     pub node_type: Option<String>,
+    /// Additional labels from multi-label patterns like `(n:A:B)`. The
+    /// first label lives in `node_type`; these are the rest.
+    pub extra_labels: Vec<String>,
     pub properties: Option<HashMap<String, PropertyMatcher>>,
 }
 

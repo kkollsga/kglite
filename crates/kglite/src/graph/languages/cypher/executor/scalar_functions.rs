@@ -462,19 +462,21 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "labels" => {
-                // labels(n) returns the list of node labels.
+                // labels(n) returns the list of node labels: primary
+                // first, then secondaries in insertion order.
                 //
-                // Phase A.1 / C2 — flipped the Track C swap-point:
-                // emits native `Value::List(Vec<Value::String>)` now
-                // that the variant exists. KGLite is still single-
-                // label so the list has one element. When multi-label
-                // lands (ROADMAP §5), this returns N elements with
-                // no consumer changes required.
+                // Multi-label arrived in 0.10.5 (Track C). The Track C
+                // swap-point comment that lived here for a year is now
+                // reality.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(&idx) = row.node_bindings.get(var) {
-                        if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let node_type = node.get_node_type_ref(&self.graph.interner);
-                            return Ok(Value::List(vec![Value::String(node_type.to_string())]));
+                        let keys = self.graph.graph.node_labels_of(idx);
+                        if !keys.is_empty() {
+                            let labels: Vec<Value> = keys
+                                .iter()
+                                .map(|k| Value::String(self.graph.interner.resolve(*k).to_string()))
+                                .collect();
+                            return Ok(Value::List(labels));
                         }
                     }
                 }
