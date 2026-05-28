@@ -70,7 +70,9 @@ graph.cypher(
 
 ## Semantic Search in Cypher
 
-`text_score()` enables semantic search directly in Cypher. Requires `set_embedder()` + `embed_texts()`:
+`text_score()` enables semantic search directly in Cypher — no
+separate vector store, no manual join between vector hits and graph
+state. Requires `set_embedder()` + `embed_texts()`:
 
 ```python
 graph.cypher("""
@@ -80,6 +82,112 @@ graph.cypher("""
     ORDER BY score DESC LIMIT 10
 """)
 ```
+
+### Why this matters
+
+The same query handles three concerns in one round-trip:
+
+1. **Semantic ranking** — `text_score()` returns a cosine-similarity
+   score against the registered embedder.
+2. **Structural filtering** — every Cypher clause is available
+   alongside the score: `MATCH` patterns, `WHERE` predicates,
+   property lookups, type filters.
+3. **Graph traversal** — once you've found relevant nodes, traverse
+   their neighbourhood in the same query.
+
+Concretely, this query ranks chunks by semantic similarity, then
+walks back to the parent document for provenance:
+
+```python
+graph.cypher("""
+    MATCH (c:Chunk)-[:OF_PAGE]->(p:Page)<-[:HAS_PAGE]-(d:Document)
+    WHERE text_score(c, 'text', $query) > 0.7
+    RETURN d.title AS document,
+           p.page_number AS page,
+           c.text AS excerpt,
+           text_score(c, 'text', $query) AS relevance
+    ORDER BY relevance DESC
+    LIMIT 20
+""", params={"query": "deferred revenue recognition"})
+```
+
+A vector-DB + graph-DB combo would split this into two queries — a
+top-k vector search returning IDs, then a separate graph query
+joining on those IDs. With `text_score()` inside Cypher the planner
+sees both halves at once, and the round-trip is one query.
+
+### Filter cohorts before ranking
+
+`text_score()` evaluates per row in the projected pipeline, so
+upstream filters narrow the set you're scoring:
+
+```python
+graph.cypher("""
+    MATCH (c:Chunk)-[:OF_PAGE]->(p:Page)<-[:HAS_PAGE]-(d:Document)
+    WHERE d.year >= 2024 AND d.publisher = 'Q4'
+    WITH c, d
+    WHERE text_score(c, 'text', $query) > 0.7
+    RETURN d.title, c.text, text_score(c, 'text', $query) AS score
+    ORDER BY score DESC LIMIT 10
+""", params={"query": "..."})
+```
+
+Cheap structural filters first → semantic scoring only on the
+surviving cohort.
+
+## Edge provenance via reified nodes
+
+kglite enforces at-most-one edge per `(source, target, edge_type)`.
+A second `add_connections` (or `MERGE`) for the same triple updates
+the existing edge's properties rather than creating a parallel one.
+That keeps the storage layer dense — but if you need to track *who
+applied the edge, when, and why*, you need provenance per
+application, not one shared property bag.
+
+The pattern is to **reify the relationship as a node**. Instead of:
+
+```cypher
+(:Chunk)-[:TAGGED_AS {by_agent, applied_at}]->(:Tag)
+```
+
+…model the tagging itself as a node, with the tag and the agent as
+edges off it:
+
+```cypher
+(:Chunk)-[:TAGGED_AS]->(:Tagging {by_agent, applied_at})-[:OF_TAG]->(:Tag)
+```
+
+Now each application is its own `Tagging` node — two agents tagging
+the same chunk with the same tag produce two distinct `Tagging`
+nodes carrying their own `by_agent` / `applied_at`. Query for the
+tagging history of a chunk:
+
+```python
+graph.cypher("""
+    MATCH (c:Chunk {id: $cid})-[:TAGGED_AS]->(t:Tagging)-[:OF_TAG]->(tag:Tag)
+    RETURN tag.name AS tag,
+           t.by_agent AS agent,
+           t.applied_at AS when
+    ORDER BY t.applied_at DESC
+""", params={"cid": "chunk_42"})
+```
+
+The cost is one extra node per application + two edges where you'd
+have one. The gain is unconstrained provenance + the ability to
+attach additional context (confidence score, source, supersession
+relationships) to each application.
+
+Use reification when you need:
+
+- Per-application metadata that differs across applications of the
+  "same" relationship.
+- An audit trail (when / who / why each application happened).
+- The ability to delete or supersede individual applications
+  without affecting others.
+
+For one-shot relationships (a `Person` works at one `Company` —
+attributes belong on the edge), the at-most-one constraint is
+exactly what you want and reification adds noise.
 
 ## Count Subqueries
 
