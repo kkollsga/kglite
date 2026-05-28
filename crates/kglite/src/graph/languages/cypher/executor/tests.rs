@@ -879,14 +879,21 @@ fn test_remove_nonexistent_property() {
 }
 
 #[test]
-fn test_remove_label_error() {
+fn test_remove_primary_label_errors() {
+    // Multi-label landed in 0.10.5: REMOVE n:Label now works for
+    // *secondary* labels but errors when the target is the node's
+    // primary type — use `SET n.type = 'NewType'` to retype instead.
     let mut graph = build_test_graph();
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n:Person")
             .unwrap();
     let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not supported"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("primary label"),
+        "expected 'primary label' in error, got: {err}"
+    );
 }
 
 // ==================================================================
