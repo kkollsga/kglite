@@ -673,12 +673,10 @@ pub(crate) fn detach_delete_nodes(
     // the index, so `MATCH (n:SecLabel) RETURN count(n)` (and the load path)
     // would over-count tombstoned nodes.
     if graph.has_secondary_labels {
-        graph
-            .secondary_label_index
-            .retain(|_, bucket| {
-                bucket.retain(|idx| !nodes_to_delete.contains(idx));
-                !bucket.is_empty()
-            });
+        graph.secondary_label_index.retain(|_, bucket| {
+            bucket.retain(|idx| !nodes_to_delete.contains(idx));
+            !bucket.is_empty()
+        });
         if graph.secondary_label_index.is_empty() {
             graph.has_secondary_labels = false;
         }

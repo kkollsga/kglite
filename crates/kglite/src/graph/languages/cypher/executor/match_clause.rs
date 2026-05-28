@@ -1900,7 +1900,11 @@ impl<'a> CypherExecutor<'a> {
             .collect();
         candidates
             .into_iter()
-            .filter(|&idx| extra_keys.iter().all(|&k| self.graph.node_has_label(idx, k)))
+            .filter(|&idx| {
+                extra_keys
+                    .iter()
+                    .all(|&k| self.graph.node_has_label(idx, k))
+            })
             .collect()
     }
 

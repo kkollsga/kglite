@@ -2817,4 +2817,26 @@ mod multi_label_tests {
         assert!(g.node_has_label(a, vip)); // secondary
         assert!(!g.node_has_label(a, ghost)); // absent
     }
+
+    #[test]
+    fn detach_delete_evicts_secondary_label_index() {
+        use std::collections::HashSet;
+        let mut g = DirGraph::new();
+        let a = add_node(&mut g, "a", "Person");
+        let b = add_node(&mut g, "b", "Person");
+        let vip = g.interner.get_or_intern("VIP");
+        g.add_node_label(a, vip);
+        g.add_node_label(b, vip);
+        assert_eq!(g.secondary_label_index[&vip].len(), 2);
+
+        let to_del: HashSet<NodeIndex> = [a].into_iter().collect();
+        crate::graph::mutation::maintain::detach_delete_nodes(&mut g, &to_del);
+
+        // `a` evicted from the secondary index; `b` survives. Without the
+        // eviction the StableDiGraph would keep `a` live in the bucket and
+        // `nodes_with_label` / counts would over-report.
+        assert_eq!(g.secondary_label_index.get(&vip).map(|v| v.len()), Some(1));
+        assert!(g.has_secondary_labels);
+        assert_eq!(g.nodes_with_label("VIP"), vec![b]);
+    }
 }

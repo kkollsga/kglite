@@ -909,6 +909,48 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'C' RETURN label ORDER BY name",
         None,
     ),
+    # ── Multi-label (secondary-label) read paths ──────────────────────────
+    # On a multi-label graph the label-dependent fusions are gated to the
+    # general matcher path, so optimised==naive proves the fused fast-paths
+    # that DO still fire (e.g. FusedCountTypedNode) agree with the matcher,
+    # and that the gates don't drop/duplicate rows. (The matcher path itself
+    # is pinned to an independent Python oracle in test_multi_label.py.)
+    (
+        "ml_count_secondary_label",
+        "multi_label_graph",
+        "MATCH (n:VIP) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "ml_count_typed_plus_secondary",
+        "multi_label_graph",
+        "MATCH (n:Person:VIP) RETURN count(n) AS c",
+        None,
+    ),
+    (
+        "ml_label_intersection_rows",
+        "multi_label_graph",
+        "MATCH (n:VIP:Staff) RETURN n.id AS id ORDER BY id",
+        None,
+    ),
+    (
+        "ml_edge_aggregate_secondary_peer",
+        "multi_label_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a.id AS a, count(b) AS c ORDER BY a",
+        None,
+    ),
+    (
+        "ml_group_node_secondary",
+        "multi_label_graph",
+        "MATCH (a)-[:KNOWS]->(v:VIP) RETURN v.id AS v, count(a) AS c ORDER BY v",
+        None,
+    ),
+    (
+        "ml_label_predicate_where",
+        "multi_label_graph",
+        "MATCH (n:Person) WHERE n:VIP RETURN n.id AS id ORDER BY id",
+        None,
+    ),
 ]
 
 

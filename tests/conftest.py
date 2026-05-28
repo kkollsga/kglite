@@ -314,6 +314,36 @@ def social_graph():
 
 
 @pytest.fixture
+def multi_label_graph():
+    """Small multi-label graph for secondary-label correctness.
+
+    Person P1..P8 (age 21..28). Secondary labels: P2,P3,P5 are :VIP;
+    P5 is also :Staff. Company C1,C2; C1 is also :VIP — so :VIP spans
+    TWO primary types, forcing `MATCH (n:VIP)` to union across buckets.
+    KNOWS edges among persons. `MATCH (n:VIP:Staff)` exercises the
+    intersection path. Single-label fixtures can't trip the secondary
+    paths/gates, so this fixture is required for the multi-label corpus.
+    """
+    g = KnowledgeGraph()
+    persons = pd.DataFrame(
+        {
+            "id": [f"P{i}" for i in range(1, 9)],
+            "name": [f"Person_{i}" for i in range(1, 9)],
+            "age": list(range(21, 29)),
+        }
+    )
+    g.add_nodes(persons, "Person", "id", "name")
+    comps = pd.DataFrame({"id": ["C1", "C2"], "name": ["Acme", "Globex"]})
+    g.add_nodes(comps, "Company", "id", "name")
+    g.add_label("Person", ["P2", "P3", "P5"], "VIP")
+    g.add_label("Person", ["P5"], "Staff")
+    g.add_label("Company", ["C1"], "VIP")
+    knows = pd.DataFrame({"src": ["P1", "P1", "P4", "P5", "P2"], "dst": ["P2", "P3", "P2", "P3", "P5"]})
+    g.add_connections(knows, "KNOWS", "Person", "src", "Person", "dst")
+    return g
+
+
+@pytest.fixture
 def large_schema_graph():
     """Graph with >15 node types for compact inventory testing.
 

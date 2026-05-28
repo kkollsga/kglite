@@ -383,3 +383,143 @@ def test_single_label_save_load_unchanged(g, tmp_path: Path):
     rows = loaded.cypher("MATCH (n:Item) RETURN labels(n) AS labels ORDER BY n.id").to_list()
     for r in rows:
         assert r["labels"] == ["Item"]
+
+
+# ─── 0.10.6 read-path correctness (downstream regression report) ─────────────
+#
+# Background: a downstream library reported `MATCH (n:Item:Pending) RETURN
+# count(n)` over-reporting after remove_label. Root cause was NOT a stale
+# index (the index is correct) but read-side count/scan/expansion fast-paths
+# that consulted only the primary `type_indices`. These tests pin the
+# corrected behaviour against an independent Python oracle computed from the
+# (verified-correct) labels() output — the differential harness alone can't,
+# because the gates push optimised + naive onto the SAME general path.
+
+
+def _oracle_labels(g: KnowledgeGraph) -> dict[str, set[str]]:
+    """id -> set(labels) for every node, via the verified-correct labels()."""
+    rows = g.cypher("MATCH (n) RETURN n.id AS id, labels(n) AS labels").to_list()
+    return {r["id"]: set(r["labels"]) for r in rows}
+
+
+def test_reporter_repro_count_after_remove_label(g):
+    """The exact downstream repro: count by multi-label / secondary label
+    must track labels(n) through add_label / remove_label."""
+    g.add_nodes(pd.DataFrame([{"id": "n1"}, {"id": "n2"}]), "Item", "id", "id")
+    g.add_label("Item", ["n1", "n2"], "Pending")
+
+    def mc(label: str) -> int:
+        return g.cypher(f"MATCH (n:Item:{label}) RETURN count(n) AS c").to_list()[0]["c"]
+
+    assert mc("Pending") == 2
+    assert g.remove_label("Item", ["n1"], "Pending") == {"removed": 1, "skipped": 0}
+    assert mc("Pending") == 1  # the original over-report
+    # secondary-only label, and primary unchanged
+    assert g.cypher("MATCH (n:Pending) RETURN count(n) AS c").to_list()[0]["c"] == 1
+    assert g.cypher("MATCH (n:Item) RETURN count(n) AS c").to_list()[0]["c"] == 2
+    # labels(n) and WHERE 'X' IN labels(n) agree with the predicate match
+    assert g.cypher("MATCH (n:Item) WHERE 'Pending' IN labels(n) RETURN count(n) AS c").to_list()[0]["c"] == 1
+
+
+def test_reporter_repro_survives_save_load(g, tmp_path: Path):
+    g.add_nodes(pd.DataFrame([{"id": "n1"}, {"id": "n2"}]), "Item", "id", "id")
+    g.add_label("Item", ["n1", "n2"], "Pending")
+    g.remove_label("Item", ["n1"], "Pending")
+    p = tmp_path / "t.kgl"
+    g.save(str(p))
+    reloaded = kglite.load(str(p))
+    assert reloaded.cypher("MATCH (n:Item:Pending) RETURN count(n) AS c").to_list()[0]["c"] == 1
+
+
+def test_parity_count_and_rows_by_label(multi_label_graph):
+    """MATCH (n:Label) count + rows == Python oracle over labels()."""
+    g = multi_label_graph
+    oracle = _oracle_labels(g)
+    for label in ("Person", "Company", "VIP", "Staff", "Ghost"):
+        expected_ids = sorted(i for i, labs in oracle.items() if label in labs)
+        got_rows = sorted(r["id"] for r in g.cypher(f"MATCH (n:{label}) RETURN n.id AS id").to_list())
+        assert got_rows == expected_ids, f":{label} rows {got_rows} != {expected_ids}"
+        got_count = g.cypher(f"MATCH (n:{label}) RETURN count(n) AS c").to_list()[0]["c"]
+        assert got_count == len(expected_ids), f":{label} count {got_count} != {len(expected_ids)}"
+
+
+def test_parity_label_intersection(multi_label_graph):
+    g = multi_label_graph
+    oracle = _oracle_labels(g)
+    expected = sorted(i for i, labs in oracle.items() if {"VIP", "Staff"} <= labs)
+    got = sorted(r["id"] for r in g.cypher("MATCH (n:VIP:Staff) RETURN n.id AS id").to_list())
+    assert got == expected
+    assert g.cypher("MATCH (n:VIP:Staff) RETURN count(n) AS c").to_list()[0]["c"] == len(expected)
+
+
+def test_parity_edge_aggregate_secondary_endpoint(multi_label_graph):
+    """`(a)-[:KNOWS]->(b:VIP)` over a secondary-labelled endpoint == oracle.
+    Exercises the gated aggregate fusions + the matcher expansion endpoint
+    filter (both primary-only before 0.10.6)."""
+    g = multi_label_graph
+    oracle = _oracle_labels(g)
+    edges = [(r["a"], r["b"]) for r in g.cypher("MATCH (a)-[:KNOWS]->(b) RETURN a.id AS a, b.id AS b").to_list()]
+    expected: dict[str, int] = {}
+    for a, b in edges:
+        if "VIP" in oracle[b]:
+            expected[a] = expected.get(a, 0) + 1
+    got = {
+        r["a"]: r["c"] for r in g.cypher("MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a.id AS a, count(b) AS c").to_list()
+    }
+    assert got == expected
+
+
+def test_parity_where_label_predicate(multi_label_graph):
+    g = multi_label_graph
+    oracle = _oracle_labels(g)
+    expected = sorted(i for i, labs in oracle.items() if "Person" in labs and "VIP" in labs)
+    got = sorted(r["id"] for r in g.cypher("MATCH (n:Person) WHERE n:VIP RETURN n.id AS id").to_list())
+    assert got == expected
+
+
+def test_delete_evicts_secondary_label(multi_label_graph, tmp_path: Path):
+    """DETACH DELETE removes the node from secondary-label counts, and the
+    repair survives save+load (pre-0.10.6 left a dangling index entry)."""
+    g = multi_label_graph
+    before = g.cypher("MATCH (n:VIP) RETURN count(n) AS c").to_list()[0]["c"]
+    g.cypher("MATCH (n:Person {id:'P2'}) DETACH DELETE n")  # P2 was :VIP
+    after = g.cypher("MATCH (n:VIP) RETURN count(n) AS c").to_list()[0]["c"]
+    assert after == before - 1
+    assert "P2" not in {r["id"] for r in g.cypher("MATCH (n:VIP) RETURN n.id AS id").to_list()}
+    p = tmp_path / "del.kgl"
+    g.save(str(p))
+    reloaded = kglite.load(str(p))
+    assert reloaded.cypher("MATCH (n:VIP) RETURN count(n) AS c").to_list()[0]["c"] == after
+
+
+def test_fluent_select_include_secondary(multi_label_graph):
+    g = multi_label_graph
+    oracle = _oracle_labels(g)
+    expected = sorted(i for i, labs in oracle.items() if "VIP" in labs)
+    # primary-only select misses secondary-labelled nodes
+    assert len(g.select("VIP")) == 0
+    sel = g.select("VIP", include_secondary=True)
+    got = sorted(sel.ids().tolist() if hasattr(sel.ids(), "tolist") else sel.ids())
+    assert got == expected
+    # existing primary select unchanged
+    assert len(g.select("Person")) == sum(1 for labs in oracle.values() if "Person" in labs)
+
+
+def test_gate_suppresses_fusion_on_multilabel(multi_label_graph):
+    """Plan-shape: the aggregate fusion must NOT fire when the graph has
+    secondary labels (it would mis-filter); it falls to the general path."""
+    g = multi_label_graph
+    ops = [
+        r["operation"] for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a.id, count(b)").to_list()
+    ]
+    assert not any("FusedMatch" in o for o in ops), ops
+
+
+def test_single_label_still_fuses(social_graph):
+    """Counterpart: on a single-label graph the same shape still fuses —
+    proving the gate costs single-label graphs nothing."""
+    ops = [
+        r["operation"]
+        for r in social_graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id, count(b)").to_list()
+    ]
+    assert any("Fused" in o for o in ops), ops

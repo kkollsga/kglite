@@ -36,8 +36,10 @@ ALLOWLIST: dict[str, int] = {
     # spatial-join fusion to top-k aggregation. A future split into
     # planner/fusion/<pass>.rs is on the deferred-refactor list
     # (Phase A.3 / 0.9.53 audit, Tier 2). Until that lands, freeze the
-    # current size as the ceiling.
-    "crates/kglite/src/graph/languages/cypher/planner/fusion.rs": 3050,
+    # current size as the ceiling. Bumped in 0.10.6 (+~30 LoC) for the
+    # multi-label `has_secondary_labels` gates added to the aggregate and
+    # spatial-join fusions.
+    "crates/kglite/src/graph/languages/cypher/planner/fusion.rs": 3085,
 }
 
 
