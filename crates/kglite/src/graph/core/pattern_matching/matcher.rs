@@ -1322,6 +1322,26 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// Expand from a source node via an edge pattern to nodes matching node pattern
+    /// Whether `idx` satisfies a node pattern's label constraints — its
+    /// `node_type` (matched as primary OR secondary label) and every
+    /// `extra_label` — multi-label aware via `DirGraph::node_has_label`.
+    /// Properties are matched separately. Used by edge-expansion target
+    /// filtering so a typed endpoint like `(b:VIP)` matches nodes carrying
+    /// `VIP` as a secondary label, not only as their primary type. On a
+    /// single-label graph `node_has_label` reduces to the primary-type
+    /// equality this replaced, so behavior is unchanged.
+    fn node_matches_pattern_labels(&self, idx: NodeIndex, node_pattern: &NodePattern) -> bool {
+        if let Some(ref nt) = node_pattern.node_type {
+            if !self.graph.node_has_label(idx, InternedKey::from_str(nt)) {
+                return false;
+            }
+        }
+        node_pattern
+            .extra_labels
+            .iter()
+            .all(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
+    }
+
     fn expand_from_node(
         &self,
         source: NodeIndex,
@@ -1376,17 +1396,11 @@ impl<'a> PatternExecutor<'a> {
                     if max_results.is_some_and(|max| results.len() >= max) {
                         break;
                     }
-                    // Check target node type
-                    if !edge_pattern.skip_target_type_check {
-                        if let Some(ref node_type) = node_pattern.node_type {
-                            if let Some(nt) = self.graph.graph.node_type_of(peer_idx) {
-                                if nt != InternedKey::from_str(node_type) {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        }
+                    // Check target node labels (primary + secondary)
+                    if !edge_pattern.skip_target_type_check
+                        && !self.node_matches_pattern_labels(peer_idx, node_pattern)
+                    {
+                        continue;
                     }
                     // Check target node properties
                     if let Some(ref props) = node_pattern.properties {
@@ -1499,18 +1513,12 @@ impl<'a> PatternExecutor<'a> {
                     Direction::Incoming => edge.source(),
                 };
 
-                // Check if target matches node pattern (skip when edge type guarantees it)
-                // Uses O(1) node_type_of() to avoid full materialization
-                if !edge_pattern.skip_target_type_check {
-                    if let Some(ref node_type) = node_pattern.node_type {
-                        if let Some(nt) = self.graph.graph.node_type_of(target) {
-                            if nt != InternedKey::from_str(node_type) {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
+                // Check if target matches node pattern labels (primary +
+                // secondary; skip when edge type guarantees it)
+                if !edge_pattern.skip_target_type_check
+                    && !self.node_matches_pattern_labels(target, node_pattern)
+                {
+                    continue;
                 }
 
                 // Check node properties if specified
@@ -1598,15 +1606,7 @@ impl<'a> PatternExecutor<'a> {
 
         // Zero-hop case: if min_hops == 0, the source node itself is a valid result
         if min_hops == 0 {
-            let node_matches = if let Some(ref node_type) = node_pattern.node_type {
-                self.graph
-                    .graph
-                    .node_type_of(source)
-                    .map(|nt| nt == InternedKey::from_str(node_type))
-                    .unwrap_or(false)
-            } else {
-                true
-            };
+            let node_matches = self.node_matches_pattern_labels(source, node_pattern);
             let props_match = if let Some(ref props) = node_pattern.properties {
                 self.node_matches_properties(source, props)
             } else {
@@ -1702,17 +1702,8 @@ impl<'a> PatternExecutor<'a> {
 
                     // Check if target is a valid result (within hop range + matches node pattern)
                     if new_depth >= min_hops {
-                        let node_matches = if edge_pattern.skip_target_type_check {
-                            true
-                        } else if let Some(ref node_type) = node_pattern.node_type {
-                            self.graph
-                                .graph
-                                .node_type_of(target)
-                                .map(|nt| nt == InternedKey::from_str(node_type))
-                                .unwrap_or(false)
-                        } else {
-                            true
-                        };
+                        let node_matches = edge_pattern.skip_target_type_check
+                            || self.node_matches_pattern_labels(target, node_pattern);
 
                         let props_match = if let Some(ref props) = node_pattern.properties {
                             self.node_matches_properties(target, props)
@@ -1799,15 +1790,7 @@ impl<'a> PatternExecutor<'a> {
         // Zero-hop case: if min_hops == 0, the source node itself is a valid result
         // (matching "zero hops" means the source IS the target).
         if min_hops == 0 {
-            let node_matches = if let Some(ref node_type) = node_pattern.node_type {
-                self.graph
-                    .graph
-                    .node_type_of(source)
-                    .map(|nt| nt == InternedKey::from_str(node_type))
-                    .unwrap_or(false)
-            } else {
-                true
-            };
+            let node_matches = self.node_matches_pattern_labels(source, node_pattern);
             let props_match = if let Some(ref props) = node_pattern.properties {
                 self.node_matches_properties(source, props)
             } else {
@@ -1905,17 +1888,8 @@ impl<'a> PatternExecutor<'a> {
 
                 // If we're within the valid hop range and target matches node pattern, add to results
                 if new_depth >= min_hops {
-                    let node_matches = if edge_pattern.skip_target_type_check {
-                        true
-                    } else if let Some(ref node_type) = node_pattern.node_type {
-                        self.graph
-                            .graph
-                            .node_type_of(target)
-                            .map(|nt| nt == InternedKey::from_str(node_type))
-                            .unwrap_or(false)
-                    } else {
-                        true
-                    };
+                    let node_matches = edge_pattern.skip_target_type_check
+                        || self.node_matches_pattern_labels(target, node_pattern);
 
                     let props_match = if let Some(ref props) = node_pattern.properties {
                         self.node_matches_properties(target, props)

@@ -462,16 +462,16 @@ fn pass_fuse_optional_match_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
 /// `MATCH ... RETURN <group_keys>, <agg>` into
 /// `FusedMatchReturnAggregate`, building the GROUP-BY hash map inline
 /// during pattern expansion.
-fn pass_fuse_match_return_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
-    fuse_match_return_aggregate(query)
+fn pass_fuse_match_return_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_match_return_aggregate(query, ctx.graph.has_secondary_labels)
 }
 
 /// **Pass:** `fuse_match_with_aggregate` — Like
 /// `fuse_match_return_aggregate`, but for `MATCH ... WITH <group>,
 /// <agg>` (pipeline continues after WITH). Emits
 /// `FusedMatchWithAggregate`.
-fn pass_fuse_match_with_aggregate(query: &mut CypherQuery, _ctx: &PassCtx) {
-    fuse_match_with_aggregate(query)
+fn pass_fuse_match_with_aggregate(query: &mut CypherQuery, ctx: &PassCtx) {
+    fuse_match_with_aggregate(query, ctx.graph.has_secondary_labels)
 }
 
 /// **Pass:** `fuse_match_with_aggregate_top_k` — Absorb a downstream
@@ -690,6 +690,13 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
                         PatternElement::Node(np) => np,
                         _ => continue,
                     };
+                    // The connection-type guarantee covers only the target's
+                    // PRIMARY type. If the pattern also carries secondary
+                    // labels (`(b:Type:Extra)`), skipping the check would drop
+                    // the `:Extra` filter — never skip in that case.
+                    if !target.extra_labels.is_empty() {
+                        continue;
+                    }
                     match (&edge.connection_type, edge.direction, &target.node_type) {
                         (Some(ct), dir, Some(nt)) => (ct.clone(), dir, nt.clone()),
                         _ => continue,

@@ -950,8 +950,18 @@ fn distinct_fusable_3elem_with_constrained_group(
 /// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable AND
 ///    the group node is type/property constrained (see
 ///    `distinct_fusable_3elem_with_constrained_group`).
-pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery) {
+pub(super) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use super::super::ast::is_aggregate_expression;
+
+    // This fusion's executor filters typed peer/group nodes via
+    // `binary_search` on the *sorted* primary `type_indices` slice, which
+    // can't see secondary-labelled nodes. On a multi-label graph, bail to
+    // the general MATCH→aggregate path (candidate selection there goes
+    // through the matcher's `find_matching_nodes`, which is multi-label
+    // correct). Single-label graphs are unaffected.
+    if has_secondary_labels {
+        return;
+    }
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -1738,8 +1748,15 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
     true
 }
 
-pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery) {
+pub(super) fn fuse_match_with_aggregate(query: &mut CypherQuery, has_secondary_labels: bool) {
     use super::super::ast::is_aggregate_expression;
+
+    // Same primary-type `binary_search` peer/group filter as
+    // `fuse_match_return_aggregate` — bail to the general path on
+    // multi-label graphs. See that function for the rationale.
+    if has_secondary_labels {
+        return;
+    }
 
     let mut i = 0;
     while i + 1 < query.clauses.len() {
@@ -2792,6 +2809,15 @@ fn extract_contains_call_vars(
 ///   clauses is folded into the SpatialJoin's residual `remainder` so
 ///   per-probe filters (e.g. `p.wkt_geometry IS NOT NULL`) survive.
 pub(super) fn fuse_spatial_join(query: &mut CypherQuery, graph: &DirGraph) {
+    // The spatial-join executor builds its R-tree from the primary
+    // `type_indices` of the container/probe types and silently drops any
+    // `extra_labels` on those patterns. On a multi-label graph that misses
+    // secondary-labelled nodes, so bail to the general `MATCH (a:T1),(b:T2)
+    // WHERE contains(...)` path (two matcher scans + predicate), which is
+    // multi-label correct. Single-label graphs are unaffected.
+    if graph.has_secondary_labels {
+        return;
+    }
     let mut i = 0;
     while i < query.clauses.len() {
         if try_fuse_spatial_single_match(query, graph, i)

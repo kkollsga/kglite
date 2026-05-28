@@ -522,11 +522,13 @@ impl<'a> CypherExecutor<'a> {
             }
             Predicate::Not(inner) => Ok(self.evaluate_predicate_tristate(inner, row)?.map(|b| !b)),
             Predicate::LabelCheck { variable, label } => {
-                // True iff the variable is bound to a node whose type matches `label`.
-                // Unbound (OPTIONAL MATCH) or non-node bindings are false.
+                // True iff the variable is bound to a node carrying `label` as
+                // its primary type OR a secondary label. Unbound (OPTIONAL
+                // MATCH) or non-node bindings are false.
                 if let Some(&idx) = row.node_bindings.get(variable) {
-                    if let Some(node) = self.graph.graph.node_weight(idx) {
-                        return Ok(Some(node.node_type_str(&self.graph.interner) == label));
+                    if self.graph.graph.node_weight(idx).is_some() {
+                        let key = crate::graph::schema::InternedKey::from_str(label);
+                        return Ok(Some(self.graph.node_has_label(idx, key)));
                     }
                 }
                 Ok(Some(false))
