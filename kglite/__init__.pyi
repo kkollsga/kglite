@@ -645,6 +645,7 @@ class KnowledgeGraph:
         column_types: Optional[dict[str, str]] = None,
         timeseries: Optional[dict[str, Any]] = None,
         nullable_int_downcast: bool = False,
+        labels: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -686,6 +687,12 @@ class KnowledgeGraph:
                   ``'hour'``, or ``'minute'``. Auto-detected from time format if omitted.
                 - ``units`` (optional): dict mapping channel names to unit strings
                   (e.g. ``{'oil': 'MSm3'}``).
+            labels: Optional secondary labels to apply to every node in
+                the batch. ``add_nodes(df, 'Agent', 'id', 'name',
+                labels=['Reviewer'])`` creates ``Agent``-typed nodes
+                that also wear the ``Reviewer`` label, queryable via
+                ``MATCH (a:Reviewer)`` or ``MATCH (a:Agent:Reviewer)``.
+                For per-row labels, call :meth:`add_label` after.
 
         Returns:
             Operation report dict with keys ``nodes_created``,

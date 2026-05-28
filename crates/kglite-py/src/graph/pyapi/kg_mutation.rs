@@ -248,6 +248,36 @@ fn store_extracted_embeddings(
     }
 }
 
+/// Apply a uniform set of secondary labels to every row in the batch.
+/// Reads the unique_id_field column from the original DataFrame and
+/// looks each id up in the graph, applying every label in `labels`.
+/// Idempotent — if a label is already present (or equals the primary
+/// type), `DirGraph::add_node_label` no-ops.
+fn apply_batch_labels<'py>(
+    graph: &mut DirGraph,
+    node_type: &str,
+    data: &Bound<'py, PyAny>,
+    unique_id_field: &str,
+    labels: &[String],
+) -> PyResult<()> {
+    graph.build_id_index(node_type);
+    let label_keys: Vec<crate::graph::schema::InternedKey> = labels
+        .iter()
+        .map(|l| graph.interner.get_or_intern(l))
+        .collect();
+    let id_series = data.get_item(unique_id_field)?;
+    let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
+    for i in 0..nrows {
+        let id_val = py_in::py_value_to_value(&id_series.get_item(i)?)?;
+        if let Some(node_idx) = graph.lookup_by_id(node_type, &id_val) {
+            for &key in &label_keys {
+                graph.add_node_label(node_idx, key);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_timeseries<'py>(
     py: Python<'py>,
     graph: &mut DirGraph,
@@ -535,7 +565,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -549,6 +579,7 @@ impl KnowledgeGraph {
         column_types: Option<&Bound<'_, PyDict>>,
         timeseries: Option<&Bound<'_, PyDict>>,
         nullable_int_downcast: bool,
+        labels: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let py = data.py();
         let parsed = parse_inline_config(
@@ -590,6 +621,11 @@ impl KnowledgeGraph {
         store_extracted_embeddings(graph, &node_type, &embedding_data);
         if let Some(ts_cfg) = parsed.ts_config {
             apply_timeseries(py, graph, &node_type, data, &unique_id_field, ts_cfg)?;
+        }
+        if let Some(label_list) = labels.as_ref() {
+            if !label_list.is_empty() {
+                apply_batch_labels(graph, &node_type, data, &unique_id_field, label_list)?;
+            }
         }
 
         self.selection.clear();

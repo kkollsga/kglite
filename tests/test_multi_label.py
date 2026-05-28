@@ -193,6 +193,37 @@ def test_remove_label_pymethod_primary_errors(g):
         g.remove_label("Agent", ["a"], "Agent")
 
 
+# ─── add_nodes(labels=[...]) batch kwarg ──────────────────────────────────
+
+
+def test_add_nodes_with_labels_kwarg(g):
+    df = pd.DataFrame({"id": ["a", "b", "c"], "name": ["A", "B", "C"]})
+    g.add_nodes(df, "Agent", "id", "name", labels=["Reviewer"])
+    rows = g.cypher("MATCH (a:Reviewer) RETURN a.id AS id ORDER BY a.id").to_list()
+    assert [r["id"] for r in rows] == ["a", "b", "c"]
+    # Primary type still works.
+    rows = g.cypher("MATCH (a:Agent) RETURN a.id AS id ORDER BY a.id").to_list()
+    assert [r["id"] for r in rows] == ["a", "b", "c"]
+    # Combined AND-intersect.
+    rows = g.cypher("MATCH (a:Agent:Reviewer) RETURN a.id AS id ORDER BY a.id").to_list()
+    assert [r["id"] for r in rows] == ["a", "b", "c"]
+
+
+def test_add_nodes_multiple_labels_kwarg(g):
+    df = pd.DataFrame({"id": ["a"], "name": ["A"]})
+    g.add_nodes(df, "Agent", "id", "name", labels=["Reviewer", "Senior"])
+    rows = g.cypher("MATCH (a:Agent) RETURN labels(a) AS labels").to_list()
+    assert set(rows[0]["labels"]) == {"Agent", "Reviewer", "Senior"}
+
+
+def test_add_nodes_labels_kwarg_none_is_unchanged(g):
+    """Default (no labels kwarg) preserves existing single-label behavior."""
+    df = pd.DataFrame({"id": ["a"], "name": ["A"]})
+    g.add_nodes(df, "Agent", "id", "name")  # no labels kwarg
+    rows = g.cypher("MATCH (a:Agent) RETURN labels(a) AS labels").to_list()
+    assert rows[0]["labels"] == ["Agent"]
+
+
 # ─── save / load round-trip ───────────────────────────────────────────────
 
 
