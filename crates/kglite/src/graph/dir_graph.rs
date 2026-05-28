@@ -180,6 +180,19 @@ pub struct DirGraph {
     /// Populated during ingestion (add_nodes, CREATE) and compaction (load).
     #[serde(skip)]
     pub type_schemas: HashMap<String, Arc<TypeSchema>>,
+    /// Fast-skip flag: true if any node has secondary labels.
+    /// Read paths short-circuit the secondary_label_index scan entirely
+    /// when this is false, so single-label graphs pay no perf tax.
+    /// `#[serde(skip)]` — rebuilt by `rebuild_type_indices`.
+    #[serde(skip)]
+    pub has_secondary_labels: bool,
+    /// O(1) secondary-label index: label_key → [NodeIndex].
+    /// Populated by the choke-point label mutation API
+    /// (`DirGraph::add_node_label` / `remove_node_label`) and on load by
+    /// `rebuild_type_indices`. `#[serde(skip)]` — rebuilt from
+    /// `NodeData.extra_labels` on load.
+    #[serde(skip)]
+    pub secondary_label_index: HashMap<InternedKey, Vec<NodeIndex>>,
 }
 
 pub(crate) fn default_auto_vacuum_threshold() -> Option<f64> {
@@ -266,6 +279,8 @@ impl DirGraph {
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
+            has_secondary_labels: false,
+            secondary_label_index: HashMap::new(),
         }
     }
 
@@ -309,6 +324,8 @@ impl DirGraph {
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
+            has_secondary_labels: false,
+            secondary_label_index: HashMap::new(),
         }
     }
 
@@ -1386,6 +1403,8 @@ impl DirGraph {
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);
+        let mut new_secondary: HashMap<InternedKey, Vec<NodeIndex>> = HashMap::new();
+        let mut has_secondary = false;
         for node_idx in self.graph.node_indices() {
             if let Some(node) = self.graph.node_weight(node_idx) {
                 let type_str = node.node_type_str(&self.interner).to_string();
@@ -1393,9 +1412,92 @@ impl DirGraph {
                     .entry(type_str)
                     .or_insert_with(|| Vec::with_capacity(avg_per_type))
                     .push(node_idx);
+                if !node.extra_labels.is_empty() {
+                    has_secondary = true;
+                    for &key in &node.extra_labels {
+                        new_secondary.entry(key).or_default().push(node_idx);
+                    }
+                }
             }
         }
         self.type_indices.replace_with(new_type_indices);
+        self.secondary_label_index = new_secondary;
+        self.has_secondary_labels = has_secondary;
+    }
+
+    /// Add a secondary label to a node. Choke-point API for label
+    /// mutations — keeps `NodeData.extra_labels` and
+    /// `secondary_label_index` in sync.
+    ///
+    /// Returns `true` if the label was added, `false` if it was already
+    /// present (idempotent) or equal to the primary type.
+    pub fn add_node_label(&mut self, idx: NodeIndex, label: InternedKey) -> bool {
+        let Some(node) = self.graph.node_weight_mut(idx) else {
+            return false;
+        };
+        if node.node_type == label || node.extra_labels.contains(&label) {
+            return false;
+        }
+        node.extra_labels.push(label);
+        self.has_secondary_labels = true;
+        self.secondary_label_index
+            .entry(label)
+            .or_default()
+            .push(idx);
+        true
+    }
+
+    /// Remove a secondary label from a node. Choke-point API for label
+    /// mutations — keeps `NodeData.extra_labels` and
+    /// `secondary_label_index` in sync.
+    ///
+    /// Returns `Ok(true)` if removed, `Ok(false)` if the node never had
+    /// the label, `Err(...)` if `label` is the primary type (use
+    /// `SET n.type = ...` to retype instead).
+    pub fn remove_node_label(
+        &mut self,
+        idx: NodeIndex,
+        label: InternedKey,
+    ) -> Result<bool, String> {
+        let Some(node) = self.graph.node_weight_mut(idx) else {
+            return Ok(false);
+        };
+        if node.node_type == label {
+            return Err(
+                "Cannot remove a node's primary label via REMOVE n:Label; use \
+                 SET n.type = 'NewType' to retype."
+                    .to_string(),
+            );
+        }
+        let before = node.extra_labels.len();
+        node.extra_labels.retain(|&k| k != label);
+        let removed = node.extra_labels.len() < before;
+        if removed {
+            if let Some(bucket) = self.secondary_label_index.get_mut(&label) {
+                bucket.retain(|&i| i != idx);
+                if bucket.is_empty() {
+                    self.secondary_label_index.remove(&label);
+                }
+            }
+            if self.secondary_label_index.is_empty() {
+                self.has_secondary_labels = false;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Return a node's labels as `[primary, ...extras]`. Returns an
+    /// empty Vec if the node is missing. Consumers that only need the
+    /// primary type should keep using `GraphRead::node_type_of` (one
+    /// InternedKey lookup, no allocation).
+    pub fn node_labels(&self, idx: NodeIndex) -> Vec<InternedKey> {
+        let Some(node) = self.graph.node_weight(idx) else {
+            return Vec::new();
+        };
+        let mut labels = Vec::with_capacity(1 + node.extra_labels.len());
+        labels.push(node.node_type);
+        labels.extend(node.extra_labels.iter().copied());
+        labels
     }
 
     /// Convert all node properties from PropertyStorage::Map to PropertyStorage::Compact.
@@ -2477,4 +2579,114 @@ pub fn make_dir_graph_mut(arc: &mut std::sync::Arc<DirGraph>) -> &mut DirGraph {
     let graph = std::sync::Arc::make_mut(arc);
     graph.version += 1;
     graph
+}
+
+#[cfg(test)]
+mod multi_label_tests {
+    use super::*;
+    use crate::datatypes::Value;
+    use crate::graph::schema::NodeData;
+    use crate::graph::storage::GraphWrite;
+
+    fn add_node(graph: &mut DirGraph, id: &str, node_type: &str) -> NodeIndex {
+        let nd = NodeData::new(
+            Value::String(id.to_string()),
+            Value::String(id.to_string()),
+            node_type.to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let idx = GraphWrite::add_node(&mut graph.graph, nd);
+        graph
+            .type_indices
+            .entry_or_default(node_type.to_string())
+            .push(idx);
+        idx
+    }
+
+    #[test]
+    fn add_node_label_idempotent_and_no_op_on_primary() {
+        let mut g = DirGraph::new();
+        let idx = add_node(&mut g, "n1", "Person");
+        let reviewer = g.interner.get_or_intern("Reviewer");
+        let person = g.interner.get_or_intern("Person");
+
+        assert!(g.add_node_label(idx, reviewer));
+        assert!(g.has_secondary_labels);
+        assert_eq!(g.secondary_label_index[&reviewer], vec![idx]);
+
+        // Idempotent — second add is a no-op.
+        assert!(!g.add_node_label(idx, reviewer));
+        assert_eq!(g.secondary_label_index[&reviewer], vec![idx]);
+
+        // Primary type is a no-op too.
+        assert!(!g.add_node_label(idx, person));
+
+        let labels = g.node_labels(idx);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0], person);
+        assert_eq!(labels[1], reviewer);
+    }
+
+    #[test]
+    fn remove_node_label_errors_on_primary() {
+        let mut g = DirGraph::new();
+        let idx = add_node(&mut g, "n1", "Person");
+        let person = g.interner.get_or_intern("Person");
+
+        let err = g.remove_node_label(idx, person).unwrap_err();
+        assert!(err.contains("primary label"));
+    }
+
+    #[test]
+    fn remove_node_label_clears_index_when_last_node_drops_it() {
+        let mut g = DirGraph::new();
+        let a = add_node(&mut g, "a", "Person");
+        let b = add_node(&mut g, "b", "Person");
+        let reviewer = g.interner.get_or_intern("Reviewer");
+
+        g.add_node_label(a, reviewer);
+        g.add_node_label(b, reviewer);
+        assert_eq!(g.secondary_label_index[&reviewer].len(), 2);
+
+        assert!(g.remove_node_label(a, reviewer).unwrap());
+        assert_eq!(g.secondary_label_index[&reviewer], vec![b]);
+        assert!(g.has_secondary_labels);
+
+        assert!(g.remove_node_label(b, reviewer).unwrap());
+        assert!(!g.secondary_label_index.contains_key(&reviewer));
+        // No labels left anywhere, fast-skip resets.
+        assert!(!g.has_secondary_labels);
+    }
+
+    #[test]
+    fn rebuild_repopulates_secondary_index_from_node_data() {
+        let mut g = DirGraph::new();
+        let idx = add_node(&mut g, "n1", "Person");
+        let reviewer = g.interner.get_or_intern("Reviewer");
+        g.add_node_label(idx, reviewer);
+
+        // Drop the index entries; rebuild should restore them from
+        // NodeData.extra_labels.
+        g.secondary_label_index.clear();
+        g.has_secondary_labels = false;
+
+        g.rebuild_type_indices();
+
+        assert!(g.has_secondary_labels);
+        assert_eq!(g.secondary_label_index[&reviewer], vec![idx]);
+    }
+
+    #[test]
+    fn graph_read_node_labels_of_returns_primary_plus_extras() {
+        use crate::graph::storage::GraphRead;
+        let mut g = DirGraph::new();
+        let idx = add_node(&mut g, "n1", "Person");
+        let reviewer = g.interner.get_or_intern("Reviewer");
+        let person = g.interner.get_or_intern("Person");
+        g.add_node_label(idx, reviewer);
+
+        let labels = g.graph.node_labels_of(idx);
+        assert_eq!(labels, vec![person, reviewer]);
+    }
 }

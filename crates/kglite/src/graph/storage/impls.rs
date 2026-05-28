@@ -84,6 +84,17 @@ macro_rules! impl_heap_graph_read {
             }
 
             #[inline]
+            fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
+                let Some(nd) = self.inner().node_weight(idx) else {
+                    return Vec::new();
+                };
+                let mut labels = Vec::with_capacity(1 + nd.extra_labels.len());
+                labels.push(nd.node_type);
+                labels.extend(nd.extra_labels.iter().copied());
+                labels
+            }
+
+            #[inline]
             fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
                 self.inner().node_weight(idx)
             }
@@ -359,6 +370,16 @@ impl GraphRead for MappedGraph {
     #[inline]
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         self.inner().node_weight(idx).map(|nd| nd.node_type)
+    }
+    #[inline]
+    fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
+        let Some(nd) = self.inner().node_weight(idx) else {
+            return Vec::new();
+        };
+        let mut labels = Vec::with_capacity(1 + nd.extra_labels.len());
+        labels.push(nd.node_type);
+        labels.extend(nd.extra_labels.iter().copied());
+        labels
     }
     #[inline]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {

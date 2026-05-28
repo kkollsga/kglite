@@ -737,6 +737,7 @@ impl DiskGraph {
                 id,
                 title,
                 node_type: node_type_key,
+                extra_labels: Vec::new(),
                 properties: crate::graph::schema::PropertyStorage::Columnar {
                     store: Arc::clone(store),
                     row_id: slot.row_id,
@@ -747,6 +748,7 @@ impl DiskGraph {
                 id: Value::Null,
                 title: Value::Null,
                 node_type: node_type_key,
+                extra_labels: Vec::new(),
                 properties: crate::graph::schema::PropertyStorage::Map(HashMap::new()),
             }
         };
@@ -818,6 +820,7 @@ impl DiskGraph {
                     id: id_val,
                     title: title_val,
                     node_type: node_type_key,
+                    extra_labels: Vec::new(),
                     properties: crate::graph::schema::PropertyStorage::Map(HashMap::new()),
                 },
             );
@@ -904,6 +907,7 @@ impl DiskGraph {
             id: id_val,
             title: title_val,
             node_type: node_type_key,
+            extra_labels: Vec::new(),
             properties: if let Some(s) = store {
                 crate::graph::schema::PropertyStorage::Columnar {
                     store: s,

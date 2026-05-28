@@ -139,6 +139,20 @@ pub trait GraphRead {
     /// Node type key for a given index. `None` if the node has been removed.
     fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey>;
 
+    /// All labels for a node: `[primary, ...secondaries]`. Defaults to a
+    /// 1-element Vec wrapping `node_type_of` for backends that don't
+    /// surface secondary labels (e.g. disk). The in-memory + mapped
+    /// backends override to include `NodeData.extra_labels`.
+    ///
+    /// Consumers that only need the primary type should keep using
+    /// `node_type_of` (no allocation).
+    fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
+        match self.node_type_of(idx) {
+            Some(key) => vec![key],
+            None => Vec::new(),
+        }
+    }
+
     /// Borrow the full NodeData. **Escape hatch** — prefer granular reads
     /// ([`GraphRead::get_node_property`], [`GraphRead::get_node_id`], etc.)
     /// in hot loops. On the disk backend, materialises NodeData through

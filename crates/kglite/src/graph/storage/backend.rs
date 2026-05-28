@@ -376,6 +376,16 @@ impl GraphRead for GraphBackend {
     }
 
     #[inline(always)]
+    fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
+        match self {
+            Self::Memory(g) => GraphRead::node_labels_of(g, idx),
+            Self::Mapped(g) => GraphRead::node_labels_of(g, idx),
+            Self::Disk(g) => GraphRead::node_labels_of(g.as_ref(), idx),
+            Self::Recording(rg) => GraphRead::node_labels_of(rg.as_ref(), idx),
+        }
+    }
+
+    #[inline(always)]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         match self {
             Self::Memory(g) => GraphRead::node_weight(g, idx),

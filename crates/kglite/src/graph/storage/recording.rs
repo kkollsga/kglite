@@ -205,6 +205,12 @@ impl<G: GraphRead> GraphRead for RecordingGraph<G> {
     }
 
     #[inline]
+    fn node_labels_of(&self, idx: NodeIndex) -> Vec<InternedKey> {
+        self.record("node_labels_of");
+        self.inner.node_labels_of(idx)
+    }
+
+    #[inline]
     fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         self.record("node_weight");
         self.inner.node_weight(idx)
