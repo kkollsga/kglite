@@ -24,6 +24,7 @@ use super::super::CypherExecutor;
 use super::RowStream;
 use crate::datatypes::values::Value;
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 
 /// Surrogate key for a single grouping expression. Mirrors the
@@ -395,7 +396,7 @@ pub fn apply<'q>(
     // Equivalent to the materialized path's first pass at
     // `return_clause::execute_return_with_aggregation` ~lines 242-273.
     let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, GroupAcc)> = Vec::new();
-    let mut surrogate_index: HashMap<Vec<GroupKeyPart>, usize> = HashMap::new();
+    let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
 
     // Capture variable names of group-key expressions that are pure
     // variable references — used to copy node bindings forward on the
@@ -486,7 +487,7 @@ pub fn apply<'q>(
     }
 
     let mut groups: Vec<(Vec<Value>, GroupAcc)> = Vec::new();
-    let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+    let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
 
     for (key_parts, acc) in surrogate_groups {
         let resolved: Vec<Value> = key_parts

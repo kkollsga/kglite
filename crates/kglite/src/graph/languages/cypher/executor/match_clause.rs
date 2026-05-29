@@ -12,6 +12,7 @@ use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 
 /// Replace every `count(...)` function-call sub-tree in `expr` with a
@@ -1980,7 +1981,7 @@ impl<'a> CypherExecutor<'a> {
         // Groups: (group_key_values, first_node_idx_for_binding)
         let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex)> = Vec::new();
         let mut group_accumulators: Vec<InlineAccumulators> = Vec::new();
-        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+        let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
 
         for (scan_count, &node_idx) in node_indices.iter().enumerate() {
             // Timeout check every 10,000 iterations (matches fused_match_return pattern)

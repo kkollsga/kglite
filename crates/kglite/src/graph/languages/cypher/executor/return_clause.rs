@@ -5,6 +5,7 @@ use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
 use chrono::Datelike;
+use rustc_hash::FxHashMap;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Surrogate key for a single grouping expression. NodeProp defers property
@@ -241,7 +242,7 @@ impl<'a> CypherExecutor<'a> {
         // operations for surrogate parts, with zero disk I/O.
         self.check_deadline()?;
         let mut surrogate_groups: Vec<(Vec<GroupKeyPart>, Vec<usize>)> = Vec::new();
-        let mut surrogate_index: HashMap<Vec<GroupKeyPart>, usize> = HashMap::new();
+        let mut surrogate_index: FxHashMap<Vec<GroupKeyPart>, usize> = FxHashMap::default();
 
         // Group-limit hint set by `push_limit_into_aggregate`. When `Some(N)`
         // and we already have `N` distinct groups, skip rows whose key
@@ -319,7 +320,7 @@ impl<'a> CypherExecutor<'a> {
         // NodeIndexes that resolve to the same property value (e.g. two Person
         // nodes both named "Alice") must collapse into one group.
         let mut groups: Vec<(Vec<Value>, Vec<usize>)> = Vec::new();
-        let mut group_index_map: HashMap<Vec<Value>, usize> = HashMap::new();
+        let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
         for (key_parts, row_indices) in surrogate_groups {
             let resolved_key: Vec<Value> = key_parts
                 .iter()
