@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 /// A compact property key backed by a hash of the original string.
@@ -126,7 +126,11 @@ impl<'de> Deserialize<'de> for InternedKey {
 /// Used for serialization and for methods that output string keys.
 #[derive(Debug, Clone, Default)]
 pub struct StringInterner {
-    strings: HashMap<InternedKey, String>,
+    /// FxHash, not SipHash: `InternedKey` is already an FNV `u64`, so the std
+    /// cryptographic hasher is pure overhead. `try_resolve`/`resolve` run per
+    /// row (e.g. `node_type_str` in `resolve_node_property`) — see the
+    /// 2026-05-29 samply profile (SipHash ~23% of in-memory query CPU).
+    strings: FxHashMap<InternedKey, String>,
 }
 
 impl StringInterner {
