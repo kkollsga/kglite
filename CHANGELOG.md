@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7] — 2026-05-29 — in-memory query perf (SipHash → FxHash)
+
+A samply profile of the in-memory query hot path found ~23% of engine
+CPU in the std default **SipHasher**: maps keyed by `InternedKey` (an
+already-well-distributed FNV `u64`) re-hashed it through a cryptographic
+hash on every property access, and the GROUP BY path did the same to
+group keys per row. Swept those to FxHash (`rustc-hash`, already a
+dependency). Semantics-identical, `.kgl`-compatible, correctness verified
+by the differential corpus + parity oracles.
+
+### Changed
+
+- **Faster property access** — `TypeSchema::key_to_slot` and
+  `StringInterner.strings` (both `InternedKey`-keyed, hit per property
+  per row on the Compact read path) now use FxHash.
+- **Faster alias resolution** — the id/title field-alias maps
+  (`resolve_alias`) now use FxHash.
+- **Faster GROUP BY** — the five group-key → group-index maps across the
+  streaming, materialized, and fused aggregation paths now use FxHash.
+
+Single-label query A/B vs 0.10.6 (50k nodes, release, min-over-rounds):
+`multi_where` −38%, `group_by` −23%, `where_scan` −21%, `proj5` −17%;
+aggregate queries an additional few percent. Traversal-bound queries are
+roughly flat. No single-label regression (every change is a no-op when no
+secondary labels / aliases exist).
+
+- **`mcp-methods` 0.3.40** — picks up the merged watch skip-patterns PR
+  plus `graph_overview`/`cypher_query` fastmcp fixes. No API change.
+
 ## [0.10.6] — 2026-05-29 — multi-label read-path correctness
 
 0.10.5 shipped secondary labels but only taught the slow matcher path
