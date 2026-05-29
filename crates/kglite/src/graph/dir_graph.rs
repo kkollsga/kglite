@@ -15,9 +15,9 @@ use crate::graph::storage::disk::type_index::TypeIndexStore;
 use crate::graph::storage::{GraphRead, GraphWrite, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 

@@ -11,9 +11,9 @@
 //
 // Extracted from `src/graph/schema.rs` in Phase 7 (Stage 2.2).
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
-use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
 /// A compact property key backed by a hash of the original string.

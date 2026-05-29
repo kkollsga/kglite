@@ -17,9 +17,9 @@ pub use crate::graph::storage::backend::GraphBackend;
 #[allow(unused_imports)]
 pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 use petgraph::graph::NodeIndex;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
-use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
