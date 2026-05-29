@@ -1916,27 +1916,36 @@ def test_f5_workspace_post_activate_hook_fires_on_activate(tmp_path: Path) -> No
     assert fired_name.startswith("local/"), f"hook received unexpected name: {fired_name!r}"
 
 
-def test_f6_local_workspace_builds_code_tree_at_boot(local_workspace_yaml: Path) -> None:
-    """local_workspace mode must build a code-tree graph for the
-    workspace root at boot — the first cypher_query (before any
-    set_root_dir) must see populated nodes from the source tree.
+def test_f6_local_workspace_lazy_boot_then_builds_on_set_root_dir(local_workspace_yaml: Path) -> None:
+    """local_workspace mode boots LAZILY: no code-tree is built until the
+    first set_root_dir. Querying before activation returns 'No active
+    graph'; set_root_dir('.') (the workspace root itself) then builds the
+    code-tree and the next cypher_query sees populated nodes.
 
-    Catches: pre-0.9.28 regression where local_workspace mode
-    instantiated Workspace but never called build_code_tree, so the
-    graph stayed empty until the agent issued set_root_dir. Operators
-    deploying code_review-style local-workspace manifests hit this
-    when their first agent action was cypher_query: it returned
-    'No active graph.' even though the manifest declared a workspace
-    root. Wired in 0.9.28 to mirror watch mode's boot-time build."""
+    Contract change (operator inbox 2026-05-25): the 0.9.28 eager
+    boot-time build(workspace.root) was dropped — on a wide
+    workspace.root (the documented lateral-swap sandbox, ~360k files) it
+    blocked MCP `initialize` past Claude Desktop's 60s timeout
+    ('Could not attach to MCP server'). Boot must now return in ms; the
+    build is deferred to the first set_root_dir via the post_activate
+    hook. This test pins the lazy-boot contract so we don't regress back
+    to the timeout-causing eager build."""
     client = _client(["--mcp-config", str(local_workspace_yaml)])
     try:
+        # Before any set_root_dir: lazy boot, nothing built yet.
+        pre = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS n"})
+        assert "No active graph" in pre, f"expected lazy boot (no graph), got: {pre!r}"
+
+        # Activate the workspace root itself; this triggers the build.
+        swap = client.call_tool("set_root_dir", {"path": "."})
+        assert "ERROR" not in swap, f"set_root_dir('.') failed: {swap!r}"
+
         body = client.call_tool("cypher_query", {"query": "MATCH (n) RETURN count(n) AS n"})
     finally:
         client.close()
-    assert "No active graph" not in body, f"graph empty at boot: {body!r}"
-    # tiny_source_dir has alpha.py (def alpha + class A), beta.py (def
-    # beta), and nested/gamma.py (def gamma) — the code-tree builder
-    # produces at minimum a non-zero node count.
+    # tiny_source_dir has alpha.py (def alpha + class A) etc. — after
+    # activation the code-tree builder produces a non-zero node count.
+    assert "No active graph" not in body, f"graph empty after set_root_dir: {body!r}"
     assert "n: 0" not in body and '"n":0' not in body.replace(" ", ""), (
         f"code-tree built but produced zero nodes: {body!r}"
     )
