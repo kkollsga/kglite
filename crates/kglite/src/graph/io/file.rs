@@ -40,6 +40,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -119,10 +120,10 @@ pub(crate) struct FileMetadata {
     connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
     /// Original ID field name per node type (for alias resolution)
     #[serde(default)]
-    id_field_aliases: HashMap<String, String>,
+    id_field_aliases: FxHashMap<String, String>,
     /// Original title field name per node type (for alias resolution)
     #[serde(default)]
-    title_field_aliases: HashMap<String, String>,
+    title_field_aliases: FxHashMap<String, String>,
     /// Auto-vacuum threshold (None = disabled, default Some(0.3))
     #[serde(default = "crate::graph::dir_graph::default_auto_vacuum_threshold")]
     auto_vacuum_threshold: Option<f64>,

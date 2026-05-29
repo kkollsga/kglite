@@ -17,6 +17,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -84,12 +85,12 @@ pub struct DirGraph {
     /// Stored when the user-supplied unique_id_field differs from "id".
     /// Used for alias resolution: querying by original column name maps to the `id` field.
     #[serde(default)]
-    pub id_field_aliases: HashMap<String, String>,
+    pub id_field_aliases: FxHashMap<String, String>,
     /// Original title field name per node type (e.g. "Person" → "prospect_name").
     /// Stored when the user-supplied node_title_field differs from "title".
     /// Used for alias resolution: querying by original column name maps to the `title` field.
     #[serde(default)]
-    pub title_field_aliases: HashMap<String, String>,
+    pub title_field_aliases: FxHashMap<String, String>,
     /// Parent type for supporting node types: child_type → parent_type.
     /// If a type has an entry here, it is a "supporting" type that belongs to the parent.
     /// Types without an entry are "core" types (shown in describe() inventory).
@@ -257,8 +258,8 @@ impl DirGraph {
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
             save_metadata: SaveMetadata::current(),
-            id_field_aliases: HashMap::new(),
-            title_field_aliases: HashMap::new(),
+            id_field_aliases: FxHashMap::default(),
+            title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
@@ -302,8 +303,8 @@ impl DirGraph {
             node_type_metadata: HashMap::new(),
             connection_type_metadata: HashMap::new(),
             save_metadata: SaveMetadata::default(),
-            id_field_aliases: HashMap::new(),
-            title_field_aliases: HashMap::new(),
+            id_field_aliases: FxHashMap::default(),
+            title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),

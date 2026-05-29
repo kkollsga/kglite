@@ -12,6 +12,7 @@ use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -42,7 +43,7 @@ const EXPANSION_RAYON_THRESHOLD: usize = 8192;
 ///      graph's existing schema — no new config API.
 fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
     let mut out: Vec<String> = vec![prop.to_string()];
-    let (family, per_type_map): (&[&str], &HashMap<String, String>) = match prop {
+    let (family, per_type_map): (&[&str], &FxHashMap<String, String>) = match prop {
         "title" | "label" | "name" => (&["title", "label", "name"], &graph.title_field_aliases),
         "id" | "nid" | "qid" => (&["id", "nid", "qid"], &graph.id_field_aliases),
         _ => return out,
