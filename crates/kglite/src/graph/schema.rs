@@ -19,6 +19,7 @@ pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 use petgraph::graph::NodeIndex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -38,8 +39,12 @@ pub const PROVISIONAL_KEY: &str = "_provisional";
 pub struct TypeSchema {
     /// slot_index → interned key (for iteration / serialization)
     pub(crate) slots: Vec<InternedKey>,
-    /// interned key → slot_index (for O(1) lookup)
-    key_to_slot: HashMap<InternedKey, u16>,
+    /// interned key → slot_index (for O(1) lookup). FxHash, not the std
+    /// SipHasher: `InternedKey` is already a well-distributed FNV `u64`, so a
+    /// cryptographic hash is pure overhead. `slot()` is the per-property,
+    /// per-row, per-column lookup on the Compact (production) read path —
+    /// samply (2026-05-29) showed SipHash here at ~23% of in-memory query CPU.
+    key_to_slot: FxHashMap<InternedKey, u16>,
 }
 
 impl TypeSchema {
@@ -47,7 +52,7 @@ impl TypeSchema {
     pub fn new() -> Self {
         TypeSchema {
             slots: Vec::new(),
-            key_to_slot: HashMap::new(),
+            key_to_slot: FxHashMap::default(),
         }
     }
 
