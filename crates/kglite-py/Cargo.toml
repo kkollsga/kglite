@@ -78,7 +78,7 @@ kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodi
 # in `src/mcp_tools.rs`. The `server` feature pulls the framework
 # half (manifest parser + tool implementations) without any pyo3
 # dep.
-mcp-methods = { version = "0.3.39", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.3.40", default-features = false, features = ["server"] }
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
