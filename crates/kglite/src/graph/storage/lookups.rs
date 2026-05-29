@@ -50,8 +50,7 @@ impl TypeLookup {
         if node_type.is_empty() {
             return Err("Node type cannot be empty".to_string());
         }
-        if let Some(type_index) = id_indices.get(&node_type) {
-            let uid_map: HashMap<Value, NodeIndex> = type_index.iter().collect();
+        if let Some(uid_map) = id_indices.materialize_type(&node_type) {
             Ok(TypeLookup {
                 uid_to_index: uid_map,
                 title_to_index: HashMap::new(),
@@ -141,16 +140,14 @@ impl CombinedTypeLookup {
 
         if has_source && has_target {
             let source_uid = id_indices
-                .get(&source_type)
-                .map(|idx| idx.iter().collect())
+                .materialize_type(&source_type)
                 .unwrap_or_default();
             let target_uid = if same_type {
                 None
             } else {
                 Some(
                     id_indices
-                        .get(&target_type)
-                        .map(|idx| idx.iter().collect())
+                        .materialize_type(&target_type)
                         .unwrap_or_default(),
                 )
             };

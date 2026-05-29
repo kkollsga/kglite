@@ -1754,4 +1754,43 @@ mod id_index_tests {
             .lookup_by_id_readonly("Person", &Value::Int64(999))
             .is_some());
     }
+
+    /// Regression (issue #20): the read path self-heals. When the index is
+    /// *absent* for a type (the state CREATE / DELETE leave it in), the very
+    /// first `lookup_by_id_readonly` — a `&self` call — must build and cache
+    /// the index, so every subsequent id-equality lookup is O(1) instead of
+    /// the old O(node-position) linear scan that re-ran on each read.
+    #[test]
+    fn readonly_lookup_self_heals_when_index_absent() {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (0..1000).map(|i| vec![Value::Int64(i)]).collect();
+        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows).unwrap();
+        add_nodes(
+            &mut g,
+            df,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap();
+
+        // Simulate the post-CREATE / post-DELETE state: index invalidated.
+        g.id_indices.remove("Person");
+        assert!(!g.id_indices.contains_key("Person"));
+
+        // A read-only lookup must still find the node...
+        assert!(g
+            .lookup_by_id_readonly("Person", &Value::Int64(999))
+            .is_some());
+        // ...and must have cached the index so the next read is O(1).
+        assert!(
+            g.id_indices.contains_key("Person"),
+            "read path must build + cache the id_index on a miss (issue #20)"
+        );
+        // A genuinely absent id still resolves to None (no false positives).
+        assert!(g
+            .lookup_by_id_readonly("Person", &Value::Int64(424242))
+            .is_none());
+    }
 }

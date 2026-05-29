@@ -360,13 +360,59 @@ impl DirGraph {
         if self.id_indices.contains_key(node_type) {
             return; // Already built
         }
+        let index = self.compute_id_index(node_type);
+        self.id_indices.insert(node_type.to_string(), index);
+    }
 
-        // First pass: check if all IDs are UniqueId
+    /// Build id_index for a type using column stores directly (no node materialization).
+    /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
+    /// Much faster and uses no arena memory. `compute_id_index` already
+    /// prefers the column path for disk graphs, so this is a thin alias.
+    pub fn build_id_index_from_columns(&mut self, node_type: &str) {
+        self.build_id_index(node_type);
+    }
+
+    /// Compute (without inserting) the `TypeIdIndex` for a node type by
+    /// scanning the graph. The shared body behind `build_id_index` (the
+    /// &mut, cache-on-build path) and the read-path lazy build in
+    /// `lookup_by_id_normalized` (via `IdIndexStore::lookup_or_build`, the
+    /// &self self-healing path — see issue #20).
+    ///
+    /// Disk graphs with a column store read ids straight from the mmap'd
+    /// columns (no node materialization); everything else scans node weights.
+    fn compute_id_index(&self, node_type: &str) -> TypeIdIndex {
+        let node_indices = match self.type_indices.get(node_type) {
+            Some(indices) => indices,
+            None => return TypeIdIndex::General(HashMap::new()),
+        };
+
         let mut all_unique_id = true;
-        let mut entries: Vec<(Value, NodeIndex)> = Vec::new();
+        let mut entries: Vec<(Value, NodeIndex)> = Vec::with_capacity(node_indices.len());
 
-        if let Some(node_indices) = self.type_indices.get(node_type) {
-            entries.reserve(node_indices.len());
+        // Disk + column store: read ids directly from mmap'd columns.
+        let used_columns = if let GraphBackend::Disk(ref dg) = self.graph {
+            if let Some(store) = self.column_stores.get(node_type) {
+                for node_idx in node_indices.iter() {
+                    let slot = dg.node_slot(node_idx.index());
+                    if slot.is_alive() {
+                        if let Some(id_val) = store.get_id(slot.row_id) {
+                            if !matches!(id_val, Value::UniqueId(_)) {
+                                all_unique_id = false;
+                            }
+                            entries.push((id_val, node_idx));
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // In-memory (and disk-without-column-store): scan node weights.
+        if !used_columns {
             for node_idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let node_id = node.id().into_owned();
@@ -378,8 +424,8 @@ impl DirGraph {
             }
         }
 
-        let index = if all_unique_id && !entries.is_empty() {
-            // Compact: u32 keys only (~8 bytes per entry vs ~60)
+        if all_unique_id && !entries.is_empty() {
+            // Compact: u32 keys only (~8 bytes per entry vs ~60).
             let map = entries
                 .into_iter()
                 .filter_map(|(id, idx)| {
@@ -392,83 +438,17 @@ impl DirGraph {
                 .collect();
             TypeIdIndex::Integer(map)
         } else {
-            // General: mixed ID types
+            // General: mixed ID types.
             TypeIdIndex::General(entries.into_iter().collect())
-        };
-
-        self.id_indices.insert(node_type.to_string(), index);
-    }
-
-    /// Build id_index for a type using column stores directly (no node materialization).
-    /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
-    /// Much faster and uses no arena memory.
-    pub fn build_id_index_from_columns(&mut self, node_type: &str) {
-        if self.id_indices.contains_key(node_type) {
-            return;
         }
-        let store = match self.column_stores.get(node_type) {
-            Some(s) => s.clone(),
-            None => {
-                // No column store — fall back to standard build
-                self.build_id_index(node_type);
-                return;
-            }
-        };
-        let node_indices = match self.type_indices.get(node_type) {
-            Some(indices) => indices,
-            None => return,
-        };
-
-        let mut all_unique_id = true;
-        let mut entries: Vec<(Value, NodeIndex)> = Vec::with_capacity(node_indices.len());
-
-        // Read ids directly from column store using row_id from node_slots
-        if let GraphBackend::Disk(ref dg) = self.graph {
-            for node_idx in node_indices.iter() {
-                let slot = dg.node_slot(node_idx.index());
-                if slot.is_alive() {
-                    if let Some(id_val) = store.get_id(slot.row_id) {
-                        if !matches!(id_val, Value::UniqueId(_)) {
-                            all_unique_id = false;
-                        }
-                        entries.push((id_val, node_idx));
-                    }
-                }
-            }
-        } else {
-            // InMemory: fall back to standard build
-            self.build_id_index(node_type);
-            return;
-        }
-
-        let index = if all_unique_id && !entries.is_empty() {
-            let map = entries
-                .into_iter()
-                .filter_map(|(id, idx)| {
-                    if let Value::UniqueId(u) = id {
-                        Some((u, idx))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            TypeIdIndex::Integer(map)
-        } else {
-            TypeIdIndex::General(entries.into_iter().collect())
-        };
-
-        self.id_indices.insert(node_type.to_string(), index);
     }
 
     /// Look up a node by type and ID value. O(1) after index is built.
     /// Builds the index lazily if not already built.
     /// Handles type normalization: Python int may come as Int64 but be stored as UniqueId.
     pub fn lookup_by_id(&mut self, node_type: &str, id: &Value) -> Option<NodeIndex> {
-        // Build index if needed
-        if !self.id_indices.contains_key(node_type) {
-            self.build_id_index(node_type);
-        }
-
+        // The normalized path self-heals: it builds + caches the index on a
+        // miss, so no separate build step is needed here.
         self.lookup_by_id_normalized(node_type, id)
     }
 
@@ -483,38 +463,16 @@ impl DirGraph {
     /// This handles the Python-Rust type mismatch where Python int -> Int64 but
     /// DataFrame unique_id columns store as UniqueId(u32).
     ///
-    /// Falls back to a linear scan of type_indices if the id_index hasn't been
-    /// built yet (e.g., after DELETE invalidates id_indices).
+    /// O(1) self-healing: if the id_index for this type is missing (e.g. after
+    /// `add_nodes` / `CREATE` / `DELETE` invalidated it), the index is built
+    /// once on this read and cached in the overlay — every subsequent lookup
+    /// is O(1). Replaces the old O(node-position) linear scan that re-ran on
+    /// every `MATCH (n {id:X})` / `MERGE` match against an un-indexed type
+    /// (issue #20). `TypeIdIndex::get` does the Int64↔UniqueId/Float/prefix
+    /// normalization the old scan did by hand.
     pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
-        if let Some(type_index) = self.id_indices.get(node_type) {
-            // Index exists for this type — trust it (O(1) with normalization).
-            // Don't fall through to linear scan.
-            return type_index.get(id);
-        }
-
-        // Fallback: linear scan through type_indices when id_index is missing
-        // (e.g., after DELETE invalidates id_indices for this type)
-        if let Some(node_indices) = self.type_indices.get(node_type) {
-            for node_idx in node_indices.iter() {
-                if let Some(node) = self.graph.node_weight(node_idx) {
-                    let node_id = node.id();
-                    if &*node_id == id {
-                        return Some(node_idx);
-                    }
-                    // Normalize: check Int64 ↔ UniqueId
-                    match (id, &*node_id) {
-                        (Value::Int64(i), Value::UniqueId(u)) if *i >= 0 && *i as u32 == *u => {
-                            return Some(node_idx);
-                        }
-                        (Value::UniqueId(u), Value::Int64(i)) if *i >= 0 && *u == *i as u32 => {
-                            return Some(node_idx);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        None
+        self.id_indices
+            .lookup_or_build(node_type, id, || self.compute_id_index(node_type))
     }
 
     /// Set the schema definition for this graph

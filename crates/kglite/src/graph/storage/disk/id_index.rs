@@ -257,40 +257,25 @@ impl IdIndexBase {
 /// Reads consult overlay first (covers post-load mutations), then base.
 /// Mutations only ever land in overlay; `removed` tracks types that the
 /// caller explicitly cleared so that base entries are masked.
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct IdIndexStore {
-    overlay: HashMap<String, TypeIdIndex>,
+    /// In-memory layer: indices built/mutated post-load, plus lazily-cached
+    /// indices the read path builds on a miss. Behind a `RwLock` so the
+    /// read path can build + cache through `&self` — `DirGraph` is shared
+    /// as `Arc<DirGraph>` and reads run on multiple threads (GIL-release),
+    /// so this must be thread-safe.
+    overlay: RwLock<HashMap<String, TypeIdIndex>>,
     /// Types that exist in `base` but were removed/invalidated post-load.
     removed: std::collections::HashSet<String>,
     base: Option<Arc<IdIndexBase>>,
 }
 
-/// Either a borrow into the overlay's `TypeIdIndex` or a slice of the base mmap.
-pub enum IdIndexRef<'a> {
-    Overlay(&'a TypeIdIndex),
-    Base {
-        base: &'a IdIndexBase,
-        name: &'a str,
-    },
-}
-
-impl<'a> IdIndexRef<'a> {
-    pub fn get(&self, id: &Value) -> Option<NodeIndex> {
-        match self {
-            IdIndexRef::Overlay(idx) => idx.get(id),
-            IdIndexRef::Base { base, name } => base.lookup(name, id),
-        }
-    }
-
-    /// Iterate (Value, NodeIndex) pairs. For the base path this materializes
-    /// per call — used only by save and by the rare `iter()` call sites.
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (Value, NodeIndex)> + '_> {
-        match self {
-            IdIndexRef::Overlay(idx) => idx.iter(),
-            IdIndexRef::Base { base, name } => match base.materialize(name) {
-                Some(materialized) => Box::new(materialized.iter().collect::<Vec<_>>().into_iter()),
-                None => Box::new(std::iter::empty()),
-            },
+impl Clone for IdIndexStore {
+    fn clone(&self) -> Self {
+        Self {
+            overlay: RwLock::new(self.overlay.read().unwrap().clone()),
+            removed: self.removed.clone(),
+            base: self.base.clone(),
         }
     }
 }
@@ -302,14 +287,14 @@ impl IdIndexStore {
 
     pub fn from_base(base: IdIndexBase) -> Self {
         Self {
-            overlay: HashMap::new(),
+            overlay: RwLock::new(HashMap::new()),
             removed: std::collections::HashSet::new(),
             base: Some(Arc::new(base)),
         }
     }
 
     pub fn contains_key(&self, name: &str) -> bool {
-        if self.overlay.contains_key(name) {
+        if self.overlay.read().unwrap().contains_key(name) {
             return true;
         }
         if self.removed.contains(name) {
@@ -318,22 +303,81 @@ impl IdIndexStore {
         self.base.as_ref().is_some_and(|b| b.contains(name))
     }
 
-    pub fn get(&self, name: &str) -> Option<IdIndexRef<'_>> {
-        if let Some(idx) = self.overlay.get(name) {
-            return Some(IdIndexRef::Overlay(idx));
+    /// Look up `id` for `name`. If the type isn't indexed anywhere (neither
+    /// overlay nor base, or it was invalidated), build the index via `build`
+    /// — which scans the graph — and cache it in the overlay, so the read
+    /// path is O(1) on every subsequent lookup. The build runs at most once
+    /// per type until the next invalidation. Returns None when the id simply
+    /// isn't present (no scan).
+    ///
+    /// This is the fix for the O(node-position) linear-scan footgun: the
+    /// read path (`MATCH (n {id:X})`, `MERGE` match) used to fall back to a
+    /// full scan whenever the index was absent (after `add_nodes` /
+    /// `CREATE` / `DELETE`). Now it self-heals on first read, regardless of
+    /// how the graph was built or mutated. (issue #20)
+    pub fn lookup_or_build(
+        &self,
+        name: &str,
+        id: &Value,
+        build: impl FnOnce() -> TypeIdIndex,
+    ) -> Option<NodeIndex> {
+        // Fast path: already cached in the overlay.
+        {
+            let ov = self.overlay.read().unwrap();
+            if let Some(idx) = ov.get(name) {
+                return idx.get(id);
+            }
+        }
+        // Base (mmap) layer, unless explicitly invalidated.
+        if !self.removed.contains(name) {
+            if let Some(base) = self.base.as_deref() {
+                if base.contains(name) {
+                    return base.lookup(name, id);
+                }
+            }
+        }
+        // Not indexed anywhere — build once and cache (idempotent under a
+        // concurrent race: the first writer wins, both indices are equal).
+        let built = build();
+        let mut ov = self.overlay.write().unwrap();
+        ov.entry(name.to_string()).or_insert(built).get(id)
+    }
+
+    /// Look up without building — None when the type isn't indexed.
+    pub fn lookup(&self, name: &str, id: &Value) -> Option<NodeIndex> {
+        {
+            let ov = self.overlay.read().unwrap();
+            if let Some(idx) = ov.get(name) {
+                return idx.get(id);
+            }
+        }
+        if self.removed.contains(name) {
+            return None;
+        }
+        self.base.as_deref().and_then(|b| {
+            if b.contains(name) {
+                b.lookup(name, id)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Materialize the full `id → NodeIndex` map for a type, or None when the
+    /// type isn't indexed. Used by the add_nodes conflict-check fast path.
+    pub fn materialize_type(&self, name: &str) -> Option<HashMap<Value, NodeIndex>> {
+        {
+            let ov = self.overlay.read().unwrap();
+            if let Some(idx) = ov.get(name) {
+                return Some(idx.iter().collect());
+            }
         }
         if self.removed.contains(name) {
             return None;
         }
         let base = self.base.as_deref()?;
         if base.contains(name) {
-            // Resolve to the base's owned String key so the returned ref
-            // does not borrow `name` (caller's string slice).
-            let base_name = base.dir.get_key_value(name).map(|(k, _)| k.as_str())?;
-            Some(IdIndexRef::Base {
-                base,
-                name: base_name,
-            })
+            base.materialize(name).map(|ti| ti.iter().collect())
         } else {
             None
         }
@@ -341,11 +385,11 @@ impl IdIndexStore {
 
     pub fn insert(&mut self, name: String, idx: TypeIdIndex) {
         self.removed.remove(&name);
-        self.overlay.insert(name, idx);
+        self.overlay.get_mut().unwrap().insert(name, idx);
     }
 
     pub fn remove(&mut self, name: &str) -> Option<TypeIdIndex> {
-        let prev = self.overlay.remove(name);
+        let prev = self.overlay.get_mut().unwrap().remove(name);
         if self.base.as_ref().is_some_and(|b| b.contains(name)) {
             self.removed.insert(name.to_string());
         }
@@ -353,20 +397,20 @@ impl IdIndexStore {
     }
 
     pub fn clear(&mut self) {
-        self.overlay.clear();
+        self.overlay.get_mut().unwrap().clear();
         if let Some(base) = &self.base {
             self.removed.extend(base.dir.keys().cloned());
         }
     }
 
     pub fn len(&self) -> usize {
+        let overlay = self.overlay.read().unwrap();
         let base_count = self
             .base
             .as_ref()
             .map(|b| b.dir.keys().filter(|k| !self.removed.contains(*k)).count())
             .unwrap_or(0);
-        let overlay_only = self
-            .overlay
+        let overlay_only = overlay
             .keys()
             .filter(|k| self.base.as_ref().map(|b| !b.contains(k)).unwrap_or(true))
             .count();
@@ -377,62 +421,65 @@ impl IdIndexStore {
         self.len() == 0
     }
 
-    /// Iterate IdIndexRefs for every live entry (overlay first, then base).
-    pub fn values(&self) -> impl Iterator<Item = IdIndexRef<'_>> {
-        self.iter().map(|(_, v)| v)
+    /// Owned snapshot of every live `TypeIdIndex` (overlay first, then base
+    /// entries that aren't shadowed/removed). Cold path — used by save and
+    /// N-Triples export. Returns owned indices because the read lock can't
+    /// be held across the caller's iteration.
+    pub fn values(&self) -> Vec<TypeIdIndex> {
+        self.snapshot().into_iter().map(|(_, v)| v).collect()
     }
 
-    /// Iterate `(name, IdIndexRef)` for every live entry.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, IdIndexRef<'_>)> {
-        // Materialize the union deterministically: overlay entries first,
-        // then base entries that aren't shadowed.
-        let overlay_pairs: Vec<(&str, IdIndexRef<'_>)> = self
-            .overlay
+    /// Owned `(name, TypeIdIndex)` snapshot of every live entry. Cold path.
+    pub fn iter(&self) -> Vec<(String, TypeIdIndex)> {
+        self.snapshot()
+    }
+
+    fn snapshot(&self) -> Vec<(String, TypeIdIndex)> {
+        let overlay = self.overlay.read().unwrap();
+        // Overlay entries first, then base entries that aren't shadowed.
+        let mut out: Vec<(String, TypeIdIndex)> = overlay
             .iter()
-            .map(|(k, v)| (k.as_str(), IdIndexRef::Overlay(v)))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let base_pairs: Vec<(&str, IdIndexRef<'_>)> = match self.base.as_deref() {
-            Some(base) => base
-                .dir
-                .keys()
-                .filter(|k| {
-                    !self.overlay.contains_key(k.as_str()) && !self.removed.contains(k.as_str())
-                })
-                .map(move |k| {
-                    (
-                        k.as_str(),
-                        IdIndexRef::Base {
-                            base,
-                            name: k.as_str(),
-                        },
-                    )
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        overlay_pairs.into_iter().chain(base_pairs)
+        if let Some(base) = self.base.as_deref() {
+            for k in base.dir.keys() {
+                if !overlay.contains_key(k.as_str()) && !self.removed.contains(k.as_str()) {
+                    if let Some(materialized) = base.materialize(k) {
+                        out.push((k.clone(), materialized));
+                    }
+                }
+            }
+        }
+        out
     }
 
-    /// HashMap-`entry`-shaped accessor that materializes any base entry into
-    /// the overlay before returning it (or default-constructs a new one).
-    /// The returned entry is owned by the overlay; subsequent reads see it
-    /// in preference to the (now superseded) base entry.
+    /// HashMap-`entry`-shaped accessor: materialize any base entry into the
+    /// overlay (or default-construct), then hand back a `&mut` to it. Used by
+    /// the N-Triples loader's per-entity incremental build. `&mut self` gives
+    /// exclusive access, so `get_mut()` is uncontended (no lock cost).
     pub fn entry_or_default(&mut self, name: String) -> &mut TypeIdIndex {
-        if !self.overlay.contains_key(&name) && !self.removed.contains(&name) {
+        let needs_materialize = {
+            let overlay = self.overlay.get_mut().unwrap();
+            !overlay.contains_key(&name) && !self.removed.contains(&name)
+        };
+        if needs_materialize {
             if let Some(base) = self.base.as_deref() {
                 if let Some(materialized) = base.materialize(&name) {
-                    self.overlay.insert(name.clone(), materialized);
+                    self.overlay
+                        .get_mut()
+                        .unwrap()
+                        .insert(name.clone(), materialized);
                 }
             }
         }
         self.removed.remove(&name);
-        self.overlay.entry(name).or_default()
+        self.overlay.get_mut().unwrap().entry(name).or_default()
     }
 
     /// Replace the entire store with a fresh HashMap (used by load fallback
     /// for legacy `.bin.zst`-only graphs and by `reindex()`).
     pub fn replace_with(&mut self, map: HashMap<String, TypeIdIndex>) {
-        self.overlay = map;
+        *self.overlay.get_mut().unwrap() = map;
         self.removed.clear();
         self.base = None;
     }
@@ -495,18 +542,13 @@ pub fn write_id_indices_bin(
     interner: &StringInterner,
 ) -> Result<(), String> {
     // Collect (type_key, name, materialized) triples sorted by type_key.
+    // `store.iter()` already returns owned, fully-materialized indices
+    // (overlay + unshadowed base).
     let mut entries: Vec<(u64, String, TypeIdIndex)> = Vec::new();
     let mut interner_clone = interner.clone();
-    for (name, view) in store.iter() {
-        let key = interner_clone.get_or_intern(name).as_u64();
-        let materialized = match &view {
-            IdIndexRef::Overlay(idx) => (*idx).clone(),
-            IdIndexRef::Base { base, name } => match base.materialize(name) {
-                Some(m) => m,
-                None => continue,
-            },
-        };
-        entries.push((key, name.to_string(), materialized));
+    for (name, materialized) in store.iter() {
+        let key = interner_clone.get_or_intern(&name).as_u64();
+        entries.push((key, name, materialized));
     }
     entries.sort_by_key(|(k, _, _)| *k);
 
