@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+openCypher dialect gaps reported by kglite-docs (2026-05-29), all with
+regression tests:
+
+- **`labels()` / `keys()` / `properties()` / `id()` on a node VALUE.**
+  These returned `NULL` silently when given a node that arrived as a value
+  (`collect(a)[0]`, `head(collect(a))`, a WITH projection) rather than a
+  bound variable — so the standard "latest per group"
+  (`… collect(x)[0] AS latest`) idiom read wrong data with no error. They
+  now resolve the node value. Relatedly, a materialised node (`RETURN n`,
+  collected nodes) now carries its **full** label set (primary +
+  secondary), not just the primary type.
+- **`DETACH DELETE` ignores NULL variables.** The idiomatic single-
+  statement cascade `MATCH (root) OPTIONAL MATCH (root)-->(child) DETACH
+  DELETE root, child` no longer errors when a branch is empty (openCypher
+  treats NULL in DELETE as a no-op).
+- **Parameter inside an `EXISTS {}` pattern.** `EXISTS { MATCH (a)-[:R]->
+  (:T {id:$id}) }` now parses (was a syntax error; the literal form
+  worked).
+- **Node-property expression as an inline-map value.** `MATCH (b {id:
+  other.id})` now parses and resolves `other.id` at match time (against a
+  bound node or a projected node value), instead of a parse error.
+
 ## [0.10.7] — 2026-05-29 — in-memory query perf (SipHash → FxHash)
 
 A samply profile of the in-memory query hot path found ~23% of engine
