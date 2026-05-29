@@ -30,14 +30,17 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry & target
-        uses: actions/cache@v5
+        # Swatinem/rust-cache@v2, matching the Python/Perf jobs (migrated in
+        # 0.9.52). The old actions/cache@v5 cached the whole `target/` dir
+        # unpruned (~3.5 GB via the broad restore-keys fallback), which
+        # occasionally failed the cache-restore `tar` with a partial write
+        # ("Wrote only N of M bytes") and took the job down. Swatinem prunes
+        # the cache (drops workspace-crate artifacts + incremental) and
+        # treats a restore failure as non-fatal.
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: rust-checks
+          workspaces: ". -> target"
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -60,14 +63,12 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry & target
-        uses: actions/cache@v5
+        # Swatinem/rust-cache@v2 — see the Rust-checks job for why (the old
+        # actions/cache@v5 of the full target/ dir flaked on restore).
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-kglite-c-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-kglite-c-
+          shared-key: kglite-c
+          workspaces: ". -> target"
 
       # Build + lint + test with every dataset feature on. fastembed
       # is off here because it pulls a ~200 MB ONNX runtime we don't
