@@ -234,11 +234,18 @@ pub fn add_nodes(
     // Execute the batch and get the statistics
     let (stats, metrics) = batch.execute(graph)?;
 
-    // Invalidate the type's id_index. The batch added rows to type_indices
-    // but no longer touches id_indices, so any pre-existing entry is now
-    // missing the freshly-added ids. Dropping the entry forces the next
-    // `build_id_index` (or `lookup_by_id`) to rebuild from type_indices.
+    // Rebuild the type's id_index. The batch added rows to type_indices but
+    // doesn't touch id_indices, so any pre-existing entry is now stale.
+    // Rebuild it eagerly (rather than only invalidating) so the read path is
+    // O(1): `lookup_by_id_readonly` — used by `MATCH (n {id:X})` and the
+    // `MERGE` match — does NOT build the index, it falls back to an O(n)
+    // linear scan when the index is absent. Pre-fix the index stayed absent
+    // after add_nodes, so every id-equality read scanned (issue #20: lookups
+    // were O(node position), e.g. 26µs for a high-id node on 30k rows). The
+    // build is O(nodes-of-type), matching the cost the load path already pays
+    // via build_id_index_from_columns.
     graph.id_indices.remove(&node_type);
+    graph.build_id_index(&node_type);
 
     // Calculate elapsed time
     let elapsed_ms = metrics.processing_time * 1000.0; // Convert to milliseconds
@@ -1710,5 +1717,41 @@ fn compute_aggregate(expr: &str, values: &[f64], count: usize) -> Value {
         }
     } else {
         Value::Null
+    }
+}
+
+#[cfg(test)]
+mod id_index_tests {
+    use super::*;
+
+    /// Regression (issue #20): after `add_nodes`, the type's `id_indices`
+    /// entry must be present so the read path (`lookup_by_id_readonly`, used
+    /// by `MATCH (n {id:X})` and the `MERGE` match) is O(1). Pre-fix the
+    /// index was removed and never rebuilt for reads, so id-equality lookups
+    /// fell back to an O(node-position) linear scan (e.g. ~26µs for a high-id
+    /// node on 30k rows vs ~0.9µs after the fix).
+    #[test]
+    fn add_nodes_builds_id_index() {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (0..1000).map(|i| vec![Value::Int64(i)]).collect();
+        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows).unwrap();
+        add_nodes(
+            &mut g,
+            df,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            g.id_indices.contains_key("Person"),
+            "id_index must be built after add_nodes so reads are O(1), not a linear scan"
+        );
+        // The index resolves a high-position id without a scan.
+        assert!(g
+            .lookup_by_id_readonly("Person", &Value::Int64(999))
+            .is_some());
     }
 }

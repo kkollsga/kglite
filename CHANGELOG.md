@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **id-equality lookups are O(1) again after `add_nodes` (issue #20).**
+  `MATCH (n {id: X})` and the `MERGE` match use a non-building read path
+  (`lookup_by_id_readonly`); after `add_nodes` the id-index was removed
+  and never rebuilt for reads, so every id-equality lookup fell back to an
+  O(node-position) linear scan — e.g. ~26 µs for a high-id node on a 30k
+  graph vs ~0.9 µs once indexed (and the cost grew with the node's
+  position). `add_nodes` now rebuilds the id-index, restoring O(1) reads.
+  Ingest is unaffected (incremental loads are actually a touch faster, as
+  later batches' conflict-checks reuse the ready index). This also
+  explains the "repeated-MERGE 36× slower" report — the slow case was
+  always a high-position id; varying-id benchmarks masked it via `min`.
+
 ## [0.10.8] — 2026-05-29 — openCypher dialect fixes
 
 ### Fixed
