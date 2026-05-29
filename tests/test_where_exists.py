@@ -591,3 +591,22 @@ class TestExistsMultiMatchSubquery:
         # Charlie and Diana neither know anyone outbound nor purchased
         # — they fail the multi-MATCH subquery, so NOT EXISTS keeps them.
         assert names == ["Charlie", "Diana"]
+
+
+def test_exists_pattern_accepts_parameter(social_graph):
+    """A parameter inside an EXISTS {} pattern's inline map must parse and
+    evaluate identically to the literal form. Regression: kglite-docs
+    2026-05-29 #1 — `EXISTS { MATCH (...{id:$id}) }` raised a syntax error
+    while the literal worked, blocking the natural parameterised work-list
+    query."""
+    param = social_graph.cypher(
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:PURCHASED]->(:Product {name:$name}) } "
+        "RETURN p.name AS name ORDER BY name",
+        params={"name": "Widget"},
+    ).to_list()
+    literal = social_graph.cypher(
+        "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:PURCHASED]->(:Product {name:'Widget'}) } "
+        "RETURN p.name AS name ORDER BY name"
+    ).to_list()
+    assert param == literal
+    assert [r["name"] for r in param] == ["Alice"]

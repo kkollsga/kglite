@@ -261,6 +261,12 @@ impl CypherParser {
                 CypherToken::FloatLit(f) => parts.push(f.to_string()),
                 CypherToken::True => parts.push("true".to_string()),
                 CypherToken::False => parts.push("false".to_string()),
+                // Re-serialize `$param` so the inner pattern parser sees it
+                // and the executor substitutes it (e.g.
+                // `EXISTS { MATCH (a)-[:R]->(:T {id:$id}) }`). The top-level
+                // MATCH-pattern extractor already does this; without it,
+                // params worked everywhere except inside an EXISTS pattern.
+                CypherToken::Parameter(name) => parts.push(format!("${}", name)),
                 _ => {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
                 }
