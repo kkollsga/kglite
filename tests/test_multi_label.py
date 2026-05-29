@@ -523,3 +523,44 @@ def test_single_label_still_fuses(social_graph):
         for r in social_graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id, count(b)").to_list()
     ]
     assert any("Fused" in o for o in ops), ops
+
+
+# ─── node functions on materialised / collected node values (0.10.x) ─────────
+#
+# Regression for kglite-docs 2026-05-29: labels(collect(a)[0]) returned NULL
+# silently (node functions only consulted node_bindings, not a node Value),
+# and materialised nodes carried only the primary label. A ledger derived
+# from labels(latest) read every row "unverified".
+
+
+def test_node_functions_on_collected_node(g):
+    df = pd.DataFrame([{"id": f"a{i}", "w": i} for i in range(3)])
+    g.add_nodes(df, "Assessment", "id", "id")
+    g.add_label("Assessment", ["a1"], "Verified")
+
+    # labels() on a collected node — no longer NULL.
+    rows = g.cypher("MATCH (a:Assessment) WITH collect(a)[0] AS f RETURN labels(f) AS l").to_list()
+    assert rows[0]["l"] is not None and "Assessment" in rows[0]["l"]
+
+    # multi-label collected node carries the FULL label set.
+    rows = g.cypher("MATCH (a:Assessment {id:'a1'}) WITH collect(a)[0] AS f RETURN labels(f) AS l").to_list()
+    assert set(rows[0]["l"]) == {"Assessment", "Verified"}
+
+    # head(collect(...)) form too.
+    rows = g.cypher("MATCH (a:Assessment {id:'a1'}) WITH head(collect(a)) AS f RETURN labels(f) AS l").to_list()
+    assert set(rows[0]["l"]) == {"Assessment", "Verified"}
+
+    # keys / properties / id on a collected node — no longer NULL.
+    rows = g.cypher(
+        "MATCH (a:Assessment {id:'a0'}) WITH collect(a)[0] AS f RETURN keys(f) AS k, properties(f) AS p, id(f) AS i"
+    ).to_list()
+    assert "w" in rows[0]["k"]
+    assert rows[0]["p"]["id"] == "a0"
+    assert rows[0]["i"] == "a0"
+
+
+def test_return_node_carries_secondary_labels(g):
+    g.add_nodes(pd.DataFrame([{"id": "a1"}]), "Assessment", "id", "id")
+    g.add_label("Assessment", ["a1"], "Verified")
+    rows = g.cypher("MATCH (a:Assessment {id:'a1'}) RETURN a").to_list()
+    assert set(rows[0]["a"]["labels"]) == {"Assessment", "Verified"}

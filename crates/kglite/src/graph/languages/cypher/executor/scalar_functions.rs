@@ -21,6 +21,30 @@ add_nodes(), or store the data under a conventional property name (wkt_geometry,
 geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
 impl<'a> CypherExecutor<'a> {
+    /// Resolve a function argument that denotes a node to its live
+    /// `NodeIndex`. Handles a bound node variable (fast path) AND a node
+    /// arriving as a `Value::NodeRef` — the shape that `collect(a)[0]`,
+    /// `head(collect(a))`, and `WITH … AS x` projection preserve. Without
+    /// the NodeRef arm, `labels()` / `keys()` / `properties()` / `id()` on
+    /// a collected node silently returned NULL: the node value was intact
+    /// (property access and `RETURN` worked) but these functions only
+    /// consulted `node_bindings`.
+    fn node_arg_index(
+        &self,
+        arg: &Expression,
+        row: &ResultRow,
+    ) -> Option<petgraph::graph::NodeIndex> {
+        if let Expression::Variable(var) = arg {
+            if let Some(&idx) = row.node_bindings.get(var.as_str()) {
+                return Some(idx);
+            }
+        }
+        match self.evaluate_expression(arg, row).ok()? {
+            Value::NodeRef(i) => Some(petgraph::graph::NodeIndex::new(i as usize)),
+            _ => None,
+        }
+    }
+
     /// Evaluate scalar (non-aggregate) functions
     pub(super) fn evaluate_scalar_function(
         &self,
@@ -412,12 +436,16 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "id" => {
-                // id(n) returns the node id
-                if let Some(Expression::Variable(var)) = args.first() {
-                    if let Some(&idx) = row.node_bindings.get(var) {
+                // id(n) returns the node id. Accepts a bound variable, a
+                // NodeRef, or a materialised node value (collect()[0] etc.).
+                if let Some(arg) = args.first() {
+                    if let Some(idx) = self.node_arg_index(arg, row) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             return Ok(resolve_node_property(node, "id", self.graph));
                         }
+                    }
+                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+                        return Ok(nv.properties.get("id").cloned().unwrap_or(Value::Null));
                     }
                 }
                 Ok(Value::Null)
@@ -473,8 +501,10 @@ impl<'a> CypherExecutor<'a> {
                 // `node_labels_of` would only see the primary because
                 // disk-materialised NodeData carries empty
                 // extra_labels.
-                if let Some(Expression::Variable(var)) = args.first() {
-                    if let Some(&idx) = row.node_bindings.get(var) {
+                if let Some(arg) = args.first() {
+                    // Bound variable or NodeRef → live labels (includes
+                    // secondaries via the canonical index).
+                    if let Some(idx) = self.node_arg_index(arg, row) {
                         let keys = self.graph.node_labels(idx);
                         if !keys.is_empty() {
                             let labels: Vec<Value> = keys
@@ -483,6 +513,14 @@ impl<'a> CypherExecutor<'a> {
                                 .collect();
                             return Ok(Value::List(labels));
                         }
+                    }
+                    // Materialised node value (e.g. `collect(a)[0]`,
+                    // `head(collect(a))`) → read its labels directly. The
+                    // value carries the full set (see materialize_node_value).
+                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+                        return Ok(Value::List(
+                            nv.labels.into_iter().map(Value::String).collect(),
+                        ));
                     }
                 }
                 Ok(Value::Null)
@@ -495,8 +533,8 @@ impl<'a> CypherExecutor<'a> {
                 // and the user's original column names (the unique-id-field
                 // and title-field passed to add_nodes), so the output
                 // matches what `n.<name>` would resolve at query time.
-                if let Some(Expression::Variable(var)) = args.first() {
-                    if let Some(&idx) = row.node_bindings.get(var) {
+                if let Some(arg) = args.first() {
+                    if let Some(idx) = self.node_arg_index(arg, row) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             let node_type = node.node_type_str(&self.graph.interner);
                             let mut keys: Vec<String> =
@@ -514,19 +552,30 @@ impl<'a> CypherExecutor<'a> {
                             return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
                         }
                     }
-                    if let Some(edge) = row.edge_bindings.get(var) {
-                        if let Some(edge_data) = {
-                            let g = &self.graph.graph;
-                            g.edge_weight(edge.edge_index)
-                        } {
-                            let mut keys: Vec<String> = vec!["type".to_string()];
-                            keys.extend(
-                                edge_data
-                                    .property_keys(&self.graph.interner)
-                                    .map(String::from),
-                            );
-                            keys.sort();
-                            return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
+                    // Materialised node value (collect()[0] etc.) → its keys.
+                    if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+                        let mut keys: Vec<String> = nv.properties.keys().cloned().collect();
+                        keys.sort();
+                        keys.dedup();
+                        return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
+                    }
+                    if let Expression::Variable(var) = arg {
+                        if let Some(edge) = row.edge_bindings.get(var) {
+                            if let Some(edge_data) = {
+                                let g = &self.graph.graph;
+                                g.edge_weight(edge.edge_index)
+                            } {
+                                let mut keys: Vec<String> = vec!["type".to_string()];
+                                keys.extend(
+                                    edge_data
+                                        .property_keys(&self.graph.interner)
+                                        .map(String::from),
+                                );
+                                keys.sort();
+                                return Ok(Value::List(
+                                    keys.into_iter().map(Value::String).collect(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -553,27 +602,32 @@ impl<'a> CypherExecutor<'a> {
                 if args.len() != 1 {
                     return Err("properties() requires 1 argument: a node or relationship".into());
                 }
-                if let Expression::Variable(var) = &args[0] {
-                    if let Some(&idx) = row.node_bindings.get(var.as_str()) {
-                        if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let mut props: std::collections::BTreeMap<String, Value> =
-                                std::collections::BTreeMap::new();
-                            for &builtin in &["id", "title", "type"] {
-                                let val = resolve_node_property(node, builtin, self.graph);
-                                if !matches!(val, Value::Null) {
-                                    props.insert(builtin.to_string(), val);
-                                }
+                let arg = &args[0];
+                if let Some(idx) = self.node_arg_index(arg, row) {
+                    if let Some(node) = self.graph.graph.node_weight(idx) {
+                        let mut props: std::collections::BTreeMap<String, Value> =
+                            std::collections::BTreeMap::new();
+                        for &builtin in &["id", "title", "type"] {
+                            let val = resolve_node_property(node, builtin, self.graph);
+                            if !matches!(val, Value::Null) {
+                                props.insert(builtin.to_string(), val);
                             }
-                            for key in node.property_keys(&self.graph.interner) {
-                                if key == "id" || key == "title" || key == "type" {
-                                    continue;
-                                }
-                                let val = resolve_node_property(node, key, self.graph);
-                                props.insert(key.to_string(), val);
-                            }
-                            return Ok(Value::Map(props));
                         }
+                        for key in node.property_keys(&self.graph.interner) {
+                            if key == "id" || key == "title" || key == "type" {
+                                continue;
+                            }
+                            let val = resolve_node_property(node, key, self.graph);
+                            props.insert(key.to_string(), val);
+                        }
+                        return Ok(Value::Map(props));
                     }
+                }
+                // Materialised node value (collect()[0] etc.) → its property map.
+                if let Ok(Value::Node(nv)) = self.evaluate_expression(arg, row) {
+                    return Ok(Value::Map(nv.properties));
+                }
+                if let Expression::Variable(var) = arg {
                     if let Some(edge) = row.edge_bindings.get(var.as_str()) {
                         if let Some(edge_data) = {
                             let g = &self.graph.graph;

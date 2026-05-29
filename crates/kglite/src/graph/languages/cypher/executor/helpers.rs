@@ -460,9 +460,23 @@ pub(crate) fn materialize_node_value(
             }
         }
     }
+    // Full label set (primary + secondaries), not just the primary type —
+    // so a materialised node (RETURN n, collect(n)[0], …) carries the same
+    // labels `MATCH (n:Sec)` / `labels(n)` see. `node_labels` reads the
+    // canonical secondary-label index.
+    let labels: Vec<String> = graph
+        .node_labels(idx)
+        .iter()
+        .map(|k| graph.interner.resolve(*k).to_string())
+        .collect();
+    let labels = if labels.is_empty() {
+        vec![node_type]
+    } else {
+        labels
+    };
     Some(NodeValue {
         id: idx.index() as u32,
-        labels: vec![node_type],
+        labels,
         properties,
     })
 }
