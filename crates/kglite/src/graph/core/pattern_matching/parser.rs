@@ -26,6 +26,7 @@ pub enum Token {
     LessThan,    // <
     Star,        // * (for variable-length paths)
     DotDot,      // .. (for range in variable-length)
+    Dot,         // . (property access in an inline-map value: {id: prior.id})
     Pipe,        // | (for multi-type edges: [:A|B])
     Identifier(String),
     StringLit(String),
@@ -117,7 +118,11 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         num_str.parse().map_err(|_| format!("Invalid float: {}", num_str))?
                     ));
                 } else {
-                    return Err("Unexpected single '.', expected '..' or a digit".to_string());
+                    // Lone '.' — property access in an inline-map value,
+                    // e.g. `MATCH (b {id: prior.id})`. `parse_properties`
+                    // consumes the `ident . ident` sequence as a correlated
+                    // node-property reference (EqualsNodeProp).
+                    tokens.push(Token::Dot);
                 }
             }
             '"' | '\'' => {
@@ -300,6 +305,7 @@ impl Parser {
             Token::LessThan => "<",
             Token::Star => "*",
             Token::DotDot => "..",
+            Token::Dot => ".",
             Token::Identifier(_) => "identifier",
             Token::StringLit(_) => "string",
             Token::IntLit(_) => "number",
@@ -615,10 +621,29 @@ impl Parser {
                             props.insert(key, PropertyMatcher::EqualsParam(name));
                         }
                     } else if let Some(Token::Identifier(_)) = self.peek() {
-                        // Bare identifier → variable reference from outer scope
-                        // e.g. WITH "Oslo" AS city MATCH (n {city: city})
                         if let Some(Token::Identifier(name)) = self.advance().cloned() {
-                            props.insert(key, PropertyMatcher::EqualsVar(name));
+                            if let Some(Token::Dot) = self.peek() {
+                                // `var.prop` → correlated node-property reference,
+                                // e.g. WITH collect(x)[0] AS first
+                                //      MATCH (b {id: first.id})
+                                self.advance(); // consume '.'
+                                if let Some(Token::Identifier(prop)) = self.advance().cloned() {
+                                    props.insert(
+                                        key,
+                                        PropertyMatcher::EqualsNodeProp { var: name, prop },
+                                    );
+                                } else {
+                                    return Err(
+                                        "Expected a property name after '.' in inline map value \
+                                         (e.g. {id: other.id})"
+                                            .to_string(),
+                                    );
+                                }
+                            } else {
+                                // Bare identifier → variable reference from outer
+                                // scope, e.g. WITH 'Oslo' AS city MATCH (n {city: city})
+                                props.insert(key, PropertyMatcher::EqualsVar(name));
+                            }
                         }
                     } else {
                         let value = self.parse_value()?;

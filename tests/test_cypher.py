@@ -2126,3 +2126,26 @@ class TestBugLabelsInconsistency:
             MATCH (n) WHERE labels(n)[0] = 'Person' RETURN count(n) AS cnt
         """)
         assert rows[0]["cnt"] == 5
+
+
+def test_inline_map_value_accepts_node_property_expression():
+    """An inline-map value may be a `var.prop` property-access expression,
+    resolved at match time against a bound node OR a projected node value.
+    Regression: kglite-docs 2026-05-29 #3 — `MATCH (b {id: first.id})`
+    raised "Pattern parse error: Unexpected single '.'"."""
+    g = KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame([{"id": f"a{i}", "w": i} for i in range(3)]),
+        "Assessment",
+        "id",
+        "id",
+    )
+    # Projected node value from collect()[0].
+    rows = g.cypher(
+        "MATCH (a:Assessment) WITH collect(a)[0] AS first "
+        "MATCH (b:Assessment {id: first.id}) RETURN b.id AS id, b.w AS w"
+    ).to_list()
+    assert rows == [{"id": "a0", "w": 0}]
+    # Correlated between two bound nodes.
+    rows = g.cypher("MATCH (a:Assessment {id:'a1'}) MATCH (b:Assessment {id: a.id}) RETURN b.id AS id").to_list()
+    assert rows == [{"id": "a1"}]
