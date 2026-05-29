@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] — 2026-05-29 — multi-label read-path correctness
+
+0.10.5 shipped secondary labels but only taught the slow matcher path
+about them; the optimiser's fused fast-paths and several other
+candidate-selection sites still assumed `type_indices[T]` was *all*
+nodes labelled `:T`. On a multi-label graph that silently over/under-
+counted. One root defect, many surfaces — swept and fixed end-to-end,
+with single-label performance provably unchanged (every change is a
+no-op when no node carries a secondary label; verified against 0.10.3).
+
 ### Fixed
 
 - **Multi-label read paths now consult secondary labels everywhere.**
