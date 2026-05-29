@@ -357,3 +357,37 @@ class TestBulkOperations:
         assert graph.select("T").len() == 10
         nodes = graph.select("T").where({"val": {"is_null": True}})
         assert nodes.len() == 5
+
+
+class TestDetachDeleteNullVar:
+    """openCypher ignores NULL in DELETE, so the single-statement cascade
+    `MATCH (root) OPTIONAL MATCH (root)-->(child) DETACH DELETE root, child`
+    works even when a branch is empty. Regression: kglite-docs 2026-05-29 #4
+    — an unmatched OPTIONAL MATCH variable raised
+    'Variable x not bound to a node or relationship in DELETE'."""
+
+    @staticmethod
+    def _study_graph() -> KnowledgeGraph:
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame([{"id": "s1"}]), "Study", "id", "id")
+        g.add_nodes(pd.DataFrame([{"id": f"a{i}"} for i in range(2)]), "Assessment", "id", "id")
+        g.add_connections(
+            pd.DataFrame([{"src": f"a{i}", "dst": "s1"} for i in range(2)]),
+            "OF_STUDY",
+            source_type="Assessment",
+            source_id_field="src",
+            target_type="Study",
+            target_id_field="dst",
+        )
+        return g
+
+    def test_unmatched_optional_var_is_noop(self):
+        g = self._study_graph()
+        # OPTIONAL MATCH matches nothing -> x is NULL -> skipped, s deleted.
+        g.cypher("MATCH (s:Study {id:'s1'}) OPTIONAL MATCH (s)-[:NONEXISTENT]->(x:Nope) DETACH DELETE s, x")
+        assert g.cypher("MATCH (n:Study) RETURN count(n) AS c").to_list()[0]["c"] == 0
+
+    def test_cascade_deletes_matched_children(self):
+        g = self._study_graph()
+        g.cypher("MATCH (s:Study {id:'s1'}) OPTIONAL MATCH (a:Assessment)-[:OF_STUDY]->(s) DETACH DELETE s, a")
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 0

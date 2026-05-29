@@ -771,10 +771,16 @@ fn execute_delete(
             } else if let Some(edge_binding) = row.edge_bindings.get(var_name) {
                 edge_vars_to_delete.push((var_name.clone(), edge_binding.edge_index));
             } else {
-                return Err(format!(
-                    "Variable '{}' not bound to a node or relationship in DELETE",
-                    var_name
-                ));
+                // Not bound to a node/edge. A node VALUE (NodeRef from
+                // WITH / collect) is still deletable; anything else is NULL
+                // — e.g. an unmatched OPTIONAL MATCH variable — and
+                // openCypher ignores NULL in DELETE (so the idiomatic
+                // single-statement cascade `MATCH (root) OPTIONAL MATCH
+                // (root)-->(child) DETACH DELETE root, child` works even
+                // when a branch is empty). Skip it.
+                if let Some(Value::NodeRef(i)) = row.projected.get(var_name) {
+                    nodes_to_delete.insert(petgraph::graph::NodeIndex::new(*i as usize));
+                }
             }
         }
     }
