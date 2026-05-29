@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.9] — 2026-05-29 — self-healing id-index (issue #20)
+
 ### Fixed
 
 - **id-equality lookups are O(1) regardless of how the graph was built
