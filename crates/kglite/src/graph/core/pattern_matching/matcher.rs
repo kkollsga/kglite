@@ -1168,16 +1168,21 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
-                    Some(node.title())
-                } else if resolved == "id" {
+                let value: Option<Cow<'_, Value>> = if resolved == "id" {
                     Some(node.id())
-                } else if resolved == "type" || resolved == "node_type" || resolved == "label" {
-                    Some(Cow::Owned(Value::String(
-                        node.node_type_str(&self.graph.interner).to_string(),
-                    )))
+                } else if resolved == "title" {
+                    Some(node.title())
+                } else if let Some(v) = node.get_property(resolved) {
+                    // Stored property wins (a user `label`/`type`/`name`… — KG-1).
+                    Some(v)
                 } else {
-                    node.get_property(resolved)
+                    // No stored property — structural convenience fallback.
+                    crate::graph::schema::soft_alias_fallback(resolved).map(|fb| match fb {
+                        crate::graph::schema::SoftAliasFallback::Title => node.title(),
+                        crate::graph::schema::SoftAliasFallback::TypeString => Cow::Owned(
+                            Value::String(node.node_type_str(&self.graph.interner).to_string()),
+                        ),
+                    })
                 };
 
                 match value {
@@ -1235,17 +1240,30 @@ impl<'a> PatternExecutor<'a> {
                 }
             }
 
-            let value: Option<Cow<'_, Value>> = if resolved == "name" || resolved == "title" {
-                self.graph.graph.get_node_title(idx).map(Cow::Owned)
-            } else if resolved == "id" {
+            let value: Option<Cow<'_, Value>> = if resolved == "id" {
                 self.graph.graph.get_node_id(idx).map(Cow::Owned)
-            } else if resolved == "type" || resolved == "node_type" || resolved == "label" {
-                Some(Cow::Owned(Value::String(type_str.to_string())))
+            } else if resolved == "title" {
+                self.graph.graph.get_node_title(idx).map(Cow::Owned)
+            } else if let Some(v) = self
+                .graph
+                .graph
+                .get_node_property(idx, InternedKey::from_str(resolved))
+            {
+                // Stored property wins (a user `label`/`type`/`name`… — KG-1).
+                Some(Cow::Owned(v))
+            } else if let Some(fb) = crate::graph::schema::soft_alias_fallback(resolved) {
+                // No stored property — structural convenience fallback.
+                let v = match fb {
+                    crate::graph::schema::SoftAliasFallback::Title => {
+                        self.graph.graph.get_node_title(idx).unwrap_or(Value::Null)
+                    }
+                    crate::graph::schema::SoftAliasFallback::TypeString => {
+                        Value::String(type_str.to_string())
+                    }
+                };
+                Some(Cow::Owned(v))
             } else {
-                self.graph
-                    .graph
-                    .get_node_property(idx, InternedKey::from_str(resolved))
-                    .map(Cow::Owned)
+                None
             };
 
             match value {

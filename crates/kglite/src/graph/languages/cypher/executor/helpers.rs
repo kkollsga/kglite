@@ -5,7 +5,7 @@
 use super::super::ast::*;
 use super::super::result::*;
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, NodeData};
+use crate::graph::schema::{soft_alias_fallback, DirGraph, NodeData, SoftAliasFallback};
 use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -334,11 +334,20 @@ pub fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) 
     let resolved = graph.resolve_alias(node_type_str, property);
     match resolved {
         "id" => node.id().into_owned(),
-        "title" | "name" => node.title().into_owned(),
-        "type" | "node_type" | "label" => Value::String(node_type_str.to_string()),
+        "title" => node.title().into_owned(),
         _ => {
+            // Stored property wins (covers a user property named `label`,
+            // `type`, `node_type`, `name`, … — KG-1).
             if let Some(val) = node.get_property_value(resolved) {
                 return val;
+            }
+            // No stored property — fall back to the structural convenience
+            // for the soft aliases.
+            if let Some(fb) = soft_alias_fallback(resolved) {
+                return match fb {
+                    SoftAliasFallback::Title => node.title().into_owned(),
+                    SoftAliasFallback::TypeString => Value::String(node_type_str.to_string()),
+                };
             }
             // Fall through to spatial virtual properties only if not found
             if let Some(config) = graph.get_spatial_config(node_type_str) {

@@ -443,13 +443,26 @@ impl<'a> CypherExecutor<'a> {
                     let tgt_type_str = nd.node_type_str(&self.graph.interner);
                     for (key, matcher) in props {
                         let resolved = self.graph.resolve_alias(tgt_type_str, key);
-                        let val: Option<std::borrow::Cow<'_, Value>> = match resolved {
-                            "name" | "title" => Some(nd.title()),
-                            "id" => Some(nd.id()),
-                            "type" | "node_type" | "label" => Some(std::borrow::Cow::Owned(
-                                Value::String(tgt_type_str.to_string()),
-                            )),
-                            other => nd.get_property(other),
+                        let val: Option<std::borrow::Cow<'_, Value>> = if resolved == "id" {
+                            Some(nd.id())
+                        } else if resolved == "title" {
+                            Some(nd.title())
+                        } else if let Some(v) = nd.get_property(resolved) {
+                            // Stored property wins (KG-1).
+                            Some(v)
+                        } else {
+                            // Structural convenience fallback for soft aliases.
+                            match crate::graph::schema::soft_alias_fallback(resolved) {
+                                Some(crate::graph::schema::SoftAliasFallback::Title) => {
+                                    Some(nd.title())
+                                }
+                                Some(crate::graph::schema::SoftAliasFallback::TypeString) => {
+                                    Some(std::borrow::Cow::Owned(Value::String(
+                                        tgt_type_str.to_string(),
+                                    )))
+                                }
+                                None => None,
+                            }
                         };
                         let ok = match matcher {
                             PropertyMatcher::Equals(expected) => val.as_deref().is_some_and(|v| {

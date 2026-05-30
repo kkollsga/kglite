@@ -445,7 +445,11 @@ fn pass_fuse_anchored_edge_count(query: &mut CypherQuery, ctx: &PassCtx) {
 /// with the preceding COUNT/GROUP BY when both can be evaluated in the
 /// same pass.
 fn pass_fuse_count_short_circuits(query: &mut CypherQuery, ctx: &PassCtx) {
-    fuse_count_short_circuits(query, ctx.graph.has_secondary_labels)
+    fuse_count_short_circuits(
+        query,
+        ctx.graph.has_secondary_labels,
+        ctx.graph.has_type_shadowing_property(),
+    )
 }
 
 /// **Pass:** `fuse_optional_match_aggregate` — Fuse

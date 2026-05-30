@@ -140,6 +140,11 @@ pub enum Clause {
     FusedCountByType {
         type_alias: String,
         count_alias: String,
+        /// Emit the type key as a single-element `labels()`-style list (`true`,
+        /// for a `labels(n)` group key) or as a scalar string (`false`, for the
+        /// `n.type` / `n.node_type` / `n.label` accessors). Keeps the fused
+        /// output shape identical to the un-fused path for each accessor.
+        type_as_list: bool,
     },
     /// Optimizer-generated: MATCH ()-[r]->() RETURN type(r), count(*) → single edge scan.
     FusedCountEdgesByType {

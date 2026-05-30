@@ -546,19 +546,21 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedCountByType {
                 type_alias,
                 count_alias,
+                type_as_list,
             } => {
                 let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
                 for (node_type, indices) in self.graph.type_indices.iter() {
                     let mut projected = Bindings::with_capacity(2);
-                    // Phase A.1 / C6 — emit native Value::List to match
-                    // the post-A.1 labels() output format. Pre-A.1 this
-                    // built a JSON-string list to align with the
-                    // stringified labels() output; both shapes were
-                    // updated to native lists in C2 + here.
-                    projected.insert(
-                        type_alias.clone(),
-                        Value::List(vec![Value::String(node_type.to_string())]),
-                    );
+                    // `labels(n)` projects a single-element list (Phase A.1 / C6
+                    // native-list format); `n.type` / `n.node_type` / `n.label`
+                    // project the scalar type string — matching each accessor's
+                    // un-fused output shape.
+                    let type_value = if *type_as_list {
+                        Value::List(vec![Value::String(node_type.to_string())])
+                    } else {
+                        Value::String(node_type.to_string())
+                    };
+                    projected.insert(type_alias.clone(), type_value);
                     projected.insert(count_alias.clone(), Value::Int64(indices.len() as i64));
                     result_rows.push(ResultRow::from_projected(projected));
                 }

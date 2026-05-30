@@ -4,6 +4,7 @@ use super::super::ast::*;
 use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
+use crate::graph::schema::{soft_alias_fallback, SoftAliasFallback};
 use crate::graph::storage::GraphRead;
 use geo::BoundingRect;
 use petgraph::graph::NodeIndex;
@@ -1098,16 +1099,27 @@ impl<'a> CypherExecutor<'a> {
                         "id" => {
                             return Ok(self.graph.graph.get_node_id(idx).unwrap_or(Value::Null))
                         }
-                        "title" | "name" => {
+                        "title" => {
                             return Ok(self.graph.graph.get_node_title(idx).unwrap_or(Value::Null))
-                        }
-                        "type" | "node_type" | "label" => {
-                            return Ok(Value::String(type_str.to_string()))
                         }
                         _ => {
                             let key = crate::graph::schema::InternedKey::from_str(resolved);
+                            // Stored property wins (a user property named
+                            // `label`, `type`, `node_type`, `name`, … — KG-1).
                             if let Some(val) = self.graph.graph.get_node_property(idx, key) {
                                 return Ok(val);
+                            }
+                            // No stored property — fall back to the structural
+                            // convenience for the soft aliases.
+                            if let Some(fb) = soft_alias_fallback(resolved) {
+                                return Ok(match fb {
+                                    SoftAliasFallback::Title => {
+                                        self.graph.graph.get_node_title(idx).unwrap_or(Value::Null)
+                                    }
+                                    SoftAliasFallback::TypeString => {
+                                        Value::String(type_str.to_string())
+                                    }
+                                });
                             }
                             // Fall through to full materialization for spatial
                             // virtual properties (location, geometry, etc.)

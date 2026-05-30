@@ -681,6 +681,22 @@ impl DirGraph {
         self.node_type_metadata.get(node_type)
     }
 
+    /// Does any node type store a property named like a soft structural alias
+    /// (`type` / `node_type` / `label`)? When true, `n.type` / `n.label` are
+    /// property-first (KG-1) and no longer equal the node's primary type, so
+    /// the `RETURN n.type, count(*)` count-fusion must NOT fire (it would
+    /// group by the wrong key). `node_type_metadata` is the complete property
+    /// catalogue — add_nodes and cypher CREATE both register into it and it
+    /// round-trips through save/load — so this O(#types) plan-time scan is an
+    /// exact gate. Cheap: only consulted for count-by-type-shaped queries.
+    pub fn has_type_shadowing_property(&self) -> bool {
+        self.node_type_metadata.values().any(|props| {
+            props.contains_key("type")
+                || props.contains_key("node_type")
+                || props.contains_key("label")
+        })
+    }
+
     /// Upsert node type metadata — merges new property types into existing.
     pub fn upsert_node_type_metadata(&mut self, node_type: &str, props: HashMap<String, String>) {
         let entry = self

@@ -1420,6 +1420,34 @@ impl EmbeddingStore {
         self.slot_to_node.len()
     }
 }
+/// Structural conveniences KGLite exposes on a node (`n.label`, `n.type`,
+/// `n.node_type`, `n.name`) that a user may also legitimately store as a real
+/// property. For these the stored property WINS during resolution (KG-1,
+/// 2026-05-30); the structural value is only the fallback used when no such
+/// property exists. `id`/`title` are deliberately NOT soft aliases — they are
+/// the node's identity fields and are always returned canonically (no stored
+/// property can shadow them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SoftAliasFallback {
+    /// `name` falls back to the node title.
+    Title,
+    /// `type` / `node_type` / `label` fall back to the node type string.
+    TypeString,
+}
+
+/// Classify a (post-alias) property name as a soft structural alias, or
+/// `None` for a normal property / identity field. Single source of truth so
+/// every resolution path (RETURN, WHERE, inline-map, EXISTS, disk fast path)
+/// agrees on which names are property-first.
+#[inline]
+pub fn soft_alias_fallback(resolved: &str) -> Option<SoftAliasFallback> {
+    match resolved {
+        "name" => Some(SoftAliasFallback::Title),
+        "type" | "node_type" | "label" => Some(SoftAliasFallback::TypeString),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeData {
     pub id: Value,

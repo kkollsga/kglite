@@ -31,16 +31,12 @@ DEFAULT_LIMIT = 3000
 # Per-file ceilings for files known to be over the default. Each entry pins
 # the CURRENT line count so the file can't grow further without an explicit
 # bump. Add a one-line justification with each entry.
-ALLOWLIST: dict[str, int] = {
-    # The optimizer-fusion pass registry. ~12 passes ranging from
-    # spatial-join fusion to top-k aggregation. A future split into
-    # planner/fusion/<pass>.rs is on the deferred-refactor list
-    # (Phase A.3 / 0.9.53 audit, Tier 2). Until that lands, freeze the
-    # current size as the ceiling. Bumped in 0.10.6 (+~30 LoC) for the
-    # multi-label `has_secondary_labels` gates added to the aggregate and
-    # spatial-join fusions.
-    "crates/kglite/src/graph/languages/cypher/planner/fusion.rs": 3085,
-}
+# Empty: the former `fusion.rs` entry was RESOLVED in 0.10.10 by splitting
+# the file into the `planner/fusion/` module directory (count / aggregate /
+# topk / spatial submodules + shared helpers in mod.rs), so no single file
+# exceeds the default limit. The correct remedy for a god-file is splitting,
+# not raising a ceiling.
+ALLOWLIST: dict[str, int] = {}
 
 
 def _count_loc(path: Path) -> int:
