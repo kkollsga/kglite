@@ -272,26 +272,39 @@ pub(super) fn create_edges_strings(
     stats: &mut NTriplesStats,
     sink: Option<&dyn ProgressSink>,
 ) -> Result<(), String> {
-    // Build Q-code string → NodeIndex lookup
-    let mut qcode_to_idx: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
+    // Build Q-code → NodeIndex lookup. Since 0.11.0 a parseable Q-code id is
+    // stored as `Value::UniqueId(42)` (cross-mode parity), so map the edge
+    // buffer's `"Q42"` strings via `parse_qcode_number` → u32. Non-parseable
+    // ids remain `Value::String` and are matched verbatim.
+    let mut qnum_to_idx: HashMap<u32, petgraph::graph::NodeIndex> = HashMap::new();
+    let mut qstr_to_idx: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
     for id_map in graph.id_indices.values() {
         for (id_val, node_idx) in id_map.iter() {
-            if let Value::String(ref s) = id_val {
-                if s.starts_with('Q') {
-                    qcode_to_idx.insert(s.clone(), node_idx);
+            match id_val {
+                Value::UniqueId(n) => {
+                    qnum_to_idx.insert(n, node_idx);
                 }
+                Value::String(s) => {
+                    qstr_to_idx.insert(s, node_idx);
+                }
+                _ => {}
             }
         }
     }
+    let lookup = |qcode: &str| -> Option<petgraph::graph::NodeIndex> {
+        parse_qcode_number(qcode)
+            .and_then(|n| qnum_to_idx.get(&n).copied())
+            .or_else(|| qstr_to_idx.get(qcode).copied())
+    };
 
     let mut conn_type_pairs: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
 
     for (i, (source_qcode, target_qcode, pred_label)) in buf.iter().enumerate() {
-        let source_idx = qcode_to_idx.get(source_qcode.as_str());
-        let target_idx = qcode_to_idx.get(target_qcode.as_str());
+        let source_idx = lookup(source_qcode.as_str());
+        let target_idx = lookup(target_qcode.as_str());
 
         match (source_idx, target_idx) {
-            (Some(&src), Some(&tgt)) => {
+            (Some(src), Some(tgt)) => {
                 let edge_data =
                     EdgeData::new(pred_label.clone(), HashMap::new(), &mut graph.interner);
 

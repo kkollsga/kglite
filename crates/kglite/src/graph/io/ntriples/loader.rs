@@ -1223,15 +1223,16 @@ fn flush_entity(
         properties.insert("P31".to_string(), Value::String(tq.clone()));
     }
 
-    // Choose ID representation: compact u32 for disk only, String for default/mapped
-    let use_compact_ids = graph.graph.is_disk();
-    let id_value = if mapped || use_compact_ids {
-        parse_qcode_number(&acc.id)
-            .map(Value::UniqueId)
-            .unwrap_or_else(|| Value::String(acc.id.clone()))
-    } else {
-        Value::String(acc.id.clone())
-    };
+    // ID representation is mode-INDEPENDENT (cross-mode parity, 0.11.0): a
+    // parseable Q-code is stored as a compact `UniqueId` in every mode, so
+    // `n.id` is the same integer and `{id: N}` matches identically in memory,
+    // mapped, and disk. The human-readable string form (`"Q42"`) lives in the
+    // `nid` property (stored above) — query `{nid: 'Q42'}`, not `{id: 'Q42'}`.
+    // Non-parseable ids fall back to `String` (memory keeps them via the
+    // General id-index; disk/mapped already dropped them at the guard above).
+    let id_value = parse_qcode_number(&acc.id)
+        .map(Value::UniqueId)
+        .unwrap_or_else(|| Value::String(acc.id.clone()));
     let title_value = Value::String(title);
 
     let mut node_data = NodeData::new(

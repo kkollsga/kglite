@@ -221,6 +221,30 @@ impl Default for DirGraph {
     }
 }
 
+/// Warn (rate-limited, stderr) when building a type's id-index collapses
+/// duplicate ids — `MATCH (n {id: …})` then returns only one node per id.
+/// Detected here (at index build) rather than per-mutation so bulk
+/// `UNWIND … CREATE` and `add_nodes` stay O(n), not O(n²). `id` is meant to
+/// be unique (like `add_nodes(unique_id_field=…)`); use MERGE or dedupe input.
+fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    if unique_count >= entry_count {
+        return;
+    }
+    let dups = entry_count - unique_count;
+    let seen = WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+    if seen < 5 {
+        eprintln!(
+            "warning: {dups} duplicate id(s) on type '{node_type}' — \
+             `MATCH (n {{id: …}})` returns only one node per id. ids must be \
+             unique; use MERGE or dedupe the input."
+        );
+    } else if seen == 5 {
+        eprintln!("warning: further duplicate-id warnings suppressed.");
+    }
+}
+
 impl DirGraph {
     /// Current monotonic version counter. Incremented on every
     /// mutation (via the kglite mutation paths). Used for optimistic
@@ -424,9 +448,10 @@ impl DirGraph {
             }
         }
 
+        let entry_count = entries.len();
         if all_unique_id && !entries.is_empty() {
             // Compact: u32 keys only (~8 bytes per entry vs ~60).
-            let map = entries
+            let map: HashMap<u32, NodeIndex> = entries
                 .into_iter()
                 .filter_map(|(id, idx)| {
                     if let Value::UniqueId(u) = id {
@@ -436,10 +461,13 @@ impl DirGraph {
                     }
                 })
                 .collect();
+            warn_on_duplicate_ids(node_type, entry_count, map.len());
             TypeIdIndex::Integer(map)
         } else {
             // General: mixed ID types.
-            TypeIdIndex::General(entries.into_iter().collect())
+            let map: HashMap<Value, NodeIndex> = entries.into_iter().collect();
+            warn_on_duplicate_ids(node_type, entry_count, map.len());
+            TypeIdIndex::General(map)
         }
     }
 
@@ -1794,6 +1822,12 @@ impl DirGraph {
             // set. Tied to `save_disk` rather than `build_csr_*` so
             // node-only graphs (no edges) still get the index built.
             let _ = dg.build_global_property_index("title");
+            // Likewise index `nid` — the string id form for prefixed-id
+            // datasets (Wikidata `"Q42"`). Since 0.11.0 `{nid: 'Q42'}` is a
+            // plain string-property lookup (not the integer id-index), so the
+            // index keeps it O(log N) instead of a 124M-row scan. No-op when
+            // no type has a `nid` column.
+            let _ = dg.build_global_property_index("nid");
         }
 
         let dir = std::path::Path::new(path);

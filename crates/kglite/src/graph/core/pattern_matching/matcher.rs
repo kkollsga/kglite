@@ -45,7 +45,13 @@ fn global_alias_candidates(prop: &str, graph: &DirGraph) -> Vec<String> {
     let mut out: Vec<String> = vec![prop.to_string()];
     let (family, per_type_map): (&[&str], &FxHashMap<String, String>) = match prop {
         "title" | "label" | "name" => (&["title", "label", "name"], &graph.title_field_aliases),
-        "id" | "nid" | "qid" => (&["id", "nid", "qid"], &graph.id_field_aliases),
+        // `nid`/`qid` are NO LONGER id-aliases (0.11.0 cross-mode parity): the
+        // node id is the compact integer in every mode, and the string form
+        // (`"Q42"`) is the plain `nid` property — so `{nid: X}` resolves as an
+        // ordinary (indexed) string property, identically across modes, rather
+        // than coercing into the integer id-index. Only `id` (+ per-type
+        // user aliases) routes to the id-index.
+        "id" => (&["id"], &graph.id_field_aliases),
         _ => return out,
     };
     for &sibling in family {
@@ -700,10 +706,11 @@ impl<'a> PatternExecutor<'a> {
             // Tries lookup_by_id_readonly on each type. When id_indices are built,
             // each lookup is O(1). Total: O(types) which is fast even for 132K types.
             //
-            // Alias-aware: `{nid: 'Q76'}` / `{qid: 'Q76'}` also take this
-            // path. Without the alias check the query falls through to a
-            // 124M-row scan on Wikidata (times out).
-            let id_val_opt = ["id", "nid", "qid"].iter().find_map(|k| {
+            // Only `{id: N}` routes to the id-index here. `{nid: 'Q76'}` is a
+            // plain string property now (0.11.0) — it falls through to the
+            // cross-type global-property-index path below, which serves the
+            // `nid` index in O(log N) (built on save_disk / lazily in memory).
+            let id_val_opt = ["id"].iter().find_map(|k| {
                 if let Some(PropertyMatcher::Equals(v)) = props.get(*k) {
                     Some(v)
                 } else {
@@ -959,17 +966,15 @@ impl<'a> PatternExecutor<'a> {
         }
 
         // Try ID index for {id: value} patterns — O(1) lookup.
-        // Alias-aware: `nid` / `qid` anchor via the same per-type
-        // id_index that `id` does — same index, same semantics.
         //
-        // Phase A.3 / 0.9.53 fix: also routes through `lookup_by_id_readonly`
-        // when the queried property is the user-declared ID alias for
-        // this type (e.g. `add_nodes(df, "Star", "starId", "title")`
-        // makes `starId` an alias for the canonical id). Pre-fix, those
-        // queries fell through to a full type scan.
+        // `nid`/`qid` are NOT id-aliases (0.11.0) — they're plain string
+        // properties served by the global property index below. Only the
+        // canonical `id` and the user-declared per-type ID alias route here
+        // (e.g. `add_nodes(df, "Star", "starId", "title")` makes `starId`
+        // the id alias for :Star).
         if equality_props.len() == 1 {
             let (prop_name, value) = equality_props[0];
-            let is_id_alias = matches!(prop_name.as_str(), "id" | "nid" | "qid")
+            let is_id_alias = prop_name.as_str() == "id"
                 || self
                     .graph
                     .id_field_aliases

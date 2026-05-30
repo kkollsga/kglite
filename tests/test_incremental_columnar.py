@@ -117,8 +117,8 @@ class TestNTriplesColumnar:
             "tests/data/sample_wikidata.nt",
             languages=["en"],
         )
-        # Mapped mode uses string IDs (same as default mode)
-        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.description, n.P1082').to_df()
+        # Cross-mode parity (0.11.0): id is the integer; query the string Q-code via nid
+        r = graph.cypher('MATCH (n {nid: "Q42"}) RETURN n.description, n.P1082').to_df()
         assert r["n.description"][0] == "English author and humourist"
         assert r["n.P1082"][0] == 42
 
@@ -128,7 +128,7 @@ class TestNTriplesColumnar:
             "tests/data/sample_wikidata.nt",
             languages=["en"],
         )
-        # Mapped mode uses string IDs (same as default mode)
-        r = graph.cypher('MATCH (n {id: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
+        # Cross-mode parity (0.11.0): id is the integer; query the string Q-code via nid
+        r = graph.cypher('MATCH (n {nid: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
         assert len(r) == 1
         assert r["m.title"][0] == "United Kingdom"

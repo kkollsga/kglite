@@ -204,8 +204,9 @@ impl IdIndexBase {
         if let Some(&idx) = map.get(id) {
             return Some(idx);
         }
-        // Mirror TypeIdIndex::General coercion fallbacks (Int64 ↔ UniqueId,
-        // Float64 → Int/UniqueId, prefix-stripped String → UniqueId).
+        // Mirror TypeIdIndex::General numeric coercion fallbacks (Int64 ↔
+        // UniqueId, Float64 → Int/UniqueId). No string→u32 coercion — a
+        // String id matches only by exact value (handled above).
         match id {
             Value::Int64(i) => {
                 if *i >= 0 && *i <= u32::MAX as i64 {
@@ -226,11 +227,6 @@ impl IdIndexBase {
                 }
                 None
             }
-            Value::String(s) => strip_prefix_to_u32(s).and_then(|u| {
-                map.get(&Value::UniqueId(u))
-                    .or_else(|| map.get(&Value::Int64(u as i64)))
-                    .copied()
-            }),
             _ => None,
         }
     }
@@ -509,24 +505,9 @@ fn coerce_to_u32(id: &Value) -> Option<u32> {
                 None
             }
         }
-        Value::String(s) => strip_prefix_to_u32(s),
+        // No string→u32 coercion: a String id matches only by exact value.
         _ => None,
     }
-}
-
-/// Same as `schema::strip_prefix_to_u32` but local to avoid an extra
-/// `pub(crate)` re-export.
-#[inline]
-fn strip_prefix_to_u32(s: &str) -> Option<u32> {
-    let digit_start = s.bytes().position(|b| b.is_ascii_digit())?;
-    if digit_start == 0 {
-        return None;
-    }
-    let prefix = &s.as_bytes()[..digit_start];
-    if !prefix.iter().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    s[digit_start..].parse::<u32>().ok()
 }
 
 // =============================================================================

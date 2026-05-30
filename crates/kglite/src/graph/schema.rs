@@ -880,26 +880,6 @@ pub enum TypeIdIndex {
     General(HashMap<Value, NodeIndex>),
 }
 
-/// Strip a leading alphabetic prefix and parse the remainder as `u32`.
-/// Returns `Some(76)` for `"Q76"`, `"P76"`, `"E76"`; `None` for pure
-/// digits, no-digits, non-ASCII-alpha prefixes, or overflow. Lets the
-/// id-index lookup accept the string form a user sees in query
-/// results (`n.nid = 'Q76'`) as well as the underlying integer.
-#[inline]
-fn strip_prefix_to_u32(s: &str) -> Option<u32> {
-    let digit_start = s.bytes().position(|b| b.is_ascii_digit())?;
-    if digit_start == 0 {
-        // No prefix — plain digits should go through the Int64/UniqueId
-        // arms of get(), not this coercion path.
-        return None;
-    }
-    let prefix = &s.as_bytes()[..digit_start];
-    if !prefix.iter().all(|b| b.is_ascii_alphabetic()) {
-        return None;
-    }
-    s[digit_start..].parse::<u32>().ok()
-}
-
 impl TypeIdIndex {
     /// Look up a node by ID value, with type coercion.
     pub fn get(&self, id: &Value) -> Option<NodeIndex> {
@@ -925,12 +905,11 @@ impl TypeIdIndex {
                         None
                     }
                 }
-                // Prefix-stripped string coercion: `"Q76"` → `UniqueId(76)`,
-                // `"P31"` → `UniqueId(31)`, etc. Lets users write
-                // `{nid: 'Q76'}` (as they see it in query results) and
-                // still hit the O(1) id index instead of a full scan.
-                // Works for any "[A-Za-z]+[0-9]+" convention.
-                Value::String(s) => strip_prefix_to_u32(s).and_then(|u| map.get(&u).copied()),
+                // NB: no string→u32 coercion. A `String` id queried against a
+                // UniqueId-keyed index does NOT match (e.g. `{id:'a1'}` must
+                // not resolve to `UniqueId(1)`). Datasets that expose a
+                // string id form (e.g. Wikidata `Q76`) store it as a queryable
+                // property — query `{nid:'Q76'}`, not `{id:'Q76'}`.
                 _ => None,
             },
             TypeIdIndex::General(map) => {
@@ -959,12 +938,8 @@ impl TypeIdIndex {
                         }
                         None
                     }
-                    // See Integer arm above for prefix-stripped string rationale.
-                    Value::String(s) => strip_prefix_to_u32(s).and_then(|u| {
-                        map.get(&Value::UniqueId(u))
-                            .or_else(|| map.get(&Value::Int64(u as i64)))
-                            .copied()
-                    }),
+                    // String ids match only by exact value (handled above);
+                    // no prefix-strip coercion. See the Integer arm.
                     _ => None,
                 }
             }
@@ -2048,34 +2023,39 @@ impl std::fmt::Display for ValidationError {
 }
 
 #[cfg(test)]
-mod strip_prefix_tests {
-    use super::strip_prefix_to_u32;
+mod type_id_index_tests {
+    use super::*;
+    use petgraph::graph::NodeIndex;
 
-    #[test]
-    fn strips_standard_prefixes() {
-        assert_eq!(strip_prefix_to_u32("Q76"), Some(76));
-        assert_eq!(strip_prefix_to_u32("P31"), Some(31));
-        assert_eq!(strip_prefix_to_u32("E5"), Some(5));
-        assert_eq!(strip_prefix_to_u32("L0"), Some(0));
-        // Multi-char prefix is fine as long as it's alpha.
-        assert_eq!(strip_prefix_to_u32("NODE42"), Some(42));
+    fn integer_index() -> TypeIdIndex {
+        let mut m = HashMap::new();
+        m.insert(1u32, NodeIndex::new(10));
+        m.insert(42u32, NodeIndex::new(20));
+        TypeIdIndex::Integer(m)
     }
 
     #[test]
-    fn rejects_inputs_without_a_leading_alpha_prefix() {
-        // Plain digits go through the Int64/UniqueId coercion arms, not this one.
-        assert_eq!(strip_prefix_to_u32("76"), None);
-        assert_eq!(strip_prefix_to_u32(""), None);
-        // Non-ASCII-alpha prefix.
-        assert_eq!(strip_prefix_to_u32("-76"), None);
-        assert_eq!(strip_prefix_to_u32("Q 76"), None);
-        // No digits at all.
-        assert_eq!(strip_prefix_to_u32("Q"), None);
+    fn numeric_coercions_retained() {
+        let idx = integer_index();
+        // UniqueId / Int64 / Float all hit the integer key.
+        assert_eq!(idx.get(&Value::UniqueId(42)), Some(NodeIndex::new(20)));
+        assert_eq!(idx.get(&Value::Int64(42)), Some(NodeIndex::new(20)));
+        assert_eq!(idx.get(&Value::Float64(42.0)), Some(NodeIndex::new(20)));
+        // Non-integral float and out-of-range miss.
+        assert_eq!(idx.get(&Value::Float64(42.5)), None);
+        assert_eq!(idx.get(&Value::Int64(-1)), None);
     }
 
     #[test]
-    fn rejects_overflow() {
-        assert_eq!(strip_prefix_to_u32("Q99999999999"), None);
+    fn string_no_longer_coerces_to_int() {
+        // Regression lock (0.10.10): a `String` id must NOT be prefix-stripped
+        // into the integer index. `{id:'a1'}` / `{id:'Q1'}` must NOT resolve to
+        // `UniqueId(1)` — that was the wrong-node false-positive bug.
+        let idx = integer_index();
+        assert_eq!(idx.get(&Value::String("a1".into())), None);
+        assert_eq!(idx.get(&Value::String("x1".into())), None);
+        assert_eq!(idx.get(&Value::String("Q1".into())), None);
+        assert_eq!(idx.get(&Value::String("1".into())), None);
     }
 }
 

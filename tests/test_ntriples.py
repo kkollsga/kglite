@@ -127,40 +127,45 @@ class TestFiltering:
         assert countries >= 1  # United Kingdom
 
 
-class TestMappedModeStringIDs:
-    """Mapped mode uses string IDs (same as default mode) for API consistency."""
+class TestWikidataIdNidSemantics:
+    """Cross-mode parity (0.10.10): a Q-code is the integer `id` in EVERY mode;
+    the string form `"Q42"` is the `nid` property. Query by `{nid: 'Q42'}`."""
 
-    def test_string_ids(self, nt_file):
+    def test_lookup_by_nid(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        # Q42 should be accessible as string "Q42" (same as default mode)
-        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.title').to_df()
+        r = graph.cypher('MATCH (n {nid: "Q42"}) RETURN n.title').to_df()
         assert r["n.title"][0] == "Douglas Adams"
 
-    def test_string_id_in_result(self, nt_file):
+    def test_id_is_integer_nid_is_string(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.id').to_df()
-        assert r["n.id"][0] == "Q42"  # string, same as default mode
+        r = graph.cypher('MATCH (n {nid: "Q42"}) RETURN n.id, n.nid').to_df()
+        assert r["n.id"][0] == 42  # integer identity (same in every mode)
+        assert r["n.nid"][0] == "Q42"  # string form
+        # And the integer id is directly matchable.
+        r2 = graph.cypher("MATCH (n {id: 42}) RETURN n.title").to_df()
+        assert r2["n.title"][0] == "Douglas Adams"
 
-    def test_edges_work_with_string_ids(self, nt_file):
+    def test_edges_work_by_nid(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
         # Q42 -> Q145 via P27 (citizenship)
-        r = graph.cypher('MATCH (n {id: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
+        r = graph.cypher('MATCH (n {nid: "Q42"})-[:P27]->(m) RETURN m.title').to_df()
         assert len(r) == 1
         assert r["m.title"][0] == "United Kingdom"
 
-    def test_default_mode_uses_string_ids(self, nt_file):
+    def test_default_mode_same_as_mapped(self, nt_file):
         graph = KnowledgeGraph()
         graph.load_ntriples(nt_file, languages=["en"])
-        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.title').to_df()
+        r = graph.cypher('MATCH (n {nid: "Q42"}) RETURN n.title, n.id').to_df()
         assert r["n.title"][0] == "Douglas Adams"
+        assert r["n.id"][0] == 42  # integer in default mode too (was 'Q42' pre-0.10.10)
 
     def test_typed_literal_property(self, nt_file):
         graph = KnowledgeGraph(storage="mapped")
         graph.load_ntriples(nt_file, languages=["en"])
-        r = graph.cypher('MATCH (n {id: "Q42"}) RETURN n.P1082').to_df()
+        r = graph.cypher('MATCH (n {nid: "Q42"}) RETURN n.P1082').to_df()
         assert r["n.P1082"][0] == 42  # decimal literal parsed as int
 
 
