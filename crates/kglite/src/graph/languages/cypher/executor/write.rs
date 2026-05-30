@@ -371,8 +371,15 @@ fn create_node(
         }
     }
 
-    // Generate ID
-    let id = Value::UniqueId(graph.graph.node_bound() as u32);
+    // Identity: honor a user-provided `id` property as the node's unique id
+    // (consistent with `add_nodes(unique_id_field='id')`), so
+    // `CREATE (n {id: 's1'})` round-trips and `MATCH (n {id: 's1'})` finds it.
+    // The `id` is the identity, not a duplicate property, so it is removed
+    // from the property map (mirroring add_nodes, which does not store the
+    // unique-id column as a property). Absent → auto-assign a fresh UniqueId.
+    let id = properties
+        .remove("id")
+        .unwrap_or_else(|| Value::UniqueId(graph.graph.node_bound() as u32));
 
     // Determine title: use 'name' or 'title' property if present
     let title = properties
