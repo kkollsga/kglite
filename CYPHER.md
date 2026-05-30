@@ -1182,6 +1182,70 @@ graph.cypher("MATCH (f:Field) RETURN ts_at(f.oil, '2020')")
 # → "Exact lookup requires 2 date components for 'month' resolution, got 1"
 ```
 
+## Naming — identifiers, reserved words & structural accessors
+
+### Reserved keywords as names (soft keywords)
+
+Most reserved keywords can be used directly as a **relationship type**, **node
+label**, or **property key** — the parser treats them as names in those
+positions:
+
+```cypher
+CREATE (s:SourceDoc)-[:CONTAINS]->(c:Chunk)   // CONTAINS as a rel type
+MATCH  (n:CONTAINS)                            // … as a label
+CREATE (n:Doc {order: 1, in: true})            // … as property keys
+RETURN n.contains, n.order                     // … and in property access
+```
+
+The soft set covers the operator / comparison / sort / set / mutation
+keywords (`CONTAINS`, `IN`, `IS`, `NOT`, `STARTS`, `ENDS`, `ORDER`, `BY`,
+`ASC`, `DESC`, `DISTINCT`, `ALL`, `MERGE`, `CREATE`, `DELETE`, `SET`,
+`REMOVE`, `UNION`, …). A few keywords stay **reserved** to avoid ambiguity:
+the clause-flow words (`MATCH`, `WHERE`, `RETURN`, `WITH`, `AND`, `OR`, …)
+and the value keywords (`NULL`, `TRUE`, `FALSE`, `CASE`/`WHEN`/`END`,
+`EXISTS`). For any reserved word, quote it with **backticks**:
+
+```cypher
+CREATE (n:Doc {`where`: 1, `null`: 'x'})
+RETURN n.`where`
+```
+
+### Structural accessors vs stored properties
+
+Every node answers four convenience accessors:
+
+| Accessor | Returns |
+|----------|---------|
+| `n.id` | the node's unique id (identity — always) |
+| `n.title` | the node's title (identity — always) |
+| `n.type` / `n.node_type` / `n.label` | the node's primary type string |
+| `n.name` | the node's title |
+
+`n.type` / `n.node_type` / `n.label` / `n.name` are **property-first**: if the
+node stores a real property of that name, `n.<name>` returns the *stored
+value*; the structural string is only the fallback when no such property
+exists. So a `label` / `type` / `name` column loaded via `add_nodes` (or set
+via `CREATE`) round-trips and reads back correctly. `id` and `title` are the
+node's identity fields and always return the identity (no stored property can
+shadow them). Use `labels(n)` for the label set and `id(n)` / `type(r)` for
+the structural forms regardless of any same-named property.
+
+### Identity (`id`) and prefixed-id datasets (`nid`)
+
+`n.id` is the node's **unique identity** and behaves identically in every
+storage mode (in-memory / mapped / disk). `CREATE (n {id: X})` and
+`add_nodes(unique_id_field='id')` both make `X` the identity; `MATCH (n {id: X})`
+finds it; it survives save → load. `id` is unique by convention — if duplicate
+ids are created, `MATCH (n {id: X})` returns one node per id (a stderr warning
+is emitted; use `MERGE` or dedupe the input).
+
+For datasets whose ids are a prefix + number (Wikidata `Q42`, `P31`, …), the
+loader stores the **integer** as `id` (compact, identical across modes — disk
+needs it at 100M-node scale) and the **string form** as the `nid` property.
+Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
+— `{id: 'Q42'}` does **not** match (ids are integers). `n.id → 42`,
+`n.nid → 'Q42'`, in every mode.
+
 ## Supported Cypher Subset
 
 | Category | Supported |

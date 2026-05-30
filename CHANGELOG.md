@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.10] — 2026-05-30 — reserved-name papercuts + cross-mode id parity
+
+Reserved-name Cypher papercuts (KG-1/KG-2) plus a node-`id` correctness sweep
+that makes the query interface identical across storage modes.
+
+### Changed
+
+- **Node `id` is the same integer in every storage mode.** For prefixed-id
+  datasets (Wikidata `Q42`, …) the loader previously stored `id` as the string
+  `"Q42"` in memory/mapped but the compact integer `42` on disk, bridged by a
+  too-eager string→int coercion. Now `id` is the **integer** (`n.id == 42`) in
+  memory, mapped, *and* disk — identical results everywhere — and the string
+  form lives in the `nid` property (`n.nid == "Q42"`). **Breaking** (pre-1.0):
+  memory/mapped `n.id` for Wikidata changes `"Q42"` → `42`; query the string
+  form via `{nid: 'Q42'}` (or the integer via `{id: 42}`). `{id: 'Q42'}` no
+  longer matches. `nid`/`qid` are no longer id-aliases — `{nid: X}` is a plain
+  (indexed) string-property lookup. See CYPHER.md → "Naming".
+
+### Fixed
+
+- **A node property named `label` (also `type`/`node_type`/`name`) is readable
+  (KG-1).** Property-first resolution across every read path — `RETURN`,
+  `WHERE`, inline-map, `EXISTS`, disk fast path, map projection. The
+  count-by-type fusion is gated when such a property shadows the type, and
+  `n.type` projects a scalar there (matching the un-fused path) while
+  `labels(n)` stays a list.
+- **`{id: 'a1'}` no longer returns the wrong node.** The string→int id coercion
+  (`'a1'`/`'x1'`/`'Q1'` → `UniqueId(1)`) is removed; a `String` id matches only
+  by exact value. Numeric (Int64↔UniqueId↔Float) coercions are retained.
+- **Cypher `CREATE (n {id: X})` honours `X` as the node identity** (was
+  auto-assigned), consistent with `add_nodes(unique_id_field='id')`; string /
+  int / float ids round-trip and survive save → load.
+- Duplicate ids now emit a rate-limited warning (`MATCH (n {id: X})` returns one
+  node per id); detected at id-index build so bulk ingest stays O(n).
+
+### Added
+
+- **Reserved keywords usable as relationship types / node labels / property
+  keys / property access (KG-2).** `CREATE (s)-[:CONTAINS]->(c)`,
+  `MATCH (n:CONTAINS)`, `{contains: 1}`, `n.contains` parse. The safe set
+  (operator/sort/set/mutation keywords) works in every name-position across
+  MATCH / CREATE / MERGE / SET / REMOVE / WHERE and EXISTS subqueries;
+  load-bearing + value keywords stay reserved with a clear error and the
+  backtick escape hatch.
+
+### Internal
+
+- Split the `fusion.rs` optimiser god-file into a `fusion/` module directory.
+- Conformance/golden test layer for id semantics (`tests/test_id_parity.py`,
+  `tests/test_cypher_id_semantics.py`) + N1–N4 regression locks — the layer the
+  differential corpus (optimised-vs-naive) and parity oracles (set-equality)
+  structurally can't provide.
+
 ## [0.10.9] — 2026-05-29 — self-healing id-index (issue #20)
 
 ### Fixed
