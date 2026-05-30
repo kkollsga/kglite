@@ -150,24 +150,14 @@ impl CypherParser {
             if let Expression::Variable(var) = &left {
                 let var = var.clone();
                 self.advance(); // consume :
-                let first_label = match self.advance().cloned() {
-                    Some(CypherToken::Identifier(name)) => name,
-                    other => {
-                        return Err(format!("Expected label name after ':', got {:?}", other));
-                    }
-                };
+                let first_label = self.expect_name("label name after ':'")?;
                 let mut pred = Predicate::LabelCheck {
                     variable: var.clone(),
                     label: first_label,
                 };
                 while self.check(&CypherToken::Colon) {
                     self.advance();
-                    let next_label = match self.advance().cloned() {
-                        Some(CypherToken::Identifier(name)) => name,
-                        other => {
-                            return Err(format!("Expected label name after ':', got {:?}", other));
-                        }
-                    };
+                    let next_label = self.expect_name("label name after ':'")?;
                     pred = Predicate::And(
                         Box::new(pred),
                         Box::new(Predicate::LabelCheck {

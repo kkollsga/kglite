@@ -951,6 +951,34 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Person) WHERE n:VIP RETURN n.id AS id ORDER BY id",
         None,
     ),
+    # KG-2 soft keywords as names — these don't match the social_graph
+    # fixture (no CONTAINS edges / labels), but they must PARSE, plan, and
+    # execute consistently under optimised vs naive passes (the optimiser
+    # must not choke on a keyword-named rel-type / label / property key).
+    (
+        "kw_rel_type_in_match",
+        "social_graph",
+        "MATCH (p:Person)-[:CONTAINS]->(q) RETURN count(q) AS n",
+        None,
+    ),
+    (
+        "kw_node_label",
+        "social_graph",
+        "MATCH (n:CONTAINS) RETURN count(n) AS n",
+        None,
+    ),
+    (
+        "kw_property_key",
+        "social_graph",
+        "MATCH (n {contains: 1}) RETURN count(n) AS n",
+        None,
+    ),
+    (
+        "kw_exists_subquery",
+        "social_graph",
+        "MATCH (p:Person) WHERE EXISTS { (p)-[:CONTAINS]->() } RETURN count(p) AS n",
+        None,
+    ),
 ]
 
 

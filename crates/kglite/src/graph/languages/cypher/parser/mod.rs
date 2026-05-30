@@ -12,7 +12,7 @@
 //! Rust merges them at codegen.
 
 use super::ast::*;
-use super::tokenizer::{token_to_keyword_name, CypherToken};
+use super::tokenizer::{keyword_name_token, token_to_keyword_name, CypherToken};
 #[cfg(test)]
 use crate::datatypes::values::Value;
 use crate::error::KgError;
@@ -85,6 +85,22 @@ impl CypherParser {
             Some(ref token) => token_to_keyword_name(token)
                 .ok_or_else(|| format!("Expected alias name after AS, got {:?}", token)),
             None => Err("Expected alias name after AS".to_string()),
+        }
+    }
+
+    /// Consume the next token as a NAME — a node label, relationship type, or
+    /// property key. Accepts an identifier verbatim, or a soft-reservable
+    /// keyword via `keyword_name_token` (KG-2: `[:CONTAINS]`, `(:CONTAINS)`,
+    /// `{contains: 1}`). `context` names the position for the error message,
+    /// preserving the original "Expected <X>" wording. Case-preserving: a
+    /// keyword name round-trips as its canonical uppercase word.
+    pub(super) fn expect_name(&mut self, context: &str) -> Result<String, String> {
+        match self.advance().cloned() {
+            Some(CypherToken::Identifier(name)) => Ok(name),
+            Some(ref token) => keyword_name_token(token)
+                .map(str::to_string)
+                .ok_or_else(|| format!("Expected {}, got {:?}", context, token)),
+            None => Err(format!("Expected {}", context)),
         }
     }
 

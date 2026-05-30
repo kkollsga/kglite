@@ -290,20 +290,10 @@ impl CypherParser {
         // Parse :Primary[:Extra1:Extra2:…]
         if self.check(&CypherToken::Colon) {
             self.advance();
-            if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
-                self.advance();
-                label = Some(name);
-            } else {
-                return Err("Expected label name after ':'".to_string());
-            }
+            label = Some(self.expect_name("label name after ':'")?);
             while self.check(&CypherToken::Colon) {
                 self.advance();
-                if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
-                    self.advance();
-                    extra_labels.push(name);
-                } else {
-                    return Err("Expected label name after ':'".to_string());
-                }
+                extra_labels.push(self.expect_name("label name after ':'")?);
             }
         }
 
@@ -328,15 +318,7 @@ impl CypherParser {
 
         if !self.check(&CypherToken::RBrace) {
             loop {
-                let key = match self.peek().cloned() {
-                    Some(CypherToken::Identifier(k)) => {
-                        self.advance();
-                        k
-                    }
-                    other => {
-                        return Err(format!("Expected property key, got {:?}", other));
-                    }
-                };
+                let key = self.expect_name("property key")?;
                 self.expect(&CypherToken::Colon)?;
                 let value_expr = self.parse_expression()?;
                 props.push((key, value_expr));
@@ -387,12 +369,7 @@ impl CypherParser {
         // Parse :TYPE (required for CREATE)
         if self.check(&CypherToken::Colon) {
             self.advance();
-            if let Some(CypherToken::Identifier(name)) = self.peek().cloned() {
-                self.advance();
-                connection_type = Some(name);
-            } else {
-                return Err("Expected relationship type after ':'".to_string());
-            }
+            connection_type = Some(self.expect_name("relationship type after ':'")?);
         }
 
         let conn_type = connection_type
@@ -455,15 +432,7 @@ impl CypherParser {
             if self.check(&CypherToken::Dot) {
                 // Property assignment: var.prop = expr
                 self.advance(); // consume .
-                let prop_name = match self.peek().cloned() {
-                    Some(CypherToken::Identifier(name)) => {
-                        self.advance();
-                        name
-                    }
-                    other => {
-                        return Err(format!("Expected property name after '.', got {:?}", other));
-                    }
-                };
+                let prop_name = self.expect_name("property name after '.'")?;
                 self.expect(&CypherToken::Equals)?;
                 let expression = self.parse_expression()?;
                 items.push(SetItem::Property {
@@ -477,15 +446,7 @@ impl CypherParser {
                 // per label, mirroring Neo4j semantics.
                 loop {
                     self.advance(); // consume :
-                    let label = match self.peek().cloned() {
-                        Some(CypherToken::Identifier(name)) => {
-                            self.advance();
-                            name
-                        }
-                        other => {
-                            return Err(format!("Expected label name after ':', got {:?}", other));
-                        }
-                    };
+                    let label = self.expect_name("label name after ':'")?;
                     items.push(SetItem::Label {
                         variable: var_name.clone(),
                         label,
@@ -569,18 +530,7 @@ impl CypherParser {
             if self.check(&CypherToken::Dot) {
                 // Property removal: var.prop
                 self.advance(); // consume .
-                let prop_name = match self.peek().cloned() {
-                    Some(CypherToken::Identifier(name)) => {
-                        self.advance();
-                        name
-                    }
-                    other => {
-                        return Err(format!(
-                            "Expected property name after '.' in REMOVE, got {:?}",
-                            other
-                        ));
-                    }
-                };
+                let prop_name = self.expect_name("property name after '.' in REMOVE")?;
                 items.push(RemoveItem::Property {
                     variable: var_name,
                     property: prop_name,
@@ -589,18 +539,7 @@ impl CypherParser {
                 // Label removal: var:Label[:More:...]
                 loop {
                     self.advance(); // consume :
-                    let label = match self.peek().cloned() {
-                        Some(CypherToken::Identifier(name)) => {
-                            self.advance();
-                            name
-                        }
-                        other => {
-                            return Err(format!(
-                                "Expected label name after ':' in REMOVE, got {:?}",
-                                other
-                            ));
-                        }
-                    };
+                    let label = self.expect_name("label name after ':' in REMOVE")?;
                     items.push(RemoveItem::Label {
                         variable: var_name.clone(),
                         label,

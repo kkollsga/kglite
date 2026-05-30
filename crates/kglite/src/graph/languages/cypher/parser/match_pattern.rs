@@ -1,7 +1,7 @@
 //! Cypher parser: MATCH / OPTIONAL MATCH clause + pattern extraction.
 
 use super::super::ast::*;
-use super::super::tokenizer::CypherToken;
+use super::super::tokenizer::{keyword_name_token, CypherToken};
 use super::CypherParser;
 
 impl CypherParser {
@@ -267,6 +267,12 @@ impl CypherParser {
                 // MATCH-pattern extractor already does this; without it,
                 // params worked everywhere except inside an EXISTS pattern.
                 CypherToken::Parameter(name) => parts.push(format!("${}", name)),
+                // KG-2: a reserved keyword used as a name (label / rel-type /
+                // property key) — backtick it so the secondary pattern parser
+                // reads it as an identifier (`[:CONTAINS]`, `(:CONTAINS)`).
+                tok if keyword_name_token(tok).is_some() => {
+                    parts.push(format!("`{}`", keyword_name_token(tok).unwrap()));
+                }
                 _ => {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
                 }
@@ -349,6 +355,14 @@ impl CypherParser {
                 CypherToken::False => parts.push("false".to_string()),
                 CypherToken::Parameter(name) => {
                     parts.push(format!("${}", name));
+                }
+                // KG-2: a reserved keyword used as a name (label / rel-type /
+                // property key) — backtick it so the secondary pattern parser
+                // reads it as an identifier (`[:CONTAINS]`, `(:CONTAINS)`,
+                // `{contains: 1}`). Only reached at bracket/paren depth > 0
+                // (depth-0 keywords break out earlier as clause boundaries).
+                tok if keyword_name_token(tok).is_some() => {
+                    parts.push(format!("`{}`", keyword_name_token(tok).unwrap()));
                 }
                 _ => {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));

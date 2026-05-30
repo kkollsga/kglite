@@ -561,6 +561,63 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Canonical UPPERCASE word for a keyword token used as a NAME (relationship
+/// type, node label, or property key) — KG-2 soft keywords. Returns `None` for
+/// non-keyword tokens AND for keywords that must stay reserved even in name
+/// position.
+///
+/// Distinct from `token_to_keyword_name` (lowercase, for `AS` aliases): names
+/// are case-sensitive and must round-trip verbatim (`[:CONTAINS]` stays
+/// `CONTAINS`, not `contains`).
+///
+/// The SAFE set is the operator / comparison / sort / set / mutation keywords —
+/// words that, inside a pattern, can only be a name (they appear elsewhere only
+/// in WHERE-expression or clause position, which the re-serializer reaches at
+/// bracket/paren depth 0, before this is ever consulted). Deliberately kept
+/// reserved (→ `None`): the clause-flow words (MATCH / OPTIONAL / WHERE /
+/// RETURN / WITH / UNWIND / LIMIT / SKIP, AND / OR), the value literals
+/// (NULL / NULLS / TRUE / FALSE), and the value-expression words (CASE / WHEN /
+/// THEN / ELSE / END, EXISTS) — because those can legitimately appear as a
+/// property *value* in an inline map (`{x: null}`) and must not be mis-read as
+/// a name. The backtick escape hatch still works for any excluded word.
+pub fn keyword_name_token(token: &CypherToken) -> Option<&'static str> {
+    let name = match token {
+        CypherToken::Contains => "CONTAINS",
+        CypherToken::StartsWith => "STARTS",
+        CypherToken::EndsWith => "ENDS",
+        CypherToken::In => "IN",
+        CypherToken::Is => "IS",
+        CypherToken::Not => "NOT",
+        CypherToken::Xor => "XOR",
+        CypherToken::Order => "ORDER",
+        CypherToken::By => "BY",
+        CypherToken::Asc => "ASC",
+        CypherToken::Desc => "DESC",
+        CypherToken::Distinct => "DISTINCT",
+        CypherToken::All => "ALL",
+        CypherToken::On => "ON",
+        CypherToken::Over => "OVER",
+        CypherToken::Partition => "PARTITION",
+        CypherToken::Having => "HAVING",
+        CypherToken::Detach => "DETACH",
+        CypherToken::Merge => "MERGE",
+        CypherToken::Create => "CREATE",
+        CypherToken::Delete => "DELETE",
+        CypherToken::Set => "SET",
+        CypherToken::Remove => "REMOVE",
+        CypherToken::Yield => "YIELD",
+        CypherToken::Call => "CALL",
+        CypherToken::Union => "UNION",
+        CypherToken::Intersect => "INTERSECT",
+        CypherToken::Except => "EXCEPT",
+        CypherToken::Explain => "EXPLAIN",
+        CypherToken::Profile => "PROFILE",
+        CypherToken::As => "AS",
+        _ => return None,
+    };
+    Some(name)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

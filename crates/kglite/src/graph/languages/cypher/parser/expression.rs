@@ -349,15 +349,11 @@ impl CypherParser {
                     // Check for property access on function result: func().property
                     if self.check(&CypherToken::Dot) {
                         self.advance(); // consume dot
-                        match self.advance().cloned() {
-                            Some(CypherToken::Identifier(prop)) => {
-                                return Ok(Expression::ExprPropertyAccess {
-                                    expr: Box::new(func_expr),
-                                    property: prop,
-                                });
-                            }
-                            _ => return Err("Expected property name after '.'".to_string()),
-                        }
+                        let prop = self.expect_name("property name after '.'")?;
+                        return Ok(Expression::ExprPropertyAccess {
+                            expr: Box::new(func_expr),
+                            property: prop,
+                        });
                     }
                     return Ok(func_expr);
                 }
@@ -382,10 +378,7 @@ impl CypherParser {
                     let mut expr = func_expr;
                     while self.check(&CypherToken::Dot) {
                         self.advance();
-                        let field = match self.advance().cloned() {
-                            Some(CypherToken::Identifier(p)) => p,
-                            _ => return Err("Expected property name after '.'".to_string()),
-                        };
+                        let field = self.expect_name("property name after '.'")?;
                         expr = Expression::ExprPropertyAccess {
                             expr: Box::new(expr),
                             property: field,
@@ -400,20 +393,14 @@ impl CypherParser {
                 // ExprPropertyAccess.
                 if self.check(&CypherToken::Dot) {
                     self.advance(); // consume dot
-                    let first_prop = match self.advance().cloned() {
-                        Some(CypherToken::Identifier(prop)) => prop,
-                        _ => return Err("Expected property name after '.'".to_string()),
-                    };
+                    let first_prop = self.expect_name("property name after '.'")?;
                     let mut expr = Expression::PropertyAccess {
                         variable: name,
                         property: first_prop,
                     };
                     while self.check(&CypherToken::Dot) {
                         self.advance(); // consume the chained dot
-                        let next_prop = match self.advance().cloned() {
-                            Some(CypherToken::Identifier(prop)) => prop,
-                            _ => return Err("Expected property name after '.'".to_string()),
-                        };
+                        let next_prop = self.expect_name("property name after '.'")?;
                         expr = Expression::ExprPropertyAccess {
                             expr: Box::new(expr),
                             property: next_prop,
