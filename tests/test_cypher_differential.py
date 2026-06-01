@@ -133,6 +133,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     # ── fuse_count_short_circuits ──
     ("count_distinct_star", "social_graph", "MATCH (p:Person) RETURN count(DISTINCT p) AS n", None),
+    # ── fuse_node_scan_aggregate: count(DISTINCT property), plain + grouped ──
+    ("count_distinct_prop", "social_graph", "MATCH (p:Person) RETURN count(DISTINCT p.city) AS n", None),
+    (
+        "count_distinct_prop_grouped",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS c, count(DISTINCT p.name) AS d",
+        None,
+    ),
     # ── fuse_optional_match_aggregate (0.8.31 bug) ──
     (
         "count_optional_edge_var",

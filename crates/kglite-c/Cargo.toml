@@ -1,6 +1,6 @@
 [package]
 name = "kglite-c"
-version = "0.10.11"
+version = "0.10.12"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"

@@ -12,7 +12,7 @@ use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 
 /// Replace every `count(...)` function-call sub-tree in `expr` with a
@@ -1961,6 +1961,17 @@ impl<'a> CypherExecutor<'a> {
             .map(|&i| self.fold_constants_expr(&return_clause.items[i].expression))
             .collect();
 
+        // Which aggregates are count(DISTINCT …) — tracked per group via a value
+        // set rather than a running count.
+        let agg_is_distinct: Vec<bool> = agg_indices
+            .iter()
+            .map(|&i| {
+                matches!(&return_clause.items[i].expression,
+                    Expression::FunctionCall { name, distinct: true, .. }
+                        if name.eq_ignore_ascii_case("count"))
+            })
+            .collect();
+
         // Pre-fold WHERE predicate once (converts In → InLiteralSet with HashSet, etc.)
         let folded_where = where_predicate.map(|p| self.fold_constants_pred(p));
         let folded_where_ref = folded_where.as_ref();
@@ -1989,6 +2000,8 @@ impl<'a> CypherExecutor<'a> {
             sums: Vec<f64>,
             mins: Vec<Option<Value>>,
             maxs: Vec<Option<Value>>,
+            // Per-agg value set for count(DISTINCT …); None for non-distinct aggs.
+            distinct_sets: Vec<Option<FxHashSet<Value>>>,
         }
 
         // Groups: (group_key_values, first_node_idx_for_binding)
@@ -2083,6 +2096,15 @@ impl<'a> CypherExecutor<'a> {
                 let acc = &mut group_accumulators[group_idx];
                 for (ai, _) in agg_indices.iter().enumerate() {
                     let val = &agg_vals[ai];
+                    // count(DISTINCT …): dedup non-null values in the per-agg set.
+                    if agg_is_distinct[ai] {
+                        if !matches!(val, Value::Null) {
+                            acc.distinct_sets[ai]
+                                .get_or_insert_with(FxHashSet::default)
+                                .insert(val.clone());
+                        }
+                        continue;
+                    }
                     // Only count non-null values (count(*) uses Boolean marker)
                     if !matches!(val, Value::Null) {
                         acc.counts[ai] += 1;
@@ -2129,9 +2151,21 @@ impl<'a> CypherExecutor<'a> {
                     sums: vec![0.0f64; na],
                     mins: vec![None; na],
                     maxs: vec![None; na],
+                    distinct_sets: agg_is_distinct
+                        .iter()
+                        .map(|&d| if d { Some(FxHashSet::default()) } else { None })
+                        .collect(),
                 };
                 for (ai, _) in agg_indices.iter().enumerate() {
                     let val = &agg_vals[ai];
+                    if agg_is_distinct[ai] {
+                        if !matches!(val, Value::Null) {
+                            acc.distinct_sets[ai]
+                                .get_or_insert_with(FxHashSet::default)
+                                .insert(val.clone());
+                        }
+                        continue;
+                    }
                     if !matches!(val, Value::Null) {
                         acc.counts[ai] = 1;
                         if let Some(f) = value_to_f64(val) {
@@ -2193,8 +2227,13 @@ impl<'a> CypherExecutor<'a> {
                         distinct,
                     } => {
                         if *distinct {
-                            // DISTINCT aggregation not supported by inline — shouldn't reach here
-                            Value::Null
+                            // count(DISTINCT …): number of distinct non-null values.
+                            Value::Int64(
+                                acc.distinct_sets[ai]
+                                    .as_ref()
+                                    .map(|s| s.len() as i64)
+                                    .unwrap_or(0),
+                            )
                         } else {
                             match name.as_str() {
                                 "count" => Value::Int64(acc.counts[ai]),

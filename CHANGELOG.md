@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.12] — 2026-06-01 — fluent select/filter perf + count(DISTINCT) fusion
+
+### Performance
+
+- **Fluent `select(sort=…, limit=k)` is now a bounded top-K, not a full sort.**
+  Previously it sorted the whole selection then truncated; now it partitions
+  (`select_nth`) + sorts only `k`. Combined with a rewrite of the sort path from
+  a per-comparison HashMap lookup to a precomputed key vector, top-10/top-100
+  over 100k nodes dropped **~25 ms → ~1.9 ms** (~13×). The no-limit full sort is
+  also faster (~61 → ~40 ms).
+- **Fluent `where()` on a full single-type selection uses the property index
+  directly** instead of building an O(N) membership set, and stops allocating a
+  `String` per node when deriving candidate types. Indexed-property lookups via
+  the fluent API are ~2× faster.
+- **`count(DISTINCT <property>)` now fuses into the node scan-aggregate.**
+  It previously materialized one result row per scanned node and de-duplicated
+  afterward; it now tracks a per-group value set inline during the scan.
+  `count(DISTINCT n.prop)` (and the grouped `RETURN k, count(DISTINCT n.prop)`
+  form) over 100k nodes dropped **~12.7 ms → ~4.9 ms** (~2.6×). Results
+  unchanged.
+
 ## [0.10.11] — 2026-06-01 — count(node) no longer materializes per row
 
 ### Performance

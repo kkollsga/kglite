@@ -1020,11 +1020,15 @@ pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
                 }
                 match &item.expression {
                     Expression::FunctionCall { name, distinct, .. } => {
+                        let n = name.to_lowercase();
                         if *distinct {
-                            return false; // DISTINCT not supported inline
+                            // Only count(DISTINCT x) fuses inline (the executor
+                            // tracks a per-group value set). DISTINCT sum/avg/min/max
+                            // still falls back to the generic path.
+                            return n == "count";
                         }
                         matches!(
-                            name.to_lowercase().as_str(),
+                            n.as_str(),
                             "count" | "sum" | "avg" | "mean" | "average" | "min" | "max"
                         )
                     }

@@ -211,15 +211,31 @@ fn filter_nodes_by_conditions(
     }
 
     // Try to use property indexes for equality conditions (O(1) lookup)
-    // Find nodes by their node_type first, then check for indexed properties
-    let node_types: HashSet<String> = nodes
+    // Find nodes by their node_type first, then check for indexed properties.
+    // Borrow the type string from the interner — no per-node allocation (this
+    // runs for every `where()`, even when no index ultimately applies).
+    let node_types: HashSet<&str> = nodes
         .iter()
         .filter_map(|&idx| {
             graph
                 .get_node(idx)
-                .map(|n| n.node_type_str(&graph.interner).to_string())
+                .map(|n| n.node_type_str(&graph.interner))
         })
         .collect();
+
+    // When the input is exactly the full set of a single node type, any index
+    // result for that type is already a subset of the input — so we can return
+    // it directly and skip building an O(N) membership set for the intersection.
+    let full_single_type: Option<&str> = if node_types.len() == 1 {
+        let t = *node_types.iter().next().expect("len()==1");
+        if graph.type_indices.get(t).map(|v| v.len()) == Some(nodes.len()) {
+            Some(t)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Collect equality conditions that could use a composite index
     let equality_conditions: Vec<(&String, &crate::datatypes::values::Value)> = conditions
@@ -303,13 +319,16 @@ fn filter_nodes_by_conditions(
                 if let Some(matching_nodes) =
                     graph.lookup_by_index(node_type, property, target_value)
                 {
-                    // Found an index! Use it to narrow down candidates
-                    let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
-                    let original_set: HashSet<_> = nodes.iter().copied().collect();
-
-                    // Intersection of indexed results with input nodes
-                    let candidates: Vec<_> =
-                        indexed_set.intersection(&original_set).copied().collect();
+                    // Found an index! Narrow down to candidates in the input.
+                    let candidates: Vec<_> = if full_single_type == Some(*node_type) {
+                        // Input is the full type set → index result is a subset
+                        // already; skip the O(N) membership intersection.
+                        matching_nodes.to_vec()
+                    } else {
+                        let indexed_set: HashSet<_> = matching_nodes.iter().copied().collect();
+                        let original_set: HashSet<_> = nodes.iter().copied().collect();
+                        indexed_set.intersection(&original_set).copied().collect()
+                    };
 
                     // If there are remaining conditions, filter further
                     let remaining_conditions: HashMap<_, _> = conditions
@@ -417,47 +436,78 @@ fn filter_nodes_by_conditions(
         .collect()
 }
 
-fn sort_nodes_by_fields(
-    graph: &DirGraph,
-    mut nodes: Vec<NodeIndex>,
+/// Multi-field ordering over precomputed per-node sort keys (positional,
+/// aligned with `sort_fields`). No per-comparison hashing — the keys are
+/// materialized once into a `Vec`, so the sort is plain slice comparisons.
+#[inline]
+fn cmp_sort_keys(
+    a: &[Option<Value>],
+    b: &[Option<Value>],
     sort_fields: &[(String, bool)],
-) -> Vec<NodeIndex> {
-    // Pre-fetch and cache field values for all nodes
-    let mut value_cache: HashMap<(NodeIndex, &str), Option<Value>> = HashMap::new();
-
-    for &node_idx in &nodes {
-        if let Some(node) = graph.get_node(node_idx) {
-            for (field, _) in sort_fields {
-                value_cache.insert(
-                    (node_idx, field.as_str()),
-                    node.get_field_ref(field).map(Cow::into_owned),
-                );
+) -> std::cmp::Ordering {
+    for (i, (_, ascending)) in sort_fields.iter().enumerate() {
+        if let (Some(va), Some(vb)) = (&a[i], &b[i]) {
+            if let Some(ordering) = compare_values(va, vb) {
+                return if *ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                };
             }
         }
     }
+    std::cmp::Ordering::Equal
+}
 
-    nodes.sort_by(|&a, &b| {
-        for (field, ascending) in sort_fields {
-            let val_a = value_cache.get(&(a, field.as_str()));
-            let val_b = value_cache.get(&(b, field.as_str()));
-
-            match (val_a, val_b) {
-                (Some(Some(va)), Some(Some(vb))) => {
-                    if let Some(ordering) = compare_values(va, vb) {
-                        return if *ascending {
-                            ordering
-                        } else {
-                            ordering.reverse()
-                        };
-                    }
-                }
-                _ => continue,
-            }
-        }
-        std::cmp::Ordering::Equal
-    });
-
+/// Materialize (sort-key, node) pairs once. Each node's sort-field values are
+/// fetched in `sort_fields` order; a missing field sorts as `None` (skipped in
+/// comparison, matching the prior HashMap-miss behaviour).
+fn build_sort_keys(
+    graph: &DirGraph,
+    nodes: &[NodeIndex],
+    sort_fields: &[(String, bool)],
+) -> Vec<(Vec<Option<Value>>, NodeIndex)> {
     nodes
+        .iter()
+        .map(|&idx| {
+            let node = graph.get_node(idx);
+            let keys = sort_fields
+                .iter()
+                .map(|(field, _)| node.and_then(|n| n.get_field_ref(field).map(Cow::into_owned)))
+                .collect();
+            (keys, idx)
+        })
+        .collect()
+}
+
+fn sort_nodes_by_fields(
+    graph: &DirGraph,
+    nodes: Vec<NodeIndex>,
+    sort_fields: &[(String, bool)],
+) -> Vec<NodeIndex> {
+    let mut keyed = build_sort_keys(graph, &nodes, sort_fields);
+    keyed.sort_by(|(a, _), (b, _)| cmp_sort_keys(a, b, sort_fields));
+    keyed.into_iter().map(|(_, idx)| idx).collect()
+}
+
+/// Return the `k` smallest-by-`sort_fields` nodes, in order. O(N) partition +
+/// O(k log k) sort instead of a full O(N log N) sort — for `ORDER BY … LIMIT k`
+/// with `k << N` (the fluent `select(sort=…, limit=k)` shape).
+fn top_k_nodes_by_fields(
+    graph: &DirGraph,
+    nodes: Vec<NodeIndex>,
+    sort_fields: &[(String, bool)],
+    k: usize,
+) -> Vec<NodeIndex> {
+    if k >= nodes.len() {
+        return sort_nodes_by_fields(graph, nodes, sort_fields);
+    }
+    let mut keyed = build_sort_keys(graph, &nodes, sort_fields);
+    // Partition so the k smallest-by-order occupy [0, k); then sort just those.
+    keyed.select_nth_unstable_by(k - 1, |(a, _), (b, _)| cmp_sort_keys(a, b, sort_fields));
+    keyed.truncate(k);
+    keyed.sort_by(|(a, _), (b, _)| cmp_sort_keys(a, b, sort_fields));
+    keyed.into_iter().map(|(_, idx)| idx).collect()
 }
 
 // Optimized processing function
@@ -480,12 +530,19 @@ pub fn process_nodes(
         result = filter_nodes_by_conditions(graph, result, conditions);
     }
 
-    if let Some(fields) = sort_fields {
-        result = sort_nodes_by_fields(graph, result, fields);
-    }
-
-    if let Some(max) = max_nodes {
-        result.truncate(max);
+    match (sort_fields, max_nodes) {
+        // ORDER BY + LIMIT k with k < N: bounded top-K, not a full sort.
+        (Some(fields), Some(max)) if max < result.len() => {
+            result = top_k_nodes_by_fields(graph, result, fields, max);
+        }
+        (Some(fields), _) => {
+            result = sort_nodes_by_fields(graph, result, fields);
+            if let Some(max) = max_nodes {
+                result.truncate(max);
+            }
+        }
+        (None, Some(max)) => result.truncate(max),
+        (None, None) => {}
     }
 
     result
