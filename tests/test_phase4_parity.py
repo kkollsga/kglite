@@ -171,8 +171,8 @@ ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
         "81461781d5379d2ef5c755d408b985453b19e3ddf51482257234e564c23c9571",
         # Demoted from GOLDEN_V3_DIGEST when 0.10.10 took over.
         "3b6d8b6c469594f2264a56bab9ffdd331ef819c48434dad753d2175c498c6d07",
-    # Demoted from GOLDEN_V3_DIGEST when 0.10.11 took over.
-    "7d1fe3311b1e80527b6bdee2b23349394a86a2defb1d3c7f9b46ea21c4968344",
+        # Demoted from GOLDEN_V3_DIGEST when 0.10.11 took over.
+        "7d1fe3311b1e80527b6bdee2b23349394a86a2defb1d3c7f9b46ea21c4968344",
     }
 )
 
