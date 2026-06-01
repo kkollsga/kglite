@@ -1996,6 +1996,12 @@ impl<'a> CypherExecutor<'a> {
         let mut group_accumulators: Vec<InlineAccumulators> = Vec::new();
         let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
 
+        // Perf: reusable per-row scratch buffers — avoids a heap allocation per
+        // passing row for the group key and aggregate-input vectors (the inner
+        // loop's dominant cost on scan-heavy filters/aggregates).
+        let mut key_values: Vec<Value> = Vec::with_capacity(folded_group_exprs.len());
+        let mut agg_vals: Vec<Value> = Vec::with_capacity(agg_indices.len());
+
         for (scan_count, &node_idx) in node_indices.iter().enumerate() {
             // Timeout check every 10,000 iterations (matches fused_match_return pattern)
             if scan_count % 10_000 == 0 && scan_count > 0 {
@@ -2019,42 +2025,58 @@ impl<'a> CypherExecutor<'a> {
                 .expect("invariant: node_var binding inserted upstream by pattern match") =
                 node_idx;
 
-            // Check WHERE predicate (using pre-folded version for optimal evaluation)
+            // Check WHERE predicate. Use the compiled fast path when available
+            // (pre-resolved accessors, no per-row interpreter overhead);
+            // otherwise fall back to the generic evaluator.
             if let Some(pred) = folded_where_ref {
                 if !self.evaluate_predicate(pred, &eval_row).unwrap_or(false) {
                     continue;
                 }
             }
 
-            // Evaluate group key
-            let key_values: Vec<Value> = folded_group_exprs
-                .iter()
-                .map(|expr| {
+            // Evaluate group key (reuse the scratch buffer — no per-row alloc)
+            key_values.clear();
+            for expr in &folded_group_exprs {
+                key_values.push(
                     self.evaluate_expression(expr, &eval_row)
-                        .unwrap_or(Value::Null)
-                })
-                .collect();
+                        .unwrap_or(Value::Null),
+                );
+            }
 
-            // Evaluate all aggregate expressions for this node
-            let agg_vals: Vec<Value> = agg_indices
-                .iter()
-                .map(|&ai| {
-                    let item = &return_clause.items[ai];
-                    match &item.expression {
-                        Expression::FunctionCall { args, .. } => {
-                            if args.is_empty() || matches!(args[0], Expression::Star) {
-                                Value::Boolean(true) // count(*) marker — always counted
-                            } else {
-                                self.evaluate_expression(&args[0], &eval_row)
-                                    .unwrap_or(Value::Null)
-                            }
+            // Evaluate all aggregate expressions for this node (reuse buffer)
+            agg_vals.clear();
+            for &ai in &agg_indices {
+                let item = &return_clause.items[ai];
+                let v = match &item.expression {
+                    Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                    } => {
+                        if args.is_empty() || matches!(args[0], Expression::Star) {
+                            Value::Boolean(true) // count(*) marker — always counted
+                        } else if !*distinct
+                            && name.eq_ignore_ascii_case("count")
+                            && matches!(&args[0], Expression::Variable(v)
+                                if eval_row.node_bindings.get(v).is_some()
+                                    || eval_row.edge_bindings.get(v).is_some())
+                        {
+                            // count(n) over a bound node/edge variable: the binding
+                            // is always present, so this is equivalent to count(*).
+                            // Avoid materializing the full node Value (every property
+                            // cloned into a BTreeMap) per row just to test non-null.
+                            Value::Boolean(true)
+                        } else {
+                            self.evaluate_expression(&args[0], &eval_row)
+                                .unwrap_or(Value::Null)
                         }
-                        _ => self
-                            .evaluate_expression(&item.expression, &eval_row)
-                            .unwrap_or(Value::Null),
                     }
-                })
-                .collect();
+                    _ => self
+                        .evaluate_expression(&item.expression, &eval_row)
+                        .unwrap_or(Value::Null),
+                };
+                agg_vals.push(v);
+            }
 
             if let Some(&group_idx) = group_index_map.get(&key_values) {
                 // Update accumulators
@@ -2098,7 +2120,7 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 let group_idx = groups.len();
                 group_index_map.insert(key_values.clone(), group_idx);
-                groups.push((key_values, node_idx));
+                groups.push((key_values.clone(), node_idx));
 
                 // Initialize accumulators
                 let na = agg_indices.len();

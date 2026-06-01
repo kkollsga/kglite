@@ -15,6 +15,102 @@ pub(super) fn fold_or_to_in(query: &mut CypherQuery) {
     }
 }
 
+/// Collect node/edge variable names bound by a MATCH pattern.
+fn collect_match_bound_vars(m: &MatchClause, out: &mut HashSet<String>) {
+    for pattern in &m.patterns {
+        for el in &pattern.elements {
+            match el {
+                PatternElement::Node(np) => {
+                    if let Some(v) = &np.variable {
+                        out.insert(v.clone());
+                    }
+                }
+                PatternElement::Edge(ep) => {
+                    if let Some(v) = &ep.variable {
+                        out.insert(v.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `count(v)` over a *mandatorily-bound* node/edge variable equals `count(*)`:
+/// `v` is always present, so there is no need to materialize the full node/edge
+/// value per row (each property cloned into a map) just to test non-null and
+/// count it. Rewriting to `count(*)` lets the cheap count plan apply and lets
+/// the MATCH avoid retaining the variable's binding for every path — the
+/// dominant cost of deep-path counts like `… RETURN count(n5)`.
+///
+/// Guards (correctness): non-distinct `count`; single `Variable` argument; the
+/// variable is bound by a non-OPTIONAL `MATCH` and by no `OPTIONAL MATCH`
+/// (OPTIONAL can leave it NULL); and the query has no `WITH` (where the name
+/// could be re-projected as a nullable scalar). The original output column name
+/// is preserved via an explicit alias.
+pub(super) fn rewrite_count_bound_var_to_star(query: &mut CypherQuery) {
+    // Bail if any clause could reference the count expression by its original
+    // form (HAVING / ORDER BY) or re-project the variable (WITH). Restricting to
+    // a single-item terminal `RETURN count(v)` keeps the rewrite trivially safe
+    // and still covers the hot shapes (deep-path / rel-type counts).
+    if query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::With(_) | Clause::OrderBy(_)))
+    {
+        return;
+    }
+
+    let mut mandatory: HashSet<String> = HashSet::new();
+    let mut optional: HashSet<String> = HashSet::new();
+    for c in &query.clauses {
+        match c {
+            Clause::Match(m) => collect_match_bound_vars(m, &mut mandatory),
+            Clause::OptionalMatch(m) => collect_match_bound_vars(m, &mut optional),
+            _ => {}
+        }
+    }
+    if mandatory.is_empty() {
+        return;
+    }
+
+    for c in &mut query.clauses {
+        if let Clause::Return(r) = c {
+            // Single, non-DISTINCT, no-HAVING RETURN of exactly `count(v)`.
+            // (Multi-item / grouped / HAVING shapes can reference the original
+            // `count(v)` elsewhere — leave those to the generic path.)
+            if r.distinct || r.having.is_some() || r.items.len() != 1 {
+                continue;
+            }
+            let item = &mut r.items[0];
+            let rewrite_var = match &item.expression {
+                Expression::FunctionCall {
+                    name,
+                    args,
+                    distinct,
+                } if !*distinct && name.eq_ignore_ascii_case("count") && args.len() == 1 => {
+                    match &args[0] {
+                        Expression::Variable(v)
+                            if mandatory.contains(v) && !optional.contains(v) =>
+                        {
+                            Some(v.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(v) = rewrite_var {
+                if item.alias.is_none() {
+                    item.alias = Some(format!("count({})", v));
+                }
+                if let Expression::FunctionCall { args, .. } = &mut item.expression {
+                    args[0] = Expression::Star;
+                }
+            }
+        }
+    }
+}
+
 /// Recursively fold OR chains of same-property equalities into IN predicates.
 pub(super) fn fold_or_to_in_pred(pred: &Predicate) -> Predicate {
     match pred {

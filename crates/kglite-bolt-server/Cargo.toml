@@ -1,6 +1,6 @@
 [package]
 name = "kglite-bolt-server"
-version = "0.10.10"
+version = "0.10.11"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"

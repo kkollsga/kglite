@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.11] — 2026-06-01 — count(node) no longer materializes per row
+
+### Performance
+
+- **`count(node)` no longer materializes the node per row.** `count(n)` (or
+  `count(c)`, …) over a bound node/edge variable evaluated the variable each
+  row, building a full node value (every property cloned into a map) just to
+  test non-null — the dominant cost of scan-, group-, and traversal-counts. It
+  is now treated as `count(*)`. Measured on a 110k-node / 830k-edge graph
+  (in-memory): `WHERE … RETURN count(n)` filters ~4× faster, `RETURN k,
+  count(n)` group-by ~5×, reverse rel-type counts ~3.5×, and deep fixed-length
+  path counts (`…->(n5) RETURN count(n5)`) ~2× — shared across the default,
+  mapped, and disk backends. Results, column names, and `count(DISTINCT …)`
+  semantics are unchanged.
+
 ## [0.10.10] — 2026-05-30 — reserved-name papercuts + cross-mode id parity
 
 Reserved-name Cypher papercuts (KG-1/KG-2) plus a node-`id` correctness sweep

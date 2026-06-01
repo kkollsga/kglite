@@ -34,6 +34,7 @@ use rel_predicate_pushdown::extract_pushable_rel_predicates;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
     push_distinct_into_match, push_limit_into_aggregate, push_limit_into_match,
+    rewrite_count_bound_var_to_star,
 };
 
 /// Carries the per-call inputs every pass might need. Passing this once
@@ -55,6 +56,12 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// add at least one query to `tests/test_cypher_differential.py`.
 pub const PASSES: &[(&str, PassFn)] = &[
     ("optimize_nested_queries", pass_optimize_nested_queries),
+    // count(bound node/edge var) → count(*): runs early so the rewritten
+    // count(*) reaches the count-fusion + light-row MATCH paths.
+    (
+        "rewrite_count_bound_var_to_star",
+        pass_rewrite_count_bound_var_to_star,
+    ),
     ("push_where_into_match.1", pass_push_where_into_match),
     ("fold_or_to_in", pass_fold_or_to_in),
     // second push_where pass: catches IN predicates created by fold_or_to_in
@@ -343,6 +350,15 @@ fn pass_push_where_into_match(query: &mut CypherQuery, ctx: &PassCtx) {
 /// equality-set matcher.
 fn pass_fold_or_to_in(query: &mut CypherQuery, _ctx: &PassCtx) {
     fold_or_to_in(query)
+}
+
+/// **Pass:** `rewrite_count_bound_var_to_star` — rewrite non-distinct
+/// `count(v)` to `count(*)` when `v` is a mandatorily-bound node/edge variable
+/// (so always non-null). Avoids per-row node materialization and heavy binding
+/// retention on deep-path counts. WHY-BAIL: DISTINCT, OPTIONAL-bound `v`, or any
+/// `WITH` present. Column name preserved via alias.
+fn pass_rewrite_count_bound_var_to_star(query: &mut CypherQuery, _ctx: &PassCtx) {
+    rewrite_count_bound_var_to_star(query)
 }
 
 /// **Pass:** `extract_pushable_rel_predicates` — Inline edge-side

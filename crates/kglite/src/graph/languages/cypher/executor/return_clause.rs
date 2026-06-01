@@ -512,10 +512,30 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::Int64(count))
                     } else {
                         let mut count = 0i64;
-                        for row in rows {
-                            let val = self.evaluate_expression(&args[0], row)?;
-                            if !matches!(val, Value::Null) {
-                                count += 1;
+                        if let Expression::Variable(v) = &args[0] {
+                            // count(node/edge var): count rows where the binding is
+                            // present — without materializing the full node/edge
+                            // Value (every property cloned) per row, which dominates
+                            // deep-path counts like `… RETURN count(n5)`.
+                            for row in rows {
+                                if row.node_bindings.get(v).is_some()
+                                    || row.edge_bindings.get(v).is_some()
+                                {
+                                    count += 1;
+                                } else if !matches!(
+                                    self.evaluate_expression(&args[0], row)?,
+                                    Value::Null
+                                ) {
+                                    // projected scalar (WITH … AS v) — value check
+                                    count += 1;
+                                }
+                            }
+                        } else {
+                            for row in rows {
+                                let val = self.evaluate_expression(&args[0], row)?;
+                                if !matches!(val, Value::Null) {
+                                    count += 1;
+                                }
                             }
                         }
                         Ok(Value::Int64(count))
