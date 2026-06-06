@@ -1,21 +1,15 @@
 """Bolt v5 wire-protocol smoke tests against `target/release/kglite-bolt-server`.
 
-These 8 tests are the **failing-by-design contract** for Phase C of
-`bolt_implementation.md`. Each is `pytest.mark.xfail(strict=True)` and
-tagged with the Phase C sub-phase that retires it. Strict mode does two
-things:
+These 8 tests are the live happy-path contract for the Bolt server: one
+per protocol capability (handshake, scalar RUN/PULL, parameters,
+Node/Relationship/Path return, BEGIN/COMMIT/ROLLBACK, `--readonly`, auth,
+typed FAILURE codes). All Phase C sub-phases shipped, so every test now
+passes; the per-test docstrings name the capability each one exercises.
 
-1. **Every test must fail in Phase B.** The bolt-server binary boots and
-   binds a port, but every `BoltBackend` method body is
-   `unimplemented!("phase C.X ...")` — so the first real Bolt message
-   panics the connection task and the driver sees a broken pipe. The
-   driver's `verify_connectivity` raises, the test catches via `xfail`,
-   pytest reports XFAIL, the suite is green.
-
-2. **Each test must turn green on exactly its retiring sub-phase.** If
-   Phase C.2 (RUN/PULL scalars) accidentally fixes test #4 (Node return)
-   before Phase C.4 lands, strict mode flips XFAIL → XPASS → fail, and
-   CI alerts the maintainer to the surprise regression-in-reverse.
+(History: these started life as `xfail(strict=True)` stubs — the
+"failing-by-design" Phase B contract that turned green one sub-phase at a
+time as Phase C landed. Phase C is complete, the xfail marks are gone, and
+these are now ordinary smoke tests.)
 
 The suite is gated three ways:
 
@@ -39,7 +33,7 @@ neo4j = pytest.importorskip("neo4j")
 pytestmark = [pytest.mark.bolt]
 
 
-# ── The 8 tests — each xfail(strict=True), tagged to its retiring sub-phase ──
+# ── The 8 smoke tests — one per protocol capability ──
 
 
 def test_bolt_handshake_and_verify_connectivity(bolt_server):

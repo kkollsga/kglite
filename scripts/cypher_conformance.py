@@ -202,7 +202,7 @@ def main() -> int:
                 pushed_to_neo4j.add(fixture)
 
             try:
-                kg_rows = kg.cypher(query, **(params or {})).to_list()
+                kg_rows = kg.cypher(query, params=params).to_list()
                 neo4j_rows = _run_neo4j(driver, query, params)
             except Exception as e:
                 print(f"  ERROR  {name:<40}  {type(e).__name__}: {str(e)[:80]}")

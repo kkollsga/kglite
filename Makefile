@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs refresh-release-constants neo4j-up neo4j-down neo4j-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs refresh-release-constants neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -99,6 +99,14 @@ neo4j-conformance:
 	$(ACTIVATE) && pip install -q -e '.[neo4j]'
 	$(ACTIVATE) && python scripts/cypher_conformance.py \
 		--uri bolt://localhost:7687 --user neo4j --password conformance
+
+## On-demand Bolt wire round-trip check: runs the differential corpus through
+## kglite-bolt-server and compares against direct cypher(). Spawns its own
+## server on an ephemeral port — no Neo4j / Docker needed. Not part of CI.
+bolt-conformance:
+	cargo build -p kglite-bolt-server --release
+	$(ACTIVATE) && pip install -q -e '.[neo4j]'
+	$(ACTIVATE) && python scripts/bolt_conformance.py
 
 ## Fast compilation check (no codegen)
 check:

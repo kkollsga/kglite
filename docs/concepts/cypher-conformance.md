@@ -108,6 +108,33 @@ of the divergence registry is to keep the gate honest — it stops
 flagging the cases that are deliberate, so the cases that aren't
 stand out.
 
+## Bolt wire conformance
+
+There's a second, sibling runner — `scripts/bolt_conformance.py` — with a
+different oracle. Instead of diffing KGLite against Neo4j (the *spec*
+oracle), it diffs the **Bolt wire path against direct in-process
+`cypher()`**. Both sides run the same engine, so any divergence is a
+PackStream / wire round-trip bug in `kglite-bolt-server`, not a semantic
+one. Because the oracle is KGLite-in-process, **no Neo4j or Docker is
+needed** — the runner spawns its own `kglite-bolt-server` on an ephemeral
+port (reusing the launch helpers in `tests/conftest.py`), runs each corpus
+query over the `neo4j` Python driver, and compares against
+`KnowledgeGraph.cypher()`.
+
+```bash
+make bolt-conformance       # builds the binary, spawns it, runs the corpus
+```
+
+The target builds `kglite-bolt-server --release` and installs the `[neo4j]`
+extra (for the driver) on first run. Flags mirror the Neo4j runner:
+`--filter SUBSTRING`, `--verbose`. Exit code 0 if every query round-trips
+identically; 1 on any divergence.
+
+This is the on-demand companion to `tests/test_bolt_server_differential.py`,
+which runs the same corpus over the wire as part of the `-m bolt` suite —
+the script is for ad-hoc investigation when a wire-encoding bug is
+suspected.
+
 ## Why this isn't in the test suite
 
 Per the test-suite-fortification design (see

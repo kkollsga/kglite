@@ -7,14 +7,15 @@
 > Phase X of bolt_implementation.md"* and writes its detail plan
 > against the frame here.
 >
-> **Status as of 2026-05-24.** Phases A, B, C (all 6 sub-phases),
-> and the robustness pass are ✅ shipped on `main` (unpushed). Phase
-> E (Session abstraction) is ✅ shipped — the pipeline + CoW + OCC
-> all live in `kglite::api::session`, used by pyapi + mcp-server +
-> bolt-server. Phase F (3 limitation fixes) is the next plan loop;
-> limitation #1 (OCC enforcement in bolt-server) is already closed
-> by E.4. Phase D (release
-> + reference clients) follows E.
+> **Status: ✅ SHIPPED.** All phases are complete. Phases A, B, C (all 6
+> sub-phases), the robustness pass, Phase E (session abstraction), and
+> Phase F (the limitation fixes — OCC enforcement, `neo4j://` routing,
+> TLS, Neo4j-aligned `db.*` key naming) landed in the 0.10.1 line. Phase D
+> (conformance script, reference examples, docs) shipped in 0.10.14,
+> finalizing the feature. The `kglite-bolt-server` binary passes 236
+> tests. This document is retained as the design/rationale record
+> (referenced from source comments); the release history lives in
+> `CHANGELOG.md`.
 
 ## Vision
 
@@ -718,27 +719,18 @@ Three artifacts that prove ecosystem compatibility:
   Neo4j Browser at the server. Mostly just configuration, but
   proves the GUI works.
 
-### Release boundary
+### Release boundary — what actually happened
 
-- Parent `Cargo.toml` version bump (next minor — likely `0.11.0`
-  since 0.10.0 shipped Phase A and bumping for Bolt-actually-ships
-  is the contract).
-- `crates/kglite-bolt-server/Cargo.toml` bumps to `0.1.0` (first
-  user-facing release).
-- Full CHANGELOG `[0.11.0]` block summarising B + C + robustness
-  pass + Phase E + Phase F (the 3 limitation fixes) + Phase D
-  itself.
-- `ROADMAP.md` §1 flipped to ✅ Shipped, sequencing table updated,
-  this doc moves into an archive section (or is deleted, since the
-  CHANGELOG carries the record).
-
-### Ordering note
-
-Phase D's release commit should include Phase E (session
-abstraction) and Phase F (the 3 limitation fixes from the
-robustness pass) in the same `[0.11.0]` block. Both land BEFORE
-D so the release ships a clean foundation, not a duplication-laden
-one.
+The original plan assumed a single `0.11.0` minor that bundled B + C +
+robustness + E + F + D. In practice the protocol shipped piecemeal across
+the 0.10.x line — Phase E, the C.1–C.6 implementation, and Phase F (TLS,
+`neo4j://` routing, `db.*` key naming) all landed in **0.10.1** — so there
+was nothing left to bundle. Phase D (this section: conformance script,
+reference examples, docs) shipped as a patch, **0.10.14**, which finalizes
+the feature. `ROADMAP.md` §1 was flipped to shipped + the section removed;
+this doc is retained as the design record. The `kglite-bolt-server` crate
+tracks the workspace version (it never reset to `0.1.0` — it was already
+publishing on crates.io at 0.10.x).
 
 ---
 

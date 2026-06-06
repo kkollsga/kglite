@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.14] — 2026-06-06 — Bolt conformance tooling + reference examples
+
+Finalizes the Bolt server (Phase D). The protocol, robustness pass,
+session abstraction, and limitation fixes shipped earlier (see [0.10.1]);
+this patch adds the conformance oracle, reference clients, and docs that
+let us call the feature done.
+
+### Added
+
+- **`scripts/bolt_conformance.py` + `make bolt-conformance`.** On-demand
+  oracle that runs the differential corpus through `kglite-bolt-server`
+  over the wire and compares against direct in-process `cypher()` —
+  catches PackStream round-trip bugs. No Neo4j / Docker needed; it spawns
+  its own server. Documented in `docs/concepts/cypher-conformance.md`.
+- **Reference examples.** `examples/bolt_client_neo4j_python.py` (drive
+  the server with the standard `neo4j` driver) and
+  `examples/bolt_neo4j_browser.md` (point Neo4j Browser at it).
+
+### Fixed
+
+- **`scripts/cypher_conformance.py`** passed query parameters as
+  `cypher(query, **params)` instead of `cypher(query, params=...)`, so
+  the Neo4j conformance run errored on every parameterized query. Now
+  fixed (same convention the differential test harness uses).
+
 ## [0.10.13] — 2026-06-06 — mcp local-mode github repo auto-detect
 
 ### Fixed

@@ -1,8 +1,8 @@
 """Correctness coverage for kglite-bolt-server — value roundtrip,
 error paths, and edge cases.
 
-Complements `tests/test_bolt_server_smoke.py` (8 happy-path tests that
-retire the Phase B contract). This file deepens coverage of the actual
+Complements `tests/test_bolt_server_smoke.py` (8 happy-path smoke tests,
+one per protocol capability). This file deepens coverage of the actual
 wire surface:
 
 - **Value roundtrip** (15 tests): each `BoltValue` variant tested both
