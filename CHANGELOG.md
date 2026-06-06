@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.13] — 2026-06-06 — mcp local-mode github repo auto-detect
+
+### Fixed
+
+- **MCP server (local-workspace mode): `github_issues` / `github_api`
+  now auto-detect the repo from the active root's git remote.**
+  Previously, calls without an explicit `repo_name` defaulted to the
+  `local/<dir>` inventory key and 404'd, even when the active root was
+  a checkout of a real GitHub repo. Bumped `mcp-methods` to 0.3.41,
+  which derives the default from the root's `origin` remote (falling
+  back to "ask for `repo_name`" when there's no GitHub remote).
+  `github`-mode behaviour is unchanged.
+
 ## [0.10.12] — 2026-06-01 — fluent select/filter perf + count(DISTINCT) fusion
 
 ### Performance

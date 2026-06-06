@@ -3,7 +3,7 @@
 # Pure-Rust engine lives in the sibling `kglite` crate (`crates/kglite/`).
 # Polars pattern: `polars` (core) + `py-polars` (wrapper).
 name = "kglite-py"
-version = "0.10.12"
+version = "0.10.13"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 description = "PyO3 wrapper for kglite — Python bindings around the pure-Rust kglite knowledge graph engine."
@@ -78,7 +78,7 @@ kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodi
 # in `src/mcp_tools.rs`. The `server` feature pulls the framework
 # half (manifest parser + tool implementations) without any pyo3
 # dep.
-mcp-methods = { version = "0.3.40", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.3.41", default-features = false, features = ["server"] }
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
