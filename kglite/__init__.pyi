@@ -285,6 +285,7 @@ class ResultView:
       - ``for row in result`` — iterate rows as dicts (one at a time)
       - ``result.head(n)`` / ``result.tail(n)`` — first/last n rows as a new ResultView
       - ``result.to_list()`` — all rows as ``list[dict]`` (full conversion)
+      - ``result.to_dicts()`` — alias for ``to_list()`` (polars/pandas naming)
       - ``result.to_df()`` — pandas DataFrame (full conversion)
       - ``result.columns`` — column names
       - ``result.stats`` — mutation stats (CREATE/SET/DELETE queries only)
@@ -340,6 +341,15 @@ class ResultView:
 
     def to_list(self) -> list[dict[str, Any]]:
         """Convert all rows to a Python list of dicts (full materialization)."""
+        ...
+
+    def to_dicts(self) -> list[dict[str, Any]]:
+        """Alias for ``to_list()`` — all rows as a list of dicts.
+
+        Provided for callers coming from polars (``.to_dicts()``) or pandas
+        (``.to_dict(orient="records")``), where the row-wise dict accessor
+        carries this name. Identical behaviour to ``to_list()``.
+        """
         ...
 
     def to_df(self) -> pd.DataFrame:

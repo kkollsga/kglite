@@ -124,6 +124,15 @@ class TestCypherToDF:
         assert "name" in result[0]
         assert "age" in result[0]
 
+    def test_to_dicts_is_alias_of_to_list(self, small_graph):
+        result = small_graph.cypher("MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY n.age")
+        rows = result.to_dicts()
+        assert isinstance(rows, list)
+        assert all(isinstance(r, dict) for r in rows)
+        # Identical behaviour to to_list() — the polars/pandas-friendly name.
+        assert rows == result.to_list()
+        assert rows[0]["name"] == "Alice"
+
     def test_cypher_to_df_with_aggregation(self, small_graph):
         df = small_graph.cypher(
             "MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt ORDER BY cnt DESC",

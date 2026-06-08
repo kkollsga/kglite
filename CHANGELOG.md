@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ResultView.to_dicts()`** — alias for `to_list()` (returns all rows as
+  `list[dict]`). Matches the polars `.to_dicts()` name (pandas calls the
+  equivalent `.to_dict(orient="records")`), so consumers coming from either
+  library reach the right method without a coercion shim.
+
 ## [0.10.14] — 2026-06-06 — Bolt conformance tooling + reference examples
 
 Finalizes the Bolt server (Phase D). The protocol, robustness pass,

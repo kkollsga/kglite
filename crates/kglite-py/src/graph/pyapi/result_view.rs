@@ -606,6 +606,15 @@ impl ResultView {
         Ok(list.into_any().unbind())
     }
 
+    /// Alias for ``to_list()`` — materialize all rows as a list of dicts.
+    ///
+    /// Provided for callers coming from polars (``.to_dicts()``) or pandas
+    /// (``.to_dict(orient="records")``), where the row-wise dict accessor
+    /// carries this name. Identical behaviour to ``to_list()``.
+    fn to_dicts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.to_list(py)
+    }
+
     /// First *n* rows as a new ResultView (default 5). Data stays lazy.
     ///
     /// Example::

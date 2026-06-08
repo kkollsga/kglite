@@ -388,7 +388,7 @@ fn push_value_repr(out: &mut String, val: &Value) {
         }
         // Phase A.1 / C5 — collection / graph-entity variants. Render
         // as compact JSON for the MCP text surface; the structured
-        // form is already what agents consume via `to_dict()` /
+        // form is already what agents consume via `to_dicts()` /
         // `to_list()`. Falls back to `?` on serialisation failure
         // (shouldn't happen — these all derive Serialize).
         Value::List(_)
