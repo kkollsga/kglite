@@ -7,19 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.10.14] — 2026-06-08 — Bolt conformance tooling + ResultView.to_dicts() + doc clarity
 
-- **`ResultView.to_dicts()`** — alias for `to_list()` (returns all rows as
-  `list[dict]`). Matches the polars `.to_dicts()` name (pandas calls the
-  equivalent `.to_dict(orient="records")`), so consumers coming from either
-  library reach the right method without a coercion shim.
-
-## [0.10.14] — 2026-06-06 — Bolt conformance tooling + reference examples
-
-Finalizes the Bolt server (Phase D). The protocol, robustness pass,
-session abstraction, and limitation fixes shipped earlier (see [0.10.1]);
-this patch adds the conformance oracle, reference clients, and docs that
-let us call the feature done.
+Finalizes the Bolt server (Phase D) — the conformance oracle, reference
+clients, and docs that let us call the feature done. Also folds in a small
+API addition and a documentation pass driven by a downstream field report:
+most flagged items were already shipped or never broken, so the bulk of
+that work is making existing behaviour discoverable.
 
 ### Added
 
@@ -31,6 +25,10 @@ let us call the feature done.
 - **Reference examples.** `examples/bolt_client_neo4j_python.py` (drive
   the server with the standard `neo4j` driver) and
   `examples/bolt_neo4j_browser.md` (point Neo4j Browser at it).
+- **`ResultView.to_dicts()`** — alias for `to_list()` (returns all rows as
+  `list[dict]`). Matches the polars `.to_dicts()` name (pandas calls the
+  equivalent `.to_dict(orient="records")`), so consumers coming from either
+  library reach the right method without a coercion shim.
 
 ### Fixed
 
@@ -38,6 +36,19 @@ let us call the feature done.
   `cypher(query, **params)` instead of `cypher(query, params=...)`, so
   the Neo4j conformance run errored on every parameterized query. Now
   fixed (same convention the differential test harness uses).
+
+### Documentation
+
+- **`add_embeddings` surfaced for incremental ingest.** The semantic-search
+  guide now has an "Incremental ingest" section: `set_embeddings` is a full
+  replace; `add_embeddings` upserts into the existing store (no
+  read-merge-write at the call site). `set_embeddings`' docstring cross-refs it.
+- **`vector_search` hit contract documented.** Each hit carries `id`,
+  `title`, `type`, `score`, and all node properties; `score` is always
+  present (every metric); properties are read live, so a hit round-trips
+  through `save()` + reload without a follow-up id-join.
+- **`ResultView` indexing clarified.** Indexing is row-wise; there is no
+  `result["col"]` column accessor (use `to_df()["col"]` or a comprehension).
 
 ## [0.10.13] — 2026-06-06 — mcp local-mode github repo auto-detect
 
