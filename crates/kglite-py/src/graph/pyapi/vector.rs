@@ -21,6 +21,11 @@ impl KnowledgeGraph {
 
     /// Store embeddings for nodes of the given type.
     ///
+    /// **Replaces** any existing store for ``(node_type, "{text_column}_emb")``.
+    /// For incremental ingest where multiple batches must coexist, use
+    /// ``add_embeddings()`` instead (it upserts without clobbering — no
+    /// read-merge-write needed at the call site).
+    ///
     /// Args:
     ///     node_type: The node type (e.g. 'Article')
     ///     text_column: Source column name (e.g. 'summary'). Stored as '{text_column}_emb'.
@@ -263,6 +268,13 @@ impl KnowledgeGraph {
     ///     metric: Distance metric - 'cosine' (default), 'dot_product', 'euclidean', or 'poincare'.
     ///            If omitted, uses the metric stored with set_embeddings(), or 'cosine'.
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts
+    ///
+    /// Returns:
+    ///     List of dicts, each with ``id``, ``title``, ``type``, ``score``, and
+    ///     all node properties. ``score`` is always present (every metric);
+    ///     properties are read live from the node at query time, so a hit
+    ///     carries the same fields before and after save/reload — no follow-up
+    ///     join is needed to recover them.
     #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None))]
     fn vector_search(
         &self,

@@ -81,7 +81,8 @@ If you manage vectors yourself, use the low-level API:
 ### Storing Embeddings
 
 ```python
-# Explicit: pass a dict of {node_id: vector}
+# Explicit: pass a dict of {node_id: vector}.
+# set_embeddings REPLACES the whole store for ('Article', 'summary_emb').
 graph.set_embeddings('Article', 'summary', {
     1: [0.1, 0.2, 0.3, ...],
     2: [0.4, 0.5, 0.6, ...],
@@ -96,7 +97,38 @@ df = pd.DataFrame({
 graph.add_nodes(df, 'Doc', 'id', 'title', column_types={'text_emb': 'embedding'})
 ```
 
+### Incremental ingest — `add_embeddings`
+
+`set_embeddings` is a **full replace**: each call discards the existing
+store for `(node_type, '{text_column}_emb')`. When you ingest documents in
+batches — embed chunks for doc A, then doc B, then doc C — a second
+`set_embeddings` call would wipe doc A's vectors.
+
+Use `add_embeddings` for that. It **upserts** into the existing store
+(creating it on the first call), so batches coexist without a
+read-merge-write cycle in your own code:
+
+```python
+graph.add_embeddings('Chunk', 'text', {  # doc A's chunks
+    'a:1': [0.1, 0.2, ...],
+    'a:2': [0.3, 0.4, ...],
+})
+graph.add_embeddings('Chunk', 'text', {  # doc B's chunks — A's survive
+    'b:1': [0.5, 0.6, ...],
+})
+# -> {'embeddings_stored': int, 'dimension': int, 'skipped': int, 'store_created': bool}
+```
+
+Reach for `set_embeddings` only when you genuinely want to replace the
+entire store (e.g. re-embedding everything with a new model).
+
 ### Vector Search
+
+Each hit is a dict with `id`, `title`, `type`, `score`, **and all node
+properties**. `score` is always present (every metric), and properties are
+read live from the node — so a hit carries the same fields before and after
+`save()` + reload. You don't need a follow-up `MATCH ... WHERE id IN [...]`
+to recover properties.
 
 ```python
 # Basic search — returns list of dicts sorted by similarity

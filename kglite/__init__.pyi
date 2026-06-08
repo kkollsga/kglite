@@ -289,6 +289,12 @@ class ResultView:
       - ``result.to_df()`` — pandas DataFrame (full conversion)
       - ``result.columns`` — column names
       - ``result.stats`` — mutation stats (CREATE/SET/DELETE queries only)
+
+    Indexing is **row-wise**: ``result[i]`` takes an integer (or slice).
+    There is no column accessor — ``result["col"]`` is not supported (the
+    only valid string keys are the magic ``"columns"`` / ``"rows"``). For a
+    single column, use ``result.to_df()["col"]`` or
+    ``[row["col"] for row in result]``.
     """
 
     @property
@@ -3930,6 +3936,11 @@ class KnowledgeGraph:
         Returns:
             List of dicts with ``id``, ``title``, ``type``, ``score``, and all
             node properties. Or a DataFrame if ``to_df=True``.
+
+            ``score`` is always present (for every metric). Properties are read
+            live from the node at query time, so a hit carries the same fields
+            before and after ``save()`` + reload — no follow-up
+            ``MATCH ... WHERE id IN [...]`` join is needed to recover them.
 
         Example::
 

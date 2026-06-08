@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex};
 /// r.head(5)        # first 5 rows → new ResultView
 /// r.tail(5)        # last 5 rows → new ResultView
 /// r.to_list()      # all rows as list[dict]
+/// r.to_dicts()     # alias for to_list() (polars/pandas naming)
 /// r.to_df()        # pandas DataFrame
 /// r.to_gdf()       # GeoDataFrame (requires geopandas)
 /// r.stats          # mutation stats (CREATE/SET/DELETE only)
@@ -57,6 +58,10 @@ use std::sync::{Arc, Mutex};
 /// for row in r:    # iterate rows as dicts (one at a time)
 ///     print(row)
 /// ```
+///
+/// Indexing is row-wise (`r[i]` / `r[1:3]`). There is no column accessor —
+/// `r["col"]` is unsupported (only `"columns"` / `"rows"` are valid string
+/// keys). For one column use `r.to_df()["col"]` or `[row["col"] for row in r]`.
 /// Lazy row backing — set when the planner flagged a terminal RETURN as
 /// `lazy_eligible`. The executor stops short of evaluating per-row
 /// projection expressions; `LazyRows` carries the unresolved
