@@ -1,6 +1,6 @@
 # Bolt protocol — implementation plan
 
-> Umbrella plan for [`ROADMAP.md`](ROADMAP.md) §1. The Bolt
+> Umbrella plan for `ROADMAP.md` §1 (roadmap now internal). The Bolt
 > implementation decomposes into discrete phase-loops (A → B → C →
 > robustness → E → D) that are planned, implemented, and committed
 > independently. Each future plan loop opens by saying *"this is

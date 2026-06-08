@@ -1,16 +1,16 @@
 """KGLite API Benchmark — tests API compatibility, performance, and correctness
 across memory, mapped, and disk storage modes on 4 datasets.
 
-Run all modes + compare:     python bench/api_benchmark.py
-Run single mode:             python bench/api_benchmark.py disk
+Run all modes + compare:     python benchmarks/api_benchmark.py
+Run single mode:             python benchmarks/api_benchmark.py disk
 
 Ingest-measurement mode (PR0 baseline for disk-graph-improvement-plan):
     maturin develop --release         # debug builds are 7–8× slower
-    python bench/api_benchmark.py --measure-ingest
+    python benchmarks/api_benchmark.py --measure-ingest
 
 Records bytes_written + peak_rss + wall_time for three scenarios
 (one-shot, incremental-10-save, mutation-stream) on the disk backend,
-streaming results to bench/ingest_baseline.csv. This is the
+streaming results to benchmarks/ingest_baseline.csv. This is the
 measurement gate for PR1 (segmented CSR) and PR2 (edge-props off heap).
 Always use a release build — debug-mode numbers are not comparable to
 the PyPI-released baseline.
@@ -603,7 +603,7 @@ def compare(all_results):
 #
 # Captures bytes_written + peak_rss + wall_time across three scenarios
 # (one-shot, incremental, mutation-stream) on disk-backed storage.
-# Streams to bench/ingest_baseline.csv — the measurement gate PR1 and PR2
+# Streams to benchmarks/ingest_baseline.csv — the measurement gate PR1 and PR2
 # compare against. See dev-documentation/disk-graph-improvement-plan.md.
 #
 # Scenarios use a synthetic graph (500k nodes, 1M edges, 10 chunks) for
@@ -665,7 +665,7 @@ def _git_sha() -> str:
 
 
 def _append_baseline_row(row: dict) -> None:
-    """Stream one result row to bench/ingest_baseline.csv. Creates header if new."""
+    """Stream one result row to benchmarks/ingest_baseline.csv. Creates header if new."""
     new_file = not BASELINE_CSV.exists()
     with BASELINE_CSV.open("a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=BASELINE_COLUMNS)
@@ -939,7 +939,7 @@ def _run_scenario_in_subprocess(scenario: str, mode: str, dataset: str, env_extr
 
 
 def run_ingest_measurement(mode: str = "disk", dataset: str = "synth500k") -> None:
-    """Run all three ingest scenarios in isolated subprocesses, stream rows to bench/ingest_baseline.csv.
+    """Run all three ingest scenarios in isolated subprocesses, stream rows to benchmarks/ingest_baseline.csv.
 
     Each scenario runs in its own Python process so ``ru_maxrss`` (a
     high-water mark, non-decreasing) reflects only that scenario's peak.

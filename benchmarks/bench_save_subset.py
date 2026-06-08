@@ -4,7 +4,7 @@ Phase 7 of the save_subset rollout. Runs in a subprocess so peak RSS
 attribution is clean (mirrors bench_500_and_wiki.py).
 
 Usage:
-    python bench/bench_save_subset.py \\
+    python benchmarks/bench_save_subset.py \\
         --source /path/to/wiki_disk_graph \\
         --out /tmp/articles_authors.kgl \\
         [--node-type Article] \\
@@ -28,11 +28,11 @@ the in-memory baseline runs comfortably, we ship as-is.
 import argparse
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 
 def dir_size_bytes(path: str) -> int:

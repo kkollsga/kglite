@@ -21,11 +21,10 @@ protocol, no connection pool, no Docker container.
 
 **When this breaks down:** If you need multi-process access, horizontal
 scaling, or a always-on service. Use Neo4j, ArangoDB, or a similar
-server-based graph database for those cases. The
-[roadmap](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md)
-includes a Bolt-protocol server (Neo4j's wire protocol) so that
-external tools can talk to a KGLite process when they need to, without
-changing the embedded-by-default design.
+server-based graph database for those cases. KGLite ships a
+Bolt-protocol server (Neo4j's wire protocol) so that external tools can
+talk to a KGLite process when they need to, without changing the
+embedded-by-default design.
 
 ## Why an LLM-agent surface
 

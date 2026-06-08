@@ -129,7 +129,7 @@ sub.cypher(
 On the full Wikidata graph (~124 M nodes / 861 M edges), this
 extracts the ~17 M-node / 35 M-edge author/paper subgraph in a few
 minutes with bounded working set; reload of the slice is sub-second.
-See `bench/bench_save_subset.py` for the canonical perf gate.
+See `benchmarks/bench_save_subset.py` for the canonical perf gate.
 
 The streaming path requires a disk-backed source. For in-memory or
 mapped graphs, use the selection-based `KnowledgeGraph.save_subset`

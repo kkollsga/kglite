@@ -1,23 +1,23 @@
 """Disk-mode wiki benchmark across KGLite versions.
 
 Runs build / save / load / cypher against each wiki .nt.zst subset on
-disk and appends rows to ``bench/wiki_benchmark.csv`` with a ``version``
+disk and appends rows to ``benchmarks/wiki_benchmark.csv`` with a ``version``
 column so multiple versions accumulate in the same file.
 
 Usage:
     # Against whatever kglite is currently installed.
-    python bench/wiki_benchmark.py --version 0.8.11
+    python benchmarks/wiki_benchmark.py --version 0.8.11
 
     # Restrict to a subset of the datasets.
-    python bench/wiki_benchmark.py --version 0.8.11 --datasets wiki50m,wiki100m
+    python benchmarks/wiki_benchmark.py --version 0.8.11 --datasets wiki50m,wiki100m
 
 Typical multi-version invocation:
     maturin develop --release                       # build current tree
-    python bench/wiki_benchmark.py --version 0.8.11
+    python benchmarks/wiki_benchmark.py --version 0.8.11
 
     git worktree add /tmp/kg-0810 v0.8.10
     ( cd /tmp/kg-0810 && maturin develop --release )
-    cp bench/wiki_benchmark.py /tmp/kg-0810/bench/
+    cp benchmarks/wiki_benchmark.py /tmp/kg-0810/bench/   # v0.8.10 tree used bench/
     python /tmp/kg-0810/bench/wiki_benchmark.py --version 0.8.10
     git worktree remove /tmp/kg-0810 --force
 
@@ -70,7 +70,7 @@ WIKIDATA_SUBSETS = [
 
 TIMEOUT_MS = 30_000
 
-# Same Cypher suite as bench/api_benchmark.py WIKIDATA_QUERIES (kept in
+# Same Cypher suite as benchmarks/api_benchmark.py WIKIDATA_QUERIES (kept in
 # sync so per-query times are directly comparable across the two
 # benchmarks).
 #

@@ -126,10 +126,6 @@ rustworkx** when you want NetworkX's API in Rust with no query
 language. **Pick Neo4j Embedded** when you've standardised on
 server-mode Cypher and want the in-process driver for tests.
 
-> **What's coming.** The [roadmap](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md)
-> lays out where this is heading — Bolt protocol server first
-> (drop-in for any Neo4j-aware client), then bindings beyond Python.
-
 ## Quick Start
 
 ```bash
@@ -473,7 +469,7 @@ directory has runnable, self-contained artifacts:
 ## Benchmarks
 
 KGLite builds and queries Wikidata-scale graphs on a laptop. Measured
-with [`bench/wiki_benchmark.py`](https://github.com/kkollsga/kglite/blob/main/bench/wiki_benchmark.py)
+with [`benchmarks/wiki_benchmark.py`](https://github.com/kkollsga/kglite/blob/main/benchmarks/wiki_benchmark.py)
 on an M-series MacBook.
 
 **Ingest** — full pipeline from compressed N-Triples to a queryable graph:

@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 bench-bugs refresh-release-constants neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -72,10 +72,6 @@ bench-check:
 		&& BASELINE=tests/benchmarks/baselines/current$$( [ "$$(uname)" = "Linux" ] && echo ".linux" )$$( [ "$$(uname)" = "Darwin" ] && echo "" ).json \
 		&& python scripts/compare_bench.py $$BASELINE .bench-current.json \
 			--metric min --threshold 20
-
-## Run bug-path performance benchmarks (pre/post bugfix baseline)
-bench-bugs:
-	$(ACTIVATE) && python bench/benchmark_bugs.py
 
 ## Refresh the three captured constants that drift across releases:
 ## the .kgl golden digest, the binary-size baseline, and the perf

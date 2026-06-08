@@ -12,7 +12,7 @@ Loads the disk-backed Wikidata graph and runs queries across categories:
 
 Each query has a 20s timeout. Failures are recorded, not fatal.
 
-Run:  python bench/benchmark_wikidata_cypher.py
+Run:  python benchmarks/benchmark_wikidata_cypher.py
 """
 
 import csv

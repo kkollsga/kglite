@@ -10,7 +10,7 @@ Three graph tiers:
 All graphs are in-memory (storage="default"). This is the regression
 gate — in-memory must not regress.
 
-Run:  python bench/benchmark_cypher_scalability.py
+Run:  python benchmarks/benchmark_cypher_scalability.py
 """
 
 import csv

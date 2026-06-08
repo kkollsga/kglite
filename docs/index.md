@@ -29,8 +29,6 @@ in; once it's in, you query with Cypher.
 | One-file persistence | `.kgl` snapshots — copy, share, reload elsewhere |
 | Rust-embeddable | Pure-Rust core; embed without PyO3 — see [Rust track](rust/index.md) |
 
-See [`ROADMAP.md`](https://github.com/kkollsga/kglite/blob/main/ROADMAP.md) for what's next.
-
 ```{rubric} Pick your track
 ```
 
