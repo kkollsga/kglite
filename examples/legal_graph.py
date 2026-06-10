@@ -8,6 +8,9 @@ Domain: laws, regulations, court decisions, and citation relationships.
 Adapt the DataFrames to your own data source (CSV, database, API).
 """
 
+from pathlib import Path
+import tempfile
+
 import pandas as pd
 
 import kglite
@@ -111,9 +114,13 @@ graph.create_index("Law", "category")
 graph.create_range_index("CourtDecision", "date")
 graph.create_range_index("Law", "year")
 
-# -- Save ------------------------------------------------------------------
+# -- Save / load round-trip ------------------------------------------------
+# Saved to a temp dir so running the example leaves nothing behind;
+# point the path anywhere to keep the file.
 
-graph.save("legal_graph.kgl")
+kgl_path = Path(tempfile.mkdtemp(prefix="legal_graph_")) / "legal_graph.kgl"
+graph.save(str(kgl_path))
+graph = kglite.load(str(kgl_path))
 print(f"Built: {graph.schema()['node_count']} nodes, {graph.schema()['edge_count']} edges")
 
 # -- Example queries -------------------------------------------------------
