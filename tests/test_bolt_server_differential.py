@@ -39,13 +39,34 @@ pytestmark = [pytest.mark.bolt]
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 
+def _canonical_cell(value):
+    """Canonical, sortable representation of one cell.
+
+    Map key order is not part of Cypher map semantics — the direct path
+    emits BTreeMap-sorted keys while Bolt PackStream preserves a
+    different order — so dict values render as sorted-key strings
+    (mirrors `_canonical` in scripts/cypher_conformance.py). List order
+    IS semantic and is preserved (tuples recurse element-wise). Scalars
+    pass through raw so existing equality/sort semantics for plain
+    columns are untouched."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k!r}: {_canonical_cell(value[k])!r}" for k in sorted(value)) + "}"
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical_cell(v) for v in value)
+    return value
+
+
+def _canonical_row(row) -> tuple:
+    vals = row.values() if hasattr(row, "values") else row
+    return tuple(_canonical_cell(v) for v in vals)
+
+
 def _normalize_rows(rows: list) -> list:
     """Normalize a row list for comparison. The corpus's queries don't
-    all pin ordering, so we sort by repr(row) for a deterministic
-    comparison. Cell values are converted to plain Python types where
-    needed (driver returns neo4j.time.* for temporal; we don't have
-    those in the corpus today)."""
-    return sorted([tuple(row.values()) if hasattr(row, "values") else tuple(row) for row in rows])
+    all pin ordering, so we sort canonicalised rows for a deterministic
+    comparison (dict-valued cells are not orderable raw — see
+    `_canonical_cell`)."""
+    return sorted(_canonical_row(row) for row in rows)
 
 
 def _direct_run(query: str, params: dict | None, fixture_name: str) -> list:
@@ -59,15 +80,7 @@ def _direct_run(query: str, params: dict | None, fixture_name: str) -> list:
     else:
         pytest.skip(f"differential corpus uses unknown fixture: {fixture_name}")
     result = graph.cypher(query, params=params)
-    # ResultView → list of tuples via iteration.
-    rows = []
-    for row in result:
-        # row is a dict-like or list-like; normalize to a tuple of values
-        if hasattr(row, "values"):
-            rows.append(tuple(row.values()))
-        else:
-            rows.append(tuple(row))
-    return sorted(rows)
+    return _normalize_rows(list(result))
 
 
 def _bolt_run(url: str, query: str, params: dict | None) -> list:
@@ -78,8 +91,8 @@ def _bolt_run(url: str, query: str, params: dict | None) -> list:
                 result = session.run(query)
             else:
                 result = session.run(query, **params)
-            rows = [tuple(record.values()) for record in result]
-    return sorted(rows)
+            rows = [dict(record) for record in result]
+    return _normalize_rows(rows)
 
 
 # ─── Fixture pools (one bolt-server per fixture name; session-scoped) ──────
