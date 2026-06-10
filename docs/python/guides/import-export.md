@@ -20,6 +20,41 @@ graph.export('my_graph.csv', format='csv')           # creates _nodes.csv + _edg
 graphml_string = graph.export_string(format='graphml')
 ```
 
+## NetworkX Interop
+
+Round-trip with [NetworkX](https://networkx.org/) for graph algorithms.
+KGLite is a directed multigraph with typed nodes/edges, so the lossless
+target is `networkx.MultiDiGraph`: each node's `id` is the networkx node
+key (with `node_type`, `title`, and every property as node attributes),
+and each edge's `connection_type` is the edge key (so parallel edges of
+different types between the same pair stay distinct).
+
+Requires the `networkx` extra: `pip install kglite[networkx]`.
+
+```python
+import networkx as nx
+
+# Export, run an algorithm, write the scores back.
+nxg = graph.to_networkx()              # -> nx.MultiDiGraph
+scores = nx.pagerank(nxg)               # {node_id: rank} (pagerank needs scipy)
+
+import pandas as pd
+df = pd.DataFrame(
+    [{'id': nid, 'pagerank': rank} for nid, rank in scores.items()]
+)
+# Update existing nodes in place (matched by id), or with Cypher SET:
+graph.add_nodes(df, 'Person', 'id', conflict_handling='update')
+# graph.cypher("MATCH (n) WHERE n.id = $id SET n.pagerank = $r", ...)
+
+# Import a plain networkx graph (defaults applied where attrs are absent).
+g2 = kglite.from_networkx(nxg, default_node_type='Node', default_edge_type='RELATED')
+```
+
+`from_networkx()` accepts `Graph` / `DiGraph` / `MultiGraph` /
+`MultiDiGraph`; undirected edges become a single directed edge each.
+`to_networkx()` exports the full graph (the active selection is ignored
+in v1).
+
 ## Subgraph Extraction
 
 ```python

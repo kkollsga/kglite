@@ -50,6 +50,11 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
+# NetworkX interop: `KnowledgeGraph.to_networkx()` /
+# `kglite.from_networkx()`. Optional — networkx is never imported at
+# module load. `from_networkx` also uses pandas (already required by the
+# DataFrame loaders), so only networkx is declared here.
+networkx = ["networkx>=3.0"]
 # Semantic search via `text_score()` and the manifest-declared
 # `extensions.embedder`. Heavy install (~100 MB) because of
 # fastembed → onnxruntime + tokenizers + pillow + huggingface-hub —

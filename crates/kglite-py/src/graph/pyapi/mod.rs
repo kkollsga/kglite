@@ -13,6 +13,7 @@ pub mod kg_core;
 pub mod kg_fluent;
 pub mod kg_introspection;
 pub mod kg_mutation;
+pub mod networkx;
 pub mod result_view;
 pub mod spatial;
 pub mod timeseries;

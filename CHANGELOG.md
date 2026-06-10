@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **NetworkX interop.** `KnowledgeGraph.to_networkx()` exports the graph
+  as a lossless `nx.MultiDiGraph` (node key = node id; `node_type`,
+  `title`, and all properties as attributes; `connection_type` as the
+  edge key, so parallel typed edges stay distinct), and
+  `kglite.from_networkx(nx_graph, *, default_node_type='Node',
+  default_edge_type='RELATED')` builds a graph from any
+  Graph/DiGraph/MultiGraph/MultiDiGraph via the bulk DataFrame fast
+  paths. Round-trips preserve ids, types, titles, node/edge properties,
+  and parallel typed edges; undirected edges become one directed edge.
+  `networkx` stays optional — `pip install 'kglite[networkx]'`; a clear
+  ImportError points there when it's missing. 10k nodes / 30k edges
+  round-trip in ~0.15 s.
+
 - **Cypher: trigonometry + UUID + local-temporal functions.**
   `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2(y, x)` /
   `cot` / `haversin` / `degrees` / `radians` (null/non-numeric → null,

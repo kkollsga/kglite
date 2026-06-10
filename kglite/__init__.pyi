@@ -533,6 +533,42 @@ def from_blueprint(
     """
     ...
 
+def from_networkx(
+    nx_graph: Any,
+    *,
+    default_node_type: str = "Node",
+    default_edge_type: str = "RELATED",
+) -> KnowledgeGraph:
+    """Build a :class:`KnowledgeGraph` from a ``networkx`` graph.
+
+    Accepts ``Graph`` / ``DiGraph`` / ``MultiGraph`` / ``MultiDiGraph``.
+    Undirected edges become a single directed edge each. Nodes carrying a
+    ``node_type`` attribute (as produced by :meth:`KnowledgeGraph.to_networkx`)
+    are grouped by that type, the networkx node key becomes the node ``id``,
+    and a ``title`` attribute becomes the title (otherwise the id is used).
+    Edges carrying a ``connection_type`` attribute (or, for a
+    ``MultiDiGraph``, the edge key) use it as the edge type. Plain networkx
+    graphs get ``default_node_type`` / ``default_edge_type``.
+
+    Requires ``networkx`` and ``pandas``: ``pip install networkx pandas``.
+
+    Args:
+        nx_graph: A networkx graph instance.
+        default_node_type: Node type for nodes lacking a ``node_type`` attr.
+        default_edge_type: Edge type for edges lacking a ``connection_type`` attr.
+
+    Returns:
+        A new :class:`KnowledgeGraph`.
+
+    Example::
+
+        import kglite, networkx as nx
+
+        nxg = nx.karate_club_graph()
+        g = kglite.from_networkx(nxg)
+    """
+    ...
+
 def to_neo4j(
     graph: KnowledgeGraph,
     uri: str,
@@ -3185,6 +3221,37 @@ class KnowledgeGraph:
         Args:
             format: Export format.
             selection_only: Export only selected nodes.
+        """
+        ...
+
+    def to_networkx(self) -> Any:
+        """Convert the graph to a :class:`networkx.MultiDiGraph`.
+
+        KGLite is a directed multigraph with typed nodes and edges, so
+        ``MultiDiGraph`` is the lossless target. Each node's ``id`` is the
+        networkx node key; ``node_type``, ``title`` and every property are
+        attached as node attributes. Each edge's ``connection_type`` is the
+        networkx edge key (so parallel edges of different types between the
+        same pair stay distinct) and is also stored as the
+        ``connection_type`` edge attribute alongside every edge property.
+
+        The inverse is :func:`kglite.from_networkx`.
+
+        Requires the ``networkx`` package: ``pip install networkx``.
+
+        Returns:
+            A ``networkx.MultiDiGraph`` mirroring the full graph.
+
+        Note:
+            v1 always exports the full graph; the active selection is
+            ignored. A future revision may honour selections.
+
+        Example::
+
+            import networkx as nx
+
+            nxg = graph.to_networkx()
+            scores = nx.pagerank(nxg)
         """
         ...
 

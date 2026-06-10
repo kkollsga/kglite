@@ -138,6 +138,27 @@ def repo_tree(
     return _repo_tree(repo, **kwargs)
 
 
+def from_networkx(
+    nx_graph,
+    *,
+    default_node_type: str = "Node",
+    default_edge_type: str = "RELATED",
+) -> "KnowledgeGraph":
+    """Build a :class:`KnowledgeGraph` from a ``networkx`` graph.
+
+    Convenience re-export of :func:`kglite.networkx_interop.from_networkx`.
+    The inverse is :meth:`KnowledgeGraph.to_networkx`.
+    Requires the ``networkx`` package: ``pip install networkx``.
+    """
+    from .networkx_interop import from_networkx as _from_networkx
+
+    return _from_networkx(
+        nx_graph,
+        default_node_type=default_node_type,
+        default_edge_type=default_edge_type,
+    )
+
+
 def to_neo4j(
     graph: "KnowledgeGraph",
     uri: str,
@@ -164,6 +185,7 @@ __all__ = [
     "from_blueprint",
     "repo_tree",
     "to_neo4j",
+    "from_networkx",
     "Agg",
     "Spatial",
     # Phase A.2 / C1 — typed exception classes. See
