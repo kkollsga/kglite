@@ -38,6 +38,23 @@ segment artifacts into a top-level `disk_graph_meta.json` so
 data that's too big to keep on the heap; they're not "faster"
 backends. For Wikidata-scale workflows, see {doc}`guides/datasets`.
 
+### Choosing a storage mode
+
+Start in-memory — it is the core product and the fastest path for
+everything that fits in RAM. Reach for `mapped` only when the graph
+stops fitting comfortably on the heap, and for `disk` only at the
+Wikidata scale where you want the OS to page data in lazily.
+
+| If your graph is… | …and you want | Use |
+|---|---|---|
+| Up to a few million nodes | Lowest latency, simplest setup | **memory** (default) |
+| Large but you still query it interactively | RAM headroom without giving up typed-lookup speed | **mapped** |
+| 100 M+ nodes / won't fit in RAM | Lazy, page-on-demand access to a huge graph | **disk** |
+
+When in doubt, stay in-memory; switch only once you hit a real RAM
+ceiling. Both larger-than-RAM modes keep the identical Python and
+Cypher API, so moving up is a one-line constructor change.
+
 ## Return Types
 
 All node-related methods use a consistent key order: **`type`, `title`, `id`**, then other properties.

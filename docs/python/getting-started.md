@@ -80,6 +80,10 @@ Cypher → save. {doc}`guides/data-loading` covers conflict handling
 (`update` / `replace` / `skip` / `preserve` / `sum`), incremental
 loads, hierarchies, and N-Triples / CSV ingest.
 
+For a runnable, self-contained version of this loop starting from real
+CSV files, see
+[`examples/csv_to_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/csv_to_graph.py).
+
 ### Ad-hoc inserts
 
 For interactive tinkering or single-node tweaks, plain Cypher works:

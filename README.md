@@ -182,6 +182,9 @@ loaded = kglite.load("my_graph.kgl")
 [Cypher reference](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html) ·
 [API reference](https://kglite.readthedocs.io/en/latest/autoapi/kglite/index.html).**
 
+Prefer a runnable file? [`examples/csv_to_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/csv_to_graph.py)
+loads real CSVs end to end.
+
 ## Serve it to an agent
 
 Three levels of effort, three levels of capability.
@@ -449,6 +452,12 @@ directory has runnable, self-contained artifacts:
   — annotated workspace-mode manifest for the github-clone-tracker
   pattern. Walked through in the
   [workspace manifest example](https://kglite.readthedocs.io/en/latest/python/examples/manifest_workspace.html).
+- **[`csv_to_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/csv_to_graph.py)**
+  — minimal `pd.read_csv` → `add_nodes` / `add_connections` walkthrough
+  on a tiny org chart, with a few Cypher queries. The fastest way in.
+- **[`incremental_update.py`](https://github.com/kkollsga/kglite/blob/main/examples/incremental_update.py)**
+  — merge a second data snapshot into an existing graph with
+  `add_nodes(conflict_handling='update')`.
 - **[`legal_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/legal_graph.py)**
   — end-to-end `add_nodes` / `add_connections` from pandas DataFrames,
   covering laws, regulations, court decisions with citation edges.
@@ -514,6 +523,7 @@ Quick reference. Each links into the appropriate guide.
 | **[Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
 | **[AI integration](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
 | **[Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
+| **[Bundled datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html)** | Fetch-build-cache wrappers for public sources — SEC EDGAR filings, Wikidata, Sodir (Norwegian Offshore Directorate) — each returns a queryable `KnowledgeGraph` |
 
 ## Documentation
 
@@ -552,6 +562,18 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 ## Requirements
 
 Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+
+## Stability
+
+KGLite is `v0.10.x` (Beta), versioned under [SemVer](https://semver.org/).
+The Python API surface and the supported Cypher dialect have been
+largely stable across the `0.9` → `0.10` line; the occasional breaking
+change (e.g. the `0.10.10` node-id semantics unification) is called out
+prominently in the changelog. The Beta label reflects API maturity, not
+engine reliability — the storage and query engine are covered by parity
+oracles and a differential Cypher corpus on every change. Deprecations
+and breaking changes are announced in
+[CHANGELOG.md](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md).
 
 ## License
 
