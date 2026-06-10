@@ -6,6 +6,7 @@
 //! keep storage caches coherent.
 
 pub mod batch;
+pub mod extend;
 pub mod maintain;
 pub mod set_ops;
 pub mod subgraph;

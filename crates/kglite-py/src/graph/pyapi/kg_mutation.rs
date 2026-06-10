@@ -490,6 +490,32 @@ fn build_node_report_dict<'py>(
     Ok(report_dict.into())
 }
 
+/// Build the report dict returned by `extend`. Mirrors the
+/// `build_node_report_dict` style (snake_case count keys + `has_errors`
+/// + optional `errors`) so users see a familiar shape.
+fn build_extend_report_dict<'py>(
+    py: Python<'py>,
+    result: &crate::graph::mutation::extend::ExtendReport,
+) -> PyResult<Py<PyAny>> {
+    let d = PyDict::new(py);
+    d.set_item("operation", "extend")?;
+    d.set_item("nodes_created", result.nodes_created)?;
+    d.set_item("nodes_updated", result.nodes_updated)?;
+    d.set_item("nodes_skipped", result.nodes_skipped)?;
+    d.set_item("edges_created", result.edges_created)?;
+    d.set_item("edges_skipped", result.edges_skipped)?;
+    d.set_item("node_types_merged", result.node_types_merged)?;
+    d.set_item("connection_types_merged", result.connection_types_merged)?;
+    d.set_item("labels_unioned", result.labels_unioned)?;
+    d.set_item("processing_time_ms", result.processing_time_ms)?;
+    let has_errors = !result.errors.is_empty() || result.nodes_skipped > 0;
+    if !result.errors.is_empty() {
+        d.set_item("errors", &result.errors)?;
+    }
+    d.set_item("has_errors", has_errors)?;
+    Ok(d.into())
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     #[new]
@@ -635,6 +661,120 @@ impl KnowledgeGraph {
         self.add_report(OperationReport::NodeOperation(result.clone()));
 
         Python::attach(|py| build_node_report_dict(py, &result))
+    }
+
+    /// Merge another KnowledgeGraph into this one, in place.
+    ///
+    /// A native alternative to round-tripping through CSV export/import
+    /// when building a graph incrementally from multiple sources (or
+    /// merging two ``.kgl`` files loaded into memory). The *other* graph
+    /// is read-only and never mutated.
+    ///
+    /// Semantics
+    /// ---------
+    /// - **Node identity** is ``(node_type, id)`` — the same key the id
+    ///   index uses. ``id`` is the canonical integer node id in every
+    ///   storage mode. When a node in ``other`` matches an existing node
+    ///   here, the conflict is resolved by ``conflict_handling`` (same
+    ///   vocabulary as ``add_nodes``):
+    ///
+    ///   - ``'update'`` (default) — merge properties, ``other`` wins on
+    ///     conflicts; title is overwritten.
+    ///   - ``'replace'`` — replace all properties and title with
+    ///     ``other``'s.
+    ///   - ``'skip'`` — leave the existing node untouched.
+    ///   - ``'preserve'`` — merge properties, existing values win;
+    ///     title kept unless currently null.
+    ///   - ``'sum'`` — adds numeric property values on **edges**; for
+    ///     **node** properties it acts as ``update`` (matches
+    ///     ``ConflictHandling::Sum`` in ``add_nodes`` / ``add_connections``).
+    ///
+    /// - **Secondary labels** (multi-label, since 0.10.5) are *unioned*
+    ///   onto the matched/created node — never removed. Idempotent.
+    /// - **Property schemas** merge: a property present in ``other`` but
+    ///   not here extends this graph's type schema (same path
+    ///   ``add_nodes`` uses for new columns).
+    /// - **Edges** dedup on ``(connection_type, source, target)``: an
+    ///   edge that already exists here is **not** duplicated — its
+    ///   properties merge per ``conflict_handling``. Exact-duplicate
+    ///   edges present in both graphs are therefore created once, not
+    ///   twice. (This is stricter than petgraph's raw parallel-edge
+    ///   capability, mirroring ``add_connections``' dedup so a merge
+    ///   never silently doubles shared edges.)
+    ///
+    /// Scope limits (v1)
+    /// -----------------
+    /// - **In-memory only.** Both graphs must use the default in-memory
+    ///   storage; ``storage='mapped'`` / ``'disk'`` graphs raise an
+    ///   error suggesting the export/import path.
+    /// - **Embeddings are NOT merged.** If ``other`` has any embedding
+    ///   stores a warning is emitted — re-run ``set_embeddings`` /
+    ///   ``add_embeddings`` after the merge to rebuild them here.
+    /// - **Self-extend** (``g.extend(g)``) is a deliberate no-op for
+    ///   creation: every node/edge already matches itself, so the result
+    ///   is property-merge-against-self (a no-op under every mode but
+    ///   ``replace``, which rewrites each node with its own values).
+    ///   Reported as 0 created, N updated.
+    /// - **Locks.** Like ``add_nodes`` / ``add_connections``, this bulk
+    ///   path does not consult ``schema_locked`` / ``read_only`` (those
+    ///   gate the Cypher write path only).
+    ///
+    /// Args:
+    ///     other: KnowledgeGraph to merge into this one (read-only).
+    ///     conflict_handling: 'update' (default), 'replace', 'skip',
+    ///         'preserve', or 'sum'.
+    ///
+    /// Returns:
+    ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
+    ///     'edges_created', 'edges_skipped', 'node_types_merged',
+    ///     'connection_types_merged', 'labels_unioned',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    #[pyo3(signature = (other, conflict_handling=None))]
+    fn extend(
+        &mut self,
+        other: &Bound<'_, KnowledgeGraph>,
+        conflict_handling: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+
+        // Clone the source's Arc<DirGraph> up front and release the
+        // borrow, keeping the source strictly read-only. `g.extend(g)`
+        // (self-extend) hits the `&mut self` borrow already held by this
+        // call, so `try_borrow` fails — fall back to cloning self's own
+        // Arc. Either way `source_arc` keeps the original DirGraph alive,
+        // so the `Arc::make_mut` inside `get_graph_mut` clones on the
+        // self-extend path: we read the original and write a fresh copy.
+        let source_arc = match other.try_borrow() {
+            Ok(other_ref) => Arc::clone(&other_ref.inner),
+            Err(_) => Arc::clone(&self.inner),
+        };
+
+        // Surface the embedding-store limitation before mutating.
+        if !source_arc.embeddings.is_empty() {
+            let store_count = source_arc.embeddings.len();
+            let msg = format!(
+                "extend: the source graph has {} embedding store(s) which are NOT merged. \
+                 Re-run set_embeddings()/add_embeddings() on the merged graph to rebuild them.",
+                store_count
+            );
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+            let _ = PyErr::warn(
+                py,
+                py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                cmsg.as_c_str(),
+                1,
+            );
+        }
+
+        let graph = get_graph_mut(&mut self.inner);
+        let result =
+            crate::graph::mutation::extend::extend_graph(graph, &source_arc, conflict_handling)
+                .map_err(|e: String| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
+
+        self.selection.clear();
+        build_extend_report_dict(py, &result)
     }
 
     /// Add connections (edges) between existing nodes.

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`KnowledgeGraph.extend(other, conflict_handling='update')`.** Merge
+  another in-memory graph in place — multi-source ingest no longer
+  round-trips through CSV. Nodes match on `(node_type, id)` and resolve
+  per the same `conflict_handling` vocabulary as `add_nodes`
+  (`update` / `replace` / `skip` / `preserve` / `sum`); property schemas
+  extend automatically; secondary labels union; edges dedup on
+  `(connection_type, src, tgt)` with property merge (mirroring
+  `add_connections`); id/title field-aliases carry over for new types.
+  Returns an `add_nodes`-style report dict. The source graph is never
+  mutated; embedding stores are not merged (a warning points at
+  `set_embeddings`/`add_embeddings`); v1 requires in-memory `Default`
+  storage on both sides. 50k-into-50k with 50% overlap merges in ~21 ms.
+
 - **NetworkX interop.** `KnowledgeGraph.to_networkx()` exports the graph
   as a lossless `nx.MultiDiGraph` (node key = node id; `node_type`,
   `title`, and all properties as attributes; `connection_type` as the

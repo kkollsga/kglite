@@ -788,6 +788,7 @@ pub(super) fn write_fluent_overview(xml: &mut String) {
     xml.push_str("  <group name=\"loading\">\n");
     xml.push_str("    <method sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, timeseries=None)\">Load nodes from DataFrame.</method>\n");
     xml.push_str("    <method sig=\"add_connections(df, conn_type, source_type, source_id, target_type, target_id)\">Load edges from DataFrame.</method>\n");
+    xml.push_str("    <method sig=\"extend(other, conflict_handling='update')\">Merge another in-memory KnowledgeGraph into this one in place (node identity (type,id); unions secondary labels; dedups edges on (type,src,tgt)). Returns a report dict.</method>\n");
     xml.push_str("    <method sig=\"kglite.from_blueprint(path, verbose=False)\">Build graph from JSON blueprint + CSVs.</method>\n");
     xml.push_str("  </group>\n");
 

@@ -875,6 +875,83 @@ class KnowledgeGraph:
         """
         ...
 
+    def extend(
+        self,
+        other: "KnowledgeGraph",
+        conflict_handling: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Merge another KnowledgeGraph into this one, in place.
+
+        A native alternative to round-tripping through CSV export/import when
+        building a graph incrementally from multiple sources (or merging two
+        ``.kgl`` files loaded into memory). The *other* graph is read-only and
+        never mutated. Both graphs must use the default in-memory storage.
+
+        Example::
+
+            g1 = kglite.load('source_a.kgl')
+            g2 = kglite.load('source_b.kgl')
+            report = g1.extend(g2)              # g2 folded into g1 in place
+            report = g1.extend(g2, 'preserve')  # existing g1 values win
+
+        Semantics:
+
+        - **Node identity** is ``(node_type, id)`` — the key the id index
+          uses. ``id`` is the canonical integer node id in every storage mode.
+          When a node in *other* matches an existing node here, the conflict is
+          resolved by ``conflict_handling`` (same vocabulary as ``add_nodes``):
+
+          - ``'update'`` (default) — merge properties, *other* wins on
+            conflicts; title is overwritten.
+          - ``'replace'`` — replace all properties and the title with
+            *other*'s.
+          - ``'skip'`` — leave the existing node untouched.
+          - ``'preserve'`` — merge properties, existing values win; title kept
+            unless currently null.
+          - ``'sum'`` — adds numeric property values on **edges**; for
+            **node** properties it acts as ``update`` (matches
+            ``add_nodes`` / ``add_connections`` ``'sum'`` semantics).
+
+        - **Secondary labels** (multi-label, since 0.10.5) are *unioned* onto
+          the matched/created node — never removed. Idempotent.
+        - **Property schemas** merge: a property present in *other* but not
+          here extends this graph's type schema (the same path ``add_nodes``
+          uses for new columns).
+        - **Edges** dedup on ``(connection_type, source, target)``: an edge
+          that already exists here is **not** duplicated — its properties merge
+          per ``conflict_handling``. Exact-duplicate edges present in both
+          graphs are created once, not twice (mirrors ``add_connections``'
+          dedup so a merge never silently doubles shared edges).
+
+        Scope limits (v1):
+
+        - **In-memory only.** Both graphs must use the default in-memory
+          storage; ``storage='mapped'`` / ``'disk'`` graphs raise an error
+          suggesting the export/import path.
+        - **Embeddings are NOT merged.** If *other* has any embedding stores a
+          warning is emitted — re-run ``set_embeddings`` / ``add_embeddings``
+          after the merge to rebuild them here.
+        - **Self-extend** (``g.extend(g)``) is a no-op for creation: every
+          node/edge already matches itself, so the result is a property merge
+          against self (a no-op under every mode but ``'replace'``).
+        - **Locks.** Like ``add_nodes`` / ``add_connections``, this bulk path
+          does not consult ``schema_locked`` / ``read_only`` (those gate the
+          Cypher write path only).
+
+        Args:
+            other: KnowledgeGraph to merge into this one (read-only).
+            conflict_handling: 'update' (default), 'replace', 'skip',
+                'preserve', or 'sum'.
+
+        Returns:
+            Operation report dict with ``nodes_created``, ``nodes_updated``,
+            ``nodes_skipped``, ``edges_created``, ``edges_skipped``,
+            ``node_types_merged``, ``connection_types_merged``,
+            ``labels_unioned``, ``processing_time_ms``, ``has_errors``, and
+            optionally ``errors``.
+        """
+        ...
+
     def add_nodes_bulk(self, nodes: list[dict[str, Any]]) -> dict[str, int]:
         """Add multiple node types at once.
 
