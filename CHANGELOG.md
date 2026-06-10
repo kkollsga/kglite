@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite-mcp-server` no longer refuses to boot on a default install.**
+  The startup dependency check demanded `fastembed`, which belongs to the
+  opt-in `[embed]` extra — so a plain `pip install kglite` (without
+  `[embed]`) exited at launch with advice to install a `[mcp]` extra that
+  no longer exists. The boot check now verifies only the deps that ship
+  in the default install (`mcp`, `pyyaml`, `aiohttp`, `watchdog`), and
+  the embedder paths (fastembed + bge-m3) raise an actionable
+  `pip install 'kglite[embed]'` error at point of use instead.
+
+### Documentation
+
+- **Removed instructions to install nonexistent extras.** Getting-started,
+  the MCP server guide, the code-tree guide, CONTRIBUTING, and the
+  conformance doc all still told users to `pip install 'kglite[mcp]'` /
+  `'kglite[code-tree]'` — neither extra exists (the MCP server runtime is
+  in the default install since 0.9.41; tree-sitter grammars are bundled).
+  Docs now point at plain `pip install kglite` and surface the real
+  `[embed]` / `[neo4j]` extras.
+
 ## [0.10.14] — 2026-06-08 — Bolt conformance tooling + ResultView.to_dicts() + doc clarity
 
 Finalizes the Bolt server (Phase D) — the conformance oracle, reference

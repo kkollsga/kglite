@@ -78,9 +78,16 @@ class BgeM3Embedder:
         with self._lock:
             if self._session is not None:
                 return
-            from huggingface_hub import hf_hub_download
-            import onnxruntime as ort
-            from tokenizers import Tokenizer
+            try:
+                from huggingface_hub import hf_hub_download
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
+            except ImportError as e:
+                raise SystemExit(
+                    "The manifest declares a bge-m3 `extensions.embedder`, "
+                    "which requires the [embed] extra. Install with:\n"
+                    "  pip install 'kglite[embed]'"
+                ) from e
 
             # Materialise model + external data + tokenizer into the
             # shared cache. hf_hub_download is idempotent — re-running

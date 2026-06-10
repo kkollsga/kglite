@@ -51,7 +51,14 @@ class FastEmbedAdapter:
 
     def load(self) -> None:
         if self._inner is None:
-            from fastembed import TextEmbedding
+            try:
+                from fastembed import TextEmbedding
+            except ImportError as e:
+                raise SystemExit(
+                    "The manifest declares an `extensions.embedder`, which "
+                    "requires the [embed] extra. Install with:\n"
+                    "  pip install 'kglite[embed]'"
+                ) from e
 
             self._inner = TextEmbedding(model_name=self._model_name)
 

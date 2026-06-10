@@ -52,15 +52,19 @@ def main() -> None:
 
 
 def _check_extras() -> None:
-    """Verify the `mcp` extras are installed. Without them the server
-    can't function; without a clear error, users hit confusing
-    `ModuleNotFoundError` deep in the stack."""
+    """Verify the server's runtime deps are installed. They ship with
+    the default `pip install kglite` (0.9.41+); without a clear error,
+    users hit confusing `ModuleNotFoundError` deep in the stack.
+
+    `fastembed` is deliberately NOT checked here — it belongs to the
+    opt-in `[embed]` extra and is only needed when the manifest declares
+    an `extensions.embedder`. The embedder import path raises its own
+    actionable error at point of use."""
     missing = []
     for mod, pkg in [
         ("mcp", "mcp"),
         ("yaml", "pyyaml"),
         ("aiohttp", "aiohttp"),
-        ("fastembed", "fastembed"),
         ("watchdog", "watchdog"),
     ]:
         try:
@@ -69,8 +73,9 @@ def _check_extras() -> None:
             missing.append(pkg)
     if missing:
         raise SystemExit(
-            "kglite-mcp-server requires the MCP extras. Install with:\n"
-            f"  pip install 'kglite[mcp]'\n"
+            "kglite-mcp-server is missing runtime dependencies that ship\n"
+            "with the default install (kglite 0.9.41+). Reinstall with:\n"
+            "  pip install --upgrade kglite\n"
             f"Missing packages: {', '.join(missing)}"
         )
 
