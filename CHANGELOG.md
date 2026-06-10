@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ResultView.one()` / `.scalar()` / `.column(name)`.** The three most
+  common result shapes get first-class accessors: `one()` returns the
+  first row as a dict (or `None`), `scalar()` the first cell by `RETURN`
+  order (or `None`) — `g.cypher("… RETURN count(n)").scalar()` — and
+  `column(name)` one named column as a plain list without a DataFrame
+  round-trip (`KeyError` listing available columns on a miss). All three
+  materialize only what they return; row indexing stays integer-only.
+- **`KnowledgeGraph.exists(node_type, unique_id) -> bool`.** O(1)
+  existence check via the same id-index as `node()`, with identical
+  id-coercion semantics — replaces the `node(...) is not None` idiom
+  without materializing the node.
+
 ### Fixed
 
 - **Map subscript by string key works.** `{x: 1}['x']`,

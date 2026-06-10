@@ -50,6 +50,9 @@ use std::sync::{Arc, Mutex};
 /// r.tail(5)        # last 5 rows → new ResultView
 /// r.to_list()      # all rows as list[dict]
 /// r.to_dicts()     # alias for to_list() (polars/pandas naming)
+/// r.one()          # first row as dict, or None if empty
+/// r.scalar()       # first column of first row, or None if empty
+/// r.column("n.age")# all values for one column as a list
 /// r.to_df()        # pandas DataFrame
 /// r.to_gdf()       # GeoDataFrame (requires geopandas)
 /// r.stats          # mutation stats (CREATE/SET/DELETE only)
@@ -59,9 +62,10 @@ use std::sync::{Arc, Mutex};
 ///     print(row)
 /// ```
 ///
-/// Indexing is row-wise (`r[i]` / `r[1:3]`). There is no column accessor —
-/// `r["col"]` is unsupported (only `"columns"` / `"rows"` are valid string
-/// keys). For one column use `r.to_df()["col"]` or `[row["col"] for row in r]`.
+/// Indexing is row-wise (`r[i]` / `r[1:3]`); `r["col"]` is unsupported (only
+/// `"columns"` / `"rows"` are valid string keys). For a single column use the
+/// explicit accessor `r.column("col")` (returns a `list`), or `r.scalar()` /
+/// `r.one()` for the first cell / first row of small results.
 /// Lazy row backing — set when the planner flagged a terminal RETURN as
 /// `lazy_eligible`. The executor stops short of evaluating per-row
 /// projection expressions; `LazyRows` carries the unresolved
@@ -618,6 +622,96 @@ impl ResultView {
     /// carries this name. Identical behaviour to ``to_list()``.
     fn to_dicts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.to_list(py)
+    }
+
+    /// First row as a dict, or None if the result is empty.
+    ///
+    /// Does not materialize the whole result set — only the first row is
+    /// converted (the same row-materialization path as ``r[0]``).
+    ///
+    /// Example::
+    ///
+    /// ```text
+    /// row = g.cypher("MATCH (n:Person {id: 1}) RETURN n.name, n.age").one()
+    /// # {'n.name': 'Alice', 'n.age': 30}  or  None if no match
+    /// ```
+    fn one(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.effective_len() == 0 {
+            return Ok(py.None());
+        }
+        self.row_to_py(py, 0)
+    }
+
+    /// First column of the first row, or None if the result is empty.
+    ///
+    /// The "first column" is decided by the query's ``RETURN`` order (the
+    /// same order as ``columns``). Convenient for aggregate queries::
+    ///
+    /// ```text
+    /// n = g.cypher("MATCH (n:Person) RETURN count(n)").scalar()  # an int
+    /// ```
+    ///
+    /// Only the first cell of the first row is materialized — the rest of the
+    /// result set is never converted.
+    fn scalar(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.effective_len() == 0 || self.columns.is_empty() {
+            return Ok(py.None());
+        }
+        let owned;
+        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+            owned = self.materialise_lazy_row(0);
+            &owned
+        } else {
+            &self.rows[0]
+        };
+        match row.first() {
+            Some(pv) => preprocessed_value_to_py(py, pv),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// All values for one named column, as a list (no DataFrame conversion).
+    ///
+    /// Raises ``KeyError`` for an unknown column name, listing the available
+    /// columns. This is the explicit column accessor — row indexing
+    /// (``r[i]``) stays integer-only.
+    ///
+    /// Example::
+    ///
+    /// ```text
+    /// r = g.cypher("MATCH (n:Person) RETURN n.name, n.age")
+    /// r.column("n.name")   # ['Alice', 'Bob', ...]
+    /// ```
+    fn column(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let col_idx = match self.columns.iter().position(|c| c == name) {
+            Some(i) => i,
+            None => {
+                let available = self
+                    .columns
+                    .iter()
+                    .map(|c| format!("'{c}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(pyo3::exceptions::PyKeyError::new_err(format!(
+                    "no column {name:?} in ResultView; available columns: [{available}]"
+                )));
+            }
+        };
+        let list = pyo3::types::PyList::empty(py);
+        for i in 0..self.effective_len() {
+            let owned;
+            let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+                owned = self.materialise_lazy_row(i);
+                &owned
+            } else {
+                &self.rows[i]
+            };
+            match row.get(col_idx) {
+                Some(pv) => list.append(preprocessed_value_to_py(py, pv)?)?,
+                None => list.append(py.None())?,
+            }
+        }
+        Ok(list.into_any().unbind())
     }
 
     /// First *n* rows as a new ResultView (default 5). Data stays lazy.

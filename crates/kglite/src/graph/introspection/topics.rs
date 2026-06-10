@@ -1009,6 +1009,7 @@ pub(super) fn write_fluent_topic_retrieval(xml: &mut String) {
     xml.push_str("      <ex desc=\"collect all\">results = graph.select('Person').where({'city': 'Oslo'}).collect()</ex>\n");
     xml.push_str("      <ex desc=\"to dataframe\">df = graph.select('Person').to_df()</ex>\n");
     xml.push_str("      <ex desc=\"single lookup\">node = graph.node('Person', 42)</ex>\n");
+    xml.push_str("      <ex desc=\"existence check\">if graph.exists('Person', 42): ...</ex>\n");
     xml.push_str(
         "      <ex desc=\"count by group\">graph.select('Person').count(group_by='city')</ex>\n",
     );

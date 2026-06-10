@@ -1181,6 +1181,38 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Return True if a node of ``node_type`` with the given id exists. O(1).
+    ///
+    /// Uses the same id-index as ``node()`` — no scan. Mirrors ``node()``'s
+    /// parameter shape and id-coercion semantics exactly (ids are integers in
+    /// every storage mode; a Python ``int`` and the stored id normalize to the
+    /// same key).
+    ///
+    /// Args:
+    ///     node_type: The type of node to check (e.g., "User", "Product")
+    ///     unique_id: The ID value of the node
+    ///
+    /// Returns:
+    ///     True if a matching node exists, False otherwise
+    ///
+    /// Example:
+    ///     ```python
+    ///     if graph.exists("User", 38870):
+    ///         ...
+    ///     ```
+    #[pyo3(signature = (node_type, unique_id))]
+    fn exists(&self, node_type: &str, unique_id: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let id_value = py_in::py_value_to_value(unique_id)?;
+        // Read-only, O(1) typed lookup. `lookup_by_id_readonly` self-heals the
+        // id-index on a miss (interior mutability in `IdIndexStore`), so no
+        // `&mut` / `Arc::make_mut` is needed and no per-call allocation beyond
+        // the lookup key.
+        Ok(self
+            .inner
+            .lookup_by_id_readonly(node_type, &id_value)
+            .is_some())
+    }
+
     // ========================================================================
     // Code Entity Search Methods
     // ========================================================================

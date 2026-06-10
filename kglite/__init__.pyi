@@ -286,15 +286,19 @@ class ResultView:
       - ``result.head(n)`` / ``result.tail(n)`` — first/last n rows as a new ResultView
       - ``result.to_list()`` — all rows as ``list[dict]`` (full conversion)
       - ``result.to_dicts()`` — alias for ``to_list()`` (polars/pandas naming)
+      - ``result.one()`` — first row as dict, or ``None`` if empty
+      - ``result.scalar()`` — first column of first row, or ``None`` if empty
+      - ``result.column(name)`` — all values for one column as a ``list``
       - ``result.to_df()`` — pandas DataFrame (full conversion)
       - ``result.columns`` — column names
       - ``result.stats`` — mutation stats (CREATE/SET/DELETE queries only)
 
-    Indexing is **row-wise**: ``result[i]`` takes an integer (or slice).
-    There is no column accessor — ``result["col"]`` is not supported (the
-    only valid string keys are the magic ``"columns"`` / ``"rows"``). For a
-    single column, use ``result.to_df()["col"]`` or
-    ``[row["col"] for row in result]``.
+    Indexing is **row-wise**: ``result[i]`` takes an integer (or slice);
+    ``result["col"]`` is not supported (the only valid string keys are the
+    magic ``"columns"`` / ``"rows"``). For a single column use the explicit
+    accessor ``result.column("col")`` (returns a ``list``), or
+    ``result.scalar()`` / ``result.one()`` for the first cell / first row of
+    small results.
     """
 
     @property
@@ -355,6 +359,44 @@ class ResultView:
         Provided for callers coming from polars (``.to_dicts()``) or pandas
         (``.to_dict(orient="records")``), where the row-wise dict accessor
         carries this name. Identical behaviour to ``to_list()``.
+        """
+        ...
+
+    def one(self) -> Optional[dict[str, Any]]:
+        """First row as a dict, or ``None`` if the result is empty.
+
+        Materializes only the first row (the same path as ``result[0]``), so
+        this stays cheap on large lazy results::
+
+            row = g.cypher("MATCH (n:Person {id: 1}) RETURN n.name").one()
+            # {'n.name': 'Alice'}  or  None
+        """
+        ...
+
+    def scalar(self) -> Any:
+        """First column of the first row, or ``None`` if the result is empty.
+
+        The first column is decided by the query's ``RETURN`` order (the same
+        order as ``columns``); extra columns are ignored. Convenient for
+        aggregate queries::
+
+            n = g.cypher("MATCH (n:Person) RETURN count(n)").scalar()  # int
+
+        Only the first cell of the first row is materialized.
+        """
+        ...
+
+    def column(self, name: str) -> list[Any]:
+        """All values for the named column, as a ``list`` (no DataFrame).
+
+        The explicit single-column accessor — row indexing (``result[i]``)
+        stays integer-only::
+
+            names = g.cypher("MATCH (n:Person) RETURN n.name").column("n.name")
+
+        Raises:
+            KeyError: If ``name`` is not a column; the message lists the
+                available column names.
         """
         ...
 
@@ -1220,6 +1262,22 @@ class KnowledgeGraph:
 
         Returns:
             Node property dict, or ``None`` if not found.
+        """
+        ...
+
+    def exists(self, node_type: str, unique_id: Any) -> bool:
+        """Return ``True`` if a node of ``node_type`` with that id exists. O(1).
+
+        Uses the same hash index as ``node()`` (no scan), and mirrors its
+        id-coercion semantics: ids are integers in every storage mode, so a
+        Python ``int`` and the stored id normalize to the same key.
+
+        Args:
+            node_type: The node type (e.g. ``'User'``).
+            unique_id: The unique ID value.
+
+        Returns:
+            ``True`` if a matching node exists, ``False`` otherwise.
         """
         ...
 
