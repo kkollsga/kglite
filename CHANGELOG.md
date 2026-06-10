@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cypher: trigonometry + UUID + local-temporal functions.**
+  `sin` / `cos` / `tan` / `asin` / `acos` / `atan` / `atan2(y, x)` /
+  `cot` / `haversin` / `degrees` / `radians` (null/non-numeric → null,
+  matching the existing math functions); `randomUUID()` (RFC 4122 v4,
+  excluded from constant folding so it stays unique per row — no new
+  dependency, generated from the existing PRNG); `localdatetime()` /
+  `localtime()` / `time()` returning ISO-8601 strings (no-arg = local
+  now; 1-arg parse form mirrors `datetime(str)`; strings because
+  KGLite's DateTime value is date-only — documented in CYPHER.md).
+  Reaches every binding through `cypher()` per the cypher-first policy.
+
 - **`ResultView.one()` / `.scalar()` / `.column(name)`.** The three most
   common result shapes get first-class accessors: `one()` returns the
   first row as a dict (or `None`), `scalar()` the first cell by `RETURN`

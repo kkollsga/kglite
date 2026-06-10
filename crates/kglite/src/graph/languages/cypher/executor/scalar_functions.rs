@@ -20,7 +20,129 @@ Either pass column_types={'<col>': 'geometry'} (or 'location.lat'/'location.lon'
 add_nodes(), or store the data under a conventional property name (wkt_geometry, geometry, \
 geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
+/// Which wall-clock "now" shape a `local*`/`time` function produces.
+/// KGLite has no time-of-day Value variant, so these emit ISO-8601
+/// strings (see the `localdatetime`/`localtime`/`time` arms).
+#[derive(Clone, Copy)]
+enum LocalTemporalKind {
+    /// `localdatetime()` → `YYYY-MM-DDTHH:MM:SS` (no offset).
+    DateTime,
+    /// `localtime()` / `time()` → `HH:MM:SS`.
+    Time,
+}
+
+/// Advance the thread-local xorshift64 PRNG one step and return the
+/// raw 64-bit state. Shared by `rand()`/`random()` and `randomUUID()`.
+///
+/// Seeded once per thread from SystemTime mixed with a monotonic
+/// per-thread counter; subsequent calls just advance the state. Avoids
+/// per-call `SystemTime::now()` overhead and guarantees distinct values
+/// within a tight per-row loop. The counter splat ensures parallel
+/// rayon workers don't collide on the same nanosecond.
+fn next_random_u64() -> u64 {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+    static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static XORSHIFT_STATE: Cell<u64> = {
+            let nanos = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let counter = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+            // Mix counter via splitmix64-ish avalanche so adjacent
+            // thread IDs produce well-separated seeds.
+            let mut seed = nanos.wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            seed ^= seed >> 30;
+            seed = seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            seed ^= seed >> 27;
+            seed = seed.wrapping_mul(0x94D0_49BB_1331_11EB);
+            seed ^= seed >> 31;
+            Cell::new(seed | 1)
+        };
+    }
+    XORSHIFT_STATE.with(|state| {
+        let mut x = state.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        state.set(x);
+        x
+    })
+}
+
+/// Draw 128 random bits as two u64 halves (for `randomUUID()`).
+fn next_random_u128_halves() -> (u64, u64) {
+    (next_random_u64(), next_random_u64())
+}
+
 impl<'a> CypherExecutor<'a> {
+    /// Evaluate `localdatetime()` / `localtime()` / `time()`. No-arg form
+    /// returns the local wall-clock "now" as an ISO-8601 string; the
+    /// single-string form validates/normalises and returns `Null` on
+    /// unparseable input (mirrors `datetime()`'s Null-on-bad-input
+    /// contract). Any other arity/type is an error.
+    fn eval_local_temporal(
+        &self,
+        args: &[Expression],
+        row: &ResultRow,
+        kind: LocalTemporalKind,
+    ) -> Result<Value, String> {
+        use chrono::{NaiveTime, Timelike};
+        if args.is_empty() {
+            let now = chrono::Local::now();
+            let s = match kind {
+                LocalTemporalKind::DateTime => now.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                LocalTemporalKind::Time => now.format("%H:%M:%S").to_string(),
+            };
+            return Ok(Value::String(s));
+        }
+        if args.len() != 1 {
+            return Err("local temporal functions take 0 or 1 string argument".into());
+        }
+        let val = self.evaluate_expression(&args[0], row)?;
+        let s = match val {
+            Value::String(s) => s,
+            Value::Null => return Ok(Value::Null),
+            _ => return Err("local temporal argument must be a string".into()),
+        };
+        match kind {
+            LocalTemporalKind::DateTime => {
+                // Accept full ISO datetime, or a bare date (midnight).
+                if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S") {
+                    Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string()))
+                } else if let Ok(d) =
+                    chrono::NaiveDate::parse_from_str(s.split('T').next().unwrap_or(&s), "%Y-%m-%d")
+                {
+                    Ok(Value::String(format!("{}T00:00:00", d.format("%Y-%m-%d"))))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            LocalTemporalKind::Time => {
+                // Accept HH:MM:SS or HH:MM.
+                if let Ok(t) = NaiveTime::parse_from_str(&s, "%H:%M:%S") {
+                    Ok(Value::String(format!(
+                        "{:02}:{:02}:{:02}",
+                        t.hour(),
+                        t.minute(),
+                        t.second()
+                    )))
+                } else if let Ok(t) = NaiveTime::parse_from_str(&s, "%H:%M") {
+                    Ok(Value::String(format!(
+                        "{:02}:{:02}:{:02}",
+                        t.hour(),
+                        t.minute(),
+                        t.second()
+                    )))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+        }
+    }
+
     /// Resolve a function argument that denotes a node to its live
     /// `NodeIndex`. Handles a bound node variable (fast path) AND a node
     /// arriving as a `Value::NodeRef` — the shape that `collect(a)[0]`,
@@ -1896,44 +2018,107 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "pi" => Ok(Value::Float64(std::f64::consts::PI)),
-            "rand" | "random" => {
-                // Thread-local xorshift64 PRNG. Seeded once per thread from
-                // SystemTime mixed with a monotonic per-thread counter;
-                // subsequent calls just advance the state. Avoids per-call
-                // SystemTime::now() overhead and guarantees distinct values
-                // within a tight per-row loop. The counter splat ensures
-                // parallel rayon workers don't collide on the same nanosecond.
-                use std::cell::Cell;
-                use std::sync::atomic::{AtomicU64, Ordering};
-                use std::time::SystemTime;
-                static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
-                thread_local! {
-                    static XORSHIFT_STATE: Cell<u64> = {
-                        let nanos = SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos() as u64;
-                        let counter = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        // Mix counter via splitmix64-ish avalanche so adjacent
-                        // thread IDs produce well-separated seeds.
-                        let mut seed = nanos.wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                        seed ^= seed >> 30;
-                        seed = seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                        seed ^= seed >> 27;
-                        seed = seed.wrapping_mul(0x94D0_49BB_1331_11EB);
-                        seed ^= seed >> 31;
-                        Cell::new(seed | 1)
-                    };
+            // ── Trigonometric / angular math ──────────────────────────
+            // Real use cases: geospatial bearing/heading math and
+            // embedding-vector angle computations done server-side in
+            // Cypher. All take a numeric arg, return Float64. Null in →
+            // null out; non-numeric (and not coercible) → Null. Mirrors
+            // the sqrt/abs arms exactly: `value_to_f64` does the coercion,
+            // `Value::Null` short-circuits before coercion.
+            "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "cot" | "haversin" | "degrees"
+            | "radians" => {
+                let val = self.evaluate_expression(&args[0], row)?;
+                match val {
+                    Value::Null => Ok(Value::Null),
+                    _ => match value_to_f64(&val) {
+                        Some(f) => {
+                            let out = match name {
+                                "sin" => f.sin(),
+                                "cos" => f.cos(),
+                                "tan" => f.tan(),
+                                "asin" => f.asin(),
+                                "acos" => f.acos(),
+                                "atan" => f.atan(),
+                                "cot" => 1.0 / f.tan(),
+                                // haversin(x) = (1 - cos(x)) / 2 — the
+                                // half-versed-sine used by the haversine
+                                // great-circle distance formula.
+                                "haversin" => (1.0 - f.cos()) / 2.0,
+                                "degrees" => f.to_degrees(),
+                                "radians" => f.to_radians(),
+                                _ => unreachable!(),
+                            };
+                            Ok(Value::Float64(out))
+                        }
+                        None => Ok(Value::Null),
+                    },
                 }
-                let val = XORSHIFT_STATE.with(|state| {
-                    let mut x = state.get();
-                    x ^= x << 13;
-                    x ^= x >> 7;
-                    x ^= x << 17;
-                    state.set(x);
-                    // Use top 53 bits → f64 mantissa to avoid precision loss.
-                    ((x >> 11) as f64) / ((1u64 << 53) as f64)
-                });
+            }
+            // atan2(y, x) — two-arg arctangent, quadrant-aware. Real use
+            // case: bearing between two geographic points. Either arg
+            // Null → Null; either non-numeric → Null.
+            "atan2" => {
+                if args.len() != 2 {
+                    return Err("atan2() requires 2 arguments: atan2(y, x)".into());
+                }
+                let y_val = self.evaluate_expression(&args[0], row)?;
+                let x_val = self.evaluate_expression(&args[1], row)?;
+                match (&y_val, &x_val) {
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                    _ => match (value_to_f64(&y_val), value_to_f64(&x_val)) {
+                        (Some(y), Some(x)) => Ok(Value::Float64(y.atan2(x))),
+                        _ => Ok(Value::Null),
+                    },
+                }
+            }
+            // randomUUID() — RFC 4122 version-4 UUID string. Non-
+            // deterministic; classified alongside rand() in
+            // `is_row_independent` (where_clause.rs) so constant folding
+            // never collapses it to a single value across rows. No `uuid`
+            // crate dependency — we draw 128 random bits from the same
+            // thread-local xorshift64 PRNG that rand() uses (two u64
+            // draws), then stamp the version (4) and variant (10xx) bits
+            // per the v4 layout. Registered under the lowercased key
+            // `randomuuid`; the canonical Cypher spelling is randomUUID().
+            "randomuuid" => {
+                if !args.is_empty() {
+                    return Err("randomUUID() takes no arguments".into());
+                }
+                let (hi, lo) = next_random_u128_halves();
+                // Stamp version 4 into the high u64 (bits 12-15 of the
+                // time_hi_and_version field) and variant 10xx into the
+                // low u64 (top two bits of clock_seq_hi).
+                let hi = (hi & 0xFFFF_FFFF_FFFF_0FFF) | 0x0000_0000_0000_4000;
+                let lo = (lo & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000;
+                let uuid = format!(
+                    "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+                    hi >> 32,
+                    (hi >> 16) & 0xFFFF,
+                    hi & 0xFFFF,
+                    lo >> 48,
+                    lo & 0xFFFF_FFFF_FFFF,
+                );
+                Ok(Value::String(uuid))
+            }
+            // localdatetime() / localtime() / time() — wall-clock
+            // temporal "now" values. KGLite's Value has no time-of-day
+            // variant (Value::DateTime wraps a date-only NaiveDate; see
+            // datatypes/values.rs), so these return ISO-8601 *strings*
+            // rather than lying about sub-day precision via a date-only
+            // Value::DateTime. The no-arg form returns local now; the
+            // single-string form validates/normalises and returns Null on
+            // unparseable input (mirrors datetime()'s Null-on-bad-input
+            // contract). Classified like datetime() — NOT added to the
+            // is_row_independent non-deterministic list, matching its
+            // sibling (the 0-arg "now" forms are evaluated per the same
+            // folding rules datetime() already follows).
+            "localdatetime" => self.eval_local_temporal(args, row, LocalTemporalKind::DateTime),
+            "localtime" => self.eval_local_temporal(args, row, LocalTemporalKind::Time),
+            "time" => self.eval_local_temporal(args, row, LocalTemporalKind::Time),
+            "rand" | "random" => {
+                // Top 53 bits → f64 mantissa to avoid precision loss.
+                let x = next_random_u64();
+                let val = ((x >> 11) as f64) / ((1u64 << 53) as f64);
                 Ok(Value::Float64(val))
             }
 

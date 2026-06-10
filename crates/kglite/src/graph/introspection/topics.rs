@@ -277,7 +277,8 @@ pub(super) fn write_topic_operators(xml: &mut String) {
 pub(super) fn write_topic_functions(xml: &mut String) {
     xml.push_str("  <functions>\n");
     xml.push_str("    <desc>All built-in functions grouped by category.</desc>\n");
-    xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), log(x)/ln(x), log10(x), exp(x), pow(x,y), pi(), rand(), toInteger(x)/toInt(x), toFloat(x)</group>\n");
+    xml.push_str("    <group name=\"math\">abs(x), ceil(x)/ceiling(x), floor(x), round(x [,decimals]), sqrt(x), sign(x), log(x)/ln(x), log10(x), exp(x), pow(x,y), pi(), rand(), randomUUID(), toInteger(x)/toInt(x), toFloat(x)</group>\n");
+    xml.push_str("    <group name=\"trig\">sin(x), cos(x), tan(x), asin(x), acos(x), atan(x), atan2(y,x), cot(x), haversin(x), degrees(x), radians(x). Angles in radians; NULL/non-numeric → NULL.</group>\n");
     xml.push_str("    <group name=\"string\">toString(x), toUpper(s), toLower(s), trim(s), lTrim(s), rTrim(s), replace(s,from,to), substring(s,start[,len]), left(s,n), right(s,n), split(s,delim), reverse(s), size(s)</group>\n");
     xml.push_str("    <group name=\"text_predicates\">text_edit_distance(a,b) — Levenshtein; text_normalize(s) — lowercase + strip punct + collapse whitespace; text_jaccard(a,b[,sep]) — token Jaccard; text_ngrams(s,n) — char n-grams; text_contains_any(s, needles) / text_starts_with_any(s, prefixes) — variadic or list arg</group>\n");
     xml.push_str("    <group name=\"geometry\">geom_buffer(geom, meters); geom_convex_hull(geoms); geom_union/intersection/difference(g1, g2); geom_is_valid(geom); geom_length(geom). Accept WKT strings, node variables, or Points; return WKT strings.</group>\n");
@@ -292,7 +293,7 @@ pub(super) fn write_topic_functions(xml: &mut String) {
     xml.push_str("      <ex desc=\"string\">RETURN toLower(n.name) AS lower_name</ex>\n");
     xml.push_str("      <ex desc=\"aggregate\">RETURN n.status, count(*) AS n, avg(n.depth) AS avg_depth</ex>\n");
     xml.push_str("    </examples>\n");
-    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), date_diff(d1,d2), date ± N (add/sub days), date - date → days (int), d.year/d.month/d.day</group>\n");
+    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), localdatetime()/localtime()/time() (wall-clock now as ISO strings; 1-arg parse form), date_diff(d1,d2), date ± N (add/sub days), date - date → days (int), d.year/d.month/d.day</group>\n");
     xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). Syntax: func() OVER (PARTITION BY expr ORDER BY expr [DESC]). PARTITION BY optional.</group>\n");
     xml.push_str("    <group name=\"semantic\">text_score(n, 'col', 'query' [, metric]) — similarity score (metrics: 'cosine', 'poincare', 'dot_product', 'euclidean'); embedding_norm(n, 'col') — L2 norm of embedding vector (hierarchy depth in Poincaré space, 0=root, ~1=leaf)</group>\n");
     xml.push_str("  </functions>\n");
@@ -1305,7 +1306,8 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
 
     // Functions
     xml.push_str("  <functions>\n");
-    xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, log10, exp, pow(x,y), pi, rand, toInteger, toFloat</group>\n");
+    xml.push_str("    <group name=\"math\">abs, ceil, floor, round(x [,decimals]), sqrt, sign, log, log10, exp, pow(x,y), pi, rand, randomUUID, toInteger, toFloat</group>\n");
+    xml.push_str("    <group name=\"trig\">sin, cos, tan, asin, acos, atan, atan2(y,x), cot, haversin, degrees, radians (radians; NULL/non-numeric → NULL)</group>\n");
     xml.push_str("    <group name=\"string\">toString, toUpper, toLower, trim, lTrim, rTrim, replace, substring, left, right, split, reverse</group>\n");
     xml.push_str(
         "    <group name=\"aggregate\">count, sum, avg, min, max, collect, stDev</group>\n",
@@ -1314,7 +1316,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
         "    <group name=\"graph\">size, length, id, labels, type, coalesce, range, keys</group>\n",
     );
     xml.push_str("    <group name=\"spatial\">distance(a,b)→m, contains(a,b), intersects(a,b), centroid(n), area(n)→m², perimeter(n)→m</group>\n");
-    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), date_diff(d1,d2), date ± N (days), date - date → int, d.year/d.month/d.day, valid_at(...), valid_during(...)</group>\n");
+    xml.push_str("    <group name=\"temporal\">date(str)/datetime(str), localdatetime()/localtime()/time() (ISO strings), date_diff(d1,d2), date ± N (days), date - date → int, d.year/d.month/d.day, valid_at(...), valid_during(...)</group>\n");
     xml.push_str("    <group name=\"window\">row_number() OVER (...), rank() OVER (...), dense_rank() OVER (...). OVER (PARTITION BY expr ORDER BY expr [DESC])</group>\n");
     xml.push_str("  </functions>\n");
 

@@ -1001,6 +1001,33 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE EXISTS { (p)-[:CONTAINS]->() } RETURN count(p) AS n",
         None,
     ),
+    # ── Trig / math scalar functions (deterministic literal args) ──
+    # Constant-foldable trig must produce identical rows with the
+    # optimizer on and off — exercises the new sin/cos/atan2/degrees/
+    # radians/cot/haversin arms through the folding path. randomUUID()
+    # and the local-temporal "now" forms are intentionally excluded
+    # (non-deterministic / wall-clock → would flake).
+    ("trig_sin_cos", "social_graph", "MATCH (p:Person) RETURN sin(0) AS s, cos(0) AS c LIMIT 1", None),
+    (
+        "trig_degrees_radians",
+        "social_graph",
+        "MATCH (p:Person) RETURN degrees(pi()) AS d, radians(180) AS r LIMIT 1",
+        None,
+    ),
+    ("trig_atan2", "social_graph", "MATCH (p:Person) RETURN atan2(1, 1) AS a LIMIT 1", None),
+    ("trig_cot_haversin", "social_graph", "MATCH (p:Person) RETURN cot(1) AS c, haversin(0) AS h LIMIT 1", None),
+    (
+        "trig_on_property",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS n, sin(radians(p.age)) AS sa ORDER BY n",
+        None,
+    ),
+    (
+        "trig_null_propagation",
+        "social_graph",
+        "MATCH (p:Person) RETURN sin(null) AS s, atan2(null, 1) AS a LIMIT 1",
+        None,
+    ),
 ]
 
 

@@ -540,6 +540,174 @@ class TestMathFunctions:
         assert result[2]["rounded"] == 3.0
 
 
+class TestTrigFunctions:
+    """Tests for sin, cos, tan, asin, acos, atan, atan2, cot, haversin,
+    degrees, radians. Angles in radians; NULL/non-numeric → NULL."""
+
+    def test_sin_zero(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN sin(0) AS v")[0]["v"] == 0.0
+
+    def test_cos_zero(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN cos(0) AS v")[0]["v"] == 1.0
+
+    def test_tan_zero(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN tan(0) AS v")[0]["v"] == 0.0
+
+    def test_degrees_pi_is_180(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN degrees(pi()) AS v")
+        assert abs(result[0]["v"] - 180.0) < 1e-9
+
+    def test_radians_180_is_pi(self):
+        import math
+
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN radians(180) AS v")
+        assert abs(result[0]["v"] - math.pi) < 1e-9
+
+    def test_atan2_one_one_is_pi_over_4(self):
+        import math
+
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN atan2(1, 1) AS v")
+        assert abs(result[0]["v"] - math.pi / 4) < 1e-9
+
+    def test_asin_acos_atan(self):
+        import math
+
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN asin(1) AS a, acos(1) AS b, atan(1) AS c")
+        assert abs(result[0]["a"] - math.pi / 2) < 1e-9
+        assert abs(result[0]["b"] - 0.0) < 1e-9
+        assert abs(result[0]["c"] - math.pi / 4) < 1e-9
+
+    def test_cot(self):
+        import math
+
+        g = rg.KnowledgeGraph()
+        result = g.cypher("RETURN cot(1) AS v")
+        assert abs(result[0]["v"] - 1.0 / math.tan(1.0)) < 1e-9
+
+    def test_haversin_zero(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN haversin(0) AS v")[0]["v"] == 0.0
+
+    def test_haversin_pi(self):
+        g = rg.KnowledgeGraph()
+        # haversin(pi) = (1 - cos(pi)) / 2 = (1 - (-1)) / 2 = 1
+        result = g.cypher("RETURN haversin(pi()) AS v")
+        assert abs(result[0]["v"] - 1.0) < 1e-9
+
+    def test_null_propagation(self):
+        g = rg.KnowledgeGraph()
+        result = g.cypher(
+            "RETURN sin(null) AS a, cos(null) AS b, atan2(null, 1) AS c, atan2(1, null) AS d, degrees(null) AS e"
+        )
+        for k in ("a", "b", "c", "d", "e"):
+            assert result[0][k] is None
+
+    def test_trig_in_unwind_pipeline(self):
+        import math
+
+        g = rg.KnowledgeGraph()
+        result = g.cypher("UNWIND [0, 90, 180] AS deg RETURN deg, sin(radians(deg)) AS s ORDER BY deg")
+        assert len(result) == 3
+        assert abs(result[0]["s"] - 0.0) < 1e-9
+        assert abs(result[1]["s"] - 1.0) < 1e-9
+        assert abs(result[2]["s"] - math.sin(math.pi)) < 1e-9
+
+
+class TestRandomUUID:
+    """randomUUID() — RFC 4122 v4 UUID string, non-deterministic."""
+
+    _UUID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+
+    def test_format(self):
+        import re
+
+        g = rg.KnowledgeGraph()
+        u = g.cypher("RETURN randomUUID() AS v")[0]["v"]
+        assert isinstance(u, str)
+        assert re.match(self._UUID_RE, u), f"not a v4 UUID: {u}"
+
+    def test_case_insensitive_spelling(self):
+        import re
+
+        g = rg.KnowledgeGraph()
+        # Cypher function names are case-insensitive — lowercase spelling works.
+        u = g.cypher("RETURN randomuuid() AS v")[0]["v"]
+        assert re.match(self._UUID_RE, u)
+
+    def test_uniqueness_across_calls(self):
+        g = rg.KnowledgeGraph()
+        u1 = g.cypher("RETURN randomUUID() AS v")[0]["v"]
+        u2 = g.cypher("RETURN randomUUID() AS v")[0]["v"]
+        assert u1 != u2
+
+    def test_per_row_uniqueness(self):
+        """Non-deterministic: must NOT be constant-folded to one value."""
+        g = rg.KnowledgeGraph()
+        rows = g.cypher("UNWIND [1, 2, 3, 4, 5] AS x RETURN randomUUID() AS u").to_list()
+        uuids = [r["u"] for r in rows]
+        assert len(set(uuids)) == 5
+
+    def test_takes_no_args(self):
+        g = rg.KnowledgeGraph()
+        with pytest.raises(Exception):
+            g.cypher("RETURN randomUUID(1) AS v")
+
+
+class TestLocalTemporal:
+    """localdatetime(), localtime(), time() — ISO-8601 string values."""
+
+    def test_localdatetime_no_arg_iso(self):
+        import re
+
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN localdatetime() AS v")[0]["v"]
+        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", v), v
+
+    def test_localtime_no_arg_iso(self):
+        import re
+
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN localtime() AS v")[0]["v"]
+        assert re.match(r"^\d{2}:\d{2}:\d{2}$", v), v
+
+    def test_time_no_arg_iso(self):
+        import re
+
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN time() AS v")[0]["v"]
+        assert re.match(r"^\d{2}:\d{2}:\d{2}$", v), v
+
+    def test_localdatetime_parse(self):
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN localdatetime('2024-03-15T10:30:00') AS v")[0]["v"]
+        assert v == "2024-03-15T10:30:00"
+
+    def test_localdatetime_parse_bare_date(self):
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN localdatetime('2024-03-15') AS v")[0]["v"]
+        assert v == "2024-03-15T00:00:00"
+
+    def test_time_parse_hh_mm(self):
+        g = rg.KnowledgeGraph()
+        v = g.cypher("RETURN time('10:30') AS v")[0]["v"]
+        assert v == "10:30:00"
+
+    def test_localdatetime_bad_input_is_null(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN localdatetime('garbage') AS v")[0]["v"] is None
+
+    def test_localtime_null_arg_is_null(self):
+        g = rg.KnowledgeGraph()
+        assert g.cypher("RETURN localtime(null) AS v")[0]["v"] is None
+
+
 # ========================================================================
 # String coercion on +
 # ========================================================================

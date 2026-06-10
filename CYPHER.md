@@ -340,6 +340,8 @@ Date-range filtering on nodes and relationships with explicit field names.
 |----------|-------------|
 | `date(str)` / `datetime(str)` | Parse date string to DateTime value |
 | `datetime()` | Today's date (no-arg form) |
+| `localdatetime()` | Local wall-clock datetime as ISO-8601 string (`YYYY-MM-DDTHH:MM:SS`); 1-arg form parses/normalises a string (NULL on bad input) |
+| `localtime()` / `time()` | Local wall-clock time-of-day as `HH:MM:SS` string; 1-arg form parses/normalises a string (NULL on bad input) |
 | `n.d.year`, `n.d.month`, `n.d.day` | Extract component from a DateTime property (chained accessor — works in `RETURN`, `WHERE`, `ORDER BY`) |
 | `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
 | `duration({days: N, months: M, ...})` | Build a Duration value (see [Duration semantics](#duration-semantics) below) |
@@ -352,6 +354,8 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
+
+**`localdatetime()` / `localtime()` / `time()` return strings, not a temporal Value.** KGLite's `Value::DateTime` is date-only (`NaiveDate`), so there is no time-of-day Value variant to carry sub-day precision. Rather than silently dropping the time component, these functions emit ISO-8601 strings (`localdatetime()` → `YYYY-MM-DDTHH:MM:SS`, `localtime()`/`time()` → `HH:MM:SS`). The single-string-argument form validates and normalises its input, returning NULL on unparseable input (same contract as `datetime(str)`).
 
 ```python
 # Nodes active at a point in time
@@ -460,6 +464,29 @@ RETURN date('2024-01-15') + duration({months: 1}) // → 2024-02-14 (1*30 days),
 | `pow(x, y)` / `power(x, y)` | x^y |
 | `pi()` | π constant |
 | `rand()` / `random()` | Random float [0, 1) |
+| `randomUUID()` | Random RFC 4122 v4 UUID string |
+
+### Trigonometric Functions
+
+All take a numeric argument and return a Float64. Angles are in
+radians (use `radians(x)` / `degrees(x)` to convert). NULL in → NULL
+out; a non-numeric argument also yields NULL.
+
+| Function | Description |
+|----------|-------------|
+| `sin(x)`, `cos(x)`, `tan(x)` | Trig functions (radians) |
+| `asin(x)`, `acos(x)`, `atan(x)` | Inverse trig functions |
+| `atan2(y, x)` | Quadrant-aware arctangent of `y/x` |
+| `cot(x)` | Cotangent (`1 / tan(x)`) |
+| `haversin(x)` | Half-versed-sine `(1 - cos(x)) / 2` (haversine distance) |
+| `degrees(x)` | Radians → degrees |
+| `radians(x)` | Degrees → radians |
+
+```cypher
+// Bearing between two points (radians)
+RETURN atan2(0.5, 0.5)           // → 0.7853981633974483 (π/4)
+RETURN degrees(pi())             // → 180.0
+```
 
 ## String Functions
 
@@ -1258,9 +1285,9 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | **Expressions** | `CASE WHEN...THEN...ELSE...END`, `$param`, `[x IN list WHERE ... \| expr]`, `any/all/none/single(...)` |
 | **Functions** | `toUpper`, `toLower`, `toString`, `toInteger`, `toFloat`, `size`, `length`, `type`, `id`, `labels`, `keys`, `coalesce`, `date`/`datetime`, `range`, `nodes(p)`, `relationships(p)`, `round` |
 | **String** | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
-| **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
+| **Math** | `abs`, `ceil`/`ceiling`, `floor`, `round`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID`, trig: `sin`/`cos`/`tan`/`asin`/`acos`/`atan`/`atan2`/`cot`/`haversin`/`degrees`/`radians` |
 | **Spatial** | `point(lat, lon)`, `distance(a, b)`, `contains(a, b)`, `intersects(a, b)`, `centroid(n)`, `area(n)`, `perimeter(n)`, `latitude(point)`, `longitude(point)` |
-| **Temporal** | `date(str)`/`datetime(str)`, `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
+| **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
@@ -1343,9 +1370,10 @@ Clause-by-clause comparison with the openCypher specification.
 | `round(x [, precision])` | Full | |
 | `nodes(p)`, `relationships(p)` | Full | Path decomposition |
 | String functions | Full | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` — auto-coerce non-strings |
-| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand` |
+| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
+| Trig functions | Full | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` — radians; NULL/non-numeric → NULL |
 | Spatial functions | Full | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter` |
-| Temporal functions | Full | `valid_at`, `valid_during` — NULL = open-ended |
+| Temporal functions | Full | `valid_at`, `valid_during` — NULL = open-ended; `localdatetime`/`localtime`/`time` → ISO strings |
 
 ### Architectural Differences from Neo4j
 
