@@ -86,6 +86,63 @@ class TestCypherAliasResolution:
         assert values == [1, 3]
 
 
+class TestPropertiesKeysAliases:
+    """properties(n) / keys(n) / n {.*} must surface the alias-recovered
+    columns (the non-literal unique_id_field / node_title_field hoisted into
+    node.id()/node.title()), matching the canonical `RETURN n` shape.
+
+    Regression: properties(n) had its own property_keys() walk that omitted
+    the hoisted alias columns while RETURN n (materialize_node_value)
+    included them — properties(n) returned only {id, title, type, status}.
+    """
+
+    def test_properties_includes_alias_columns(self, graph_with_aliases):
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 1 RETURN properties(n) AS p").to_list()
+        props = result[0]["p"]
+        assert props["npdid"] == 1
+        assert props["prospect_name"] == "Alpha"
+        # Canonical virtuals + the regular property still present.
+        assert props["id"] == 1
+        assert props["title"] == "Alpha"
+        assert props["type"] == "Prospect"
+        assert props["status"] == "active"
+
+    def test_keys_includes_alias_columns(self, graph_with_aliases):
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 1 RETURN keys(n) AS k").to_list()
+        keys = set(result[0]["k"])
+        assert {"id", "title", "type", "npdid", "prospect_name", "status"} <= keys
+
+    def test_properties_equals_return_n_properties(self, graph_with_aliases):
+        """properties(n) must equal the properties dict inside RETURN n's
+        node (the materialize_node_value lockstep guarantee)."""
+        node = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 2 RETURN n").to_list()[0]["n"]
+        props = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 2 RETURN properties(n) AS p").to_list()[
+            0
+        ]["p"]
+        assert props == node["properties"]
+
+    def test_keys_equals_properties_keys(self, graph_with_aliases):
+        keys = set(
+            graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 3 RETURN keys(n) AS k").to_list()[0]["k"]
+        )
+        props = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 3 RETURN properties(n) AS p").to_list()[
+            0
+        ]["p"]
+        assert keys == set(props.keys())
+
+    def test_map_projection_star_includes_alias_columns(self, graph_with_aliases):
+        """n {.*} (MapProjection AllProperties) must also surface aliases."""
+        result = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 1 RETURN n {.*} AS m").to_list()
+        m = result[0]["m"]
+        assert m["npdid"] == 1
+        assert m["prospect_name"] == "Alpha"
+        # Matches properties(n) for the same node.
+        props = graph_with_aliases.cypher("MATCH (n:Prospect) WHERE n.npdid = 1 RETURN properties(n) AS p").to_list()[
+            0
+        ]["p"]
+        assert m == props
+
+
 class TestFilterAliasResolution:
     """Fluent API where() should resolve original column names."""
 

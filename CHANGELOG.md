@@ -95,6 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`properties(n)`, `keys(n)`, and `n {.*}` now match `RETURN n` on
+  graphs loaded with non-literal id/title columns.** When `add_nodes`
+  hoists e.g. `npdid`/`name` into the node's id/title, `RETURN n`
+  recovered those columns into the property map but `properties(n)`,
+  `keys(n)`, and the `n {.*}` map projection each had their own
+  enumeration that omitted them (`keys(n)` additionally dropped real
+  columns on the disk/mapped backends). All three now delegate to the
+  same materializer `RETURN n` uses, so the shapes stay in lockstep
+  across every storage mode.
+
 - **Map subscript by string key works.** `{x: 1}['x']`,
   `properties(n)['title']`, dynamic keys (`{x: 1}[k]`), nested access
   (`{a: {b: 2}}['a']['b']`), and dynamic property access on bound nodes

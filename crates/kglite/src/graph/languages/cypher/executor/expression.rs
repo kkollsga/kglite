@@ -224,18 +224,17 @@ impl<'a> CypherExecutor<'a> {
                                     props.insert(prop.clone(), val);
                                 }
                                 MapProjectionItem::AllProperties => {
-                                    for &builtin in &["title", "id", "type"] {
-                                        let val = resolve_node_property(node, builtin, self.graph);
-                                        if !matches!(val, Value::Null) {
-                                            props.insert(builtin.to_string(), val);
-                                        }
-                                    }
-                                    for key in node.property_keys(&self.graph.interner) {
-                                        if key == "id" || key == "title" || key == "type" {
-                                            continue;
-                                        }
-                                        let val = resolve_node_property(node, key, self.graph);
-                                        props.insert(key.to_string(), val);
+                                    // `n {.*}` returns every node property —
+                                    // derive the set from `materialize_node_value`
+                                    // so it matches `properties(n)` / `RETURN n`,
+                                    // including alias-recovered columns (non-literal
+                                    // `unique_id_field`/`node_title_field`) and the
+                                    // columnar (disk/mapped) metadata columns a bare
+                                    // `property_keys()` walk would miss.
+                                    if let Some(node_value) =
+                                        materialize_node_value(node_idx, self.graph)
+                                    {
+                                        props.extend(node_value.properties);
                                     }
                                 }
                                 MapProjectionItem::Alias { key, expr } => {

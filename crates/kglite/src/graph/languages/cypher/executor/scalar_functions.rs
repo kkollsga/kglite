@@ -651,27 +651,25 @@ impl<'a> CypherExecutor<'a> {
                 // keys(n) or keys(r) — return property names as a list.
                 //
                 // Phase A.1 / C2 — native `Value::List(Vec<Value::String>)`.
-                // Includes both the virtual aliases (`id`, `title`, `type`)
-                // and the user's original column names (the unique-id-field
-                // and title-field passed to add_nodes), so the output
-                // matches what `n.<name>` would resolve at query time.
+                // For nodes, derive the key set from `materialize_node_value`
+                // so it exactly matches `keys(properties(n))` and the property
+                // dict carried by `RETURN n`: virtual id/title/type, every
+                // user-set property, the alias-recovered columns (non-literal
+                // `unique_id_field`/`node_title_field`), and — on the columnar
+                // (disk/mapped) backends — the per-type metadata columns that a
+                // bare `property_keys()` walk would miss. The materialiser
+                // omits null-valued aliases, so the key set is consistent with
+                // what `n.<name>` resolves at query time.
                 if let Some(arg) = args.first() {
                     if let Some(idx) = self.node_arg_index(arg, row) {
-                        if let Some(node) = self.graph.graph.node_weight(idx) {
-                            let node_type = node.node_type_str(&self.graph.interner);
-                            let mut keys: Vec<String> =
-                                vec!["id".to_string(), "title".to_string(), "type".to_string()];
-                            if let Some(id_alias) = self.graph.id_field_aliases.get(node_type) {
-                                keys.push(id_alias.clone());
-                            }
-                            if let Some(title_alias) = self.graph.title_field_aliases.get(node_type)
-                            {
-                                keys.push(title_alias.clone());
-                            }
-                            keys.extend(node.property_keys(&self.graph.interner).map(String::from));
-                            keys.sort();
-                            keys.dedup();
-                            return Ok(Value::List(keys.into_iter().map(Value::String).collect()));
+                        if let Some(node_value) = materialize_node_value(idx, self.graph) {
+                            // BTreeMap keys are already sorted + unique.
+                            let keys: Vec<Value> = node_value
+                                .properties
+                                .into_keys()
+                                .map(Value::String)
+                                .collect();
+                            return Ok(Value::List(keys));
                         }
                     }
                     // Materialised node value (collect()[0] etc.) → its keys.
@@ -717,8 +715,14 @@ impl<'a> CypherExecutor<'a> {
                 // properties(n) / properties(r) → native Value::Map.
                 //
                 // Phase A.1 / C2 — emits `Value::Map(BTreeMap)` directly.
-                // For nodes, includes the virtual id/title/type plus
-                // every user-set property (mirrors materialize_node_value).
+                // For nodes, delegate to `materialize_node_value` so the map
+                // is byte-for-byte the property dict `RETURN n` produces:
+                // virtual id/title/type, every user-set property, AND the
+                // alias-recovered columns (a non-literal `unique_id_field` /
+                // `node_title_field` hoisted into `node.id()`/`node.title()`).
+                // Reusing the materializer keeps the two in lockstep across
+                // backends — including the columnar (disk/mapped) metadata
+                // walk that a bare `property_keys()` loop here would miss.
                 // For relationships, includes `type` + every user-set
                 // edge property.
                 if args.len() != 1 {
@@ -726,23 +730,8 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let arg = &args[0];
                 if let Some(idx) = self.node_arg_index(arg, row) {
-                    if let Some(node) = self.graph.graph.node_weight(idx) {
-                        let mut props: std::collections::BTreeMap<String, Value> =
-                            std::collections::BTreeMap::new();
-                        for &builtin in &["id", "title", "type"] {
-                            let val = resolve_node_property(node, builtin, self.graph);
-                            if !matches!(val, Value::Null) {
-                                props.insert(builtin.to_string(), val);
-                            }
-                        }
-                        for key in node.property_keys(&self.graph.interner) {
-                            if key == "id" || key == "title" || key == "type" {
-                                continue;
-                            }
-                            let val = resolve_node_property(node, key, self.graph);
-                            props.insert(key.to_string(), val);
-                        }
-                        return Ok(Value::Map(props));
+                    if let Some(node_value) = materialize_node_value(idx, self.graph) {
+                        return Ok(Value::Map(node_value.properties));
                     }
                 }
                 // Materialised node value (collect()[0] etc.) → its property map.

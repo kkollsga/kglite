@@ -1028,6 +1028,30 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN sin(null) AS s, atan2(null, 1) AS a LIMIT 1",
         None,
     ),
+    # ── properties()/keys()/{.*} on an alias-bearing fixture ──
+    # `small_graph` loads Person via non-literal id/title fields
+    # (add_nodes(..., "person_id", "name")), so each node carries
+    # `{id,title}_field_aliases`. properties(n)/keys(n)/n {.*} must
+    # surface those recovered columns identically under optimiser-on
+    # and optimiser-off (and match the canonical RETURN n shape).
+    (
+        "properties_aliased_node",
+        "small_graph",
+        "MATCH (p:Person) RETURN properties(p) AS props ORDER BY props.id",
+        None,
+    ),
+    (
+        "keys_aliased_node",
+        "small_graph",
+        "MATCH (p:Person) RETURN keys(p) AS ks ORDER BY p.person_id",
+        None,
+    ),
+    (
+        "map_projection_star_aliased_node",
+        "small_graph",
+        "MATCH (p:Person) RETURN p {.*} AS m ORDER BY m.id",
+        None,
+    ),
 ]
 
 
