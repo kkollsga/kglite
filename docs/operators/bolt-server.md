@@ -116,13 +116,6 @@ filtering downstream.
 
 ## Known limitations
 
-- **No OCC version checking on commit.** Two concurrent transactions
-  that both mutate the graph and both commit will both succeed; the
-  second commit overwrites the first ("last-writer-wins"). The
-  Python `Transaction` class does OCC; bolt-server doesn't, because
-  `DirGraph::version` is `pub(crate)` and not exposed via
-  `kglite::api` yet. A follow-up adds the accessor and wires it in
-  here.
 - **No auto-commit mutations.** Mutations (`CREATE` / `SET` /
   `DELETE` / `MERGE`) must be wrapped in an explicit `BEGIN` /
   `COMMIT`. Auto-commit reads work fine. (Drivers always wrap writes
@@ -134,16 +127,14 @@ filtering downstream.
 - **No causal consistency / bookmarks.** Each session sees a
   consistent snapshot during a transaction; the `bookmark` field is
   not returned on COMMIT.
-- **No `neo4j://` routing.** Single-server topology only. Routed-
-  protocol clients fail at `verify_connectivity()`.
-- **No TLS.** boltr supports a `tls` feature flag but bolt-server
-  doesn't wire it. Add behind your own TLS-terminating reverse
-  proxy if you need encrypted transport.
-- **`db.labels()` / `db.relationshipTypes()` yield `name`, not
-  Neo4j's `label` / `relationshipType`.** This is a kglite divergence
-  from the canonical Neo4j proc surface; expressions like
-  `CALL db.labels() YIELD label` will fail with "Procedure does not
-  yield 'label'. Available: name". Use `YIELD name` instead.
+
+Formerly listed here, now supported: **OCC version checking on
+commit** (Phase E.4 — conflicting concurrent commits are rejected
+with a retryable error instead of last-writer-wins), **TLS** via
+`--tls-cert` / `--tls-key` (Phase F), **`neo4j://` routing URIs**
+via a single-server routing table (`--advertise-addr`), and
+Neo4j-canonical **`CALL db.labels() YIELD label`** /
+`db.relationshipTypes() YIELD relationshipType` column names.
 
 ## Driver compatibility matrix
 

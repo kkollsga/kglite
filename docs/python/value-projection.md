@@ -231,6 +231,6 @@ explicitly.
 - `docs/concepts/multi-label-rationale.md` — multi-label nodes
   shipped in 0.10.5. `labels()` now returns `[primary, ...secondaries]`.
 - `docs/concepts/design-decisions.md` — the "why" behind the
-  embedded design, single-label nodes, and the LLM-agent surface.
+  embedded design, the primary-type label model, and the LLM-agent surface.
 - `tests/test_value_variants.py` — the canonical pinning suite for
   every shape this doc describes. When in doubt, search this file.

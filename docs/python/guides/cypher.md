@@ -3,7 +3,7 @@
 KGLite supports a substantial Cypher subset. This page covers the essentials — see the [full Cypher reference](../reference/cypher-reference.md) for complete documentation of every clause and function.
 
 ```{note}
-**Single-label note:** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
+**Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'`.
 ```
 
 ## Basic Queries

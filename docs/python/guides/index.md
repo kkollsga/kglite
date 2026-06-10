@@ -44,4 +44,4 @@ why APIs look the way they do:
 
 - {doc}`/python/core-concepts` — storage modes (memory / mapped / disk), return types, the fluent / Cypher split.
 - {doc}`/concepts/architecture` — Rust core + PyO3 bindings + petgraph, where each subsystem lives.
-- {doc}`/concepts/design-decisions` — single-label nodes, columnar storage, Cypher subset choices.
+- {doc}`/concepts/design-decisions` — the label model, columnar storage, Cypher subset choices.

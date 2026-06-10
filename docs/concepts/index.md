@@ -11,8 +11,8 @@ or [Rust guide](../rust/index.md).
 
 - **[Architecture](architecture.md)** — layered diagram, the
   petgraph storage, indexes, the query pipeline.
-- **[Design decisions](design-decisions.md)** — single-label
-  nodes, why Cypher over SQL, transaction model.
+- **[Design decisions](design-decisions.md)** — the label
+  model, why Cypher over SQL, transaction model.
 - **[Multi-label rationale](multi-label-rationale.md)** — why
   kglite chose single-label (vs Neo4j's multi-label).
 - **[Cypher conformance](cypher-conformance.md)** — what subset

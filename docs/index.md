@@ -25,7 +25,7 @@ in; once it's in, you query with Cypher.
 | LLM-agent surface | Bundled MCP server + `describe()` schema for system prompts |
 | Cypher subset, honest semantics | Querying + mutations + `text_score()` for semantic search |
 | In-memory by default | Mapped + disk modes for Wikidata-scale; in-memory is the design centre |
-| Single-label nodes | Each node has exactly one type — see [design decisions](concepts/design-decisions.md) |
+| Label model | One primary type + optional secondary labels — see [multi-label rationale](concepts/multi-label-rationale.md) |
 | One-file persistence | `.kgl` snapshots — copy, share, reload elsewhere |
 | Rust-embeddable | Pure-Rust core; embed without PyO3 — see [Rust track](rust/index.md) |
 

@@ -142,7 +142,7 @@ if info['fragmentation_ratio'] > 0.3:
 
 ## Common Gotchas
 
-- **Single-label only.** Each node has exactly one type. `labels(n)` returns a string, not a list.
+- **One primary type per node.** Secondary labels (multi-label, 0.10.5+) are preserved; `labels(n)` returns a list, primary type first.
 - **`id` and `title` are canonical.** `add_nodes(unique_id_field='user_id')` stores the column as `id`. The original name works as an alias.
 - **Save files use a pinned binary format.** Compatible across OS/architecture within the same major version.
 - **Indexes:** `create_index()` accelerates equality only. For range queries, use `create_range_index()`.

@@ -2,7 +2,7 @@
 
 Full Cypher subset supported by KGLite. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
 
-> **Single-label note:** Each node has exactly one type. `labels(n)` returns a string, not a list. `SET n:OtherLabel` is not supported.
+> **Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'` (`REMOVE n:Primary` errors deliberately).
 
 ---
 
@@ -175,7 +175,7 @@ graph.cypher("""
 | `size(expr)` | Length of string or list |
 | `type(r)` | Relationship type |
 | `id(n)` | Node ID |
-| `labels(n)` | Node type (string, not list — single-label) |
+| `labels(n)` | Node labels as a list, primary type first |
 | `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
 | `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map) |
 | `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |
@@ -1362,7 +1362,7 @@ Clause-by-clause comparison with the openCypher specification.
 | `size`, `length` | Full | Strings, lists, and paths |
 | `type(r)` | Full | Returns relationship type |
 | `id(n)` | Full | Returns node id |
-| `labels(n)` | Full | Returns single label (string, not list — single-label model) |
+| `labels(n)` | Full | Returns the label list, primary type first (multi-label since 0.10.5) |
 | `keys(n)` / `keys(r)` | Full | Returns property names as JSON list |
 | `date(str)` / `datetime(str)` | Full | Parse date string to DateTime; `d.year`, `d.month`, `d.day` accessors; `date ± N`, `date - date`, `date_diff()` |
 | `coalesce` | Full | |
@@ -1379,9 +1379,9 @@ Clause-by-clause comparison with the openCypher specification.
 
 | Feature | KGLite | Neo4j | Rationale |
 |---------|--------|-------|-----------|
-| Labels per node | Single label | Multiple | Simplifies indexing, type_indices are `HashMap<String, Vec<NodeIndex>>` |
-| `labels(n)` return type | `String` | `List[String]` | Single-label model |
-| `SET n:Label` | Not supported | Supported | Single-label model — change type via `SET n.type = 'NewType'` |
+| Labels per node | One primary type + secondary labels | Multiple equal labels | Primary type drives indexing (`type_indices`); secondary labels are additive (0.10.5+) |
+| `labels(n)` return type | `List[String]` (primary first) | `List[String]` | Matches Neo4j since 0.10.5 |
+| `SET n:Label` | Supported (adds a secondary label) | Supported | Primary type is immutable via label ops — change it with `SET n.type = 'NewType'` |
 | Storage | In-memory (petgraph) | Disk-based | Embedded use case, explicit `save()`/`load()` |
 | Transactions | Snapshot isolation + OCC | Full ACID | GIL serializes Python access; OCC catches conflicts |
 | Indexing | Type indices + vector index | Schema indexes | Automatic type-based lookup, no manual `CREATE INDEX` |
