@@ -733,6 +733,14 @@ impl CypherParser {
             }
         }
 
+        // v1 structural validation of the body (§1.4 / §6 decisions in
+        // dev-documentation/design/call-subqueries.md). These are
+        // body-only checks that need no outer-scope information, so they
+        // belong at parse time where they fire uniformly on every path
+        // (read / mutate / Python pre-parse / bolt / mcp) before
+        // execution or mutation classification ever runs.
+        validate_subquery_body(&clauses)?;
+
         let body = Box::new(CypherQuery {
             clauses,
             explain: false,
@@ -806,4 +814,63 @@ fn extract_importing_with(w: &WithClause) -> Result<Vec<String>, String> {
         }
     }
     Ok(names)
+}
+
+/// v1 structural validation of a `CALL { }` subquery body
+/// (§1.4 / §6 of `dev-documentation/design/call-subqueries.md`).
+///
+/// `clauses` is the body *after* the importing `WITH` has been lifted
+/// and dropped. Rejects the shapes excluded from v1:
+///
+/// - **Write clauses** (`CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE`) —
+///   deferred (§6 Q1): routing + atomicity are out of v1 scope. We
+///   classify write-in-`CALL` correctly (`is_mutation_query` recurses)
+///   but reject it here so it is never mis-executed.
+/// - **No terminal `RETURN` (unit subquery)** — deferred (§1.3): a
+///   body must end in `RETURN` in v1.
+///
+/// `UNION` / `INTERSECT` / `EXCEPT` inside the body (deferred, §6 Q2)
+/// are rejected earlier, in `parse_clause_sequence`, so they never
+/// reach here.
+///
+/// Nested `CALL { }` is *allowed* in v1 (§1.4: "falls out of
+/// recursion") and is intentionally not rejected — each nested body
+/// is validated by its own `parse_call_subquery` call.
+fn validate_subquery_body(clauses: &[Clause]) -> Result<(), String> {
+    for clause in clauses {
+        if matches!(
+            clause,
+            Clause::Create(_)
+                | Clause::Set(_)
+                | Clause::Delete(_)
+                | Clause::Remove(_)
+                | Clause::Merge(_)
+        ) {
+            return Err(
+                "write clauses (CREATE / SET / DELETE / REMOVE / MERGE) inside a CALL { } \
+                 subquery are not supported in this version"
+                    .to_string(),
+            );
+        }
+    }
+
+    // The body must terminate in a RETURN. ORDER BY / SKIP / LIMIT are
+    // parsed as separate trailing clauses *after* the RETURN, so accept
+    // a RETURN followed only by those.
+    let return_idx = clauses.iter().position(|c| matches!(c, Clause::Return(_)));
+    match return_idx {
+        Some(idx)
+            if clauses[idx + 1..]
+                .iter()
+                .all(|c| matches!(c, Clause::OrderBy(_) | Clause::Skip(_) | Clause::Limit(_))) => {}
+        _ => {
+            return Err(
+                "a CALL { } subquery body must end with RETURN; unit subqueries (no RETURN) are \
+                 not supported in this version"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
 }

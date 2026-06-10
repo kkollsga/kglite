@@ -17,18 +17,34 @@ use std::time::Instant;
 // Mutation Execution
 // ============================================================================
 
-/// Check if a query contains any mutation clauses
+/// Check if a query contains any mutation clauses.
+///
+/// Recurses into nested sub-pipelines (`CALL { ... }` bodies and
+/// `UNION` arms) so a write buried inside one routes the *whole*
+/// query to the mutation path (`execute_mutable`) rather than
+/// slipping through `execute_read` as a read. This is a correctness
+/// requirement, not an optimisation: mis-classifying a write as a
+/// read would either run it on a read-only graph view or bypass the
+/// read-only / schema-locked guards that key on this function.
 pub fn is_mutation_query(query: &CypherQuery) -> bool {
-    query.clauses.iter().any(|c| {
-        matches!(
-            c,
-            Clause::Create(_)
-                | Clause::Set(_)
-                | Clause::Delete(_)
-                | Clause::Remove(_)
-                | Clause::Merge(_)
-        )
-    })
+    query.clauses.iter().any(clause_is_mutation)
+}
+
+/// True if `clause` is itself a write clause or contains a write
+/// clause in a nested sub-pipeline.
+fn clause_is_mutation(clause: &Clause) -> bool {
+    match clause {
+        Clause::Create(_)
+        | Clause::Set(_)
+        | Clause::Delete(_)
+        | Clause::Remove(_)
+        | Clause::Merge(_) => true,
+        // Nested sub-pipelines: a write inside the body makes the
+        // enclosing query a mutation.
+        Clause::CallSubquery { body, .. } => is_mutation_query(body),
+        Clause::Union(u) => is_mutation_query(&u.query),
+        _ => false,
+    }
 }
 
 /// Execute a mutation query against a mutable graph.
@@ -1234,5 +1250,99 @@ fn try_match_merge_pattern(
             }
         }
         _ => Err("MERGE supports single-node or single-edge patterns only".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod is_mutation_query_tests {
+    use super::super::super::ast::*;
+    use super::is_mutation_query;
+
+    fn query(clauses: Vec<Clause>) -> CypherQuery {
+        CypherQuery {
+            clauses,
+            explain: false,
+            profile: false,
+            output_format: OutputFormat::Default,
+        }
+    }
+
+    fn create_clause() -> Clause {
+        Clause::Create(CreateClause {
+            patterns: Vec::new(),
+        })
+    }
+
+    fn return_clause() -> Clause {
+        Clause::Return(ReturnClause {
+            items: Vec::new(),
+            distinct: false,
+            having: None,
+            lazy_eligible: false,
+            group_limit_hint: None,
+        })
+    }
+
+    #[test]
+    fn plain_read_is_not_a_mutation() {
+        assert!(!is_mutation_query(&query(vec![return_clause()])));
+    }
+
+    #[test]
+    fn top_level_write_is_a_mutation() {
+        assert!(is_mutation_query(&query(vec![create_clause()])));
+    }
+
+    #[test]
+    fn write_inside_call_subquery_body_is_a_mutation() {
+        // CALL { CREATE (...) RETURN ... } — the body carries a write,
+        // so the enclosing query must classify as a mutation even though
+        // the outer clause is a CallSubquery (not itself a write clause).
+        let body = Box::new(query(vec![create_clause(), return_clause()]));
+        let call = Clause::CallSubquery {
+            import: Vec::new(),
+            body,
+        };
+        assert!(is_mutation_query(&query(vec![call, return_clause()])));
+    }
+
+    #[test]
+    fn nested_write_inside_call_subquery_body_is_a_mutation() {
+        // CALL { CALL { CREATE (...) RETURN ... } RETURN ... } — recursion
+        // must reach an arbitrarily-deep nested body.
+        let inner = Box::new(query(vec![create_clause(), return_clause()]));
+        let inner_call = Clause::CallSubquery {
+            import: Vec::new(),
+            body: inner,
+        };
+        let outer = Box::new(query(vec![inner_call, return_clause()]));
+        let outer_call = Clause::CallSubquery {
+            import: Vec::new(),
+            body: outer,
+        };
+        assert!(is_mutation_query(&query(vec![outer_call])));
+    }
+
+    #[test]
+    fn read_only_call_subquery_body_is_not_a_mutation() {
+        let body = Box::new(query(vec![return_clause()]));
+        let call = Clause::CallSubquery {
+            import: Vec::new(),
+            body,
+        };
+        assert!(!is_mutation_query(&query(vec![call, return_clause()])));
+    }
+
+    #[test]
+    fn write_inside_union_arm_is_a_mutation() {
+        // UNION arms also recurse — a write in either arm makes the
+        // query a mutation.
+        let arm = Box::new(query(vec![create_clause(), return_clause()]));
+        let union = Clause::Union(UnionClause {
+            all: false,
+            query: arm,
+            kind: SetOpKind::Union,
+        });
+        assert!(is_mutation_query(&query(vec![return_clause(), union])));
     }
 }

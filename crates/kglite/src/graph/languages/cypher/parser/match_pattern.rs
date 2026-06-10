@@ -314,6 +314,16 @@ impl CypherParser {
                 break;
             }
 
+            // Stop at a top-level RBrace — it can only be the `}` closing a
+            // `CALL { ... }` subquery body (property maps live inside `()` or
+            // `[]`, so any `}` belonging to a map is at paren/bracket depth
+            // > 0). Without this, a MATCH that is the last clause of a
+            // subquery body swallows the terminating `}` into the pattern
+            // string and the body fails to close.
+            if paren_depth == 0 && bracket_depth == 0 && self.check(&CypherToken::RBrace) {
+                break;
+            }
+
             let token = self.advance().unwrap().clone();
 
             match &token {

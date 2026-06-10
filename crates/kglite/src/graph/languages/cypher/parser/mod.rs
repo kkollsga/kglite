@@ -236,6 +236,22 @@ impl CypherParser {
                 Some(CypherToken::Unwind) => {
                     clauses.push(self.parse_unwind_clause()?);
                 }
+                Some(CypherToken::Union)
+                | Some(CypherToken::Intersect)
+                | Some(CypherToken::Except)
+                    if end_at_rbrace =>
+                {
+                    // v1: UNION / INTERSECT / EXCEPT inside a CALL { }
+                    // body are deferred (§1.4 / §6 Q2 of the design doc).
+                    // Reject here with a precise message — otherwise the
+                    // set-op arm parser greedily consumes to EOF and dies
+                    // on the closing `}` with a confusing token error.
+                    return Err(
+                        "UNION / INTERSECT / EXCEPT inside a CALL { } subquery is not supported \
+                         in this version"
+                            .to_string(),
+                    );
+                }
                 Some(CypherToken::Union) => {
                     clauses.push(self.parse_union_clause()?);
                 }
