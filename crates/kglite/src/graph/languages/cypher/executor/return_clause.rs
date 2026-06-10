@@ -5,8 +5,8 @@ use super::helpers::*;
 use super::*;
 use crate::datatypes::values::Value;
 use chrono::Datelike;
-use rustc_hash::FxHashMap;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BinaryHeap, HashMap};
 
 /// Surrogate key for a single grouping expression. NodeProp defers property
 /// materialization until after the per-row pass — the same NodeIndex hashes to
@@ -176,7 +176,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Handle DISTINCT
         if clause.distinct {
-            let mut seen = HashSet::new();
+            let mut seen: FxHashSet<Vec<Value>> = FxHashSet::default();
             result_set.rows.retain(|row| {
                 let key: Vec<Value> = columns
                     .iter()
@@ -413,7 +413,7 @@ impl<'a> CypherExecutor<'a> {
 
         // Handle DISTINCT
         if clause.distinct {
-            let mut seen = HashSet::new();
+            let mut seen: FxHashSet<Vec<Value>> = FxHashSet::default();
             result_rows.retain(|row| {
                 let key: Vec<Value> = columns
                     .iter()
@@ -483,9 +483,9 @@ impl<'a> CypherExecutor<'a> {
                             _ => None,
                         };
                         let mut count = 0i64;
-                        let mut seen_nodes: HashSet<usize> = HashSet::new();
-                        let mut seen_edges: HashSet<usize> = HashSet::new();
-                        let mut seen_values: HashSet<Value> = HashSet::new();
+                        let mut seen_nodes: FxHashSet<usize> = FxHashSet::default();
+                        let mut seen_edges: FxHashSet<usize> = FxHashSet::default();
+                        let mut seen_values: FxHashSet<Value> = FxHashSet::default();
                         for row in rows {
                             let val = self.evaluate_expression(&args[0], row)?;
                             if matches!(val, Value::Null) {
@@ -617,7 +617,7 @@ impl<'a> CypherExecutor<'a> {
                     // shapes during the cutover, but new producers
                     // should emit native lists.
                     let mut values: Vec<Value> = Vec::new();
-                    let mut seen = HashSet::new();
+                    let mut seen: FxHashSet<String> = FxHashSet::default();
                     for row in rows {
                         let val = self.evaluate_expression(&args[0], row)?;
                         if !matches!(val, Value::Null) {
@@ -682,13 +682,12 @@ impl<'a> CypherExecutor<'a> {
                 //
                 // 2026-05-25 broad-scan lift, Batch 5.
                 "mode" => {
-                    use std::collections::HashMap;
                     // Key = canonical string repr of the value (Debug
                     // distinguishes Int(1) from String("1")); first
                     // Value seen for that key is the returned winner
                     // on tie (insertion-order tiebreak).
-                    let mut counts: HashMap<String, (Value, u64)> = HashMap::new();
-                    let mut seen_distinct = std::collections::HashSet::new();
+                    let mut counts: FxHashMap<String, (Value, u64)> = FxHashMap::default();
+                    let mut seen_distinct: FxHashSet<String> = FxHashSet::default();
                     for row in rows {
                         let val = self.evaluate_expression(&args[0], row)?;
                         if matches!(val, Value::Null) {
@@ -928,7 +927,7 @@ impl<'a> CypherExecutor<'a> {
         distinct: bool,
     ) -> Result<Vec<f64>, String> {
         let mut values = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen: FxHashSet<u64> = FxHashSet::default();
 
         for row in rows {
             let val = self.evaluate_expression(expr, row)?;

@@ -10,7 +10,7 @@ use crate::graph::core::pattern_matching::{
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -901,7 +901,11 @@ impl<'a> CypherExecutor<'a> {
                     // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
                     // creating ResultRows for matches that would be DISTINCT-removed later.
                     if let Some(ref dedup_var) = clause.distinct_node_hint {
-                        let mut seen = HashSet::with_capacity(matches.len().min(10000));
+                        let mut seen: rustc_hash::FxHashSet<_> =
+                            rustc_hash::FxHashSet::with_capacity_and_hasher(
+                                matches.len().min(10000),
+                                Default::default(),
+                            );
                         for m in matches {
                             // Check if this match's dedup variable is a node we've seen
                             let dominated = m

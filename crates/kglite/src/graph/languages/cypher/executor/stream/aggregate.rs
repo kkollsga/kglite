@@ -24,8 +24,8 @@ use super::super::CypherExecutor;
 use super::RowStream;
 use crate::datatypes::values::Value;
 use petgraph::graph::NodeIndex;
-use rustc_hash::FxHashMap;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
 
 /// Surrogate key for a single grouping expression. Mirrors the
 /// `GroupKeyPart` enum in `return_clause` so the streaming path
@@ -96,18 +96,18 @@ struct AggState {
     min: Option<Value>,
     max: Option<Value>,
     /// Populated only when the corresponding `AggSpec` has `distinct`.
-    distinct_nodes: Option<HashSet<usize>>,
-    distinct_edges: Option<HashSet<usize>>,
-    distinct_values: Option<HashSet<Value>>,
+    distinct_nodes: Option<FxHashSet<usize>>,
+    distinct_edges: Option<FxHashSet<usize>>,
+    distinct_values: Option<FxHashSet<Value>>,
 }
 
 impl AggState {
     fn new(spec: &AggSpec) -> Self {
         let (distinct_nodes, distinct_edges, distinct_values) = if spec.distinct {
             (
-                Some(HashSet::new()),
-                Some(HashSet::new()),
-                Some(HashSet::new()),
+                Some(FxHashSet::default()),
+                Some(FxHashSet::default()),
+                Some(FxHashSet::default()),
             )
         } else {
             (None, None, None)
@@ -560,7 +560,7 @@ pub fn apply<'q>(
     // DISTINCT post-filter on projected columns. Mirrors materialized
     // path's DISTINCT step in `execute_return_with_aggregation`.
     if return_clause.distinct {
-        let mut seen = HashSet::new();
+        let mut seen: FxHashSet<Vec<Value>> = FxHashSet::default();
         output_rows.retain(|row| {
             let key: Vec<Value> = columns
                 .iter()
@@ -597,7 +597,7 @@ fn update_agg_state(
         if let Some(var_name) = &spec.arg_is_node_var {
             if let Some(&idx) = row.node_bindings.get(var_name) {
                 let key = idx.index();
-                let dn = state.distinct_nodes.get_or_insert_with(HashSet::new);
+                let dn = state.distinct_nodes.get_or_insert_with(FxHashSet::default);
                 if !dn.insert(key) {
                     return;
                 }
@@ -613,7 +613,7 @@ fn update_agg_state(
         if let Some(var_name) = &spec.arg_is_edge_var {
             if let Some(eb) = row.edge_bindings.get(var_name) {
                 let key = eb.edge_index.index();
-                let de = state.distinct_edges.get_or_insert_with(HashSet::new);
+                let de = state.distinct_edges.get_or_insert_with(FxHashSet::default);
                 if !de.insert(key) {
                     return;
                 }
@@ -627,7 +627,7 @@ fn update_agg_state(
         if matches!(val, Value::Null) {
             return;
         }
-        let dv = state.distinct_values.get_or_insert_with(HashSet::new);
+        let dv = state.distinct_values.get_or_insert_with(FxHashSet::default);
         if !dv.insert(val.clone()) {
             return;
         }

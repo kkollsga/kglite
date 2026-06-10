@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **DISTINCT dedup structures use FxHash.** The `RETURN DISTINCT` /
+  `WITH DISTINCT` row-dedup sets (plus the `count(DISTINCT)` /
+  `collect(DISTINCT)` / `mode()` / streaming-aggregate DISTINCT sets and
+  the `distinct_node_hint` pre-dedup) still ran on the default SipHasher
+  — missed by the 0.10.7 FxHash sweep and the top symbol in a samply
+  profile of the DISTINCT shape. Same exact-equality dedup, faster
+  hasher: `RETURN DISTINCT` over 50k rows ~14-17% faster,
+  `collect(DISTINCT)` ~15% (min, 50k-node hot-path suite).
+
 - **Per-row property access skips alias resolution when the property
   can't be an alias.** Every in-memory `n.prop` in WHERE/RETURN paid two
   string-keyed HashMap lookups in `resolve_alias` per row, even for
