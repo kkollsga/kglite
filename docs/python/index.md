@@ -52,6 +52,8 @@ guides/sec
 
 ## Migrations
 
+- **[Neo4j → KGLite](migrations/neo4j-to-kglite.md)** — evaluate or
+  adopt KGLite from an existing Neo4j database / driver code.
 - **[MCP 0.6 → 0.9](migrations/mcp-0.6-to-0.9.md)** — older MCP
   server users.
 - **[MCP pre-0.9.20](migrations/mcp-pre-0.9.20.md)** — the
@@ -65,6 +67,7 @@ core-concepts
 transactions
 error-handling
 value-projection
+migrations/neo4j-to-kglite
 migrations/mcp-0.6-to-0.9
 migrations/mcp-pre-0.9.20
 ```
