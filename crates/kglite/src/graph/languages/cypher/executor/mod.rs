@@ -204,6 +204,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Remove(_) => "Remove".into(),
         Clause::Merge(_) => "Merge".into(),
         Clause::Call(_) => "Call".into(),
+        Clause::CallSubquery { .. } => "CallSubquery".into(),
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
         Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),
         Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
@@ -747,6 +748,11 @@ impl<'a> CypherExecutor<'a> {
                 remainder.as_ref(),
             ),
             Clause::Call(c) => self.execute_call(c, result_set),
+            Clause::CallSubquery { .. } => Err(
+                "CALL { } subqueries are parsed but not yet executable (planned for a future \
+                 release); rewrite using WITH chaining or multiple cypher() calls for now"
+                    .to_string(),
+            ),
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)

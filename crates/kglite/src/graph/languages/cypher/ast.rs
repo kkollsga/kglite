@@ -45,6 +45,20 @@ pub enum Clause {
     Remove(RemoveClause),
     Merge(MergeClause),
     Call(CallClause),
+    /// `CALL { ... }` subquery: a nested sub-pipeline evaluated once per outer
+    /// row (correlated) or exactly once (uncorrelated). `import` holds the
+    /// outer variable names lifted from a leading bare importing `WITH`
+    /// (empty = uncorrelated); the importing `WITH` is stripped from `body`
+    /// during parsing so the body re-binds those names from the seed row.
+    /// `body` is the remaining sub-pipeline (a full `CypherQuery`).
+    ///
+    /// Phase 1 ships the parser + AST node only; execution and planner
+    /// integration land in later phases. See
+    /// `dev-documentation/design/call-subqueries.md`.
+    CallSubquery {
+        import: Vec<String>,
+        body: Box<CypherQuery>,
+    },
     /// Optimizer-generated: fuse OPTIONAL MATCH + WITH count(...) into a single pass.
     /// Instead of expanding rows then aggregating, count matches directly per input row.
     FusedOptionalMatchAggregate {

@@ -156,9 +156,46 @@ impl CypherParser {
             profile = true;
         }
 
+        let (clauses, output_format) = self.parse_clause_sequence(false)?;
+
+        if clauses.is_empty() {
+            return Err("Empty query".to_string());
+        }
+
+        Ok(CypherQuery {
+            clauses,
+            explain,
+            profile,
+            output_format,
+        })
+    }
+
+    /// Parse a sequence of clauses into the body of a query.
+    ///
+    /// When `end_at_rbrace` is `false` the loop runs until end-of-input
+    /// (the top-level query). When `true` it stops at — and leaves
+    /// unconsumed — the closing `}` of a `CALL { ... }` subquery body; the
+    /// caller (`parse_call_subquery`) is responsible for consuming that
+    /// brace. Nested `{ ... }` (map literals, nested `CALL {}`) are handled
+    /// by the per-clause parsers, which consume their own braces in
+    /// balanced pairs — so a `RBrace` seen *at clause-boundary level* here
+    /// is unambiguously the subquery terminator.
+    ///
+    /// Returns the parsed clauses plus the trailing `OutputFormat` (only a
+    /// top-level `FORMAT CSV` sets it to `Csv`; subquery bodies reject
+    /// `FORMAT`).
+    pub(super) fn parse_clause_sequence(
+        &mut self,
+        end_at_rbrace: bool,
+    ) -> Result<(Vec<Clause>, OutputFormat), String> {
         let mut clauses = Vec::new();
 
         while self.has_tokens() {
+            // Closing brace of a CALL { ... } body — stop, leave it for the caller.
+            if end_at_rbrace && self.check(&CypherToken::RBrace) {
+                break;
+            }
+
             // Skip semicolons between statements
             if self.check(&CypherToken::Semicolon) {
                 self.advance();
@@ -227,17 +264,17 @@ impl CypherParser {
                     clauses.push(self.parse_call_clause()?);
                 }
                 Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
+                    if end_at_rbrace {
+                        return Err(
+                            "FORMAT is not allowed inside a CALL { } subquery body".to_string()
+                        );
+                    }
                     // FORMAT CSV — must be last clause
                     self.advance(); // consume FORMAT
                     match self.peek() {
                         Some(CypherToken::Identifier(fmt)) if fmt.eq_ignore_ascii_case("CSV") => {
                             self.advance(); // consume CSV
-                            return Ok(CypherQuery {
-                                clauses,
-                                explain,
-                                profile,
-                                output_format: OutputFormat::Csv,
-                            });
+                            return Ok((clauses, OutputFormat::Csv));
                         }
                         other => {
                             return Err(format!(
@@ -254,16 +291,7 @@ impl CypherParser {
             }
         }
 
-        if clauses.is_empty() {
-            return Err("Empty query".to_string());
-        }
-
-        Ok(CypherQuery {
-            clauses,
-            explain,
-            profile,
-            output_format: OutputFormat::Default,
-        })
+        Ok((clauses, OutputFormat::Default))
     }
 }
 
@@ -1067,6 +1095,139 @@ mod tests {
             assert_eq!(c.yield_items[1].alias.as_deref(), Some("limit"));
         } else {
             panic!("Expected CALL clause");
+        }
+    }
+
+    // ========================================================================
+    // CALL { } subqueries (Phase 1: parser + AST node)
+    // ========================================================================
+
+    #[test]
+    fn test_call_subquery_uncorrelated() {
+        let query =
+            parse_cypher("CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        if let Clause::CallSubquery { import, body } = &query.clauses[0] {
+            assert!(import.is_empty(), "uncorrelated subquery has no imports");
+            assert_eq!(body.clauses.len(), 2);
+            assert!(matches!(&body.clauses[0], Clause::Match(_)));
+            assert!(matches!(&body.clauses[1], Clause::Return(_)));
+        } else {
+            panic!("Expected CallSubquery, got {:?}", query.clauses[0]);
+        }
+        assert!(matches!(&query.clauses[1], Clause::Return(_)));
+    }
+
+    #[test]
+    fn test_call_subquery_correlated_importing_with() {
+        let query = parse_cypher(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } \
+             RETURN p.name, c",
+        )
+        .unwrap();
+        assert_eq!(query.clauses.len(), 3);
+        assert!(matches!(&query.clauses[0], Clause::Match(_)));
+        if let Clause::CallSubquery { import, body } = &query.clauses[1] {
+            assert_eq!(import, &vec!["p".to_string()]);
+            // The importing WITH is stripped from the body.
+            assert_eq!(body.clauses.len(), 2);
+            assert!(matches!(&body.clauses[0], Clause::Match(_)));
+            assert!(matches!(&body.clauses[1], Clause::Return(_)));
+        } else {
+            panic!("Expected CallSubquery, got {:?}", query.clauses[1]);
+        }
+    }
+
+    #[test]
+    fn test_call_subquery_multi_import() {
+        let query = parse_cypher(
+            "MATCH (p:Person), (q:Person) CALL { WITH p, q MATCH (p)-[:KNOWS]->(q) \
+             RETURN count(*) AS c } RETURN c",
+        )
+        .unwrap();
+        if let Clause::CallSubquery { import, .. } = &query.clauses[1] {
+            assert_eq!(import, &vec!["p".to_string(), "q".to_string()]);
+        } else {
+            panic!("Expected CallSubquery");
+        }
+    }
+
+    #[test]
+    fn test_call_subquery_nested_braces() {
+        // Nested CALL {} plus a map literal containing a '}' must not close early.
+        let query = parse_cypher(
+            "CALL { CALL { MATCH (n) RETURN n LIMIT 1 } MATCH (m {tag: 'x}y'}) \
+             RETURN m AS r, {a: 1, b: 2} AS meta } RETURN r, meta",
+        )
+        .unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        if let Clause::CallSubquery { import, body } = &query.clauses[0] {
+            assert!(import.is_empty());
+            // body = [nested CallSubquery, MATCH, RETURN]
+            assert_eq!(body.clauses.len(), 3);
+            assert!(matches!(&body.clauses[0], Clause::CallSubquery { .. }));
+            assert!(matches!(&body.clauses[1], Clause::Match(_)));
+            assert!(matches!(&body.clauses[2], Clause::Return(_)));
+        } else {
+            panic!("Expected outer CallSubquery, got {:?}", query.clauses[0]);
+        }
+    }
+
+    #[test]
+    fn test_call_subquery_map_literal_not_closing() {
+        // A RETURN'd map literal at the end of the body must not be mistaken
+        // for the subquery's closing brace.
+        let query = parse_cypher("CALL { MATCH (n) RETURN {a: n.x} AS m } RETURN m").unwrap();
+        assert_eq!(query.clauses.len(), 2);
+        assert!(matches!(&query.clauses[0], Clause::CallSubquery { .. }));
+        assert!(matches!(&query.clauses[1], Clause::Return(_)));
+    }
+
+    #[test]
+    fn test_call_subquery_missing_closing_brace() {
+        let err = parse_cypher("CALL { MATCH (n:Person) RETURN n").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains('}') || msg.to_lowercase().contains("close"),
+            "expected a missing-brace error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_call_subquery_importing_with_alias_rejected() {
+        // `WITH p AS x` in the importing position is illegal.
+        let err = parse_cypher(
+            "MATCH (p:Person) CALL { WITH p AS x MATCH (x) RETURN count(x) AS c } RETURN c",
+        )
+        .unwrap_err();
+        let msg = format!("{}", err).to_lowercase();
+        assert!(
+            msg.contains("importing with"),
+            "expected importing-WITH violation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_call_subquery_importing_with_projection_rejected() {
+        // `WITH p.name` (a projection) in the importing position is illegal.
+        let err = parse_cypher("MATCH (p:Person) CALL { WITH p.name MATCH (n) RETURN n } RETURN n")
+            .unwrap_err();
+        let msg = format!("{}", err).to_lowercase();
+        assert!(
+            msg.contains("importing with"),
+            "expected importing-WITH violation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_call_procedure_still_parses() {
+        // The existing CALL procedure form must be unaffected by the
+        // subquery branch.
+        let query = parse_cypher("CALL pagerank() YIELD node, score RETURN node, score").unwrap();
+        assert!(matches!(&query.clauses[0], Clause::Call(_)));
+        if let Clause::Call(c) = &query.clauses[0] {
+            assert_eq!(c.procedure_name, "pagerank");
+            assert_eq!(c.yield_items.len(), 2);
         }
     }
 }

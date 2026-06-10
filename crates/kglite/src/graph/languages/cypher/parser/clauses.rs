@@ -610,6 +610,11 @@ impl CypherParser {
     pub(super) fn parse_call_clause(&mut self) -> Result<Clause, String> {
         self.expect(&CypherToken::Call)?;
 
+        // `CALL {` → subquery; `CALL procName(...)` → procedure call.
+        if self.check(&CypherToken::LBrace) {
+            return self.parse_call_subquery();
+        }
+
         // Parse procedure name (may be namespaced: `db.labels`, `apoc.coll.sum`).
         // The tokenizer splits these into Identifier/Dot/Identifier sequences;
         // we re-join them into a single flat `String` so the executor dispatch
@@ -679,6 +684,65 @@ impl CypherParser {
         }))
     }
 
+    /// Parse a `CALL { ... }` subquery body. Assumes `CALL` is already
+    /// consumed and the current token is `{`.
+    ///
+    /// The body is parsed with the *real* clause parser
+    /// (`parse_clause_sequence`) bounded by the matching `}` — NOT the
+    /// pattern re-serialization mechanism, which only handles patterns and
+    /// stops at clause keywords (it cannot parse a multi-clause nested
+    /// pipeline). Nested `{ ... }` (map literals, nested `CALL {}`) are
+    /// consumed in balanced pairs by the individual clause parsers, so the
+    /// only `}` visible at clause-boundary level is this subquery's
+    /// terminator.
+    ///
+    /// A leading bare importing `WITH` (all items plain variable
+    /// references, no alias/aggregation/DISTINCT/inline WHERE) is lifted
+    /// into `import` and dropped from the body; any other leading `WITH`
+    /// shape in the importing position is a parse error (§1.2 rule 2).
+    fn parse_call_subquery(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::LBrace)?;
+
+        let (mut clauses, output_format) = self.parse_clause_sequence(true)?;
+        self.expect(&CypherToken::RBrace)
+            .map_err(|_| "Expected `}` to close CALL { } subquery".to_string())?;
+
+        if !matches!(output_format, OutputFormat::Default) {
+            // Defensive: parse_clause_sequence already rejects FORMAT inside
+            // a subquery body, so this should be unreachable.
+            return Err("FORMAT is not allowed inside a CALL { } subquery body".to_string());
+        }
+
+        if clauses.is_empty() {
+            return Err("CALL { } subquery body must contain at least one clause".to_string());
+        }
+
+        // Detect + lift a leading importing WITH.
+        let import = match clauses.first() {
+            Some(Clause::With(w)) => extract_importing_with(w)?,
+            _ => Vec::new(),
+        };
+        if !import.is_empty() {
+            clauses.remove(0); // drop the importing WITH; body re-binds from the seed
+            if clauses.is_empty() {
+                return Err(
+                    "CALL { } subquery body must contain at least one clause after the \
+                     importing WITH"
+                        .to_string(),
+                );
+            }
+        }
+
+        let body = Box::new(CypherQuery {
+            clauses,
+            explain: false,
+            profile: false,
+            output_format: OutputFormat::Default,
+        });
+
+        Ok(Clause::CallSubquery { import, body })
+    }
+
     /// Parse comma-separated YIELD items: name [AS alias], ...
     pub(super) fn parse_yield_items(&mut self) -> Result<Vec<YieldItem>, String> {
         let mut items = Vec::new();
@@ -712,4 +776,34 @@ impl CypherParser {
 
         Ok(items)
     }
+}
+
+/// Validate a `WITH` in the *importing* position of a `CALL { }` subquery and
+/// extract the imported variable names.
+///
+/// Per openCypher (§1.2 rule 2 of the design doc), an importing `WITH` may
+/// only be a list of plain variable references: no projections, no aliasing,
+/// no aggregation, no `DISTINCT`, no inline `WHERE`. Returns the variable
+/// names on success, or a precise error on violation. An empty result is
+/// impossible here — a `WITH` always has ≥1 item — so a non-empty return
+/// signals "this WITH is an importing clause".
+fn extract_importing_with(w: &WithClause) -> Result<Vec<String>, String> {
+    const VIOLATION: &str = "the importing WITH of a CALL { } subquery may only list plain \
+         variables (no aliasing, projection, aggregation, DISTINCT, or WHERE)";
+
+    if w.distinct || w.where_clause.is_some() {
+        return Err(VIOLATION.to_string());
+    }
+
+    let mut names = Vec::with_capacity(w.items.len());
+    for item in &w.items {
+        if item.alias.is_some() {
+            return Err(VIOLATION.to_string());
+        }
+        match &item.expression {
+            Expression::Variable(v) => names.push(v.clone()),
+            _ => return Err(VIOLATION.to_string()),
+        }
+    }
+    Ok(names)
 }

@@ -1319,6 +1319,7 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
             }
         }
         Clause::Call(_)
+        | Clause::CallSubquery { .. }
         | Clause::Create(_)
         | Clause::Set(_)
         | Clause::Delete(_)
