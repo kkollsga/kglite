@@ -505,6 +505,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (n:Person) RETURN labels(n)[0] AS l LIMIT 1",
         None,
     ),
+    # Map subscript by string key (IndexAccess string-index path,
+    # added 0.10.14). Integer index → list; string index → map/node key.
+    (
+        "map_literal_string_subscript",
+        "social_graph",
+        "RETURN {x: 1}['x'] AS r",
+        None,
+    ),
+    (
+        "node_dynamic_property_subscript",
+        "social_graph",
+        "MATCH (n:Person) RETURN n['name'] AS r ORDER BY r LIMIT 1",
+        None,
+    ),
     ("in_list", "social_graph", "MATCH (p:Person) WHERE p.city IN ['Oslo', 'Bergen'] RETURN count(p) AS n", None),
     (
         "predicate_stack",

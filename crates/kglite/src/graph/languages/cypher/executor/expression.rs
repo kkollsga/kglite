@@ -283,17 +283,25 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
 
-                let list_val = self.evaluate_expression(expr, row)?;
+                let container = self.evaluate_expression(expr, row)?;
                 let idx_val = self.evaluate_expression(index, row)?;
 
+                // Integer index → list subscript (hot path, checked first so
+                // lists stay first-class and incur no extra branching).
                 let idx = match &idx_val {
                     Value::Int64(i) => *i,
                     Value::Float64(f) => *f as i64,
+                    // String key → map / node / relationship subscript
+                    // (`{x:1}['x']`, `properties(n)['title']`, `n['title']`).
+                    // Missing key is NULL, never an error (Neo4j semantics).
+                    Value::String(key) => return Ok(map_subscript(&container, key)),
+                    // NULL key (or NULL container) → NULL, per openCypher.
+                    Value::Null => return Ok(Value::Null),
                     _ => return Err(format!("Index must be an integer, got {:?}", idx_val)),
                 };
 
                 // Parse the list (JSON-formatted string like "[\"Person\"]" or "[1, 2, 3]")
-                let items = parse_list_value(&list_val);
+                let items = parse_list_value(&container);
 
                 // Support negative indexing
                 let len = items.len() as i64;

@@ -858,13 +858,13 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             Expression::IndexAccess { expr: inner, index } => {
-                let list_val = self.evaluate_aggregate_with_rows(inner, rows)?;
-                let items = parse_list_value(&list_val);
+                let container = self.evaluate_aggregate_with_rows(inner, rows)?;
                 let dummy = ResultRow::new();
                 let row = rows.first().copied().unwrap_or(&dummy);
                 let idx_val = self.evaluate_expression(index, row)?;
                 match idx_val {
                     Value::Int64(idx) => {
+                        let items = parse_list_value(&container);
                         let len = items.len() as i64;
                         let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < items.len() {
@@ -873,6 +873,9 @@ impl<'a> CypherExecutor<'a> {
                             Ok(Value::Null)
                         }
                     }
+                    // String key → map / node / relationship subscript;
+                    // missing key (or non-map container) is NULL.
+                    Value::String(key) => Ok(map_subscript(&container, &key)),
                     _ => Ok(Value::Null),
                 }
             }

@@ -2149,3 +2149,47 @@ def test_inline_map_value_accepts_node_property_expression():
     # Correlated between two bound nodes.
     rows = g.cypher("MATCH (a:Assessment {id:'a1'}) MATCH (b:Assessment {id: a.id}) RETURN b.id AS id").to_list()
     assert rows == [{"id": "a1"}]
+
+
+class TestMapSubscriptAccess:
+    """BUG (0.10.14): `RETURN {x: 1}['x']` raised "Index must be an integer".
+
+    Map subscript by string key is standard openCypher/Neo4j. The
+    IndexAccess evaluator now dispatches on the index value's type:
+    integer → list indexing (hot path, checked first); string → map /
+    node / relationship key lookup; null → null. Missing keys resolve to
+    null, never an error.
+    """
+
+    def test_map_literal_string_key(self, cypher_graph):
+        assert cypher_graph.cypher("RETURN {x: 1}['x'] AS r")[0]["r"] == 1
+
+    def test_properties_string_key(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN properties(n)['city'] AS r")
+        assert rows[0]["r"] == "Oslo"
+
+    def test_dynamic_key_from_variable(self, cypher_graph):
+        assert cypher_graph.cypher("WITH 'x' AS k RETURN {x: 1}[k] AS r")[0]["r"] == 1
+
+    def test_missing_key_is_null(self, cypher_graph):
+        assert cypher_graph.cypher("RETURN {x: 1}['nope'] AS r")[0]["r"] is None
+
+    def test_null_key_is_null(self, cypher_graph):
+        assert cypher_graph.cypher("RETURN {x: 1}[null] AS r")[0]["r"] is None
+
+    def test_nested_map_subscript(self, cypher_graph):
+        assert cypher_graph.cypher("RETURN {a: {b: 2}}['a']['b'] AS r")[0]["r"] == 2
+
+    def test_node_dynamic_property_access(self, cypher_graph):
+        """Neo4j supports dynamic property access on a node binding."""
+        rows = cypher_graph.cypher("MATCH (n:Person {name: 'Alice'}) RETURN n['city'] AS r")
+        assert rows[0]["r"] == "Oslo"
+
+    def test_node_subscript_in_where(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (n:Person) WHERE n['city'] = 'Bergen' RETURN count(n) AS cnt")
+        assert rows[0]["cnt"] == 2
+
+    def test_list_indexing_still_works(self, cypher_graph):
+        assert cypher_graph.cypher("RETURN [1, 2, 3][0] AS r")[0]["r"] == 1
+        assert cypher_graph.cypher("RETURN [1, 2, 3][-1] AS r")[0]["r"] == 3
+        assert cypher_graph.cypher("RETURN [1, 2, 3][9] AS r")[0]["r"] is None

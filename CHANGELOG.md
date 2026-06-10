@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Map subscript by string key works.** `{x: 1}['x']`,
+  `properties(n)['title']`, dynamic keys (`{x: 1}[k]`), nested access
+  (`{a: {b: 2}}['a']['b']`), and dynamic property access on bound nodes
+  and relationships (`n['title']`, `r['since']`) previously failed with
+  `Index must be an integer`. Missing keys and `null` keys now resolve to
+  `null` (Neo4j semantics), never an error. List indexing (including the
+  integer fast path, negative indices, and out-of-range → `null`) is
+  unchanged.
+
 - **`kglite-mcp-server` no longer refuses to boot on a default install.**
   The startup dependency check demanded `fastembed`, which belongs to the
   opt-in `[embed]` extra — so a plain `pip install kglite` (without

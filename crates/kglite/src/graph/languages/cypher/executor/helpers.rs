@@ -549,6 +549,20 @@ pub(crate) fn materialize_path_value(
     PathValue { nodes, rels }
 }
 
+/// Resolve a string-keyed subscript (`container[key]`) against a map-like
+/// value: a `Value::Map`, a node's properties, or a relationship's
+/// properties. Per openCypher / Neo4j semantics a missing key resolves to
+/// `Value::Null` (never an error), and subscripting a non-map value also
+/// yields `Value::Null`.
+pub(super) fn map_subscript(container: &Value, key: &str) -> Value {
+    match container {
+        Value::Map(map) => map.get(key).cloned().unwrap_or(Value::Null),
+        Value::Node(node) => node.properties.get(key).cloned().unwrap_or(Value::Null),
+        Value::Relationship(rel) => rel.properties.get(key).cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
 /// Parse a list value.
 ///
 /// Phase A.1 / C2 — fast path for native `Value::List`: just clone the
