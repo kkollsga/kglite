@@ -1141,6 +1141,95 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN p.name AS pn, colleagues ORDER BY pn",
         None,
     ),
+    # ── CALL { } cross-clause barrier (Phase 5) ──
+    # These shapes would diverge optimized-vs-naive if a planner pass were
+    # to treat CallSubquery as transparent — fusing through it, reordering
+    # a MATCH across it, or pushing LIMIT/predicates past it. Each pairs a
+    # CALL with a downstream/adjacent shape that the pass it targets would
+    # otherwise rewrite. The naive (optimizer-off) run is the oracle.
+    (
+        # push_limit_into_match barrier: a CALL sits between the MATCH and
+        # the RETURN+LIMIT, so the LIMIT must NOT be pushed into the MATCH
+        # (the CALL's cartesian fan-out changes which rows the LIMIT keeps).
+        "call_then_return_limit_barrier",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age < 25 "
+        "CALL { MATCH (n:Person) RETURN count(n) AS tot } "
+        "RETURN p.name AS pn, tot ORDER BY pn LIMIT 3",
+        None,
+    ),
+    (
+        # fuse_order_by_top_k barrier: a correlated CALL feeds an outer
+        # ORDER BY ... LIMIT. The top-K fusion must see the CALL's output
+        # column (`c`), not fuse through to the upstream MATCH.
+        "call_correlated_then_order_by_limit",
+        "social_graph",
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+        "RETURN p.name AS pn, c ORDER BY c DESC, pn LIMIT 5",
+        None,
+    ),
+    (
+        # desugar_multi_match_return_aggregate / reorder_match_clauses
+        # barrier: a CALL sits BETWEEN two MATCHes that the outer RETURN
+        # aggregates over. The two MATCHes are NOT adjacent, so neither the
+        # multi-match desugar nor the cross-clause MATCH reorder may treat
+        # them as a contiguous span.
+        "call_between_two_matches_aggregate",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age < 24 "
+        "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS fc } "
+        "MATCH (p)-[:WORKS_AT]->(co:Company) "
+        "RETURN co.name AS cn, sum(fc) AS total ORDER BY cn",
+        None,
+    ),
+    (
+        # fold_pass_through_with barrier: a pass-through `WITH p` precedes a
+        # correlated `CALL { WITH p ... }`. Folding the WITH must not drop
+        # the binding the CALL imports; the collect_clause_variables fix
+        # records the CALL's import so the fold's downstream-ref check sees
+        # `p` is still needed.
+        "with_passthrough_before_correlated_call",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(co:Company) WITH p "
+        "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS fc } "
+        "RETURN p.name AS pn, fc ORDER BY pn",
+        None,
+    ),
+    (
+        # aggregate-after-CALL: the outer RETURN aggregates the per-row
+        # multiplicity the non-aggregating CALL produced. fuse_match_*_
+        # aggregate must NOT absorb the upstream MATCH through the CALL.
+        "aggregate_over_call_multiplicity",
+        "social_graph",
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS fn } "
+        "RETURN p.city AS city, count(fn) AS knows_count ORDER BY city",
+        None,
+    ),
+    (
+        # WITH-chain on BOTH sides of the CALL: a WITH narrows before, a
+        # WITH re-projects after. Exercises the import-declaredness +
+        # fold_pass_through_with interaction around a CALL in the middle of
+        # a pipeline.
+        "with_chain_around_call",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age >= 30 WITH p "
+        "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS fc } "
+        "WITH p.city AS city, fc AS fc "
+        "RETURN city, sum(fc) AS total ORDER BY city",
+        None,
+    ),
+    (
+        # uncorrelated CALL with its OWN body that the body-optimizer can
+        # fuse (MATCH+RETURN count) — confirms body optimization (now in
+        # the planner pass) agrees with the naive body. The outer LIMIT
+        # after the cartesian must not push into the body.
+        "call_uncorrelated_body_fusion_then_limit",
+        "social_graph",
+        "MATCH (c:Company) "
+        "CALL { MATCH (n:Person) WHERE n.age > 30 RETURN count(n) AS pc } "
+        "RETURN c.name AS cn, pc ORDER BY cn LIMIT 2",
+        None,
+    ),
 ]
 
 

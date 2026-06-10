@@ -1367,8 +1367,28 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
                 collect_clause_variables(c, out);
             }
         }
+        Clause::CallSubquery { import, body } => {
+            // A correlated `CALL { }` REFERENCES its imported outer
+            // variables (its leading WITH was lifted into `import` at parse
+            // time, so they appear nowhere else). Recording them here is a
+            // barrier-correctness fix: `fold_pass_through_with` asks "does
+            // any downstream clause reference a pre-WITH variable not in the
+            // projection?" — without these names, a `WITH p` could be folded
+            // away even though a later `CALL { WITH q ... }` depends on `q`
+            // still being in scope (folding `WITH p` re-exposes the dropped
+            // `q`, silently changing scope). The body's own clauses are also
+            // walked so a body reference to an imported name counts too;
+            // body-internal variables (re-bound from the seed) leak into
+            // `out` harmlessly — they can't collide with a pre-WITH name the
+            // fold check cares about.
+            for name in import {
+                out.insert(name.clone());
+            }
+            for c in &body.clauses {
+                collect_clause_variables(c, out);
+            }
+        }
         Clause::Call(_)
-        | Clause::CallSubquery { .. }
         | Clause::Create(_)
         | Clause::Set(_)
         | Clause::Delete(_)

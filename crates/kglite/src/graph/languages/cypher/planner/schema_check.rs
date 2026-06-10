@@ -125,6 +125,27 @@ fn validate_clause(
             let mut inner_vars: HashMap<String, String> = HashMap::new();
             validate_query(&u.query, graph, &mut inner_vars)?;
         }
+        Clause::CallSubquery { import, body } => {
+            // Recurse into the body so pattern-literal property typos inside
+            // `CALL { MATCH (n:T {prp: v}) ... }` get the same "did you
+            // mean?" treatment as top-level patterns (mirrors the Union /
+            // EXISTS recursion).
+            //
+            // Imported variables are EXTERNALLY bound: the leading importing
+            // `WITH` was stripped at parse time, so the body re-binds them
+            // from the outer scope. Seed the body's `var_types` with the
+            // imported names' outer types so a body pattern that re-anchors
+            // on an import (`CALL { WITH p MATCH (p {prp: v}) }`) validates
+            // against the import's real type. Non-imported body variables
+            // start fresh (§1.2 rule 1 — a bare body name is a new variable).
+            let mut inner_vars: HashMap<String, String> = HashMap::new();
+            for name in import {
+                if let Some(ty) = var_types.get(name) {
+                    inner_vars.insert(name.clone(), ty.clone());
+                }
+            }
+            validate_query(body, graph, &mut inner_vars)?;
+        }
         Clause::Return(_) | Clause::OrderBy(_) | Clause::Unwind(_) => {}
         Clause::Create(c) => {
             for pattern in &c.patterns {
@@ -431,6 +452,48 @@ mod tests {
     fn create_builtin_field_is_allowed() {
         let g = graph_with_schema();
         let q = parse_cypher("CREATE (n:Person {id: 99, title: 'Eve'}) RETURN n").unwrap();
+        assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn validates_property_inside_call_subquery_body() {
+        // A pattern-literal typo inside a CALL { } body must be caught with
+        // the same "did you mean?" quality as a top-level pattern.
+        let g = graph_with_schema();
+        let q = parse_cypher("CALL { MATCH (n:Person {agee: 1}) RETURN n.name AS nm } RETURN nm")
+            .unwrap();
+        let err = validate_schema(&q, &g).unwrap_err();
+        assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
+        assert!(err.message.contains("age"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn validates_labeled_pattern_literal_inside_correlated_call_body() {
+        // A correlated body that introduces a NEW labeled node with a
+        // property typo is caught (same rule as a top-level labeled
+        // pattern literal). `f:Person {agee:...}` inside the body is
+        // invalid.
+        let g = graph_with_schema();
+        let q = parse_cypher(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f:Person {agee: 1}) RETURN count(f) AS c } RETURN p.name, c",
+        )
+        .unwrap();
+        let err = validate_schema(&q, &g).unwrap_err();
+        assert_eq!(err.kind, SchemaErrorKind::UnknownProperty);
+        assert!(err.message.contains("age"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn call_subquery_body_non_imported_var_is_fresh_scope() {
+        // A bare body variable that shadows an outer name is a FRESH
+        // variable (§1.2 rule 1) — without the import, the body's `n` has
+        // no declared type, so a property reference is permissively allowed
+        // (matches top-level untyped behaviour). No false positive.
+        let g = graph_with_schema();
+        let q = parse_cypher(
+            "MATCH (p:Person) CALL { MATCH (n) RETURN n.anything AS a } RETURN p.name, a",
+        )
+        .unwrap();
         assert!(validate_schema(&q, &g).is_ok());
     }
 

@@ -54,6 +54,43 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// dependencies. Adding a new pass: write the impl, write a `pass_*`
 /// wrapper, register here with a unique name, doc-comment the wrapper,
 /// add at least one query to `tests/test_cypher_differential.py`.
+///
+/// ## `CALL { }` (CallSubquery) barrier audit (Phase 5)
+///
+/// `Clause::CallSubquery` is an OPAQUE barrier to every pass below. A
+/// subquery's per-row cardinality is unknown at plan time and a
+/// correlated body depends on its seeded input — so NO pass may move a
+/// clause across it, fuse a window through it, or push a LIMIT/predicate
+/// into or past it. The audit verdict for each pass:
+///
+/// | Pass | Verdict | Why safe |
+/// |---|---|---|
+/// | `optimize_nested_queries` | **recurses (by design)** | Owns body optimization; import-aware (disables seed-ignoring fusion for anchored correlated bodies). |
+/// | `rewrite_count_bound_var_to_star` | safe-by-shape | Rewrites a `count(v)` expression in place; never spans clauses. |
+/// | `push_where_into_match` (×2) | safe-by-shape | Matches adjacent `(Match\|OptionalMatch, Where)`; a CallSubquery is neither, so it breaks the window. Prior-scope helpers under-report CALL outputs → under-push (conservative). |
+/// | `fold_or_to_in` | safe-by-shape | Rewrites a WHERE predicate in place. |
+/// | `extract_pushable_rel_predicates` | safe-by-shape | Matches `(Match, Where)` adjacency only. |
+/// | `fold_pass_through_with` | **guarded** | Folds only `WITH`. Its downstream-ref check now records a CallSubquery's import names + body refs (see `collect_clause_variables`) so a `WITH` a correlated CALL depends on is never folded away. |
+/// | `desugar_multi_match_return_aggregate` | safe-by-shape | Requires `Match, Match, Return` ADJACENT; a CallSubquery between two MATCHes breaks adjacency. |
+/// | `fuse_spatial_join` | safe-by-shape | Matches `(Match, Where)` adjacency. |
+/// | `reorder_match_clauses` | safe-by-shape | Reorders only WITHIN a contiguous span of `Clause::Match`; a CallSubquery ends the span (`_ => break`). |
+/// | `optimize_pattern_start_node` / `reorder_match_patterns` | safe-by-shape | Reorder patterns WITHIN one MATCH; never move clauses. CallSubquery hits `_ => continue`; its body vars don't enter bound_vars (heuristic-only anyway). |
+/// | `push_limit_into_match` | safe-by-shape | Matches `Match → [Where] → Return → Limit` adjacency; a CallSubquery breaks it. The `only_match` guard also bails if any MATCH is non-first. |
+/// | `push_limit_into_aggregate` | safe-by-shape | Matches `(Return\|With) → Limit` adjacency. |
+/// | `push_distinct_into_match` | safe-by-shape | Matches `Match → [Where] → Return` adjacency. |
+/// | `fuse_anchored_edge_count` / `fuse_count_short_circuits` | safe-by-shape | Fire only when the WHOLE query is exactly `[Match, Return]` (len 2); a CallSubquery makes len ≠ 2. |
+/// | `fuse_optional_match_aggregate` | safe-by-shape | Matches `(OptionalMatch, With\|Return)` adjacency. |
+/// | `fuse_match_return_aggregate` / `fuse_match_with_aggregate` | safe-by-shape | Match `(Match, Return\|With)` adjacency. |
+/// | `fuse_match_with_aggregate_top_k` | safe-by-shape | Absorbs into a preceding `FusedMatchWithAggregate`; a CallSubquery is never that. |
+/// | `fuse_node_scan_aggregate` / `fuse_node_scan_top_k` | safe-by-shape | Match `Match → [Where] → Return [→ OrderBy → Limit]` adjacency. |
+/// | `fuse_vector_score_order_limit` / `fuse_order_by_top_k` | safe-by-shape | Match `(Return, OrderBy, Limit)` adjacency; a CallSubquery breaks it. |
+/// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE. |
+/// | `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
+///
+/// When in doubt the rule is: correctness beats optimization — a pass
+/// that can't confidently reason about a CallSubquery should bail on any
+/// query containing one. None needed a hard bail; all are safe-by-shape
+/// except the two flagged above.
 pub const PASSES: &[(&str, PassFn)] = &[
     ("optimize_nested_queries", pass_optimize_nested_queries),
     // count(bound node/edge var) → count(*): runs early so the rewritten
@@ -323,15 +360,126 @@ fn check_limit_skip_nonnegative(query: &CypherQuery) -> Result<(), String> {
 // `tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES`.
 
 /// **Pass:** `optimize_nested_queries` — Recurse the optimizer into
-/// every nested query (UNION right-arms today; subqueries when added).
+/// every nested query: UNION right-arms and `CALL { }` subquery bodies.
 /// Inherits the parent's `disabled` set so diagnostic toggles propagate
-/// to the inner planner pipeline.
+/// to the inner planner pipeline — including the `disable_optimizer=True`
+/// expansion, which puts every pass name (this one among them) into
+/// `disabled`. When THIS pass is itself disabled the recursion never
+/// runs, so a fully-disabled optimizer leaves bodies un-optimized too,
+/// making the differential corpus's optimized-vs-naive comparison
+/// meaningful for subquery bodies (Phase 5: previously the executor
+/// stopgap optimized bodies unconditionally, ignoring the outer knob).
+///
+/// This pass OWNS `CALL { }` body optimization (the executor runs the
+/// body exactly as planned here). Two body shapes are optimized
+/// differently:
+///
+/// - **Uncorrelated body** (`import.is_empty()`) or a correlated body
+///   whose patterns do NOT anchor on an imported variable: the full
+///   pipeline runs. A graph-global aggregate in such a body is genuinely
+///   the same value for every outer row, so the seed-ignoring fused
+///   operators are correct.
+/// - **Correlated body whose patterns anchor on an imported variable**
+///   (`!import_pattern_anchors(body, import).is_empty()`): the
+///   seed-ignoring fusion passes are disabled for that body. Those
+///   passes ((fuse_anchored_edge_count, fuse_*_aggregate, fuse_node_scan_*)
+///   emit plan-time-anchored operators that ignore the per-row seed and
+///   would return the GLOBAL count for every outer row. Disabling them
+///   leaves a plain `Match`/`Return` that honours the seeded binding via
+///   CSR adjacency (§3.2). The disable is unioned with the inherited
+///   `disabled` set so an outer toggle still propagates.
 fn pass_optimize_nested_queries(query: &mut CypherQuery, ctx: &PassCtx) {
     for clause in &mut query.clauses {
-        if let Clause::Union(ref mut u) = clause {
-            optimize_with_disabled(&mut u.query, ctx.graph, ctx.params, ctx.disabled);
+        match clause {
+            Clause::Union(ref mut u) => {
+                optimize_with_disabled(&mut u.query, ctx.graph, ctx.params, ctx.disabled);
+            }
+            Clause::CallSubquery {
+                ref import,
+                ref mut body,
+            } => {
+                let anchors = import_pattern_anchors(body, import);
+                if anchors.is_empty() {
+                    optimize_with_disabled(body, ctx.graph, ctx.params, ctx.disabled);
+                } else {
+                    // Union the seed-ignoring set with the inherited
+                    // disabled set so both the per-row-correctness disable
+                    // AND any outer diagnostic toggle apply to the body.
+                    let mut merged = ctx.disabled.clone();
+                    merged.extend(seed_ignoring_fusion_passes().iter().cloned());
+                    optimize_with_disabled(body, ctx.graph, ctx.params, &merged);
+                }
+            }
+            _ => {}
         }
     }
+}
+
+/// The subset of `import` names that appear as a `MATCH` / `OPTIONAL
+/// MATCH` pattern element in a correlated `CALL { }` body (so the body
+/// anchors on the seeded binding). Non-empty ⇒ the seed-ignoring fusion
+/// passes must be disabled when optimizing the body, and (in the
+/// executor) a NULL value for any of these names empties the per-row
+/// pipeline (§1.3 of the design doc).
+///
+/// Only the body's OWN clauses are scanned — a nested `CALL { }` re-binds
+/// its own imports from its own seed, so its patterns are not this body's
+/// concern.
+///
+/// Lives in the planner because the seed-ignoring-fusion decision is a
+/// plan-time concern; the executor (`call_subquery.rs`) re-uses it for
+/// per-row NULL-anchor detection.
+pub(crate) fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> Vec<String> {
+    let mut anchors: Vec<String> = Vec::new();
+    for clause in &body.clauses {
+        let patterns = match clause {
+            Clause::Match(m) | Clause::OptionalMatch(m) => &m.patterns,
+            _ => continue,
+        };
+        for pattern in patterns {
+            for elem in &pattern.elements {
+                let var = match elem {
+                    PatternElement::Node(np) => np.variable.as_ref(),
+                    PatternElement::Edge(ep) => ep.variable.as_ref(),
+                };
+                if let Some(v) = var {
+                    if import.iter().any(|name| name == v) && !anchors.iter().any(|a| a == v) {
+                        anchors.push(v.clone());
+                    }
+                }
+            }
+        }
+    }
+    anchors
+}
+
+/// The optimizer passes that emit a graph-global / plan-time-anchored
+/// operator (`FusedCount*`, `FusedMatch*Aggregate`, `FusedNodeScan*`)
+/// which IGNORES the incoming seed row. Disabled when a correlated body
+/// anchors on an imported variable (see [`pass_optimize_nested_queries`]),
+/// so the body runs as a plain `Match`/`Return` that honours the seed.
+/// Process-lifetime set — built once.
+///
+/// These names MUST stay in sync with `PASSES`; each is a registered pass
+/// name. A future `fuse_call_subquery_aggregate` pass (design §Q7) would
+/// be the correct seed-AWARE replacement and would NOT belong here.
+pub(crate) fn seed_ignoring_fusion_passes() -> &'static HashSet<String> {
+    static PASSES_SET: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    PASSES_SET.get_or_init(|| {
+        [
+            "fuse_anchored_edge_count",
+            "fuse_count_short_circuits",
+            "fuse_optional_match_aggregate",
+            "fuse_match_return_aggregate",
+            "fuse_match_with_aggregate",
+            "fuse_match_with_aggregate_top_k",
+            "fuse_node_scan_aggregate",
+            "fuse_node_scan_top_k",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    })
 }
 
 /// **Pass:** `push_where_into_match` — Move comparison predicates from

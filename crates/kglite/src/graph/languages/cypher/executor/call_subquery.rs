@@ -15,6 +15,14 @@
 //! inner-joined back to *that* outer row; zero rows drops the outer row
 //! (§1.3), an aggregating body always returns one row (count = 0) so the
 //! outer row survives.
+//!
+//! Phase 5 moved body OPTIMIZATION into the planner: this module no longer
+//! optimizes bodies. `planner::pass_optimize_nested_queries` recurses into
+//! every `CALL { }` body once at plan time (import-aware: it disables the
+//! seed-ignoring fusion passes for correlated bodies that anchor on an
+//! imported variable) and the executor runs the body exactly as planned.
+//! The executor still re-derives `import_pattern_anchors` (re-exported
+//! from the planner) for per-row NULL-anchor detection (§1.3).
 
 use super::*;
 use crate::datatypes::values::Value;
@@ -87,42 +95,21 @@ impl<'a> CypherExecutor<'a> {
             });
         }
 
-        // Plan the body ONCE outside the row loop (§3: never re-plan per
-        // row). The same optimized AST drives every per-row execution.
+        // The body is ALREADY optimized — the planner's
+        // `pass_optimize_nested_queries` recurses into every `CALL { }`
+        // body once at plan time (§3.1: never re-plan per row), with the
+        // seed-ignoring fusion passes disabled when the body anchors on an
+        // imported variable (so a per-row `MATCH (p)-[:KNOWS]->(f) RETURN
+        // count(f)` honours the seeded `p` via CSR adjacency rather than
+        // collapsing to the global KNOWS count). The executor runs the
+        // body exactly as planned; it does NOT re-optimize.
         //
-        // Correlated subtlety (Phase-4 boundary with Phase-5): the
-        // graph-global aggregate/count-collapse passes fold a pattern such
-        // as `MATCH (p)-[:KNOWS]->(f) RETURN count(f)` into a seed-ignoring
-        // `FusedCountTypedEdge :KNOWS` (the *total* KNOWS count) because,
-        // optimised in isolation, the body has no upstream clause binding
-        // `p`. With `p` seeded per row, those fused operators ignore the
-        // seed and return the global count for every outer row. Until
-        // Phase 5 makes the fusion passes import-aware, disable exactly the
-        // seed-ignoring collapse passes whenever a body pattern references
-        // an imported variable — leaving a plain `Match`/`Return` that
-        // anchors on the seeded binding (CSR adjacency, §3.2). Bodies that
-        // never reference an import keep the full pipeline (their global
-        // aggregate is genuinely correct — same value for every outer row).
-        // Imported names used as a MATCH/OPTIONAL-MATCH pattern anchor in
-        // the body. Drives two things: (a) disable seed-ignoring fusion
-        // when non-empty, and (b) per-row NULL-anchor detection below.
+        // `import_pattern_anchors` is still needed here — but only for
+        // per-row NULL-anchor detection below (an imported pattern anchor
+        // that is NULL on a given outer row empties that row's pipeline,
+        // §1.3). It is the same analysis the planner used to make the
+        // fusion decision, re-used at execution time.
         let anchor_imports = import_pattern_anchors(body, import);
-
-        let mut planned = body.clone();
-        if anchor_imports.is_empty() {
-            crate::graph::languages::cypher::planner::optimize(
-                &mut planned,
-                self.graph,
-                self.params,
-            );
-        } else {
-            crate::graph::languages::cypher::planner::optimize_with_disabled(
-                &mut planned,
-                self.graph,
-                self.params,
-                seed_ignoring_fusion_passes(),
-            );
-        }
 
         // One sub-executor, reused across every outer row. It holds only
         // graph/params refs + fresh per-query caches (regex/spatial), so
@@ -162,7 +149,7 @@ impl<'a> CypherExecutor<'a> {
             // The body is optimized but NOT lazy-marked (`mark_lazy_eligibility`
             // runs only on the top-level query, never on a subquery body), so
             // `finalize_result` yields eager `Vec<Vec<Value>>` rows here.
-            let body_set = sub.execute_clauses(&planned, seed_set)?;
+            let body_set = sub.execute_clauses(body, seed_set)?;
             let body_result = sub.finalize_result(body_set)?;
 
             // First row establishes + validates the subquery's columns.
@@ -308,17 +295,15 @@ impl<'a> CypherExecutor<'a> {
         // NO outer bindings (§1.2 rule 1). Reuse this executor's graph,
         // params, and deadline so the subquery honours the outer timeout.
         //
-        // Phase 3 optimizes the body locally on first use; Phase 5 moves
-        // this into `pass_optimize_nested_queries` so it happens once at
-        // plan time instead of at execution time.
-        // TODO(phase5): drop this local optimize; recurse the planner pass
-        // into CallSubquery bodies and rely on the pre-optimized AST.
-        let mut planned = body.clone();
-        crate::graph::languages::cypher::planner::optimize(&mut planned, self.graph, self.params);
-
+        // The body is ALREADY optimized: the planner's
+        // `pass_optimize_nested_queries` recurses into `CALL { }` bodies at
+        // plan time (Phase 5). The executor runs the body as planned and
+        // does NOT re-optimize — so a `disable_optimizer=True` outer query,
+        // which disables that recursion, leaves the body naive too (the
+        // differential corpus relies on this for body-level coverage).
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
             .with_streaming(self.streaming);
-        let sub_result = sub.execute(&planned)?;
+        let sub_result = sub.execute(body)?;
 
         // The body must terminate in RETURN (parser-enforced, §1.4), so a
         // lazy descriptor is never produced here — the body is not lazy-
@@ -429,61 +414,9 @@ fn splice_subquery_columns(row: &mut ResultRow, sub_row: &[Value], sub_columns: 
     }
 }
 
-/// The subset of `import` names that appear as a `MATCH` / `OPTIONAL
-/// MATCH` pattern element in the correlated body (so the body anchors on
-/// the seeded binding). Non-empty ⇒ the seed-ignoring fusion passes must
-/// be disabled, and a NULL value for any of these names empties the
-/// per-row pipeline (§1.3).
-///
-/// Only the body's own clauses are scanned — a nested `CALL { }` re-binds
-/// its own imports from its own seed, so its patterns are not this body's
-/// concern.
-fn import_pattern_anchors(body: &CypherQuery, import: &[String]) -> Vec<String> {
-    let mut anchors: Vec<String> = Vec::new();
-    for clause in &body.clauses {
-        let patterns = match clause {
-            Clause::Match(m) | Clause::OptionalMatch(m) => &m.patterns,
-            _ => continue,
-        };
-        for pattern in patterns {
-            for elem in &pattern.elements {
-                let var = match elem {
-                    PatternElement::Node(np) => np.variable.as_ref(),
-                    PatternElement::Edge(ep) => ep.variable.as_ref(),
-                };
-                if let Some(v) = var {
-                    if import.iter().any(|name| name == v) && !anchors.iter().any(|a| a == v) {
-                        anchors.push(v.clone());
-                    }
-                }
-            }
-        }
-    }
-    anchors
-}
-
-/// The optimizer passes that emit a graph-global / plan-time-anchored
-/// operator (`FusedCount*`, `FusedMatch*Aggregate`, `FusedNodeScan*`)
-/// which IGNORES the incoming seed row. Disabled when a correlated body
-/// anchors on an imported variable, so the body runs as a plain
-/// `Match`/`Return` that honours the seed. Process-lifetime set —
-/// built once.
-fn seed_ignoring_fusion_passes() -> &'static std::collections::HashSet<String> {
-    static PASSES: std::sync::OnceLock<std::collections::HashSet<String>> =
-        std::sync::OnceLock::new();
-    PASSES.get_or_init(|| {
-        [
-            "fuse_anchored_edge_count",
-            "fuse_count_short_circuits",
-            "fuse_optional_match_aggregate",
-            "fuse_match_return_aggregate",
-            "fuse_match_with_aggregate",
-            "fuse_match_with_aggregate_top_k",
-            "fuse_node_scan_aggregate",
-            "fuse_node_scan_top_k",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-    })
-}
+// `import_pattern_anchors` and `seed_ignoring_fusion_passes` moved to the
+// planner (`planner::mod`) in Phase 5 — they encode the plan-time
+// seed-ignoring-fusion decision, which the planner now OWNS. The executor
+// re-uses `import_pattern_anchors` for per-row NULL-anchor detection via
+// the planner re-export.
+use crate::graph::languages::cypher::planner::import_pattern_anchors;
