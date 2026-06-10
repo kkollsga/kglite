@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Whole-node materialization (`RETURN n`, `collect(n)`) skips the
+  per-node schema walk on in-memory storage.** Materializing a node
+  walked every node-type metadata key per node, paying alias + spatial
+  resolution per key, although for in-memory storage that pass can only
+  ever recover the hoisted id/title field-alias columns — now fetched
+  with two O(1) alias lookups instead (the full walk is kept for the
+  columnar disk/mapped backends, which need it). `collect(n)` ~8%
+  faster, wide `RETURN n` ~4%, and the tracked `return_node_10k` /
+  `return_node_rel_node_100` benchmarks ~4% (min). Python-visible
+  output is unchanged, including alias-recovered properties.
+
 - **DISTINCT dedup structures use FxHash.** The `RETURN DISTINCT` /
   `WITH DISTINCT` row-dedup sets (plus the `count(DISTINCT)` /
   `collect(DISTINCT)` / `mode()` / streaming-aggregate DISTINCT sets and

@@ -448,6 +448,31 @@ pub(super) fn node_to_map_value(node: &NodeData) -> Value {
 /// The `id` field uses the petgraph NodeIndex as a stable internal
 /// identity (mirrors Neo4j's INT64 node identity in Bolt). The
 /// user-set `id` field, if any, is preserved inside `properties.id`.
+/// Insert the hoisted id/title column back under its original df-column
+/// name (e.g. `npdid`, `prospect_name`), skipping the three reserved
+/// virtuals and any key already materialised. `value` is only evaluated
+/// when an alias actually needs inserting.
+#[inline]
+fn insert_field_alias(
+    properties: &mut std::collections::BTreeMap<String, Value>,
+    alias: Option<&String>,
+    value: impl FnOnce() -> Value,
+) {
+    let Some(alias) = alias else { return };
+    if alias == "id" || alias == "title" || alias == "type" {
+        return;
+    }
+    if properties.contains_key(alias) {
+        return;
+    }
+    // Match the old metadata-pass behaviour: a Null resolution is omitted,
+    // not inserted (preserves the null-omission rule in returned nodes).
+    let v = value();
+    if !matches!(v, Value::Null) {
+        properties.insert(alias.clone(), v);
+    }
+}
+
 pub(crate) fn materialize_node_value(
     idx: petgraph::graph::NodeIndex,
     graph: &crate::graph::DirGraph,
@@ -464,31 +489,54 @@ pub(crate) fn materialize_node_value(
     properties.insert("title".to_string(), node.title().into_owned());
     properties.insert("type".to_string(), Value::String(node_type.clone()));
     // Then every user-set property the node carries.
-    //
-    // Cross-backend discovery: in memory mode NodeData.property_iter
-    // returns every property. In disk/mapped mode the property values
-    // live in the column store, NOT in NodeData — property_iter
-    // returns nothing useful there. Use node_type_metadata as the
-    // schema source for "which properties does this type have", then
-    // read each via `resolve_node_property` (which knows the
-    // backend-specific access path).
     for (key, val) in node.property_iter(&graph.interner) {
         if key == "id" || key == "title" || key == "type" {
             continue;
         }
         properties.insert(key.to_string(), val.clone());
     }
-    if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
-        for prop_name in type_meta.keys() {
-            if prop_name == "id" || prop_name == "title" || prop_name == "type" {
-                continue;
-            }
-            if properties.contains_key(prop_name) {
-                continue;
-            }
-            let val = resolve_node_property(node, prop_name, graph);
-            if !matches!(val, Value::Null) {
-                properties.insert(prop_name.clone(), val);
+    // Cross-backend property completion.
+    //
+    // For the in-memory backend (`Map` / `Compact`) `property_iter` above
+    // already yields every stored property. The ONE thing it can't yield is
+    // a column the loader hoisted out of `properties` into the dedicated
+    // `id` / `title` fields: when `add_nodes` is given a `unique_id_field` /
+    // `node_title_field` whose name isn't literally "id"/"title", that
+    // original column name is recorded in `{id,title}_field_aliases` and the
+    // value lives in `node.id()` / `node.title()`, NOT in `properties`.
+    // `RETURN n` must surface it back under the original column name (e.g.
+    // `Person.name` -> title). That's at most two O(1) map lookups — far
+    // cheaper than the former per-node walk over every metadata key with a
+    // `resolve_node_property` (alias + spatial) call each, which for the
+    // in-memory backend could only ever re-discover these same two columns.
+    insert_field_alias(
+        &mut properties,
+        graph.title_field_aliases.get(&node_type),
+        || node.title().into_owned(),
+    );
+    insert_field_alias(
+        &mut properties,
+        graph.id_field_aliases.get(&node_type),
+        || node.id().into_owned(),
+    );
+    // For the columnar backend (disk/mapped) the values live in the per-type
+    // column store, NOT in NodeData, so `property_iter` yields nothing. Use
+    // `node_type_metadata` as the "which properties does this type have"
+    // schema and read each through `resolve_node_property` (which knows the
+    // backend-specific access path).
+    if node.properties_are_columnar() {
+        if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
+            for prop_name in type_meta.keys() {
+                if prop_name == "id" || prop_name == "title" || prop_name == "type" {
+                    continue;
+                }
+                if properties.contains_key(prop_name) {
+                    continue;
+                }
+                let val = resolve_node_property(node, prop_name, graph);
+                if !matches!(val, Value::Null) {
+                    properties.insert(prop_name.clone(), val);
+                }
             }
         }
     }

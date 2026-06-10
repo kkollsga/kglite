@@ -1631,6 +1631,17 @@ impl NodeData {
         self.properties.contains(InternedKey::from_str(key))
     }
 
+    /// True when properties live in a per-type column store (disk/mapped
+    /// backends). For `Columnar`, `property_iter` yields nothing — callers
+    /// that need the full property set must consult the type metadata and
+    /// read each value through the backend-specific path. For `Map` /
+    /// `Compact` (the in-memory backend) `property_iter` already yields
+    /// every present property, so the metadata fall-back is unnecessary.
+    #[inline]
+    pub(crate) fn properties_are_columnar(&self) -> bool {
+        matches!(self.properties, PropertyStorage::Columnar { .. })
+    }
+
     /// Clone all properties into a new HashMap<String, Value> (for export/interop).
     /// Requires interner to resolve InternedKey → String.
     #[inline]
