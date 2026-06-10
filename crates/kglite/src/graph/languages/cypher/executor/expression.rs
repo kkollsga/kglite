@@ -1143,9 +1143,17 @@ impl<'a> CypherExecutor<'a> {
                 return Ok(Value::Null);
             }
 
-            // In-memory path: node_weight() is a cheap pointer chase
+            // In-memory path: node_weight() is a cheap pointer chase.
+            // Fast-reject alias resolution: when `property` can't be a
+            // registered id-/title-field alias for any type, the resolved
+            // name is `property` verbatim, so we skip `resolve_alias`'s two
+            // String-keyed HashMap lookups (the per-row hot cost) and read
+            // the property directly.
             if let Some(node) = self.graph.graph.node_weight(idx) {
-                return Ok(resolve_node_property(node, property, self.graph));
+                if self.property_might_be_alias(property) {
+                    return Ok(resolve_node_property(node, property, self.graph));
+                }
+                return Ok(resolve_node_property_unaliased(node, property, self.graph));
             }
             return Ok(Value::Null);
         }

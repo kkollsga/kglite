@@ -61,6 +61,7 @@ SHAPES = {
     "unwind": ("MATCH (n:Item) WHERE n.rank_val < 5000 UNWIND [1,2,3,4,5,6,7,8,9,10] AS x RETURN count(x)"),
     "where": ("MATCH (n:Item) WHERE n.value > 25000.0 AND n.p4 < 40 AND n.flag RETURN count(n)"),
     "topk": "MATCH (n:Item) RETURN n.name, n.value ORDER BY n.value DESC LIMIT 25",
+    "distinct_rows": "MATCH (n:Item) RETURN DISTINCT n.mid_card, n.low_card",
 }
 
 

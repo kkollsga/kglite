@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Per-row property access skips alias resolution when the property
+  can't be an alias.** Every in-memory `n.prop` in WHERE/RETURN paid two
+  string-keyed HashMap lookups in `resolve_alias` per row, even for
+  properties that are plainly not id/title aliases (the hottest symbol
+  in a samply profile of five query shapes). A per-query lock-free
+  `OnceLock` set of alias-name hashes now fast-rejects non-alias
+  properties — semantics unchanged (id/title virtuals,
+  stored-property-wins, spatial fallbacks all preserved; hash collisions
+  can only route to the slower full path, never change results).
+  Measured on the 50k-node hot-path suite (min): multi-property WHERE
+  filters ~12-13% faster, `count(DISTINCT)` ~10-11%, `collect(DISTINCT)`
+  ~10%, `ORDER BY … LIMIT` ~9%. Tracked core benchmarks flat.
+
 ### Added
 
 - **`KnowledgeGraph.extend(other, conflict_handling='update')`.** Merge

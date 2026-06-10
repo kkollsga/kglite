@@ -261,6 +261,23 @@ pub struct CypherExecutor<'a> {
     spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
     /// Compiled regex cache — avoids recompiling the same pattern per row.
     regex_cache: RwLock<HashMap<String, regex::Regex>>,
+    /// FNV hashes of every registered id-/title-field-alias *name*
+    /// (the values of `DirGraph::id_field_aliases` / `title_field_aliases`).
+    ///
+    /// Hot-path fast-reject for in-memory property access: `resolve_alias`
+    /// returns the property unchanged unless the property name exactly
+    /// matches a registered alias, yet it pays two `String`-keyed HashMap
+    /// lookups (hashing the node-type string twice) on *every* call — even
+    /// for the overwhelmingly common non-alias property. With this set we
+    /// FNV-hash the property once (no allocation) and, on a miss, skip
+    /// `resolve_alias` entirely. Only a property whose name could be an
+    /// alias falls through to the full per-type resolution.
+    ///
+    /// `OnceLock`: built once on first access, then read lock-free — safe
+    /// to share across the rayon-parallel projection loop with no
+    /// per-row lock contention. The graph is immutable during a read
+    /// query, so the set never goes stale within an executor's lifetime.
+    alias_name_hashes: OnceLock<rustc_hash::FxHashSet<u64>>,
     /// When `true`, the executor tries to absorb compatible clause runs
     /// into the streaming pipeline ([`stream::pipeline::try_run_streaming`]).
     /// Default `true`; disabled per-query via `kg.cypher(streaming=False)`.
@@ -281,8 +298,35 @@ impl<'a> CypherExecutor<'a> {
             max_rows: None,
             spatial_node_cache: RwLock::new(HashMap::new()),
             regex_cache: RwLock::new(HashMap::new()),
+            alias_name_hashes: OnceLock::new(),
             streaming: true,
         }
+    }
+
+    /// Whether `property` could possibly be a registered id-/title-field
+    /// alias for *some* node type. A `false` answer lets the in-memory
+    /// property-access path skip `resolve_alias` (and its two String-keyed
+    /// HashMap lookups) entirely. Lazily builds and caches the alias-name
+    /// FNV-hash set on first call; subsequent calls are a lock-free read.
+    #[inline]
+    pub(super) fn property_might_be_alias(&self, property: &str) -> bool {
+        let set = self.alias_name_hashes.get_or_init(|| {
+            let mut s = rustc_hash::FxHashSet::default();
+            for alias in self.graph.id_field_aliases.values() {
+                s.insert(InternedKey::from_str(alias).as_u64());
+            }
+            for alias in self.graph.title_field_aliases.values() {
+                s.insert(InternedKey::from_str(alias).as_u64());
+            }
+            s
+        });
+        // Empty set (the common no-alias graph) → never an alias, so the
+        // membership probe is a single integer-set lookup that returns
+        // false without hashing the property string at all in that case.
+        if set.is_empty() {
+            return false;
+        }
+        set.contains(&InternedKey::from_str(property).as_u64())
     }
 
     /// Set the maximum number of intermediate result rows.

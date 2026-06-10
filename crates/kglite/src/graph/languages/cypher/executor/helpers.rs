@@ -332,6 +332,28 @@ pub(super) fn evaluate_comparison(
 pub fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
     let node_type_str = node.node_type_str(&graph.interner);
     let resolved = graph.resolve_alias(node_type_str, property);
+    resolve_node_property_resolved(node, resolved, graph)
+}
+
+/// Hot-path variant of [`resolve_node_property`] for when the caller has
+/// already established that `property` is **not** a registered id-/title-
+/// field alias for this node's type (via
+/// `CypherExecutor::property_might_be_alias`). The resolved name then
+/// equals `property` verbatim, so we skip `resolve_alias` entirely — its
+/// two `String`-keyed HashMap lookups are the dominant per-row cost on
+/// alias-bearing graphs. Results are identical to `resolve_node_property`
+/// for any non-alias property.
+pub fn resolve_node_property_unaliased(node: &NodeData, property: &str, graph: &DirGraph) -> Value {
+    resolve_node_property_resolved(node, property, graph)
+}
+
+/// Shared tail of [`resolve_node_property`] / [`resolve_node_property_unaliased`]:
+/// turn an already-resolved canonical property name into an owned `Value`,
+/// honouring the `id` / `title` virtuals, stored-property-wins (KG-1), the
+/// soft-alias fallbacks, and spatial virtual properties. `node_type_str` is
+/// resolved lazily — only the soft-alias / spatial branches need it.
+#[inline]
+fn resolve_node_property_resolved(node: &NodeData, resolved: &str, graph: &DirGraph) -> Value {
     match resolved {
         "id" => node.id().into_owned(),
         "title" => node.title().into_owned(),
@@ -341,6 +363,7 @@ pub fn resolve_node_property(node: &NodeData, property: &str, graph: &DirGraph) 
             if let Some(val) = node.get_property_value(resolved) {
                 return val;
             }
+            let node_type_str = node.node_type_str(&graph.interner);
             // No stored property — fall back to the structural convenience
             // for the soft aliases.
             if let Some(fb) = soft_alias_fallback(resolved) {
