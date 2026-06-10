@@ -19,11 +19,9 @@ make test-rust    # Rust only
 make test-py      # Python only
 ```
 
-If you also want to work on the code tree parser:
-
-```bash
-pip install ".[code-tree]"
-```
+The code tree parser ships with the default install — the
+tree-sitter grammars are bundled into the Rust extension, so a plain
+`pip install .` is all you need to work on it.
 
 ## Project Structure
 

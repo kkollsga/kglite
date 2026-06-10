@@ -10,7 +10,7 @@ the current setup flow in {doc}`../guides/mcp-servers` instead.
 Rust binary. Operator action:
 
 ```bash
-pip install --upgrade 'kglite[mcp]'
+pip install --upgrade kglite
 ```
 
 YAMLs unchanged. Tool surface unchanged. fastembed cache directory

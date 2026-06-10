@@ -6,12 +6,15 @@
 pip install kglite
 ```
 
+The default install includes everything needed to ship the graph as
+an MCP server for Claude / Cursor / agents and to parse Python / Rust
+/ TS / Go / Java / C++ codebases into a graph.
+
 Optional extras:
 
 ```bash
-pip install "kglite[mcp]"        # ship the graph as an MCP server for Claude / Cursor / agents
-pip install "kglite[code-tree]"  # parse Python / Rust / TS / Go / Java / C++ codebases into a graph
-pip install "kglite[neo4j]"      # round-trip with Neo4j
+pip install "kglite[embed]"  # local embedding models (fastembed) for semantic search
+pip install "kglite[neo4j]"  # round-trip with Neo4j
 ```
 
 ## Quick Start — DataFrames in, queries out
@@ -95,11 +98,10 @@ goes straight to the columnar store.
 
 ## Serve it to an AI agent
 
-With the `[mcp]` extra installed, expose any `.kgl` file to Claude /
-Cursor / any MCP-capable agent in one command:
+The MCP server ships with the default install — expose any `.kgl`
+file to Claude / Cursor / any MCP-capable agent in one command:
 
 ```bash
-pip install "kglite[mcp]"
 kglite-mcp-server --graph my_graph.kgl
 ```
 

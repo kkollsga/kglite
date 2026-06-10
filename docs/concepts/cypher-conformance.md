@@ -140,7 +140,7 @@ suspected.
 Per the test-suite-fortification design (see
 `docs/concepts/design-decisions.md` — Test gates section, *if added*):
 the project's stated principle is that the regular test run depends
-only on what `pip install -e .[mcp]` provides. Wiring Neo4j into the
+only on what `pip install -e .` provides. Wiring Neo4j into the
 suite would mean:
 
 - CI needs a Docker layer or a running Neo4j service.

@@ -10,7 +10,7 @@ KGLite ships `kglite-mcp-server` as a Python entry point on top of
 the pure-Rust [mcp-methods] framework (rmcp + manifest-driven tool
 registration in Rust; Python orchestration thin enough that hot-path
 dispatch is sub-microsecond per call). Install with
-`pip install 'kglite[mcp]'`; the server lands on PATH and the agent
+`pip install kglite`; the server lands on PATH and the agent
 gets `graph_overview` + `cypher_query` over MCP stdio. For
 project-specific tools — semantic search, source-file access,
 parameterised Cypher lookups, query preprocessing — drop a YAML
@@ -24,16 +24,16 @@ automatically. **No fork required for most customisation.**
 ### 1. Install
 
 ```bash
-pip install 'kglite[mcp]'
+pip install kglite
 ```
 
 `kglite-mcp-server` ships with the wheel as a Python console-script
 entry point. Run `kglite-mcp-server --help` to confirm.
 
-The `[mcp]` extras pull `mcp` (the official Python SDK), `fastembed`,
-`aiohttp`, `pyyaml`, and `watchdog` — only installed when you
-actually want to run the server. Plain `pip install kglite` gives
-you the graph engine without the server deps.
+The default install pulls everything the server needs — `mcp` (the
+official Python SDK), `aiohttp`, `pyyaml`, and `watchdog`. For
+semantic search you'll also want local embedding models: add
+`pip install 'kglite[embed]'` to pull `fastembed`.
 
 ### 2. Point it at a graph file
 
@@ -284,7 +284,7 @@ startup with a non-zero exit code. The recurring ones:
 | `ERROR: extensions.cypher_preprocessor.module file does not exist: <path>` | Preprocessor module path is wrong (paths are manifest-relative). | Check that the `.py` file exists at the configured path. |
 
 Exit code 3 is reserved for manifest / validation errors; exit 1 for
-graph-file-not-found; exit 2 for missing `[mcp]` extras. Wrapping
+graph-file-not-found and for missing runtime dependencies. Wrapping
 scripts can branch on those.
 
 ## End-to-end example: a conference catalog graph
@@ -661,7 +661,7 @@ PyPI's `simple/` index lags the JSON metadata by ~few minutes
 after publish. Workaround:
 
 ```bash
-pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite[mcp]==X.Y.Z'
+pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite==X.Y.Z'
 ```
 
 Or wait a few minutes. This is a PyPI mirror-cache behaviour, not
@@ -1011,7 +1011,7 @@ minutes. The first `pip install kglite==X.Y.Z` after publish may
 return `No matching distribution found`. Workaround:
 
 ```bash
-pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite[mcp]==X.Y.Z'
+pip install --index-url https://pypi.org/simple/ --no-cache-dir 'kglite==X.Y.Z'
 ```
 
 The `--index-url` forces a direct fetch (some mirrors cache

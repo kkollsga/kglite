@@ -7,7 +7,7 @@ Parses: Python, Rust, TypeScript, Go, Java, C#, C++.
 Generates: Function, Class, Struct, Enum, Module, File nodes
            with CALLS, DEFINES, IMPORTS, HAS_METHOD edges.
 
-Requires: pip install kglite[code-tree]
+Requires: pip install kglite
 """
 
 from pathlib import Path

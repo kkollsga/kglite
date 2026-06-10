@@ -29,11 +29,12 @@ manifest. Five custom Python servers retired across the 0.9.16 →
 ## Install
 
 ```bash
-pip install --upgrade 'kglite[mcp]'
+pip install --upgrade kglite
 ```
 
-The `[mcp]` extras pulls everything the server needs: `mcp`,
-`pyyaml`, `fastembed`, `aiohttp`, `watchdog`. There is no separate
+The default install pulls everything the server needs: `mcp`,
+`pyyaml`, `aiohttp`, and `watchdog` (for semantic search, add the
+`[embed]` extra to pull `fastembed`). There is no separate
 `[code-tree]` extras — tree-sitter grammars are bundled into the
 Rust extension and load with kglite itself.
 

@@ -2,8 +2,10 @@
 
 Parse multi-language codebases into KGLite knowledge graphs using [tree-sitter](https://tree-sitter.github.io/tree-sitter/). Extracts functions, classes/structs, enums, traits/interfaces, modules, and their relationships.
 
+The tree-sitter grammars are bundled into the wheel — no extra needed:
+
 ```bash
-pip install kglite[code-tree]
+pip install kglite
 ```
 
 ## Quick Start
