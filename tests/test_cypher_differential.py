@@ -1230,6 +1230,65 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN c.name AS cn, pc ORDER BY cn LIMIT 2",
         None,
     ),
+    # ── CALL { } Neo4j-conformance shapes (Phase 6) ──
+    # These target the five shapes called out in the design's §5 Neo4j
+    # conformance plan. They flow into scripts/cypher_conformance.py (which
+    # imports DIFFERENTIAL_QUERIES) automatically — the next
+    # `make neo4j-conformance` run diffs each against a live Neo4j 5. They
+    # also run optimized-vs-naive here. Zero divergences expected for v1.
+    (
+        # Leading uncorrelated: the subquery runs once with no outer driver,
+        # producing the single seed row × S subquery rows.
+        "call_conf_leading_uncorrelated",
+        "social_graph",
+        "CALL { MATCH (p:Person) WHERE p.city = 'Oslo' RETURN p.name AS pn } RETURN pn ORDER BY pn",
+        None,
+    ),
+    (
+        # Cartesian combine: an outer MATCH × an uncorrelated subquery body
+        # → R×S rows. Neo4j's uncorrelated-subquery cartesian semantics.
+        "call_conf_cartesian_combine",
+        "social_graph",
+        "MATCH (c:Company) WHERE c.industry = 'Tech' "
+        "CALL { MATCH (p:Person) WHERE p.age < 23 RETURN p.name AS pn } "
+        "RETURN c.name AS cn, pn ORDER BY cn, pn",
+        None,
+    ),
+    (
+        # Correlated aggregate, count=0 row preserved: Person_20 has zero
+        # outgoing KNOWS, but the aggregating body returns count(f)=0 (one
+        # row), so the outer row SURVIVES with c=0 (§1.3). Neo4j agrees.
+        "call_conf_correlated_aggregate_zero_preserved",
+        "social_graph",
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+        "RETURN p.name AS pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        # OPTIONAL MATCH null import: an OPTIONAL MATCH that misses leaves the
+        # imported anchor `f` NULL on those rows; the correlated body runs
+        # with the NULL binding, the aggregating body yields count=0, the row
+        # survives. Matches Neo4j's NULL-import semantics.
+        "call_conf_optional_match_null_import",
+        "social_graph",
+        "MATCH (p:Person) "
+        "OPTIONAL MATCH (p)-[:KNOWS]->(f) "
+        "CALL { WITH f MATCH (f)-[:WORKS_AT]->(co:Company) RETURN count(co) AS jobs } "
+        "RETURN p.name AS pn, jobs ORDER BY pn",
+        None,
+    ),
+    (
+        # ORDER BY + LIMIT inside the subquery body: per-row top-K. Each
+        # outer Person imports into a body that orders its KNOWS targets by
+        # age DESC and keeps the single oldest. Neo4j evaluates the body's
+        # ORDER BY/LIMIT independently per outer row.
+        "call_conf_order_limit_in_body",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age < 25 "
+        "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS oldest ORDER BY f.age DESC LIMIT 1 } "
+        "RETURN p.name AS pn, oldest ORDER BY pn",
+        None,
+    ),
 ]
 
 

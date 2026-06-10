@@ -57,6 +57,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_embeddings`/`add_embeddings`); v1 requires in-memory `Default`
   storage on both sides. 50k-into-50k with 50% overlap merges in ~21 ms.
 
+- **Cypher: `CALL { … }` subqueries.** Both uncorrelated (body executes
+  once; results combine with the outer rows as a cartesian product) and
+  correlated via an importing `WITH` (body plans once, executes per
+  outer row seeded with *only* the imported variables — node/edge/path
+  bindings anchor body patterns, including variables left `null` by an
+  `OPTIONAL MATCH` miss). Cardinality follows Neo4j: a non-aggregating
+  body with zero rows drops the outer row; an aggregating body always
+  returns one row, so per-row counts preserve `0` rows —
+  `MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN
+  count(f) AS c } RETURN p.name, c`. Scoping is strict: the body sees
+  no outer variables beyond the imports, only its `RETURN` columns
+  escape, and column collisions with outer scope raise a clear error.
+  Writes inside a body route through the mutation classifier and are
+  rejected in this version (as are unit subqueries and `UNION` inside a
+  body). Planner passes treat the clause as an optimization barrier
+  (audited pass-by-pass, documented above the `PASSES` registry); body
+  optimization respects `disabled_passes` / `disable_optimizer`.
+  Covered by 22 differential-corpus entries, Bolt round-trip
+  conformance (172 queries, 0 failures), and Neo4j-conformance queries;
+  documented in CYPHER.md with the v1 limitation table and surfaced to
+  agents via a `CALL_SUBQUERY` introspection topic. The work also fixed
+  a pre-existing hole: a write inside a `UNION` arm was classified as a
+  read.
+
 - **NetworkX interop.** `KnowledgeGraph.to_networkx()` exports the graph
   as a lossless `nx.MultiDiGraph` (node key = node id; `node_type`,
   `title`, and all properties as attributes; `connection_type` as the

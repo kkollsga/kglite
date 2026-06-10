@@ -225,7 +225,10 @@ Verified absent against 0.10.14:
 | Neo4j construct | KGLite status | Workaround |
 |---|---|---|
 | `FOREACH (x IN list \| ...)` | Not supported | `UNWIND list AS x` then `CREATE`/`SET` |
-| `CALL { ... }` subqueries | Not supported | `WITH`-chaining, or multiple `cypher()` calls |
+| `CALL { ... CREATE/SET/DELETE ... }` (writes in body) | Not supported (v1) | Do writes in a separate top-level clause; read subqueries **are** supported (see below) |
+| `CALL { ... UNION ... }` (UNION inside body) | Not supported (v1) | Top-level `UNION`, or combine separate `cypher()` results |
+| Unit `CALL { ... }` (no terminal `RETURN`) | Not supported (v1) | Body must end in `RETURN` |
+| `CALL { ... } IN TRANSACTIONS` | Not supported | Server batching; no in-memory analogue |
 | Pattern comprehensions `[(n)-->(m) \| m]` | Not supported | `MATCH`/`OPTIONAL MATCH` + `collect()` |
 | Quantified path patterns `((a)-->(b))+` | Not supported | Variable-length paths `-[:R*1..3]->` (supported) |
 | `allShortestPaths(...)` | Not supported | `shortestPath(...)` (supported) returns one path |
@@ -242,6 +245,15 @@ These port unchanged from Neo4j and are easy to assume missing:
 - Variable-length paths `-[:KNOWS*1..3]->`, `shortestPath(...)`.
 - `WHERE EXISTS { pattern WHERE ... }` (pattern-existence), inline
   pattern predicates, `any/all/none/single(x IN list WHERE ...)`.
+- `CALL { ... }` **read** subqueries — both uncorrelated (`CALL {
+  MATCH ... RETURN ... }`, cartesian-combined with the outer rows)
+  and correlated (`CALL { WITH p MATCH (p)-->... RETURN ... }`, run
+  per outer row). The importing `WITH` lists **bare variables only**.
+  Aggregating bodies preserve the outer row with a zero value; non-
+  aggregating bodies inner-join (zero matches drops the row). v1
+  caveats: no writes / `UNION` / unit subqueries in the body, no
+  `IN TRANSACTIONS`. See
+  [CYPHER.md → `CALL { ... }` Subqueries](https://github.com/kkollsga/kglite/blob/main/CYPHER.md#call----subqueries).
 - List comprehensions `[x IN list WHERE p \| expr]`, `reduce(...)`,
   list slicing `xs[1..3]`, map projections `n {.a, .b}`, map literals.
 - Map subscript `m['key']` and **dynamic property access** `n[key]`

@@ -6,7 +6,7 @@
 // ── Cypher tier 3: topic detail functions ──────────────────────────────────
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
-    CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
+    CALL_SUBQUERY, CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, \
     label_propagation, connected_components, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
@@ -38,6 +38,9 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "SET" => write_topic_set(xml),
             "DELETE" | "REMOVE" => write_topic_delete(xml),
             "MERGE" => write_topic_merge(xml),
+            "CALL_SUBQUERY" | "CALLSUBQUERY" | "CALL {}" | "CALL { }" => {
+                write_topic_call_subquery(xml);
+            }
             "OPERATORS" => write_topic_operators(xml),
             "FUNCTIONS" => write_topic_functions(xml),
             "PATTERNS" => write_topic_patterns(xml),
@@ -252,6 +255,18 @@ pub(super) fn write_topic_merge(xml: &mut String) {
     xml.push_str("      <ex desc=\"on match\">MERGE (n:Field {name: 'Troll'}) ON MATCH SET n.updated = 2025</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </MERGE>\n");
+}
+
+pub(super) fn write_topic_call_subquery(xml: &mut String) {
+    xml.push_str("  <CALL_SUBQUERY>\n");
+    xml.push_str("    <desc>Nested read subquery. Uncorrelated CALL { MATCH ... RETURN ... } runs once and its rows cartesian-combine with the outer stream. Correlated CALL { WITH x ... RETURN ... } runs once per outer row with the imported variables bound. The importing WITH lists bare variables only (no aliasing/projection/aggregation). Aggregating bodies preserve the outer row with a zero value; non-aggregating bodies inner-join (zero matches drops the row). Only RETURN columns escape to the outer scope. v1 excludes writes, UNION, and unit (no-RETURN) subqueries in the body.</desc>\n");
+    xml.push_str("    <syntax>CALL { [WITH vars] &lt;body clauses&gt; RETURN ... }</syntax>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"uncorrelated\">CALL { MATCH (n:Person) RETURN count(n) AS total } RETURN total</ex>\n");
+    xml.push_str("      <ex desc=\"correlated per-row aggregate\">MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</ex>\n");
+    xml.push_str("      <ex desc=\"per-row top-K\">MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN f.name AS oldest ORDER BY f.age DESC LIMIT 1 } RETURN p.name, oldest</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </CALL_SUBQUERY>\n");
 }
 
 pub(super) fn write_topic_operators(xml: &mut String) {
@@ -1289,6 +1304,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str(
         "    <clause name=\"MERGE\">Match existing or create new (upsert pattern).</clause>\n",
     );
+    xml.push_str("    <clause name=\"CALL { }\">Read subquery — runs a nested MATCH/WITH/RETURN per outer row. Uncorrelated CALL { MATCH ... RETURN ... } runs once (cartesian-combined); correlated CALL { WITH p MATCH (p)-->... RETURN count(...) AS c } runs per outer row. Importing WITH lists bare variables only. Example: MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]-&gt;(f) RETURN count(f) AS c } RETURN p.name, c</clause>\n");
     xml.push_str("    <clause name=\"HAVING\">Post-aggregation filter on RETURN/WITH. Example: RETURN n.type, count(*) AS cnt HAVING cnt > 5</clause>\n");
     xml.push_str("    <clause name=\"EXPLAIN\">Prefix to show query plan as ResultView [step, operation, estimated_rows] without executing.</clause>\n");
     xml.push_str("    <clause name=\"PROFILE\">Prefix to execute and collect per-clause stats. Result has .profile with [clause, rows_in, rows_out, elapsed_us].</clause>\n");

@@ -101,11 +101,24 @@ def _is_kglite_only(query: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _canonical(value) -> str:
+    """Recursively canonicalise a value for comparison. Map key order is
+    not part of Cypher map semantics (the direct path emits BTreeMap-
+    sorted keys while Bolt PackStream preserves a different order), so
+    nested dicts render with sorted keys. List order IS semantic and is
+    preserved. Scalars stringify via repr to dodge type-mismatch noise
+    (e.g. Neo4j's `int` vs KGLite's `int64`)."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k!r}: {_canonical(value[k])}" for k in sorted(value)) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_canonical(v) for v in value) + "]"
+    return repr(value)
+
+
 def _normalise_row(row: dict) -> tuple:
     """Stable, hashable representation of a single row. Keys sorted;
-    values stringified to dodge type-mismatch noise (e.g. Neo4j's
-    `int` vs KGLite's `int64`)."""
-    return tuple((k, repr(row[k])) for k in sorted(row.keys()))
+    values canonicalised recursively (see `_canonical`)."""
+    return tuple((k, _canonical(row[k])) for k in sorted(row.keys()))
 
 
 def _normalise(rows: list[dict], order_sensitive: bool) -> list[tuple]:

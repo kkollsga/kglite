@@ -898,6 +898,109 @@ graph.shortest_path_length("Stop", "A", "Stop", "Z")                          # 
 
 Same Louvain plumbing — `weight_property=None` falls back to BFS.
 
+## `CALL { ... }` Subqueries
+
+`CALL { ... }` nests a complete read sub-pipeline (`MATCH`/`WHERE`/`WITH`/`RETURN`, including nested `CALL { ... }`) and evaluates it as part of the outer query. It is the direct expression of post-aggregation enrichment shapes that otherwise require multiple `cypher()` calls or `WITH`-chaining workarounds that collapse the per-row cardinality you wanted to keep.
+
+There are two forms, distinguished by whether the body imports outer variables.
+
+### Uncorrelated — the body imports nothing
+
+The subquery runs **exactly once**, independent of the outer row stream. Its result rows are **cartesian-producted** with the outer rows: an outer stream of *R* rows combined with a subquery returning *S* rows yields *R × S* rows.
+
+```python
+# Leading uncorrelated — no preceding clause, so R = 1 (one seed row):
+# the result is simply the S rows the body returns.
+graph.cypher("""
+    CALL { MATCH (n:Person) RETURN count(n) AS total }
+    RETURN total
+""")
+
+# Cartesian combine — each Company row is paired with the single
+# subquery row, attaching the global person count to every company.
+graph.cypher("""
+    MATCH (c:Company)
+    CALL { MATCH (n:Person) RETURN count(n) AS people }
+    RETURN c.name AS company, people
+""")
+```
+
+### Correlated — an importing `WITH` brings outer variables in
+
+When the body's **first clause** is a `WITH` that lists outer variables, the subquery runs **once per outer row**, with those variables bound to that row's values. The subquery's result rows are joined back to *that* outer row.
+
+```python
+# The canonical per-row aggregate: count each person's friends without
+# collapsing the person rows (a plain WITH ... count() would).
+graph.cypher("""
+    MATCH (p:Person)
+    CALL {
+        WITH p
+        MATCH (p)-[:KNOWS]->(f)
+        RETURN count(f) AS friend_count
+    }
+    RETURN p.name AS name, friend_count
+""")
+
+# Per-row top-K: keep each person's single oldest friend. ORDER BY and
+# LIMIT inside the body apply independently per outer row.
+graph.cypher("""
+    MATCH (p:Person)
+    CALL {
+        WITH p
+        MATCH (p)-[:KNOWS]->(f)
+        RETURN f.name AS oldest ORDER BY f.age DESC LIMIT 1
+    }
+    RETURN p.name AS name, oldest
+""")
+```
+
+### The importing `WITH` — bare variables only
+
+The leading importing `WITH` may list **only plain variable references** — `WITH p`, `WITH p, c`. Projection, aliasing, aggregation, and a `WHERE` are all rejected in the importing position; re-project inside the body instead.
+
+```python
+# Rejected — aliasing in the importing WITH:
+#   CALL { WITH p AS x  MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS c }
+# Rejected — projection / aggregation in the importing WITH:
+#   CALL { WITH p.name AS n ... }
+#   CALL { WITH p, count(*) ... }
+# Correct — import the bare variable, re-project in the body:
+graph.cypher("""
+    MATCH (p:Person)
+    CALL { WITH p RETURN p.name AS n }
+    RETURN n
+""")
+```
+
+Import is explicit and total: an outer variable is visible inside the body **iff** it appears in the importing `WITH`. A bare `MATCH (p)-[:KNOWS]->(f)` inside the body *without* `WITH p` treats `p` as a fresh, unbound pattern variable — not the outer `p`.
+
+### Cardinality semantics
+
+| Body shape | Per outer row | Outer row fate |
+|---|---|---|
+| Uncorrelated (any) | runs once, *S* rows | every outer row × *S* (cartesian) |
+| Correlated, **non-aggregating** body returning *k* rows | runs per row | *k* output rows (inner join); **`k = 0` drops the outer row** |
+| Correlated, **aggregating** body (`RETURN count(...)`, etc.) | runs per row | always exactly one row — `count` of an empty match is `0`, so the row **survives with the zero value** |
+
+`CALL { ... }` is an **inner join**, not an optional one: a non-aggregating body that matches nothing for an outer row removes that row from the output. An aggregating body always returns one row, so those rows survive (e.g. `friend_count = 0`). A `NULL` import (e.g. an anchor that came from an upstream `OPTIONAL MATCH` miss) runs the body with the `NULL` binding — pattern matches against `NULL` produce no rows, so the same drop-vs-zero rule applies.
+
+### Scoping
+
+- **No outer leakage except via `RETURN`.** Variables introduced *inside* the body (`f` above) are not visible after the `CALL { ... }`. Only the columns named in the body's terminal `RETURN` escape, under their `RETURN` aliases.
+- **Returned aliases must not collide with in-scope outer variables.** `CALL { ... RETURN p AS p }` when `p` is already bound outside is a compile error.
+- **No auto-correlation.** Un-imported outer names are not silently visible inside the body (see the importing-`WITH` note above).
+
+### v1 limitations
+
+| Not supported (v1) | Why / workaround |
+|---|---|
+| Writes in the body (`CALL { ... CREATE/SET/DELETE ... }`) | Rejected at validation. Per-outer-row mutation + atomicity is deferred; do writes in a separate top-level clause. |
+| Unit subquery (no terminal `RETURN`) | Deferred. The body must end in a `RETURN`. |
+| `UNION` inside the body | Rejected at validation. Run separate queries and combine outside, or use a top-level `UNION`. |
+| `CALL { ... } IN TRANSACTIONS` | Neo4j-server batching; no in-memory analogue. |
+| `CALL (x) { ... }` scope-shorthand | Use the explicit `CALL { WITH x ... }` form. |
+
 ## Schema Introspection (`CALL db.*`)
 
 Neo4j-compatible schema procedures for discovering what's in the graph
@@ -1277,7 +1380,7 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 
 | Category | Supported |
 |----------|-----------|
-| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
+| **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
 | **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
@@ -1322,8 +1425,8 @@ Clause-by-clause comparison with the openCypher specification.
 | `PROFILE` | Full | Execute + per-clause stats (rows_in, rows_out, elapsed_us) |
 | `HAVING` | Full | Post-aggregation filter on `RETURN`/`WITH` |
 | `CALL ... YIELD` | Full | Built-in graph algorithm procedures |
+| `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See [`CALL { ... }` Subqueries](#call----subqueries) |
 | `FOREACH` | Not supported | Use `UNWIND` + `CREATE`/`SET` instead |
-| `CALL {}` subqueries | Not supported | Use `WITH` chaining or multiple `cypher()` calls |
 | `LOAD CSV` | Not supported | By design — use Python `pandas`/`csv` for better control |
 
 ### Expressions & Operators

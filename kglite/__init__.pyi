@@ -3527,6 +3527,8 @@ class KnowledgeGraph:
         OPTIONAL MATCH, UNWIND, UNION, CREATE, SET, DELETE, DETACH DELETE,
         REMOVE, MERGE (with ON CREATE SET / ON MATCH SET), HAVING,
         CASE expressions, WHERE EXISTS, shortestPath(), list comprehensions,
+        CALL { ... } read subqueries (uncorrelated + correlated; v1 excludes
+        writes / UNION / unit subqueries in the body),
         CALL...YIELD (graph algorithms: pagerank, betweenness, degree,
         closeness, louvain, label_propagation, connected_components),
         parameters ($param), ``!=`` operator, aggregation functions,
