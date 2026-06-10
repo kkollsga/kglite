@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.15] — 2026-06-10 — CALL { } subqueries, graph interop, hot-path perf sweep
+
+A user-experience release driven by a roadmap audit: the most-requested
+missing Cypher construct (`CALL { }`), ecosystem bridges
+(NetworkX round-trip, in-place graph merge), a profile-gated
+performance sweep (-5 to -17 % on the measured hot shapes), a Neo4j
+migration guide, and a batch of papercut/correctness fixes — including
+an MCP-server boot blocker on clean installs and several
+stale-docs purges.
+
 ### Performance
 
 - **Whole-node materialization (`RETURN n`, `collect(n)`) skips the
