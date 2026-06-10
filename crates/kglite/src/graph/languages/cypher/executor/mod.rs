@@ -748,11 +748,9 @@ impl<'a> CypherExecutor<'a> {
                 remainder.as_ref(),
             ),
             Clause::Call(c) => self.execute_call(c, result_set),
-            Clause::CallSubquery { .. } => Err(
-                "CALL { } subqueries are parsed but not yet executable (planned for a future \
-                 release); rewrite using WITH chaining or multiple cypher() calls for now"
-                    .to_string(),
-            ),
+            Clause::CallSubquery { import, body } => {
+                self.execute_call_subquery(import, body, result_set)
+            }
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
@@ -1195,6 +1193,7 @@ impl<'a> CypherExecutor<'a> {
 
 pub mod affected_tests;
 pub mod call_clause;
+pub mod call_subquery;
 pub mod expression;
 pub mod helpers;
 pub mod match_clause;

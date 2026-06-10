@@ -1052,6 +1052,38 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) RETURN p {.*} AS m ORDER BY m.id",
         None,
     ),
+    # ── CALL { } uncorrelated subqueries (Phase 3) ──
+    # The body runs once and its rows cartesian-product with the outer
+    # stream. CALL { } is opaque to the optimizer passes this phase (the
+    # body is optimized once locally), so these entries validate that the
+    # run-once + cartesian-combine path is deterministic across the
+    # optimizer-on / optimizer-off outer runs.
+    (
+        "call_uncorrelated_leading_count",
+        "social_graph",
+        "CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c",
+        None,
+    ),
+    (
+        "call_uncorrelated_cartesian_after_match",
+        "social_graph",
+        "MATCH (c:Company) CALL { MATCH (n:Person) RETURN count(n) AS pc } RETURN c.name AS cn, pc ORDER BY cn",
+        None,
+    ),
+    (
+        "call_uncorrelated_multi_row_inner",
+        "social_graph",
+        "MATCH (c:Company) WHERE c.name = 'TechCorp' "
+        "CALL { MATCH (p:Person) WHERE p.age < 23 RETURN p.name AS pn } "
+        "RETURN c.name AS cn, pn ORDER BY pn",
+        None,
+    ),
+    (
+        "call_uncorrelated_nested",
+        "social_graph",
+        "CALL { CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c AS cc } RETURN cc",
+        None,
+    ),
 ]
 
 
