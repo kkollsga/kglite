@@ -367,9 +367,47 @@ impl<'a> CypherExecutor<'a> {
         // across queries. No-op for InMemory graphs.
         GraphRead::reset_arenas(&self.graph.graph);
 
-        let mut result_set = ResultSet::new();
-        let profiling = query.profile;
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
+        let result_set =
+            self.execute_clauses_profiled(query, ResultSet::new(), Some(&mut profile_stats))?;
+
+        // Convert ResultSet to CypherResult
+        let mut result = self.finalize_result(result_set)?;
+        result.stats = None;
+        if query.profile {
+            result.profile = Some(profile_stats);
+        }
+        Ok(result)
+    }
+
+    /// Run a query's clause pipeline from a seed result set, without
+    /// PROFILE accounting. Thin wrapper for the subquery body path.
+    pub(super) fn execute_clauses(
+        &self,
+        query: &CypherQuery,
+        initial: ResultSet,
+    ) -> Result<ResultSet, String> {
+        self.execute_clauses_profiled(query, initial, None)
+    }
+
+    /// Run a query's clause pipeline starting from a caller-provided
+    /// `initial` result set, returning the final `ResultSet` (not yet
+    /// finalised into a `CypherResult`).
+    ///
+    /// `execute` calls this with an empty `initial` and an opt-in
+    /// `profile` accumulator. A correlated `CALL { ... }` subquery calls
+    /// it via `execute_clauses` with a single seed row carrying the
+    /// imported bindings (and `profile = None`), so the body's first
+    /// `MATCH` expands from the bound outer node/edge (§1.2 rule 1 / §4 of
+    /// the design doc).
+    fn execute_clauses_profiled(
+        &self,
+        query: &CypherQuery,
+        initial: ResultSet,
+        mut profile: Option<&mut Vec<ClauseStats>>,
+    ) -> Result<ResultSet, String> {
+        let mut result_set = initial;
+        let profiling = query.profile;
 
         // Track which clauses have been consumed by fusion (WHERE into MATCH)
         let mut skip_clause = vec![false; query.clauses.len()];
@@ -399,8 +437,8 @@ impl<'a> CypherExecutor<'a> {
                 && result_set.rows.is_empty()
                 && matches!(clause, Clause::Match(_) | Clause::OptionalMatch(_))
             {
-                if profiling {
-                    profile_stats.push(ClauseStats {
+                if let Some(stats) = profile.as_deref_mut() {
+                    stats.push(ClauseStats {
                         clause_name: clause_display_name(clause),
                         rows_in: 0,
                         rows_out: 0,
@@ -469,6 +507,15 @@ impl<'a> CypherExecutor<'a> {
                 let start = std::time::Instant::now();
                 result_set = if let Clause::Match(m) = clause {
                     self.execute_match(m, result_set, inline_where)?
+                } else if let Clause::CallSubquery { import, body } = clause {
+                    // Correlated import validation needs the *declared* outer
+                    // scope (all variables bound by clauses 0..i), not just
+                    // the variables present in this row — an OPTIONAL MATCH
+                    // miss leaves a declared variable absent/null in the row.
+                    let declared = crate::graph::languages::cypher::planner::simplification::declared_variables(
+                        &query.clauses[..i],
+                    );
+                    self.execute_call_subquery(import, body, result_set, &declared)?
                 } else {
                     self.execute_single_clause(clause, result_set)?
                 };
@@ -478,28 +525,29 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     clause_display_name(clause)
                 };
-                profile_stats.push(ClauseStats {
-                    clause_name: name,
-                    rows_in,
-                    rows_out: result_set.rows.len(),
-                    elapsed_us: elapsed.as_micros() as u64,
-                });
+                if let Some(stats) = profile.as_deref_mut() {
+                    stats.push(ClauseStats {
+                        clause_name: name,
+                        rows_in,
+                        rows_out: result_set.rows.len(),
+                        elapsed_us: elapsed.as_micros() as u64,
+                    });
+                }
             } else {
                 result_set = if let Clause::Match(m) = clause {
                     self.execute_match(m, result_set, inline_where)?
+                } else if let Clause::CallSubquery { import, body } = clause {
+                    let declared = crate::graph::languages::cypher::planner::simplification::declared_variables(
+                        &query.clauses[..i],
+                    );
+                    self.execute_call_subquery(import, body, result_set, &declared)?
                 } else {
                     self.execute_single_clause(clause, result_set)?
                 };
             }
         }
 
-        // Convert ResultSet to CypherResult
-        let mut result = self.finalize_result(result_set)?;
-        result.stats = None;
-        if profiling {
-            result.profile = Some(profile_stats);
-        }
-        Ok(result)
+        Ok(result_set)
     }
 
     /// Execute a single clause, transforming the result set.
@@ -749,7 +797,16 @@ impl<'a> CypherExecutor<'a> {
             ),
             Clause::Call(c) => self.execute_call(c, result_set),
             Clause::CallSubquery { import, body } => {
-                self.execute_call_subquery(import, body, result_set)
+                // Index-aware dispatch (`execute_clauses_profiled` /
+                // `execute_mutable`) computes the declared outer scope from
+                // the preceding clauses and calls `execute_call_subquery`
+                // directly. This single-clause path has no preceding-clause
+                // context, so it derives the declared scope from the bindings
+                // actually present on the incoming rows — sufficient for the
+                // uncorrelated case and for correlated bodies whose imports
+                // are bound (non-null) on every row.
+                let declared = declared_from_rows(&result_set);
+                self.execute_call_subquery(import, body, result_set, &declared)
             }
             Clause::Create(_)
             | Clause::Set(_)
@@ -1213,3 +1270,29 @@ pub mod write;
 
 pub use helpers::return_item_column_name;
 pub use write::{execute_mutable, is_mutation_query};
+
+/// Best-effort declared-variable set derived from the bindings present on
+/// a result set's rows. Used only by the index-less `execute_single_clause`
+/// dispatch fallback for `CALL { }` (the index-aware loops compute the
+/// declared scope statically from the preceding clauses). Probing every
+/// row — not just the first — picks up names that are absent on some rows
+/// (an OPTIONAL MATCH miss) but bound on others, so a correlated import
+/// over a heterogeneous stream still validates.
+fn declared_from_rows(result_set: &ResultSet) -> std::collections::HashSet<String> {
+    let mut declared = std::collections::HashSet::new();
+    for row in &result_set.rows {
+        for k in row.node_bindings.keys() {
+            declared.insert(k.clone());
+        }
+        for k in row.edge_bindings.keys() {
+            declared.insert(k.clone());
+        }
+        for k in row.path_bindings.keys() {
+            declared.insert(k.clone());
+        }
+        for k in row.projected.keys() {
+            declared.insert(k.clone());
+        }
+    }
+    declared
+}

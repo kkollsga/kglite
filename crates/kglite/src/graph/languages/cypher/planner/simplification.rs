@@ -1198,9 +1198,18 @@ pub(super) fn fold_pass_through_with(query: &mut CypherQuery) {
     }
 }
 
-/// Collect the variable names *introduced* (newly bound) by `clause`.
-/// Used to track which variables were in scope before a candidate WITH.
-fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
+/// Collect the variable names *introduced* (newly bound) by `clause`
+/// into `out`. Covers MATCH / OPTIONAL MATCH pattern variables (node /
+/// edge / path), WITH and RETURN aliases (and bare-`Variable`
+/// pass-throughs), UNWIND aliases, and a nested `CALL { }` subquery's
+/// terminal RETURN output columns.
+///
+/// Used in two places: the cohort-top-K WITH fold (which scope was a
+/// variable bound before a candidate WITH) and correlated-`CALL { }`
+/// import validation (is an imported name *declared* by some preceding
+/// clause — distinct from "present in this row", since an OPTIONAL MATCH
+/// miss leaves a declared variable absent/null in the row).
+pub(crate) fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
     match clause {
         Clause::Match(m) | Clause::OptionalMatch(m) => {
             for pat in &m.patterns {
@@ -1234,16 +1243,56 @@ fn collect_introduced_variables(clause: &Clause, out: &mut HashSet<String>) {
                 }
             }
         }
+        Clause::Return(r) => {
+            // A RETURN can be a non-terminal clause in a subquery body, and
+            // its output columns are the declared scope for anything that
+            // follows (e.g. a CALL { } body's terminal RETURN feeds the
+            // outer scope). Mirror the WITH arm: alias, else bare variable.
+            for item in &r.items {
+                let name = item.alias.clone().or_else(|| match &item.expression {
+                    Expression::Variable(v) => Some(v.clone()),
+                    _ => None,
+                });
+                if let Some(n) = name {
+                    out.insert(n);
+                }
+            }
+        }
         Clause::Unwind(u) => {
             out.insert(u.alias.clone());
         }
+        Clause::CallSubquery { body, .. } => {
+            // A nested CALL { } introduces its body's terminal RETURN
+            // columns into the outer scope (§1.2 rule 3). Those names are
+            // declared for clauses that follow this CallSubquery — including
+            // a later correlated CALL { } that imports them.
+            if let Some(Clause::Return(r)) = body.clauses.last() {
+                for item in &r.items {
+                    out.insert(super::super::executor::return_item_column_name(item));
+                }
+            }
+        }
         Clause::Call(_) | Clause::Create(_) | Clause::Merge(_) => {
-            // CALL/CREATE/MERGE can introduce variables, but those forms
-            // don't appear in the cohort-top-K shape this fold targets.
+            // CALL (procedure) / CREATE / MERGE can introduce variables, but
+            // those forms don't appear in the shapes these callers target.
             // Be conservative: don't claim to know what they bind.
         }
         _ => {}
     }
+}
+
+/// The set of variable names *declared* (newly bound) by the clauses in
+/// `clauses`, in order. A thin accumulator over
+/// [`collect_introduced_variables`] — used by correlated `CALL { }`
+/// import validation to distinguish "never declared" (typo → error) from
+/// "declared upstream but absent/null in this row" (seed per the NULL-
+/// import paths).
+pub(crate) fn declared_variables(clauses: &[Clause]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for clause in clauses {
+        collect_introduced_variables(clause, &mut out);
+    }
+    out
 }
 
 /// Returns the projected variable names if `clause` is a pass-through

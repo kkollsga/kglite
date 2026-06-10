@@ -141,6 +141,17 @@ pub fn execute_mutable(
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
             }
+            // Correlated CALL { } import validation needs the declared outer
+            // scope (variables bound by clauses 0..i), distinct from the
+            // bindings present in any single row.
+            Clause::CallSubquery { import, body } => {
+                let executor = CypherExecutor::with_params(graph, &params, deadline);
+                let declared =
+                    crate::graph::languages::cypher::planner::simplification::declared_variables(
+                        &query.clauses[..i],
+                    );
+                result_set = executor.execute_call_subquery(import, body, result_set, &declared)?;
+            }
             // Read clauses: create temporary immutable executor
             _ => {
                 let executor = CypherExecutor::with_params(graph, &params, deadline);

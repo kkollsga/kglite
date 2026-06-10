@@ -1,5 +1,5 @@
 """CALL { } subqueries — Phase 1 (parser) + Phase 2 (validation) +
-Phase 3 (executor: uncorrelated).
+Phase 3 (executor: uncorrelated) + Phase 4 (executor: correlated).
 
 Phase 1 ships the parser; Phase 2 adds v1 structural validation
 (write / unit / UNION bodies rejected, importing-WITH restrictions,
@@ -9,17 +9,22 @@ once and its result rows are cartesian-producted with the outer row
 stream (§1.1 of ``dev-documentation/design/call-subqueries.md``). The
 body sees no outer variables (§1.2 rule 1); only its RETURN columns flow
 out (§1.2 rule 3); a RETURN alias colliding with an outer variable is a
-compile/execution error (§1.2 rule 4). The **correlated** form (leading
-importing ``WITH``) still raises a clean not-yet-executable error
-(Phase 4).
+compile/execution error (§1.2 rule 4).
+
+Phase 4 makes the **correlated** form (leading importing ``WITH``)
+executable: the body is planned once and executed once per outer row,
+seeded with only the imported variables (preserving each import's
+binding kind). Its result rows are inner-joined back to the driving
+outer row (§1.1 / §1.3 — zero rows drops the outer row, an aggregating
+body always returns one row so the outer row survives); a NULL imported
+pattern-anchor yields the empty-match result (§1.3); importing a
+variable not in the outer scope errors at execution start.
 """
 
 import pytest
 
 import kglite
 from kglite import KnowledgeGraph
-
-NOT_EXECUTABLE = "not yet executable"
 
 
 @pytest.fixture
@@ -31,6 +36,23 @@ def graph():
         MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
         CREATE (a)-[:KNOWS]->(b)
     """)
+    return g
+
+
+@pytest.fixture
+def friends():
+    """4 people in a KNOWS web (Anna, Bo, Cy connected; Dee isolated).
+
+    Anna KNOWS Bo, Bo KNOWS Cy; Dee has no KNOWS edges. Deterministic
+    titles for ORDER BY assertions and a guaranteed zero-degree node
+    (Dee) for the inner-join / aggregate-zero distinction.
+    """
+    g = KnowledgeGraph()
+    for t in ("Anna", "Bo", "Cy", "Dee"):
+        g.cypher("CREATE (:Person {title: $t})", params={"t": t})
+    g.cypher("MATCH (a:Person {title:'Anna'}),(b:Person {title:'Bo'}) CREATE (a)-[:KNOWS]->(b)")
+    g.cypher("MATCH (a:Person {title:'Bo'}),(b:Person {title:'Cy'}) CREATE (a)-[:KNOWS]->(b)")
+    g.cypher("MATCH (a:Person {title:'Anna'}),(b:Person {title:'Cy'}) CREATE (a)-[:KNOWS]->(b)")
     return g
 
 
@@ -145,21 +167,257 @@ class TestUncorrelatedScoping:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Phase 4 deferral — correlated still errors cleanly
+# Phase 4 — correlated execution (per-row inner join)
 # ──────────────────────────────────────────────────────────────────
 
 
-class TestCorrelatedNotExecutable:
-    @pytest.mark.parametrize(
-        "query",
-        [
-            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN p.name, c",
-            "MATCH (p:Person), (q:Person) CALL { WITH p, q MATCH (p)-[:KNOWS]->(q) RETURN count(*) AS c } RETURN c",
-        ],
-    )
-    def test_correlated_clean_error(self, graph, query):
-        with pytest.raises(kglite.CypherExecutionError, match=NOT_EXECUTABLE):
-            graph.cypher(query)
+class TestCorrelatedCallSubquery:
+    def test_canonical_aggregate_preserves_zero_degree_rows(self, friends):
+        """Per-person friend counts; aggregating body keeps the zero-degree
+        rows (Cy, Dee) with c=0 (§1.3)."""
+        rows = friends.cypher(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+            "RETURN p.title AS pt, c ORDER BY pt"
+        ).to_list()
+        assert rows == [
+            {"pt": "Anna", "c": 2},
+            {"pt": "Bo", "c": 1},
+            {"pt": "Cy", "c": 0},
+            {"pt": "Dee", "c": 0},
+        ]
+
+    def test_non_aggregating_body_drops_zero_degree_rows(self, friends):
+        """Non-aggregating body → inner join: Cy and Dee (no outgoing KNOWS)
+        disappear; Anna appears twice (multiplicity preserved, §1.1)."""
+        rows = friends.cypher(
+            "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.title AS fn } "
+            "RETURN p.title AS pt, fn ORDER BY pt, fn"
+        ).to_list()
+        assert rows == [
+            {"pt": "Anna", "fn": "Bo"},
+            {"pt": "Anna", "fn": "Cy"},
+            {"pt": "Bo", "fn": "Cy"},
+        ]
+
+    def test_multi_import(self, friends):
+        """Two imports (`WITH p, q`); the body anchors on both."""
+        rows = friends.cypher(
+            "MATCH (p:Person), (q:Person) WHERE p.title = 'Anna' AND q.title = 'Bo' "
+            "CALL { WITH p, q MATCH (p)-[:KNOWS]->(q) RETURN count(*) AS c } "
+            "RETURN p.title AS pt, q.title AS qt, c"
+        ).to_list()
+        # Anna KNOWS Bo → exactly one matching edge.
+        assert rows == [{"pt": "Anna", "qt": "Bo", "c": 1}]
+
+    def test_imported_projected_scalar(self, friends):
+        """Import a scalar from an outer WITH (not a node) and use it in the
+        body's expression — the projected value flows in unchanged."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WITH p, p.title AS t "
+            "CALL { WITH t RETURN toUpper(t) AS up } "
+            "RETURN p.title AS pt, up ORDER BY pt"
+        ).to_list()
+        assert rows == [
+            {"pt": "Anna", "up": "ANNA"},
+            {"pt": "Bo", "up": "BO"},
+            {"pt": "Cy", "up": "CY"},
+            {"pt": "Dee", "up": "DEE"},
+        ]
+
+    def test_null_import_anchor_aggregating_keeps_row(self, friends):
+        """A NULL imported pattern-anchor (§1.3): the aggregating body still
+        yields one row (count = 0), so the outer row survives."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WITH p, null AS x "
+            "CALL { WITH x MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS c } "
+            "RETURN p.title AS pt, c ORDER BY pt"
+        ).to_list()
+        assert rows == [
+            {"pt": "Anna", "c": 0},
+            {"pt": "Bo", "c": 0},
+            {"pt": "Cy", "c": 0},
+            {"pt": "Dee", "c": 0},
+        ]
+
+    def test_null_import_anchor_non_aggregating_drops_row(self, friends):
+        """A NULL imported pattern-anchor with a non-aggregating body yields
+        zero rows, so every outer row drops (§1.3)."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WITH p, null AS x "
+            "CALL { WITH x MATCH (x)-[:KNOWS]->(f) RETURN f.title AS fn } "
+            "RETURN p.title AS pt, fn"
+        ).to_list()
+        assert rows == []
+
+    def test_null_import_from_optional_match(self, friends):
+        """The realistic NULL-import shape: an unmatched leading OPTIONAL
+        MATCH binds the node to NULL, then the correlated CALL anchors on
+        it. Aggregating body → count 0, row survives."""
+        rows = friends.cypher(
+            "OPTIONAL MATCH (x:Nope) CALL { WITH x MATCH (x)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN c"
+        ).to_list()
+        assert rows == [{"c": 0}]
+
+    def test_null_import_non_anchor_scalar_keeps_row(self, friends):
+        """A NULL import that is NOT a pattern anchor flows in as NULL; the
+        body's expression sees it (coalesce), the row is kept."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WITH p, null AS x "
+            "CALL { WITH x RETURN coalesce(x, 'fallback') AS v } "
+            "RETURN p.title AS pt, v ORDER BY pt LIMIT 1"
+        ).to_list()
+        assert rows == [{"pt": "Anna", "v": "fallback"}]
+
+    def test_import_not_in_scope_errors(self, friends):
+        """Importing a variable not bound in the outer scope errors at
+        execution start (deferred Phase-2 check that needs the outer scope)."""
+        with pytest.raises(kglite.CypherExecutionError, match="not bound in the outer scope"):
+            friends.cypher("MATCH (p:Person) CALL { WITH zzz MATCH (zzz)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN c")
+
+    def test_re_returning_imported_name_collides(self, friends):
+        """Re-returning an imported variable under the same name is a
+        collision (§1.2 rule 4 — Neo4j errors)."""
+        with pytest.raises(kglite.CypherExecutionError, match="already exists in"):
+            friends.cypher("MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN p AS p } RETURN p")
+
+    def test_correlated_inside_uncorrelated(self, friends):
+        """A correlated CALL nested inside an uncorrelated CALL."""
+        rows = friends.cypher(
+            "CALL { MATCH (p:Person) "
+            "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+            "RETURN p.title AS pt, c } RETURN pt, c ORDER BY pt"
+        ).to_list()
+        assert rows == [
+            {"pt": "Anna", "c": 2},
+            {"pt": "Bo", "c": 1},
+            {"pt": "Cy", "c": 0},
+            {"pt": "Dee", "c": 0},
+        ]
+
+    def test_uncorrelated_inside_correlated(self, friends):
+        """An uncorrelated CALL nested inside a correlated body — the inner
+        body imports nothing and runs once per outer row."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WHERE p.title = 'Anna' "
+            "CALL { WITH p MATCH (p)-[:KNOWS]->(f) "
+            "CALL { MATCH (t:Person) RETURN count(t) AS total } "
+            "RETURN f.title AS fn, total } "
+            "RETURN p.title AS pt, fn, total ORDER BY fn"
+        ).to_list()
+        # Anna knows Bo + Cy (2 friends); each carries the global Person count (4).
+        assert rows == [
+            {"pt": "Anna", "fn": "Bo", "total": 4},
+            {"pt": "Anna", "fn": "Cy", "total": 4},
+        ]
+
+    def test_determinism_per_row_distinct_uuid(self, friends):
+        """Inverse of the Phase-3 determinism probe: randomUUID() in a
+        correlated body executes once PER outer row → N distinct values."""
+        rows = friends.cypher(
+            "MATCH (p:Person) CALL { WITH p RETURN randomUUID() AS u } RETURN p.title AS pt, u ORDER BY pt"
+        ).to_list()
+        assert len(rows) == 4
+        assert len({r["u"] for r in rows}) == 4  # one UUID per outer row
+
+    def test_zero_outer_rows_body_never_runs(self, friends):
+        """No outer rows → the body never runs, output is empty."""
+        rows = friends.cypher(
+            "MATCH (p:Person) WHERE p.title = 'Nobody' "
+            "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+            "RETURN p.title AS pt, c"
+        ).to_list()
+        assert rows == []
+
+
+@pytest.fixture
+def likes():
+    """3 P nodes (a, b, c) and one T node. a and b LIKE T; c LIKEs nothing.
+
+    Drives the OPTIONAL-MATCH-miss → correlated-CALL shape: for c the
+    upstream OPTIONAL MATCH misses, so the imported anchor is declared but
+    absent/null on that row. a and b bind the anchor to a real T node.
+    """
+    g = KnowledgeGraph()
+    for t in ("a", "b", "c"):
+        g.cypher("CREATE (:P {nid: $t, title: $t})", params={"t": t})
+    g.cypher("CREATE (:T {nid: 't1', title: 'T1'})")
+    g.cypher("MATCH (p:P {nid:'a'}),(t:T {nid:'t1'}) CREATE (p)-[:LIKES]->(t)")
+    g.cypher("MATCH (p:P {nid:'b'}),(t:T {nid:'t1'}) CREATE (p)-[:LIKES]->(t)")
+    return g
+
+
+class TestCorrelatedCallAfterOptionalMatch:
+    """The OPTIONAL-MATCH-miss → correlated-CALL shape. The miss leaves the
+    imported anchor declared-but-absent (null) on that row, distinct from a
+    never-declared (typo'd) import. Static declaredness (the variable is
+    bound by a preceding clause) gates the error; per-row seeding decides
+    sentinel-vs-real-node so the body runs with the row's actual value.
+    """
+
+    def test_missed_optional_match_anchor_aggregating_keeps_row(self, likes):
+        """The repro: c has no LIKES edge → x is null on that row → the
+        aggregating body returns oc=0 and the row survives (Neo4j semantics,
+        previously errored 'not bound in the outer scope')."""
+        rows = likes.cypher(
+            "MATCH (p:P {nid:'c'}) "
+            "OPTIONAL MATCH (p)-[:LIKES]->(x:T) "
+            "CALL { WITH x MATCH (x)<-[:LIKES]-(o) RETURN count(o) AS oc } "
+            "RETURN p.title AS pt, oc"
+        ).to_list()
+        assert rows == [{"pt": "c", "oc": 0}]
+
+    def test_mixed_rows_aggregating_per_row_value(self, likes):
+        """a, b bind x to a real T (oc = #likers of T1 = 2); c misses → x
+        null → oc=0, row kept. Per-row kind decision: real node vs sentinel."""
+        rows = likes.cypher(
+            "MATCH (p:P) "
+            "OPTIONAL MATCH (p)-[:LIKES]->(x:T) "
+            "CALL { WITH x MATCH (x)<-[:LIKES]-(o) RETURN count(o) AS oc } "
+            "RETURN p.title AS pt, oc ORDER BY pt"
+        ).to_list()
+        assert rows == [
+            {"pt": "a", "oc": 2},
+            {"pt": "b", "oc": 2},
+            {"pt": "c", "oc": 0},
+        ]
+
+    def test_mixed_rows_non_aggregating_drops_null_row(self, likes):
+        """Non-aggregating body inner-joins: a and b (x bound) keep their
+        rows; c (x null) drops entirely."""
+        rows = likes.cypher(
+            "MATCH (p:P) "
+            "OPTIONAL MATCH (p)-[:LIKES]->(x:T) "
+            "CALL { WITH x MATCH (x)<-[:LIKES]-(o) RETURN o.title AS ot } "
+            "RETURN p.title AS pt, ot ORDER BY pt, ot"
+        ).to_list()
+        assert rows == [
+            {"pt": "a", "ot": "a"},
+            {"pt": "a", "ot": "b"},
+            {"pt": "b", "ot": "a"},
+            {"pt": "b", "ot": "b"},
+        ]
+
+    def test_truly_undeclared_import_still_errors(self, likes):
+        """A name never declared by any preceding clause is a typo → error,
+        even though no row carries it (same absence as a missed OPTIONAL
+        MATCH). Static declaredness, not row-probing, distinguishes them."""
+        with pytest.raises(kglite.CypherExecutionError, match="not bound in the outer scope"):
+            likes.cypher(
+                "MATCH (p:P {nid:'c'}) "
+                "OPTIONAL MATCH (p)-[:LIKES]->(x:T) "
+                "CALL { WITH zzz MATCH (zzz)<-[:LIKES]-(o) RETURN count(o) AS oc } "
+                "RETURN oc"
+            )
+
+    def test_explicit_with_null_import_regression(self, likes):
+        """`WITH null AS x` (explicit null, x IS declared) still works — the
+        declared-set includes x, per-row seeding picks the sentinel."""
+        rows = likes.cypher(
+            "MATCH (p:P {nid:'c'}) WITH p, null AS x "
+            "CALL { WITH x MATCH (x)<-[:LIKES]-(o) RETURN count(o) AS oc } "
+            "RETURN p.title AS pt, oc"
+        ).to_list()
+        assert rows == [{"pt": "c", "oc": 0}]
 
 
 # ──────────────────────────────────────────────────────────────────

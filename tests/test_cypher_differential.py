@@ -1084,6 +1084,63 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL { CALL { MATCH (n:Person) RETURN count(n) AS c } RETURN c AS cc } RETURN cc",
         None,
     ),
+    # ── CALL { } correlated subqueries (Phase 4) ──
+    # The body is planned once and executed per outer row, seeded with the
+    # imported variables only. The unoptimized run is the oracle for the
+    # optimized run; both must agree on the inner-join cardinality + the
+    # per-row aggregate values.
+    (
+        "call_correlated_aggregate",
+        "social_graph",
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+        "RETURN p.name AS pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_correlated_non_aggregating_multiplicity",
+        "social_graph",
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS fn } "
+        "RETURN p.name AS pn, fn ORDER BY pn, fn",
+        None,
+    ),
+    (
+        "call_correlated_empty_row_drop",
+        "social_graph",
+        # Person_20 has zero outgoing KNOWS → dropped by the non-aggregating
+        # body's inner join (§1.3).
+        "MATCH (p:Person) CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN f.name AS fn } RETURN p.name AS pn ORDER BY pn",
+        None,
+    ),
+    (
+        "call_correlated_multi_import",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) "
+        "CALL { WITH p, c MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c2 } "
+        "RETURN p.name AS pn, c.name AS cn, c2 ORDER BY pn",
+        None,
+    ),
+    (
+        "call_correlated_nested_in_uncorrelated",
+        "social_graph",
+        "CALL { MATCH (p:Person) WHERE p.age < 23 "
+        "CALL { WITH p MATCH (p)-[:KNOWS]->(f) RETURN count(f) AS c } "
+        "RETURN p.name AS pn, c } RETURN pn, c ORDER BY pn",
+        None,
+    ),
+    (
+        "call_correlated_after_optional_match_miss",
+        "social_graph",
+        # An OPTIONAL MATCH that misses for some Persons (no WORKS_AT edge)
+        # leaves the imported anchor `c` declared-but-null on those rows;
+        # the correlated body anchors on it. Aggregating body → those rows
+        # survive with count 0. The naive run is the oracle for the per-row
+        # sentinel-vs-real-node seeding decision.
+        "MATCH (p:Person) "
+        "OPTIONAL MATCH (p)-[:WORKS_AT]->(c:Company) "
+        "CALL { WITH c MATCH (c)<-[:WORKS_AT]-(co:Person) RETURN count(co) AS colleagues } "
+        "RETURN p.name AS pn, colleagues ORDER BY pn",
+        None,
+    ),
 ]
 
 
