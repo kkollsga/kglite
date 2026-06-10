@@ -488,6 +488,16 @@ pub(crate) fn materialize_node_value(
     properties.insert("id".to_string(), node.id().into_owned());
     properties.insert("title".to_string(), node.title().into_owned());
     properties.insert("type".to_string(), Value::String(node_type.clone()));
+    // `type` is a soft alias, not a hard virtual: a stored property named
+    // "type" wins over the structural type string (KG-1), matching what
+    // `n.type` resolves to via `resolve_node_property_resolved`. `id` and
+    // `title` are genuine virtuals — the canonical identity always wins —
+    // so only `type` gets the stored-shadow check. `get_property_value` is
+    // a point lookup that works on every backend (incl. the columnar one,
+    // where `property_iter` below yields nothing).
+    if let Some(stored) = node.get_property_value("type") {
+        properties.insert("type".to_string(), stored);
+    }
     // Then every user-set property the node carries.
     for (key, val) in node.property_iter(&graph.interner) {
         if key == "id" || key == "title" || key == "type" {

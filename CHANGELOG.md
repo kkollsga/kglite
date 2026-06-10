@@ -103,7 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enumeration that omitted them (`keys(n)` additionally dropped real
   columns on the disk/mapped backends). All three now delegate to the
   same materializer `RETURN n` uses, so the shapes stay in lockstep
-  across every storage mode.
+  across every storage mode. The materializer also honours the KG-1
+  soft-alias rule for `type`: a stored property named `type` wins over
+  the structural type string in all four shapes (matching `n.type`);
+  `id`/`title` remain canonical virtuals.
 
 - **Map subscript by string key works.** `{x: 1}['x']`,
   `properties(n)['title']`, dynamic keys (`{x: 1}[k]`), nested access
