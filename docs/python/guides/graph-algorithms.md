@@ -66,6 +66,73 @@ print(f"Largest component: {len(components[0])} nodes")
 graph.are_connected(source_type='Person', source_id=1, target_type='Person', target_id=100)
 ```
 
+## Cypher procedures: scoped subgraph algorithms
+
+Several algorithms are also exposed as Cypher `CALL` procedures so you can
+run them over a *subgraph* — one node type and one (or several) relationship
+types — instead of the whole graph. This is the idiomatic way to ask
+"components among `Person` nodes connected by `KNOWS`" without first
+extracting a separate graph.
+
+All three share the same optional `{node_type, relationship}` scoping. Each
+field accepts a string or a list of strings; omit the map to run over the
+whole graph.
+
+### Connected components
+
+```cypher
+-- Whole graph
+CALL connected_components() YIELD node, component
+RETURN component, count(*) AS size ORDER BY size DESC
+
+-- Scoped to one node type + relationship
+CALL connected_components({node_type: 'Person', relationship: 'KNOWS'})
+YIELD node, component
+RETURN component, collect(node.name) AS members
+
+-- Multiple relationship types
+CALL connected_components({node_type: ['Person'], relationship: ['KNOWS', 'OWNS']})
+YIELD node, component
+RETURN count(DISTINCT component) AS num_components
+```
+
+### K-core decomposition (coreness)
+
+The *coreness* of a node is the largest `k` for which it survives in the
+`k`-core (the maximal subgraph where every node has degree ≥ `k`). High
+coreness marks structurally central, resilient nodes. `k_core` and `coreness`
+are aliases.
+
+```cypher
+CALL k_core() YIELD node, coreness
+RETURN node.name AS name, coreness ORDER BY coreness DESC LIMIT 10
+
+-- Scoped
+CALL k_core({node_type: 'Person', relationship: 'KNOWS'})
+YIELD node, coreness
+RETURN coreness, count(*) AS n ORDER BY coreness DESC
+```
+
+### Local clustering coefficient
+
+The fraction of a node's neighbour pairs that are themselves connected — the
+local triangle-closure rate (0.0 = no neighbours linked, 1.0 = neighbourhood
+is a clique). `clustering_coefficient` and `local_clustering_coefficient` are
+aliases.
+
+```cypher
+CALL clustering_coefficient() YIELD node, coefficient
+RETURN node.name AS name, coefficient ORDER BY coefficient DESC
+
+-- Scoped, then averaged
+CALL clustering_coefficient({node_type: 'Person', relationship: 'KNOWS'})
+YIELD node, coefficient
+RETURN avg(coefficient) AS global_avg
+```
+
+Scoping is computed lazily over the live graph (no copy), so these run
+identically across the in-memory, mapped, and disk storage modes.
+
 ## Centrality Algorithms
 
 All centrality methods return a `ResultView` of `{type, title, id, score}` rows, sorted by score descending.
