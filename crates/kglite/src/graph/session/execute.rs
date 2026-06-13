@@ -254,6 +254,10 @@ fn prepare(
     // (`{ttle: 'Alice'}`) get caught with a "did you mean?" hint.
     cypher::validate_schema(&parsed, graph).map_err(KgError::from)?;
 
+    // Non-fatal: warn (stderr) when a MATCH references an unknown node label
+    // or relationship type — the most common "why is my query empty?" typo.
+    cypher::warn_unknown_pattern_refs(&parsed, graph);
+
     // text_score() rewrite. Scans for `text_score(...)` calls in the
     // AST and rewrites them to `vector_score(...)`, collecting the
     // texts to embed alongside.

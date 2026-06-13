@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **"Did you mean?" warnings for MATCH typos.** A `MATCH` against a node label
+  or relationship type the graph has never seen now emits a non-fatal
+  `warning:` to stderr with an edit-distance hint (e.g. unknown label
+  `'Persn'` → "Did you mean 'Person'?"). The query still runs and returns zero
+  rows (unknown types are legal Cypher — a valid existence check), so this is
+  a warning, not an error. It catches the single most common "why is my query
+  empty?" foot-gun. Emitted from the shared execute path, so every binding
+  benefits. (Routing the same messages into structured `QueryDiagnostics` for
+  MCP/agent callers is the natural follow-up.)
+
 - **`CALL k_core` / `coreness` and `CALL clustering_coefficient`.** Two graph
   procedures, in-place over the knowledge graph (no export to an external
   graph-algorithm library): k-core decomposition (coreness per node, via

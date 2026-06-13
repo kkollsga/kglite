@@ -12,10 +12,13 @@
 //! - **`CREATE (n:T {prop: v})`** and `CREATE`-style multi-element paths.
 //! - **`MERGE (n:T {prop: v})`** including the embedded `CREATE` shape.
 //!
-//! Deliberately *does not* validate:
+//! Deliberately *does not reject* (these are legal, so they are warned about
+//! non-fatally instead — see below — never turned into errors):
 //! - Unknown node types in MATCH (`MATCH (n:Nonexistent)` legitimately
 //!   returns zero rows and is a common existence-check idiom).
 //! - Unknown connection types (same rationale).
+//!
+//! Deliberately *ignores entirely*:
 //! - Property references in WHERE / RETURN expressions (virtual columns,
 //!   timeseries sub-nodes, aliases can be legitimate `n.prop` accesses
 //!   not present in `node_type_metadata`).
@@ -23,9 +26,15 @@
 //!   introduce new properties depending on kglite's mutation policy;
 //!   REMOVE of a non-existent property is benign.
 //!
-//! Phase 3 will surface those as non-fatal warnings in `QueryDiagnostics`
-//! with "did you mean?" hints — the agent sees the signal without
-//! rejecting legitimate empty-result queries.
+//! ## Non-fatal "did you mean?" warnings
+//!
+//! [`collect_unknown_pattern_warnings`] / [`warn_unknown_pattern_refs`] flag
+//! MATCH patterns that reference an unknown node label or relationship type —
+//! the most common "why is my query empty?" typo — with an edit-distance hint,
+//! *without* rejecting (the zero-row existence-check idiom stays valid). The
+//! wrapper emits to stderr (kglite's existing `warning:` convention); routing
+//! the same messages into `QueryDiagnostics` so MCP/agent callers see them
+//! structurally is the natural next step.
 //!
 //! ## Pipeline placement
 //!
@@ -38,8 +47,8 @@
 use super::super::ast::*;
 use crate::graph::core::pattern_matching::{Pattern, PatternElement};
 use crate::graph::mutation::validation::did_you_mean;
-use crate::graph::schema::DirGraph;
-use std::collections::HashMap;
+use crate::graph::schema::{DirGraph, InternedKey};
+use std::collections::{HashMap, HashSet};
 
 /// Built-in fields valid on any node type — mirrors BUILTIN_FIELDS in
 /// `mutation/validation.rs`. Listed explicitly so it's obvious what's
@@ -84,6 +93,116 @@ pub fn validate_schema(query: &CypherQuery, graph: &DirGraph) -> Result<(), Sche
 
     let mut var_types: HashMap<String, String> = HashMap::new();
     validate_query(query, graph, &mut var_types)
+}
+
+/// Non-fatal counterpart to [`validate_schema`]: collect "did you mean?"
+/// warnings for MATCH patterns that reference a node label or relationship
+/// type the graph has never seen. An unknown type is legal Cypher (a zero-row
+/// existence check), so this is *not* an error — but in practice it's almost
+/// always a typo that silently yields no rows, the single most common
+/// "why is my query empty?" foot-gun. Returns one message per distinct
+/// unknown label/type (deduplicated). Pure (no I/O) so it's directly testable;
+/// [`warn_unknown_pattern_refs`] is the stderr-emitting wrapper.
+pub fn collect_unknown_pattern_warnings(query: &CypherQuery, graph: &DirGraph) -> Vec<String> {
+    let have_node_schema =
+        !graph.node_type_metadata.is_empty() || graph.type_indices.keys().next().is_some();
+    let have_edge_schema = !graph.connection_type_metadata.is_empty();
+    if !have_node_schema && !have_edge_schema {
+        return Vec::new();
+    }
+
+    // Walk MATCH / OPTIONAL MATCH patterns, checking each label/relationship
+    // against the schema directly. The all-valid path (the overwhelming common
+    // case) allocates nothing — only confirmed-unknown, not-yet-seen names are
+    // recorded, and the candidate lists for "did you mean?" are built lazily
+    // only if there's at least one unknown.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unknown_labels: Vec<String> = Vec::new();
+    let mut unknown_rels: Vec<String> = Vec::new();
+
+    for clause in &query.clauses {
+        if let Clause::Match(m) | Clause::OptionalMatch(m) = clause {
+            for pattern in &m.patterns {
+                for element in &pattern.elements {
+                    match element {
+                        PatternElement::Node(np) if have_node_schema => {
+                            for label in np.node_type.iter().chain(np.extra_labels.iter()) {
+                                // A label is known if it's a declared primary
+                                // type OR a secondary label applied via
+                                // add_label (`MATCH (n:Reviewer)` is valid even
+                                // though `Reviewer` is no node's primary type).
+                                let known = graph.node_type_metadata.contains_key(label)
+                                    || graph.type_indices.contains_key(label)
+                                    || graph
+                                        .secondary_label_index
+                                        .contains_key(&InternedKey::from_str(label));
+                                if !known && seen.insert(format!("L:{label}")) {
+                                    unknown_labels.push(label.clone());
+                                }
+                            }
+                        }
+                        PatternElement::Edge(ep) if have_edge_schema => {
+                            let single = ep.connection_type.iter();
+                            let multi = ep.connection_types.iter().flatten();
+                            for rel in single.chain(multi) {
+                                if !graph.connection_type_metadata.contains_key(rel)
+                                    && seen.insert(format!("R:{rel}"))
+                                {
+                                    unknown_rels.push(rel.clone());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if unknown_labels.is_empty() && unknown_rels.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(unknown_labels.len() + unknown_rels.len());
+    if !unknown_labels.is_empty() {
+        let candidates: Vec<&str> = graph
+            .node_type_metadata
+            .keys()
+            .map(|s| s.as_str())
+            .chain(graph.type_indices.keys())
+            .collect();
+        for label in &unknown_labels {
+            out.push(format!(
+                "MATCH references unknown node label '{label}' — the graph has no such type, \
+                 so this pattern returns no rows.{}",
+                did_you_mean(label, &candidates)
+            ));
+        }
+    }
+    if !unknown_rels.is_empty() {
+        let candidates: Vec<&str> = graph
+            .connection_type_metadata
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        for rel in &unknown_rels {
+            out.push(format!(
+                "MATCH references unknown relationship type '{rel}' — the graph has no such \
+                 edge type, so this pattern returns no rows.{}",
+                did_you_mean(rel, &candidates)
+            ));
+        }
+    }
+    out
+}
+
+/// Emit [`collect_unknown_pattern_warnings`] to stderr (matching kglite's
+/// existing `warning:`-prefixed convention for non-fatal query/load issues).
+/// Called from the shared execute path so every binding gets the signal.
+pub fn warn_unknown_pattern_refs(query: &CypherQuery, graph: &DirGraph) {
+    for msg in collect_unknown_pattern_warnings(query, graph) {
+        eprintln!("warning: {msg}");
+    }
 }
 
 fn validate_query(
@@ -310,6 +429,66 @@ mod tests {
         let g = graph_with_schema();
         let q = parse_cypher("MATCH (a:Person)-[:nonexistent]->(b:Person) RETURN a").unwrap();
         assert!(validate_schema(&q, &g).is_ok());
+    }
+
+    #[test]
+    fn warns_unknown_node_label_with_hint() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (n:Persn) RETURN n").unwrap();
+        let warnings = collect_unknown_pattern_warnings(&q, &g);
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(warnings[0].contains("unknown node label 'Persn'"));
+        assert!(
+            warnings[0].contains("Did you mean 'Person'?"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn warns_unknown_relationship_type_with_hint() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (a:Person)-[:KNOWZ]->(b:Person) RETURN a").unwrap();
+        let warnings = collect_unknown_pattern_warnings(&q, &g);
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(warnings[0].contains("unknown relationship type 'KNOWZ'"));
+        assert!(
+            warnings[0].contains("Did you mean 'KNOWS'?"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn no_warning_for_secondary_label() {
+        // A label applied via add_label is valid in MATCH even though it is no
+        // node's primary type — must NOT be flagged as unknown (regression
+        // guard for a false positive: the warning once claimed `:Reviewer`
+        // was unknown and "returns no rows" while it returned rows).
+        let mut g = graph_with_schema();
+        g.secondary_label_index
+            .entry(InternedKey::from_str("Reviewer"))
+            .or_default();
+        let q = parse_cypher("MATCH (n:Reviewer) RETURN n").unwrap();
+        assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
+        // And it still warns on a genuine typo of the secondary label.
+        let q2 = parse_cypher("MATCH (n:Reviewr) RETURN n").unwrap();
+        assert_eq!(collect_unknown_pattern_warnings(&q2, &g).len(), 1);
+    }
+
+    #[test]
+    fn no_warning_for_known_label_and_relationship() {
+        let g = graph_with_schema();
+        let q = parse_cypher("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a").unwrap();
+        assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
+    }
+
+    #[test]
+    fn no_warning_on_schemaless_graph() {
+        // A fresh graph has nothing to compare against → never warns.
+        let g = DirGraph::new();
+        let q = parse_cypher("MATCH (n:Anything) RETURN n").unwrap();
+        assert!(collect_unknown_pattern_warnings(&q, &g).is_empty());
     }
 
     #[test]
