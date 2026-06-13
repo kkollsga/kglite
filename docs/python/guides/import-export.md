@@ -55,6 +55,53 @@ g2 = kglite.from_networkx(nxg, default_node_type='Node', default_edge_type='RELA
 `to_networkx()` exports the full graph (the active selection is ignored
 in v1).
 
+## Neo4j Export
+
+Push a graph (or the active selection) to a live Neo4j database over Bolt,
+using batched `UNWIND` writes. Requires the `neo4j` driver:
+`pip install neo4j`.
+
+```python
+import kglite
+
+g = kglite.load("graph.kgl")
+report = kglite.to_neo4j(
+    g,
+    "bolt://localhost:7687",
+    auth=("neo4j", "password"),
+    clear=False,    # set True to wipe the target DB first
+    merge=False,    # set True for MERGE (upsert) instead of CREATE
+    batch_size=5000,
+)
+# {'nodes_created': ..., 'relationships_created': ..., 'elapsed': ..., 'database': 'neo4j'}
+```
+
+Pass `selection_only=True` to export just the current selection (otherwise
+the full graph is written). Use `merge=True` for idempotent re-runs against
+an existing dataset; `clear=True` for a clean reload.
+
+## Merging Graphs (multi-source ingest)
+
+`extend()` folds one in-memory graph into another in place — the native
+alternative to round-tripping through CSV when you build a graph
+incrementally from several sources or merge two loaded `.kgl` files.
+
+```python
+g1 = kglite.load("source_a.kgl")
+g2 = kglite.load("source_b.kgl")
+
+report = g1.extend(g2)              # g2 folded into g1; g2 untouched
+report = g1.extend(g2, "preserve")  # on conflict, existing g1 values win
+```
+
+Node identity is `(node_type, id)`. The `conflict_handling` argument shares
+the `add_nodes` vocabulary — `'update'` (default, *other* wins), `'replace'`,
+`'skip'`, `'preserve'` (existing wins), `'sum'` (adds numeric **edge**
+properties). Secondary labels are unioned (never removed); edges dedup on
+`(connection_type, source, target)` so a merge never silently doubles shared
+edges. Scope limits (v1): **in-memory storage only**, and **embeddings are
+not merged** — re-run `set_embeddings` / `add_embeddings` after the merge.
+
 ## Subgraph Extraction
 
 ```python
