@@ -679,6 +679,12 @@ fn execute_set(
                                 touched_columnar_types.insert(node_type_str.clone());
                                 stats.properties_set += 1;
                                 wrote_via_master = true;
+                                // This master-store write bypasses the recorded
+                                // GraphWrite path, so explicitly capture the one
+                                // mutated node for the WAL. (The silent refresh
+                                // sweep below must NOT be captured — else a
+                                // single SET would log every node of the type.)
+                                graph.graph.note_recorded_node_upsert(*node_idx);
                             }
                         }
                     }
@@ -767,7 +773,10 @@ fn execute_set(
             .map(|s| s.iter().collect())
             .unwrap_or_default();
         for idx in indices {
-            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, idx) {
+            // `_silent`: re-pointing per-node Arc handles is internal storage
+            // bookkeeping, not a logical mutation — must not be captured by the
+            // WAL recorder (the actual SET was recorded in the fast path above).
+            if let Some(node) = GraphWrite::node_weight_mut_silent(&mut graph.graph, idx) {
                 if let crate::graph::schema::PropertyStorage::Columnar { store, .. } =
                     &mut node.properties
                 {

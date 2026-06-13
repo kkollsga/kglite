@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Durable `SET`/property-update no longer scales with graph size.** On a
+  `durable=True` graph loaded from a checkpoint (columnar storage), a Cypher
+  `SET` ran in O(N-of-type), not O(rows-updated): ~113 ms to set one property on
+  one node in a 127k-node graph. Two coupled causes, both fixed: (1) the
+  columnar `SET` fast path writes through the master `ColumnStore`, bypassing the
+  WAL capture wrapper, so the actual mutation wasn't recorded directly; (2) the
+  per-node `Arc<ColumnStore>` handle-refresh sweep that follows touches *every*
+  node of the type via `node_weight_mut`, which the wrapper captured as N
+  spurious mutations — logging (and re-serialising) the whole type per `SET`.
+  Now the fast path records the one mutated node explicitly
+  (`note_recorded_node_upsert`), and the refresh sweep uses a new
+  `GraphWrite::node_weight_mut_silent` that bypasses capture (it's internal
+  storage bookkeeping, not a logical mutation). Durable 1-node `SET` dropped from
+  ~5/24/113 ms (2.5k/25k/127k nodes) to a flat ~3 ms; a 500-node `SET` on a
+  127k-node graph from ~120 ms to ~5 ms. Crash recovery still captures the `SET`
+  (verified). Surfaced by the embedded-app benchmark + a kùzu source-level
+  comparison (its per-column in-place update has no such sweep).
+
 - **WAL crash recovery is no longer quadratic.** Replaying recovered WAL frames
   routed each frame through `add_nodes`, which rebuilds the type's id-index per
   call — so recovering N un-checkpointed single-row commits was O(N · graph).

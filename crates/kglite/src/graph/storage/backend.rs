@@ -55,6 +55,20 @@ impl GraphBackend {
         GraphBackend::Memory(MemoryGraph::new())
     }
 
+    /// Record that node `idx` was upserted, for the WAL capture wrapper.
+    /// No-op unless this is the [`GraphBackend::Recording`] backend. Used by
+    /// mutation paths that write through a side channel (the columnar master
+    /// `ColumnStore`) and so bypass the recorded
+    /// [`GraphWrite::node_weight_mut`] — without this the mutation would not
+    /// be captured for the WAL at all (the recorded path only sees the
+    /// silent handle-refresh sweep).
+    #[inline]
+    pub fn note_recorded_node_upsert(&mut self, idx: NodeIndex) {
+        if let GraphBackend::Recording(rg) = self {
+            rg.note_node_upsert(idx);
+        }
+    }
+
     /// Borrow the inner heap `StableDiGraph` for petgraph algorithms
     /// (e.g. `kosaraju_scc`) that require concrete petgraph types.
     /// Disk panics — callers must gate on [`GraphRead::is_disk`].
@@ -802,6 +816,18 @@ impl GraphWrite for GraphBackend {
             Self::Mapped(g) => GraphWrite::node_weight_mut(g, idx),
             Self::Disk(g) => GraphWrite::node_weight_mut(g.as_mut(), idx),
             Self::Recording(rg) => GraphWrite::node_weight_mut(rg.as_mut(), idx),
+        }
+    }
+
+    #[inline]
+    fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        match self {
+            Self::Memory(g) => GraphWrite::node_weight_mut_silent(g, idx),
+            Self::Mapped(g) => GraphWrite::node_weight_mut_silent(g, idx),
+            Self::Disk(g) => GraphWrite::node_weight_mut_silent(g.as_mut(), idx),
+            // The whole point: route to the wrapper's *silent* override so the
+            // columnar handle-refresh sweep isn't captured as N mutations.
+            Self::Recording(rg) => GraphWrite::node_weight_mut_silent(rg.as_mut(), idx),
         }
     }
 

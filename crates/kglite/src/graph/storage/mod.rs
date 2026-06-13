@@ -429,6 +429,18 @@ pub trait GraphWrite: GraphRead {
     /// flush needed.
     fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData>;
 
+    /// Like [`node_weight_mut`](Self::node_weight_mut) but **not** captured
+    /// by a write-recording wrapper (the WAL `RecordingGraph`). For internal
+    /// storage bookkeeping that must not surface as a logical mutation —
+    /// notably the columnar-`SET` per-node `Arc<ColumnStore>` handle refresh,
+    /// which touches every node of a type to re-point its handle after the
+    /// master store was mutated. Recording those as user mutations would log
+    /// the whole type per `SET` (O(N) WAL frames). Default = the recorded
+    /// `node_weight_mut`; only the recording wrapper overrides it to bypass.
+    fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        self.node_weight_mut(idx)
+    }
+
     /// Mutable borrow of the full EdgeData.
     fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData>;
 

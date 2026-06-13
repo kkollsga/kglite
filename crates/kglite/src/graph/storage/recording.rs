@@ -100,6 +100,15 @@ impl<G: GraphRead> RecordingGraph<G> {
         &mut self.inner
     }
 
+    /// Record that node `idx` was upserted by a mutation that wrote through
+    /// a side channel (the columnar master `ColumnStore`) and so bypassed
+    /// the recorded `GraphWrite::node_weight_mut`. Resolved at flush like any
+    /// other [`RawOp::UpsertNode`].
+    #[inline]
+    pub fn note_node_upsert(&mut self, idx: NodeIndex) {
+        self.ops.push(RawOp::UpsertNode(idx));
+    }
+
     /// Drain the buffered raw ops, leaving the buffer empty. Called at
     /// each commit/flush before [`resolve_ops`].
     #[inline]
@@ -513,6 +522,13 @@ impl<G: GraphWrite> GraphWrite for RecordingGraph<G> {
         if self.inner.node_weight(idx).is_some() {
             self.ops.push(RawOp::UpsertNode(idx));
         }
+        self.inner.node_weight_mut(idx)
+    }
+
+    #[inline]
+    fn node_weight_mut_silent(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
+        // Bypass recording — internal bookkeeping (columnar handle refresh),
+        // not a logical mutation. See the trait method docs.
         self.inner.node_weight_mut(idx)
     }
 
@@ -1040,6 +1056,23 @@ mod tests {
         let drained = rg.take_ops();
         assert_eq!(drained.len(), 1);
         assert_eq!(rg.ops_len(), 0);
+    }
+
+    #[test]
+    fn silent_mut_does_not_record_but_note_upsert_does() {
+        let mut interner = StringInterner::new();
+        let mut rg: RecordingGraph<GraphBackend> =
+            RecordingGraph::new(make_memory_backend(&mut interner));
+        // The recorded path captures.
+        let _ = rg.node_weight_mut(NodeIndex::new(0));
+        assert_eq!(rg.ops_len(), 1);
+        let _ = rg.take_ops();
+        // The silent path (columnar handle-refresh bookkeeping) must NOT.
+        let _ = rg.node_weight_mut_silent(NodeIndex::new(0));
+        assert_eq!(rg.ops_len(), 0, "node_weight_mut_silent must not capture");
+        // Side-channel writes (columnar master) record explicitly.
+        rg.note_node_upsert(NodeIndex::new(0));
+        assert_eq!(rg.ops_len(), 1);
     }
 
     #[test]
