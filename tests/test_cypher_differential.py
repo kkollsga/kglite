@@ -106,6 +106,15 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN a.name AS a, b.name AS b, c.name AS c",
         None,
     ),
+    # ── cyclic pattern (matcher target_hint fast path) ──
+    # `a` reappears at the end → the closing segment is a bound-target check,
+    # not a full expansion. Optimised vs naive must agree on the cycle count.
+    (
+        "knows_triangle_cycle",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) RETURN count(*) AS n",
+        None,
+    ),
     # ── push_limit_into_match ──
     ("limit_simple", "social_graph", "MATCH (p:Person) RETURN p.name AS n LIMIT 5", None),
     ("limit_one", "social_graph", "MATCH (p:Person) RETURN p.name AS n LIMIT 1", None),

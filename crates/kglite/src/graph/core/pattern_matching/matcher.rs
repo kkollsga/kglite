@@ -345,6 +345,7 @@ impl<'a> PatternExecutor<'a> {
                             edge_pattern,
                             node_pattern,
                             None,
+                            self.bound_target(node_pattern, current_match),
                         ) {
                             Ok(exp) => exp,
                             Err(e) => {
@@ -450,8 +451,14 @@ impl<'a> PatternExecutor<'a> {
                         break;
                     }
                     let remaining = hop_limit.map(|max| max.saturating_sub(new_matches_seq.len()));
-                    let expansions =
-                        self.expand_from_node(source_idx, edge_pattern, node_pattern, remaining)?;
+                    let hint = self.bound_target(node_pattern, current_match);
+                    let expansions = self.expand_from_node(
+                        source_idx,
+                        edge_pattern,
+                        node_pattern,
+                        remaining,
+                        hint,
+                    )?;
                     for (target_idx, edge_binding) in expansions {
                         expand_count += 1;
                         if expand_count.is_multiple_of(1024) {
@@ -1366,12 +1373,47 @@ impl<'a> PatternExecutor<'a> {
             .all(|l| self.graph.node_has_label(idx, InternedKey::from_str(l)))
     }
 
+    /// If this node-pattern's variable is *already* bound — externally (an
+    /// UNWIND pre-binding) or earlier in the same pattern (a cycle that
+    /// re-uses a variable, e.g. `(p)-[]->(c)-[]->(pr)<-[]-(p)`) — return the
+    /// bound node index. The matching segment then only needs to confirm the
+    /// edge to that one node (passed as `expand_from_node`'s `target_hint`)
+    /// rather than expanding every neighbour and discarding all but one.
+    /// `None` ⇒ the variable is new (or anonymous) ⇒ a normal full expansion.
+    fn bound_target(
+        &self,
+        node_pattern: &NodePattern,
+        current_match: &PatternMatch,
+    ) -> Option<NodeIndex> {
+        let var = node_pattern.variable.as_ref()?;
+        if let Some(&idx) = self.pre_bindings.get(var) {
+            return Some(idx);
+        }
+        current_match.bindings.iter().find_map(|(name, binding)| {
+            if name == var {
+                match binding {
+                    MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => Some(*index),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+    }
+
     fn expand_from_node(
         &self,
         source: NodeIndex,
         edge_pattern: &EdgePattern,
         node_pattern: &NodePattern,
         max_results: Option<usize>,
+        // When the segment's target variable is already bound (an UNWIND
+        // pre-binding or a cycle that re-binds an earlier variable), only the
+        // edge(s) to that one node can match. Rejecting every other peer here —
+        // before binding construction and the caller's per-result scan — turns
+        // an expand-all-then-filter (O(degree)) into a targeted check. Skipped
+        // for variable-length segments (those return via `expand_var_length`).
+        target_hint: Option<NodeIndex>,
     ) -> Result<Vec<(NodeIndex, MatchBinding)>, String> {
         // Early exit: if the specified connection type doesn't exist in the graph, skip all iteration
         if let Some(ref types) = edge_pattern.connection_types {
@@ -1419,6 +1461,9 @@ impl<'a> PatternExecutor<'a> {
                 {
                     if max_results.is_some_and(|max| results.len() >= max) {
                         break;
+                    }
+                    if target_hint.is_some_and(|h| peer_idx != h) {
+                        continue;
                     }
                     // Check target node labels (primary + secondary)
                     if !edge_pattern.skip_target_type_check
@@ -1539,6 +1584,12 @@ impl<'a> PatternExecutor<'a> {
                     Direction::Outgoing => edge.target(),
                     Direction::Incoming => edge.source(),
                 };
+
+                // Bound-target fast reject: the edge doesn't reach the one
+                // already-bound node, so skip label/property checks + binding.
+                if target_hint.is_some_and(|h| target != h) {
+                    continue;
+                }
 
                 // Check if target matches node pattern labels (primary +
                 // secondary; skip when edge type guarantees it)

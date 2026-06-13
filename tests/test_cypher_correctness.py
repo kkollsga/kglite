@@ -1240,3 +1240,66 @@ class TestMapStringFieldAccess:
         assert len(result) == 1
         assert result[0]["n"] == "Anna, the great"
         assert result[0]["c"] == "X-1"
+
+
+class TestCyclicPatternCorrectness:
+    """Cycle-closing pattern segments — where a node variable reappears later
+    in the same pattern, or is pre-bound by UNWIND — must confirm the edge to
+    that one node, not expand-and-match-anything. Guards the matcher's
+    `target_hint` fast path (it skips work, so it must skip the *right* work).
+    """
+
+    @pytest.fixture
+    def triangle(self):
+        # Directed 3-cycle a->b->c->a, plus a dangling d->a (no return edge),
+        # so a naive over-match would inflate the count.
+        g = rg.KnowledgeGraph()
+        for n in "abcd":
+            g.cypher(f"CREATE (:P {{id: '{n}'}})")
+        for s, t in [("a", "b"), ("b", "c"), ("c", "a"), ("d", "a")]:
+            g.cypher(
+                "MATCH (s:P {id:$s}),(t:P {id:$t}) CREATE (s)-[:R]->(t)",
+                params={"s": s, "t": t},
+            )
+        return g
+
+    def test_intra_pattern_cycle_close_exact_count(self, triangle):
+        # The 3-cycle yields exactly 3 directed closings (one per start node);
+        # d->a does NOT close (a has no edge back to d).
+        n = triangle.cypher("MATCH (a:P)-[:R]->(b:P)-[:R]->(c:P)-[:R]->(a) RETURN count(*) AS n").scalar()
+        assert n == 3
+
+    def test_cycle_close_binds_same_node(self, triangle):
+        # The closing variable `a` must be the SAME node it was at the start.
+        rows = triangle.cypher(
+            "MATCH (a:P)-[:R]->(b:P)-[:R]->(c:P)-[:R]->(a) RETURN a.id AS a, b.id AS b, c.id AS c"
+        ).to_list()
+        assert len(rows) == 3
+        for r in rows:
+            assert r["a"] == r["a"]  # closes on a real node
+            assert {r["a"], r["b"], r["c"]} == {"a", "b", "c"}
+
+    def test_unwind_prebound_endpoint_exact(self, triangle):
+        # Pre-binding `a` to one node restricts to the single cycle through it.
+        n = triangle.cypher(
+            "UNWIND ['a'] AS s MATCH (a:P {id:s})-[:R]->(b:P)-[:R]->(c:P)-[:R]->(a) RETURN count(*) AS n"
+        ).scalar()
+        assert n == 1
+
+    def test_business_cycle_pattern_no_overmatch(self):
+        # Person-WORKS_AT->Company-OWNS->Project<-CONTRIBUTES_TO-Person:
+        # only Alice closes the cycle (works at Acme, which owns Widget, which
+        # she contributes to). Bob works at Acme but does NOT contribute.
+        g = rg.KnowledgeGraph()
+        g.cypher("CREATE (:Person {id:'alice'})")
+        g.cypher("CREATE (:Person {id:'bob'})")
+        g.cypher("CREATE (:Company {id:'acme'})")
+        g.cypher("CREATE (:Project {id:'widget'})")
+        g.cypher("MATCH (p:Person {id:'alice'}),(c:Company {id:'acme'}) CREATE (p)-[:WORKS_AT]->(c)")
+        g.cypher("MATCH (p:Person {id:'bob'}),(c:Company {id:'acme'}) CREATE (p)-[:WORKS_AT]->(c)")
+        g.cypher("MATCH (c:Company {id:'acme'}),(pr:Project {id:'widget'}) CREATE (c)-[:OWNS]->(pr)")
+        g.cypher("MATCH (p:Person {id:'alice'}),(pr:Project {id:'widget'}) CREATE (p)-[:CONTRIBUTES_TO]->(pr)")
+        rows = g.cypher(
+            "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p) RETURN p.id AS p"
+        ).to_list()
+        assert [r["p"] for r in rows] == ["alice"]

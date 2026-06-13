@@ -5,6 +5,26 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+
+- **Cycle-closing pattern segments no longer expand-then-filter.** When a node
+  variable reappears later in the same pattern (a cycle, e.g.
+  `(p)-[:WORKS_AT]->(c)-[:OWNS]->(pr)<-[:CONTRIBUTES_TO]-(p)`) or is pre-bound
+  by an `UNWIND` seed, the matching segment only needs to confirm the edge to
+  that one already-bound node. The matcher previously expanded *every* neighbour
+  of the source and discarded all but the matching one — O(degree) work, plus a
+  per-result binding allocation and an intra-pattern bound-variable scan. It now
+  passes the bound node as a `target_hint` and rejects non-matching peers before
+  any of that — turning the closing segment into a targeted check. Measured on a
+  hub-skewed graph: an anchored triangle count dropped **2.2×** (41.3 ms →
+  18.9 ms); a 4-way cyclic join (`pattern_match`) ~10% on a uniform graph (the
+  win scales with the cycle-close target's degree). Variable-length segments are
+  unaffected (they still expand). Results are identical — verified by new
+  `TestCyclicPatternCorrectness` cases (exact cycle counts + no over-match) and
+  a `knows_triangle_cycle` entry in the differential corpus.
+
 ## [0.10.17] — 2026-06-13 — durable WAL writes (`durable=True`), disk Cypher CREATE/MERGE, embedded-app perf
 
 ### Performance
