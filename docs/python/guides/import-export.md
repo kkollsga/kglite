@@ -9,6 +9,37 @@ loaded_graph = kglite.load("my_graph.kgl")
 
 Save files (`.kgl`) use a pinned binary format (bincode with explicit little-endian, fixed-int encoding). Files are forward-compatible within the same major version. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
 
+### `open()` — load-or-create lifecycle
+
+For an app that persists to one file, `kglite.open(path)` is the ergonomic
+entry point: it loads the graph if the file exists and creates a fresh one if
+it doesn't, and the returned graph **remembers the path**.
+
+```python
+g = kglite.open("app.kgl")          # loads if present, else creates
+g.cypher("CREATE (:Person {name: 'Alice'})")
+g.save()                             # no path needed — writes back to app.kgl
+```
+
+Use it as a context manager to auto-save on clean exit:
+
+```python
+with kglite.open("app.kgl") as g:
+    g.cypher("CREATE (:Person {name: 'Bob'})")
+# snapshotted to app.kgl on block exit
+```
+
+- `save()` with no argument writes to the remembered path; passing a path
+  (`save("other.kgl")`) updates the remembered target ("save as"). A graph built
+  in memory with no path raises `ValueError` if you call `save()` with no path.
+- `kglite.load(path)` also remembers its path, so bare `save()` works after a load.
+- The context manager **skips the save if the block raised** — the on-disk file
+  keeps its last good state. `close()` persists explicitly.
+
+> **Not crash safety.** Auto-save-on-close is a *clean-exit* checkpoint — a hard
+> crash (`kill -9`, power loss) mid-session writes nothing. Durable-on-commit
+> with crash recovery is a separate capability.
+
 ## Export Formats
 
 ```python
