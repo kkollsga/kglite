@@ -1,0 +1,18 @@
+# Standalone benchmark dataset generator. Deliberately NOT a member of the
+# root workspace (own `[workspace]` table) so it never slows `cargo build`
+# in the main project and carries zero external dependencies (pure std).
+[package]
+name = "graphgen"
+version = "0.1.0"
+edition = "2021"
+description = "Streaming synthetic property-graph generator for kglite/kùzu benchmarks at arbitrary scale"
+
+[[bin]]
+name = "graphgen"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[workspace]
