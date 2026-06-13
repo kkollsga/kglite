@@ -19,7 +19,8 @@ clone-apply-replace flush in `DiskGraph::clear_arenas`). Asserted by
 property values through save + reload (bug F2 fix — sidecar format
 prefixes `row_count` so the loader uses the true stored row count
 instead of `type_indices.len()` which undercounts tombstoned rows).
-Asserted by `test_detach_delete_property_persistence_disk`.
+Asserted by `test_detach_delete_property_persistence` (parametrized
+across every storage mode, including disk).
 
 Run: pytest tests/test_disk_mutation_roundtrip.py
 """
@@ -162,11 +163,19 @@ def test_detach_delete_count_survives_save_reload(mode, tmp_path):
     )
 
 
-@pytest.mark.parametrize("mode", ["memory", "mapped"])
-def test_detach_delete_property_persistence_in_memory_modes(mode, tmp_path):
-    """DETACH DELETE preserves surviving nodes' full property values on
-    memory + mapped modes. Disk mode has a pre-existing property
-    corruption on delete — tracked by the xfail sibling below."""
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_detach_delete_property_persistence(mode, tmp_path):
+    """DETACH DELETE preserves surviving nodes' full property values across
+    every storage mode, including after save/reload.
+
+    Disk-mode regression (Bug F2): the sidecar load path derived
+    `row_count` from `type_indices[type].len()` — which after a DELETE
+    reflects only the live rows, while the sidecar blob still contains the
+    tombstoned-but-retained rows. The mismatch made `load_packed` read
+    column blobs at the wrong offsets and return garbage titles / null
+    ages. Fix: the sidecar format prefixes the stored
+    `ColumnStore::row_count` with a `KGLCOLv1` magic tag so the loader uses
+    the true row count regardless of live-vs-stored divergence."""
     graph_path = str(tmp_path / f"g_{mode}")
     kg = _new_kg(mode, path=graph_path if mode == "disk" else None)
     kg.add_nodes(
@@ -191,46 +200,6 @@ def test_detach_delete_property_persistence_in_memory_modes(mode, tmp_path):
         idx = int(r["n.id"][2:])
         assert r["n.title"] == f"P{idx}", f"{mode}: title mismatch for {r['n.id']}"
         assert r["n.age"] == 20 + idx, f"{mode}: age mismatch for {r['n.id']}"
-
-
-def test_detach_delete_property_persistence_disk(tmp_path):
-    """DETACH DELETE on disk preserves surviving nodes' full property
-    values. Bug F2 regression.
-
-    Pre-fix, the sidecar load path derived `row_count` from
-    `type_indices[type].len()` — which after a DELETE reflects only
-    the live rows, while the sidecar blob still contains the
-    tombstoned-but-retained rows. The mismatch made `load_packed`
-    read column blobs at the wrong offsets and return garbage titles
-    / null ages. Fix: sidecar format prefixes the stored
-    `ColumnStore::row_count` with a `KGLCOLv1` magic tag so the
-    loader uses the true row count regardless of live-vs-stored
-    divergence."""
-    graph_path = str(tmp_path / "g_disk")
-    kg = KnowledgeGraph(storage="disk", path=graph_path)
-    kg.add_nodes(
-        pd.DataFrame([{"id": f"P_{i}", "title": f"P{i}", "age": 20 + i} for i in range(10)]),
-        "Thing",
-        "id",
-        "title",
-    )
-    kg.cypher(
-        "MATCH (n:Thing) WHERE n.id >= 'P_5' DETACH DELETE n",
-        timeout_ms=10_000,
-    )
-    kg.save(graph_path)
-    del kg
-    reloaded = kglite.load(graph_path)
-    post = _rows(
-        reloaded.cypher(
-            "MATCH (n:Thing) RETURN n.id, n.title, n.age ORDER BY n.id",
-            timeout_ms=10_000,
-        )
-    )
-    for r in post:
-        idx = int(r["n.id"][2:])
-        assert r["n.title"] == f"P{idx}"
-        assert r["n.age"] == 20 + idx
 
 
 @pytest.mark.parametrize("mode", STORAGE_MODES)

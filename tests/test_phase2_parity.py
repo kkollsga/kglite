@@ -26,13 +26,11 @@ from kglite import KnowledgeGraph
 pytestmark = pytest.mark.parity
 
 STORAGE_MODES = ("memory", "mapped", "disk")
-# Modes for which all Phase 2 parity invariants hold today. `disk` has
-# three known pre-existing divergences documented at the bottom of this
-# file — see `test_known_disk_divergences_*`. Phase 5 reconciles them.
-STRICT_PARITY_MODES = ("memory", "mapped")
 # Modes that support mutating Cypher (CREATE / MERGE / SET / DELETE). Disk
 # joined this set when CREATE/MERGE gained the columnar write path
 # (DirGraph::insert_node_routed) — see test_disk_create_persists_properties.
+# All Phase-2 parity invariants now hold across every mode, including disk
+# (the historical update/replace + MERGE-edge divergences were reconciled).
 MUTATING_CYPHER_MODES = ("memory", "mapped", "disk")
 
 
@@ -104,12 +102,8 @@ def test_conflict_matrix_nodes(conflict, tmp_path):
 
     q = "MATCH (n:Person) WHERE n.id = 1 RETURN n.age AS age, n.email AS email"
     ref = _snapshot(kgs["memory"], q)
-    # 'update' and 'replace' diverge on disk (pre-existing, Phase 5).
-    # 'skip' and 'preserve' hold across all three modes.
-    compare_modes = STRICT_PARITY_MODES if conflict in ("update", "replace") else STORAGE_MODES[1:]
-    for mode in compare_modes:
-        if mode == "memory":
-            continue
+    # All conflict modes now hold across every backend (incl. disk).
+    for mode in STORAGE_MODES[1:]:
         got = _snapshot(kgs[mode], q)
         assert got == ref, f"conflict='{conflict}' diverged in {mode}:\n  memory: {ref}\n  {mode}: {got}"
 
