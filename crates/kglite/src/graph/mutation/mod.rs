@@ -13,3 +13,4 @@ pub mod subgraph;
 pub mod subgraph_streaming;
 pub mod subgraph_streaming_writer;
 pub mod validation;
+pub mod wal_replay;
