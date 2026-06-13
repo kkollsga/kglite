@@ -5,7 +5,7 @@
 #   kglite = { path = "..." }  # pre-publish
 #   kglite = "0.10"            # post-crates.io-publish
 name = "kglite"
-version = "0.10.15"
+version = "0.10.16"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"

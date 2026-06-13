@@ -70,8 +70,7 @@ class TestHybridRagRetrieval:
         g = graph_with_embeddings
         q = [1.0, 0.0, 0.0]  # nearest: Alpha (1.0), Gamma (~0.99)
         rows = g.cypher(
-            "MATCH (a:Article) RETURN a.title AS t, "
-            "vector_score(a, 'summary_emb', $q) AS s ORDER BY s DESC LIMIT 2",
+            "MATCH (a:Article) RETURN a.title AS t, vector_score(a, 'summary_emb', $q) AS s ORDER BY s DESC LIMIT 2",
             params={"q": q},
         ).to_list()
         assert [r["t"] for r in rows] == ["Alpha", "Gamma"]

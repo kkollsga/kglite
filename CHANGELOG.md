@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.16] — 2026-06-13 — scoped graph algorithms, IN-param anchoring, disk lazy-edge, docs sweep
+
+A capability-discoverability release: the in-place graph procedures
+(`k_core` / `coreness` / `clustering_coefficient`, scoped
+`connected_components`) shipped alongside an `IN $param` planner-anchoring
+fix and a disk-mode lazy-edge traversal rewrite (~4–20× on disk pattern
+match / shortest path), then a documentation sweep that surfaced a batch of
+previously CHANGELOG-only capabilities in the user guides with verified
+examples. Plus schema "did you mean?" warnings now readable on
+`diagnostics["warnings"]` for agent callers.
+
 ### Added
 
 - **"Did you mean?" warnings for MATCH typos.** A `MATCH` against a node label
@@ -16,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows (unknown types are legal Cypher — a valid existence check), so this is
   a warning, not an error. It catches the single most common "why is my query
   empty?" foot-gun. Emitted from the shared execute path, so every binding
-  benefits. (Routing the same messages into structured `QueryDiagnostics` for
-  MCP/agent callers is the natural follow-up.)
+  benefits. The same messages are now also exposed programmatically on
+  `result.diagnostics["warnings"]` (a `list[str]`), so MCP/agent callers that
+  never see stderr can read why a query came back empty.
 
 - **`CALL k_core` / `coreness` and `CALL clustering_coefficient`.** Two graph
   procedures, in-place over the knowledge graph (no export to an external
@@ -41,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on an edge-type-projected view. Backed by the new
   `weakly_connected_components_scoped` core function; reached by every
   binding through `cypher_query`.
+
+- **`k_core` / `clustering_coefficient` now surface in `describe()`.** The
+  agent-facing schema introspection lists the new procedures (with the
+  scoping note) so an LLM can discover them without reading the docs.
+
+### Documentation
+
+- **Surfaced previously CHANGELOG-only capabilities in the guides.** A
+  docs-vs-capabilities audit found several shipped, tested features that were
+  invisible in the user guides (so under-discovered, including by evaluating
+  agents). Now documented with verified examples: scoped `CALL` algorithms
+  (graph-algorithms.md + CYPHER.md), `to_neo4j()` export and `extend()`
+  multi-source merge (import-export.md), query tuning & diagnostics —
+  `PROFILE`/`EXPLAIN`/`timeout_ms`/`max_rows`/`disabled_passes`/
+  `diagnostics["warnings"]` (cypher.md), spatial constructive geometry
+  (spatial.md), and temporal time-travel `valid_at`/`valid_during`
+  (timeseries.md). Plus a hybrid RAG-over-a-graph retrieval recipe (CYPHER.md)
+  locked with tests.
 
 ### Performance
 

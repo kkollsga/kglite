@@ -18,9 +18,7 @@ import kglite
 def _graph() -> kglite.KnowledgeGraph:
     g = kglite.KnowledgeGraph()
     g.add_nodes(pd.DataFrame({"gid": [1, 2], "name": ["a", "b"]}), "Person", "gid", "name")
-    g.add_connections(
-        pd.DataFrame({"s": [1], "d": [2]}), "KNOWS", "Person", "s", "Person", "d"
-    )
+    g.add_connections(pd.DataFrame({"s": [1], "d": [2]}), "KNOWS", "Person", "s", "Person", "d")
     return g
 
 
