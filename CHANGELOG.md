@@ -5,23 +5,7 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **Cypher `CREATE` / `MERGE` now work on `storage="disk"` graphs.** Previously
-  rejected with a loud guard, because the disk `add_node` writes only a slot
-  (node_type + row_id) and drops the node's properties/title/id — a naive CREATE
-  would silently lose data. Node insertion now routes through one mode-aware
-  choke point (`DirGraph::insert_node_routed`): on disk it pushes id/title/
-  properties into the per-type `ColumnStore` (the same mechanism `add_nodes`
-  uses) and registers the property types in the schema, so created nodes carry
-  their properties and **survive save/reload**. `MERGE` (whose create branch
-  reuses CREATE) works too. Reached by every interface (Python, Bolt, MCP) since
-  they share the executor. memory/mapped behaviour is unchanged; `SET`/`DELETE`/
-  `REMOVE` already worked on disk. The cross-mode parity oracle
-  (`test_phase2_parity.py`) and `test_cypher_id_semantics.py` now exercise disk
-  CREATE/MERGE.
+## [0.10.17] — 2026-06-13 — durable WAL writes (`durable=True`), disk Cypher CREATE/MERGE, embedded-app perf
 
 ### Performance
 
@@ -105,6 +89,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safety: a hard crash mid-session writes nothing (durable-on-commit is a
   separate, upcoming capability). `storage=` applies only when creating a new
   graph; opening an existing file keeps its saved mode.
+
+- **Cypher `CREATE` / `MERGE` now work on `storage="disk"` graphs.** Previously
+  rejected with a loud guard, because the disk `add_node` writes only a slot
+  (node_type + row_id) and drops the node's properties/title/id — a naive CREATE
+  would silently lose data. Node insertion now routes through one mode-aware
+  choke point (`DirGraph::insert_node_routed`): on disk it pushes id/title/
+  properties into the per-type `ColumnStore` (the same mechanism `add_nodes`
+  uses) and registers the property types in the schema, so created nodes carry
+  their properties and **survive save/reload**. `MERGE` (whose create branch
+  reuses CREATE) works too. Reached by every interface (Python, Bolt, MCP) since
+  they share the executor. memory/mapped behaviour is unchanged; `SET`/`DELETE`/
+  `REMOVE` already worked on disk. The cross-mode parity oracle
+  (`test_phase2_parity.py`) and `test_cypher_id_semantics.py` now exercise disk
+  CREATE/MERGE.
+
+### Documentation
+
+- **New guide: "Durable embedded apps"** (`docs/python/guides/durable-apps.md`).
+  Covers the embedded-app lifecycle — `open()` load-or-create, the
+  remembered-path + context-manager checkpoint-on-close ergonomics, and
+  crash-safe `durable=True` write-ahead-log writes (fsync per commit, replay on
+  reopen, checkpoint-and-truncate). Includes mode selection (in-memory durable
+  vs non-durable vs `storage="disk"`), the fsync-bound cost model, and batching
+  guidance. Fills the gap where `durable=True` existed only in the API-reference
+  stub. Linked from the guides index + toctree.
 
 ## [0.10.16] — 2026-06-13 — scoped graph algorithms, IN-param anchoring, disk lazy-edge, docs sweep
 
