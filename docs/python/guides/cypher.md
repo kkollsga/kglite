@@ -68,6 +68,85 @@ graph.cypher(
 )
 ```
 
+## Tuning and diagnostics
+
+Every read query carries lightweight diagnostics, and you can profile,
+explain, bound, and even disable individual optimizer passes. This is the
+machinery agents lean on to run untrusted queries safely and to explain why
+a query returned what it did.
+
+### Diagnostics (timing, timeouts, warnings)
+
+```python
+r = graph.cypher("MATCH (n:Person) RETURN n.name")
+r.diagnostics
+# {'elapsed_ms': 1, 'timed_out': False, 'timeout_ms': 180000, 'warnings': []}
+```
+
+The `warnings` list surfaces non-fatal advisories — most importantly a
+`MATCH` against an unknown label or relationship type, which silently returns
+zero rows. The same "did you mean?" hint interactive users see on stderr is
+exposed here for programmatic / agent callers:
+
+```python
+r = graph.cypher("MATCH (n:Persn) RETURN n")   # typo
+r.diagnostics["warnings"]
+# ["MATCH references unknown node label 'Persn' — the graph has no such
+#   type, so this pattern returns no rows. Did you mean 'Person'?"]
+```
+
+Surface `warnings` whenever an agent gets an empty result — it turns a silent
+zero-row mystery into an actionable typo hint.
+
+### Timeouts and row caps
+
+```python
+# Abort after 500 ms; rows reflect the partial set, diagnostics['timed_out'] is True
+graph.cypher(long_query, timeout_ms=500)
+
+# Cap the result set
+graph.cypher(broad_query, max_rows=1000)
+
+# Set graph-wide defaults (per-query args still override)
+graph.set_default_timeout(30_000)
+graph.set_default_max_rows(10_000)
+```
+
+In-memory graphs default to a generous deadline (shown in
+`diagnostics['timeout_ms']`); pass `timeout_ms=0` to disable it. When a query
+repeatedly nears its deadline, that's the signal to add an index or anchor the
+pattern, not just to raise the budget.
+
+### EXPLAIN and PROFILE
+
+```python
+# EXPLAIN — show the optimized plan without running it
+graph.cypher("EXPLAIN MATCH (n:Person) WHERE n.age > 25 RETURN n")
+
+# PROFILE — run it and report per-clause row counts + timing
+r = graph.cypher("PROFILE MATCH (n:Person) RETURN n.name")
+r.profile
+# [{'clause': 'Match :Person', 'rows_in': 0, 'rows_out': 2, 'elapsed_us': 1},
+#  {'clause': 'Return', 'rows_in': 2, 'rows_out': 2, 'elapsed_us': 0}]
+```
+
+`rows_in` / `rows_out` per clause make it obvious where a query explodes
+(a `Match` emitting far more rows than the next clause keeps is the usual
+culprit — add a `WHERE` or an index upstream).
+
+### Disabling optimizer passes (debugging)
+
+If you suspect an optimizer pass changed results or regressed performance,
+disable passes by name to bisect:
+
+```python
+kglite.cypher_pass_names()          # → ['fold_or_to_in', 'push_where_into_match.1', ...]
+graph.cypher(query, disabled_passes=['fold_or_to_in'])
+```
+
+Comparing a query with and without a pass is the supported way to confirm a
+planner bug before filing it.
+
 ## Semantic Search in Cypher
 
 `text_score()` enables semantic search directly in Cypher — no
