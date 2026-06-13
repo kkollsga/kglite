@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CALL k_core` / `coreness` and `CALL clustering_coefficient`.** Two graph
+  procedures, in-place over the knowledge graph (no export to an external
+  graph-algorithm library): k-core decomposition (coreness per node, via
+  O(V+E) Batagelj–Zaversnik) and local clustering coefficient per node. Both
+  take the same optional `{node_type, relationship}` scoping as
+  `connected_components` (analyse a single-relationship projection rather
+  than the whole graph) and are reached by every binding through
+  `cypher_query`. Filter `WHERE coreness >= k` for the k-core itself.
+
 - **Scoped weakly-connected-components.** `CALL connected_components()` now
   accepts an optional parameter map — `{node_type, relationship}`, each a
   string or a list of strings — to restrict the analysis to a subgraph

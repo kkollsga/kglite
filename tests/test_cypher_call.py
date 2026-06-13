@@ -278,6 +278,52 @@ class TestCallConnectedComponents:
         assert [r["size"] for r in result] == [2, 2]
 
 
+class TestCallKCoreAndClustering:
+    """CALL k_core / coreness and clustering_coefficient (Lever 1)."""
+
+    @staticmethod
+    def _triangle():
+        g = KnowledgeGraph()
+        for n in ["A", "B", "C"]:
+            g.cypher(f"CREATE (:Person {{name: '{n}'}})")
+        for a, b in [("A", "B"), ("B", "C"), ("C", "A")]:
+            g.cypher(
+                f"MATCH (x:Person {{name:'{a}'}}),(y:Person {{name:'{b}'}}) CREATE (x)-[:KNOWS]->(y)"
+            )
+        return g
+
+    def test_k_core_triangle(self):
+        g = self._triangle()
+        rows = g.cypher(
+            "CALL k_core() YIELD node, coreness RETURN node.name AS name, coreness ORDER BY name"
+        )
+        assert [r["coreness"] for r in rows] == [2, 2, 2]
+
+    def test_coreness_alias(self):
+        # `coreness` is an alias for `k_core`.
+        g = self._triangle()
+        rows = g.cypher("CALL coreness() YIELD node, coreness RETURN coreness")
+        assert all(r["coreness"] == 2 for r in rows)
+
+    def test_clustering_coefficient_triangle(self):
+        g = self._triangle()
+        rows = g.cypher(
+            "CALL clustering_coefficient() YIELD node, coefficient RETURN coefficient"
+        )
+        assert all(abs(r["coefficient"] - 1.0) < 1e-9 for r in rows)
+
+    def test_k_core_scoped_to_relationship(self):
+        # Person/KNOWS subgraph = two disjoint single edges → coreness 1 each;
+        # the bridging Company is excluded.
+        g = TestCallConnectedComponents._two_type_graph()
+        rows = g.cypher(
+            "CALL k_core({node_type: 'Person', relationship: 'KNOWS'}) "
+            "YIELD node, coreness RETURN coreness"
+        )
+        assert len(rows) == 4
+        assert all(r["coreness"] == 1 for r in rows)
+
+
 class TestCallYieldAlias:
     """Test YIELD with AS aliases."""
 

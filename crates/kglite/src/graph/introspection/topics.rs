@@ -53,6 +53,10 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "CONNECTED_COMPONENTS" | "CONNECTEDCOMPONENTS" => {
                 write_topic_connected_components(xml);
             }
+            "K_CORE" | "KCORE" | "CORENESS" => write_topic_k_core(xml),
+            "CLUSTERING_COEFFICIENT" | "CLUSTERINGCOEFFICIENT" => {
+                write_topic_clustering_coefficient(xml);
+            }
             "CLUSTER" => write_topic_cluster(xml),
             "ORPHAN_NODE" => write_topic_orphan_node(xml),
             "SELF_LOOP" => write_topic_self_loop(xml),
@@ -436,6 +440,30 @@ pub(super) fn write_topic_connected_components(xml: &mut String) {
     xml.push_str("      <ex desc=\"find isolated\">CALL connected_components() YIELD node, component WITH component, count(*) AS size WHERE size = 1 RETURN count(*) AS isolated_nodes</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </connected_components>\n");
+}
+
+pub(super) fn write_topic_k_core(xml: &mut String) {
+    xml.push_str("  <k_core>\n");
+    xml.push_str("    <desc>k-core decomposition: the coreness of each node — the largest k for which the node belongs to a subgraph where every vertex has degree at least k. Optional `{node_type, relationship}` (string or list) scopes the analysis to a single-relationship projection. Filter `WHERE coreness >= k` to extract the k-core itself.</desc>\n");
+    xml.push_str(
+        "    <syntax>CALL k_core([{node_type, relationship}]) YIELD node, coreness</syntax>\n",
+    );
+    xml.push_str("    <aliases>coreness</aliases>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"dense core of a social graph\">CALL k_core({node_type: 'Person', relationship: 'KNOWS'}) YIELD node, coreness WHERE coreness >= 3 RETURN node.name, coreness ORDER BY coreness DESC</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </k_core>\n");
+}
+
+pub(super) fn write_topic_clustering_coefficient(xml: &mut String) {
+    xml.push_str("  <clustering_coefficient>\n");
+    xml.push_str("    <desc>Local clustering coefficient per node: how interconnected its neighbours are (fraction of possible links among neighbours that exist), in [0, 1]. Nodes with degree &lt; 2 are 0. Optional `{node_type, relationship}` (string or list) scopes to a single-relationship projection.</desc>\n");
+    xml.push_str("    <syntax>CALL clustering_coefficient([{node_type, relationship}]) YIELD node, coefficient</syntax>\n");
+    xml.push_str("    <aliases>local_clustering_coefficient</aliases>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"most-cliquey people\">CALL clustering_coefficient({node_type: 'Person', relationship: 'KNOWS'}) YIELD node, coefficient RETURN node.name, coefficient ORDER BY coefficient DESC LIMIT 10</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </clustering_coefficient>\n");
 }
 
 pub(super) fn write_topic_cluster(xml: &mut String) {

@@ -778,6 +778,227 @@ pub fn weakly_connected_components_scoped(
     Ok(components)
 }
 
+/// Build the undirected adjacency of a *scoped* subgraph — same scoping rules
+/// as [`weakly_connected_components_scoped`]: `node_types` sets the vertex
+/// universe (nodes of other types are excluded), `rel_types` limits which edge
+/// types contribute an (undirected) link. Returns the universe node list and
+/// per-vertex sorted, de-duplicated neighbour lists in compact indices
+/// (`0..n`), with self-loops dropped. Shared by the coreness and
+/// clustering-coefficient procedures.
+fn build_scoped_undirected_adjacency(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Option<Instant>,
+) -> Result<(Vec<NodeIndex>, Vec<Vec<u32>>), String> {
+    let edge_matches = |key: InternedKey| -> bool {
+        match rel_types {
+            Some(keys) => keys.contains(&key),
+            None => true,
+        }
+    };
+
+    let nodes: Vec<NodeIndex> = if let Some(types) = node_types {
+        let mut v = Vec::new();
+        for t in types {
+            if let Some(tn) = graph.type_indices.get(t.as_str()) {
+                v.extend(tn.iter());
+            }
+        }
+        v
+    } else if rel_types.is_some() {
+        let mut seen: HashSet<NodeIndex> = HashSet::new();
+        for edge in {
+            let g = &graph.graph;
+            g.edge_references()
+        } {
+            if edge_matches(edge.connection_type()) {
+                seen.insert(edge.source());
+                seen.insert(edge.target());
+            }
+        }
+        seen.into_iter().collect()
+    } else {
+        let g = &graph.graph;
+        g.node_indices().collect()
+    };
+
+    let n = nodes.len();
+    let bound = graph.graph.node_bound();
+    let mut node_to_idx = vec![u32::MAX; bound];
+    for (i, &node) in nodes.iter().enumerate() {
+        node_to_idx[node.index()] = i as u32;
+    }
+
+    let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut counter = 0usize;
+    for edge in {
+        let g = &graph.graph;
+        g.edge_references()
+    } {
+        counter += 1;
+        if counter & 0xFFFFF == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return Err(algorithm_timeout_err());
+                }
+            }
+        }
+        if !edge_matches(edge.connection_type()) {
+            continue;
+        }
+        let s = node_to_idx[edge.source().index()];
+        let t = node_to_idx[edge.target().index()];
+        if s == u32::MAX || t == u32::MAX || s == t {
+            continue;
+        }
+        adj[s as usize].push(t);
+        adj[t as usize].push(s);
+    }
+    for list in adj.iter_mut() {
+        list.sort_unstable();
+        list.dedup();
+    }
+    Ok((nodes, adj))
+}
+
+/// k-core decomposition (coreness): the largest `k` such that each node belongs
+/// to a maximal subgraph where every vertex has degree ≥ `k`. Computed over the
+/// scoped undirected subgraph via the O(V+E) Batagelj–Zaversnik peeling.
+/// Returns `(node, coreness)` per node. Filter `WHERE coreness >= k` for the
+/// k-core itself.
+pub fn coreness_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Option<Instant>,
+) -> Result<Vec<(NodeIndex, i64)>, String> {
+    let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
+    let n = nodes.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut deg: Vec<u32> = adj.iter().map(|a| a.len() as u32).collect();
+    let max_deg = deg.iter().copied().max().unwrap_or(0) as usize;
+
+    // Bin counts of vertices per degree, turned into bin start offsets.
+    let mut bin = vec![0usize; max_deg + 2];
+    for &d in &deg {
+        bin[d as usize] += 1;
+    }
+    let mut start = 0usize;
+    for slot in bin.iter_mut().take(max_deg + 1) {
+        let count = *slot;
+        *slot = start;
+        start += count;
+    }
+
+    // `vert` lists vertices ordered by degree; `pos` is each vertex's index in
+    // `vert`. (Bin offsets are consumed as vertices are placed.)
+    let mut vert = vec![0usize; n];
+    let mut pos = vec![0usize; n];
+    {
+        let mut binc = bin.clone();
+        for v in 0..n {
+            let d = deg[v] as usize;
+            pos[v] = binc[d];
+            vert[pos[v]] = v;
+            binc[d] += 1;
+        }
+    }
+
+    let mut core = vec![0i64; n];
+    for i in 0..n {
+        let v = vert[i];
+        core[v] = deg[v] as i64;
+        // Iterating `adj[v]` immutably while mutating the separate bookkeeping
+        // vectors (vert/pos/bin/deg) is fine — there are no self-loops, so
+        // `deg[v]` is never touched inside the loop.
+        let dv = deg[v];
+        for &nbr in &adj[v] {
+            let u = nbr as usize;
+            if deg[u] > dv {
+                let du = deg[u] as usize;
+                let pu = pos[u];
+                let pw = bin[du];
+                let w = vert[pw];
+                if u != w {
+                    vert[pu] = w;
+                    vert[pw] = u;
+                    pos[u] = pw;
+                    pos[w] = pu;
+                }
+                bin[du] += 1;
+                deg[u] -= 1;
+            }
+        }
+    }
+
+    Ok(nodes.into_iter().zip(core).collect())
+}
+
+/// Local clustering coefficient per node over the scoped undirected subgraph:
+/// `2 * (links among neighbours) / (k * (k-1))`, where `k` is the node's
+/// degree. Nodes with degree < 2 get `0.0`. Returns `(node, coefficient)`.
+pub fn clustering_coefficient_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Option<Instant>,
+) -> Result<Vec<(NodeIndex, f64)>, String> {
+    let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
+    let n = nodes.len();
+    let mut out = Vec::with_capacity(n);
+
+    for v in 0..n {
+        if v & 0xFFFF == 0 {
+            if let Some(dl) = deadline {
+                if Instant::now() > dl {
+                    return Err(algorithm_timeout_err());
+                }
+            }
+        }
+        let nbrs = &adj[v];
+        let k = nbrs.len();
+        if k < 2 {
+            out.push((nodes[v], 0.0));
+            continue;
+        }
+        // Count links among neighbours: for each neighbour a, count its
+        // neighbours that are also neighbours of v and have a higher index
+        // (so each link is counted once). Both lists are sorted → linear merge.
+        let mut links: u64 = 0;
+        for &a in nbrs {
+            links += intersection_count_gt(&adj[a as usize], nbrs, a);
+        }
+        let kf = k as f64;
+        out.push((nodes[v], (2.0 * links as f64) / (kf * (kf - 1.0))));
+    }
+    Ok(out)
+}
+
+/// Count elements common to two sorted slices that are strictly greater than
+/// `gt`. Linear merge.
+fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut count = 0u64;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if a[i] > gt {
+                    count += 1;
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Get node info for building Python-friendly path output
 pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeInfo> {
     let node = graph.get_node(node_idx)?;

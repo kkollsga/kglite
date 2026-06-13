@@ -324,6 +324,67 @@ fn test_wcc_scoped_to_node_type_and_relationship() {
     assert_eq!(components[1].len(), 2);
 }
 
+// ========================================================================
+// coreness (k-core) + clustering coefficient
+// ========================================================================
+
+#[test]
+fn test_coreness_triangle_all_two() {
+    let (graph, _) = build_triangle_graph();
+    let mut scores = coreness_scoped(&graph, None, None, None).unwrap();
+    scores.sort_by_key(|(n, _)| n.index());
+    assert_eq!(scores.len(), 3);
+    assert!(
+        scores.iter().all(|(_, c)| *c == 2),
+        "triangle coreness should all be 2: {scores:?}"
+    );
+}
+
+#[test]
+fn test_coreness_chain_all_one() {
+    let (graph, _) = build_chain_graph();
+    let scores = coreness_scoped(&graph, None, None, None).unwrap();
+    assert_eq!(scores.len(), 5);
+    assert!(
+        scores.iter().all(|(_, c)| *c == 1),
+        "path coreness should all be 1: {scores:?}"
+    );
+}
+
+#[test]
+fn test_clustering_triangle_all_one() {
+    let (graph, _) = build_triangle_graph();
+    let scores = clustering_coefficient_scoped(&graph, None, None, None).unwrap();
+    assert_eq!(scores.len(), 3);
+    assert!(
+        scores.iter().all(|(_, c)| (*c - 1.0).abs() < 1e-9),
+        "triangle clustering coefficient should all be 1.0: {scores:?}"
+    );
+}
+
+#[test]
+fn test_clustering_chain_all_zero() {
+    let (graph, _) = build_chain_graph();
+    let scores = clustering_coefficient_scoped(&graph, None, None, None).unwrap();
+    // A path has no triangles → every coefficient is 0.
+    assert!(
+        scores.iter().all(|(_, c)| *c == 0.0),
+        "path clustering should all be 0: {scores:?}"
+    );
+}
+
+#[test]
+fn test_coreness_scoped_to_relationship() {
+    // Person/KNOWS subgraph is two disjoint single edges → coreness 1 each;
+    // the bridging Company (WORKS_AT) must be excluded.
+    let graph = build_two_type_graph();
+    let node_types = ["Person".to_string()];
+    let rel_types = [InternedKey::from_str("KNOWS")];
+    let scores = coreness_scoped(&graph, Some(&node_types), Some(&rel_types), None).unwrap();
+    assert_eq!(scores.len(), 4); // 4 Persons, Company excluded
+    assert!(scores.iter().all(|(_, c)| *c == 1));
+}
+
 #[test]
 fn test_wcc_scoped_relationship_only_induces_subgraph() {
     let graph = build_two_type_graph();

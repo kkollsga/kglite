@@ -7,6 +7,25 @@ use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
+/// Extract the shared `{node_type, relationship}` scoping params used by the
+/// subgraph-scoped algorithm procedures (connected_components / k_core /
+/// clustering_coefficient). Each accepts a string or a list of strings.
+fn scoped_node_and_rel(
+    params: &HashMap<String, Value>,
+) -> (
+    Option<Vec<String>>,
+    Option<Vec<crate::graph::schema::InternedKey>>,
+) {
+    let node_types = string_list_param(params, "node_type");
+    let rel_types = string_list_param(params, "relationship").map(|names| {
+        names
+            .iter()
+            .map(|s| crate::graph::schema::InternedKey::from_str(s))
+            .collect()
+    });
+    (node_types, rel_types)
+}
+
 /// Read a procedure parameter that may be a single string or a list of
 /// strings — e.g. `relationship: 'KNOWS'` or `relationship: ['KNOWS', 'OWNS']`.
 /// Returns `None` when the key is absent or holds no usable strings.
@@ -120,6 +139,8 @@ impl<'a> CypherExecutor<'a> {
             | "closeness_centrality" => &["node", "score"],
             "louvain" | "louvain_communities" | "label_propagation" => &["node", "community"],
             "connected_components" | "weakly_connected_components" => &["node", "component"],
+            "k_core" | "coreness" => &["node", "coreness"],
+            "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
             "cluster" => &["node", "cluster"],
             "list_procedures" => &["name", "description", "yield_columns"],
             "orphan_node"
@@ -169,6 +190,7 @@ impl<'a> CypherExecutor<'a> {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
                      closeness, louvain, label_propagation, connected_components, \
+                     k_core, clustering_coefficient, \
                      cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
                      missing_required_edge, missing_inbound_edge, duplicate_title, \
                      null_property, inverse_violation, transitivity_violation, \
@@ -313,14 +335,7 @@ impl<'a> CypherExecutor<'a> {
                 // Optional scoping: `CALL connected_components({node_type: 'Person',
                 // relationship: 'KNOWS'})`. Each accepts a string or a list of
                 // strings. Absent → whole graph (every node, every edge type).
-                let node_types = string_list_param(&params, "node_type");
-                let rel_types: Option<Vec<crate::graph::schema::InternedKey>> =
-                    string_list_param(&params, "relationship").map(|names| {
-                        names
-                            .iter()
-                            .map(|s| crate::graph::schema::InternedKey::from_str(s))
-                            .collect()
-                    });
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
                 let components =
                     crate::graph::algorithms::graph_algorithms::weakly_connected_components_scoped(
                         self.graph,
@@ -354,6 +369,65 @@ impl<'a> CypherExecutor<'a> {
                         }
                         rows.push(row);
                     }
+                }
+                rows
+            }
+            "k_core" | "coreness" => {
+                // Scoped k-core decomposition; same {node_type, relationship}
+                // scoping as connected_components. YIELD node, coreness.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let scores = crate::graph::algorithms::graph_algorithms::coreness_scoped(
+                    self.graph,
+                    node_types.as_deref(),
+                    rel_types.as_deref(),
+                    self.deadline,
+                )?;
+                let mut rows = Vec::with_capacity(scores.len());
+                for (node_idx, core) in scores {
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        match item.name.as_str() {
+                            "node" => {
+                                row.node_bindings.insert(alias.to_string(), node_idx);
+                            }
+                            "coreness" => {
+                                row.projected.insert(alias.to_string(), Value::Int64(core));
+                            }
+                            _ => {}
+                        }
+                    }
+                    rows.push(row);
+                }
+                rows
+            }
+            "clustering_coefficient" | "local_clustering_coefficient" => {
+                // Scoped local clustering coefficient. YIELD node, coefficient.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let scores =
+                    crate::graph::algorithms::graph_algorithms::clustering_coefficient_scoped(
+                        self.graph,
+                        node_types.as_deref(),
+                        rel_types.as_deref(),
+                        self.deadline,
+                    )?;
+                let mut rows = Vec::with_capacity(scores.len());
+                for (node_idx, coeff) in scores {
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        match item.name.as_str() {
+                            "node" => {
+                                row.node_bindings.insert(alias.to_string(), node_idx);
+                            }
+                            "coefficient" => {
+                                row.projected
+                                    .insert(alias.to_string(), Value::Float64(coeff));
+                            }
+                            _ => {}
+                        }
+                    }
+                    rows.push(row);
                 }
                 rows
             }
@@ -468,8 +542,18 @@ impl<'a> CypherExecutor<'a> {
                     ),
                     (
                         "connected_components",
-                        "Find weakly connected components",
+                        "Find weakly connected components. Optional {node_type, relationship} scoping to a subgraph.",
                         "node, component",
+                    ),
+                    (
+                        "k_core",
+                        "k-core decomposition (coreness per node). Optional {node_type, relationship} scoping. Filter WHERE coreness >= k for the k-core.",
+                        "node, coreness",
+                    ),
+                    (
+                        "clustering_coefficient",
+                        "Local clustering coefficient per node (how interconnected its neighbours are). Optional {node_type, relationship} scoping.",
+                        "node, coefficient",
                     ),
                     (
                         "cluster",
