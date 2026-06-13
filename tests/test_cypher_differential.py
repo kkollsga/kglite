@@ -711,6 +711,23 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person)-[:KNOWS]-(f:Person) WHERE p.id IN $ids RETURN f.name AS n ORDER BY n",
         {"ids": [3, 7, 11, 15]},
     ),
+    # `MATCH (n) WHERE n.id IN $ids RETURN count(n)` — fuse_node_scan_aggregate
+    # must BAIL on an id-anchorable WHERE so the id-index anchoring drives the
+    # scan instead of a full node sweep. Trigger shape for the bail; optimised
+    # (anchored count) must equal naive (full scan).
+    (
+        "id_in_count_bails_fusion",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id IN $ids RETURN count(p) AS n",
+        {"ids": [3, 7, 11, 15, 999999]},
+    ),
+    # `n.id = literal` count must also bail the fusion and anchor.
+    (
+        "id_eq_count_bails_fusion",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.id = 7 RETURN count(p) AS n",
+        None,
+    ),
     # ── Parameterized scalar with arithmetic ──
     (
         "param_arithmetic",

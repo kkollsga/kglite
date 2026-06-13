@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **`WHERE n.id IN $ids RETURN count(n)` now anchors on the id index instead
+  of full-scanning.** The `fuse_node_scan_aggregate` planner pass fused
+  `MATCH (n) WHERE … RETURN count(n)` into a streaming node sweep that applied
+  the predicate per node — correct for a non-indexable filter like `age > 30`,
+  but ~40× too slow when the filter is an `id` equality / `id IN …` that should
+  seed from the always-present id index. The pass now **bails on an
+  id-anchorable WHERE**, leaving the MATCH+WHERE+RETURN for the eq/IN-anchoring
+  passes to drive from the index, then counting the small anchored set. On a
+  21k-node graph, `WHERE n.id IN $ids` (500 ids) `count(n)` dropped from ~27 ms
+  to ~0.6 ms; `WHERE n.id = $x RETURN count(n)` is now an O(1) index hit.
+  Non-id filters keep fusing (the streaming scan is the right plan there).
+  Trigger shapes added to the differential corpus (`id_in_count_bails_fusion`,
+  `id_eq_count_bails_fusion`). Surfaced by the embedded-app benchmark, where
+  batch point-lookup-by-id was the one phase kùzu won.
+
 ### Added
 
 - **`kglite.open(path, durable=True)` — crash-safe durable graphs (write-ahead

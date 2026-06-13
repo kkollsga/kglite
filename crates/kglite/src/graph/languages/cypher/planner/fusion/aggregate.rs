@@ -958,6 +958,33 @@ pub(crate) fn fuse_aggregate_order_limit(query: &mut CypherQuery) {
 ///
 /// Instead of: MATCH creates 20k ResultRows → RETURN groups and aggregates them
 /// Fused: iterate nodes directly, evaluate group keys and aggregates from node properties.
+/// Whether a WHERE predicate can be anchored on the always-present `id`
+/// index — an `n.id = …` or `n.id IN …` (incl. the constant-folded
+/// `InLiteralSet` / param `InExpression` forms) at the top conjunctive
+/// level. Used by [`fuse_node_scan_aggregate`] to *decline* fusing such a
+/// query, so the index-anchoring passes can seed the scan from the id index
+/// instead of sweeping every node. Descends only through `And` (each conjunct
+/// is independently anchorable); `Or` / `Not` make the index unusable, so we
+/// don't recurse into them. Matches `id` exactly — the property the
+/// eq/IN-anchoring passes themselves key on.
+fn where_is_id_anchorable(pred: &Predicate) -> bool {
+    fn is_id_prop(e: &Expression) -> bool {
+        matches!(e, Expression::PropertyAccess { property, .. } if property == "id")
+    }
+    match pred {
+        Predicate::And(a, b) => where_is_id_anchorable(a) || where_is_id_anchorable(b),
+        Predicate::In { expr, .. }
+        | Predicate::InLiteralSet { expr, .. }
+        | Predicate::InExpression { expr, .. } => is_id_prop(expr),
+        Predicate::Comparison {
+            left,
+            operator: ComparisonOp::Equals,
+            right,
+        } => is_id_prop(left) || is_id_prop(right),
+        _ => false,
+    }
+}
+
 pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
     use crate::graph::languages::cypher::ast::is_aggregate_expression;
 
@@ -1042,6 +1069,24 @@ pub(crate) fn fuse_node_scan_aggregate(query: &mut CypherQuery) {
         if !has_supported_agg {
             i += 1;
             continue;
+        }
+
+        // Bail when the WHERE can be anchored on the always-present `id`
+        // index. This fusion full-scans the node type applying the predicate
+        // per node; for an id equality / `id IN …` that is dramatically more
+        // expensive than seeding from the id index. Leaving MATCH+WHERE+RETURN
+        // unfused lets the eq/IN anchoring passes drive the scan from the
+        // index, then count the small anchored set. Measured: `WHERE n.id IN
+        // $ids RETURN count(n)` on a 21k-node graph — ~0.6 ms anchored vs
+        // ~27 ms scanned. (Non-id predicates like `age > 30` keep fusing —
+        // they have no index to anchor on, so the streaming scan is correct.)
+        if let Some(wi) = where_idx {
+            if let Clause::Where(w) = &query.clauses[wi] {
+                if where_is_id_anchorable(&w.predicate) {
+                    i += 1;
+                    continue;
+                }
+            }
         }
 
         // All checks passed — fuse
