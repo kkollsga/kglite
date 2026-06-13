@@ -20,6 +20,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import kglite
 from kglite import KnowledgeGraph
 
 pytestmark = pytest.mark.parity
@@ -29,11 +30,10 @@ STORAGE_MODES = ("memory", "mapped", "disk")
 # three known pre-existing divergences documented at the bottom of this
 # file — see `test_known_disk_divergences_*`. Phase 5 reconciles them.
 STRICT_PARITY_MODES = ("memory", "mapped")
-# 0.9.26 intentionally turned off Cypher CREATE / MERGE on disk-backed
-# graphs (DiskGraph::new_at_path's mutation surface is bulk-loader-only).
-# Tests that exercise mutating Cypher must iterate this subset and let
-# the dedicated disk-lockout test below guard the rejection.
-MUTATING_CYPHER_MODES = ("memory", "mapped")
+# Modes that support mutating Cypher (CREATE / MERGE / SET / DELETE). Disk
+# joined this set when CREATE/MERGE gained the columnar write path
+# (DirGraph::insert_node_routed) — see test_disk_create_persists_properties.
+MUTATING_CYPHER_MODES = ("memory", "mapped", "disk")
 
 
 def _new_kg(mode: str, path: str | None = None) -> KnowledgeGraph:
@@ -77,8 +77,7 @@ def _per_mode(tmp_path, fn, modes: tuple[str, ...] = STORAGE_MODES):
 
     `fn` performs the mutations under test. The returned kg's are kept
     alive so follow-up queries can compare state. Pass `modes` to
-    restrict to a subset (e.g. `MUTATING_CYPHER_MODES` for tests that
-    use CREATE / MERGE, which are disk-locked since 0.9.26).
+    restrict to a subset (e.g. `MUTATING_CYPHER_MODES`).
     """
     kgs: dict[str, KnowledgeGraph] = {}
     for mode in modes:
@@ -175,16 +174,11 @@ def test_mid_batch_failure_schema_locked(tmp_path):
 
 def test_schema_locked_unknown_property_message(tmp_path):
     """Error message for CREATE with unknown property is identical across
-    the modes that support mutating Cypher.
-
-    Disk-backed graphs reject the CREATE itself in 0.9.26+ (before any
-    schema check runs) — see test_disk_create_lockout_message. So the
-    schema-violation message parity is asserted across memory + mapped
-    only, and the disk lockout is guarded by its own dedicated test.
-    """
+    every storage mode (memory/mapped/disk) — disk now supports mutating
+    Cypher, so the schema-violation message parity must hold there too."""
     messages: dict[str, str] = {}
     for mode in MUTATING_CYPHER_MODES:
-        kg = _new_kg(mode)
+        kg = _new_kg(mode, path=str(tmp_path / f"kg_lock_{mode}"))
         _build_seed(kg)
         kg.lock_schema()
         try:
@@ -243,12 +237,8 @@ def test_tombstone_visibility_detach_delete(tmp_path):
 
 
 def test_merge_idempotency_node(tmp_path):
-    """Running the same MERGE twice: counts identical across the modes
-    that support MERGE.
-
-    Disk-mode MERGE is locked out in 0.9.26+ by design — guarded by
-    `test_disk_merge_lockout_message`.
-    """
+    """Running the same MERGE twice: counts identical across every storage
+    mode (memory/mapped/disk)."""
 
     def mutate(kg):
         kg.cypher("MERGE (p:Person {id: 1})")
@@ -265,11 +255,8 @@ def test_merge_idempotency_node(tmp_path):
 
 
 def test_merge_idempotency_edge(tmp_path):
-    """Same MERGE pattern for an edge, run twice, no duplicates.
-
-    Disk-mode MERGE is locked out in 0.9.26+ — see
-    `test_disk_merge_lockout_message`.
-    """
+    """Same MERGE pattern for an edge, run twice, no duplicates — across
+    every storage mode (memory/mapped/disk)."""
 
     def mutate(kg):
         for _ in range(2):
@@ -353,35 +340,35 @@ def test_disk_conflict_replace_clears_omitted_properties(tmp_path):
     assert rows == [{"age": None, "email": "alice@new.com"}]
 
 
-def test_disk_create_lockout_message(tmp_path):
-    """CREATE on a disk-backed graph is intentionally rejected in
-    0.9.26+ — bulk loaders only. The error message must point users
-    at `add_nodes` and the build-then-`to_disk` escape hatch, so the
-    diagnostic is actionable.
-
-    Pinning the message guards against silent rewording — if the
-    rejection text changes, downstream docs / agent guidance need to
-    move with it.
-    """
-    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_create_lockout"))
+def test_disk_create_persists_properties(tmp_path):
+    """CREATE on a disk-backed graph works (was rejected pre-this-change).
+    Properties route through the per-type ColumnStore and must survive a
+    save/reload round-trip — the columnar write path, not a slot-only add."""
+    path = str(tmp_path / "kg_disk_create")
+    kg = _new_kg("disk", path=path)
     _build_seed(kg)
-    with pytest.raises(Exception) as ei:
-        kg.cypher("CREATE (p:Person {pid: 99, name: 'New'})")
-    msg = str(ei.value)
-    assert "CREATE" in msg and "disk" in msg
-    assert "add_nodes" in msg, msg
-    assert "to_disk" in msg, msg
+    kg.cypher("CREATE (:Person {id: 99, name: 'New', age: 50, email: 'new@x.com'})")
+    # Visible immediately, with all properties.
+    row = kg.cypher("MATCH (p:Person {id: 99}) RETURN p.name AS n, p.age AS a, p.email AS e").to_list()
+    assert row == [{"n": "New", "a": 50, "e": "new@x.com"}]
+    assert kg.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 4
+    # Survives save + reload (the properties must persist, not just in-memory).
+    kg.save(path)
+    kg2 = kglite.load(path)
+    assert kg2.cypher("MATCH (p:Person {id: 99}) RETURN p.name AS n, p.age AS a, p.email AS e").to_list() == [
+        {"n": "New", "a": 50, "e": "new@x.com"}
+    ]
+    assert kg2.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar() == 4
 
 
-def test_disk_merge_lockout_message(tmp_path):
-    """MERGE on a disk-backed graph is intentionally rejected in
-    0.9.26+ (MERGE shares the CREATE write path). The diagnostic
-    must explain the lockout and the workaround."""
-    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_merge_lockout"))
+def test_disk_merge_create_and_match(tmp_path):
+    """MERGE on a disk-backed graph works: creates when absent, matches when
+    present (no duplicate). Was rejected pre-this-change."""
+    kg = _new_kg("disk", path=str(tmp_path / "kg_disk_merge"))
     _build_seed(kg)
-    with pytest.raises(Exception) as ei:
-        kg.cypher("MERGE (p:Person {pid: 1})")
-    msg = str(ei.value)
-    assert "MERGE" in msg and "disk" in msg
-    assert "add_nodes" in msg, msg
-    assert "to_disk" in msg, msg
+    # Create branch (id 500 absent).
+    kg.cypher("MERGE (:Person {id: 500, name: 'Zed', age: 33})")
+    assert kg.cypher("MATCH (p:Person {id: 500}) RETURN p.name AS n").scalar() == "Zed"
+    # Match branch (id 500 now present) — no duplicate.
+    kg.cypher("MERGE (:Person {id: 500, name: 'Zed', age: 33})")
+    assert kg.cypher("MATCH (p:Person {id: 500}) RETURN count(p) AS c").scalar() == 1

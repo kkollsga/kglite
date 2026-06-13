@@ -2351,6 +2351,110 @@ impl DirGraph {
         }
     }
 
+    /// Insert one node, routing storage by backend; returns the new index.
+    ///
+    /// - **Memory / mapped**: build a Compact `NodeData` on the shared
+    ///   `TypeSchema` and `add_node` — the heap `StableDiGraph` keeps the
+    ///   properties (today's path; unchanged behaviour).
+    /// - **Disk**: the disk `add_node` stores only a slot and drops the
+    ///   `NodeData` payload, so route id/title/properties through the per-type
+    ///   `ColumnStore` first (the same mechanism `batch.rs::flush_chunk` uses
+    ///   for bulk `add_nodes`): register schema keys, push id/title/row, then
+    ///   `add_node` a `Columnar` slot and `update_row_id`.
+    ///
+    /// Used by Cypher `CREATE` (`executor::write::create_node`) so a single
+    /// choke point gives uniform create semantics across modes. The caller
+    /// owns id-index / type-index / property-index / metadata bookkeeping.
+    ///
+    /// **Disk note:** this does NOT push the mutated store to the disk
+    /// read-side (`dg.column_stores`). The caller must call
+    /// [`sync_disk_column_stores`](Self::sync_disk_column_stores) **once after
+    /// the batch of inserts** — per-node syncing would share the store `Arc`
+    /// and force every subsequent `ensure_column_store_for_push` to deep-clone
+    /// it (O(store) per node).
+    pub fn insert_node_routed(
+        &mut self,
+        id: Value,
+        title: Value,
+        node_type: &str,
+        properties: HashMap<String, Value>,
+    ) -> NodeIndex {
+        // Register property types in node_type_metadata from the values we
+        // have in hand. Do NOT read the node back for this: on disk the
+        // columnar store isn't synced to the read-side (`dg.column_stores`)
+        // until the end of the clause, so a read-back would see no properties
+        // — and the metadata-driven column persistence would then drop them on
+        // save (properties survive in-memory but vanish after save/reload).
+        // Merge-upsert, so it composes with any later `ensure_type_metadata`.
+        let prop_types: HashMap<String, String> = properties
+            .iter()
+            .map(|(k, v)| (k.clone(), v.type_name().to_string()))
+            .collect();
+        self.upsert_node_type_metadata(node_type, prop_types);
+
+        if self.graph.is_disk() {
+            // Pre-intern property keys (and node type) before borrowing stores.
+            let interned_props: Vec<(InternedKey, Value)> = properties
+                .iter()
+                .map(|(k, v)| (self.interner.get_or_intern(k), v.clone()))
+                .collect();
+            let keys: Vec<InternedKey> = interned_props.iter().map(|(k, _)| *k).collect();
+            self.ensure_type_schema_keys(node_type, &keys);
+
+            let row_id = {
+                let store = self.ensure_column_store_for_push(node_type);
+                store.push_id(&id);
+                store.push_title(&title);
+                store.push_row(&interned_props)
+            };
+            // The Arc borrow above has ended; clone the (now-extended) store
+            // handle for the node's Columnar pointer.
+            let store_arc = Arc::clone(
+                self.column_stores
+                    .get(node_type)
+                    .expect("ensure_column_store_for_push just inserted it"),
+            );
+            let node_type_key = self.interner.get_or_intern(node_type);
+            // id/title live in the ColumnStore (pushed above); the disk
+            // `add_node` drops NodeData.id/title anyway and reads row_id out of
+            // the Columnar variant. update_row_id re-stamps it for parity with
+            // the bulk path (harmless if already correct).
+            let node_data = NodeData {
+                id,
+                title,
+                node_type: node_type_key,
+                properties: PropertyStorage::Columnar {
+                    store: store_arc,
+                    row_id,
+                },
+            };
+            let idx = GraphWrite::add_node(&mut self.graph, node_data);
+            GraphWrite::update_row_id(&mut self.graph, idx, row_id);
+            idx
+        } else {
+            // Memory / mapped: Compact NodeData on the shared TypeSchema.
+            let interned_keys: Vec<InternedKey> = properties
+                .keys()
+                .map(|k| self.interner.get_or_intern(k))
+                .collect();
+            self.ensure_type_schema_keys(node_type, &interned_keys);
+            let schema = Arc::clone(
+                self.type_schemas
+                    .get(node_type)
+                    .expect("ensure_type_schema_keys just inserted it"),
+            );
+            let node_data = NodeData::new_compact(
+                id,
+                title,
+                node_type.to_string(),
+                properties,
+                &mut self.interner,
+                &schema,
+            );
+            GraphWrite::add_node(&mut self.graph, node_data)
+        }
+    }
+
     /// Check heap usage of column stores and spill largest to disk if over limit.
     /// No-op if memory_limit is None or the backend is memory-mode.
     pub fn maybe_spill_columns(&mut self) {

@@ -5,7 +5,7 @@ use super::super::ast::*;
 use super::super::result::*;
 use super::{clause_display_name, CypherExecutor};
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData, TypeSchema};
+use crate::graph::schema::{DirGraph, EdgeData, InternedKey};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
@@ -213,41 +213,11 @@ fn execute_create(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
 ) -> Result<ResultSet, String> {
-    // Refuse Cypher CREATE on disk-backed graphs. The disk-storage
-    // `add_node` path only writes a slot (node_type + row_id) and
-    // drops the per-node `NodeData.properties` / `title` / `id`
-    // fields — so a naive CREATE would silently lose every property
-    // and the auto-generated title. The supported paths for adding
-    // nodes to a disk graph are:
-    //   1. `graph.add_nodes(df, type, id_field, title_field=...)` —
-    //      goes through `batch.rs::flush_chunk`'s deferred-columnar
-    //      pass which writes properties to the ColumnStore before
-    //      calling `add_node` with `PropertyStorage::Columnar`.
-    //   2. Build the graph in default (heap) storage with `CREATE`,
-    //      then call `graph.to_disk(path)` to materialise the
-    //      column stores from the in-memory state.
-    // SET and DELETE on disk graphs work (they route through
-    // `node_weight_mut` → `node_mut_cache` → `clear_arenas` flush);
-    // only the new-node path is affected by this guard. Cypher MERGE
-    // is also refused (separate guard in execute_merge) when it would
-    // create new nodes. REMOVE on disk graphs is separately broken
-    // (silent no-op) and documented as a known limitation; not a
-    // regression introduced by this guard.
-    //
-    // Loud-fail rather than silent corruption was the explicit
-    // operator-facing call in 0.9.26 (see CHANGELOG known-issue
-    // entry). A proper write path is tracked for a future release.
-    if graph.graph.is_disk() {
-        return Err(
-            "Cypher CREATE is not supported on storage=\"disk\" graphs in 0.9.26. \
-             Use graph.add_nodes(...) for bulk loading, or build the graph in default \
-             (heap) storage with CREATE and call graph.to_disk(path) afterward. \
-             SET and DELETE on disk-backed graphs work as expected; REMOVE is \
-             currently a silent no-op (separate known limitation)."
-                .to_string(),
-        );
-    }
-
+    // CREATE works on every storage mode. On disk, node properties are routed
+    // through the per-type ColumnStore by `DirGraph::insert_node_routed` (the
+    // same mechanism `add_nodes` uses), and the disk read-side is synced once
+    // at the end of this function — see the `sync_disk_column_stores` call
+    // below. (SET/DELETE/REMOVE already work on disk via the staged-write path.)
     let source_rows = if existing.rows.is_empty() {
         // No prior MATCH: execute once with an empty row
         vec![ResultRow::new()]
@@ -371,6 +341,19 @@ fn execute_create(
     // Invalidate edge type count cache if any edges were created
     if stats.relationships_created > 0 {
         graph.invalidate_edge_type_counts_cache();
+        // Defensive: build the CSR if these edges landed in the deferred-build
+        // pending set (no-op on memory/mapped and when nothing is pending —
+        // individual Cypher edges normally go straight to disk overflow and are
+        // already visible).
+        graph.ensure_disk_edges_built();
+    }
+
+    // Disk: push the column stores we wrote into (via insert_node_routed) to the
+    // disk read-side, ONCE for the whole CREATE clause. Per-node syncing would
+    // share the store Arc and force every later insert to deep-clone it. No-op
+    // on memory/mapped.
+    if stats.nodes_created > 0 {
+        graph.sync_disk_column_stores();
     }
 
     Ok(ResultSet {
@@ -430,43 +413,11 @@ fn create_node(
         )?;
     }
 
-    // Pre-intern all property keys (borrows only graph.interner)
-    let interned_keys: Vec<InternedKey> = properties
-        .keys()
-        .map(|k| graph.interner.get_or_intern(k))
-        .collect();
-
-    // Build or extend the TypeSchema for this label (borrows only graph.type_schemas)
-    let schema_entry = graph
-        .type_schemas
-        .entry(label.clone())
-        .or_insert_with(|| Arc::new(TypeSchema::new()));
-    let schema_mut = Arc::make_mut(schema_entry);
-    for &ik in &interned_keys {
-        schema_mut.add_key(ik);
-    }
-    // Phase A.2 / C4 — invariant: type_schemas was populated above
-    // (Arc::make_mut at line 410 forces an entry). expect() instead
-    // of unwrap() gives a clear panic message if the invariant ever
-    // breaks (e.g. a future refactor moves the populate step).
-    let schema = Arc::clone(
-        graph
-            .type_schemas
-            .get(&label)
-            .expect("invariant: type_schemas entry populated above"),
-    );
-
-    // Create compact node using the shared TypeSchema
-    let node_data = NodeData::new_compact(
-        id,
-        title,
-        label.clone(),
-        properties,
-        &mut graph.interner,
-        &schema,
-    );
-
-    let node_idx = GraphWrite::add_node(&mut graph.graph, node_data);
+    // Insert the node, routing storage by backend. On disk this writes
+    // id/title/properties through the per-type ColumnStore (memory/mapped
+    // build a Compact NodeData) — see DirGraph::insert_node_routed. The
+    // per-clause disk read-side sync happens once in execute_create, not here.
+    let node_idx = graph.insert_node_routed(id, title, &label, properties);
 
     // Update type_indices
     graph
@@ -971,22 +922,10 @@ fn execute_merge(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
 ) -> Result<ResultSet, String> {
-    // Refuse MERGE on disk-backed graphs — when the match misses,
-    // MERGE creates new nodes through the same disk `add_node` path
-    // that CREATE uses, and silently loses properties. Refuse at the
-    // entry rather than partial-pattern-match-then-fail. See the
-    // `execute_create` guard for the full rationale + workaround.
-    if graph.graph.is_disk() {
-        return Err(
-            "Cypher MERGE is not supported on storage=\"disk\" graphs in 0.9.26 \
-             (MERGE can create new nodes through the same write path as CREATE). \
-             Use graph.add_nodes(...) / graph.add_connections(...) for bulk loading, \
-             or build the graph in default (heap) storage and call \
-             graph.to_disk(path) afterward."
-                .to_string(),
-        );
-    }
-
+    // MERGE works on every storage mode. Its match branch is a read; its create
+    // branch routes through `execute_create` (disk-capable via
+    // `DirGraph::insert_node_routed`); ON CREATE/MATCH SET route through
+    // `execute_set` (already disk-capable). No disk guard needed.
     let source_rows = if existing.rows.is_empty() {
         vec![ResultRow::new()]
     } else {

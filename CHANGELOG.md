@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cypher `CREATE` / `MERGE` now work on `storage="disk"` graphs.** Previously
+  rejected with a loud guard, because the disk `add_node` writes only a slot
+  (node_type + row_id) and drops the node's properties/title/id — a naive CREATE
+  would silently lose data. Node insertion now routes through one mode-aware
+  choke point (`DirGraph::insert_node_routed`): on disk it pushes id/title/
+  properties into the per-type `ColumnStore` (the same mechanism `add_nodes`
+  uses) and registers the property types in the schema, so created nodes carry
+  their properties and **survive save/reload**. `MERGE` (whose create branch
+  reuses CREATE) works too. Reached by every interface (Python, Bolt, MCP) since
+  they share the executor. memory/mapped behaviour is unchanged; `SET`/`DELETE`/
+  `REMOVE` already worked on disk. The cross-mode parity oracle
+  (`test_phase2_parity.py`) and `test_cypher_id_semantics.py` now exercise disk
+  CREATE/MERGE.
+
 ### Performance
 
 - **Durable `SET`/property-update no longer scales with graph size.** On a

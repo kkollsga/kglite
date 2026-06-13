@@ -562,28 +562,6 @@ extensions:
 See {doc}`../examples/manifest_cypher_preprocessor` for the full
 Wikidata example (Q-number → integer rewriting).
 
-## Known limitations
-
-Things that don't work today and need a workaround.
-
-### Cypher `CREATE` / `MERGE` on `storage="disk"` graphs
-
-The disk-storage write path doesn't yet support per-node property
-persistence for ad-hoc node creation. Cypher `CREATE` and `MERGE`
-against a disk-backed graph fail at execution with a clear error
-pointing at the supported alternatives.
-
-Workarounds:
-- **Bulk loading**: `g.add_nodes(df, type, id_field, title_field)`
-  and `g.add_connections(df, edge_type, ...)` go through the batched
-  write path which correctly persists properties on disk.
-- **Ad-hoc construction**: build the graph in default heap storage
-  with `kglite.KnowledgeGraph()` + `g.cypher("CREATE …")`, then call
-  `g.to_disk("/path/to/dir/")` to materialise the column stores.
-
-`SET` and `DELETE` on disk-backed graphs work normally. The proper
-disk `CREATE` write path is on the roadmap for a future release.
-
 ## Troubleshooting
 
 Common post-boot pitfalls, grouped by symptom.

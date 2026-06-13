@@ -24,22 +24,26 @@ import pytest
 import kglite
 from kglite import KnowledgeGraph
 
-# cypher CREATE is supported on heap (memory) + mapped graphs; disk-storage
-# graphs reject CREATE by design (use add_nodes / build-then-to_disk).
-CREATE_MODES = ("memory", "mapped")
+# cypher CREATE is supported on every storage mode (memory/mapped/disk).
+# On disk, properties route through the per-type ColumnStore via
+# DirGraph::insert_node_routed (the same mechanism add_nodes uses).
+CREATE_MODES = ("memory", "mapped", "disk")
 
 
-def _new_kg(mode: str) -> KnowledgeGraph:
+def _new_kg(mode: str, tmp_path=None) -> KnowledgeGraph:
     if mode == "memory":
         return KnowledgeGraph()
     if mode == "mapped":
         return KnowledgeGraph(storage="mapped")
+    if mode == "disk":
+        assert tmp_path is not None, "disk mode needs a path"
+        return KnowledgeGraph(storage="disk", path=str(tmp_path / "kg"))
     raise ValueError(mode)
 
 
 @pytest.mark.parametrize("mode", CREATE_MODES)
-def test_create_honours_string_id(mode):
-    kg = _new_kg(mode)
+def test_create_honours_string_id(mode, tmp_path):
+    kg = _new_kg(mode, tmp_path)
     kg.cypher("CREATE (:Doc {id: 's1', extra: 7})")
     assert kg.cypher("MATCH (n:Doc) RETURN n.id AS id").to_list() == [{"id": "s1"}]
     # matchable by the provided id
@@ -48,10 +52,51 @@ def test_create_honours_string_id(mode):
 
 
 @pytest.mark.parametrize("mode", CREATE_MODES)
-def test_create_honours_int_id(mode):
-    kg = _new_kg(mode)
+def test_create_honours_int_id(mode, tmp_path):
+    kg = _new_kg(mode, tmp_path)
     kg.cypher("CREATE (:Doc {id: 42, v: 1})")
     assert kg.cypher("MATCH (n:Doc {id: 42}) RETURN n.id AS id, n.v AS v").to_list() == [{"id": 42, "v": 1}]
+
+
+@pytest.mark.parametrize("mode", CREATE_MODES)
+def test_create_merge_parity_with_save_reload(mode, tmp_path):
+    """CREATE + MERGE produce identical results across modes; on disk they
+    also survive save/reload with properties + edges intact (the disk-CREATE
+    columnar write path)."""
+    kg = _new_kg(mode, tmp_path)
+    kg.cypher("CREATE (:Person {id: 1, name: 'Alice', age: 30})")
+    kg.cypher("CREATE (:Person {id: 2, name: 'Bob', age: 25})")
+    kg.cypher("MATCH (a:Person {id:1}),(b:Person {id:2}) CREATE (a)-[:KNOWS {since: 2020}]->(b)")
+    kg.cypher("MERGE (:Company {id: 100, name: 'Acme'})")
+    kg.cypher("MERGE (:Company {id: 100, name: 'Acme'})")  # match -> no duplicate
+
+    def snapshot(g):
+        return (
+            g.cypher("MATCH (p:Person) RETURN count(p) AS c").scalar(),
+            g.cypher("MATCH (c:Company) RETURN count(c) AS c").scalar(),
+            g.cypher("MATCH (p:Person {id:1}) RETURN p.name AS n, p.age AS a").to_list(),
+            g.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.since AS s").scalar(),
+            g.cypher("MATCH (c:Company {id:100}) RETURN c.name AS n").scalar(),
+        )
+
+    assert snapshot(kg) == (2, 1, [{"n": "Alice", "a": 30}], 2020, "Acme")
+
+    if mode == "disk":
+        path = str(tmp_path / "kg")
+        kg.save(path)
+        kg2 = kglite.load(path)
+        # Properties (age), title (name), and edge props (since) survive the
+        # round-trip — the disk-CREATE columnar write must persist them.
+        assert snapshot(kg2) == (2, 1, [{"n": "Alice", "a": 30}], 2020, "Acme")
+
+
+@pytest.mark.parametrize("mode", CREATE_MODES)
+def test_merge_on_create_set(mode, tmp_path):
+    kg = _new_kg(mode, tmp_path)
+    kg.cypher("MERGE (c:Widget {id: 1}) ON CREATE SET c.tag = 'new'")
+    kg.cypher("MERGE (c:Widget {id: 1}) ON CREATE SET c.tag = 'should-not-apply'")
+    assert kg.cypher("MATCH (w:Widget {id:1}) RETURN w.tag AS t").scalar() == "new"
+    assert kg.cypher("MATCH (w:Widget) RETURN count(w) AS c").scalar() == 1
 
 
 def test_create_auto_assigns_when_no_id():
