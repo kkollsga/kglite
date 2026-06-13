@@ -8,7 +8,7 @@
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
     CALL_SUBQUERY, CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
     temporal, pagerank, betweenness, degree, closeness, louvain, \
-    label_propagation, connected_components, cluster, orphan_node, self_loop, \
+    label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
     null_property, inverse_violation, transitivity_violation, cardinality_violation, \
     type_domain_violation, type_range_violation, parallel_edges";
