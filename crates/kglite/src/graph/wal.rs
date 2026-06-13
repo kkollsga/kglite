@@ -38,7 +38,9 @@
 //! atomic unit of durability is the whole frame, committed by the `fsync`
 //! that follows its append.
 
-use std::io::{self, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -244,6 +246,86 @@ pub fn read_frames(mut r: impl Read) -> io::Result<Vec<WalFrame>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// File handle — session-scoped append log
+// ─────────────────────────────────────────────────────────────────────
+
+/// The sidecar WAL path for a `.kgl` checkpoint file: `<path>-wal`. Keeps
+/// the WAL adjacent to its checkpoint so one is never found without the
+/// other being locatable.
+pub fn wal_path(checkpoint: &Path) -> PathBuf {
+    let mut s = checkpoint.as_os_str().to_owned();
+    s.push("-wal");
+    PathBuf::from(s)
+}
+
+/// Read every intact frame from the WAL at `path` for crash recovery.
+/// A missing file yields no frames (a graph that was never mutated since
+/// its checkpoint). Stops at the first torn/corrupt frame (see
+/// [`read_frames`]).
+pub fn recover(path: &Path) -> io::Result<Vec<WalFrame>> {
+    match File::open(path) {
+        Ok(f) => read_frames(BufReader::new(f)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// An open, append-only WAL file. Session-scoped (one per open graph
+/// file) — it owns a `File` handle, so it lives *outside* the CoW-cloned
+/// `DirGraph` (which must stay `Clone`). Each [`append`](Self::append)
+/// writes a frame and `fsync`s, making the committed mutation durable
+/// before the call returns.
+#[derive(Debug)]
+pub struct Wal {
+    file: File,
+    path: PathBuf,
+}
+
+impl Wal {
+    /// Open the WAL at `path` for appending, creating it with a fresh
+    /// header if absent. An existing WAL is opened in append mode with its
+    /// frames intact — call [`recover`] *before* opening if you need to
+    /// replay them.
+    pub fn open(path: PathBuf) -> io::Result<Self> {
+        let existed = path.exists();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&path)?;
+        if !existed {
+            write_header(&mut file)?;
+            file.sync_all()?;
+        }
+        Ok(Self { file, path })
+    }
+
+    /// Append one frame and `fsync` — the durability point. Returns only
+    /// after the bytes are on stable storage.
+    pub fn append(&mut self, frame: &WalFrame) -> io::Result<()> {
+        append_frame(&mut self.file, frame)?;
+        self.file.flush()?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    /// Reset to an empty WAL (header only), `fsync`ing the truncation.
+    /// Called after a checkpoint (a full `.kgl` save) has folded every
+    /// frame into the snapshot, so the log can start fresh.
+    pub fn reset(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        write_header(&mut self.file)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    /// The WAL's filesystem path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────
 
@@ -251,6 +333,7 @@ pub fn read_frames(mut r: impl Read) -> io::Result<Vec<WalFrame>> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use tempfile::TempDir;
 
     fn sample_ops() -> Vec<MutationOp> {
         vec![
@@ -396,5 +479,68 @@ mod tests {
     fn empty_reader_is_error() {
         let bytes: Vec<u8> = Vec::new();
         assert!(read_frames(Cursor::new(bytes)).is_err());
+    }
+
+    // ── file handle ──────────────────────────────────────────────────
+
+    fn frame(lsn: u64) -> WalFrame {
+        WalFrame {
+            lsn,
+            ops: sample_ops(),
+        }
+    }
+
+    #[test]
+    fn open_creates_with_header_and_appends_survive_reopen() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        {
+            let mut wal = Wal::open(p.clone()).unwrap();
+            wal.append(&frame(1)).unwrap();
+            wal.append(&frame(2)).unwrap();
+        } // drop closes the file
+          // Reopen for append (must NOT clobber existing frames)...
+        {
+            let mut wal = Wal::open(p.clone()).unwrap();
+            wal.append(&frame(3)).unwrap();
+        }
+        let frames = recover(&p).unwrap();
+        assert_eq!(frames.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn reset_truncates_to_header_only() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        let mut wal = Wal::open(p.clone()).unwrap();
+        wal.append(&frame(1)).unwrap();
+        wal.append(&frame(2)).unwrap();
+        wal.reset().unwrap();
+        assert!(recover(&p).unwrap().is_empty());
+        // Still usable after reset.
+        wal.append(&frame(5)).unwrap();
+        assert_eq!(
+            recover(&p)
+                .unwrap()
+                .iter()
+                .map(|f| f.lsn)
+                .collect::<Vec<_>>(),
+            [5]
+        );
+    }
+
+    #[test]
+    fn recover_missing_file_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("does-not-exist.kgl-wal");
+        assert!(recover(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn wal_path_appends_suffix() {
+        assert_eq!(
+            wal_path(Path::new("/data/graph.kgl")),
+            PathBuf::from("/data/graph.kgl-wal")
+        );
     }
 }
