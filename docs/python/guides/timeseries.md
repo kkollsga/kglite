@@ -133,3 +133,58 @@ graph.timeseries(node_id, start='2020', end='2020')
 ```
 
 **Available functions:** `ts_at`, `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_first`, `ts_last`, `ts_series`, `ts_delta`. See the [Cypher reference](../reference/cypher-reference.md) for the full documentation.
+
+---
+
+# Time-travel queries (temporal validity)
+
+Timeseries (above) attaches numeric channels to a node. *Temporal validity* is
+a different axis: nodes and edges that carry a validity interval — a role held
+from a hire date to an end date, a price effective over a range, an estimate
+superseded by a later one. `valid_at` and `valid_during` filter to the slice
+of the graph that was true at a point in time or overlapped an interval, so
+you can ask "what did the graph look like on this date?" without versioning
+the whole store. Almost nothing in the embedded-graph space has this built into
+the query language.
+
+You don't configure anything — you just name the two date properties holding
+the interval bounds (any ISO date/datetime strings, or `date()` values).
+
+### Point-in-time: `valid_at(entity, date, 'from_field', 'to_field')`
+
+```python
+# Roles active on a specific date
+graph.cypher("""
+    MATCH (r:Role)
+    WHERE valid_at(r, '2020-06-15', 'start_date', 'end_date')
+    RETURN r.person, r.title
+""")
+# Alice's role on 2020-06-15 was 'Engineer'; on 2022-01-01 it was 'Manager'
+```
+
+Works on edges too — filter a relationship by *when it was valid*:
+
+```python
+graph.cypher("""
+    MATCH (p:Person)-[r:EMPLOYED_BY]->(c:Company)
+    WHERE valid_at(r, '2019-01-01', 'start_date', 'end_date')
+    RETURN p.name, c.name
+""")
+```
+
+### Interval overlap: `valid_during(entity, start, end, 'from_field', 'to_field')`
+
+```python
+# Everything whose validity overlapped calendar-year 2021
+graph.cypher("""
+    MATCH (r:Role)
+    WHERE valid_during(r, '2021-01-01', '2021-12-31', 'start_date', 'end_date')
+    RETURN r.person, r.title
+""")
+```
+
+Both accept a date string or a `date(...)` value for the query date, and
+treat an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
+them with [date functions](../reference/cypher-reference.md) — `date()`,
+`add_days(date(), 30)` — to express relative windows like "active in the next
+30 days".

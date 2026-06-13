@@ -110,6 +110,43 @@ graph.select('Field').intersects_geometry(box(1, 58, 5, 62))
 graph.select('Block').contains_point(lat=60.5, lon=3.2)
 ```
 
+## Constructive geometry (Cypher)
+
+Beyond the predicates (`distance`/`contains`/`intersects`) and measures
+(`area`/`perimeter`/`centroid`), Cypher exposes *constructive* operators that
+build new geometry from existing geometry. They return WKT, so results chain
+into other spatial functions or land in a GeoDataFrame.
+
+| Function | Returns | Use |
+|----------|---------|-----|
+| `geom_buffer(geom, meters)` | MultiPolygon | safety/exclusion zone around a point or shape |
+| `geom_union(g1, g2)` | MultiPolygon | merge overlapping areas into one footprint |
+| `geom_intersection(g1, g2)` | MultiPolygon | the overlap between two areas |
+| `geom_difference(g1, g2)` | MultiPolygon | `g1` minus `g2` |
+| `geom_convex_hull(geoms)` | Polygon | tightest hull over a set of points/shapes |
+
+```python
+# A 5 km exclusion zone around a platform
+graph.cypher("RETURN geom_buffer('POINT(10.7 59.9)', 5000) AS zone")
+
+# Merge two licence areas into a single operating footprint
+graph.cypher("""
+    MATCH (a:Licence {id:'A'}), (b:Licence {id:'B'})
+    RETURN geom_union(a.geometry, b.geometry) AS footprint
+""")
+
+# Catchment hull over every well in a field
+graph.cypher("""
+    MATCH (w:Wellbore)-[:IN_FIELD]->(:Field {name:'Troll'})
+    WITH collect(w.geometry) AS shapes
+    RETURN geom_convex_hull(shapes) AS catchment
+""")
+```
+
+`geom_buffer` builds a planar buffer at the geometry's centroid latitude
+(accurate locally; it degrades far from the centroid). `geom_convex_hull`
+also accepts variadic arguments, not just a list.
+
 ## GeoDataFrame Export
 
 Convert query results with WKT columns to geopandas GeoDataFrames:
