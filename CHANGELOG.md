@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kglite.open(path, durable=True)` — crash-safe durable graphs (write-ahead
+  log).** A committed Cypher mutation is now appended to a `<path>-wal` sidecar
+  and `fsync`'d *before the call returns*, so it survives a hard crash
+  (`kill -9` / power loss) — not just a clean close. On open, any WAL frames are
+  replayed onto the loaded `.kgl` checkpoint to recover work committed since the
+  last `save()`; a durable graph that was never saved recovers entirely from its
+  WAL. `save()` writes a full checkpoint and truncates the WAL. The log is
+  logical and identity-keyed (`(node_type, id)` / `(conn_type, src, tgt)`) with
+  idempotent upsert/remove ops + per-frame CRC, so a torn trailing frame from a
+  crash mid-append is discarded and replay is safe to repeat. This is the first
+  half of contesting the embedded-Cypher-database use case: a committed mutation
+  is durable without an explicit `save()`. **In-memory graphs only** in this
+  release (`storage="mapped"/"disk"` raise `ValueError`); the columnar disk
+  modes keep their explicit-`save()` checkpoint model. **In-memory non-durable
+  performance is unchanged** — a non-durable graph never enters the capture
+  path (verified: tracked mutation/read benchmarks flat vs the prior baseline).
+
 - **`kglite.open(path)` — load-or-create embedded-database lifecycle.** Opens a
   graph at `path`, loading it if the file/directory exists or creating a fresh
   one if it doesn't. The returned graph *remembers* `path`, so:

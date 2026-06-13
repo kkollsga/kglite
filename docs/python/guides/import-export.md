@@ -36,9 +36,35 @@ with kglite.open("app.kgl") as g:
 - The context manager **skips the save if the block raised** — the on-disk file
   keeps its last good state. `close()` persists explicitly.
 
-> **Not crash safety.** Auto-save-on-close is a *clean-exit* checkpoint — a hard
-> crash (`kill -9`, power loss) mid-session writes nothing. Durable-on-commit
-> with crash recovery is a separate capability.
+> **Not crash safety (by default).** Plain `open()` auto-save-on-close is a
+> *clean-exit* checkpoint — a hard crash (`kill -9`, power loss) mid-session
+> writes nothing. For crash safety, use `durable=True` below.
+
+### `durable=True` — crash-safe writes (write-ahead log)
+
+Open with `durable=True` to make every committed Cypher mutation survive a hard
+crash. Each mutation is appended to a `<path>-wal` sidecar and `fsync`'d **before
+the call returns**; on open, any WAL frames are replayed onto the loaded
+checkpoint to recover work committed since the last `save()`.
+
+```python
+with kglite.open("app.kgl", durable=True) as g:
+    g.cypher("CREATE (:Person {id: 1, name: 'Alice'})")
+    # committed + fsync'd to app.kgl-wal here — survives kill -9
+
+# A later run recovers automatically, even after a crash with no save():
+g = kglite.open("app.kgl", durable=True)
+g.cypher("MATCH (p:Person) RETURN p.name")   # -> Alice
+```
+
+- `save()` writes a full `.kgl` checkpoint and truncates the WAL. A durable
+  graph that was *never* saved still recovers entirely from its WAL.
+- The log is idempotent (identity-keyed upsert/remove ops, per-frame CRC), so a
+  torn trailing frame from a crash mid-append is discarded and recovery is safe.
+- **In-memory graphs only** in this release — `storage="mapped"/"disk"` raise
+  `ValueError` (the columnar disk modes use explicit-`save()` checkpoints).
+- Non-durable graphs pay nothing: the capture path is entered only under
+  `durable=True`.
 
 ## Export Formats
 
