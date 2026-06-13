@@ -335,9 +335,15 @@ class ResultView:
         - ``timeout_ms`` (Optional[int]): the deadline that was in effect,
           or ``None`` when no deadline applied (memory graphs by default,
           or any call with ``timeout_ms=0``).
+        - ``warnings`` (list[str]): non-fatal advisory warnings about the
+          query — e.g. a ``MATCH`` against an unknown node label or
+          relationship type (almost always a typo), with a "did you mean?"
+          hint. Empty for a clean query. The same signal interactive users
+          see on stderr, exposed here for programmatic / agent callers.
 
         Use this to tune ``timeout_ms`` or move toward anchored queries
-        when your query repeatedly approaches the deadline.
+        when your query repeatedly approaches the deadline, and surface
+        ``warnings`` to catch silent-empty-result typos.
         """
         ...
 

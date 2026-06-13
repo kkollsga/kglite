@@ -1415,6 +1415,10 @@ impl KnowledgeGraph {
             elapsed_ms,
             timed_out: false,
             timeout_ms: reported_timeout_ms,
+            // Surface schema "did you mean?" warnings structurally so agent /
+            // programmatic callers (who can't see the stderr emission) get the
+            // signal too — e.g. a typo'd label that returned zero rows.
+            warnings: cypher::collect_unknown_pattern_warnings(&pre_parsed, &inner),
         };
         {
             let columns = result.columns;

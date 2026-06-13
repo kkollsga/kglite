@@ -237,6 +237,12 @@ pub struct QueryDiagnostics {
     /// Deadline that was in effect for this query, in milliseconds.
     /// `None` when no deadline applied.
     pub timeout_ms: Option<u64>,
+    /// Non-fatal advisory warnings about this query — e.g. a MATCH that
+    /// references an unknown node label or relationship type (almost always a
+    /// typo), with a "did you mean?" hint. Empty for a clean query. Lets
+    /// programmatic / agent callers see the same signal interactive users get
+    /// on stderr.
+    pub warnings: Vec<String>,
 }
 
 /// Side-channel lazy-evaluation descriptor. When set on a `CypherResult`,

@@ -594,6 +594,7 @@ impl ResultView {
                     Some(ms) => dict.set_item("timeout_ms", ms)?,
                     None => dict.set_item("timeout_ms", py.None())?,
                 }
+                dict.set_item("warnings", d.warnings.clone())?;
                 Ok(dict.into_any().unbind())
             }
             None => Ok(py.None()),

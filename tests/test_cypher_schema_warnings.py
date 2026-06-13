@@ -47,3 +47,21 @@ def test_valid_query_emits_no_warning(capfd):
     err = capfd.readouterr().err
     assert "unknown node label" not in err
     assert "unknown relationship type" not in err
+
+
+# --- structured warnings via diagnostics() (agent-visible; no stderr needed) ---
+
+
+def test_diagnostics_exposes_warnings():
+    g = _graph()
+    diag = g.cypher("MATCH (n:Persn) RETURN n").diagnostics
+    assert diag is not None
+    warnings = diag["warnings"]
+    assert any("unknown node label 'Persn'" in w and "Did you mean 'Person'?" in w for w in warnings)
+
+
+def test_diagnostics_warnings_empty_for_clean_query():
+    g = _graph()
+    diag = g.cypher("MATCH (a:Person)-[:KNOWS]->(b) RETURN a").diagnostics
+    assert diag is not None
+    assert diag["warnings"] == []
