@@ -956,6 +956,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
+            durable: None,
         };
 
         // Store the report in the new graph
@@ -1035,6 +1036,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
+            durable: None,
         };
 
         // Record plan step
@@ -1157,6 +1159,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
+            durable: None,
         };
 
         // Store the report
@@ -1280,6 +1283,7 @@ impl KnowledgeGraph {
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
                         source_path: None,
+                        durable: None,
                     };
 
                     // Store the calculation report
@@ -1446,6 +1450,7 @@ impl KnowledgeGraph {
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
                 source_path: None,
+                durable: None,
             };
 
             // Add the report
@@ -1689,6 +1694,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
+            durable: None,
         }
     }
 

@@ -558,7 +558,27 @@ impl KnowledgeGraph {
         let inner = self.inner.clone();
         let path_owned = path.to_string();
         py.detach(move || io::file::write_graph_v3(&inner, &path_owned))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+
+        // Durable checkpoint: the .kgl now holds the full current state, so
+        // discard the capture buffer (those ops are folded in) and truncate
+        // the WAL. Order matters — the .kgl write above succeeded before we
+        // truncate, and replay is idempotent, so a crash between the two
+        // only costs a harmless re-apply on the next open.
+        if self.durable.is_some() {
+            if let kglite_core::graph::schema::GraphBackend::Recording(rg) =
+                &mut Arc::make_mut(&mut self.inner).graph
+            {
+                let _ = rg.take_ops();
+            }
+            if let Some(ds) = self.durable.as_mut() {
+                ds.wal
+                    .reset()
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+                ds.next_lsn = 1;
+            }
+        }
+        Ok(())
     }
 
     /// Persist the graph to its remembered origin path and release nothing
@@ -1408,6 +1428,13 @@ impl KnowledgeGraph {
                 }
                 this.last_mutation_stats = Some(stats.clone());
             }
+
+            // Durability: append + fsync this mutation's WAL frame before
+            // returning. No-op for non-durable graphs. (The `graph` borrow
+            // above has ended; flush_wal re-borrows self.inner.)
+            this.flush_wal()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+
             // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);
 

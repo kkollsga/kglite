@@ -456,7 +456,7 @@ def load(path: str) -> KnowledgeGraph:
     """
     ...
 
-def open(path: str, *, storage: str | None = None) -> KnowledgeGraph:
+def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
 
@@ -475,16 +475,24 @@ def open(path: str, *, storage: str | None = None) -> KnowledgeGraph:
         storage: Storage mode for a *newly created* graph (``"mapped"`` /
             ``"disk"``); ignored when opening an existing file, which keeps the
             mode it was saved in.
+        durable: If ``True``, open in write-ahead-log mode. Each committed
+            Cypher mutation is appended to a ``<path>-wal`` sidecar and
+            ``fsync``'d before the call returns, and on open any WAL frames are
+            replayed onto the loaded checkpoint to recover work committed since
+            the last ``save()``. ``save()`` writes a full checkpoint and
+            truncates the WAL. In-memory graphs only in this release
+            (``storage="mapped"/"disk"`` raise ``ValueError``).
 
     Returns:
         A KnowledgeGraph bound to ``path``.
 
     Note:
-        ``open()`` gives "feels like a database" ergonomics (open, mutate,
-        close → persisted on clean exit). It is **not** crash-safe on its own —
-        an auto-saved snapshot is written only on a clean close, not on a hard
-        crash mid-session. Durable-on-commit / crash recovery is a separate
-        capability.
+        Without ``durable=True``, ``open()`` gives "feels like a database"
+        ergonomics (open, mutate, close → persisted on clean exit) but is
+        **not** crash-safe — an auto-saved snapshot is written only on a clean
+        close, not on a hard crash mid-session. ``durable=True`` adds the
+        crash-safety: a committed Cypher mutation survives a hard crash
+        (``kill -9`` / power loss) via the WAL.
     """
     ...
 

@@ -167,6 +167,7 @@ pub fn from_blueprint_rust(
                     default_timeout_ms: None,
                     default_max_rows: None,
                     source_path: None,
+                    durable: None,
                 };
                 Ok((kg, output_path))
             },

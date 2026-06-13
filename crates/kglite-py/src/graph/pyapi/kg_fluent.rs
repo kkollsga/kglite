@@ -694,6 +694,7 @@ impl KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
+            durable: None,
         };
 
         // Create and add a report

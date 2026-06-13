@@ -171,6 +171,32 @@ pub struct KnowledgeGraph {
     /// `.select()` / subgraph view does not inherit a save target. A true
     /// `Clone` preserves it (same graph identity).
     pub(crate) source_path: Option<std::path::PathBuf>,
+    /// Durability state for a graph opened with `durable=True`: the
+    /// session-scoped WAL handle plus the next log-sequence number.
+    /// `Some` only on the primary durable graph from `kglite.open(...,
+    /// durable=True)`; `None` everywhere else, including on every clone /
+    /// derived view (a `File` handle isn't shareable and a view isn't the
+    /// durable session). When `Some`, the graph's backend is wrapped in
+    /// `GraphBackend::Recording` so mutations are captured for the WAL.
+    pub(crate) durable: Option<DurableState>,
+}
+
+/// Session-scoped durability state held by a durable [`KnowledgeGraph`].
+/// Lives on the binding (not the CoW-cloned `DirGraph`) because it owns a
+/// `File` handle. See `flush_wal`.
+pub(crate) struct DurableState {
+    pub(crate) wal: kglite_core::graph::wal::Wal,
+    /// Monotonic log-sequence number stamped on the next WAL frame.
+    pub(crate) next_lsn: u64,
+}
+
+impl std::fmt::Debug for DurableState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DurableState")
+            .field("wal", &self.wal.path())
+            .field("next_lsn", &self.next_lsn)
+            .finish()
+    }
 }
 
 // `TemporalContext`, `SourceLocation`, and `SourceLookup` live
@@ -206,6 +232,7 @@ impl KnowledgeGraph {
             default_timeout_ms: None,
             default_max_rows: None,
             source_path: None,
+            durable: None,
         }
     }
 
@@ -224,6 +251,53 @@ impl KnowledgeGraph {
     pub fn embedder(&self) -> Option<&Arc<dyn embedder::Embedder>> {
         self.embedder.as_ref()
     }
+
+    /// Wrap a `DirGraph`'s backend in the `Recording` write-capture layer
+    /// so mutations are buffered for the WAL. Idempotent. Used by
+    /// `kglite.open(..., durable=True)` after load / create.
+    pub(crate) fn wrap_backend_for_durability(dir: &mut DirGraph) {
+        use kglite_core::graph::schema::GraphBackend;
+        use kglite_core::graph::storage::recording::RecordingGraph;
+        if matches!(dir.graph, GraphBackend::Recording(_)) {
+            return;
+        }
+        let inner = std::mem::replace(&mut dir.graph, GraphBackend::new());
+        dir.graph = GraphBackend::Recording(Box::new(RecordingGraph::new(inner)));
+    }
+
+    /// Drain the capture buffer, resolve it to logical ops, and append a
+    /// durably-`fsync`'d WAL frame. No-op for a non-durable graph or when
+    /// no ops are pending. Called after each mutation on a durable graph;
+    /// the `fsync` inside makes the committed mutation crash-safe before
+    /// control returns to the caller.
+    pub(crate) fn flush_wal(&mut self) -> std::io::Result<()> {
+        if self.durable.is_none() {
+            return Ok(());
+        }
+        // Drain + resolve in a scope so the `self.inner` borrow ends before
+        // we touch the `self.durable` field (disjoint, but keep it clean).
+        let ops = {
+            let dir = get_graph_mut(&mut self.inner);
+            let raw = match &mut dir.graph {
+                kglite_core::graph::schema::GraphBackend::Recording(rg) => rg.take_ops(),
+                // Not wrapped — durable state without a recording backend
+                // shouldn't happen, but treat it as nothing to flush.
+                _ => return Ok(()),
+            };
+            if raw.is_empty() {
+                return Ok(());
+            }
+            kglite_core::graph::storage::recording::resolve_ops(&raw, &dir.graph, &dir.interner)
+        };
+        let ds = self
+            .durable
+            .as_mut()
+            .expect("durable checked Some above; not cleared in between");
+        let lsn = ds.next_lsn;
+        ds.next_lsn += 1;
+        ds.wal
+            .append(&kglite_core::graph::wal::WalFrame { lsn, ops })
+    }
 }
 
 impl Clone for KnowledgeGraph {
@@ -238,6 +312,7 @@ impl Clone for KnowledgeGraph {
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: self.source_path.clone(),
+            durable: None,
         }
     }
 }

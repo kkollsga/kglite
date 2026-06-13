@@ -1198,6 +1198,7 @@ impl KnowledgeGraph {
             default_timeout_ms: None,
             default_max_rows: None,
             source_path: None,
+            durable: None,
         })
     }
 

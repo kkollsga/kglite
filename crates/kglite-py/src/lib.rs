@@ -159,9 +159,20 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 ///
 /// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
 /// graph; opening an existing file uses whatever mode it was saved in.
+///
+/// `durable=True` opens the graph in write-ahead-log mode: each committed
+/// Cypher mutation is `fsync`'d to a `<path>-wal` sidecar before returning,
+/// and on open any WAL frames are replayed onto the loaded checkpoint to
+/// recover work committed since the last `save()`. In-memory graphs only in
+/// this release.
 #[pyfunction]
-#[pyo3(signature = (path, *, storage=None))]
-fn open(py: Python<'_>, path: String, storage: Option<&str>) -> PyResult<KnowledgeGraph> {
+#[pyo3(signature = (path, *, storage=None, durable=false))]
+fn open(
+    py: Python<'_>,
+    path: String,
+    storage: Option<&str>,
+    durable: bool,
+) -> PyResult<KnowledgeGraph> {
     let mut kg = if std::path::Path::new(&path).exists() {
         py.detach(|| load_file(&path))
             .map(KnowledgeGraph::from_arc)
@@ -170,7 +181,47 @@ fn open(py: Python<'_>, path: String, storage: Option<&str>) -> PyResult<Knowled
         KnowledgeGraph::construct(storage, Some(&path))?
     };
     kg.source_path = Some(std::path::PathBuf::from(&path));
+    if durable {
+        setup_durable(&mut kg, &path)?;
+    }
     Ok(kg)
+}
+
+/// Turn `kg` into a durable graph: replay any WAL frames committed since
+/// the last checkpoint onto the loaded graph, wrap its backend in the
+/// write-capture layer, and open the WAL for append. In-memory only.
+fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
+    use kglite_core::graph::storage::GraphRead;
+    use kglite_core::graph::wal;
+
+    if kg.inner.graph.is_mapped() || kg.inner.graph.is_disk() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "durable=True is supported only for in-memory graphs in this release \
+             (not storage='mapped'/'disk'). The WAL captures the in-memory mutation \
+             path; for the columnar disk modes, use save() checkpoints.",
+        ));
+    }
+
+    let wpath = wal::wal_path(std::path::Path::new(path));
+    // Read (do not truncate) any frames committed since the last checkpoint.
+    let frames = wal::recover(&wpath)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+
+    // Replay onto the (unwrapped) loaded graph, then wrap so subsequent
+    // mutations are captured. Replaying before wrapping keeps the replay's
+    // own GraphWrite calls out of the capture buffer.
+    let dir = crate::graph::get_graph_mut(&mut kg.inner);
+    let max_lsn = kglite_core::graph::mutation::wal_replay::apply_frames(dir, &frames, 0)
+        .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+    KnowledgeGraph::wrap_backend_for_durability(dir);
+
+    let walh = wal::Wal::open(wpath)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+    kg.durable = Some(crate::graph::DurableState {
+        wal: walh,
+        next_lsn: max_lsn + 1,
+    });
+    Ok(())
 }
 
 /// Names of every Cypher optimizer pass, in execution order. Useful for
