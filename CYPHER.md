@@ -220,6 +220,40 @@ graph.cypher("""
 | `ts_delta(n.ch, 'from', 'to')` | Value change between two time points |
 | `ts_series(n.ch [, 'start'] [, 'end'])` | Extract series as `[{time, value}, ...]` |
 
+### Hybrid retrieval (RAG) over a knowledge graph
+
+`vector_score` / `text_score` compose with ordinary `WHERE` predicates and
+traversal, so semantic retrieval and graph constraints run in **one query** —
+no separate vector store + join. The graph filter and the similarity ranking
+combine: filter first, rank the survivors by similarity, take the top *k*.
+
+```cypher
+// Top-3 'politics' articles most similar to a query embedding —
+// the category filter is applied *before* ranking, so a highly-similar
+// 'sports' article is correctly excluded.
+MATCH (a:Article)
+WHERE a.category = 'politics'
+RETURN a.title, vector_score(a, 'summary_emb', $query_vec) AS score
+ORDER BY score DESC
+LIMIT 3
+```
+
+```cypher
+// RAG with a graph hop: retrieve passages, then pull their source document
+// and author in the same query (`text_score` auto-embeds the query string;
+// requires set_embedder()).
+MATCH (p:Passage)-[:OF_DOC]->(d:Document)-[:WRITTEN_BY]->(author:Person)
+WHERE d.published_year >= 2020
+RETURN p.text, d.title, author.name,
+       text_score(p, 'text', 'how does photosynthesis work?') AS score
+ORDER BY score DESC
+LIMIT 5
+```
+
+The embedding store key is `{text_column}_emb` (set via
+`set_embeddings(node_type, text_column, {id: vector})`), so embeddings set on
+the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
+
 ## Spatial Functions
 
 Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](https://kglite.readthedocs.io/en/latest/guides/spatial.html).

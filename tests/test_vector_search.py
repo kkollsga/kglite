@@ -44,6 +44,39 @@ def graph_with_embeddings():
     return graph
 
 
+class TestHybridRagRetrieval:
+    """#20 — filtered hybrid retrieval: a graph predicate AND vector ranking in
+    one Cypher query (the RAG-over-a-knowledge-graph shape). The point is that
+    the graph filter and the semantic ranking compose — you don't need a
+    separate vector store + join."""
+
+    def test_graph_filter_overrides_vector_similarity(self, graph_with_embeddings):
+        g = graph_with_embeddings
+        # Query points along y — the closest vectors are Beta (id 2) and Epsilon
+        # (id 5), but both are 'sports'. A 'politics' filter must exclude them
+        # and return only Alpha/Gamma, proving the filter composes with ranking.
+        q = [0.0, 1.0, 0.0]
+        rows = g.cypher(
+            "MATCH (a:Article) WHERE a.category = 'politics' "
+            "RETURN a.title AS t, vector_score(a, 'summary_emb', $q) AS s "
+            "ORDER BY s DESC LIMIT 5",
+            params={"q": q},
+        ).to_list()
+        assert {r["t"] for r in rows} == {"Alpha", "Gamma"}
+        scores = [r["s"] for r in rows]
+        assert scores == sorted(scores, reverse=True)  # ranked by similarity
+
+    def test_top_k_semantic_retrieval(self, graph_with_embeddings):
+        g = graph_with_embeddings
+        q = [1.0, 0.0, 0.0]  # nearest: Alpha (1.0), Gamma (~0.99)
+        rows = g.cypher(
+            "MATCH (a:Article) RETURN a.title AS t, "
+            "vector_score(a, 'summary_emb', $q) AS s ORDER BY s DESC LIMIT 2",
+            params={"q": q},
+        ).to_list()
+        assert [r["t"] for r in rows] == ["Alpha", "Gamma"]
+
+
 # ── set_embeddings / embeddings ────────────────────────────────────────
 
 
