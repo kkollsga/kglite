@@ -509,7 +509,31 @@ impl KnowledgeGraph {
         })
     }
 
-    fn save(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
+    #[pyo3(signature = (path=None))]
+    fn save(&mut self, py: Python<'_>, path: Option<&str>) -> PyResult<()> {
+        // Resolve the target: explicit path wins; otherwise fall back to the
+        // origin file this graph was opened from (`kglite.open`/`load`). A
+        // graph built in memory with no origin and no explicit path has
+        // nowhere to go — guide the user rather than panicking.
+        let effective: String = match path {
+            Some(p) => p.to_string(),
+            None => self
+                .source_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "save() needs a path: this graph was not opened from a file. \
+                         Pass an explicit path (g.save('graph.kgl')) or open it with \
+                         kglite.open('graph.kgl') so save() remembers the target.",
+                    )
+                })?,
+        };
+        // Remember the target so a later bare save() / auto-save-on-close
+        // writes back to the same file ("save as" updates the home path).
+        self.source_path = Some(std::path::PathBuf::from(&effective));
+        let path: &str = &effective;
+
         // Disk mode: save as directory (the folder IS the graph)
         if self.inner.graph.is_disk() {
             let graph = Arc::make_mut(&mut self.inner);
@@ -535,6 +559,48 @@ impl KnowledgeGraph {
         let path_owned = path.to_string();
         py.detach(move || io::file::write_graph_v3(&inner, &path_owned))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))
+    }
+
+    /// Persist the graph to its remembered origin path and release nothing
+    /// else (the graph stays usable). No-op if the graph has no associated
+    /// path (built in memory, never opened/saved to a file) — there is
+    /// nowhere to write, and silently doing nothing is friendlier than
+    /// raising on a best-effort cleanup call. Pair with `save(path)` if you
+    /// need an explicit target.
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        if self.source_path.is_some() {
+            self.save(py, None)?;
+        }
+        Ok(())
+    }
+
+    /// Context-manager entry: `with kglite.open(path) as g:` binds the graph
+    /// itself, so the body queries/mutates `g` directly.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Context-manager exit. On a **clean** exit (no exception) of a graph
+    /// that remembers an origin path, snapshot to that path — the
+    /// auto-save-on-close that gives `open()` its embedded-database feel. On
+    /// an exception, the save is skipped so the on-disk file keeps its last
+    /// good state. Never suppresses the exception (returns `False`).
+    ///
+    /// This is a *clean-exit* checkpoint, not crash safety: a hard crash
+    /// (`kill -9`, power loss) mid-block writes nothing. Durable-on-commit is
+    /// a separate capability.
+    #[pyo3(signature = (exc_type, _exc_value, _traceback))]
+    fn __exit__(
+        &mut self,
+        py: Python<'_>,
+        exc_type: &Bound<'_, pyo3::PyAny>,
+        _exc_value: &Bound<'_, pyo3::PyAny>,
+        _traceback: &Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<bool> {
+        if exc_type.is_none() && self.source_path.is_some() {
+            self.save(py, None)?;
+        }
+        Ok(false)
     }
 
     /// Compact a disk-mode graph: merge overflow edges back into CSR arrays.

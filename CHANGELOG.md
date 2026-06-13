@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite.open(path)` — load-or-create embedded-database lifecycle.** Opens a
+  graph at `path`, loading it if the file/directory exists or creating a fresh
+  one if it doesn't. The returned graph *remembers* `path`, so:
+  - **`save()` takes no argument** when the graph was opened (or previously
+    saved) — it writes back to the origin file. Passing a path still works and
+    updates the remembered target ("save as"). A graph built purely in memory
+    with no path raises a clear `ValueError` rather than failing silently.
+  - **Context-manager auto-save-on-close**: `with kglite.open("app.kgl") as g:
+    …` snapshots to the file on clean block exit. On an exception the save is
+    skipped so the on-disk file keeps its last good state. A new `close()`
+    method does the same explicitly.
+  - `kglite.load(path)` now also remembers `path` for bare `save()`.
+
+  This is lifecycle ergonomics ("open, mutate, close → persisted"), the first
+  step toward contesting the embedded-Cypher-DB use case. It is **not** crash
+  safety: a hard crash mid-session writes nothing (durable-on-commit is a
+  separate, upcoming capability). `storage=` applies only when creating a new
+  graph; opening an existing file keeps its saved mode.
+
 ## [0.10.16] — 2026-06-13 — scoped graph algorithms, IN-param anchoring, disk lazy-edge, docs sweep
 
 A capability-discoverability release: the in-place graph procedures

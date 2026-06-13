@@ -1197,6 +1197,7 @@ impl KnowledgeGraph {
             temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
+            source_path: None,
         })
     }
 

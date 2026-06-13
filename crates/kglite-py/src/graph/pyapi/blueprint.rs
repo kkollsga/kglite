@@ -166,6 +166,7 @@ pub fn from_blueprint_rust(
                     temporal_context: TemporalContext::default(),
                     default_timeout_ms: None,
                     default_max_rows: None,
+                    source_path: None,
                 };
                 Ok((kg, output_path))
             },

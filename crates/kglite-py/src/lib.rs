@@ -143,8 +143,34 @@ impl crate::graph::KnowledgeGraph {
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     py.detach(|| load_file(&path))
-        .map(KnowledgeGraph::from_arc)
+        .map(|inner| {
+            let mut kg = KnowledgeGraph::from_arc(inner);
+            kg.source_path = Some(std::path::PathBuf::from(&path));
+            kg
+        })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+}
+
+/// Open a graph at `path`, loading it if the file/directory exists or
+/// creating a fresh one if it doesn't (load-or-create) — the embedded-DB
+/// lifecycle entry point. The returned graph remembers `path`, so a later
+/// bare `save()` (or the context-manager auto-save-on-close) writes back to
+/// it without re-specifying the target.
+///
+/// `storage` (`"mapped"` / `"disk"`) applies only when *creating* a new
+/// graph; opening an existing file uses whatever mode it was saved in.
+#[pyfunction]
+#[pyo3(signature = (path, *, storage=None))]
+fn open(py: Python<'_>, path: String, storage: Option<&str>) -> PyResult<KnowledgeGraph> {
+    let mut kg = if std::path::Path::new(&path).exists() {
+        py.detach(|| load_file(&path))
+            .map(KnowledgeGraph::from_arc)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?
+    } else {
+        KnowledgeGraph::construct(storage, Some(&path))?
+    };
+    kg.source_path = Some(std::path::PathBuf::from(&path));
+    Ok(kg)
 }
 
 /// Names of every Cypher optimizer pass, in execution order. Useful for
@@ -160,6 +186,7 @@ fn cypher_pass_names() -> Vec<String> {
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
     m.add_class::<KnowledgeGraph>()?;

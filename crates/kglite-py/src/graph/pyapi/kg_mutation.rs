@@ -521,6 +521,17 @@ impl KnowledgeGraph {
     #[new]
     #[pyo3(signature = (*, storage=None, path=None))]
     fn new(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
+        Self::construct(storage, path)
+    }
+}
+
+impl KnowledgeGraph {
+    /// Build a fresh `KnowledgeGraph` for the given storage mode, creating
+    /// disk-backed state at `path` when `storage="disk"`. Shared by the
+    /// `#[new]` Python constructor and the `kglite.open(path)` load-or-create
+    /// pyfunction. `source_path` is left `None` here — callers that want the
+    /// graph to remember an origin file set it after construction.
+    pub(crate) fn construct(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
         let mut graph = DirGraph::new();
 
         if let Some(mode) = storage {
@@ -568,9 +579,13 @@ impl KnowledgeGraph {
             temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
+            source_path: None,
         })
     }
+}
 
+#[pymethods]
+impl KnowledgeGraph {
     /// Add nodes from a pandas DataFrame.
     ///
     /// Args:

@@ -163,6 +163,14 @@ pub struct KnowledgeGraph {
     /// explicitly passed. Queries exceeding this limit return an error.
     /// None = no limit (default).
     pub(crate) default_max_rows: Option<usize>,
+    /// Path this graph was opened from / last associated with, if any.
+    /// Set by `kglite.open(path)` and `kglite.load(path)`; lets `save()`
+    /// default to the origin file and powers the context-manager
+    /// auto-save-on-close lifecycle (see `__enter__`/`__exit__`/`close`).
+    /// `None` for graphs built in memory and for derived views — a
+    /// `.select()` / subgraph view does not inherit a save target. A true
+    /// `Clone` preserves it (same graph identity).
+    pub(crate) source_path: Option<std::path::PathBuf>,
 }
 
 // `TemporalContext`, `SourceLocation`, and `SourceLookup` live
@@ -197,6 +205,7 @@ impl KnowledgeGraph {
             temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
+            source_path: None,
         }
     }
 
@@ -228,6 +237,7 @@ impl Clone for KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: self.source_path.clone(),
         }
     }
 }

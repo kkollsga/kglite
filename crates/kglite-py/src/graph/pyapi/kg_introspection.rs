@@ -955,6 +955,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: None,
         };
 
         // Store the report in the new graph
@@ -1033,6 +1034,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: None,
         };
 
         // Record plan step
@@ -1154,6 +1156,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: None,
         };
 
         // Store the report
@@ -1276,6 +1279,7 @@ impl KnowledgeGraph {
                         temporal_context: self.temporal_context.clone(),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
+                        source_path: None,
                     };
 
                     // Store the calculation report
@@ -1441,6 +1445,7 @@ impl KnowledgeGraph {
                 temporal_context: self.temporal_context.clone(),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
+                source_path: None,
             };
 
             // Add the report
@@ -1683,6 +1688,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: None,
         }
     }
 

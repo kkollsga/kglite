@@ -693,6 +693,7 @@ impl KnowledgeGraph {
             temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
+            source_path: None,
         };
 
         // Create and add a report

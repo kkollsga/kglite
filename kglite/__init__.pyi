@@ -450,6 +450,41 @@ def load(path: str) -> KnowledgeGraph:
 
     Returns:
         A new KnowledgeGraph with the loaded data.
+
+    The returned graph remembers ``path``, so a later bare ``save()`` writes
+    back to it. See :func:`open` for load-or-create semantics.
+    """
+    ...
+
+def open(path: str, *, storage: str | None = None) -> KnowledgeGraph:
+    """Open a graph at ``path`` — load it if it exists, create a fresh one if
+    it doesn't (load-or-create). The embedded-database lifecycle entry point.
+
+    The returned graph remembers ``path``: a later bare ``save()`` (or the
+    context-manager auto-save-on-close) writes back to it without re-specifying
+    the target::
+
+        with kglite.open("app.kgl") as g:
+            g.cypher("CREATE (:Person {name: 'Alice'})")
+        # auto-saved on clean exit
+
+    Args:
+        path: Path to a ``.kgl`` file or a disk-mode directory. Loaded if it
+            exists, otherwise created on first ``save()`` (or immediately, for
+            ``storage="disk"``, which materializes the directory).
+        storage: Storage mode for a *newly created* graph (``"mapped"`` /
+            ``"disk"``); ignored when opening an existing file, which keeps the
+            mode it was saved in.
+
+    Returns:
+        A KnowledgeGraph bound to ``path``.
+
+    Note:
+        ``open()`` gives "feels like a database" ergonomics (open, mutate,
+        close → persisted on clean exit). It is **not** crash-safe on its own —
+        an auto-saved snapshot is written only on a clean close, not on a hard
+        crash mid-session. Durable-on-commit / crash recovery is a separate
+        capability.
     """
     ...
 
@@ -2686,7 +2721,7 @@ class KnowledgeGraph:
     # Persistence
     # ====================================================================
 
-    def save(self, path: str) -> None:
+    def save(self, path: str | None = None) -> None:
         """Serialise the graph to disk.
 
         For default/mapped modes: saves to a ``.kgl`` v3 binary file.
@@ -2702,7 +2737,33 @@ class KnowledgeGraph:
         directories).
 
         Args:
-            path: Output file path (typically ``*.kgl``).
+            path: Output file path (typically ``*.kgl``). May be omitted if the
+                graph was opened via :func:`kglite.open` or :func:`kglite.load`,
+                in which case it defaults to that origin file. Passing a path
+                updates the remembered target ("save as"). Raises ``ValueError``
+                if omitted and there is no remembered path.
+        """
+        ...
+
+    def close(self) -> None:
+        """Persist the graph to its remembered origin path (the file it was
+        opened from via :func:`kglite.open` / :func:`kglite.load`, or last
+        saved to). No-op if the graph has no associated path. The graph stays
+        usable after ``close()``.
+        """
+        ...
+
+    def __enter__(self) -> "KnowledgeGraph":
+        """Context-manager entry — returns the graph itself."""
+        ...
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        """Context-manager exit. On a clean exit, auto-saves to the remembered
+        origin path (see :func:`kglite.open`); on an exception, skips the save
+        to preserve the last good file. Does not suppress exceptions.
+
+        This is a clean-exit checkpoint, not crash safety — a hard crash
+        mid-block writes nothing.
         """
         ...
 
