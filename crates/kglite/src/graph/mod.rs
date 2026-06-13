@@ -26,6 +26,7 @@ pub mod mutation;
 pub mod schema;
 pub mod session;
 pub mod storage;
+pub mod wal;
 
 // Re-export DirGraph at the graph-mod top level — matches the
 // path the executor / planner / blueprint code uses
