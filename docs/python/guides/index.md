@@ -1,6 +1,6 @@
 # Guides
 
-KGLite has fourteen how-to guides. Most projects only need three.
+KGLite has a set of how-to guides. Most projects only need three.
 
 ## Start here (the load-bearing path)
 
@@ -19,6 +19,7 @@ Domain-specific surfaces — pull them in when your data has the shape:
 
 | Guide | Read this if… |
 |---|---|
+| {doc}`durable-apps` | …the graph is long-lived state your app reopens across runs. `open()` load-or-create lifecycle, checkpoint-on-close, and crash-safe `durable=True` write-ahead-log writes. |
 | {doc}`code-tree` | …your "data" is a codebase. Parse Python / Rust / TS / Go / Java / C# / C++ into a graph of functions, classes, calls. |
 | {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
 | {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |
