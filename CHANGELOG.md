@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scoped weakly-connected-components.** `CALL connected_components()` now
+  accepts an optional parameter map — `{node_type, relationship}`, each a
+  string or a list of strings — to restrict the analysis to a subgraph
+  instead of the whole graph. `relationship` limits which edge types union
+  their endpoints; `node_type` sets the component universe (nodes of other
+  types are excluded, even as singletons). With neither, behaviour is
+  unchanged (every node, every edge type). This is the "components of a
+  single-relationship projection" query — e.g.
+  `CALL connected_components({node_type: 'Person', relationship: 'KNOWS'})`
+  for the social-graph components — that a graph-algorithm library computes
+  on an edge-type-projected view. Backed by the new
+  `weakly_connected_components_scoped` core function; reached by every
+  binding through `cypher_query`.
+
+### Performance
+
+- **Disk-mode traversal no longer materialises an `EdgeData` per edge.**
+  On `storage="disk"`, every edge crossed during pattern matching,
+  variable-length / `shortestPath` traversal, or a relationship-scoped
+  `connected_components` used to allocate a heap `EdgeData` (with a cloned
+  property vector) and take a per-edge arena mutex — *just to read the
+  edge's connection type*, which is available for free from the CSR
+  endpoint table. `GraphEdgeRef` now carries the connection type directly
+  and materialises the full edge lazily, only when a query actually reads
+  edge properties; the traversal hot paths read the cheap
+  `connection_type()` accessor instead. On the 25k-node / 266k-edge
+  comparative benchmark, disk-mode `pattern_match` dropped ~394 ms → ~19 ms,
+  `shortest_path` (100 pairs) ~747 ms → ~120 ms, and scoped
+  `connected_components` ~20 ms → ~2 ms — now on par with in-memory and
+  mapped. In-memory and mapped are unaffected (they keep their borrowed
+  `&EdgeData` path; the connection type is a field they already had).
+
+- **`WHERE x.prop IN $param` now anchors on the index instead of a full
+  scan.** The planner's predicate-pushdown only recognised an `IN` list
+  written as a literal (`IN [1, 2, 3]`); the parameterised form
+  (`IN $ids`, an `InExpression`) fell through to a full type scan +
+  post-filter. It now resolves the parameter (and the JSON-array string
+  form the Python binding uses for list params) at plan time, pushes an
+  `IN` matcher into the MATCH pattern — anchoring on the id index when
+  the property is `id` — and rewrites the surviving WHERE to the O(1)
+  `InLiteralSet` form so the safety-net re-filter is cheap. On a 2k-node
+  graph, `MATCH (p:Person)-[:KNOWS]-(f) WHERE p.id IN $ids` (200 seeds)
+  dropped from ~89 ms to ~1.2 ms (1-hop) and ~266 ms to ~1.3 ms (2-hop),
+  matching the hand-written `UNWIND $ids … MATCH (p {id:sid})` form.
+  Trigger query added to the differential corpus as
+  `id_in_param_anchored`.
+
 ## [0.10.15] — 2026-06-10 — CALL { } subqueries, graph interop, hot-path perf sweep
 
 A user-experience release driven by a roadmap audit: the most-requested

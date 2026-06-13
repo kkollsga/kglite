@@ -330,6 +330,30 @@ pub(super) fn extract_from_predicate(
             }
             Some(pred.clone())
         }
+        Predicate::InExpression { expr, list_expr } => {
+            // Push `variable.property IN $param` (and any RHS that resolves to a
+            // list at plan time) into the MATCH pattern. The common case is
+            // `WHERE n.id IN $ids`: without this, an `id IN <param>` predicate
+            // falls through to a full type scan + post-filter; with it, the
+            // pattern matcher anchors on the id index (one lookup per id).
+            if let Expression::PropertyAccess { variable, property } = expr {
+                if match_vars.iter().any(|(v, _)| v == variable) {
+                    if let Some(values) = resolve_value_list(list_expr, params) {
+                        pushable_in.push((variable.clone(), property.clone(), values.clone()));
+                        // The pushdown anchors the scan (e.g. via the id index).
+                        // Replace the surviving WHERE with the O(1) HashSet form
+                        // so the safety-net re-filter doesn't re-parse the list
+                        // per row — matching the speed of a literal `IN [...]`.
+                        let set: std::collections::HashSet<Value> = values.into_iter().collect();
+                        return Some(Predicate::InLiteralSet {
+                            expr: expr.clone(),
+                            values: set,
+                        });
+                    }
+                }
+            }
+            Some(pred.clone())
+        }
         Predicate::StartsWith { expr, pattern } => {
             // Push `variable.property STARTS WITH 'literal'` into MATCH
             // so the persistent prefix index can route the scan.
@@ -382,6 +406,30 @@ pub(super) fn extract_from_predicate(
         }
         // Other predicate types can't be pushed
         _ => Some(pred.clone()),
+    }
+}
+
+/// Resolve an `IN <rhs>` right-hand side to a concrete list of values at plan
+/// time, when possible. The RHS must be a `$param` or an inline literal whose
+/// value is a list. Reuses the executor's [`parse_list_value`], which accepts
+/// both a native `Value::List` and the JSON-array `Value::String("[...]")` form
+/// that the Python binding currently uses for list params — so the *same*
+/// element parsing drives the index pushdown here and the WHERE safety-net
+/// filter at run time. Returns `None` for anything not known at plan time
+/// (e.g. a correlated sub-expression) or an empty list, leaving the predicate
+/// in the WHERE clause. (A bracket list `IN [a, b]` parses to `Predicate::In`,
+/// not `InExpression`, and is handled separately.)
+fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Option<Vec<Value>> {
+    let val = match expr {
+        Expression::Parameter(name) => params.get(name.as_str())?,
+        Expression::Literal(v) => v,
+        _ => return None,
+    };
+    let items = super::super::executor::helpers::parse_list_value(val);
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
     }
 }
 

@@ -233,6 +233,50 @@ class TestCallConnectedComponents:
         """)
         assert len(result) == 6
 
+    @staticmethod
+    def _two_type_graph():
+        # Two Person pairs joined only through a shared Company (WORKS_AT).
+        g = KnowledgeGraph()
+        for n in ["A", "B", "C", "D"]:
+            g.cypher(f"CREATE (:Person {{name: '{n}'}})")
+        g.cypher("CREATE (:Company {name: 'Co'})")
+        g.cypher("MATCH (a:Person {name:'A'}),(b:Person {name:'B'}) CREATE (a)-[:KNOWS]->(b)")
+        g.cypher("MATCH (a:Person {name:'C'}),(b:Person {name:'D'}) CREATE (a)-[:KNOWS]->(b)")
+        g.cypher("MATCH (a:Person {name:'A'}),(c:Company {name:'Co'}) CREATE (a)-[:WORKS_AT]->(c)")
+        g.cypher("MATCH (a:Person {name:'C'}),(c:Company {name:'Co'}) CREATE (a)-[:WORKS_AT]->(c)")
+        return g
+
+    def test_unscoped_bridges_via_other_edge_type(self):
+        g = self._two_type_graph()
+        result = g.cypher("""
+            CALL connected_components() YIELD node, component
+            RETURN component, count(*) AS size ORDER BY size DESC
+        """)
+        # WORKS_AT bridges both pairs through the Company → one component of 5.
+        assert len(result) == 1
+        assert result[0]["size"] == 5
+
+    def test_scoped_to_node_type_and_relationship(self):
+        g = self._two_type_graph()
+        result = g.cypher("""
+            CALL connected_components({node_type: 'Person', relationship: 'KNOWS'})
+            YIELD node, component
+            RETURN component, count(*) AS size ORDER BY size DESC
+        """)
+        # Persons only, unioned by KNOWS only → two pairs, Company excluded.
+        assert len(result) == 2
+        assert [r["size"] for r in result] == [2, 2]
+
+    def test_scoped_relationship_accepts_list(self):
+        g = self._two_type_graph()
+        result = g.cypher("""
+            CALL connected_components({node_type: ['Person'], relationship: ['KNOWS']})
+            YIELD node, component
+            RETURN component, count(*) AS size ORDER BY size DESC
+        """)
+        assert len(result) == 2
+        assert [r["size"] for r in result] == [2, 2]
+
 
 class TestCallYieldAlias:
     """Test YIELD with AS aliases."""

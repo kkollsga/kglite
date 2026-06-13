@@ -653,7 +653,7 @@ pub(super) fn map_subscript(container: &Value, key: &str) -> Value {
 /// every producer emits native lists (C4 removes PreProcessedValue;
 /// later cleanups retire the string path), this function can shrink
 /// to just the List arm.
-pub(super) fn parse_list_value(val: &Value) -> Vec<Value> {
+pub(in crate::graph::languages::cypher) fn parse_list_value(val: &Value) -> Vec<Value> {
     match val {
         Value::List(items) => items.clone(),
         Value::String(s) => {

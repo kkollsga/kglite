@@ -7,6 +7,30 @@ use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
+/// Read a procedure parameter that may be a single string or a list of
+/// strings — e.g. `relationship: 'KNOWS'` or `relationship: ['KNOWS', 'OWNS']`.
+/// Returns `None` when the key is absent or holds no usable strings.
+fn string_list_param(params: &HashMap<String, Value>, key: &str) -> Option<Vec<String>> {
+    match params.get(key) {
+        Some(Value::String(s)) => Some(vec![s.clone()]),
+        Some(Value::List(items)) => {
+            let v: Vec<String> = items
+                .iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+        _ => None,
+    }
+}
+
 impl<'a> CypherExecutor<'a> {
     pub(super) fn execute_unwind(
         &self,
@@ -286,9 +310,22 @@ impl<'a> CypherExecutor<'a> {
                 self.community_to_rows(&result.assignments, &clause.yield_items)?
             }
             "connected_components" | "weakly_connected_components" => {
+                // Optional scoping: `CALL connected_components({node_type: 'Person',
+                // relationship: 'KNOWS'})`. Each accepts a string or a list of
+                // strings. Absent → whole graph (every node, every edge type).
+                let node_types = string_list_param(&params, "node_type");
+                let rel_types: Option<Vec<crate::graph::schema::InternedKey>> =
+                    string_list_param(&params, "relationship").map(|names| {
+                        names
+                            .iter()
+                            .map(|s| crate::graph::schema::InternedKey::from_str(s))
+                            .collect()
+                    });
                 let components =
-                    crate::graph::algorithms::graph_algorithms::weakly_connected_components(
+                    crate::graph::algorithms::graph_algorithms::weakly_connected_components_scoped(
                         self.graph,
+                        node_types.as_deref(),
+                        rel_types.as_deref(),
                         self.deadline,
                     )?;
                 // Periodic deadline check: 124M nodes can spend minutes here even

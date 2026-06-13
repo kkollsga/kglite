@@ -701,6 +701,16 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person) WHERE p.city IN $cities RETURN p.name AS n ORDER BY n",
         {"cities": ["Oslo", "Bergen"]},
     ),
+    # `n.id IN $ids` (param) → index_selection pushes an `id IN [...]` matcher
+    # so the scan anchors on the id index (instead of a full type scan +
+    # post-filter), and rewrites the surviving WHERE to the O(1) InLiteralSet
+    # form. Optimised must equal naive.
+    (
+        "id_in_param_anchored",
+        "social_graph",
+        "MATCH (p:Person)-[:KNOWS]-(f:Person) WHERE p.id IN $ids RETURN f.name AS n ORDER BY n",
+        {"ids": [3, 7, 11, 15]},
+    ),
     # ── Parameterized scalar with arithmetic ──
     (
         "param_arithmetic",

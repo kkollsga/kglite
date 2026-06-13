@@ -428,10 +428,11 @@ pub(super) fn write_topic_label_propagation(xml: &mut String) {
 
 pub(super) fn write_topic_connected_components(xml: &mut String) {
     xml.push_str("  <connected_components>\n");
-    xml.push_str("    <desc>Find weakly connected components. Nodes in the same component can reach each other ignoring edge direction.</desc>\n");
-    xml.push_str("    <syntax>CALL connected_components() YIELD node, component</syntax>\n");
+    xml.push_str("    <desc>Find weakly connected components. Nodes in the same component can reach each other ignoring edge direction. Optionally scope to a node-type universe and/or relationship type(s) via a parameter map — `{node_type, relationship}`, each a string or list — to analyse a single-relationship projection (e.g. components of the social graph) rather than the whole graph.</desc>\n");
+    xml.push_str("    <syntax>CALL connected_components([{node_type, relationship}]) YIELD node, component</syntax>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"basic\">CALL connected_components() YIELD node, component RETURN component, count(*) AS size ORDER BY size DESC</ex>\n");
+    xml.push_str("      <ex desc=\"scoped to a relationship\">CALL connected_components({node_type: 'Person', relationship: 'KNOWS'}) YIELD node, component RETURN component, count(*) AS size ORDER BY size DESC</ex>\n");
     xml.push_str("      <ex desc=\"find isolated\">CALL connected_components() YIELD node, component WITH component, count(*) AS size WHERE size = 1 RETURN count(*) AS isolated_nodes</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </connected_components>\n");

@@ -1471,17 +1471,18 @@ impl<'a> PatternExecutor<'a> {
                 .edges_directed_filtered(source, direction, conn_key);
 
             for edge in edges {
-                let edge_data = edge.weight();
-
-                // Check connection type if specified (u64 == u64)
+                // Connection-type check uses the cheap accessor — on disk this
+                // avoids materialising the edge (heap alloc + property clone)
+                // for every edge just to read its type.
                 // For single conn_key, DiskGraph already pre-filtered; this is a no-op.
                 // For multi-type conn_keys, post-filter is still needed.
+                let conn_type = edge.connection_type();
                 if let Some(ref keys) = conn_keys {
-                    if !keys.contains(&edge_data.connection_type) {
+                    if !keys.contains(&conn_type) {
                         continue;
                     }
                 } else if let Some(key) = conn_key {
-                    if edge_data.connection_type != key {
+                    if conn_type != key {
                         continue;
                     }
                 }
@@ -1492,8 +1493,10 @@ impl<'a> PatternExecutor<'a> {
                 // anyway, so the dominant cost (binding allocation +
                 // node-property reads below) never happens. The
                 // `if let Some` guards the no-filter hot path with a
-                // single branch-predicted check.
+                // single branch-predicted check. Reads edge properties, so it
+                // materialises the edge (lazy on disk) only when a filter exists.
                 if let Some(ref filter) = edge_pattern.edge_filter {
+                    let edge_data = edge.weight();
                     let edge_source = edge.source();
                     let edge_target = edge.target();
                     // Map the matcher's `direction` onto "is the peer
@@ -1505,9 +1508,8 @@ impl<'a> PatternExecutor<'a> {
                         (AnchorSide::Target, Direction::Outgoing) => true,
                         (AnchorSide::Target, Direction::Incoming) => false,
                     };
-                    let conn_ty = edge_data.connection_type;
                     let keep = filter.predicate.eval(
-                        conn_ty,
+                        conn_type,
                         peer_is_start,
                         edge_source,
                         edge_target,
@@ -1518,8 +1520,9 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Check edge properties if specified
+                // Check edge properties if specified — materialise lazily.
                 if let Some(ref props) = edge_pattern.properties {
+                    let edge_data = edge.weight();
                     let matches = props.iter().all(|(key, matcher)| {
                         edge_data
                             .get_property(key)
@@ -1684,21 +1687,21 @@ impl<'a> PatternExecutor<'a> {
                             }
                         }
                     }
-                    let edge_data = edge.weight();
-
-                    // Check connection type(s) (u64 == u64)
+                    // Cheap connection-type check (no disk materialisation).
+                    let conn_type = edge.connection_type();
                     if let Some(ref keys) = conn_keys {
-                        if !keys.contains(&edge_data.connection_type) {
+                        if !keys.contains(&conn_type) {
                             continue;
                         }
                     } else if let Some(key) = conn_key {
-                        if edge_data.connection_type != key {
+                        if conn_type != key {
                             continue;
                         }
                     }
 
-                    // Check edge properties
+                    // Check edge properties — materialise lazily only here.
                     if let Some(ref props) = edge_pattern.properties {
+                        let edge_data = edge.weight();
                         let matches = props.iter().all(|(key, matcher)| {
                             edge_data
                                 .get_property(key)
@@ -1858,21 +1861,21 @@ impl<'a> PatternExecutor<'a> {
                     .edges_directed_filtered(current, direction, conn_key);
 
                 for edge in edges {
-                    let edge_data = edge.weight();
-
-                    // Check connection type(s) if specified (u64 == u64)
+                    // Cheap connection-type check (no disk materialisation).
+                    let conn_type = edge.connection_type();
                     if let Some(ref keys) = conn_keys {
-                        if !keys.contains(&edge_data.connection_type) {
+                        if !keys.contains(&conn_type) {
                             continue;
                         }
                     } else if let Some(key) = conn_key {
-                        if edge_data.connection_type != key {
+                        if conn_type != key {
                             continue;
                         }
                     }
 
-                    // Check edge properties if specified
+                    // Check edge properties if specified — materialise lazily.
                     if let Some(ref props) = edge_pattern.properties {
+                        let edge_data = edge.weight();
                         let matches = props.iter().all(|(key, matcher)| {
                             edge_data
                                 .get_property(key)
@@ -1897,7 +1900,7 @@ impl<'a> PatternExecutor<'a> {
                     }
                     visited_at_depth.insert(visit_key, true);
 
-                    valid_targets.push((target, edge_data.connection_type));
+                    valid_targets.push((target, conn_type));
                 }
             }
 

@@ -6,7 +6,7 @@
 // GraphEdgeRef implements petgraph::visit::EdgeRef so callers that import
 // that trait can call .source(), .target(), .weight(), .id() unchanged.
 
-use crate::graph::schema::{EdgeData, NodeData};
+use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
@@ -70,6 +70,22 @@ pub(crate) fn binary_search_conn_type(
 // GraphEdgeRef — unified edge reference
 // ============================================================================
 
+/// Where a [`GraphEdgeRef`]'s full `EdgeData` comes from.
+///
+/// In-memory / mapped backends already hold a borrowed `&EdgeData`, so they
+/// use `Ref`. The disk backend uses `DiskLazy`: it carries only the graph
+/// handle and materialises the `EdgeData` (heap alloc + property clone) *on
+/// demand* when `weight()` is first called. Traversals that need only the
+/// target and the connection type — pattern matching, variable-length paths,
+/// `shortestPath` — never trigger that materialisation. The connection type
+/// itself is always carried directly (a cheap `u64`-backed `InternedKey` read
+/// from the CSR endpoint table), so type filtering costs nothing extra.
+#[derive(Clone, Copy)]
+enum EdgeWeightSrc<'a> {
+    Ref(&'a EdgeData),
+    DiskLazy(&'a DiskGraph),
+}
+
 /// A lightweight edge reference returned by graph edge iterators.
 /// Implements `petgraph::visit::EdgeRef` for compatibility with existing code.
 #[derive(Clone, Copy)]
@@ -77,7 +93,8 @@ pub struct GraphEdgeRef<'a> {
     source_: NodeIndex,
     target_: NodeIndex,
     index_: EdgeIndex,
-    weight_: &'a EdgeData,
+    conn_type_: InternedKey,
+    weight_: EdgeWeightSrc<'a>,
 }
 
 impl<'a> GraphEdgeRef<'a> {
@@ -92,7 +109,28 @@ impl<'a> GraphEdgeRef<'a> {
             source_: source,
             target_: target,
             index_: index,
-            weight_: weight,
+            conn_type_: weight.connection_type,
+            weight_: EdgeWeightSrc::Ref(weight),
+        }
+    }
+
+    /// Disk constructor: the connection type is read cheaply from the CSR
+    /// endpoint table; the full `EdgeData` is materialised lazily in
+    /// `weight()` only if a caller actually needs the edge's properties.
+    #[inline]
+    pub fn new_disk_lazy(
+        source: NodeIndex,
+        target: NodeIndex,
+        index: EdgeIndex,
+        conn_type: InternedKey,
+        graph: &'a DiskGraph,
+    ) -> Self {
+        GraphEdgeRef {
+            source_: source,
+            target_: target,
+            index_: index,
+            conn_type_: conn_type,
+            weight_: EdgeWeightSrc::DiskLazy(graph),
         }
     }
 
@@ -110,9 +148,19 @@ impl<'a> GraphEdgeRef<'a> {
         self.target_
     }
 
+    /// The edge's connection type — always cheap (no materialisation on disk).
+    /// Prefer this over `weight().connection_type` in hot traversal paths.
+    #[inline]
+    pub fn connection_type(&self) -> InternedKey {
+        self.conn_type_
+    }
+
     #[inline]
     pub fn weight(&self) -> &'a EdgeData {
-        self.weight_
+        match self.weight_ {
+            EdgeWeightSrc::Ref(w) => w,
+            EdgeWeightSrc::DiskLazy(g) => g.materialize_edge(self.index_.index() as u32),
+        }
     }
 
     #[inline]
@@ -138,7 +186,10 @@ impl<'a> EdgeRef for GraphEdgeRef<'a> {
 
     #[inline]
     fn weight(&self) -> &EdgeData {
-        self.weight_
+        match self.weight_ {
+            EdgeWeightSrc::Ref(w) => w,
+            EdgeWeightSrc::DiskLazy(g) => g.materialize_edge(self.index_.index() as u32),
+        }
     }
 
     #[inline]
@@ -293,12 +344,26 @@ impl<'a> DiskEdges<'a> {
 
     #[inline]
     fn make_edge_ref(&self, csr: &CsrEdge) -> GraphEdgeRef<'a> {
-        let weight = self.graph.materialize_edge(csr.edge_idx);
+        // Lazy: carry only the cheap connection type (a bare u64 read from the
+        // endpoint table); defer the EdgeData materialisation (heap alloc +
+        // property clone + arena lock) until a caller calls `weight()`.
+        let conn_type = InternedKey::from_u64(
+            self.graph
+                .edge_endpoints
+                .get(csr.edge_idx as usize)
+                .connection_type,
+        );
         let (src, tgt) = match self.direction {
             Direction::Outgoing => (self.source_node, NodeIndex::new(csr.peer as usize)),
             Direction::Incoming => (NodeIndex::new(csr.peer as usize), self.source_node),
         };
-        GraphEdgeRef::new(src, tgt, EdgeIndex::new(csr.edge_idx as usize), weight)
+        GraphEdgeRef::new_disk_lazy(
+            src,
+            tgt,
+            EdgeIndex::new(csr.edge_idx as usize),
+            conn_type,
+            self.graph,
+        )
     }
 }
 
@@ -418,12 +483,14 @@ impl<'a> Iterator for DiskEdgeReferences<'a> {
             self.pos += 1;
             let ep = self.graph.edge_endpoints.get(i as usize);
             if ep.source != TOMBSTONE_EDGE {
-                let weight = self.graph.materialize_edge(i);
-                return Some(GraphEdgeRef::new(
+                // Lazy: carry the cheap connection type from the endpoint table;
+                // defer EdgeData materialisation until `weight()` is called.
+                return Some(GraphEdgeRef::new_disk_lazy(
                     NodeIndex::new(ep.source as usize),
                     NodeIndex::new(ep.target as usize),
                     EdgeIndex::new(i as usize),
-                    weight,
+                    InternedKey::from_u64(ep.connection_type),
+                    self.graph,
                 ));
             }
         }

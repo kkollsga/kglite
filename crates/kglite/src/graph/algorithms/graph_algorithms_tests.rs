@@ -1,6 +1,6 @@
 use super::*;
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, EdgeData, NodeData};
+use crate::graph::schema::{DirGraph, EdgeData, InternedKey, NodeData};
 use crate::graph::storage::GraphWrite;
 use std::collections::HashMap;
 
@@ -250,6 +250,89 @@ fn test_weakly_connected_components_empty() {
     let graph = DirGraph::new();
     let components = weakly_connected_components(&graph, None).unwrap();
     assert!(components.is_empty());
+}
+
+/// Two Person pairs joined only via a shared Company:
+///   P0-[:KNOWS]-P1, P2-[:KNOWS]-P3, and P0,P2 -[:WORKS_AT]-> C0.
+/// Whole-graph WCC sees one component (WORKS_AT bridges everything);
+/// scoping to {node_type: Person, relationship: KNOWS} must split into the
+/// two KNOWS pairs and exclude the Company entirely.
+fn build_two_type_graph() -> DirGraph {
+    let mut graph = DirGraph::new();
+    let mut persons = Vec::new();
+    for i in 0..4 {
+        let node = NodeData::new(
+            Value::Int64(i),
+            Value::String(format!("P{i}")),
+            "Person".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default("Person".to_string())
+            .push(idx);
+        persons.push(idx);
+    }
+    let company = NodeData::new(
+        Value::Int64(100),
+        Value::String("C0".to_string()),
+        "Company".to_string(),
+        HashMap::new(),
+        &mut graph.interner,
+    );
+    let c0 = graph.graph.add_node(company);
+    graph
+        .type_indices
+        .entry_or_default("Company".to_string())
+        .push(c0);
+
+    let knows =
+        |g: &mut DirGraph| EdgeData::new("KNOWS".to_string(), HashMap::new(), &mut g.interner);
+    let e = knows(&mut graph);
+    graph.graph.add_edge(persons[0], persons[1], e);
+    let e = knows(&mut graph);
+    graph.graph.add_edge(persons[2], persons[3], e);
+    let e = EdgeData::new("WORKS_AT".to_string(), HashMap::new(), &mut graph.interner);
+    graph.graph.add_edge(persons[0], c0, e);
+    let e = EdgeData::new("WORKS_AT".to_string(), HashMap::new(), &mut graph.interner);
+    graph.graph.add_edge(persons[2], c0, e);
+    graph
+}
+
+#[test]
+fn test_wcc_unscoped_bridges_via_other_edge_type() {
+    let graph = build_two_type_graph();
+    let components = weakly_connected_components(&graph, None).unwrap();
+    // WORKS_AT connects both Person pairs through C0 → one component of 5.
+    assert_eq!(components.len(), 1);
+    assert_eq!(components[0].len(), 5);
+}
+
+#[test]
+fn test_wcc_scoped_to_node_type_and_relationship() {
+    let graph = build_two_type_graph();
+    let node_types = ["Person".to_string()];
+    let rel_types = [InternedKey::from_str("KNOWS")];
+    let components =
+        weakly_connected_components_scoped(&graph, Some(&node_types), Some(&rel_types), None)
+            .unwrap();
+    // Two KNOWS pairs, Company excluded → two components of 2.
+    assert_eq!(components.len(), 2);
+    assert_eq!(components[0].len(), 2);
+    assert_eq!(components[1].len(), 2);
+}
+
+#[test]
+fn test_wcc_scoped_relationship_only_induces_subgraph() {
+    let graph = build_two_type_graph();
+    // No node_type → universe is nodes incident to a KNOWS edge (the 4 Persons).
+    let rel_types = [InternedKey::from_str("KNOWS")];
+    let components =
+        weakly_connected_components_scoped(&graph, None, Some(&rel_types), None).unwrap();
+    assert_eq!(components.len(), 2);
+    assert_eq!(components.iter().map(|c| c.len()).sum::<usize>(), 4);
 }
 
 // ========================================================================

@@ -58,12 +58,12 @@ fn filtered_neighbors_undirected(
         Some(types) => {
             let mut n = Vec::new();
             for edge in g.edges_directed(node, Direction::Outgoing) {
-                if types.iter().any(|t| *t == edge.weight().connection_type) {
+                if types.iter().any(|t| *t == edge.connection_type()) {
                     n.push(edge.target());
                 }
             }
             for edge in g.edges_directed(node, Direction::Incoming) {
-                if types.iter().any(|t| *t == edge.weight().connection_type) {
+                if types.iter().any(|t| *t == edge.connection_type()) {
                     n.push(edge.source());
                 }
             }
@@ -89,7 +89,7 @@ fn filtered_neighbors_outgoing(
         None => g.neighbors_directed(node, Direction::Outgoing).collect(),
         Some(types) => g
             .edges_directed(node, Direction::Outgoing)
-            .filter(|e| types.iter().any(|t| *t == e.weight().connection_type))
+            .filter(|e| types.iter().any(|t| *t == e.connection_type()))
             .map(|e| e.target())
             .collect(),
     }
@@ -629,10 +629,64 @@ pub fn weakly_connected_components(
     graph: &DirGraph,
     deadline: Option<Instant>,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
-    let nodes: Vec<NodeIndex> = {
+    weakly_connected_components_scoped(graph, None, None, deadline)
+}
+
+/// Weakly connected components, optionally scoped to a node-type universe
+/// and/or a set of relationship types.
+///
+/// - `node_types`: when `Some`, the component universe is restricted to
+///   nodes of those types — a node of an excluded type never appears, even
+///   as a singleton. When `None`, the universe is every node, *unless*
+///   `rel_types` is `Some`, in which case it is the set of nodes incident to
+///   at least one matching edge (the subgraph induced by those edges).
+/// - `rel_types`: when `Some`, only edges of those types union their
+///   endpoints; all other edges are ignored. When `None`, every edge unions.
+///
+/// `weakly_connected_components_scoped(g, Some(&["Person"]), Some(&[knows]), …)`
+/// is the "components of the Person/KNOWS subgraph" query — the single-
+/// relationship projection a graph-algorithm library would operate on.
+/// Unknown node-type names contribute no nodes (they are skipped, not an
+/// error) so a multi-type request degrades gracefully.
+pub fn weakly_connected_components_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Option<Instant>,
+) -> Result<Vec<Vec<NodeIndex>>, String> {
+    let edge_matches = |key: InternedKey| -> bool {
+        match rel_types {
+            Some(keys) => keys.contains(&key),
+            None => true,
+        }
+    };
+
+    // Node universe (see doc-comment for the three cases).
+    let nodes: Vec<NodeIndex> = if let Some(types) = node_types {
+        let mut v = Vec::new();
+        for t in types {
+            if let Some(type_nodes) = graph.type_indices.get(t.as_str()) {
+                v.extend(type_nodes.iter());
+            }
+        }
+        v
+    } else if rel_types.is_some() {
+        let mut seen: HashSet<NodeIndex> = HashSet::new();
+        for edge in {
+            let g = &graph.graph;
+            g.edge_references()
+        } {
+            if edge_matches(edge.connection_type()) {
+                seen.insert(edge.source());
+                seen.insert(edge.target());
+            }
+        }
+        seen.into_iter().collect()
+    } else {
         let g = &graph.graph;
         g.node_indices().collect()
     };
+
     let n = nodes.len();
 
     if n == 0 {
@@ -642,8 +696,9 @@ pub fn weakly_connected_components(
     // Use node_bound() not node_count() — StableDiGraph indices can have gaps
     let bound = graph.graph.node_bound();
 
-    // Build compact index mapping: graph NodeIndex → contiguous 0..n
-    let mut node_to_idx = vec![0usize; bound];
+    // Build compact index mapping: graph NodeIndex → contiguous 0..n.
+    // usize::MAX marks a node outside the universe (skipped during union).
+    let mut node_to_idx = vec![usize::MAX; bound];
     for (i, &node) in nodes.iter().enumerate() {
         node_to_idx[node.index()] = i;
     }
@@ -695,8 +750,16 @@ pub fn weakly_connected_components(
                 }
             }
         }
+        if !edge_matches(edge.connection_type()) {
+            continue;
+        }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
+        // Skip edges touching a node outside the universe (e.g. a KNOWS edge
+        // to a node type not in `node_types`).
+        if src_i == usize::MAX || tgt_i == usize::MAX {
+            continue;
+        }
         union(&mut parent, &mut rank, src_i, tgt_i);
     }
 
@@ -842,7 +905,7 @@ pub fn betweenness_centrality(
         g.edge_references()
     } {
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -1131,7 +1194,7 @@ pub fn pagerank(
         g.edge_references()
     } {
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -1298,7 +1361,7 @@ pub fn degree_centrality(
             }
         }
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -1371,7 +1434,7 @@ pub fn closeness_centrality(
         g.edge_references()
     } {
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -1655,7 +1718,7 @@ pub fn louvain_communities(
         g.edge_references()
     } {
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -1876,7 +1939,7 @@ pub fn label_propagation(
         g.edge_references()
     } {
         if let Some(ref types) = interned_ct {
-            if !types.iter().any(|t| *t == edge.weight().connection_type) {
+            if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
         }
@@ -2113,7 +2176,7 @@ pub fn shortest_path_weighted(
             )
         {
             if let Some(types) = conn_filter {
-                if !types.iter().any(|t| *t == edge.weight().connection_type) {
+                if !types.iter().any(|t| *t == edge.connection_type()) {
                     continue;
                 }
             }
