@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **WAL crash recovery is no longer quadratic.** Replaying recovered WAL frames
+  routed each frame through `add_nodes`, which rebuilds the type's id-index per
+  call — so recovering N un-checkpointed single-row commits was O(N · graph).
+  Replay now **folds all frames into net per-entity state** (last write wins per
+  `(node_type, id)` / `(conn, src, tgt)`) and applies it in a handful of bulk
+  calls, rebuilding each index once. Sound because the ops are identity-keyed and
+  idempotent. Replaying 1,000 un-checkpointed commits onto a 21k-node checkpoint
+  dropped from ~932 ms to ~42 ms (~22×); the win grows with the un-checkpointed
+  frame count. (Only matters between checkpoints — `save()` truncates the WAL.)
+
 - **`WHERE n.id IN $ids RETURN count(n)` now anchors on the id index instead
   of full-scanning.** The `fuse_node_scan_aggregate` planner pass fused
   `MATCH (n) WHERE … RETURN count(n)` into a streaming node sweep that applied

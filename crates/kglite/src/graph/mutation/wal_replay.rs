@@ -15,19 +15,28 @@
 //! touches the storage layer directly except for the one thing those
 //! helpers don't expose — removing a single edge by identity.
 //!
-//! ## Ordering & idempotence
+//! ## Net-state fold (why not per-frame)
 //!
-//! Frames apply in ascending `lsn`; frames at or below the checkpoint
-//! version are already folded into the snapshot and skipped. *Within* a
-//! frame, the upsert set and the remove set are disjoint by identity (the
-//! capture layer collapses an add-then-remove of the same entity to just
-//! the remove), so the four phases below — node upserts, edge upserts,
-//! edge removes, node removes — are order-safe and respect referential
-//! integrity (endpoints exist before their edges; edges go before their
-//! endpoints on the way out). Upserts are full-state `"replace"`, so
-//! replaying a frame twice is harmless — the property of a redo log that
-//! makes crash recovery safe regardless of whether the last frame reached
-//! the snapshot.
+//! The WAL is a **redo log**: the recovered graph is the fold of every op
+//! with `lsn > checkpoint_version` over the snapshot. Applying that
+//! frame-by-frame is correct but quadratic — each frame's `add_nodes` call
+//! rebuilds the type's id-index over a growing graph, so replaying N
+//! single-row frames is O(N · graph). Instead we **fold all ops into a net
+//! per-entity state first** (last write wins per `(node_type, id)` /
+//! `(conn, src, tgt)` — `Upsert` or `Remove`), then apply that net state in
+//! a handful of bulk calls (one `add_nodes` per node type, one
+//! `add_connections` per edge group), rebuilding each index once.
+//!
+//! This is sound because the ops are **identity-keyed and idempotent**: the
+//! final value of an entity depends only on its last op, not on the path
+//! there. Folding then applying reaches the same final state as a
+//! frame-by-frame replay, and replaying twice is still harmless.
+//!
+//! Apply order — node upserts → edge upserts → edge removes → node removes —
+//! respects referential integrity (endpoints exist before their edges; a
+//! removed node's edges go with it via detach). An edge whose endpoint is
+//! net-removed is dropped from the edge-upsert batch (its node-remove will
+//! detach it anyway).
 
 use std::collections::{HashMap, HashSet};
 
@@ -39,47 +48,137 @@ use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::wal::{MutationOp, WalFrame};
 
-/// Apply every frame with `lsn > after_lsn` to `graph`, in order.
-/// Returns the highest `lsn` applied (or `after_lsn` if none), so the
-/// caller can set the graph version to match the recovered state.
+/// Logical node identity: `(node_type, id)`.
+type NodeKey = (String, Value);
+/// Logical edge identity: `(conn_type, src_type, src_id, tgt_type, tgt_id)`.
+type EdgeKey = (String, String, Value, String, Value);
+
+/// Net state of a node after folding: an upsert (title + props) or a remove.
+enum NodeNet {
+    Upsert {
+        title: Value,
+        props: Vec<(String, Value)>,
+    },
+    Remove,
+}
+/// Net state of an edge after folding.
+enum EdgeNet {
+    Upsert { props: Vec<(String, Value)> },
+    Remove,
+}
+
+/// Fold every frame with `lsn > after_lsn` into net per-entity state and
+/// apply it to `graph` in bulk. Returns the highest `lsn` folded in (or
+/// `after_lsn` if none), so the caller can set the recovered graph version.
 pub fn apply_frames(
     graph: &mut DirGraph,
     frames: &[WalFrame],
     after_lsn: u64,
 ) -> Result<u64, String> {
+    let mut nodes: HashMap<NodeKey, NodeNet> = HashMap::new();
+    let mut edges: HashMap<EdgeKey, EdgeNet> = HashMap::new();
     let mut max_lsn = after_lsn;
+    let mut any = false;
+
     for frame in frames {
         if frame.lsn <= after_lsn {
             continue;
         }
-        apply_ops(graph, &frame.ops)?;
+        any = true;
         max_lsn = max_lsn.max(frame.lsn);
+        for op in &frame.ops {
+            match op {
+                MutationOp::UpsertNode {
+                    node_type,
+                    id,
+                    title,
+                    properties,
+                } => {
+                    nodes.insert(
+                        (node_type.clone(), id.clone()),
+                        NodeNet::Upsert {
+                            title: title.clone(),
+                            props: properties.clone(),
+                        },
+                    );
+                }
+                MutationOp::RemoveNode { node_type, id } => {
+                    nodes.insert((node_type.clone(), id.clone()), NodeNet::Remove);
+                }
+                MutationOp::UpsertEdge {
+                    conn_type,
+                    src_type,
+                    src_id,
+                    tgt_type,
+                    tgt_id,
+                    properties,
+                } => {
+                    edges.insert(
+                        (
+                            conn_type.clone(),
+                            src_type.clone(),
+                            src_id.clone(),
+                            tgt_type.clone(),
+                            tgt_id.clone(),
+                        ),
+                        EdgeNet::Upsert {
+                            props: properties.clone(),
+                        },
+                    );
+                }
+                MutationOp::RemoveEdge {
+                    conn_type,
+                    src_type,
+                    src_id,
+                    tgt_type,
+                    tgt_id,
+                } => {
+                    edges.insert(
+                        (
+                            conn_type.clone(),
+                            src_type.clone(),
+                            src_id.clone(),
+                            tgt_type.clone(),
+                            tgt_id.clone(),
+                        ),
+                        EdgeNet::Remove,
+                    );
+                }
+            }
+        }
+    }
+
+    if any {
+        apply_net(graph, nodes, edges)?;
     }
     Ok(max_lsn)
 }
 
-/// Apply one frame's ops. See the module docs for why the upsert and
-/// remove sets can be grouped into four order-safe phases.
-fn apply_ops(graph: &mut DirGraph, ops: &[MutationOp]) -> Result<(), String> {
-    // ── Phase 1: node upserts, grouped by node_type ──────────────────
-    let mut node_groups: HashMap<String, NodeRows> = HashMap::new();
-    for op in ops {
-        if let MutationOp::UpsertNode {
-            node_type,
-            id,
-            title,
-            properties,
-        } = op
-        {
-            let g = node_groups.entry(node_type.clone()).or_default();
-            for (k, _) in properties {
+/// Apply folded net state in bulk. See the module docs for the ordering
+/// rationale.
+fn apply_net(
+    graph: &mut DirGraph,
+    nodes: HashMap<NodeKey, NodeNet>,
+    edges: HashMap<EdgeKey, EdgeNet>,
+) -> Result<(), String> {
+    // Node identities scheduled for removal — used to drop edge upserts whose
+    // endpoint won't exist.
+    let removed_nodes: HashSet<NodeKey> = nodes
+        .iter()
+        .filter(|(_, v)| matches!(v, NodeNet::Remove))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    // ── Phase 1: node upserts, grouped by node_type, one add_nodes each ──
+    let mut node_groups: HashMap<&str, NodeRows> = HashMap::new();
+    for ((node_type, id), net) in &nodes {
+        if let NodeNet::Upsert { title, props } = net {
+            let g = node_groups.entry(node_type.as_str()).or_default();
+            for (k, _) in props {
                 g.note_column(k);
             }
-            g.rows.push((
-                id.clone(),
-                title.clone(),
-                properties.iter().cloned().collect(),
-            ));
+            g.rows
+                .push((id.clone(), title.clone(), props.iter().cloned().collect()));
         }
     }
     for (node_type, group) in node_groups {
@@ -87,7 +186,7 @@ fn apply_ops(graph: &mut DirGraph, ops: &[MutationOp]) -> Result<(), String> {
         add_nodes(
             graph,
             df,
-            node_type,
+            node_type.to_string(),
             "id".to_string(),
             Some("title".to_string()),
             Some("replace".to_string()),
@@ -95,39 +194,39 @@ fn apply_ops(graph: &mut DirGraph, ops: &[MutationOp]) -> Result<(), String> {
     }
 
     // ── Phase 2: edge upserts, grouped by (conn, src_type, tgt_type) ──
-    let mut edge_groups: HashMap<(String, String, String), EdgeRows> = HashMap::new();
-    for op in ops {
-        if let MutationOp::UpsertEdge {
-            conn_type,
-            src_type,
-            src_id,
-            tgt_type,
-            tgt_id,
-            properties,
-        } = op
-        {
+    let mut edge_groups: HashMap<(&str, &str, &str), EdgeRows> = HashMap::new();
+    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in &edges {
+        if let EdgeNet::Upsert { props } = net {
+            // Skip if either endpoint is being removed — the node-remove
+            // detaches any such edge anyway, and add_connections would fail
+            // on a missing endpoint.
+            if removed_nodes.contains(&(src_type.clone(), src_id.clone()))
+                || removed_nodes.contains(&(tgt_type.clone(), tgt_id.clone()))
+            {
+                continue;
+            }
             let g = edge_groups
-                .entry((conn_type.clone(), src_type.clone(), tgt_type.clone()))
+                .entry((conn.as_str(), src_type.as_str(), tgt_type.as_str()))
                 .or_default();
-            for (k, _) in properties {
+            for (k, _) in props {
                 g.note_column(k);
             }
             g.rows.push((
                 src_id.clone(),
                 tgt_id.clone(),
-                properties.iter().cloned().collect(),
+                props.iter().cloned().collect(),
             ));
         }
     }
-    for ((conn_type, src_type, tgt_type), group) in edge_groups {
+    for ((conn, src_type, tgt_type), group) in edge_groups {
         let df = build_dataframe(&["src_id", "tgt_id"], &group.columns, &group.rows)?;
         add_connections(
             graph,
             df,
-            conn_type,
-            src_type,
+            conn.to_string(),
+            src_type.to_string(),
             "src_id".to_string(),
-            tgt_type,
+            tgt_type.to_string(),
             "tgt_id".to_string(),
             None,
             None,
@@ -137,31 +236,25 @@ fn apply_ops(graph: &mut DirGraph, ops: &[MutationOp]) -> Result<(), String> {
 
     // ── Phase 3: edge removes ─────────────────────────────────────────
     let mut removed_edges = 0usize;
-    for op in ops {
-        if let MutationOp::RemoveEdge {
-            conn_type,
-            src_type,
-            src_id,
-            tgt_type,
-            tgt_id,
-        } = op
-        {
-            let (Some(src), Some(tgt)) = (
-                graph.lookup_by_id(src_type, src_id),
-                graph.lookup_by_id(tgt_type, tgt_id),
-            ) else {
-                continue;
-            };
-            let conn_key = InternedKey::from_str(conn_type);
-            let eidx = graph
-                .graph
-                .edges_connecting(src, tgt)
-                .find(|er| er.weight().connection_type == conn_key)
-                .map(|er| er.id());
-            if let Some(eidx) = eidx {
-                GraphWrite::remove_edge(&mut graph.graph, eidx);
-                removed_edges += 1;
-            }
+    for ((conn, src_type, src_id, tgt_type, tgt_id), net) in &edges {
+        if !matches!(net, EdgeNet::Remove) {
+            continue;
+        }
+        let (Some(src), Some(tgt)) = (
+            graph.lookup_by_id(src_type, src_id),
+            graph.lookup_by_id(tgt_type, tgt_id),
+        ) else {
+            continue;
+        };
+        let conn_key = InternedKey::from_str(conn);
+        let eidx = graph
+            .graph
+            .edges_connecting(src, tgt)
+            .find(|er| er.weight().connection_type == conn_key)
+            .map(|er| er.id());
+        if let Some(eidx) = eidx {
+            GraphWrite::remove_edge(&mut graph.graph, eidx);
+            removed_edges += 1;
         }
     }
     if removed_edges > 0 {
@@ -171,8 +264,8 @@ fn apply_ops(graph: &mut DirGraph, ops: &[MutationOp]) -> Result<(), String> {
 
     // ── Phase 4: node removes (detach incident edges + index cleanup) ─
     let mut to_delete: HashSet<NodeIndex> = HashSet::new();
-    for op in ops {
-        if let MutationOp::RemoveNode { node_type, id } = op {
+    for ((node_type, id), net) in &nodes {
+        if matches!(net, NodeNet::Remove) {
             if let Some(idx) = graph.lookup_by_id(node_type, id) {
                 to_delete.insert(idx);
             }
