@@ -29,7 +29,10 @@ use fusion::{
     fuse_vector_score_order_limit, mark_return_lazy_eligible,
 };
 use index_selection::push_where_into_match;
-use join_order::{optimize_pattern_start_node, reorder_match_clauses, reorder_match_patterns};
+use join_order::{
+    optimize_pattern_start_node, reorder_cyclic_pattern_edges, reorder_match_clauses,
+    reorder_match_patterns,
+};
 use rel_predicate_pushdown::extract_pushable_rel_predicates;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
@@ -120,6 +123,13 @@ pub const PASSES: &[(&str, PassFn)] = &[
     // O(1) cost-proxy reorder. Runs BEFORE pattern_start_node so reversal
     // sees the post-reorder clause sequence and tracks bound_vars correctly.
     ("reorder_match_clauses", pass_reorder_match_clauses),
+    // Re-root simple cyclic patterns at their most-selective node BEFORE
+    // pattern_start_node (which can't help a cycle — both ends are the same
+    // variable, so its reverse is a no-op).
+    (
+        "reorder_cyclic_pattern_edges",
+        pass_reorder_cyclic_pattern_edges,
+    ),
     (
         "optimize_pattern_start_node",
         pass_optimize_pattern_start_node,
@@ -551,6 +561,16 @@ fn pass_fuse_spatial_join(query: &mut CypherQuery, ctx: &PassCtx) {
 /// correctly.
 fn pass_reorder_match_clauses(query: &mut CypherQuery, ctx: &PassCtx) {
     reorder_match_clauses(query, ctx.graph)
+}
+
+/// **Pass:** `reorder_cyclic_pattern_edges` — Re-root a simple cyclic pattern
+/// (a ring whose start variable repeats at the end) at its most-selective node,
+/// orienting the walk so the cheaper incident edge drives first. Turns the
+/// cycle-closing segment into an O(1) bound-target check in the matcher.
+/// Shape-gated: only fires on simple rings of clean single-typed edges and only
+/// on a clear (≥4×) selectivity win, leaving every acyclic pattern unchanged.
+fn pass_reorder_cyclic_pattern_edges(query: &mut CypherQuery, ctx: &PassCtx) {
+    reorder_cyclic_pattern_edges(query, ctx.graph)
 }
 
 /// **Pass:** `optimize_pattern_start_node` — For 3+-element patterns,

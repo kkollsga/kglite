@@ -17,6 +17,6 @@ pub mod pattern;
 pub use matcher::PatternExecutor;
 pub use parser::parse_pattern;
 pub use pattern::{
-    EdgeDirection, MatchBinding, NodePattern, Pattern, PatternElement, PatternMatch,
+    EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement, PatternMatch,
     PropertyMatcher,
 };

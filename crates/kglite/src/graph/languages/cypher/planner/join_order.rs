@@ -528,3 +528,197 @@ pub(super) fn reorder_match_patterns(query: &mut CypherQuery, graph: &DirGraph) 
         }
     }
 }
+
+/// A simple cyclic pattern (ring) extracted from a MATCH pattern's elements —
+/// `k` distinct nodes joined by `k` clean single-typed edges, where the start
+/// variable repeats exactly once (closing the ring). Cloned out of the AST so
+/// the pass can re-root freely, then write a fresh `elements` vec back.
+struct SimpleCycle {
+    nodes: Vec<crate::graph::core::pattern_matching::NodePattern>,
+    edges: Vec<crate::graph::core::pattern_matching::EdgePattern>,
+    k: usize,
+}
+
+impl SimpleCycle {
+    /// Recognise `[N, E, N, E, …, N]` (len `2k+1`, `k ≥ 2`) where the first and
+    /// last node share a variable, every ring node has a *distinct* `Some`
+    /// variable, and every edge is "clean" — single connection type, exactly
+    /// one hop, no edge variable / properties / inline filter / path-info.
+    /// Anything else returns `None` (⇒ the caller leaves the pattern untouched),
+    /// which keeps the rewrite confined to the shape it can prove equivalent.
+    fn detect(elements: &[PatternElement]) -> Option<SimpleCycle> {
+        if elements.len() < 5 || elements.len().is_multiple_of(2) {
+            return None;
+        }
+        let k = elements.len() / 2; // ring nodes == ring edges
+        if k < 2 {
+            return None;
+        }
+
+        // First and last must be nodes sharing a variable (the closing cycle).
+        let (first_var, last_var) = match (&elements[0], elements.last()?) {
+            (PatternElement::Node(a), PatternElement::Node(b)) => {
+                (a.variable.as_ref()?, b.variable.as_ref()?)
+            }
+            _ => return None,
+        };
+        if first_var != last_var {
+            return None;
+        }
+
+        let mut nodes = Vec::with_capacity(k);
+        let mut edges = Vec::with_capacity(k);
+        for (i, el) in elements.iter().enumerate() {
+            match (i % 2, el) {
+                // ring nodes are the even indices except the repeated last one
+                (0, PatternElement::Node(np)) if i + 1 < elements.len() => nodes.push(np.clone()),
+                (0, PatternElement::Node(_)) => {} // trailing repeat — skip
+                (1, PatternElement::Edge(ep)) => edges.push(ep.clone()),
+                _ => return None,
+            }
+        }
+        if nodes.len() != k || edges.len() != k {
+            return None;
+        }
+
+        // Every ring node distinct & named (a non-adjacent variable repeat would
+        // be a figure-eight, not a simple ring — out of scope, bail).
+        let mut seen = HashSet::with_capacity(k);
+        for np in &nodes {
+            let v = np.variable.as_ref()?;
+            if !seen.insert(v.clone()) {
+                return None;
+            }
+        }
+
+        // Clean edges only — keeps re-rooting (which may flip directions)
+        // provably result-preserving and avoids edge-binding/path concerns.
+        // NB: `needs_path_info` is the parser's default (`true`) until a later
+        // pass clears it — NOT a cleanliness signal — so it is deliberately not
+        // checked. `var_length: None` already guarantees a single fixed edge.
+        for ep in &edges {
+            if ep.variable.is_some()
+                || ep.connection_type.is_none()
+                || ep.connection_types.is_some()
+                || ep.var_length.is_some()
+                || ep.properties.is_some()
+                || ep.edge_filter.is_some()
+            {
+                return None;
+            }
+        }
+
+        Some(SimpleCycle { nodes, edges, k })
+    }
+
+    /// Edge `j` connects `nodes[j]` and `nodes[(j+1) % k]` (per its written
+    /// direction). Re-emit the ring as a linear `elements` vec rooted at
+    /// `root`, walking forward or reflected so the *cheaper* incident edge of
+    /// the root drives first. Reflected edges have their direction flipped so
+    /// the traversal semantics are identical to the original ring.
+    fn linearize(
+        &self,
+        root: usize,
+        edge_counts: Option<&HashMap<String, usize>>,
+    ) -> Vec<PatternElement> {
+        use crate::graph::core::pattern_matching::EdgeDirection;
+        let k = self.k;
+        let cost = |ep: &crate::graph::core::pattern_matching::EdgePattern| -> usize {
+            match (edge_counts, ep.connection_type.as_ref()) {
+                (Some(m), Some(ct)) => m.get(ct).copied().unwrap_or(usize::MAX),
+                _ => 0, // unknown ⇒ treat equal; forward wins the tie below
+            }
+        };
+        // Forward drives edges[root]; reflected drives edges[root-1].
+        let forward = cost(&self.edges[root]) <= cost(&self.edges[(root + k - 1) % k]);
+
+        let flip = |mut ep: crate::graph::core::pattern_matching::EdgePattern| {
+            ep.direction = match ep.direction {
+                EdgeDirection::Outgoing => EdgeDirection::Incoming,
+                EdgeDirection::Incoming => EdgeDirection::Outgoing,
+                EdgeDirection::Both => EdgeDirection::Both,
+            };
+            ep
+        };
+
+        let mut out = Vec::with_capacity(2 * k + 1);
+        out.push(PatternElement::Node(self.nodes[root].clone()));
+        for m in 0..k {
+            let (edge_idx, next_node) = if forward {
+                ((root + m) % k, (root + m + 1) % k)
+            } else {
+                let ej = (root + k - 1 - m) % k;
+                (ej, ej) // reflected: next node is the edge's lower-index endpoint
+            };
+            let ep = self.edges[edge_idx].clone();
+            out.push(PatternElement::Edge(if forward { ep } else { flip(ep) }));
+            out.push(PatternElement::Node(self.nodes[next_node].clone()));
+        }
+        out
+    }
+}
+
+/// Re-root a *simple cyclic* pattern at its most-selective node.
+///
+/// A cycle such as
+/// `(p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p)`
+/// is evaluated left-to-right from `elements[0]`. Starting at the
+/// largest-cardinality node (`p` — every Person) materialises a huge
+/// intermediate set before the cycle closes. `optimize_pattern_start_node`
+/// can't help: it only *reverses*, and a cycle's two ends are the same node, so
+/// first/last selectivity are equal.
+///
+/// This pass rotates the ring so the **most-selective** node starts the walk,
+/// and (when the edge-type-count cache is warm) orients it so the cheaper
+/// incident edge drives first. The cycle-closing segment then lands on an
+/// already-bound node, which the matcher confirms with an O(1) adjacency check
+/// (`bound_target` → `expand_from_node`'s `target_hint`) rather than a full
+/// expansion.
+///
+/// **Shape-gated for zero acyclic regression.** Fires ONLY on a simple ring of
+/// clean single-typed edges whose start variable repeats exactly once, and only
+/// re-roots when the new root is ≥`ROOT_GAIN`× more selective than the written
+/// one (and only when that root isn't already `elements[0]`). Every other
+/// pattern is left byte-identical, so acyclic queries are provably unaffected.
+pub(super) fn reorder_cyclic_pattern_edges(query: &mut CypherQuery, graph: &DirGraph) {
+    /// Re-root only on a clear selectivity win, to avoid churn on marginal
+    /// cases where the cost proxy could mislead.
+    const ROOT_GAIN: usize = 4;
+
+    // Edge orientation is a refinement that needs the count cache; rooting only
+    // needs node selectivity (always available). Skip the cache scan if cold.
+    let edge_counts = if graph.has_edge_type_counts_cache() {
+        Some(graph.get_edge_type_counts())
+    } else {
+        None
+    };
+
+    for clause in &mut query.clauses {
+        // OPTIONAL MATCH excluded: its null-extension semantics make re-rooting
+        // riskier and cyclic OPTIONAL patterns are vanishingly rare.
+        let (patterns, path_assignments) = match clause {
+            Clause::Match(m) => (&mut m.patterns, &m.path_assignments),
+            _ => continue,
+        };
+        for (pi, pattern) in patterns.iter_mut().enumerate() {
+            if path_assignments.iter().any(|pa| pa.pattern_index == pi) {
+                continue; // path semantics depend on written order
+            }
+            let Some(ring) = SimpleCycle::detect(&pattern.elements) else {
+                continue;
+            };
+            let sels: Vec<usize> = ring
+                .nodes
+                .iter()
+                .map(|np| estimate_node_selectivity(np, graph))
+                .collect();
+            let root = (0..ring.k).min_by_key(|&j| sels[j]).unwrap_or(0);
+            // Clear-win gate; also a no-op when the written root is already best
+            // (root == 0 ⇒ sels[root] == sels[0] ⇒ condition false).
+            if sels[root].saturating_mul(ROOT_GAIN) >= sels[0] {
+                continue;
+            }
+            pattern.elements = ring.linearize(root, edge_counts.as_ref());
+        }
+    }
+}

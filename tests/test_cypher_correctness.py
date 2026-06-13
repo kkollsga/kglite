@@ -1303,3 +1303,33 @@ class TestCyclicPatternCorrectness:
             "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p) RETURN p.id AS p"
         ).to_list()
         assert [r["p"] for r in rows] == ["alice"]
+
+    def test_reroot_preserves_results_when_pass_fires(self):
+        """`reorder_cyclic_pattern_edges` re-roots a cyclic pattern at its
+        most-selective node. On a graph with a clear selectivity gap (50 Person,
+        2 Company, 4 Project) the pass fires — and the optimised result must
+        equal the naive (pass-disabled) result, node-for-node."""
+        g = rg.KnowledgeGraph()
+        for i in range(50):
+            g.cypher(f"CREATE (:Person {{id: {i}}})")
+        for i in range(2):
+            g.cypher(f"CREATE (:Company {{id: {1000 + i}}})")
+        for i in range(4):
+            g.cypher(f"CREATE (:Project {{id: {2000 + i}}})")
+        for i in range(50):  # everyone works at a company; half contribute to a project
+            g.cypher(f"MATCH (p:Person {{id:{i}}}),(c:Company {{id:{1000 + i % 2}}}) CREATE (p)-[:WORKS_AT]->(c)")
+            g.cypher(
+                f"MATCH (p:Person {{id:{i}}}),(pr:Project {{id:{2000 + i % 4}}}) CREATE (p)-[:CONTRIBUTES_TO]->(pr)"
+            )
+        for i in range(4):  # each company owns 2 projects
+            g.cypher(f"MATCH (c:Company {{id:{1000 + i % 2}}}),(pr:Project {{id:{2000 + i}}}) CREATE (c)-[:OWNS]->(pr)")
+
+        q = (
+            "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)"
+            "<-[:CONTRIBUTES_TO]-(p) RETURN p.id AS p ORDER BY p.id"
+        )
+        optimised = g.cypher(q).to_list()
+        naive = g.cypher(q, disabled_passes=["reorder_cyclic_pattern_edges"]).to_list()
+        assert optimised == naive
+        # sanity: the cycle actually matches some rows (not a vacuous pass)
+        assert len(optimised) > 0

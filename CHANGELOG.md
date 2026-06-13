@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestCyclicPatternCorrectness` cases (exact cycle counts + no over-match) and
   a `knows_triangle_cycle` entry in the differential corpus.
 
+- **Cyclic patterns are re-rooted at their most-selective node** (new planner
+  pass `reorder_cyclic_pattern_edges`). A cycle like
+  `(p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p)`
+  was evaluated from the written start (`p` — every Person), materialising a
+  huge intermediate set before the cycle closed; `optimize_pattern_start_node`
+  couldn't help (a cycle's two ends are the same variable, so its reverse is a
+  no-op). The pass rotates the ring so the smallest-cardinality node starts the
+  walk (here `Company`, ~25× fewer start rows) and — when the edge-type-count
+  cache is warm — orients it so the cheaper incident edge drives first; the
+  closing segment then lands on the bound start node (the O(1) check above).
+  On the 25k-node embedded-app graph this took the 4-way cyclic `pattern_match`
+  join from ~16.8 ms to ~6.2 ms (**2.7×**, matching kùzu). Strictly shape-gated
+  — fires only on a simple ring of clean single-typed edges and only on a clear
+  (≥4×) selectivity win, so every acyclic pattern is left byte-identical. The
+  pass is disable-able via `disabled_passes=["reorder_cyclic_pattern_edges"]`;
+  a `TestCyclicPatternCorrectness` case asserts optimised == naive when it fires.
+
 ## [0.10.17] — 2026-06-13 — durable WAL writes (`durable=True`), disk Cypher CREATE/MERGE, embedded-app perf
 
 ### Performance
