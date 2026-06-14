@@ -5,6 +5,36 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Leiden community detection — `CALL leiden(...)`.** The algorithm the
+  GraphRAG ecosystem standardised on: like Louvain but a refinement phase
+  guarantees every returned community is **well-connected** (Louvain can return
+  internally-disconnected communities). `CALL leiden({resolution,
+  weight_property, connection_types}) YIELD node, community [, level]`.
+  Deterministic variant — refinement splits communities into connected
+  components (guaranteeing connectivity) without the reference implementation's
+  randomised modularity sub-refinement, so results are reproducible. Reaches
+  every interface via `cypher_query`; documented in `describe()` /
+  `graph_overview(cypher=['leiden'])` and CYPHER.md.
+
+### Changed
+
+- **Louvain is now multilevel (hierarchical).** `CALL louvain(...)` /
+  `louvain_communities()` previously ran only the local-moving phase (single
+  level) — no aggregation, no hierarchy, and lower modularity than the full
+  algorithm. It now runs the complete multilevel loop (local-move → aggregate →
+  repeat), finding higher-modularity partitions. **The returned flat partition
+  may differ from prior versions** (coarser, higher modularity) — community
+  detection results were never a stable contract; existing `louvain_communities()`
+  dict shape is unchanged.
+- **`CALL louvain` / `CALL leiden` expose the community hierarchy** via an
+  optional `level` column: `YIELD node, community, level` emits one row per
+  (node, level), finest (0) → coarsest. Omitting `level` returns the flat best
+  partition as before. Useful for GraphRAG-style tiered community summaries.
+
 ## [0.10.18] — 2026-06-14 — cyclic pattern-match optimisation (matcher + planner)
 
 ### Performance
