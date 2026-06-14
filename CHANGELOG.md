@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.20] — 2026-06-15 — Native OKF (Open Knowledge Format) ingestion
+
 ### Added
 
 - **Native OKF (Open Knowledge Format) ingestion — `from kglite import okf`.**
