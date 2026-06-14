@@ -16,11 +16,13 @@
 //! This module is gated behind the `okf` Cargo feature (it pulls a YAML parser);
 //! the Python wheel enables it, bare builds don't.
 
+pub mod build;
 pub mod frontmatter;
 pub mod links;
 pub mod model;
 pub mod walk;
 
+pub use build::build;
 pub use model::{BuildOptions, ConceptDoc, Dialect, Link};
 
 use crate::datatypes::values::Value;
