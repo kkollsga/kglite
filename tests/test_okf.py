@@ -1,0 +1,159 @@
+"""OKF (Open Knowledge Format) ingestion tests.
+
+Tier 1 — golden synthetic fixtures (deterministic regression backbone). The
+committed bundles under ``tests/fixtures/okf/golden/`` exercise every parse and
+build path: labelled concepts, the edge-type ladder, dangling → provisional
+stubs, an orphan, nested-frontmatter flattening, a no-frontmatter degrade, the
+loose/obsidian wikilink dialect, and reserved-file handling.
+
+(Tier 2 — real-corpus integration against Google's OKF bundles — lives in
+``test_okf_corpus.py``.)
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+
+import kglite
+from kglite import okf
+
+FIXTURES = Path(__file__).parent / "fixtures" / "okf" / "golden"
+OKF_BUNDLE = FIXTURES / "okf"
+OBSIDIAN_BUNDLE = FIXTURES / "obsidian"
+
+
+def _labels(g) -> Counter:
+    rows = g.cypher("MATCH (n) RETURN labels(n)[0] AS l").to_list()
+    return Counter(r["l"] for r in rows)
+
+
+def _edge_types(g) -> Counter:
+    rows = g.cypher("MATCH ()-[r]->() RETURN type(r) AS t").to_list()
+    return Counter(r["t"] for r in rows)
+
+
+class TestOkfGoldenBundle:
+    """Strict OKF dialect over the committed golden bundle."""
+
+    def test_node_count_and_labels(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # 9 concepts + 1 vivified `tables/ghost` stub (index.md reserved, plain.md
+        # counts as a Concept).
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 10
+        labels = _labels(g)
+        assert labels["BigQuery Table"] == 2
+        assert labels["BigQuery Dataset"] == 1
+        assert labels["Reference"] == 1
+        assert labels["Playbook"] == 1
+        assert labels["Memory"] == 1
+        assert labels["Guide"] == 1
+        assert labels["Section"] == 1
+        # plain.md (no frontmatter) + the ghost stub both degrade to Concept.
+        assert labels["Concept"] == 2
+
+    def test_concept_id_and_title(self):
+        g = okf.build(str(OKF_BUNDLE))
+        rows = g.cypher("MATCH (n {concept_id:'tables/orders'}) RETURN n.title AS title, n.file_path AS fp").to_list()
+        assert rows == [{"title": "Orders", "fp": "tables/orders.md"}]
+        # no-frontmatter file: title falls back to the file stem.
+        plain = g.cypher("MATCH (n {concept_id:'plain'}) RETURN n.title AS t, labels(n)[0] AS l").to_list()
+        assert plain == [{"t": "plain", "l": "Concept"}]
+
+    def test_frontmatter_mapping(self):
+        g = okf.build(str(OKF_BUNDLE))
+        rows = g.cypher("MATCH (n {concept_id:'tables/orders'}) RETURN n.tags AS tags, n.timestamp AS ts").to_list()
+        # `tags` list → JSON string; ISO timestamp stays a string.
+        assert rows[0]["tags"] == '["sales","orders"]'
+        assert rows[0]["ts"] == "2026-05-28T14:30:00Z"
+        # nested `metadata:` flattens to dotted keys.
+        meta = g.cypher(
+            "MATCH (n {concept_id:'meta/profile'}) RETURN n.`metadata.type` AS mt, n.`metadata.scope` AS ms"
+        ).to_list()
+        assert meta == [{"mt": "user", "ms": "project"}]
+
+    def test_edge_type_ladder(self):
+        g = okf.build(str(OKF_BUNDLE))
+        et = _edge_types(g)
+        assert et["JOINS_WITH"] == 1  # "# Joins" section
+        assert et["PART_OF"] == 1  # explicit link title
+        assert et["CITES"] == 1  # "# Citations" section
+        assert et["LINKS_TO"] == 1  # untyped (the dangling ghost link)
+        assert et["CONTAINS"] == 1  # structural: guide → guide/intro
+
+        # spot-check endpoints of the typed edges
+        joins = g.cypher("MATCH (a)-[:JOINS_WITH]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
+        assert joins == [{"a": "tables/orders", "b": "tables/customers"}]
+        contains = g.cypher("MATCH (a)-[:CONTAINS]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
+        assert contains == [{"a": "guide", "b": "guide/intro"}]
+
+    def test_dangling_link_becomes_provisional_stub(self):
+        g = okf.build(str(OKF_BUNDLE))
+        stubs = g.cypher("MATCH (n {_provisional:true}) RETURN n.concept_id AS id").to_list()
+        assert stubs == [{"id": "tables/ghost"}]
+
+    def test_orphan_detectable(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # the playbook is deliberately unlinked → degree 0
+        deg = g.cypher(
+            "MATCH (n {concept_id:'playbooks/incident'}) OPTIONAL MATCH (n)-[r]-(m) RETURN count(r) AS d"
+        ).to_list()
+        assert deg[0]["d"] == 0
+
+    def test_reserved_index_not_a_node(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # index.md must not appear as a concept.
+        assert g.cypher("MATCH (n {concept_id:'index'}) RETURN count(n) AS c").to_list()[0]["c"] == 0
+
+    def test_build_is_deterministic(self):
+        a = okf.build(str(OKF_BUNDLE))
+        b = okf.build(str(OKF_BUNDLE))
+        for q in (
+            "MATCH (n) RETURN count(n) AS c",
+            "MATCH ()-[r]->() RETURN count(r) AS c",
+        ):
+            assert a.cypher(q).to_list() == b.cypher(q).to_list()
+
+    def test_save_load_roundtrip(self, tmp_path):
+        g = okf.build(str(OKF_BUNDLE))
+        before_n = g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
+        before_e = g.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"]
+        path = str(tmp_path / "okf.kgl")
+        g.save(path)
+        h = kglite.load(path)
+        assert h.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == before_n
+        assert h.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"] == before_e
+        # a property survives the round-trip
+        assert (
+            h.cypher("MATCH (n {concept_id:'tables/orders'}) RETURN n.tags AS t").to_list()[0]["t"]
+            == '["sales","orders"]'
+        )
+
+
+class TestOkfObsidianDialect:
+    """Loose / obsidian dialect: [[wikilinks]] + frontmatter without `type`."""
+
+    def test_wikilinks_and_degrade(self):
+        g = okf.build(str(OBSIDIAN_BUNDLE), dialect="obsidian")
+        # alice, bob, MEMORY (not reserved) + carol-missing stub = 4 nodes.
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 4
+        # no frontmatter `type` → everything degrades to Concept.
+        assert set(_labels(g)) == {"Concept"}
+
+    def test_wikilink_resolution_and_dangling(self):
+        g = okf.build(str(OBSIDIAN_BUNDLE), dialect="obsidian")
+        edges = g.cypher("MATCH (a)-[r]->(b) RETURN a.concept_id AS a, b.concept_id AS b ORDER BY b").to_list()
+        assert {"a": "alice", "b": "bob"} in edges
+        assert {"a": "alice", "b": "carol-missing"} in edges
+        stubs = g.cypher("MATCH (n {_provisional:true}) RETURN n.concept_id AS id").to_list()
+        assert stubs == [{"id": "carol-missing"}]
+
+    def test_wikilinks_ignored_in_strict_dialect(self):
+        # In the default (okf) dialect, [[wikilinks]] are not links → no edges.
+        g = okf.build(str(OBSIDIAN_BUNDLE))
+        assert g.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list()[0]["c"] == 0
+
+
+def test_empty_directory_builds_empty_graph(tmp_path):
+    g = okf.build(str(tmp_path))
+    assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 0
