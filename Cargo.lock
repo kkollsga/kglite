@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.10.17"
+version = "0.10.18"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.10.17"
+version = "0.10.18"
 dependencies = [
  "anyhow",
  "bincode",
