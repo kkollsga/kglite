@@ -35,6 +35,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (node, level), finest (0) → coarsest. Omitting `level` returns the flat best
   partition as before. Useful for GraphRAG-style tiered community summaries.
 
+### Performance
+
+- **Bounded-memory graph algorithms on mapped/disk.** Community detection
+  (`louvain` / `leiden` / `label_propagation`) and `k_core` previously
+  materialised the whole graph into an in-memory `O(edges)` adjacency before
+  running — defeating the point of the mmap-backed `mapped` / `disk` modes,
+  which keep the graph off-heap so you can explore a larger-than-RAM graph.
+  On those modes they now **stream neighbours on demand from the CSR**, holding
+  only `O(nodes)` resident state (edges stay page-cached on mmap). Louvain/Leiden
+  stream level 0 (the bulk); the aggregated super-graph at levels ≥1 is tiny and
+  stays materialised. The in-memory (`Default`) hot path is unchanged — the
+  streaming path is gated on storage mode. This makes "cluster a graph too big
+  for RAM" — the GraphRAG indexing bottleneck — a real capability. Streaming
+  community detection is also exempt from the per-query deadline (bounded but
+  slower than in-memory).
+
+### Fixed
+
+- **Disk backend dropped the last node's overflow edges in three fast paths.**
+  On a disk graph whose edges live in the overflow maps (a fresh in-memory disk
+  graph, or nodes appended after the last CSR rebuild), `iter_peers_filtered`,
+  `count_edges_filtered`, and `neighbors_directed_iter` returned early when the
+  CSR offset table didn't cover `node + 1` — skipping the overflow scan entirely.
+  The highest-index node therefore appeared to have **no** matching/incoming
+  edges (e.g. `MATCH`-free count queries undercounted, and the streaming graph
+  algorithms above saw it as isolated). Now mirrors the correct
+  `edges_directed_filtered_iter` path: empty CSR range, then always scan overflow.
+
 ## [0.10.18] — 2026-06-14 — cyclic pattern-match optimisation (matcher + planner)
 
 ### Performance

@@ -994,11 +994,13 @@ impl DiskGraph {
             Direction::Outgoing => (&self.out_offsets, &self.out_edges),
             Direction::Incoming => (&self.in_offsets, &self.in_edges),
         };
-        if idx >= offsets.len().saturating_sub(1) {
-            return Ok(0);
-        }
-        let mut start = offsets.get(idx) as usize;
-        let mut end = offsets.get(idx + 1) as usize;
+        // Empty CSR range when offsets don't cover `idx + 1` (overflow-only node);
+        // fall through to the overflow count below rather than returning early.
+        let (mut start, mut end) = if idx + 1 < offsets.len() {
+            (offsets.get(idx) as usize, offsets.get(idx + 1) as usize)
+        } else {
+            (0, 0)
+        };
 
         // Narrow range via binary search when CSR is sorted by type
         if let Some(ct) = conn_type {
@@ -1126,11 +1128,16 @@ impl DiskGraph {
             Direction::Outgoing => (&self.out_offsets, &self.out_edges),
             Direction::Incoming => (&self.in_offsets, &self.in_edges),
         };
-        if idx >= offsets.len().saturating_sub(1) {
-            return Vec::new();
-        }
-        let mut start = offsets.get(idx) as usize;
-        let mut end = offsets.get(idx + 1) as usize;
+        // If the CSR offset table doesn't cover `idx + 1` (fresh in-memory disk
+        // graph where edges live in overflow, or a node appended after the last
+        // CSR build), use an empty CSR range and fall through to the overflow
+        // scan below — mirroring `edges_directed_filtered_iter`. Returning early
+        // here drops the node's overflow-resident edges entirely.
+        let (mut start, mut end) = if idx + 1 < offsets.len() {
+            (offsets.get(idx) as usize, offsets.get(idx + 1) as usize)
+        } else {
+            (0, 0)
+        };
 
         // Narrow range via binary search when CSR is sorted
         if let Some(ct) = conn_type {
@@ -1922,12 +1929,13 @@ impl DiskGraph {
             Direction::Incoming => self.overflow_in.get(&(node as u32)),
         };
 
-        if node >= offsets.len().saturating_sub(1) {
-            return DiskNeighbors::new_empty();
-        }
-
-        let start = offsets.get(node) as usize;
-        let end = offsets.get(node + 1) as usize;
+        // Empty CSR range when offsets don't cover `node + 1` (overflow-only
+        // node); still build the iterator so overflow edges are yielded.
+        let (start, end) = if node + 1 < offsets.len() {
+            (offsets.get(node) as usize, offsets.get(node + 1) as usize)
+        } else {
+            (0, 0)
+        };
 
         DiskNeighbors::new(edges, start, end, overflow)
     }

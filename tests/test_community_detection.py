@@ -344,3 +344,75 @@ class TestLeidenCypher:
         assert by_name["Alice"] == by_name["Bob"] == by_name["Charlie"]
         assert by_name["Dave"] == by_name["Eve"] == by_name["Frank"]
         assert by_name["Alice"] != by_name["Dave"]
+
+
+def _mode_graph(storage, tmp_path):
+    if storage == "memory":
+        return KnowledgeGraph()
+    if storage == "mapped":
+        return KnowledgeGraph(storage="mapped")
+    return KnowledgeGraph(storage="disk", path=str(tmp_path / "kg"))
+
+
+class TestBoundedMemoryParity:
+    """The streaming (bounded-memory) mapped/disk paths for k_core and
+    label_propagation must produce results identical to the in-memory
+    materialised path."""
+
+    def test_label_propagation_parity_across_modes(self, tmp_path):
+        """The streaming mapped/disk paths must produce the *same partition* as
+        the in-memory path. Compared as a canonical grouping (label ids are
+        arbitrary) rather than a fixed structure — label propagation can collapse
+        symmetric graphs to one community, which is fine as long as every mode
+        agrees."""
+
+        def partition(storage):
+            g = _mode_graph(storage, tmp_path)
+            _build_two_clusters(g)
+            rows = g.cypher(
+                "CALL label_propagation() YIELD node, community RETURN node.name AS name, community AS c"
+            ).to_list()
+            groups = {}
+            for r in rows:
+                groups.setdefault(r["c"], set()).add(r["name"])
+            # canonical: frozenset of frozensets, label ids dropped
+            return frozenset(frozenset(s) for s in groups.values())
+
+        mem = partition("memory")
+        assert partition("mapped") == mem
+        assert partition("disk") == mem
+
+    @pytest.mark.parity
+    @pytest.mark.parametrize("storage", ["memory", "mapped", "disk"])
+    def test_k_core_parity_across_modes(self, storage, tmp_path):
+        g = _mode_graph(storage, tmp_path)
+        _build_two_clusters(g)
+        rows = g.cypher(
+            "CALL k_core() YIELD node, coreness RETURN node.name AS name, coreness AS k ORDER BY name"
+        ).to_list()
+        by_name = {r["name"]: r["k"] for r in rows}
+        # Two triangles joined by a single Charlie–Dave bridge: every node sits
+        # in a triangle (coreness 2). The bridge doesn't raise either endpoint.
+        assert by_name == {
+            "Alice": 2,
+            "Bob": 2,
+            "Charlie": 2,
+            "Dave": 2,
+            "Eve": 2,
+            "Frank": 2,
+        }
+
+    @pytest.mark.parity
+    @pytest.mark.parametrize("storage", ["memory", "mapped", "disk"])
+    def test_k_core_with_pendant_parity(self, storage, tmp_path):
+        """A pendant node (degree 1) must get coreness 1 in every mode — exercises
+        the peeling order, not just the uniform-triangle case."""
+        g = _mode_graph(storage, tmp_path)
+        _build_two_clusters(g)
+        g.cypher("CREATE (:Person {name:'Zoe', group:'A'})")
+        g.cypher("MATCH (a:Person {name:'Alice'}),(z:Person {name:'Zoe'}) CREATE (a)-[:KNOWS]->(z)")
+        rows = g.cypher("CALL k_core() YIELD node, coreness RETURN node.name AS name, coreness AS k").to_list()
+        by_name = {r["name"]: r["k"] for r in rows}
+        assert by_name["Zoe"] == 1
+        assert by_name["Alice"] == 2
+        assert by_name["Frank"] == 2

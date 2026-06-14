@@ -5,6 +5,7 @@
 //! this pattern?"; algorithms here answer "what does the graph look
 //! like structurally?".
 
+pub mod centrality;
 pub mod clustering;
 pub mod graph_algorithms;
 pub mod vector;
