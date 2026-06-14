@@ -69,7 +69,7 @@ pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
 # crate's source to avoid an extern-crate collision with this
 # crate's own `[lib] name = "kglite"` (the cdylib that becomes
 # the wheel's `kglite.abi3.so`).
-kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata"] }
+kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata", "okf"] }
 
 # Generic MCP framework tools (ping, read_source, grep, list_source,
 # github_issues, github_api, workspace). 0.9.21+: depend on the
