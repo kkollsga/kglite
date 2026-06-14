@@ -83,6 +83,13 @@ parsed codebase.
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
   [Code analysis guide](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html).**
+- 🧠 **Markdown knowledge bases & agent memory.** `kglite.okf.build(dir)`
+  ingests an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)
+  bundle — or a Claude memory dir, skills folder, or Obsidian vault — into a
+  graph: frontmatter → node properties, markdown links → typed edges. Then
+  cluster it (`CALL leiden`), find orphaned or stale notes, and surface dangling
+  references — the query engine OKF itself doesn't ship. **→
+  [OKF guide](https://kglite.readthedocs.io/en/latest/python/guides/okf.html).**
 
 ## Why Cypher?
 
@@ -523,6 +530,7 @@ Quick reference. Each links into the appropriate guide.
 | **[Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
 | **[AI integration](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
 | **[Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
+| **[OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html)** | Markdown + YAML-frontmatter bundles (`kglite.okf`) — Open Knowledge Format, Claude memory dirs, skills, Obsidian vaults → frontmatter as properties, links as typed edges |
 | **[Bundled datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html)** | Fetch-build-cache wrappers for public sources — SEC EDGAR filings, Wikidata, Sodir (Norwegian Offshore Directorate) — each returns a queryable `KnowledgeGraph` |
 
 ## Documentation
@@ -537,6 +545,7 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 - [Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) — shortest path, PageRank, community detection
 - [Semantic Search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
 - [Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html) — `code_tree.build`, framework route detection
+- [OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html) — `okf.build`, markdown knowledge bases & agent memory
 - [Datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html) — SEC, Wikidata, Sodir wrappers
 - [MCP server config](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) — manifests, skills, extensions
 - [Spatial](https://kglite.readthedocs.io/en/latest/python/guides/spatial.html) · [Timeseries](https://kglite.readthedocs.io/en/latest/python/guides/timeseries.html) · [Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html) · [Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html) · [Traversal & hierarchy](https://kglite.readthedocs.io/en/latest/python/guides/traversal-hierarchy.html) · [AI Agents](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)

@@ -21,6 +21,7 @@ Domain-specific surfaces — pull them in when your data has the shape:
 |---|---|
 | {doc}`durable-apps` | …the graph is long-lived state your app reopens across runs. `open()` load-or-create lifecycle, checkpoint-on-close, and crash-safe `durable=True` write-ahead-log writes. |
 | {doc}`code-tree` | …your "data" is a codebase. Parse Python / Rust / TS / Go / Java / C# / C++ into a graph of functions, classes, calls. |
+| {doc}`okf` | …your "data" is a markdown knowledge base — an OKF bundle, a Claude memory dir, a skills folder, an Obsidian vault. Frontmatter → nodes, links → typed edges. |
 | {doc}`spatial` | …your nodes have coordinates. R-tree indexing, distance-based filters, GeoJSON I/O. |
 | {doc}`timeseries` | …property values change over time. Snapshot history, valid_at / valid_during temporal filters. |
 | {doc}`semantic-search` | …you want fuzzy / meaning-based lookup. `text_score()` in Cypher, embedding model registration. |

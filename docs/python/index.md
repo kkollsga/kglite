@@ -38,6 +38,7 @@ guides/graph-algorithms
 guides/import-export
 guides/ai-agents
 guides/code-tree
+guides/okf
 guides/recipes
 guides/sec
 ```
