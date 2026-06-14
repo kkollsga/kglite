@@ -544,3 +544,114 @@ fn test_get_path_connections() {
     assert_eq!(connections[0], Some("NEXT".to_string()));
     assert_eq!(connections[1], Some("NEXT".to_string()));
 }
+
+// ========================================================================
+// multilevel Louvain + hierarchy
+// ========================================================================
+
+/// Two triangles {A,B,C} and {D,E,F}, each fully connected, joined by a single
+/// bridge edge C--D. Classic community-structure fixture.
+fn build_two_triangle_bridge() -> (DirGraph, Vec<petgraph::graph::NodeIndex>) {
+    let mut graph = DirGraph::new();
+    let mut indices = Vec::new();
+    for i in 0..6 {
+        let node = NodeData::new(
+            Value::Int64(i),
+            Value::String(format!("N_{}", i)),
+            "Node".to_string(),
+            HashMap::new(),
+            &mut graph.interner,
+        );
+        let idx = graph.graph.add_node(node);
+        graph
+            .type_indices
+            .entry_or_default("Node".to_string())
+            .push(idx);
+        indices.push(idx);
+    }
+    // triangle 0-1-2, triangle 3-4-5, bridge 2-3
+    let pairs = [(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5), (2, 3)];
+    for (from, to) in pairs {
+        let edge = EdgeData::new("LINK".to_string(), HashMap::new(), &mut graph.interner);
+        graph.graph.add_edge(indices[from], indices[to], edge);
+    }
+    (graph, indices)
+}
+
+fn community_of(result: &CommunityResult, idx: petgraph::graph::NodeIndex) -> usize {
+    result
+        .assignments
+        .iter()
+        .find(|a| a.node_idx == idx)
+        .map(|a| a.community_id)
+        .expect("node assigned")
+}
+
+#[test]
+fn test_louvain_multilevel_two_communities() {
+    let (graph, ix) = build_two_triangle_bridge();
+    let r = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    assert_eq!(r.num_communities, 2, "two triangles → two communities");
+    assert!(
+        r.modularity > 0.0,
+        "positive modularity, got {}",
+        r.modularity
+    );
+    // triangle members share a community, distinct across triangles
+    assert_eq!(community_of(&r, ix[0]), community_of(&r, ix[1]));
+    assert_eq!(community_of(&r, ix[0]), community_of(&r, ix[2]));
+    assert_eq!(community_of(&r, ix[3]), community_of(&r, ix[4]));
+    assert_eq!(community_of(&r, ix[3]), community_of(&r, ix[5]));
+    assert_ne!(community_of(&r, ix[0]), community_of(&r, ix[3]));
+}
+
+#[test]
+fn test_louvain_exposes_hierarchy_levels() {
+    let (graph, _) = build_two_triangle_bridge();
+    let r = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    assert!(!r.levels.is_empty(), "hierarchy levels present");
+    // last level == flat assignments (best partition)
+    assert_eq!(r.levels.last().unwrap().len(), r.assignments.len());
+    // every level assigns all 6 nodes
+    for level in &r.levels {
+        assert_eq!(level.len(), 6);
+    }
+}
+
+#[test]
+fn test_louvain_deterministic() {
+    let (graph, _) = build_two_triangle_bridge();
+    let a = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    let b = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    assert_eq!(a.num_communities, b.num_communities);
+    let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
+    let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
+    assert_eq!(ca, cb, "deterministic across runs");
+}
+
+#[test]
+fn test_louvain_empty_and_isolated() {
+    // empty
+    let g = DirGraph::new();
+    let r = louvain_communities(&g, None, 1.0, None, None).unwrap();
+    assert_eq!(r.num_communities, 0);
+    assert!(r.levels.is_empty());
+    // isolated nodes (no edges) → each its own community, modularity 0
+    let mut g3 = DirGraph::new();
+    for i in 0..3 {
+        let node = NodeData::new(
+            Value::Int64(i),
+            Value::String(format!("I_{}", i)),
+            "Node".to_string(),
+            HashMap::new(),
+            &mut g3.interner,
+        );
+        let idx = g3.graph.add_node(node);
+        g3.type_indices
+            .entry_or_default("Node".to_string())
+            .push(idx);
+    }
+    let r3 = louvain_communities(&g3, None, 1.0, None, None).unwrap();
+    assert_eq!(r3.num_communities, 3);
+    assert_eq!(r3.modularity, 0.0);
+}
