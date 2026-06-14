@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.19] — 2026-06-14 — Leiden + multilevel Louvain + bounded-memory algorithms
+
 ### Added
 
 - **Leiden community detection — `CALL leiden(...)`.** The algorithm the
