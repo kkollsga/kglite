@@ -263,3 +263,84 @@ class TestLabelPropagation:
                 assert "title" in node
                 assert "type" in node
                 assert "id" in node
+
+
+def _build_two_clusters(graph):
+    """Two triangles {Alice,Bob,Charlie} and {Dave,Eve,Frank} + a bridge,
+    on any storage mode."""
+    for name, grp in [("Alice", "A"), ("Bob", "A"), ("Charlie", "A"), ("Dave", "B"), ("Eve", "B"), ("Frank", "B")]:
+        graph.cypher("CREATE (:Person {name: $n, group: $g})", params={"n": name, "g": grp})
+    edges = [
+        ("Alice", "Bob"),
+        ("Alice", "Charlie"),
+        ("Bob", "Charlie"),
+        ("Dave", "Eve"),
+        ("Dave", "Frank"),
+        ("Eve", "Frank"),
+        ("Charlie", "Dave"),
+    ]
+    for a, b in edges:
+        graph.cypher(
+            "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS]->(b)",
+            params={"a": a, "b": b},
+        )
+    return graph
+
+
+class TestLeidenCypher:
+    """CALL leiden(...) — Leiden community detection via Cypher."""
+
+    def test_leiden_two_communities(self, two_cluster_graph):
+        rows = two_cluster_graph.cypher(
+            "CALL leiden() YIELD node, community RETURN node.name AS name, community AS c"
+        ).to_list()
+        assert len(rows) == 6
+        by_name = {r["name"]: r["c"] for r in rows}
+        assert by_name["Alice"] == by_name["Bob"] == by_name["Charlie"]
+        assert by_name["Dave"] == by_name["Eve"] == by_name["Frank"]
+        assert by_name["Alice"] != by_name["Dave"]
+        assert len({r["c"] for r in rows}) == 2
+
+    def test_leiden_level_yield_hierarchy(self, two_cluster_graph):
+        rows = two_cluster_graph.cypher(
+            "CALL leiden() YIELD node, community, level RETURN node.name AS name, community AS c, level AS l"
+        ).to_list()
+        # at least one level, every row has an integer level >= 0
+        levels = {r["l"] for r in rows}
+        assert len(levels) >= 1
+        assert all(isinstance(r["l"], int) and r["l"] >= 0 for r in rows)
+        # each level assigns all 6 nodes
+        from collections import Counter
+
+        per_level = Counter(r["l"] for r in rows)
+        assert all(count == 6 for count in per_level.values())
+
+    def test_louvain_level_yield(self, two_cluster_graph):
+        rows = two_cluster_graph.cypher(
+            "CALL louvain() YIELD node, community, level RETURN node.name AS name, level AS l"
+        ).to_list()
+        assert all(r["l"] >= 0 for r in rows)
+
+    def test_leiden_in_list_procedures(self):
+        g = KnowledgeGraph()
+        rows = g.cypher("CALL list_procedures() YIELD name RETURN name").to_list()
+        names = {r["name"] for r in rows}
+        assert "leiden" in names
+        assert "louvain" in names
+
+    @pytest.mark.parity
+    @pytest.mark.parametrize("storage", ["memory", "mapped", "disk"])
+    def test_leiden_parity_across_modes(self, storage, tmp_path):
+        if storage == "memory":
+            g = KnowledgeGraph()
+        elif storage == "mapped":
+            g = KnowledgeGraph(storage="mapped")
+        else:
+            g = KnowledgeGraph(storage="disk", path=str(tmp_path / "kg"))
+        _build_two_clusters(g)
+        rows = g.cypher("CALL leiden() YIELD node, community RETURN node.name AS name, community AS c").to_list()
+        by_name = {r["name"]: r["c"] for r in rows}
+        # same community structure regardless of storage mode
+        assert by_name["Alice"] == by_name["Bob"] == by_name["Charlie"]
+        assert by_name["Dave"] == by_name["Eve"] == by_name["Frank"]
+        assert by_name["Alice"] != by_name["Dave"]

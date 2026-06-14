@@ -1974,12 +1974,18 @@ fn build_weighted_adjacency(
 /// exclusion never fires at level 0 and behaviour there is unchanged.
 fn local_move(
     adj: &[Vec<(usize, f64)>],
+    init: Option<&[usize]>,
     resolution: f64,
     total_weight: f64,
     deadline: Option<Instant>,
 ) -> Result<Vec<usize>, String> {
     let n = adj.len();
-    let mut community: Vec<usize> = (0..n).collect();
+    // Start from the given partition (Leiden: previous level's communities) or
+    // from singletons (Louvain / level 0). Community ids stay in `0..n`.
+    let mut community: Vec<usize> = match init {
+        Some(p) => p.to_vec(),
+        None => (0..n).collect(),
+    };
     if n == 0 || total_weight == 0.0 {
         return Ok(community);
     }
@@ -1990,7 +1996,11 @@ fn local_move(
             degree[i] += w;
         }
     }
-    let mut sigma_tot: Vec<f64> = degree.clone();
+    // sigma_tot[c] = sum of degrees of nodes currently in community c.
+    let mut sigma_tot: Vec<f64> = vec![0.0; n];
+    for i in 0..n {
+        sigma_tot[community[i]] += degree[i];
+    }
 
     let m = total_weight;
     let two_m = 2.0 * m;
@@ -2118,7 +2128,7 @@ fn louvain_levels(
     let mut node_to_super: Vec<usize> = (0..n0).collect();
 
     loop {
-        let moved = local_move(&adj, resolution, total_weight, deadline)?;
+        let moved = local_move(&adj, None, resolution, total_weight, deadline)?;
         let (partition, k) = renumber_communities(&moved);
 
         if k == adj.len() {
@@ -2225,6 +2235,137 @@ pub fn louvain_communities(
         });
     }
     let levels = louvain_levels(adj, total_weight, resolution, deadline)?;
+    Ok(build_community_result(
+        graph,
+        &nodes,
+        &levels,
+        total_weight,
+        weight_property,
+    ))
+}
+
+// ── Leiden ────────────────────────────────────────────────────────────────
+
+/// Refine a partition by splitting each community into its **connected
+/// components** (using only in-community edges). Returns `(refined, k_ref)` with
+/// contiguous ids; every refined sub-community is therefore connected. This is
+/// the property Louvain lacks — a local-move community can be internally
+/// disconnected. Deterministic: components discovered by index-ordered BFS over
+/// the (sorted) adjacency. Self-loops are ignored.
+fn refine_connected(adj: &[Vec<(usize, f64)>], partition: &[usize]) -> (Vec<usize>, usize) {
+    let n = adj.len();
+    let mut refined = vec![usize::MAX; n];
+    let mut next_id = 0usize;
+    let mut stack: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if refined[start] != usize::MAX {
+            continue;
+        }
+        let comm = partition[start];
+        let id = next_id;
+        next_id += 1;
+        refined[start] = id;
+        stack.push(start);
+        while let Some(u) = stack.pop() {
+            for &(v, _w) in &adj[u] {
+                if v != u && partition[v] == comm && refined[v] == usize::MAX {
+                    refined[v] = id;
+                    stack.push(v);
+                }
+            }
+        }
+    }
+    (refined, next_id)
+}
+
+/// Multilevel **Leiden** driver. Like [`louvain_levels`] but inserts a
+/// refinement step: each level's local-move partition `P` is split into
+/// connected components (`refine_connected`), aggregation is done on those
+/// components, and the next level's local move *starts from* `P` (so it can only
+/// re-merge components along real edges). The net effect is the same hierarchy
+/// shape as Louvain but with a **well-connectedness guarantee** on the merged
+/// communities — Leiden's defining property over Louvain.
+///
+/// This is a *deterministic* Leiden variant: the refinement guarantees connected
+/// communities (the headline fix) but omits the reference implementation's
+/// randomised within-community modularity sub-refinement, keeping results
+/// reproducible — a kglite value. Returns per-level partitions in original
+/// node-index space, finest → coarsest.
+fn leiden_levels(
+    mut adj: Adjacency,
+    total_weight: f64,
+    resolution: f64,
+    deadline: Option<Instant>,
+) -> Result<Vec<Vec<usize>>, String> {
+    let n0 = adj.len();
+    let mut levels: Vec<Vec<usize>> = Vec::new();
+    let mut node_to_super: Vec<usize> = (0..n0).collect();
+    let mut init: Option<Vec<usize>> = None;
+
+    loop {
+        let moved = local_move(&adj, init.as_deref(), resolution, total_weight, deadline)?;
+        let (p, _kp) = renumber_communities(&moved);
+
+        // This level's partition over original nodes (normalised contiguous).
+        let raw_level: Vec<usize> = (0..n0).map(|o| p[node_to_super[o]]).collect();
+        let (level_norm, _) = renumber_communities(&raw_level);
+
+        // Converged when the partition stops changing between levels.
+        if levels.last() == Some(&level_norm) {
+            break;
+        }
+        levels.push(level_norm);
+
+        // Refine P into connected components; aggregate on those.
+        let (refined, k_ref) = refine_connected(&adj, &p);
+        if k_ref == adj.len() {
+            // Nothing to coarsen further (every node already its own component).
+            break;
+        }
+        // Next level's super-nodes are refined components; each starts in the
+        // P-community it came from so local move can only re-merge along edges.
+        let mut next_init = vec![0usize; k_ref];
+        for s in 0..adj.len() {
+            next_init[refined[s]] = p[s];
+        }
+        adj = aggregate_graph(&adj, &refined, k_ref);
+        for s in node_to_super.iter_mut() {
+            *s = refined[*s];
+        }
+        init = Some(next_init);
+    }
+
+    if levels.is_empty() {
+        levels.push((0..n0).collect());
+    }
+    Ok(levels)
+}
+
+/// Leiden community detection — multilevel modularity optimisation with a
+/// refinement phase that guarantees **well-connected communities** (Louvain can
+/// return internally-disconnected ones). Same parameters and output shape as
+/// [`louvain_communities`], including the `CommunityResult.levels` hierarchy.
+///
+/// @procedure: leiden
+/// @procedure: leiden_communities
+pub fn leiden_communities(
+    graph: &DirGraph,
+    weight_property: Option<&str>,
+    resolution: f64,
+    connection_types: Option<&[String]>,
+    deadline: Option<Instant>,
+) -> Result<CommunityResult, String> {
+    let (nodes, adj, total_weight) =
+        build_weighted_adjacency(graph, weight_property, connection_types);
+    if nodes.is_empty() {
+        return Ok(CommunityResult {
+            assignments: Vec::new(),
+            num_communities: 0,
+            modularity: 0.0,
+            levels: Vec::new(),
+        });
+    }
+    let levels = leiden_levels(adj, total_weight, resolution, deadline)?;
     Ok(build_community_result(
         graph,
         &nodes,

@@ -655,3 +655,107 @@ fn test_louvain_empty_and_isolated() {
     assert_eq!(r3.num_communities, 3);
     assert_eq!(r3.modularity, 0.0);
 }
+
+// ========================================================================
+// Leiden
+// ========================================================================
+
+/// Assert every multi-node community in `result` is a connected subgraph
+/// (Leiden's well-connectedness guarantee). Rebuilds an undirected adjacency
+/// from the graph and BFSes within each community.
+fn assert_all_communities_connected(graph: &DirGraph, result: &CommunityResult) {
+    use petgraph::visit::EdgeRef;
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let mut adj: HashMap<petgraph::graph::NodeIndex, Vec<petgraph::graph::NodeIndex>> =
+        HashMap::new();
+    for e in graph.graph.edge_references() {
+        adj.entry(e.source()).or_default().push(e.target());
+        adj.entry(e.target()).or_default().push(e.source());
+    }
+    let mut groups: HashMap<usize, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
+    for a in &result.assignments {
+        groups.entry(a.community_id).or_default().push(a.node_idx);
+    }
+    for (cid, members) in &groups {
+        if members.len() <= 1 {
+            continue;
+        }
+        let set: HashSet<_> = members.iter().copied().collect();
+        let mut seen: HashSet<_> = HashSet::new();
+        let mut q = VecDeque::new();
+        q.push_back(members[0]);
+        seen.insert(members[0]);
+        while let Some(u) = q.pop_front() {
+            if let Some(ns) = adj.get(&u) {
+                for &v in ns {
+                    if set.contains(&v) && seen.insert(v) {
+                        q.push_back(v);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            members.len(),
+            "community {cid} is disconnected (Leiden must not produce that)"
+        );
+    }
+}
+
+#[test]
+fn test_leiden_two_communities() {
+    let (graph, ix) = build_two_triangle_bridge();
+    let r = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    assert_eq!(r.num_communities, 2);
+    assert!(r.modularity > 0.0);
+    assert_eq!(community_of(&r, ix[0]), community_of(&r, ix[1]));
+    assert_eq!(community_of(&r, ix[3]), community_of(&r, ix[5]));
+    assert_ne!(community_of(&r, ix[0]), community_of(&r, ix[3]));
+}
+
+#[test]
+fn test_leiden_communities_well_connected() {
+    let (graph, _) = build_two_triangle_bridge();
+    let r = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    assert_all_communities_connected(&graph, &r);
+
+    // also on a chain and a triangle — the invariant must always hold
+    let (chain, _) = build_chain_graph();
+    let rc = leiden_communities(&chain, None, 1.0, None, None).unwrap();
+    assert_all_communities_connected(&chain, &rc);
+}
+
+#[test]
+fn test_leiden_deterministic() {
+    let (graph, _) = build_two_triangle_bridge();
+    let a = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let b = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
+    let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
+    assert_eq!(ca, cb);
+}
+
+#[test]
+fn test_leiden_hierarchy_and_modularity_vs_louvain() {
+    let (graph, _) = build_two_triangle_bridge();
+    let lei = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let lou = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    assert!(!lei.levels.is_empty());
+    assert_eq!(lei.levels.last().unwrap().len(), lei.assignments.len());
+    // Leiden modularity should be competitive with Louvain (≥ within fp slack).
+    assert!(
+        lei.modularity >= lou.modularity - 1e-9,
+        "leiden {} should be >= louvain {}",
+        lei.modularity,
+        lou.modularity
+    );
+}
+
+#[test]
+fn test_leiden_empty_and_isolated() {
+    let g = DirGraph::new();
+    let r = leiden_communities(&g, None, 1.0, None, None).unwrap();
+    assert_eq!(r.num_communities, 0);
+    assert!(r.levels.is_empty());
+}

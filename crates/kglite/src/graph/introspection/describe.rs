@@ -642,7 +642,7 @@ fn write_extensions(xml: &mut String, graph: &DirGraph) {
             "    <semantic hint=\"text_score(n, 'col', 'query', metric) — similarity (metric: 'cosine'|'poincare'|'dot_product'|'euclidean'); embedding_norm(n, 'col') — L2 norm (hierarchy depth in Poincaré space)\"/>\n",
         );
     }
-    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
+    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation. Compose with WHERE/RETURN/aggregation as normal Cypher rows.\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions: ||, =~, coalesce(), CALL cluster/pagerank/louvain/..., distance(), contains(). graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference, graph_overview(fluent=['topic']) for detailed docs.\"/>\n");
@@ -1268,7 +1268,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
 
     // Minimal extensions (skip capability-dependent hints)
     xml.push_str("  <extensions>\n");
-    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
+    xml.push_str("    <algorithms hint=\"CALL proc() YIELD node, col — score (pagerank/betweenness/degree/closeness), community (louvain/leiden/label_propagation), component (connected_components), coreness (k_core), coefficient (clustering_coefficient), cluster (cluster). Algorithms take optional {node_type, relationship} scoping.\"/>\n");
     xml.push_str("    <rules hint=\"CALL proc(...) YIELD ... — structural validators. Unary: orphan_node, self_loop, missing_required_edge, missing_inbound_edge, duplicate_title, null_property. Pair: cycle_2step, inverse_violation, parallel_edges. Schema: type_domain_violation, type_range_violation. Cardinality: cardinality_violation. Triple: transitivity_violation.\"/>\n");
     xml.push_str("    <cypher hint=\"Full Cypher with extensions. graph_overview(cypher=True) for reference, graph_overview(cypher=['topic']) for detailed docs.\"/>\n");
     xml.push_str("    <fluent_api hint=\"Method-chaining API: select/where/traverse/collect. graph_overview(fluent=True) for reference.\"/>\n");

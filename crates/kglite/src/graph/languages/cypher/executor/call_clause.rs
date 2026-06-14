@@ -137,7 +137,11 @@ impl<'a> CypherExecutor<'a> {
             | "degree_centrality"
             | "closeness"
             | "closeness_centrality" => &["node", "score"],
-            "louvain" | "louvain_communities" | "label_propagation" => &["node", "community"],
+            "louvain"
+            | "louvain_communities"
+            | "leiden"
+            | "leiden_communities"
+            | "label_propagation" => &["node", "community", "level"],
             "connected_components" | "weakly_connected_components" => &["node", "component"],
             "k_core" | "coreness" => &["node", "coreness"],
             "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
@@ -234,6 +238,8 @@ impl<'a> CypherExecutor<'a> {
                 | "closeness_centrality"
                 | "louvain"
                 | "louvain_communities"
+                | "leiden"
+                | "leiden_communities"
                 | "label_propagation"
                 | "connected_components"
                 | "weakly_connected_components"
@@ -318,7 +324,20 @@ impl<'a> CypherExecutor<'a> {
                     conn.as_deref(),
                     self.deadline,
                 )?;
-                self.community_to_rows(&result.assignments, &clause.yield_items)?
+                self.community_result_to_rows(&result, &clause.yield_items)?
+            }
+            "leiden" | "leiden_communities" => {
+                let resolution = call_param_f64(&params, "resolution", 1.0);
+                let weight_prop = call_param_opt_string(&params, "weight_property");
+                let conn = call_param_string_list(&params, "connection_types");
+                let result = crate::graph::algorithms::graph_algorithms::leiden_communities(
+                    self.graph,
+                    weight_prop.as_deref(),
+                    resolution,
+                    conn.as_deref(),
+                    self.deadline,
+                )?;
+                self.community_result_to_rows(&result, &clause.yield_items)?
             }
             "label_propagation" => {
                 let max_iter = call_param_usize(&params, "max_iterations", 100);
@@ -329,7 +348,7 @@ impl<'a> CypherExecutor<'a> {
                     conn.as_deref(),
                     self.deadline,
                 )?;
-                self.community_to_rows(&result.assignments, &clause.yield_items)?
+                self.community_result_to_rows(&result, &clause.yield_items)?
             }
             "connected_components" | "weakly_connected_components" => {
                 // Optional scoping: `CALL connected_components({node_type: 'Person',
@@ -532,8 +551,13 @@ impl<'a> CypherExecutor<'a> {
                     ),
                     (
                         "louvain",
-                        "Detect communities using the Louvain algorithm",
-                        "node, community",
+                        "Detect communities using multilevel Louvain (hierarchical). YIELD optional 'level' for the community hierarchy. Params: {resolution, weight_property, connection_types}",
+                        "node, community, level",
+                    ),
+                    (
+                        "leiden",
+                        "Detect communities using Leiden (multilevel, well-connected communities). YIELD optional 'level' for the hierarchy. Params: {resolution, weight_property, connection_types}",
+                        "node, community, level",
                     ),
                     (
                         "label_propagation",
@@ -1046,33 +1070,54 @@ impl<'a> CypherExecutor<'a> {
         Ok(rows)
     }
 
-    /// Convert community assignments to ResultRows with node bindings + community id.
+    /// Convert a community-detection result to ResultRows (node + community,
+    /// optional level). When the query yields `level`, emit one row per
+    /// (node, level) across the full hierarchy (finest→coarsest) — for
+    /// hierarchical algorithms (louvain/leiden). Otherwise emit the flat best
+    /// partition, one row per node. Single-level algorithms (label_propagation)
+    /// have an empty `levels`, so `assignments` is treated as the only level.
     /// Periodic deadline check: see centrality_to_rows rationale.
-    pub(super) fn community_to_rows(
+    pub(super) fn community_result_to_rows(
         &self,
-        assignments: &[crate::graph::algorithms::graph_algorithms::CommunityAssignment],
+        result: &crate::graph::algorithms::graph_algorithms::CommunityResult,
         yield_items: &[YieldItem],
     ) -> Result<Vec<ResultRow>, String> {
-        let mut rows = Vec::with_capacity(assignments.len());
-        for (i, ca) in assignments.iter().enumerate() {
-            if i & 0xFFFFF == 0 {
-                self.check_deadline()?;
-            }
-            let mut row = ResultRow::new();
-            for item in yield_items {
-                let alias = item.alias.as_deref().unwrap_or(&item.name);
-                match item.name.as_str() {
-                    "node" => {
-                        row.node_bindings.insert(alias.to_string(), ca.node_idx);
-                    }
-                    "community" => {
-                        row.projected
-                            .insert(alias.to_string(), Value::Int64(ca.community_id as i64));
-                    }
-                    _ => {}
+        let wants_level = yield_items.iter().any(|y| y.name == "level");
+        let levels: Vec<&[crate::graph::algorithms::graph_algorithms::CommunityAssignment]> =
+            if wants_level && !result.levels.is_empty() {
+                result.levels.iter().map(|v| v.as_slice()).collect()
+            } else {
+                vec![result.assignments.as_slice()]
+            };
+
+        let mut rows = Vec::new();
+        let mut counter = 0usize;
+        for (lvl, assignments) in levels.iter().enumerate() {
+            for ca in assignments.iter() {
+                counter += 1;
+                if counter & 0xFFFFF == 0 {
+                    self.check_deadline()?;
                 }
+                let mut row = ResultRow::new();
+                for item in yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    match item.name.as_str() {
+                        "node" => {
+                            row.node_bindings.insert(alias.to_string(), ca.node_idx);
+                        }
+                        "community" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Int64(ca.community_id as i64));
+                        }
+                        "level" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Int64(lvl as i64));
+                        }
+                        _ => {}
+                    }
+                }
+                rows.push(row);
             }
-            rows.push(row);
         }
         Ok(rows)
     }

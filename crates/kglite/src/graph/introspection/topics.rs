@@ -7,7 +7,7 @@
 
 const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, UNWIND, UNION, \
     CALL_SUBQUERY, CASE, CREATE, SET, DELETE, MERGE, EXPLAIN, PROFILE, operators, functions, patterns, spatial, \
-    temporal, pagerank, betweenness, degree, closeness, louvain, \
+    temporal, pagerank, betweenness, degree, closeness, louvain, leiden, \
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
     null_property, inverse_violation, transitivity_violation, cardinality_violation, \
@@ -49,6 +49,7 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "DEGREE" => write_topic_degree(xml),
             "CLOSENESS" => write_topic_closeness(xml),
             "LOUVAIN" => write_topic_louvain(xml),
+            "LEIDEN" => write_topic_leiden(xml),
             "LABEL_PROPAGATION" | "LABELPROPAGATION" => write_topic_label_propagation(xml),
             "CONNECTED_COMPONENTS" | "CONNECTEDCOMPONENTS" => {
                 write_topic_connected_components(xml);
@@ -402,8 +403,8 @@ pub(super) fn write_topic_closeness(xml: &mut String) {
 
 pub(super) fn write_topic_louvain(xml: &mut String) {
     xml.push_str("  <louvain>\n");
-    xml.push_str("    <desc>Community detection using the Louvain algorithm. Assigns each node a community ID.</desc>\n");
-    xml.push_str("    <syntax>CALL louvain({params}) YIELD node, community</syntax>\n");
+    xml.push_str("    <desc>Community detection using multilevel Louvain modularity optimisation (hierarchical). Assigns each node a community ID; YIELD optional 'level' for the community hierarchy (level 0 = finest).</desc>\n");
+    xml.push_str("    <syntax>CALL louvain({params}) YIELD node, community [, level]</syntax>\n");
     xml.push_str("    <params>\n");
     xml.push_str("      <param name=\"resolution\" type=\"float\" default=\"1.0\">Higher = more/smaller communities, lower = fewer/larger.</param>\n");
     xml.push_str("      <param name=\"weight_property\" type=\"string\" optional=\"true\">Edge property to use as weight.</param>\n");
@@ -411,9 +412,25 @@ pub(super) fn write_topic_louvain(xml: &mut String) {
     xml.push_str("    </params>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"basic\">CALL louvain() YIELD node, community RETURN community, count(*) AS size, collect(node.name) AS members ORDER BY size DESC</ex>\n");
-    xml.push_str("      <ex desc=\"high resolution\">CALL louvain({resolution: 2.0}) YIELD node, community RETURN community, count(*) AS size ORDER BY size DESC</ex>\n");
+    xml.push_str("      <ex desc=\"hierarchy\">CALL louvain() YIELD node, community, level RETURN level, count(DISTINCT community) AS communities ORDER BY level</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </louvain>\n");
+}
+
+pub(super) fn write_topic_leiden(xml: &mut String) {
+    xml.push_str("  <leiden>\n");
+    xml.push_str("    <desc>Community detection using the Leiden algorithm (multilevel, hierarchical). Like Louvain but a refinement phase guarantees every community is well-connected (Louvain can return internally-disconnected communities). Deterministic. YIELD optional 'level' for the hierarchy (level 0 = finest).</desc>\n");
+    xml.push_str("    <syntax>CALL leiden({params}) YIELD node, community [, level]</syntax>\n");
+    xml.push_str("    <params>\n");
+    xml.push_str("      <param name=\"resolution\" type=\"float\" default=\"1.0\">Higher = more/smaller communities, lower = fewer/larger.</param>\n");
+    xml.push_str("      <param name=\"weight_property\" type=\"string\" optional=\"true\">Edge property to use as weight.</param>\n");
+    xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("    </params>\n");
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"basic\">CALL leiden() YIELD node, community RETURN community, count(*) AS size, collect(node.name) AS members ORDER BY size DESC</ex>\n");
+    xml.push_str("      <ex desc=\"hierarchy for GraphRAG\">CALL leiden() YIELD node, community, level RETURN level, community, collect(node.name) AS members ORDER BY level, community</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </leiden>\n");
 }
 
 pub(super) fn write_topic_label_propagation(xml: &mut String) {
