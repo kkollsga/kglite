@@ -1904,6 +1904,10 @@ pub struct CommunityResult {
 /// `(neighbor_idx, weight)` pairs (self-loops allowed after aggregation).
 type Adjacency = Vec<Vec<(usize, f64)>>;
 
+/// One Leiden coarsening step's result: `(refined_partition, k_ref, next_init)`,
+/// or `None` when converged / nothing left to coarsen.
+type RefineStep = Option<(Vec<usize>, usize, Vec<usize>)>;
+
 /// Build a compact undirected weighted adjacency list from the graph.
 ///
 /// Returns `(nodes, adj, total_weight)` where `adj[i]` is the deduped neighbour
@@ -1960,6 +1964,161 @@ fn build_weighted_adjacency(
     (nodes, adj, total_weight)
 }
 
+/// Per-node weighted adjacency for the community-detection inner loops, abstracted
+/// so level 0 can be served either from a materialised in-memory adjacency or
+/// **streamed from the CSR** (disk/mapped) without ever holding O(edges) on the
+/// heap. The local-move / aggregate / refine primitives are generic over this, so
+/// there is one implementation of each algorithm.
+///
+/// Resident state for the streaming source is O(nodes) (an index map); the edges
+/// stay on mmap and are read on demand. Correctness matches the materialised path:
+/// parallel edges sum naturally in `comm_weight`, and self-loops are skipped by the
+/// existing `neighbor == i` guard.
+trait NeighborSource {
+    /// Number of (compact) nodes — community ids live in `0..len()`.
+    fn len(&self) -> usize;
+    /// Total edge weight `m` (each edge counted once).
+    fn total_weight(&self) -> f64;
+    /// Invoke `f(peer_compact_idx, weight)` for every neighbour of compact node `i`
+    /// (both directions; parallel edges yielded separately; self-loops included —
+    /// callers skip `peer == i`).
+    fn for_each_neighbor(&self, i: usize, f: impl FnMut(usize, f64));
+}
+
+/// Materialised adjacency source — wraps a `Vec<Vec<(usize,f64)>>` (the in-memory
+/// path and every aggregated level). Zero-cost: `for_each_neighbor` just iterates
+/// the slice.
+struct MaterializedAdj<'a> {
+    adj: &'a [Vec<(usize, f64)>],
+    m: f64,
+}
+
+impl NeighborSource for MaterializedAdj<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.adj.len()
+    }
+    #[inline]
+    fn total_weight(&self) -> f64 {
+        self.m
+    }
+    #[inline]
+    fn for_each_neighbor(&self, i: usize, mut f: impl FnMut(usize, f64)) {
+        for &(j, w) in &self.adj[i] {
+            f(j, w);
+        }
+    }
+}
+
+/// Streaming adjacency source for mapped/disk graphs — reads each node's incident
+/// edges straight from the CSR (`edges_directed`) on demand. Holds only the
+/// compact node list + reverse index (O(nodes)); never materialises the O(edges)
+/// adjacency. Used for level 0 only; after the first aggregation the super-graph is
+/// small and runs through `MaterializedAdj`.
+struct CsrSource<'a> {
+    graph: &'a DirGraph,
+    nodes: Vec<NodeIndex>,
+    node_to_idx: Vec<usize>,
+    interned_ct: Option<Vec<InternedKey>>,
+    weight_property: Option<&'a str>,
+    /// Fast path: unweighted + at most one connection type → use the CSR
+    /// peer-walk (`iter_peers_filtered`, no `EdgeData` materialisation, weight
+    /// implicitly 1.0). `fast_conn` is the single interned type (or `None` for
+    /// no filter). Weighted / multi-type fall back to `edges_directed`.
+    use_fast: bool,
+    fast_conn: Option<u64>,
+    m: f64,
+}
+
+impl<'a> CsrSource<'a> {
+    fn new(
+        graph: &'a DirGraph,
+        weight_property: Option<&'a str>,
+        connection_types: Option<&[String]>,
+    ) -> Self {
+        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+        let bound = graph.graph.node_bound();
+        let mut node_to_idx = vec![0usize; bound];
+        for (i, &node) in nodes.iter().enumerate() {
+            node_to_idx[node.index()] = i;
+        }
+        let interned_ct = intern_connection_types(connection_types);
+        let multi_type = connection_types.is_some_and(|c| c.len() > 1);
+        let use_fast = weight_property.is_none() && !multi_type;
+        let fast_conn = if use_fast {
+            interned_ct
+                .as_ref()
+                .and_then(|v| v.first())
+                .map(|k| k.as_u64())
+        } else {
+            None
+        };
+        // m = total matching edge weight (each edge once), one streaming pass.
+        let mut m = 0.0f64;
+        for edge in graph.graph.edge_references() {
+            if let Some(ref types) = interned_ct {
+                if !types.iter().any(|t| *t == edge.connection_type()) {
+                    continue;
+                }
+            }
+            m += edge_weight(graph, edge.id(), weight_property);
+        }
+        Self {
+            graph,
+            nodes,
+            node_to_idx,
+            interned_ct,
+            weight_property,
+            use_fast,
+            fast_conn,
+            m,
+        }
+    }
+}
+
+impl NeighborSource for CsrSource<'_> {
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+    fn total_weight(&self) -> f64 {
+        self.m
+    }
+    fn for_each_neighbor(&self, i: usize, mut f: impl FnMut(usize, f64)) {
+        use petgraph::Direction;
+        let node = self.nodes[i];
+        if self.use_fast {
+            // CSR peer-walk: no EdgeData materialisation, weight 1.0. On disk
+            // this is a direct offsets/targets read (forward + reverse CSR).
+            for dir in [Direction::Outgoing, Direction::Incoming] {
+                for (peer, _eid) in self
+                    .graph
+                    .graph
+                    .iter_peers_filtered(node, dir, self.fast_conn)
+                {
+                    f(self.node_to_idx[peer.index()], 1.0);
+                }
+            }
+            return;
+        }
+        // Weighted / multi-type: materialise edges to read weights + filter.
+        for dir in [Direction::Outgoing, Direction::Incoming] {
+            for edge in self.graph.graph.edges_directed(node, dir) {
+                if let Some(ref types) = self.interned_ct {
+                    if !types.iter().any(|t| *t == edge.connection_type()) {
+                        continue;
+                    }
+                }
+                let peer = match dir {
+                    Direction::Outgoing => edge.target(),
+                    Direction::Incoming => edge.source(),
+                };
+                let w = edge_weight(self.graph, edge.id(), self.weight_property);
+                f(self.node_to_idx[peer.index()], w);
+            }
+        }
+    }
+}
+
 /// One Louvain local-moving phase over a compact weighted adjacency list.
 ///
 /// Each node starts in its own community and greedily moves to the neighbouring
@@ -1972,14 +2131,14 @@ fn build_weighted_adjacency(
 /// degree but are excluded when scoring moves — they are the node's own internal
 /// weight, not a link to another node. The original graph is loop-free, so this
 /// exclusion never fires at level 0 and behaviour there is unchanged.
-fn local_move(
-    adj: &[Vec<(usize, f64)>],
+fn local_move<S: NeighborSource>(
+    src: &S,
     init: Option<&[usize]>,
     resolution: f64,
-    total_weight: f64,
     deadline: Option<Instant>,
 ) -> Result<Vec<usize>, String> {
-    let n = adj.len();
+    let n = src.len();
+    let total_weight = src.total_weight();
     // Start from the given partition (Leiden: previous level's communities) or
     // from singletons (Louvain / level 0). Community ids stay in `0..n`.
     let mut community: Vec<usize> = match init {
@@ -1991,10 +2150,8 @@ fn local_move(
     }
 
     let mut degree: Vec<f64> = vec![0.0; n];
-    for (i, neighbors) in adj.iter().enumerate() {
-        for &(_, w) in neighbors {
-            degree[i] += w;
-        }
+    for (i, d) in degree.iter_mut().enumerate() {
+        src.for_each_neighbor(i, |_, w| *d += w);
     }
     // sigma_tot[c] = sum of degrees of nodes currently in community c.
     let mut sigma_tot: Vec<f64> = vec![0.0; n];
@@ -2025,16 +2182,16 @@ fn local_move(
             let k_i_res = k_i * resolution_over_two_m_sq;
 
             touched_comms.clear();
-            for &(neighbor, w) in &adj[i] {
+            src.for_each_neighbor(i, |neighbor, w| {
                 if neighbor == i {
-                    continue; // self-loop: internal weight, not a move target
+                    return; // self-loop: internal weight, not a move target
                 }
                 let c = community[neighbor];
                 if comm_weight[c] == 0.0 {
                     touched_comms.push(c);
                 }
                 comm_weight[c] += w;
-            }
+            });
 
             let k_i_in_current = comm_weight[current_community];
             let mut best_community = current_community;
@@ -2095,14 +2252,14 @@ fn renumber_communities(community: &[usize]) -> (Vec<usize>, usize) {
 /// weight equals the community's internal weight ×2 — exactly the degree the
 /// super-node must carry so modularity is preserved across levels. The total
 /// edge weight `m` is invariant under aggregation, so callers keep the original.
-fn aggregate_graph(adj: &[Vec<(usize, f64)>], community: &[usize], k: usize) -> Adjacency {
+fn aggregate_graph<S: NeighborSource>(src: &S, community: &[usize], k: usize) -> Adjacency {
     let mut acc: Vec<HashMap<usize, f64>> = vec![HashMap::new(); k];
-    for (i, neighbors) in adj.iter().enumerate() {
+    for i in 0..src.len() {
         let ci = community[i];
-        for &(j, w) in neighbors {
+        src.for_each_neighbor(i, |j, w| {
             let cj = community[j];
             *acc[ci].entry(cj).or_insert(0.0) += w;
-        }
+        });
     }
     let mut new_adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
     for (ci, entry) in acc.into_iter().enumerate() {
@@ -2117,42 +2274,56 @@ fn aggregate_graph(adj: &[Vec<(usize, f64)>], community: &[usize], k: usize) -> 
 /// merging. Returns one partition per level in **original** node-index space
 /// (`0..n0`), finest (level 0) → coarsest (last). Reuses [`local_move`],
 /// [`renumber_communities`], [`aggregate_graph`].
-fn louvain_levels(
-    mut adj: Adjacency,
-    total_weight: f64,
+fn louvain_levels<S: NeighborSource>(
+    level0: &S,
     resolution: f64,
     deadline: Option<Instant>,
 ) -> Result<Vec<Vec<usize>>, String> {
-    let n0 = adj.len();
+    let n0 = level0.len();
+    let m = level0.total_weight();
     let mut levels: Vec<Vec<usize>> = Vec::new();
     let mut node_to_super: Vec<usize> = (0..n0).collect();
 
-    loop {
-        let moved = local_move(&adj, None, resolution, total_weight, deadline)?;
-        let (partition, k) = renumber_communities(&moved);
+    // ── Level 0 — served by `level0` (streamed from CSR on disk/mapped, or a
+    //    MaterializedAdj in-memory). This is the only level that can be O(edges)
+    //    big, so it's the one we keep off the heap on disk/mapped. ──
+    let moved = local_move(level0, None, resolution, deadline)?;
+    let (partition, k) = renumber_communities(&moved);
+    for s in node_to_super.iter_mut() {
+        *s = partition[*s];
+    }
+    levels.push(node_to_super.clone());
+    if k == n0 {
+        // No merging — communities already optimal (e.g. all singletons).
+        return Ok(levels);
+    }
+    let mut adj = aggregate_graph(level0, &partition, k);
 
+    // ── Levels ≥1 — the aggregated super-graph is small, always materialised. ──
+    loop {
+        let src = MaterializedAdj { adj: &adj, m };
+        let moved = local_move(&src, None, resolution, deadline)?;
+        let (partition, k) = renumber_communities(&moved);
         if k == adj.len() {
-            // No merging this round — communities already optimal at this level.
-            if levels.is_empty() {
-                for s in node_to_super.iter_mut() {
-                    *s = partition[*s];
-                }
-                levels.push(node_to_super.clone());
-            }
             break;
         }
-
         for s in node_to_super.iter_mut() {
             *s = partition[*s];
         }
         levels.push(node_to_super.clone());
-        adj = aggregate_graph(&adj, &partition, k);
-    }
-
-    if levels.is_empty() {
-        levels.push((0..n0).collect());
+        adj = aggregate_graph(&src, &partition, k);
     }
     Ok(levels)
+}
+
+/// Empty result for a graph with no nodes.
+fn empty_community_result() -> CommunityResult {
+    CommunityResult {
+        assignments: Vec::new(),
+        num_communities: 0,
+        modularity: 0.0,
+        levels: Vec::new(),
+    }
 }
 
 /// Assemble a [`CommunityResult`] from per-level partitions (compact node-index
@@ -2224,22 +2395,26 @@ pub fn louvain_communities(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    let (nodes, adj, total_weight) =
-        build_weighted_adjacency(graph, weight_property, connection_types);
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     if nodes.is_empty() {
-        return Ok(CommunityResult {
-            assignments: Vec::new(),
-            num_communities: 0,
-            modularity: 0.0,
-            levels: Vec::new(),
-        });
+        return Ok(empty_community_result());
     }
-    let levels = louvain_levels(adj, total_weight, resolution, deadline)?;
+    // Disk/mapped: stream level 0 from the CSR (O(nodes) heap). In-memory: keep
+    // the materialised fast path unchanged.
+    let (levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+        let src = CsrSource::new(graph, weight_property, connection_types);
+        let m = src.total_weight();
+        (louvain_levels(&src, resolution, deadline)?, m)
+    } else {
+        let (_n, adj, m) = build_weighted_adjacency(graph, weight_property, connection_types);
+        let src = MaterializedAdj { adj: &adj, m };
+        (louvain_levels(&src, resolution, deadline)?, m)
+    };
     Ok(build_community_result(
         graph,
         &nodes,
         &levels,
-        total_weight,
+        m,
         weight_property,
     ))
 }
@@ -2252,8 +2427,8 @@ pub fn louvain_communities(
 /// the property Louvain lacks — a local-move community can be internally
 /// disconnected. Deterministic: components discovered by index-ordered BFS over
 /// the (sorted) adjacency. Self-loops are ignored.
-fn refine_connected(adj: &[Vec<(usize, f64)>], partition: &[usize]) -> (Vec<usize>, usize) {
-    let n = adj.len();
+fn refine_connected<S: NeighborSource>(src: &S, partition: &[usize]) -> (Vec<usize>, usize) {
+    let n = src.len();
     let mut refined = vec![usize::MAX; n];
     let mut next_id = 0usize;
     let mut stack: Vec<usize> = Vec::new();
@@ -2267,12 +2442,12 @@ fn refine_connected(adj: &[Vec<(usize, f64)>], partition: &[usize]) -> (Vec<usiz
         refined[start] = id;
         stack.push(start);
         while let Some(u) = stack.pop() {
-            for &(v, _w) in &adj[u] {
+            src.for_each_neighbor(u, |v, _w| {
                 if v != u && partition[v] == comm && refined[v] == usize::MAX {
                     refined[v] = id;
                     stack.push(v);
                 }
-            }
+            });
         }
     }
     (refined, next_id)
@@ -2291,52 +2466,93 @@ fn refine_connected(adj: &[Vec<(usize, f64)>], partition: &[usize]) -> (Vec<usiz
 /// randomised within-community modularity sub-refinement, keeping results
 /// reproducible — a kglite value. Returns per-level partitions in original
 /// node-index space, finest → coarsest.
-fn leiden_levels(
-    mut adj: Adjacency,
-    total_weight: f64,
+fn leiden_levels<S: NeighborSource>(
+    level0: &S,
     resolution: f64,
     deadline: Option<Instant>,
 ) -> Result<Vec<Vec<usize>>, String> {
-    let n0 = adj.len();
+    let n0 = level0.len();
+    let m = level0.total_weight();
     let mut levels: Vec<Vec<usize>> = Vec::new();
     let mut node_to_super: Vec<usize> = (0..n0).collect();
-    let mut init: Option<Vec<usize>> = None;
 
-    loop {
-        let moved = local_move(&adj, init.as_deref(), resolution, total_weight, deadline)?;
+    // One coarsening step shared by level 0 (`src` = `level0`) and levels ≥1
+    // (`src` = a MaterializedAdj over the small super-graph). Records this level's
+    // partition, then returns the refined component partition for aggregation, or
+    // `None` if we've converged / can't coarsen further.
+    fn step<S: NeighborSource>(
+        src: &S,
+        n0: usize,
+        node_to_super: &[usize],
+        init: Option<&[usize]>,
+        levels: &mut Vec<Vec<usize>>,
+        resolution: f64,
+        deadline: Option<Instant>,
+    ) -> Result<RefineStep, String> {
+        let moved = local_move(src, init, resolution, deadline)?;
         let (p, _kp) = renumber_communities(&moved);
-
-        // This level's partition over original nodes (normalised contiguous).
         let raw_level: Vec<usize> = (0..n0).map(|o| p[node_to_super[o]]).collect();
         let (level_norm, _) = renumber_communities(&raw_level);
-
-        // Converged when the partition stops changing between levels.
         if levels.last() == Some(&level_norm) {
-            break;
+            return Ok(None); // partition stable → converged
         }
         levels.push(level_norm);
-
-        // Refine P into connected components; aggregate on those.
-        let (refined, k_ref) = refine_connected(&adj, &p);
-        if k_ref == adj.len() {
-            // Nothing to coarsen further (every node already its own component).
-            break;
+        let (refined, k_ref) = refine_connected(src, &p);
+        if k_ref == src.len() {
+            return Ok(None); // can't coarsen further
         }
-        // Next level's super-nodes are refined components; each starts in the
-        // P-community it came from so local move can only re-merge along edges.
+        // Each refined component starts in its P-community next round, so local
+        // move can only re-merge components along real edges (connectivity guard).
         let mut next_init = vec![0usize; k_ref];
-        for s in 0..adj.len() {
+        for s in 0..src.len() {
             next_init[refined[s]] = p[s];
         }
-        adj = aggregate_graph(&adj, &refined, k_ref);
-        for s in node_to_super.iter_mut() {
-            *s = refined[*s];
-        }
-        init = Some(next_init);
+        Ok(Some((refined, k_ref, next_init)))
     }
 
-    if levels.is_empty() {
-        levels.push((0..n0).collect());
+    // ── Level 0 (streamed for disk/mapped) ──
+    let Some((refined, k_ref, next_init)) = step(
+        level0,
+        n0,
+        &node_to_super,
+        None,
+        &mut levels,
+        resolution,
+        deadline,
+    )?
+    else {
+        if levels.is_empty() {
+            levels.push((0..n0).collect());
+        }
+        return Ok(levels);
+    };
+    let mut adj = aggregate_graph(level0, &refined, k_ref);
+    for s in node_to_super.iter_mut() {
+        *s = refined[*s];
+    }
+    let mut init = next_init;
+
+    // ── Levels ≥1 (materialised super-graph) ──
+    loop {
+        let src = MaterializedAdj { adj: &adj, m };
+        match step(
+            &src,
+            n0,
+            &node_to_super,
+            Some(&init),
+            &mut levels,
+            resolution,
+            deadline,
+        )? {
+            None => break,
+            Some((refined, k_ref, next_init)) => {
+                adj = aggregate_graph(&src, &refined, k_ref);
+                for s in node_to_super.iter_mut() {
+                    *s = refined[*s];
+                }
+                init = next_init;
+            }
+        }
     }
     Ok(levels)
 }
@@ -2355,22 +2571,24 @@ pub fn leiden_communities(
     connection_types: Option<&[String]>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    let (nodes, adj, total_weight) =
-        build_weighted_adjacency(graph, weight_property, connection_types);
+    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     if nodes.is_empty() {
-        return Ok(CommunityResult {
-            assignments: Vec::new(),
-            num_communities: 0,
-            modularity: 0.0,
-            levels: Vec::new(),
-        });
+        return Ok(empty_community_result());
     }
-    let levels = leiden_levels(adj, total_weight, resolution, deadline)?;
+    let (levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+        let src = CsrSource::new(graph, weight_property, connection_types);
+        let m = src.total_weight();
+        (leiden_levels(&src, resolution, deadline)?, m)
+    } else {
+        let (_n, adj, m) = build_weighted_adjacency(graph, weight_property, connection_types);
+        let src = MaterializedAdj { adj: &adj, m };
+        (leiden_levels(&src, resolution, deadline)?, m)
+    };
     Ok(build_community_result(
         graph,
         &nodes,
         &levels,
-        total_weight,
+        m,
         weight_property,
     ))
 }

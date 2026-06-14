@@ -244,7 +244,18 @@ impl<'a> CypherExecutor<'a> {
                 | "connected_components"
                 | "weakly_connected_components"
         );
-        if needs_scope && self.deadline.is_some() {
+        // Streaming community detection (louvain/leiden on mapped/disk) is
+        // bounded-memory by design and walks the whole graph on purpose. It is
+        // slower than the in-memory path, so the per-query deadline is dropped
+        // for it (auto-relax) and it's exempt from the full-graph refusal — it
+        // may run for minutes but cannot OOM. See `louvain_communities` /
+        // `leiden_communities` (both gate the streaming path on is_disk/is_mapped).
+        let streaming_community = matches!(
+            proc_name.as_str(),
+            "louvain" | "louvain_communities" | "leiden" | "leiden_communities"
+        ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
+
+        if needs_scope && self.deadline.is_some() && !streaming_community {
             let n = self.graph.graph.node_count();
             if n > PROC_FULL_GRAPH_LIMIT {
                 return Err(format!(
@@ -322,7 +333,11 @@ impl<'a> CypherExecutor<'a> {
                     weight_prop.as_deref(),
                     resolution,
                     conn.as_deref(),
-                    self.deadline,
+                    if streaming_community {
+                        None
+                    } else {
+                        self.deadline
+                    },
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?
             }
@@ -335,7 +350,11 @@ impl<'a> CypherExecutor<'a> {
                     weight_prop.as_deref(),
                     resolution,
                     conn.as_deref(),
-                    self.deadline,
+                    if streaming_community {
+                        None
+                    } else {
+                        self.deadline
+                    },
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?
             }
