@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native OKF (Open Knowledge Format) ingestion — `from kglite import okf`.**
+  Loads a directory of markdown files with YAML frontmatter, cross-linked by
+  markdown links — Google's [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog),
+  and equally Claude memory dirs, skills folders, and Obsidian vaults — into a
+  `KnowledgeGraph`. Conceptually `code_tree` for prose knowledge: read-only and
+  **partial** (each concept becomes a node carrying its frontmatter as
+  properties plus a `file_path` pointer; the body is read on demand via
+  `okf.source(path)`, not stored unless `with_body=True`). Markdown links become
+  typed edges via an inference ladder — explicit link title (`[x](/y.md
+  "JOINS_WITH")`) → enclosing section header (`# Citations` → `CITES`) →
+  `LINKS_TO` — plus structural `CONTAINS` edges; links to not-yet-written
+  concepts become `_provisional` stub nodes (`MATCH (n {_provisional:true})`).
+  A `dialect="obsidian"` mode also resolves `[[wikilinks]]` and tolerates
+  frontmatter without a `type`. OKF ships no query engine of its own, so the
+  result composes with everything KGLite already has — `CALL leiden`/`pagerank`
+  to cluster/rank a knowledge corpus, the `orphan_node` rule to find
+  unreferenced notes, temporal filters for staleness. Feature-gated behind the
+  engine's `okf` Cargo feature (pulls only `yaml-rust2`); enabled in the wheel,
+  off in the bare crate so non-OKF builds pay nothing.
+
 ## [0.10.19] — 2026-06-14 — Leiden + multilevel Louvain + bounded-memory algorithms
 
 ### Added

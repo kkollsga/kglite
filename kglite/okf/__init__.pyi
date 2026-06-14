@@ -43,3 +43,21 @@ def build(
     Raises:
         RuntimeError: If the bundle path does not exist or is not a directory.
     """
+
+def source(path: str) -> str:
+    """Read a concept's markdown body on demand (frontmatter stripped).
+
+    Pairs with partial ingestion: nodes store a ``file_path`` (relative to the
+    bundle root), not the body. Join it with the root and pass it here to fetch
+    the prose once a query has narrowed to a single concept. A file with no
+    frontmatter returns its whole content.
+
+    Args:
+        path: Path to the concept's ``.md`` file.
+
+    Returns:
+        The markdown body, with any leading YAML frontmatter removed.
+
+    Raises:
+        RuntimeError: If the file cannot be read.
+    """

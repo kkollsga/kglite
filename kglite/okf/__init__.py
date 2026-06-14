@@ -28,6 +28,6 @@ Usage::
     g.cypher("CALL leiden() YIELD node, community RETURN community, count(*)")
 """
 
-from kglite._kglite_okf import build
+from kglite._kglite_okf import build, source
 
-__all__ = ["build"]
+__all__ = ["build", "source"]

@@ -30,3 +30,13 @@ pub fn build(
         .map(KnowledgeGraph::from_arc)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
+
+/// Read a concept's markdown body on demand (frontmatter stripped).
+///
+/// Pairs with partial ingestion: the graph stores each concept's `file_path`;
+/// pass that path (joined with the bundle root) here to fetch the prose when an
+/// agent has narrowed to a single concept.
+#[pyfunction]
+pub fn source(path: PathBuf) -> PyResult<String> {
+    crate::okf::read_body(&path).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}

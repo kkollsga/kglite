@@ -29,6 +29,17 @@ use crate::datatypes::values::Value;
 use rayon::prelude::*;
 use std::path::Path;
 
+/// Read a concept's markdown body on demand (frontmatter stripped). The
+/// counterpart to partial ingestion: the graph stores a `file_path` pointer, and
+/// this resolves it to the prose when an agent has narrowed to one concept.
+/// A file with no frontmatter returns its whole content.
+pub fn read_body(path: &Path) -> Result<String, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let (_yaml, body) = frontmatter::split(&text);
+    Ok(body)
+}
+
 /// Parse a bundle directory into [`ConceptDoc`]s (no graph yet). Files are read
 /// and parsed in parallel; a file with malformed frontmatter degrades to a
 /// body-only `Concept` rather than being dropped (permissive consumption).

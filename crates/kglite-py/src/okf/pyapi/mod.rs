@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 pub fn register(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "_kglite_okf")?;
     m.add_function(wrap_pyfunction!(entry::build, &m)?)?;
+    m.add_function(wrap_pyfunction!(entry::source, &m)?)?;
     parent.add_submodule(&m)?;
     py.import("sys")?
         .getattr("modules")?
