@@ -85,6 +85,13 @@ sodir = [
     "dep:reqwest",
     "dep:governor",
 ]
+# OKF (Open Knowledge Format) bundle loader — parses a directory of
+# markdown files with YAML frontmatter, cross-linked by markdown links,
+# into a knowledge graph (read-only ingestion, like `code_tree` but for
+# OKF / memory / skills / Obsidian bundles). Off by default so the bare
+# crate pulls no YAML parser; the Python wheel enables it. `regex` (link
+# extraction) and `walkdir` (tree walk) are already non-optional deps.
+okf = ["dep:yaml-rust2"]
 wikidata = [
     "dep:thiserror",
     "dep:reqwest",
@@ -166,6 +173,12 @@ governor = { version = "0.7", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.36", optional = true }
 
+# OKF loader YAML frontmatter parser — gated behind the `okf` feature.
+# `yaml-rust2` is a pure-Rust, actively-maintained YAML 1.2 parser (no
+# `unsafe`/libyaml, no unmaintained advisory); only pulled when `okf` is
+# enabled (the wheel enables it; bare builds don't).
+yaml-rust2 = { version = "0.10", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -180,5 +193,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # docs.rs/kglite badge in the README. `rustdoc-args` enables doc-cfg
 # annotations so feature-gated APIs are visually marked on the page.
 [package.metadata.docs.rs]
-features = ["sec", "sodir", "wikidata", "fastembed"]
+features = ["sec", "sodir", "wikidata", "fastembed", "okf"]
 rustdoc-args = ["--cfg", "docsrs"]

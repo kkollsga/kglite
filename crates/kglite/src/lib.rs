@@ -46,6 +46,8 @@ pub mod datasets;
 pub mod datatypes;
 pub mod error;
 pub mod graph;
+#[cfg(feature = "okf")]
+pub mod okf;
 pub mod param;
 
 /// Curated stable Rust API. Downstream consumers should depend on
