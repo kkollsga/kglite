@@ -18,6 +18,7 @@ pub fn clone_and_build(
     verbose: bool,
     include_tests: bool,
     max_loc_per_file: Option<usize>,
+    include_docs: bool,
 ) -> Result<Arc<DirGraph>, String> {
     if !repo.contains('/') || repo.matches('/').count() != 1 {
         return Err(format!(
@@ -37,6 +38,7 @@ pub fn clone_and_build(
             include_tests,
             save_to,
             max_loc_per_file,
+            include_docs,
         );
     }
 
@@ -48,6 +50,7 @@ pub fn clone_and_build(
         include_tests,
         save_to,
         max_loc_per_file,
+        include_docs,
     )
 }
 

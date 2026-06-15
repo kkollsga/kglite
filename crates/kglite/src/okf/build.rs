@@ -304,8 +304,9 @@ fn build_nodes(
 }
 
 /// Coerce a property value for columnar storage: structured values (lists, maps)
-/// JSON-encode to a String; scalars pass through unchanged.
-fn column_value(v: &Value) -> Value {
+/// JSON-encode to a String; scalars pass through unchanged. `pub(crate)` so
+/// `code_tree`'s docs pass reuses the same frontmatter→column convention.
+pub(crate) fn column_value(v: &Value) -> Value {
     match v {
         Value::List(_) | Value::Map(_) => {
             Value::String(serde_json::to_string(&value_to_json(v)).unwrap_or_default())

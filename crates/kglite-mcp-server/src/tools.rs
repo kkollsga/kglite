@@ -90,7 +90,7 @@ impl GraphState {
 
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
         // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
-        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None)
+        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None, false)
             .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *self.inner.write().unwrap() = Some(ActiveGraph {

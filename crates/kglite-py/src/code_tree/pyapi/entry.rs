@@ -35,6 +35,7 @@ pub fn build(
             include_tests,
             save_to.as_deref(),
             max_loc_per_file,
+            false,
         )
     })
     .map(KnowledgeGraph::from_arc)
@@ -110,6 +111,7 @@ pub fn repo_tree(
             verbose,
             include_tests,
             max_loc_per_file,
+            false,
         )
     })
     .map(KnowledgeGraph::from_arc)

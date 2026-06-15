@@ -49,12 +49,9 @@ pub fn parse_bundle(root: &Path, opts: &BuildOptions) -> Result<Vec<ConceptDoc>,
 }
 
 /// Parse already-discovered concept files into [`ConceptDoc`]s (parallel). Used
-/// by both [`parse_bundle`] and the builder (which walks once and also needs the
-/// `index.md` map).
-pub(crate) fn parse_concepts(
-    files: &[walk::DiscoveredFile],
-    opts: &BuildOptions,
-) -> Vec<ConceptDoc> {
+/// by [`parse_bundle`], the builder, and `code_tree`'s docs pass (which reuses
+/// the OKF parser to ingest a repo's markdown).
+pub fn parse_concepts(files: &[walk::DiscoveredFile], opts: &BuildOptions) -> Vec<ConceptDoc> {
     let mut docs: Vec<ConceptDoc> = files
         .par_iter()
         .filter_map(|f| parse_file(f, opts).ok().flatten())
@@ -105,7 +102,9 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<Option<Co
         })
         .unwrap_or_else(|| model::DEFAULT_LABEL.to_string());
 
-    // Title: `title` → `name` (Claude memories) → file stem.
+    // Title: `title` → `name` (Claude memories) → first `# H1` heading (so a
+    // frontmatter-less README/doc gets its real title, not the file stem) →
+    // file stem.
     let title = fm
         .remove("title")
         .map(value_to_display)
@@ -116,6 +115,7 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<Option<Co
                 .map(value_to_display)
                 .filter(|s| !s.is_empty())
         })
+        .or_else(|| first_heading(&body))
         .unwrap_or_else(|| stem(&concept_id).to_string());
 
     let props: Vec<(String, Value)> = fm.into_iter().collect();
@@ -143,6 +143,29 @@ fn value_to_display(v: Value) -> String {
         Value::Boolean(b) => b.to_string(),
         other => format!("{other:?}"),
     }
+}
+
+/// First markdown heading (`# ...`) in a body, used as a title fallback for
+/// frontmatter-less docs. Skips fenced code blocks; returns the heading text
+/// (leading `#`s stripped), or `None`.
+fn first_heading(body: &str) -> Option<String> {
+    let mut in_fence = false;
+    for line in body.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            if let Some(rest) = t.strip_prefix('#') {
+                let h = rest.trim_start_matches('#').trim();
+                if !h.is_empty() {
+                    return Some(h.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Last path component of a concept-id (the file stem).
@@ -232,7 +255,20 @@ mod tests {
         let docs = parse_bundle(dir.path(), &opts).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].label, "Concept");
-        assert_eq!(docs[0].title, "plain");
+        // No frontmatter title/name → falls back to the first H1 heading.
+        assert_eq!(docs[0].title, "Just a note");
+    }
+
+    #[test]
+    fn title_from_first_heading_when_no_frontmatter_fields() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "readme.md", "# My Project\n\nIntro text.");
+        let opts = BuildOptions {
+            require_frontmatter: false,
+            ..BuildOptions::default()
+        };
+        let docs = parse_bundle(dir.path(), &opts).unwrap();
+        assert_eq!(docs[0].title, "My Project");
     }
 
     #[test]

@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Parsing {:?} ...", src_dir);
     let graph = build_code_tree(
         &src_dir, /* verbose = */ false, /* include_tests = */ true, None, None,
+        /* include_docs = */ false,
     )?;
 
     // ── 2. Inspect the graph schema via Cypher ────────────────────
