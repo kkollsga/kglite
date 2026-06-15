@@ -456,12 +456,29 @@ fn ensure_type_metadata(
     node_type: &str,
     sample_node_idx: petgraph::graph::NodeIndex,
 ) {
-    // Read sample node properties for type inference
+    // Read sample node properties for type inference.
     let sample_props: HashMap<String, String> = match graph.graph.node_weight(sample_node_idx) {
-        Some(node) => node
-            .property_iter(&graph.interner)
-            .map(|(k, v)| (k.to_string(), value_type_name(v)))
-            .collect(),
+        Some(node) => {
+            // Fast path: if the type's metadata already covers every property
+            // key on this node, there is nothing to add. The common case
+            // (homogeneous CREATE — enforced by the planner schema check) hits
+            // this for every node after the first, skipping the per-node
+            // HashMap build + upsert (key/type/node-type String allocations).
+            // Heterogeneous nodes (a key not yet seen) fall through to the
+            // full upsert, preserving behaviour exactly.
+            if let Some(existing) = graph.node_type_metadata.get(node_type) {
+                if !existing.is_empty()
+                    && node
+                        .property_iter(&graph.interner)
+                        .all(|(k, _)| existing.contains_key(k))
+                {
+                    return;
+                }
+            }
+            node.property_iter(&graph.interner)
+                .map(|(k, v)| (k.to_string(), value_type_name(v)))
+                .collect()
+        }
         None => return,
     };
 

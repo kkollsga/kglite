@@ -9,15 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- **Bulk Cypher `CREATE` is ~17% faster — recovers a 0.10.17 regression.**
-  `insert_node_routed` registered node-type metadata for *every* created node
-  (building a `HashMap<String,String>` of property types per node), and
-  `create_node` *also* ran `ensure_type_metadata` per node — duplicate,
-  type-level work done per-row. The metadata upsert is only needed on disk
-  (where the node can't be read back), so it's now gated to disk mode;
-  memory/mapped rely on the existing `ensure_type_metadata` pass. A 50k-node
-  `UNWIND … CREATE` drops from ~49 ms back to ~42 ms, matching 0.10.15.
-  Behavior unchanged (metadata, MERGE, save/load round-trip all identical).
+- **Bulk Cypher `CREATE` is ~30% faster — now beats the 0.10.15 baseline.**
+  Two per-node redundancies in the node-create path were removed:
+  1. `insert_node_routed` registered node-type metadata for *every* created
+     node (a `HashMap<String,String>` of property types), and `create_node`
+     *also* ran `ensure_type_metadata` per node — duplicate, type-level work
+     per row (the regression introduced in 0.10.17). The upsert is only needed
+     on disk (where the node can't be read back), so it's gated to disk mode.
+  2. `ensure_type_metadata` now skips its read-back + HashMap build + upsert
+     when the type's metadata already covers the node's property keys — the
+     common homogeneous case after the first node. Heterogeneous nodes (a new
+     key) still fall through to the full upsert, so behaviour is unchanged.
+
+  A 50k-node `UNWIND … CREATE` drops from ~49 ms (0.10.23) to ~34 ms — below
+  the ~42 ms 0.10.15 baseline. Metadata, MERGE, and save/load round-trip are
+  all byte-identical.
 
 ### Fixed
 
