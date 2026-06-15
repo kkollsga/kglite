@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.23] — 2026-06-15 — code_tree docs pass: link a repo's prose to its code
+
 ### Added
 
 - **`code_tree` can ingest a repo's docs and link them to its code.** Pass
