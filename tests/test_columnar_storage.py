@@ -394,19 +394,68 @@ class TestIdTitleSentinel:
     matches the loaded form byte-for-byte.
     """
 
-    def test_fresh_save_matches_load_resave(self, tmp_path):
-        """As-built save == load->save (no id/title duplication in topology)."""
+    @staticmethod
+    def _topology_bytes(path: str) -> bytes:
+        """Extract the compressed topology section from a v4 .kgl file.
+
+        Layout: [0..4] magic, [8..12] metadata_len (u32 LE), [12..12+len] JSON
+        metadata (carries ``topology_compressed_size``), then the topology
+        section. The topology holds the node/edge structure incl. each node's
+        inline id/title; it is the section the id/title-dedup fix shrinks, and
+        it is deterministic (node order = insertion order, no zstd-ordering
+        ambiguity), unlike the column sections.
+        """
+        import json
+        import struct
+
+        with open(path, "rb") as f:
+            b = f.read()
+        mlen = struct.unpack_from("<I", b, 8)[0]
+        meta = json.loads(b[12 : 12 + mlen])
+        start = 12 + mlen
+        return b[start : start + meta["topology_compressed_size"]]
+
+    def _create_graph(self):
         kg = kglite.KnowledgeGraph()
         kg.cypher("UNWIND range(1,2000) AS i CREATE (:N {id:i, name:'entity_'+toString(i), score:i%100})")
+        return kg
+
+    def test_topology_has_no_idtitle_duplication(self, tmp_path):
+        """The core invariant: a fresh build's topology carries no inline
+        id/title (they live only in the column section), so it is byte-identical
+        to the topology of a load->save round-trip. Asserting on the topology
+        section — not the whole file — keeps this independent of the (zstd-
+        order-sensitive) column sections.
+        """
         built = str(tmp_path / "built.kgl")
         resaved = str(tmp_path / "resaved.kgl")
-        kg.save(built)
+        self._create_graph().save(built)
         kglite.load(built).save(resaved)
-        b1 = open(built, "rb").read()
-        b2 = open(resaved, "rb").read()
-        assert b1 == b2, (
-            f"as-built ({len(b1)}B) != load->resave ({len(b2)}B): id/title duplication leaked into the topology section"
+        tb, tr = self._topology_bytes(built), self._topology_bytes(resaved)
+        assert tb == tr, (
+            f"as-built topology ({len(tb)}B) != load->resave topology ({len(tr)}B): "
+            "id/title duplication leaked into the topology section"
         )
+
+    def test_save_is_deterministic(self, tmp_path):
+        """Saving the same in-memory graph twice yields byte-identical files.
+
+        Guards the deterministic schema/column ordering in the CREATE path:
+        `properties` is a std HashMap whose iteration order is randomized per
+        process, so without an explicit sort the saved column order — and thus
+        the compressed bytes — would vary run to run (the original flaky-test
+        cause). This is the anti-flake guarantee.
+        """
+        kg = self._create_graph()
+        a = str(tmp_path / "a.kgl")
+        b = str(tmp_path / "b.kgl")
+        kg.save(a)
+        kg.save(b)
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            assert fa.read() == fb.read(), (
+                "saving the same graph twice produced different bytes — "
+                "non-deterministic column/schema ordering regressed"
+            )
 
     def test_disable_columnar_preserves_ids_on_loaded_graph(self, tmp_path):
         """disable_columnar() must not lose id/title for null-sentinel nodes."""

@@ -2435,7 +2435,10 @@ impl DirGraph {
                 .iter()
                 .map(|(k, v)| (self.interner.get_or_intern(k), v.clone()))
                 .collect();
-            let keys: Vec<InternedKey> = interned_props.iter().map(|(k, _)| *k).collect();
+            // Sort for a deterministic schema slot order (see the memory branch
+            // below) — `properties` HashMap iteration order is randomized.
+            let mut keys: Vec<InternedKey> = interned_props.iter().map(|(k, _)| *k).collect();
+            keys.sort_unstable_by_key(|k| k.as_u64());
             self.ensure_type_schema_keys(node_type, &keys);
 
             let row_id = {
@@ -2470,10 +2473,15 @@ impl DirGraph {
             idx
         } else {
             // Memory / mapped: Compact NodeData on the shared TypeSchema.
-            let interned_keys: Vec<InternedKey> = properties
+            // Sort keys for a deterministic schema slot order — `properties`
+            // HashMap iteration is randomized per process, which would make the
+            // saved column order (and compressed .kgl bytes) non-reproducible.
+            // InternedKey's FNV hash is stable across processes/versions.
+            let mut interned_keys: Vec<InternedKey> = properties
                 .keys()
                 .map(|k| self.interner.get_or_intern(k))
                 .collect();
+            interned_keys.sort_unstable_by_key(|k| k.as_u64());
             self.ensure_type_schema_keys(node_type, &interned_keys);
             let schema = Arc::clone(
                 self.type_schemas

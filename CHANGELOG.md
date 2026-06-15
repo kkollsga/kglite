@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns, so calling `disable_columnar()` on a loaded graph (whose nodes hold
   the columnar null-sentinel) wiped every id and title. It now restores them
   from the store.
+- **Deterministic `.kgl` output for Cypher-`CREATE` graphs.** The schema slot
+  order was derived from a `properties` HashMap whose iteration order is
+  randomized per process, so saving the same CREATE-built graph could produce
+  different column orderings — and, because zstd's ratio is order-sensitive,
+  different compressed bytes — run to run. The CREATE path now sorts schema keys,
+  so identical input always yields identical output (`save` is reproducible).
 
 ## [0.10.23] — 2026-06-15 — code_tree docs pass: link a repo's prose to its code
 
