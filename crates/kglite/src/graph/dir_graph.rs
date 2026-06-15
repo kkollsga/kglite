@@ -2411,20 +2411,25 @@ impl DirGraph {
         node_type: &str,
         properties: HashMap<String, Value>,
     ) -> NodeIndex {
-        // Register property types in node_type_metadata from the values we
-        // have in hand. Do NOT read the node back for this: on disk the
-        // columnar store isn't synced to the read-side (`dg.column_stores`)
-        // until the end of the clause, so a read-back would see no properties
-        // — and the metadata-driven column persistence would then drop them on
-        // save (properties survive in-memory but vanish after save/reload).
-        // Merge-upsert, so it composes with any later `ensure_type_metadata`.
-        let prop_types: HashMap<String, String> = properties
-            .iter()
-            .map(|(k, v)| (k.clone(), v.type_name().to_string()))
-            .collect();
-        self.upsert_node_type_metadata(node_type, prop_types);
-
         if self.graph.is_disk() {
+            // Register property types in node_type_metadata from the values we
+            // have in hand. Do NOT read the node back for this: on disk the
+            // columnar store isn't synced to the read-side (`dg.column_stores`)
+            // until the end of the clause, so a read-back would see no properties
+            // — and the metadata-driven column persistence would then drop them on
+            // save (properties survive in-memory but vanish after save/reload).
+            // Merge-upsert, so it composes with any later `ensure_type_metadata`.
+            //
+            // Memory/mapped skip this: the caller (`create_node`) runs
+            // `ensure_type_metadata` against the read-back node, which produces
+            // identical metadata. Doing both was redundant per-node work — the
+            // bulk-CREATE regression introduced in 0.10.17.
+            let prop_types: HashMap<String, String> = properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.type_name().to_string()))
+                .collect();
+            self.upsert_node_type_metadata(node_type, prop_types);
+
             // Pre-intern property keys (and node type) before borrowing stores.
             let interned_props: Vec<(InternedKey, Value)> = properties
                 .iter()

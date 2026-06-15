@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Bulk Cypher `CREATE` is ~17% faster — recovers a 0.10.17 regression.**
+  `insert_node_routed` registered node-type metadata for *every* created node
+  (building a `HashMap<String,String>` of property types per node), and
+  `create_node` *also* ran `ensure_type_metadata` per node — duplicate,
+  type-level work done per-row. The metadata upsert is only needed on disk
+  (where the node can't be read back), so it's now gated to disk mode;
+  memory/mapped rely on the existing `ensure_type_metadata` pass. A 50k-node
+  `UNWIND … CREATE` drops from ~49 ms back to ~42 ms, matching 0.10.15.
+  Behavior unchanged (metadata, MERGE, save/load round-trip all identical).
+
 ### Fixed
 
 - **Smaller, faster-loading `.kgl` files for in-memory builds.** `enable_columnar()`
