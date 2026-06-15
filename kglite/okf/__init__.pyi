@@ -24,6 +24,12 @@ def build(
     concepts become ``_provisional`` stub nodes
     (``MATCH (n {_provisional: true})``).
 
+    The graph is enriched by default with synthesized nodes that densify it:
+    ``Tag`` nodes (``(:Concept)-[:TAGGED]->(:Tag)`` from ``tags``), ``Source``
+    nodes (external ``http(s)`` links → ``(:Concept)-[:CITES]->(:Source)``), and
+    ``Folder`` nodes (the directory tree, ``(:Folder)-[:CONTAINS]->`` concepts /
+    subfolders, with each directory's ``index.md`` enriching its Folder).
+
     Ingestion is *partial*: the markdown body is not stored unless ``with_body``
     is set — each node keeps a ``file_path`` pointer instead.
 

@@ -43,8 +43,16 @@ graph is a rebuildable lens over it.
 | Frontmatter keys | Node properties (`tags`/lists → JSON string; nested `metadata:` → dotted keys `metadata.type`) |
 | The markdown body | **Not stored** — a `file_path` pointer is kept; read on demand with `okf.source()` (or pass `with_body=True`) |
 | A markdown link | A typed directed edge (see the ladder below) |
+| `tags:` entries | `(:Concept)-[:TAGGED]->(:Tag)` — a Tag hub per distinct tag |
+| External `http(s)` links | `(:Concept)-[:CITES\|REFERENCES]->(:Source {url})` |
+| Each directory | `(:Folder)-[:CONTAINS]->` its concepts and subfolders; `index.md` enriches the Folder's title/description |
 | A link to a not-yet-written concept | A `_provisional` stub node |
-| `index.md` / `log.md` | Reserved — skipped (not concepts) |
+| `log.md` | Reserved — skipped |
+
+Tag, Source, and Folder nodes are synthesized by default — they turn the sparse
+author-link graph into a dense, well-clustering one (the hubs connect otherwise-
+disconnected concepts). Disable per kind via `BuildOptions` if you want a bare
+concept graph.
 
 ### The edge-type ladder
 
@@ -55,7 +63,11 @@ is inferred most-specific-first:
 2. the enclosing **section header** — `# Joins` → `JOINS_WITH`, `# Citations` → `CITES`, `# References` → `REFERENCES`
 3. the generic fallback — `LINKS_TO`
 
-Plus structural `CONTAINS` edges (a concept whose directory is itself a concept).
+Plus structural `CONTAINS` edges from the directory hierarchy.
+
+Link resolution is forgiving: a `[[wikilink]]` or path resolves by exact id →
+file stem → normalized slug (case- and `_`/`-`-insensitive) → title, so
+`[[my-note]]`, `[[My Note]]`, and `my_note.md` all reach the same concept.
 
 ## Maintaining agent memory & skills
 
@@ -65,12 +77,19 @@ queries — no new API:
 ```python
 g = okf.build("~/.claude/.../memory", dialect="obsidian")
 
-# Orphaned memories (nothing links to or from them)
-g.cypher("MATCH (n) OPTIONAL MATCH (n)-[r]-() WITH n, count(r) AS d "
-         "WHERE d = 0 RETURN n.concept_id")
+# Orphaned memories: no *semantic* edge (every concept has a structural
+# CONTAINS from its Folder and TAGGED edges, so exclude those).
+g.cypher("MATCH (n) WHERE n.concept_id IS NOT NULL "
+         "OPTIONAL MATCH (n)-[r]-() WHERE NOT type(r) IN ['CONTAINS', 'TAGGED'] "
+         "WITH n, count(r) AS d WHERE d = 0 RETURN n.concept_id")
 
 # Dangling [[links]] — references to knowledge not yet written
 g.cypher("MATCH (n {_provisional: true}) RETURN n.concept_id")
+
+# Most-referenced sources, and memories grouped by tag
+g.cypher("MATCH (:Concept)-[:CITES]->(s:Source) "
+         "RETURN s.id, count(*) AS cited ORDER BY cited DESC")
+g.cypher("MATCH (c)-[:TAGGED]->(t:Tag) RETURN t.id, collect(c.title)")
 
 # Cluster memories into themes (the OKF → GraphRAG indexing story)
 g.cypher("CALL leiden() YIELD node, community "
