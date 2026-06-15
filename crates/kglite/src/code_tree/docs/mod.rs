@@ -1,28 +1,39 @@
 //! Optional docs pass for `code_tree`.
 //!
-//! Ingests a repo's markdown as `:Doc` nodes — reusing the OKF parser
-//! (`crate::okf`) — and links them to the rest of the graph:
+//! Ingests a repo's prose documentation as `:Doc` nodes and links them to the
+//! rest of the graph:
 //!
 //! - `(:Doc)-[:MENTIONS]->(:Function|:Class|:Struct|:Enum|:Trait|:Interface|:Constant)`
-//!   — the *prize*: an agent can jump from a README's prose to the symbol it
-//!   describes (and back). Resolution is **conservative** — backtick-quoted
-//!   tokens and `::`-qualified names only, matched to an exact `qualified_name`
-//!   or a **unique** bare `name`; ambiguous / common-word tokens never link.
-//! - `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` — markdown links from one doc to
-//!   another doc or to a source file (the latter matched by **unique basename**,
-//!   robust to source-root-relative path bases).
+//!   — the *prize*: an agent can jump from a doc's prose to the symbol it
+//!   describes (and back). Resolution is **conservative** — only strong code
+//!   signals are considered (Markdown backtick spans / `::`-qualified names;
+//!   reStructuredText `:func:`/`:class:`/… roles and ``` ``literals``` ```),
+//!   matched to an exact `qualified_name` or a **unique** bare `name`; ambiguous
+//!   / common-word tokens never link.
+//! - `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` — links from one doc to another doc or
+//!   to a source file (the latter matched by **unique basename**, robust to
+//!   source-root-relative path bases).
 //!
 //! Each `:Doc` node also carries a `kind` (readme / changelog / guide / …,
 //! inferred from the filename) and a `headings` outline (JSON list).
+//!
+//! **Two markup formats** are understood: Markdown (`.md`, parsed via the OKF
+//! loader — frontmatter, markdown links) and reStructuredText (`.rst`, parsed
+//! by the [`rst`] submodule — Sphinx is the dominant doc toolchain for the
+//! scientific-Python ecosystem). Format-specific extraction (title / headings /
+//! mention candidates / links) dispatches on [`DocFormat`]; everything
+//! downstream (symbol index, edge emit) is shared.
 //!
 //! Runs *after* the code nodes are loaded, so symbol resolution can find them.
 //! Gated on the `okf` feature.
 //!
 //! Repo docs (READMEs, `docs/`, design notes) rarely carry YAML frontmatter, so
-//! this ingests **all** `.md` (`require_frontmatter = false`) while still
-//! honoring `kg_skip: true` markers and the OKF walk's built-in pruning
-//! (node_modules / target / hidden dirs). Doc bodies are kept transiently for
-//! the link scan but not stored as node properties (partial ingestion).
+//! this ingests **all** `.md` / `.rst` (`require_frontmatter = false`) while
+//! honoring `kg_skip: true` markers (Markdown) and the same directory pruning as
+//! the code walk (node_modules / target / hidden dirs). Doc bodies are kept
+//! transiently for the link scan but not stored as node properties.
+
+mod rst;
 
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::mutation::maintain;
@@ -30,8 +41,9 @@ use crate::graph::DirGraph;
 use crate::okf;
 use regex::Regex;
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use walkdir::WalkDir;
 
 /// Node label for ingested repo documentation (distinct from code nodes).
 const DOC_LABEL: &str = "Doc";
@@ -52,6 +64,8 @@ const MENTIONS_CONN: &str = "MENTIONS";
 const DOCUMENTS_CONN: &str = "DOCUMENTS";
 /// File node label (id = `path`).
 const FILE_LABEL: &str = "File";
+/// Heading-outline cap (keeps the `headings` property bounded).
+const MAX_HEADINGS: usize = 64;
 
 /// Common identifiers that appear as prose words — never link a bare token in
 /// this set (a `qualified_name` exact match still wins, this only guards the
@@ -67,19 +81,47 @@ const STOP_WORDS: &[&str] = &[
 /// `(source_label, target_label, conn_type)` → `[(source_id, target_id)]`.
 type EdgeGroups = HashMap<(String, String, String), Vec<(String, String)>>;
 
-/// Ingest the repo's markdown as `:Doc` nodes and link them to code + each
-/// other. `graph` already contains the code nodes.
+/// Markup format of an ingested doc — selects the title / heading / mention /
+/// link extractor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocFormat {
+    Markdown,
+    Rst,
+}
+
+/// One ingested documentation file, normalized across markup formats. `body` is
+/// retained transiently for the link/mention scan; it is not stored on the node.
+struct DocEntry {
+    concept_id: String,
+    file_path: String,
+    title: String,
+    body: String,
+    /// Flattened frontmatter (Markdown only; empty for RST).
+    props: Vec<(String, Value)>,
+    format: DocFormat,
+}
+
+/// A candidate symbol token extracted from a doc body. `allow_fallback` permits
+/// the unique-bare-name match (set for strong code signals — backtick spans,
+/// RST roles — and cleared for weaker bare `::` prose, which requires an exact
+/// `qualified_name`).
+struct Candidate {
+    token: String,
+    allow_fallback: bool,
+}
+
+/// A resolved outbound documentation link target.
+enum LinkTarget {
+    /// Another doc, by extension-stripped `concept_id`.
+    Doc(String),
+    /// A source file, by repo-relative path (matched on unique basename).
+    File(String),
+}
+
+/// Ingest the repo's docs as `:Doc` nodes and link them to code + each other.
+/// `graph` already contains the code nodes.
 pub fn ingest_and_link(graph: &mut DirGraph, root: &Path, verbose: bool) -> Result<(), String> {
-    let opts = okf::BuildOptions {
-        dialect: okf::Dialect::Okf,
-        require_frontmatter: false, // READMEs / design docs rarely have frontmatter
-        respect_skip: true,         // honor `kg_skip: true`
-        skip_dirs: Vec::new(),      // the OKF walk already prunes node_modules/target/hidden
-        with_body: true,            // body retained for the symbol-link scan
-        embed: false,
-    };
-    let walked = okf::walk::discover(root, &opts.skip_dirs)?;
-    let docs = okf::parse_concepts(&walked.concepts, &opts);
+    let docs = discover_and_parse(root)?;
     if docs.is_empty() {
         return Ok(());
     }
@@ -87,19 +129,127 @@ pub fn ingest_and_link(graph: &mut DirGraph, root: &Path, verbose: bool) -> Resu
     let mentions = link_docs_to_code(graph, &docs)?;
     let documents = link_docs_to_docs_and_files(graph, &docs)?;
     if verbose {
+        let md = docs
+            .iter()
+            .filter(|d| d.format == DocFormat::Markdown)
+            .count();
+        let rst = docs.len() - md;
         eprintln!(
-            "[docs] ingested {} markdown doc(s); {mentions} MENTIONS, {documents} DOCUMENTS edge(s)",
+            "[docs] ingested {} doc(s) ({md} md, {rst} rst); {mentions} MENTIONS, {documents} DOCUMENTS edge(s)",
             docs.len()
         );
     }
     Ok(())
 }
 
-/// Add one `:Doc` node per markdown file. Label is forced to `Doc` (repo docs
-/// aren't typed concepts). Each node carries the flattened frontmatter plus a
-/// `kind` (filename heuristic) and `headings` outline (JSON list). Mirrors
-/// `okf::build`'s columnar add-nodes pattern.
-fn add_doc_nodes(graph: &mut DirGraph, docs: &[okf::ConceptDoc]) -> Result<(), String> {
+// ── discovery + parsing ─────────────────────────────────────────────────────
+
+/// A discovered doc file (before parsing): repo-relative path, abs path, format.
+struct Discovered {
+    rel_path: String,
+    abs_path: PathBuf,
+    format: DocFormat,
+}
+
+/// Walk `root` for `.md` / `.rst` files, then parse each via its format's
+/// extractor. Markdown reuses the OKF parser (frontmatter, `kg_skip`); RST uses
+/// the [`rst`] submodule. Directory pruning matches the code walk
+/// ([`crate::code_tree::manifest::walk_filter`]).
+fn discover_and_parse(root: &Path) -> Result<Vec<DocEntry>, String> {
+    let found = discover_docs(root);
+
+    // Markdown: hand the discovered `.md` files to the OKF parser (it computes
+    // titles from frontmatter / first heading, honors `kg_skip`, flattens
+    // frontmatter). We bypass `okf::walk` so `.rst` shares one traversal and so
+    // `index.md` is kept (the docs pass builds no Folder hierarchy).
+    let md_opts = okf::BuildOptions {
+        dialect: okf::Dialect::Okf,
+        require_frontmatter: false,
+        respect_skip: true,
+        skip_dirs: Vec::new(),
+        with_body: true,
+        embed: false,
+    };
+    let md_files: Vec<okf::walk::DiscoveredFile> = found
+        .iter()
+        .filter(|d| d.format == DocFormat::Markdown)
+        .map(|d| okf::walk::DiscoveredFile {
+            rel_path: d.rel_path.clone(),
+            abs_path: d.abs_path.clone(),
+        })
+        .collect();
+    let mut docs: Vec<DocEntry> = okf::parse_concepts(&md_files, &md_opts)
+        .into_iter()
+        .map(|c| DocEntry {
+            concept_id: c.concept_id,
+            file_path: c.file_path,
+            title: c.title,
+            body: c.body.unwrap_or_default(),
+            props: c.props,
+            format: DocFormat::Markdown,
+        })
+        .collect();
+
+    // reStructuredText.
+    for d in found.iter().filter(|d| d.format == DocFormat::Rst) {
+        if let Some(entry) = rst::parse(&d.rel_path, &d.abs_path) {
+            docs.push(entry);
+        }
+    }
+
+    docs.sort_by(|a, b| a.concept_id.cmp(&b.concept_id));
+    Ok(docs)
+}
+
+/// Enumerate `.md` / `.rst` files under `root`, pruning hidden / build dirs.
+fn discover_docs(root: &Path) -> Vec<Discovered> {
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root)
+        .into_iter()
+        .filter_entry(crate::code_tree::manifest::walk_filter);
+    for entry in walker.filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let format = match entry.path().extension().and_then(|e| e.to_str()) {
+            Some(e) if e.eq_ignore_ascii_case("md") => DocFormat::Markdown,
+            Some(e) if e.eq_ignore_ascii_case("rst") => DocFormat::Rst,
+            _ => continue,
+        };
+        let Ok(rel) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        let rel_path = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        out.push(Discovered {
+            rel_path,
+            abs_path: entry.path().to_path_buf(),
+            format,
+        });
+    }
+    out
+}
+
+/// Strip the trailing markup extension from a path, yielding the `concept_id`.
+fn strip_doc_ext(rel_path: &str) -> &str {
+    for ext in [".md", ".rst", ".MD", ".RST"] {
+        if let Some(stem) = rel_path.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    rel_path
+}
+
+// ── :Doc node materialisation ───────────────────────────────────────────────
+
+/// Add one `:Doc` node per doc. Label is forced to `Doc` (repo docs aren't typed
+/// concepts). Each node carries the flattened frontmatter plus a `kind`
+/// (filename heuristic) and `headings` outline (JSON list). Mirrors `okf::build`'s
+/// columnar add-nodes pattern.
+fn add_doc_nodes(graph: &mut DirGraph, docs: &[DocEntry]) -> Result<(), String> {
     let mut keys: BTreeSet<&str> = BTreeSet::new();
     for d in docs {
         for (k, _) in &d.props {
@@ -119,7 +269,7 @@ fn add_doc_nodes(graph: &mut DirGraph, docs: &[okf::ConceptDoc]) -> Result<(), S
 
     let mut rows = Vec::with_capacity(docs.len());
     for d in docs {
-        let headings = heading_outline(d.body.as_deref().unwrap_or(""));
+        let headings = doc_headings(d);
         let headings_val = if headings.is_empty() {
             Value::Null
         } else {
@@ -170,7 +320,12 @@ fn doc_kind(concept_id: &str) -> String {
         .any(|seg| matches!(seg.to_ascii_lowercase().as_str(), "docs" | "doc"));
     let kind = if stem.starts_with("readme") {
         "readme"
-    } else if stem.starts_with("changelog") || stem == "changes" || stem == "history" {
+    } else if stem.starts_with("changelog")
+        || stem == "changes"
+        || stem == "history"
+        || stem.starts_with("whats-new")
+        || stem.starts_with("whatsnew")
+    {
         "changelog"
     } else if stem.starts_with("contributing") {
         "contributing"
@@ -190,10 +345,16 @@ fn doc_kind(concept_id: &str) -> String {
     kind.to_string()
 }
 
-/// Heading outline: every markdown heading text, in document order (fenced code
-/// skipped). Capped to keep node properties bounded.
-fn heading_outline(body: &str) -> Vec<String> {
-    const MAX_HEADINGS: usize = 64;
+/// Heading outline for a doc, dispatched on format.
+fn doc_headings(d: &DocEntry) -> Vec<String> {
+    match d.format {
+        DocFormat::Markdown => markdown_headings(&d.body),
+        DocFormat::Rst => rst::headings(&d.body),
+    }
+}
+
+/// Markdown heading outline (`#`-prefixed), fenced code skipped, capped.
+fn markdown_headings(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut in_fence = false;
     for line in body.lines() {
@@ -272,7 +433,7 @@ impl SymbolIndex {
 
     /// Resolve one candidate token to a `(qualified_name, label)` target, or
     /// `None`. `allow_name_fallback` enables the unique-bare-name match (used for
-    /// backtick-quoted tokens, which are stronger code signals than bare prose).
+    /// strong code signals, which beat bare prose).
     fn resolve(&self, token: &str, allow_name_fallback: bool) -> Option<(String, &'static str)> {
         if let Some(&label) = self.qname_to_label.get(token) {
             return Some((token.to_string(), label));
@@ -293,10 +454,11 @@ impl SymbolIndex {
     }
 }
 
+/// Leading identifier path of a code span: `parse_wkt`, `Type::method`,
+/// `mod.Class`. Anchored at the start of an already-extracted span. Shared with
+/// the [`rst`] submodule.
 fn ident_path_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // Leading identifier path of a code span: `parse_wkt`, `Type::method`,
-    // `mod.Class`. Anchored at the start of the (already-extracted) span.
     RE.get_or_init(|| {
         Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)*").unwrap()
     })
@@ -313,11 +475,18 @@ fn qualified_prose_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+").unwrap())
 }
 
-/// Collect the distinct symbol mentions in one doc body. Backtick-quoted tokens
-/// get the unique-bare-name fallback; bare `::` prose names require an exact
-/// `qualified_name` match.
-fn scan_mentions(body: &str, index: &SymbolIndex) -> BTreeSet<(String, &'static str)> {
-    let mut hits: BTreeSet<(String, &'static str)> = BTreeSet::new();
+/// Collect symbol-mention candidates from a doc body, dispatched on format.
+fn mention_candidates(d: &DocEntry) -> Vec<Candidate> {
+    match d.format {
+        DocFormat::Markdown => markdown_candidates(&d.body),
+        DocFormat::Rst => rst::candidates(&d.body),
+    }
+}
+
+/// Markdown mention candidates: backtick spans (fallback ON) + bare `::` prose
+/// names (fallback OFF, exact qualified_name only). Fenced code skipped.
+fn markdown_candidates(body: &str) -> Vec<Candidate> {
+    let mut out = Vec::new();
     let mut in_fence = false;
     for line in body.lines() {
         let t = line.trim_start();
@@ -331,32 +500,37 @@ fn scan_mentions(body: &str, index: &SymbolIndex) -> BTreeSet<(String, &'static 
         for cap in backtick_re().captures_iter(line) {
             let span = cap.get(1).map(|m| m.as_str()).unwrap_or("");
             if let Some(m) = ident_path_re().find(span) {
-                if let Some(hit) = index.resolve(m.as_str(), true) {
-                    hits.insert(hit);
-                }
+                out.push(Candidate {
+                    token: m.as_str().to_string(),
+                    allow_fallback: true,
+                });
             }
         }
         for m in qualified_prose_re().find_iter(line) {
-            if let Some(hit) = index.resolve(m.as_str(), false) {
-                hits.insert(hit);
-            }
+            out.push(Candidate {
+                token: m.as_str().to_string(),
+                allow_fallback: false,
+            });
         }
     }
-    hits
+    out
 }
 
 /// Build `(:Doc)-[:MENTIONS]->(:<symbol>)` edges. Returns the edge count.
-fn link_docs_to_code(graph: &mut DirGraph, docs: &[okf::ConceptDoc]) -> Result<usize, String> {
+fn link_docs_to_code(graph: &mut DirGraph, docs: &[DocEntry]) -> Result<usize, String> {
     let index = SymbolIndex::build(graph);
     if index.is_empty() {
         return Ok(0);
     }
     let mut groups: EdgeGroups = HashMap::new();
     for d in docs {
-        let Some(body) = d.body.as_deref() else {
-            continue;
-        };
-        for (qname, label) in scan_mentions(body, &index) {
+        let mut hits: BTreeSet<(String, &'static str)> = BTreeSet::new();
+        for c in mention_candidates(d) {
+            if let Some(hit) = index.resolve(&c.token, c.allow_fallback) {
+                hits.insert(hit);
+            }
+        }
+        for (qname, label) in hits {
             groups
                 .entry((
                     DOC_LABEL.to_string(),
@@ -372,39 +546,37 @@ fn link_docs_to_code(graph: &mut DirGraph, docs: &[okf::ConceptDoc]) -> Result<u
 
 // ── DOCUMENTS (doc → doc / doc → file) ─────────────────────────────────────
 
-/// Build `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` edges from markdown links. Doc
-/// targets match by exact `concept_id`; file targets by **unique basename**
-/// (robust to source-root-relative File ids). Returns the edge count.
-fn link_docs_to_docs_and_files(
-    graph: &mut DirGraph,
-    docs: &[okf::ConceptDoc],
-) -> Result<usize, String> {
+/// Collect outbound link targets from a doc body, dispatched on format.
+fn doc_link_targets(d: &DocEntry) -> Vec<LinkTarget> {
+    let src_dir = okf::parent_dir(&d.concept_id);
+    match d.format {
+        DocFormat::Markdown => markdown_link_targets(&d.body, src_dir),
+        DocFormat::Rst => rst::link_targets(&d.body, src_dir),
+    }
+}
+
+/// Build `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` edges. Doc targets match by exact
+/// `concept_id`; file targets by **unique basename** (robust to source-root-
+/// relative File ids). Returns the edge count.
+fn link_docs_to_docs_and_files(graph: &mut DirGraph, docs: &[DocEntry]) -> Result<usize, String> {
     let doc_ids: BTreeSet<&str> = docs.iter().map(|d| d.concept_id.as_str()).collect();
     let file_by_basename = file_basename_index(graph);
 
     let mut groups: EdgeGroups = HashMap::new();
     for d in docs {
-        let Some(body) = d.body.as_deref() else {
-            continue;
-        };
-        let src_dir = okf::parent_dir(&d.concept_id);
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-        for dest in markdown_link_dests(body) {
-            let Some(target) = resolve_doc_link(&dest, src_dir) else {
-                continue;
-            };
-            let edge = if let Some(rest) = target.strip_suffix(".md") {
-                // Doc → Doc (exact concept_id).
-                doc_ids
-                    .contains(rest)
-                    .then(|| (DOC_LABEL.to_string(), rest.to_string()))
-            } else {
-                // Doc → File (unique basename).
-                let base = target.rsplit('/').next().unwrap_or(&target);
-                file_by_basename
-                    .get(base)
-                    .and_then(|ids| (ids.len() == 1).then(|| ids[0].clone()))
-                    .map(|id| (FILE_LABEL.to_string(), id))
+        for target in doc_link_targets(d) {
+            let edge = match target {
+                LinkTarget::Doc(cid) => doc_ids
+                    .contains(cid.as_str())
+                    .then(|| (DOC_LABEL.to_string(), cid)),
+                LinkTarget::File(path) => {
+                    let base = path.rsplit('/').next().unwrap_or(&path);
+                    file_by_basename
+                        .get(base)
+                        .and_then(|ids| (ids.len() == 1).then(|| ids[0].clone()))
+                        .map(|id| (FILE_LABEL.to_string(), id))
+                }
             };
             let Some((tgt_label, tgt_id)) = edge else {
                 continue;
@@ -445,8 +617,9 @@ fn markdown_link_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap())
 }
 
-/// All non-image markdown link destinations in a body (fenced code skipped).
-fn markdown_link_dests(body: &str) -> Vec<String> {
+/// Markdown link targets: `[text](dest)` → a Doc (`.md` target) or File (other),
+/// fenced code + image links skipped.
+fn markdown_link_targets(body: &str, src_dir: &str) -> Vec<LinkTarget> {
     let mut out = Vec::new();
     let mut in_fence = false;
     for raw in body.lines() {
@@ -463,17 +636,25 @@ fn markdown_link_dests(body: &str) -> Vec<String> {
             if m.start() > 0 && raw.as_bytes()[m.start() - 1] == b'!' {
                 continue; // image link
             }
-            if let Some(dest) = cap.get(1) {
-                out.push(dest.as_str().to_string());
+            let Some(dest) = cap.get(1) else { continue };
+            let Some(target) = resolve_rel_path(dest.as_str(), src_dir) else {
+                continue;
+            };
+            if let Some(rest) = target.strip_suffix(".md") {
+                out.push(LinkTarget::Doc(rest.to_string()));
+            } else {
+                out.push(LinkTarget::File(target));
             }
         }
     }
     out
 }
 
-/// Resolve a markdown link destination to a bundle-relative path (keeping the
-/// extension), or `None` for external / anchor-only / mailto links.
-fn resolve_doc_link(dest: &str, src_dir: &str) -> Option<String> {
+/// Resolve a relative/absolute link destination to a repo-relative path (keeping
+/// any extension), or `None` for external / anchor-only / mailto links. Shared
+/// with the [`rst`] submodule. `src_dir` is the linking doc's directory; a
+/// leading `/` is treated as repo-root-absolute.
+fn resolve_rel_path(dest: &str, src_dir: &str) -> Option<String> {
     let dest = dest.split(['#', '?']).next().unwrap_or(dest);
     if dest.is_empty() || dest.contains("://") || dest.starts_with("mailto:") {
         return None;
@@ -667,5 +848,61 @@ mod tests {
             })
             .and_then(|nd| nd.get_field_ref("kind").map(|v| v.into_owned()));
         assert_eq!(readme_kind, Some(Value::String("readme".to_string())));
+    }
+
+    #[test]
+    fn rst_docs_link_via_roles_and_doc_refs() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join("python/pkg")).unwrap();
+        fs::create_dir_all(root.join("doc")).unwrap();
+        fs::write(
+            root.join("python/pkg/core.py"),
+            "def open_dataset():\n    pass\n\nclass DataArray:\n    pass\n",
+        )
+        .unwrap();
+        fs::write(root.join("doc/io.rst"), "I/O\n===\nNotes.\n").unwrap();
+        // RST roles (:func:/:class:) are explicit symbol refs; `:doc:` is a
+        // doc cross-reference; the `~` prefix and `text <target>` forms resolve
+        // to the underlying symbol.
+        fs::write(
+            root.join("doc/index.rst"),
+            "xarray\n======\n\nLoad with :func:`~pkg.open_dataset` into a \
+             :class:`DataArray`. See :doc:`io` for details.\n",
+        )
+        .unwrap();
+
+        let g = run_with_options(&root, false, true, None, None, true).unwrap();
+        assert!(count_label(&g, "Doc") >= 2, "two rst docs");
+        let mentioned = mention_target_names(&g, "MENTIONS");
+        assert!(mentioned.contains("open_dataset"), ":func: role links");
+        assert!(mentioned.contains("DataArray"), ":class: role links");
+        // index.rst :doc:`io` → doc/io  => one DOCUMENTS (Doc) edge.
+        assert!(count_conn(&g, "DOCUMENTS") >= 1, ":doc: ref links doc->doc");
+    }
+
+    #[test]
+    fn rst_title_from_section_heading() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+        fs::write(
+            root.join("guide.rst"),
+            "Getting Started\n===============\n\nIntro.\n",
+        )
+        .unwrap();
+
+        let g = run_with_options(&root, false, true, None, None, true).unwrap();
+        let title = g
+            .graph
+            .node_indices()
+            .filter_map(|n| g.get_node(n))
+            .find(|nd| {
+                nd.node_type_str(&g.interner) == "Doc"
+                    && matches!(&*nd.id(), Value::String(s) if s == "guide")
+            })
+            .map(|nd| nd.title().into_owned());
+        assert_eq!(title, Some(Value::String("Getting Started".to_string())));
     }
 }

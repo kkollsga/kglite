@@ -276,7 +276,7 @@ When a manifest is detected, `build()` reads project metadata (name, version, de
 
 ## Documentation nodes (`include_docs`)
 
-A repo's prose — its `README`, `docs/`, design notes, ADRs — is part of its intelligence, but a plain code graph discards every `.md`. Pass `include_docs=True` to `build()` (or `repo_tree()`) to ingest the repo's markdown alongside the code and **link the two**:
+A repo's prose — its `README`, `docs/`, design notes, ADRs — is part of its intelligence, but a plain code graph discards every doc. Pass `include_docs=True` to `build()` (or `repo_tree()`) to ingest the repo's documentation alongside the code and **link the two**. Both **Markdown** (`.md`) and **reStructuredText** (`.rst`, the Sphinx format used across scientific-Python — numpy / pandas / xarray / scipy) are understood:
 
 ```python
 g = build(".", include_docs=True)
@@ -306,9 +306,9 @@ Each markdown file becomes a `:Doc` node carrying:
 
 And two edge types connect docs to the rest of the graph:
 
-- **`(:Doc)-[:MENTIONS]->(:Function | :Class | :Struct | :Enum | :Trait | :Interface | :Constant)`** — symbols named in the prose. Resolution is **conservative**: only backtick-quoted tokens (`` `parse_wkt` ``, `` `Type::method` ``) and `::`-qualified names are considered, matched to an exact `qualified_name` or a *unique* bare `name`. Ambiguous names and common words never link, so the edges are high-precision.
-- **`(:Doc)-[:DOCUMENTS]->(:Doc | :File)`** — markdown links to another doc (matched by `concept_id`) or to a source file (matched by unique basename).
+- **`(:Doc)-[:MENTIONS]->(:Function | :Class | :Struct | :Enum | :Trait | :Interface | :Constant)`** — symbols named in the prose. Resolution is **conservative**: only strong code signals are considered — Markdown backtick spans (`` `parse_wkt` ``) and `::`-qualified names; reStructuredText cross-reference roles (`` :func:`~xarray.open_dataset` ``, `` :class:`Dataset` ``) and double-backtick literals — matched to an exact `qualified_name` or a *unique* bare `name`. Ambiguous names and common words never link, so the edges are high-precision.
+- **`(:Doc)-[:DOCUMENTS]->(:Doc | :File)`** — links to another doc (Markdown `[..](other.md)` / RST `` :doc:`other` ``, matched by `concept_id`) or to a source file (matched by unique basename).
 
-Markdown ingestion reuses the [OKF loader](okf.md) — the same parser that turns a standalone vault or bundle into a graph. `include_docs` honors `kg_skip: true` markers and the same directory pruning as the code walk (`node_modules/`, `target/`, hidden dirs). The doc body is **not** stored as a property (read it on demand via `file_path`).
+Markdown ingestion reuses the [OKF loader](okf.md) — the same parser that turns a standalone vault or bundle into a graph; RST is parsed by a dedicated extractor. `include_docs` honors `kg_skip: true` markers (Markdown) and the same directory pruning as the code walk (`node_modules/`, `target/`, hidden dirs). The doc body is **not** stored as a property (read it on demand via `file_path`).
 
 The open-source MCP server (code intelligence over cloned GitHub repos) enables `include_docs` by default; the `build()` / `repo_tree()` API keeps it off so existing code-only graphs are unchanged.
