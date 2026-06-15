@@ -664,7 +664,6 @@ fn test_louvain_empty_and_isolated() {
 /// (Leiden's well-connectedness guarantee). Rebuilds an undirected adjacency
 /// from the graph and BFSes within each community.
 fn assert_all_communities_connected(graph: &DirGraph, result: &CommunityResult) {
-    use petgraph::visit::EdgeRef;
     use std::collections::{HashMap, HashSet, VecDeque};
 
     let mut adj: HashMap<petgraph::graph::NodeIndex, Vec<petgraph::graph::NodeIndex>> =

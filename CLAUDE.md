@@ -310,6 +310,7 @@ The Cypher planner/executor is shared across all modes. Changes to `core/pattern
 
 Each pass through a file should leave it more compartmentalised than you found it.
 
+- **No bugs left behind.** When you encounter a pre-existing bug while working — even one unrelated to your task — fix it in the same change, or if it's genuinely out of scope, surface it explicitly (file an issue / call it out) rather than silently stepping over it. Don't leave known bugs in the codebase. Before "fixing", confirm it's actually a bug and not deliberate behaviour: read the surrounding code and tests, check whether it's consistent across versions, and distinguish a real defect from an intentional design choice (e.g. the planner schema-check rejecting unknown CREATE properties is a deliberate typo-guard, not a bug). A measured performance change is only a "fix" if it measurably improves performance — never ship a perf change that doesn't.
 - Factor a function when it grows past ~80 lines or starts handling 3+ unrelated concerns. Prefer small named strategy fns dispatched by the caller over long if/else chains.
 - Fixing a bug — scan for the *class* of bug. The reported symptom is rarely the only one; probe with scratch fixtures before declaring scope.
 - A new feature is a chance to extract a helper that's been wanted elsewhere. Don't over-design, don't pass it up either.
