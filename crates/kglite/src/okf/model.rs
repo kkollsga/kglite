@@ -60,17 +60,21 @@ impl Default for BuildOptions {
     }
 }
 
-/// A resolved cross-link from one concept to another.
+/// A resolved cross-link from a concept to another concept or an external URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
-    /// Target concept-id (bundle-relative path minus `.md`) for path links, or
-    /// the raw wikilink name (resolved by file stem in the builder).
+    /// Target concept-id (bundle-relative path minus `.md`) for path links, the
+    /// raw wikilink name (resolved in the builder), or the URL for external
+    /// links.
     pub target: String,
     /// Edge type from the inference ladder: explicit link title → section
     /// header → `LINKS_TO`.
     pub conn_type: String,
-    /// True when `target` is a wikilink stem awaiting builder resolution.
+    /// True when `target` is a wikilink awaiting builder resolution.
     pub is_wikilink: bool,
+    /// True when `target` is an external `http(s)` URL — becomes a `Source` node
+    /// rather than resolving to a concept.
+    pub is_external: bool,
 }
 
 /// One parsed concept document. Partial by default: `body` is `None` unless
@@ -102,3 +106,8 @@ pub const DEFAULT_CONN_TYPE: &str = "LINKS_TO";
 pub const CONTAINS_CONN_TYPE: &str = "CONTAINS";
 /// Node label assigned to concepts with no frontmatter `type`.
 pub const DEFAULT_LABEL: &str = "Concept";
+/// Node label for synthesized tag nodes; edge type concept → tag.
+pub const TAG_LABEL: &str = "Tag";
+pub const TAGGED_CONN_TYPE: &str = "TAGGED";
+/// Node label for synthesized external-source (URL) nodes.
+pub const SOURCE_LABEL: &str = "Source";

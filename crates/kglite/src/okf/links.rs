@@ -10,8 +10,9 @@
 //!  3. the generic [`DEFAULT_CONN_TYPE`] (`LINKS_TO`).
 //!
 //! Links inside fenced code blocks and markdown image links (`![alt](src)`) are
-//! ignored. External (`http(s)://`, `mailto:`) and non-`.md` targets are skipped
-//! — directory/index links are covered by structural `CONTAINS` edges instead.
+//! ignored. External `http(s)` links are captured as `is_external` (they become
+//! `Source` nodes in the builder); `mailto:`, anchors, and non-`.md` directory
+//! links are skipped (directory structure is captured separately).
 
 use crate::okf::model::{Dialect, Link, DEFAULT_CONN_TYPE};
 use regex::Regex;
@@ -95,22 +96,33 @@ pub fn extract_links(body: &str, source_dir: &str, dialect: Dialect) -> Vec<Link
                 continue;
             }
             let dest = cap.get(1).map(|d| d.as_str()).unwrap_or("");
-            let Some(target) = resolve_target(dest, source_dir) else {
-                continue;
-            };
             let conn = cap
                 .get(2)
                 .and_then(|t| conn_from_title(t.as_str()))
                 .or_else(|| heading_conn.map(|c| c.to_string()))
                 .unwrap_or_else(|| DEFAULT_CONN_TYPE.to_string());
-            push_unique(
-                &mut out,
-                Link {
-                    target,
-                    conn_type: conn,
-                    is_wikilink: false,
-                },
-            );
+            if is_external_url(dest) {
+                // External http(s) link → a Source node (citation / reference).
+                push_unique(
+                    &mut out,
+                    Link {
+                        target: dest.to_string(),
+                        conn_type: conn,
+                        is_wikilink: false,
+                        is_external: true,
+                    },
+                );
+            } else if let Some(target) = resolve_target(dest, source_dir) {
+                push_unique(
+                    &mut out,
+                    Link {
+                        target,
+                        conn_type: conn,
+                        is_wikilink: false,
+                        is_external: false,
+                    },
+                );
+            }
         }
 
         if dialect.wikilinks() {
@@ -129,6 +141,7 @@ pub fn extract_links(body: &str, source_dir: &str, dialect: Dialect) -> Vec<Link
                         target: name.trim_end_matches(".md").to_string(),
                         conn_type: conn,
                         is_wikilink: true,
+                        is_external: false,
                     },
                 );
             }
@@ -141,6 +154,12 @@ fn push_unique(out: &mut Vec<Link>, link: Link) {
     if !out.contains(&link) {
         out.push(link);
     }
+}
+
+/// An external link target — `http(s)` only (`mailto:` and other schemes are not
+/// turned into Source nodes).
+fn is_external_url(dest: &str) -> bool {
+    dest.starts_with("http://") || dest.starts_with("https://")
 }
 
 /// Resolve a raw markdown link destination to a bundle-relative concept-id, or
@@ -249,9 +268,15 @@ mod tests {
     }
 
     #[test]
-    fn external_and_non_md_skipped() {
-        let body = "[site](https://example.com) and [dir](subdir/) and [img](./pic.png)";
-        assert!(extract_links(body, "", Dialect::Okf).is_empty());
+    fn external_captured_non_md_skipped() {
+        let body =
+            "# Citations\n[site](https://example.com) and [dir](subdir/) and [doc](./pic.png)";
+        let links = extract_links(body, "", Dialect::Okf);
+        // the http link becomes an external (Source) link; dir/ and .png are skipped
+        assert_eq!(links.len(), 1);
+        assert!(links[0].is_external);
+        assert_eq!(links[0].target, "https://example.com");
+        assert_eq!(links[0].conn_type, "CITES");
     }
 
     #[test]

@@ -15,7 +15,10 @@
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::mutation::maintain;
 use crate::graph::DirGraph;
-use crate::okf::model::{BuildOptions, ConceptDoc, Link, CONTAINS_CONN_TYPE, DEFAULT_LABEL};
+use crate::okf::model::{
+    BuildOptions, ConceptDoc, Link, CONTAINS_CONN_TYPE, DEFAULT_LABEL, SOURCE_LABEL,
+    TAGGED_CONN_TYPE, TAG_LABEL,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,8 +31,69 @@ pub fn build(root: &Path, opts: &BuildOptions) -> Result<Arc<DirGraph>, String> 
         return Ok(Arc::new(graph));
     }
     build_nodes(&mut graph, &docs, opts)?;
+    build_aux_nodes(&mut graph, &docs)?;
     build_edges(&mut graph, &docs)?;
     Ok(Arc::new(graph))
+}
+
+/// Synthesize `Tag` and `Source` nodes from the concepts' tags and external
+/// links. Added before edges so the `TAGGED` / `CITES` connections find real
+/// endpoints instead of vivifying provisional stubs.
+fn build_aux_nodes(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> {
+    let mut tags: BTreeSet<&str> = BTreeSet::new();
+    let mut sources: BTreeSet<&str> = BTreeSet::new();
+    for d in docs {
+        for t in doc_tags(d) {
+            tags.insert(t);
+        }
+        for l in &d.links {
+            if l.is_external {
+                sources.insert(l.target.as_str());
+            }
+        }
+    }
+    add_id_nodes(graph, TAG_LABEL, &tags)?;
+    add_id_nodes(graph, SOURCE_LABEL, &sources)?;
+    Ok(())
+}
+
+/// Bulk-add bare nodes whose id is their title (Tag names, Source URLs).
+fn add_id_nodes(graph: &mut DirGraph, label: &str, ids: &BTreeSet<&str>) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<Vec<Value>> = ids
+        .iter()
+        .map(|s| vec![Value::String((*s).to_string())])
+        .collect();
+    let df = DataFrame::from_cypher_rows(vec!["id".to_string()], rows)?;
+    maintain::add_nodes(
+        graph,
+        df,
+        label.to_string(),
+        "id".to_string(),
+        None,
+        Some("update".to_string()),
+    )?;
+    Ok(())
+}
+
+/// The string items of a concept's `tags` frontmatter list (empty if none).
+fn doc_tags(d: &ConceptDoc) -> Vec<&str> {
+    d.props
+        .iter()
+        .filter(|(k, _)| k == "tags")
+        .flat_map(|(_, v)| match v {
+            Value::List(items) => items
+                .iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 /// One `add_nodes` call per label; columns = id/title/file_path (+ body) plus the
@@ -136,14 +200,33 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
     type EdgeKey = (String, String, String);
     let mut groups: HashMap<EdgeKey, Vec<(String, String)>> = HashMap::new();
 
-    // Semantic links.
+    // Semantic links: internal → concept edges (resolved), external → Source.
     for d in docs {
         for link in &d.links {
-            let (target_id, target_label) = resolver.resolve(link);
+            let (target_label, target_id) = if link.is_external {
+                (SOURCE_LABEL.to_string(), link.target.clone())
+            } else {
+                let (id, label) = resolver.resolve(link);
+                (label, id)
+            };
             groups
                 .entry((d.label.clone(), target_label, link.conn_type.clone()))
                 .or_default()
                 .push((d.concept_id.clone(), target_id));
+        }
+    }
+
+    // Tag membership: concept → Tag.
+    for d in docs {
+        for tag in doc_tags(d) {
+            groups
+                .entry((
+                    d.label.clone(),
+                    TAG_LABEL.to_string(),
+                    TAGGED_CONN_TYPE.to_string(),
+                ))
+                .or_default()
+                .push((d.concept_id.clone(), tag.to_string()));
         }
     }
 
@@ -300,6 +383,16 @@ mod tests {
         fs::write(p, content).unwrap();
     }
 
+    fn count_label(g: &DirGraph, label: &str) -> usize {
+        g.graph
+            .node_indices()
+            .filter(|&n| {
+                g.get_node(n)
+                    .is_some_and(|nd| nd.node_type_str(&g.interner) == label)
+            })
+            .count()
+    }
+
     fn provisional_count(g: &DirGraph) -> usize {
         let key = InternedKey::from_str("_provisional");
         g.graph
@@ -370,6 +463,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let g = build(dir.path(), &BuildOptions::default()).unwrap();
         assert_eq!(g.graph.node_indices().count(), 0);
+    }
+
+    #[test]
+    fn synthesizes_tag_and_source_nodes() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.md",
+            "---\ntype: Note\ntags:\n- alpha\n- beta\n---\n# Citations\n[1] [src](https://example.com/x)",
+        );
+        write(
+            dir.path(),
+            "b.md",
+            "---\ntype: Note\ntags:\n- alpha\n---\nleaf",
+        );
+        let g = build(dir.path(), &BuildOptions::default()).unwrap();
+        assert_eq!(count_label(&g, "Tag"), 2, "alpha, beta");
+        assert_eq!(count_label(&g, "Source"), 1, "the cited URL");
+        // a→alpha, a→beta, b→alpha (TAGGED) + a→source (CITES) = 4 edges
+        assert_eq!(g.graph.edge_count(), 4);
     }
 
     #[test]

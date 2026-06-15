@@ -22,11 +22,12 @@ from kglite import okf
 
 CORPUS = Path(__file__).parent / "fixtures" / "okf" / "google"
 
-# Captured shape of the vendored bundles (md-file count minus reserved index.md).
+# Captured shape of the vendored bundles, with the default-on enrichment
+# (concepts + Tag + Source nodes; link / TAGGED / CITES edges).
 EXPECTED = {
-    "stackoverflow": {"nodes": 49, "edges": 51},
-    "ga4": {"nodes": 11, "edges": 9},
-    "crypto_bitcoin": {"nodes": 5, "edges": 13},
+    "stackoverflow": {"nodes": 130, "edges": 328},
+    "ga4": {"nodes": 23, "edges": 34},
+    "crypto_bitcoin": {"nodes": 24, "edges": 49},
 }
 
 
@@ -88,8 +89,26 @@ def test_okf_source_reads_body_on_demand():
 
 def test_concepts_carry_file_path_pointer():
     # Partial ingestion: every concept keeps a file_path back to its source.
+    # (Tag/Source nodes have no concept_id and are excluded.)
     g = _build("crypto_bitcoin")
     rows = g.cypher(
-        "MATCH (n) WHERE n.file_path IS NULL AND coalesce(n._provisional, false) = false RETURN count(n) AS c"
+        "MATCH (n) WHERE n.concept_id IS NOT NULL AND n.file_path IS NULL "
+        "AND coalesce(n._provisional, false) = false RETURN count(n) AS c"
     ).to_list()
     assert rows[0]["c"] == 0
+
+
+def test_enrichment_densifies_and_improves_clustering():
+    # Tag + Source nodes turn the sparse author-link graph into a dense,
+    # well-clustering one. On stackoverflow this collapsed leiden from 19
+    # fragmented communities (12 singletons) to a handful of real ones.
+    g = _build("stackoverflow")
+    from collections import Counter
+
+    tagged = g.cypher("MATCH ()-[r:TAGGED]->() RETURN count(r) AS c").to_list()[0]["c"]
+    cites = g.cypher("MATCH ()-[r:CITES]->() RETURN count(r) AS c").to_list()[0]["c"]
+    assert tagged > 100 and cites > 10
+    comm = Counter(r["c"] for r in g.cypher("CALL leiden() YIELD community RETURN community AS c").to_list())
+    singletons = sum(1 for v in comm.values() if v == 1)
+    assert len(comm) <= 10
+    assert singletons <= 4

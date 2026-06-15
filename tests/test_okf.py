@@ -38,9 +38,9 @@ class TestOkfGoldenBundle:
 
     def test_node_count_and_labels(self):
         g = okf.build(str(OKF_BUNDLE))
-        # 9 concepts + 1 vivified `tables/ghost` stub (index.md reserved, plain.md
-        # counts as a Concept).
-        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 10
+        # 9 concepts + 1 `tables/ghost` stub + 2 Tag nodes (sales, orders) +
+        # 1 Source node (the external citation) = 13.
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 13
         labels = _labels(g)
         assert labels["BigQuery Table"] == 2
         assert labels["BigQuery Dataset"] == 1
@@ -51,6 +51,9 @@ class TestOkfGoldenBundle:
         assert labels["Section"] == 1
         # plain.md (no frontmatter) + the ghost stub both degrade to Concept.
         assert labels["Concept"] == 2
+        # synthesized nodes
+        assert labels["Tag"] == 2
+        assert labels["Source"] == 1
 
     def test_concept_id_and_title(self):
         g = okf.build(str(OKF_BUNDLE))
@@ -77,15 +80,29 @@ class TestOkfGoldenBundle:
         et = _edge_types(g)
         assert et["JOINS_WITH"] == 1  # "# Joins" section
         assert et["PART_OF"] == 1  # explicit link title
-        assert et["CITES"] == 1  # "# Citations" section
+        assert et["CITES"] == 2  # "# Citations": internal note + external Source
         assert et["LINKS_TO"] == 1  # untyped (the dangling ghost link)
         assert et["CONTAINS"] == 1  # structural: guide → guide/intro
+        assert et["TAGGED"] == 3  # orders→{sales,orders}, customers→sales
 
         # spot-check endpoints of the typed edges
         joins = g.cypher("MATCH (a)-[:JOINS_WITH]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
         assert joins == [{"a": "tables/orders", "b": "tables/customers"}]
         contains = g.cypher("MATCH (a)-[:CONTAINS]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
         assert contains == [{"a": "guide", "b": "guide/intro"}]
+
+    def test_tag_nodes_connect_concepts(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # the shared `sales` tag links both tables through a Tag hub (the
+        # densification that makes clustering meaningful).
+        tagged = g.cypher("MATCH (a)-[:TAGGED]->(:Tag {id:'sales'}) RETURN a.concept_id AS a").to_list()
+        assert {r["a"] for r in tagged} == {"tables/orders", "tables/customers"}
+
+    def test_external_citation_becomes_source(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # the external citation URL became a Source node with a CITES edge.
+        src = g.cypher("MATCH (a {concept_id:'tables/orders'})-[:CITES]->(s:Source) RETURN s.id AS url").to_list()
+        assert any("cloud.google.com" in r["url"] for r in src)
 
     def test_dangling_link_becomes_provisional_stub(self):
         g = okf.build(str(OKF_BUNDLE))

@@ -17,3 +17,4 @@ See also [the ghost table](/tables/ghost.md).
 
 # Citations
 [1] [schema notes](/references/notes.md)
+[2] [BigQuery docs](https://cloud.google.com/bigquery/docs)
