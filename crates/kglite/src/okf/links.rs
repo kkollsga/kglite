@@ -127,7 +127,11 @@ pub fn extract_links(body: &str, source_dir: &str, dialect: Dialect) -> Vec<Link
 
         if dialect.wikilinks() {
             for cap in wikilink_re().captures_iter(raw) {
-                let name = cap.get(1).unwrap().as_str().trim();
+                // Strip a `#heading` anchor: `[[Note#Section]]` targets `Note`
+                // (mirrors path-link fragment handling). Avoids phantom
+                // dangling refs for section links.
+                let raw_name = cap.get(1).unwrap().as_str();
+                let name = raw_name.split('#').next().unwrap_or(raw_name).trim();
                 if name.is_empty() {
                     continue;
                 }
@@ -297,5 +301,16 @@ mod tests {
         assert!(links[0].is_wikilink);
         assert_eq!(links[0].target, "other-note");
         assert_eq!(links[1].target, "sub/thing");
+    }
+
+    #[test]
+    fn wikilink_anchor_is_stripped() {
+        let links = extract_links(
+            "see [[Design Notes#Goals]] and [[api#parse]]",
+            "",
+            Dialect::Loose,
+        );
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, vec!["Design Notes", "api"]);
     }
 }
