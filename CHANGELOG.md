@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Smaller, faster-loading `.kgl` files for in-memory builds.** `enable_columnar()`
+  (run on every in-memory `save()`) moved id/title into the column store but left
+  the inline copies in each node, so they were serialized twice — once in the
+  topology section and once in the column section. A fresh build now nulls the
+  inline copies (as a load already did), so a freshly-built graph is byte-for-byte
+  identical to a load→save round-trip. Eliminates ~27 bytes/node of duplicated
+  topology (e.g. a 557k-node graph sheds ~15 MB uncompressed / ~2.6 MB compressed
+  topology), shrinking files ~1.5–2% and speeding load ~2–3%. Existing `.kgl`
+  files are unaffected and still load correctly.
+- **`disable_columnar()` no longer drops node ids/titles.** Rebuilding per-node
+  storage from the column store omitted the reserved `__id__`/`__title__`
+  columns, so calling `disable_columnar()` on a loaded graph (whose nodes hold
+  the columnar null-sentinel) wiped every id and title. It now restores them
+  from the store.
+
 ## [0.10.23] — 2026-06-15 — code_tree docs pass: link a repo's prose to its code
 
 ### Added

@@ -2247,6 +2247,17 @@ impl DirGraph {
                             store: Arc::clone(store),
                             row_id,
                         };
+                        // id/title were pushed into the store's reserved
+                        // __id__/__title__ columns in the first pass, so the
+                        // inline copies are now redundant. Null them to the
+                        // sentinel (NodeData::id()/title() read through to the
+                        // store) — otherwise topology serialization writes
+                        // every id/title twice (inline + column section),
+                        // bloating the saved file by ~27 B/node. Mirrors the
+                        // load path (io/file.rs) and the mapped batch path
+                        // (mutation/batch.rs), which both null here.
+                        node.id = Value::Null;
+                        node.title = Value::Null;
                     }
                 }
             }
@@ -2262,7 +2273,22 @@ impl DirGraph {
         for node_idx in node_indices {
             let node = self.graph.node_weight_mut(node_idx).unwrap();
             if let PropertyStorage::Columnar { store, row_id } = &node.properties {
-                let pairs = store.row_properties(*row_id);
+                let rid = *row_id;
+                let pairs = store.row_properties(rid);
+                // row_properties() excludes the reserved __id__/__title__
+                // columns, so a null-sentinel node (set by enable_columnar /
+                // load) would lose its id/title when we drop the Columnar
+                // link. Pull them back from the store first.
+                let restored_id = if matches!(node.id, Value::Null) {
+                    store.get_id(rid)
+                } else {
+                    None
+                };
+                let restored_title = if matches!(node.title, Value::Null) {
+                    store.get_title(rid)
+                } else {
+                    None
+                };
                 let type_str = node.node_type_str(&self.interner);
                 if let Some(schema) = self.type_schemas.get(type_str) {
                     node.properties = PropertyStorage::from_compact(pairs, schema);
@@ -2270,6 +2296,12 @@ impl DirGraph {
                     // Fallback to Map
                     let map: HashMap<InternedKey, Value> = pairs.into_iter().collect();
                     node.properties = PropertyStorage::Map(map);
+                }
+                if let Some(v) = restored_id {
+                    node.id = v;
+                }
+                if let Some(v) = restored_title {
+                    node.title = v;
                 }
             }
         }

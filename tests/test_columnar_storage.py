@@ -380,3 +380,45 @@ class TestTempDirCleanup:
 
         dirs_remaining = glob.glob(pattern)
         assert len(dirs_remaining) == 0, f"Temp dirs leaked after 5 cycles: {dirs_remaining}"
+
+
+class TestIdTitleSentinel:
+    """enable_columnar() must null inline id/title once they live in the
+    column store, and disable_columnar() must restore them from the store.
+
+    Regression guard for the topology-bloat bug: a default-mode build that
+    saves directly used to serialize id/title twice (inline in the topology
+    *and* in the column section), inflating the saved file by ~27 B/node.
+    A load round-trip nulled the inline copies, which is why load->save
+    compacted. The fix nulls them at columnarize time so a fresh build
+    matches the loaded form byte-for-byte.
+    """
+
+    def test_fresh_save_matches_load_resave(self, tmp_path):
+        """As-built save == load->save (no id/title duplication in topology)."""
+        kg = kglite.KnowledgeGraph()
+        kg.cypher("UNWIND range(1,2000) AS i CREATE (:N {id:i, name:'entity_'+toString(i), score:i%100})")
+        built = str(tmp_path / "built.kgl")
+        resaved = str(tmp_path / "resaved.kgl")
+        kg.save(built)
+        kglite.load(built).save(resaved)
+        b1 = open(built, "rb").read()
+        b2 = open(resaved, "rb").read()
+        assert b1 == b2, (
+            f"as-built ({len(b1)}B) != load->resave ({len(b2)}B): id/title duplication leaked into the topology section"
+        )
+
+    def test_disable_columnar_preserves_ids_on_loaded_graph(self, tmp_path):
+        """disable_columnar() must not lose id/title for null-sentinel nodes."""
+        kg = kglite.KnowledgeGraph()
+        kg.cypher("UNWIND range(1,500) AS i CREATE (:N {id:i, name:'n'+toString(i)})")
+        fp = str(tmp_path / "g.kgl")
+        kg.save(fp)
+        loaded = kglite.load(fp)  # null-sentinel columnar nodes
+        loaded.disable_columnar()
+        res = loaded.cypher("MATCH (n:N) RETURN count(n) AS total, count(n.id) AS with_id")
+        row = res.to_dicts()[0] if hasattr(res, "to_dicts") else res
+        assert row["total"] == 500
+        assert row["with_id"] == 500, "disable_columnar dropped node ids"
+        sample = loaded.cypher("MATCH (n:N) WHERE n.id = 7 RETURN n.id AS id, n.name AS nm").to_dicts()[0]
+        assert sample["id"] == 7 and sample["nm"] == "n7"
