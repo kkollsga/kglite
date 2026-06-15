@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.21] — 2026-06-15 — richer OKF graphs (folders, tags, sources)
+
+### Changed
+
+- **OKF ingestion now extracts more meaning from the bundle, by default.**
+  `okf.build` synthesizes three structural node types beyond bare concepts, so
+  the result is a dense, well-clustering graph instead of a sparse author-link
+  one — all from data already in the bundle (no embeddings, no new dependency):
+  - **`Folder` nodes** — the directory hierarchy, `(:Folder)-[:CONTAINS]->`
+    concepts and subfolders. Each directory's `index.md` (previously discarded)
+    now enriches its Folder's title/description.
+  - **`Tag` nodes** — `(:Concept)-[:TAGGED]->(:Tag)` from frontmatter `tags`,
+    so concepts sharing a tag are connected through a hub.
+  - **`Source` nodes** — external `http(s)` links (previously dropped) become
+    `(:Concept)-[:CITES|REFERENCES]->(:Source {url})`, enabling co-citation.
+  - **Forgiving link resolution** — `[[wikilinks]]` and paths resolve by exact
+    id → file stem → normalized slug (case- and `_`/`-`-insensitive) → title, so
+    `[[my-note]]` / `[[My Note]]` / `my_note.md` all reach the same concept (cuts
+    false-dangling references substantially on real memory dirs).
+
+  On the reference Google bundles this densification roughly tripled node/edge
+  counts and turned fragmented clustering into useful communities (stackoverflow
+  `CALL leiden`: 19 communities with 12 singletons → 6 communities). Note: with
+  structural `CONTAINS`/`TAGGED` edges, an "orphan" query should exclude those
+  edge types. Each enrichment can be disabled via `BuildOptions`.
+
 ## [0.10.20] — 2026-06-15 — Native OKF (Open Knowledge Format) ingestion
 
 ### Added
