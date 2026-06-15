@@ -352,6 +352,8 @@ fn finalize_and_load(
     }
 
     let t_load = std::time::Instant::now();
+    // `mut` is consumed only by the `okf`-gated docs pass below (Arc::get_mut).
+    #[cfg_attr(not(feature = "okf"), allow(unused_mut))]
     let mut graph = load::load_into_graph(&combined, project_info.as_ref())?;
     if verbose {
         eprintln!("[timing] load: {:.3}s", t_load.elapsed().as_secs_f64());

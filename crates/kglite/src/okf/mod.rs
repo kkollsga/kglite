@@ -173,8 +173,9 @@ fn stem(concept_id: &str) -> &str {
     concept_id.rsplit('/').next().unwrap_or(concept_id)
 }
 
-/// Directory portion of a concept-id (`""` at the bundle root).
-fn parent_dir(concept_id: &str) -> &str {
+/// Directory portion of a concept-id (`""` at the bundle root). `pub(crate)` so
+/// `code_tree`'s docs pass reuses it to resolve relative markdown links.
+pub(crate) fn parent_dir(concept_id: &str) -> &str {
     match concept_id.rfind('/') {
         Some(i) => &concept_id[..i],
         None => "",
