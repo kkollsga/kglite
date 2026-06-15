@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.24] — 2026-06-16 — smaller .kgl files, faster CREATE
+
 ### Performance
 
 - **Bulk Cypher `CREATE` is ~30% faster — now beats the 0.10.15 baseline.**
