@@ -268,7 +268,47 @@ graph = build(".")                           # auto-detect manifest (pyproject.t
 graph = build("pyproject.toml")              # explicit manifest file
 graph = build("/path/to/src")                # directory scan (fallback when no manifest)
 graph = build(".", include_tests=True)       # include test directories
+graph = build(".", include_docs=True)        # also ingest markdown as :Doc nodes
 graph = build(".", save_to="code.kgl", verbose=True)
 ```
 
 When a manifest is detected, `build()` reads project metadata (name, version, dependencies) and only scans declared source directories — avoiding `.venv/`, `target/`, `node_modules/`, etc.
+
+## Documentation nodes (`include_docs`)
+
+A repo's prose — its `README`, `docs/`, design notes, ADRs — is part of its intelligence, but a plain code graph discards every `.md`. Pass `include_docs=True` to `build()` (or `repo_tree()`) to ingest the repo's markdown alongside the code and **link the two**:
+
+```python
+g = build(".", include_docs=True)
+
+# Which docs describe a given function?
+g.cypher("""
+    MATCH (d:Doc)-[:MENTIONS]->(f:Function {name: 'parse_wkt'})
+    RETURN d.title, d.kind
+""")
+
+# What does the README point at?
+g.cypher("""
+    MATCH (r:Doc {kind: 'readme'})-[:DOCUMENTS]->(t)
+    RETURN labels(t)[0], coalesce(t.title, t.name)
+""")
+```
+
+Each markdown file becomes a `:Doc` node carrying:
+
+| Property | Meaning |
+|---|---|
+| `concept_id` | repo-relative path minus `.md` (the node id) |
+| `title` | YAML `title` → `name` → first `# H1` → file stem |
+| `kind` | filename role: `readme` / `changelog` / `contributing` / `license` / `adr` / `guide` (under `docs/`) / `doc` |
+| `headings` | the heading outline (JSON list) |
+| `file_path` | pointer to the source markdown (read on demand) |
+
+And two edge types connect docs to the rest of the graph:
+
+- **`(:Doc)-[:MENTIONS]->(:Function | :Class | :Struct | :Enum | :Trait | :Interface | :Constant)`** — symbols named in the prose. Resolution is **conservative**: only backtick-quoted tokens (`` `parse_wkt` ``, `` `Type::method` ``) and `::`-qualified names are considered, matched to an exact `qualified_name` or a *unique* bare `name`. Ambiguous names and common words never link, so the edges are high-precision.
+- **`(:Doc)-[:DOCUMENTS]->(:Doc | :File)`** — markdown links to another doc (matched by `concept_id`) or to a source file (matched by unique basename).
+
+Markdown ingestion reuses the [OKF loader](okf.md) — the same parser that turns a standalone vault or bundle into a graph. `include_docs` honors `kg_skip: true` markers and the same directory pruning as the code walk (`node_modules/`, `target/`, hidden dirs). The doc body is **not** stored as a property (read it on demand via `file_path`).
+
+The open-source MCP server (code intelligence over cloned GitHub repos) enables `include_docs` by default; the `build()` / `repo_tree()` API keeps it off so existing code-only graphs are unchanged.

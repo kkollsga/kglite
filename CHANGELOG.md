@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`code_tree` can ingest a repo's docs and link them to its code.** Pass
+  `include_docs=True` to `code_tree.build(...)` / `code_tree.repo_tree(...)` to
+  ingest every `.md` as a `:Doc` node *and* link it to the rest of the graph:
+  - `(:Doc)-[:MENTIONS]->(:Function|:Class|:Struct|:Enum|:Trait|:Interface|:Constant)`
+    — symbols named in the prose, resolved conservatively (backtick-quoted or
+    `::`-qualified tokens only, matched to an exact `qualified_name` or a
+    *unique* bare `name`; ambiguous names and common words never link).
+  - `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` — markdown links to another doc
+    (by `concept_id`) or a source file (by unique basename).
+  Each `:Doc` carries a `kind` (readme / changelog / contributing / license /
+  adr / guide / doc), a `headings` outline, and a `file_path` pointer. The
+  markdown parser is shared with the OKF loader; `kg_skip: true` markers and the
+  code walk's directory pruning are honored. Off by default (existing code-only
+  graphs are unchanged); the open-source MCP server enables it by default for
+  cloned GitHub repos.
+
 - **OKF wikilink anchors resolved.** `[[Note#Heading]]` now targets `Note` (the `#anchor` is stripped, mirroring path-link fragment handling), so section links no longer create phantom dangling references.
 - **OKF `skip_dirs` directory ignore.** `okf.build(..., skip_dirs=[...])` prunes whole directories (and their subtrees) from the walk — gitignore-style: a bare name matches a directory at any depth, a `path/with/slashes` is an anchored bundle-relative subtree. For excluding cloned / vendored trees you don't own.
 - **OKF `kg_skip` opt-out marker.** A file with `kg_skip: true` in its
