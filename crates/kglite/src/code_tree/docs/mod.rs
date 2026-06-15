@@ -483,7 +483,13 @@ impl SymbolIndex {
         }
         let segs = qname_segments(token);
         let last = *segs.last()?;
-        if last.len() < 3 || STOP_WORDS.contains(&last.to_ascii_lowercase().as_str()) {
+        // Skip dunder / private names (`__init__`, `_helper`): no agent benefits
+        // from a doc→`__init__` edge, and they're the main source of low-signal
+        // matches. An exact `qualified_name` hit above is still honored.
+        if last.len() < 3
+            || last.starts_with('_')
+            || STOP_WORDS.contains(&last.to_ascii_lowercase().as_str())
+        {
             return None;
         }
         let cands = self.by_name.get(last)?;
@@ -884,16 +890,16 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("src/lib.rs"),
-            "pub fn parse_wkt() {}\npub struct KnowledgeGraph;\npub fn run() {}",
+            "pub fn parse_wkt() {}\npub struct KnowledgeGraph;\npub fn run() {}\npub fn _internal() {}",
         )
         .unwrap();
         // `parse_wkt` (unique fn) and `KnowledgeGraph` (unique struct) link;
-        // `run` is a stop-word and must NOT link; `nonexistent` resolves to
-        // nothing.
+        // `run` is a stop-word and must NOT link; `_internal` is private and
+        // must NOT link; `nonexistent` resolves to nothing.
         fs::write(
             root.join("README.md"),
             "# Guide\nCall `parse_wkt` then build a `KnowledgeGraph`.\n\
-             Do not `run` this. The `nonexistent` symbol is absent.",
+             Do not `run` this or `_internal`. The `nonexistent` symbol is absent.",
         )
         .unwrap();
 
@@ -902,6 +908,7 @@ mod tests {
         assert!(names.contains("parse_wkt"), "unique fn links");
         assert!(names.contains("KnowledgeGraph"), "unique struct links");
         assert!(!names.contains("run"), "stop-word must not link");
+        assert!(!names.contains("_internal"), "private name must not link");
     }
 
     #[test]

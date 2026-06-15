@@ -21,8 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     aligned **dotted-suffix** match when the doc gives a path (`Dataset.mean`);
     a *unique* bare `name`; and — when a bare name is overloaded — a unique
     **module-level** definition (a free function beats class methods, recovering
-    re-exported top-level API like `concat` / `apply_ufunc`). Ambiguous names and
-    common words never link.
+    re-exported top-level API like `concat` / `apply_ufunc`). Ambiguous names,
+    common words, and private / dunder names never link.
   - `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` — links to another doc (Markdown
     `[..](other.md)` / RST `:doc:`other``, by `concept_id`) or a source file
     (by unique basename).
