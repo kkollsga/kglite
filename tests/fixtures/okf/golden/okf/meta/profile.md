@@ -1,8 +1,8 @@
 ---
-type: Memory
-title: User profile
+name: User Profile
 metadata:
   type: user
   scope: project
 ---
-Nested-frontmatter concept; metadata flattens to dotted keys.
+Claude-memory-shaped concept: no top-level `type`/`title`, so the label
+falls back to `metadata.type` (user) and the title to `name`.

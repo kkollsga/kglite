@@ -31,6 +31,27 @@ g = okf.build("path/to/memory", dialect="obsidian")
 g.cypher("MATCH (n) RETURN labels(n)[0] AS type, count(*) ORDER BY type")
 ```
 
+### Sweep many projects in one pass
+
+By default `build` only ingests `.md` files that have a YAML frontmatter block
+(`require_frontmatter=True`) — the discriminator between *structured* knowledge
+(OKF concepts, Claude memories) and plain markdown (READMEs, notes). So you can
+point at a **parent of many projects** and extract only the structured knowledge
+across all of them in one sweep — plain docs are skipped, each project's tree
+becomes `Folder` nodes, and concept ids stay path-relative so they don't collide:
+
+```python
+g = okf.build("~/code", dialect="obsidian")   # require_frontmatter=True
+g.cypher("MATCH (f:Folder)-[:CONTAINS]->(m) "
+         "RETURN split(m.concept_id, '/')[0] AS project, count(m) AS memories "
+         "ORDER BY memories DESC")
+```
+
+Node labels fall back `type` → `metadata.type` → `Concept`, so Claude memories
+(which carry `metadata.type`, not a top-level `type`) land as `:feedback` /
+`:project` / `:user` / `:reference`, with their `name` as the title. Pass
+`require_frontmatter=False` to ingest every `.md` (vault-style).
+
 ## How a bundle maps to a graph
 
 Ingestion is **read-only and partial** — conceptually [`code_tree`](code-tree.md)

@@ -57,17 +57,25 @@ pub(crate) fn parse_concepts(
 ) -> Vec<ConceptDoc> {
     let mut docs: Vec<ConceptDoc> = files
         .par_iter()
-        .filter_map(|f| parse_file(f, opts).ok())
+        .filter_map(|f| parse_file(f, opts).ok().flatten())
         .collect();
     // Stable order for reproducible builds / tests.
     docs.sort_by(|a, b| a.concept_id.cmp(&b.concept_id));
     docs
 }
 
-/// Parse one discovered file into a [`ConceptDoc`].
-fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<ConceptDoc, String> {
+/// Parse one discovered file into a [`ConceptDoc`]. Returns `Ok(None)` when the
+/// file is skipped (no frontmatter while `require_frontmatter` is set).
+fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<Option<ConceptDoc>, String> {
     let text = std::fs::read_to_string(&f.abs_path)
         .map_err(|e| format!("reading {}: {e}", f.abs_path.display()))?;
+
+    let (yaml, body) = frontmatter::split(&text);
+    // Plain markdown (no frontmatter) is skipped by default — the discriminator
+    // between structured knowledge (OKF concepts / memories) and normal md.
+    if opts.require_frontmatter && yaml.is_none() {
+        return Ok(None);
+    }
 
     let concept_id = f
         .rel_path
@@ -75,21 +83,34 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<ConceptDo
         .unwrap_or(&f.rel_path)
         .to_string();
 
-    let (_yaml, body) = frontmatter::split(&text);
     // Malformed YAML degrades to an empty frontmatter map (the concept still
     // becomes a node — losing the file entirely would be worse).
     let mut fm = frontmatter::parse(&text).unwrap_or_default();
 
+    // Label: top-level `type` → `metadata.type` (Claude memories) → `Concept`.
     let label = fm
         .remove("type")
         .map(value_to_display)
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            fm.get("metadata.type")
+                .cloned()
+                .map(value_to_display)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| model::DEFAULT_LABEL.to_string());
 
+    // Title: `title` → `name` (Claude memories) → file stem.
     let title = fm
         .remove("title")
         .map(value_to_display)
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            fm.get("name")
+                .cloned()
+                .map(value_to_display)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| stem(&concept_id).to_string());
 
     let props: Vec<(String, Value)> = fm.into_iter().collect();
@@ -97,7 +118,7 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<ConceptDo
     let links = links::extract_links(&body, source_dir, opts.dialect);
     let body = if opts.with_body { Some(body) } else { None };
 
-    Ok(ConceptDoc {
+    Ok(Some(ConceptDoc {
         concept_id,
         file_path: f.rel_path.clone(),
         label,
@@ -105,7 +126,7 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<ConceptDo
         props,
         links,
         body,
-    })
+    }))
 }
 
 /// Coerce a frontmatter scalar to a display string for label/title use.
@@ -188,17 +209,43 @@ mod tests {
     }
 
     #[test]
-    fn no_frontmatter_degrades_to_concept() {
+    fn no_frontmatter_skipped_by_default_degrades_when_allowed() {
         let dir = tempdir().unwrap();
         write(
             dir.path(),
             "plain.md",
             "# Just a note\n\nNo frontmatter here.",
         );
+        // Default: structured-only → plain markdown is skipped.
         let docs = parse_bundle(dir.path(), &BuildOptions::default()).unwrap();
+        assert_eq!(docs.len(), 0);
+        // Opt out → it degrades to a Concept.
+        let opts = BuildOptions {
+            require_frontmatter: false,
+            ..BuildOptions::default()
+        };
+        let docs = parse_bundle(dir.path(), &opts).unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].label, "Concept");
         assert_eq!(docs[0].title, "plain");
+    }
+
+    #[test]
+    fn label_and_title_fall_back_to_metadata_type_and_name() {
+        let dir = tempdir().unwrap();
+        // A Claude-memory-shaped file: no top-level `type`/`title`.
+        write(
+            dir.path(),
+            "feedback_x.md",
+            "---\nname: Cypher First\nmetadata:\n  type: feedback\n---\nbody",
+        );
+        let docs = parse_bundle(dir.path(), &BuildOptions::default()).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].label, "feedback",
+            "label falls back to metadata.type"
+        );
+        assert_eq!(docs[0].title, "Cypher First", "title falls back to name");
     }
 
     #[test]

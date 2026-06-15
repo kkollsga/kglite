@@ -342,6 +342,8 @@ fn value_to_json(v: &Value) -> serde_json::Value {
 fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> {
     let resolver = Resolver::new(docs);
     let mut groups: EdgeGroups = HashMap::new();
+    // Dangling internal-link targets — concepts referenced but not present.
+    let mut dangling: BTreeSet<String> = BTreeSet::new();
 
     // Semantic links: internal → concept edges (resolved), external → Source.
     for d in docs {
@@ -350,6 +352,9 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
                 (SOURCE_LABEL.to_string(), link.target.clone())
             } else {
                 let (id, label) = resolver.resolve(link);
+                if !resolver.id_to_label.contains_key(id.as_str()) {
+                    dangling.insert(id.clone());
+                }
                 (label, id)
             };
             groups
@@ -357,6 +362,29 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
                 .or_default()
                 .push((d.concept_id.clone(), target_id));
         }
+    }
+
+    // Pre-create dangling targets as provisional `Concept` nodes carrying
+    // `concept_id` — so "references not yet written" are queryable identically to
+    // real concepts (`MATCH (n {_provisional:true}) RETURN n.concept_id`) rather
+    // than via the mutator's default `id` stub field.
+    if !dangling.is_empty() {
+        let rows: Vec<Vec<Value>> = dangling
+            .iter()
+            .map(|id| vec![Value::String(id.clone()), Value::Boolean(true)])
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec!["concept_id".to_string(), "_provisional".to_string()],
+            rows,
+        )?;
+        maintain::add_nodes(
+            graph,
+            df,
+            DEFAULT_LABEL.to_string(),
+            "concept_id".to_string(),
+            None,
+            Some("preserve".to_string()),
+        )?;
     }
 
     // Tag membership: concept → Tag.
@@ -642,8 +670,7 @@ mod tests {
         );
         let opts = BuildOptions {
             dialect: crate::okf::model::Dialect::Loose,
-            with_body: false,
-            embed: false,
+            ..BuildOptions::default()
         };
         let g = build(dir.path(), &opts).unwrap();
         // both wikilinks resolve to the one file → 2 nodes, no provisional stub.
@@ -661,8 +688,7 @@ mod tests {
         );
         let opts = BuildOptions {
             dialect: crate::okf::model::Dialect::Loose,
-            with_body: false,
-            embed: false,
+            ..BuildOptions::default()
         };
         let g = build(dir.path(), &opts).unwrap();
         assert_eq!(provisional_count(&g), 1);

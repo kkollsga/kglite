@@ -8,6 +8,7 @@ def build(
     path: str,
     *,
     dialect: str | None = ...,
+    require_frontmatter: bool = ...,
     with_body: bool = ...,
     embed: bool = ...,
 ) -> KnowledgeGraph:
@@ -38,6 +39,15 @@ def build(
         dialect: ``"okf"`` (default) for strict markdown links, or
             ``"loose"`` / ``"obsidian"`` to also resolve ``[[wikilinks]]`` and
             tolerate concepts with no frontmatter ``type``.
+        require_frontmatter: When ``True`` (default), only ``.md`` files with a
+            YAML frontmatter block are ingested — the discriminator between
+            *structured* knowledge (OKF concepts, Claude memories) and plain
+            markdown (READMEs, notes). Point at a parent of many projects to
+            sweep out only the structured files across all of them. Set ``False``
+            to ingest every ``.md`` (vault-style). Node labels fall back
+            ``type`` → ``metadata.type`` → ``Concept`` and titles ``title`` →
+            ``name`` → file stem, so Claude memories land as ``:feedback`` /
+            ``:project`` / etc. with their ``name`` as title.
         with_body: Store each concept's markdown body as a ``body`` property
             (off by default — bodies are read on demand).
         embed: Reserved for the opt-in embedder pass (body vectors for

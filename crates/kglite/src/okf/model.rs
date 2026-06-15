@@ -42,6 +42,12 @@ impl Dialect {
 #[derive(Debug, Clone)]
 pub struct BuildOptions {
     pub dialect: Dialect,
+    /// Only ingest `.md` files that have a YAML frontmatter block — the
+    /// discriminator between *structured* knowledge (OKF concepts, Claude
+    /// memories) and plain markdown (READMEs, notes). On by default, so pointing
+    /// at a large mixed tree (e.g. a parent of many projects) sweeps out only the
+    /// structured files. Set false to ingest every `.md` (vault-style).
+    pub require_frontmatter: bool,
     /// Store each concept's markdown body as a `body` property. Off by default
     /// (partial ingestion — read bodies on demand via the file pointer).
     pub with_body: bool,
@@ -54,6 +60,7 @@ impl Default for BuildOptions {
     fn default() -> Self {
         BuildOptions {
             dialect: Dialect::Okf,
+            require_frontmatter: true,
             with_body: false,
             embed: false,
         }

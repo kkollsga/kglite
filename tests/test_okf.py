@@ -38,21 +38,22 @@ class TestOkfGoldenBundle:
 
     def test_node_count_and_labels(self):
         g = okf.build(str(OKF_BUNDLE))
-        # 9 concepts + 1 `tables/ghost` stub + 2 Tag (sales, orders) +
-        # 1 Source (external citation) + 6 Folder (tables, datasets, references,
-        # playbooks, meta, guide) = 19.
-        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 19
+        # 8 concepts (plain.md has no frontmatter → skipped by default) +
+        # 1 `tables/ghost` stub + 2 Tag (sales, orders) + 1 Source +
+        # 6 Folder (tables, datasets, references, playbooks, meta, guide) = 18.
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 18
         labels = _labels(g)
         assert labels["Folder"] == 6
         assert labels["BigQuery Table"] == 2
         assert labels["BigQuery Dataset"] == 1
         assert labels["Reference"] == 1
         assert labels["Playbook"] == 1
-        assert labels["Memory"] == 1
+        # profile.md has no top-level `type` → label falls back to metadata.type.
+        assert labels["user"] == 1
         assert labels["Guide"] == 1
         assert labels["Section"] == 1
-        # plain.md (no frontmatter) + the ghost stub both degrade to Concept.
-        assert labels["Concept"] == 2
+        # only the ghost stub is a bare Concept now (plain.md was skipped).
+        assert labels["Concept"] == 1
         # synthesized nodes
         assert labels["Tag"] == 2
         assert labels["Source"] == 1
@@ -61,9 +62,21 @@ class TestOkfGoldenBundle:
         g = okf.build(str(OKF_BUNDLE))
         rows = g.cypher("MATCH (n {concept_id:'tables/orders'}) RETURN n.title AS title, n.file_path AS fp").to_list()
         assert rows == [{"title": "Orders", "fp": "tables/orders.md"}]
-        # no-frontmatter file: title falls back to the file stem.
-        plain = g.cypher("MATCH (n {concept_id:'plain'}) RETURN n.title AS t, labels(n)[0] AS l").to_list()
-        assert plain == [{"t": "plain", "l": "Concept"}]
+        # plain.md (no frontmatter) is skipped by default (require_frontmatter).
+        plain = g.cypher("MATCH (n {concept_id:'plain'}) RETURN count(n) AS c").to_list()
+        assert plain[0]["c"] == 0
+
+    def test_label_and_title_fallback(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # profile.md: no top-level `type`/`title` → label from metadata.type,
+        # title from `name` (the Claude-memory shape).
+        rows = g.cypher("MATCH (n {concept_id:'meta/profile'}) RETURN labels(n)[0] AS l, n.title AS t").to_list()
+        assert rows == [{"l": "user", "t": "User Profile"}]
+
+    def test_require_frontmatter_false_includes_plain(self):
+        g = okf.build(str(OKF_BUNDLE), require_frontmatter=False)
+        plain = g.cypher("MATCH (n {concept_id:'plain'}) RETURN labels(n)[0] AS l").to_list()
+        assert plain == [{"l": "Concept"}]
 
     def test_frontmatter_mapping(self):
         g = okf.build(str(OKF_BUNDLE))
@@ -169,10 +182,11 @@ class TestOkfObsidianDialect:
 
     def test_wikilinks_and_degrade(self):
         g = okf.build(str(OBSIDIAN_BUNDLE), dialect="obsidian")
-        # alice, bob, MEMORY (not reserved) + carol-missing stub = 4 nodes.
-        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 4
-        # no frontmatter `type` → everything degrades to Concept.
-        assert set(_labels(g)) == {"Concept"}
+        # alice + bob + carol-missing stub = 3 (MEMORY.md has no frontmatter →
+        # skipped by default).
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 3
+        # alice has metadata.type → :person; bob (name only) + stub → :Concept.
+        assert set(_labels(g)) == {"person", "Concept"}
 
     def test_wikilink_resolution_and_dangling(self):
         g = okf.build(str(OBSIDIAN_BUNDLE), dialect="obsidian")
