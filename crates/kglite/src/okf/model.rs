@@ -48,6 +48,9 @@ pub struct BuildOptions {
     /// at a large mixed tree (e.g. a parent of many projects) sweeps out only the
     /// structured files. Set false to ingest every `.md` (vault-style).
     pub require_frontmatter: bool,
+    /// Honor the `kg_skip: true` frontmatter marker (exclude that file from the
+    /// sweep). On by default; set false to ingest skip-marked files anyway.
+    pub respect_skip: bool,
     /// Store each concept's markdown body as a `body` property. Off by default
     /// (partial ingestion — read bodies on demand via the file pointer).
     pub with_body: bool,
@@ -61,6 +64,7 @@ impl Default for BuildOptions {
         BuildOptions {
             dialect: Dialect::Okf,
             require_frontmatter: true,
+            respect_skip: true,
             with_body: false,
             embed: false,
         }
@@ -120,3 +124,5 @@ pub const TAGGED_CONN_TYPE: &str = "TAGGED";
 pub const SOURCE_LABEL: &str = "Source";
 /// Node label for synthesized directory nodes (the bundle's folder hierarchy).
 pub const FOLDER_LABEL: &str = "Folder";
+/// Frontmatter key that opts a file out of the sweep (`kg_skip: true`).
+pub const SKIP_KEY: &str = "kg_skip";

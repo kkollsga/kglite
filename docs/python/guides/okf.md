@@ -52,6 +52,10 @@ Node labels fall back `type` → `metadata.type` → `Concept`, so Claude memori
 `:project` / `:user` / `:reference`, with their `name` as the title. Pass
 `require_frontmatter=False` to ingest every `.md` (vault-style).
 
+To exclude an individual file from sweeps, add `kg_skip: true` to its
+frontmatter — it's honored by default (pass `respect_skip=False` to ingest
+skip-marked files anyway).
+
 ## How a bundle maps to a graph
 
 Ingestion is **read-only and partial** — conceptually [`code_tree`](code-tree.md)

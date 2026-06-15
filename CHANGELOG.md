@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **OKF `kg_skip` opt-out marker.** A file with `kg_skip: true` in its
+  frontmatter is excluded from `okf.build` sweeps by default — drop it into
+  scratch notes or a project you don't want in a cross-project graph. Honored by
+  default; pass `respect_skip=False` to ingest skip-marked files anyway.
+
 ## [0.10.22] — 2026-06-15 — OKF: structured-only sweeps + memory-aware labels
 
 ### Changed

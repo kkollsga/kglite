@@ -87,6 +87,11 @@ fn parse_file(f: &walk::DiscoveredFile, opts: &BuildOptions) -> Result<Option<Co
     // becomes a node — losing the file entirely would be worse).
     let mut fm = frontmatter::parse(&text).unwrap_or_default();
 
+    // Honor the `kg_skip: true` opt-out marker (excludes the file from the sweep).
+    if opts.respect_skip && matches!(fm.get(model::SKIP_KEY), Some(Value::Boolean(true))) {
+        return Ok(None);
+    }
+
     // Label: top-level `type` → `metadata.type` (Claude memories) → `Concept`.
     let label = fm
         .remove("type")
@@ -228,6 +233,28 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].label, "Concept");
         assert_eq!(docs[0].title, "plain");
+    }
+
+    #[test]
+    fn kg_skip_excludes_by_default_and_respects_override() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "keep.md", "---\ntype: Note\n---\nkeep me");
+        write(
+            dir.path(),
+            "scratch.md",
+            "---\ntype: Note\nkg_skip: true\n---\nignore me",
+        );
+        // Default: kg_skip files are excluded.
+        let docs = parse_bundle(dir.path(), &BuildOptions::default()).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].concept_id, "keep");
+        // respect_skip=false ingests them anyway.
+        let opts = BuildOptions {
+            respect_skip: false,
+            ..BuildOptions::default()
+        };
+        let docs = parse_bundle(dir.path(), &opts).unwrap();
+        assert_eq!(docs.len(), 2);
     }
 
     #[test]

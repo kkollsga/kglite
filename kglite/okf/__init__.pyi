@@ -9,6 +9,7 @@ def build(
     *,
     dialect: str | None = ...,
     require_frontmatter: bool = ...,
+    respect_skip: bool = ...,
     with_body: bool = ...,
     embed: bool = ...,
 ) -> KnowledgeGraph:
@@ -48,6 +49,9 @@ def build(
             ``type`` → ``metadata.type`` → ``Concept`` and titles ``title`` →
             ``name`` → file stem, so Claude memories land as ``:feedback`` /
             ``:project`` / etc. with their ``name`` as title.
+        respect_skip: When ``True`` (default), honor a ``kg_skip: true``
+            frontmatter marker that opts a file out of the sweep. Set ``False``
+            to ingest skip-marked files anyway.
         with_body: Store each concept's markdown body as a ``body`` property
             (off by default — bodies are read on demand).
         embed: Reserved for the opt-in embedder pass (body vectors for

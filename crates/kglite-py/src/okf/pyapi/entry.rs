@@ -12,22 +12,26 @@ use crate::okf::{BuildOptions, Dialect};
 /// (also resolve `[[wikilinks]]`, tolerate missing `type`). `require_frontmatter`
 /// (default `True`): ingest only `.md` files with YAML frontmatter — the
 /// structured-knowledge vs plain-markdown discriminator; set `False` to ingest
-/// every `.md`. `with_body`: store each concept's markdown body as a `body`
-/// property (off by default — bodies are read on demand via the `file_path`
-/// pointer).
+/// every `.md`. `respect_skip` (default `True`): honor the `kg_skip: true`
+/// frontmatter marker that opts a file out of the sweep; set `False` to ingest
+/// skip-marked files anyway. `with_body`: store each concept's markdown body as a
+/// `body` property (off by default — bodies are read on demand via the
+/// `file_path` pointer).
 #[pyfunction]
-#[pyo3(signature = (path, *, dialect=None, require_frontmatter=true, with_body=false, embed=false))]
+#[pyo3(signature = (path, *, dialect=None, require_frontmatter=true, respect_skip=true, with_body=false, embed=false))]
 pub fn build(
     py: Python<'_>,
     path: PathBuf,
     dialect: Option<String>,
     require_frontmatter: bool,
+    respect_skip: bool,
     with_body: bool,
     embed: bool,
 ) -> PyResult<KnowledgeGraph> {
     let opts = BuildOptions {
         dialect: Dialect::parse(dialect.as_deref()),
         require_frontmatter,
+        respect_skip,
         with_body,
         embed,
     };
