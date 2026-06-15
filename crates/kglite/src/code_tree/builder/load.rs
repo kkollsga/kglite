@@ -66,73 +66,6 @@ fn is_numeric_segment(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::code_tree::models::FileInfo;
-
-    fn file_with_module(language: &str, module_path: &str) -> FileInfo {
-        FileInfo {
-            path: format!("{}/dummy", module_path),
-            filename: "dummy".into(),
-            loc: 0,
-            module_path: module_path.into(),
-            language: language.into(),
-            submodule_declarations: Vec::new(),
-            imports: Vec::new(),
-            exports: Vec::new(),
-            annotations: None,
-            is_test: false,
-            skip_reason: None,
-        }
-    }
-
-    #[test]
-    fn build_modules_skips_numeric_leaf() {
-        // dotnet-style path with a numeric bug-id directory.
-        let files = vec![file_with_module("csharp", "tests.JIT.Regression.125042")];
-        let modules = build_modules(&files);
-        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, vec!["tests", "JIT", "Regression"]);
-        // The qualified ancestor "tests.JIT.Regression.125042" should NOT exist.
-        assert!(!modules
-            .iter()
-            .any(|m| m.qualified_name == "tests.JIT.Regression.125042"));
-    }
-
-    #[test]
-    fn build_modules_skips_numeric_intermediate() {
-        // A numeric mid-segment must drop only itself and any descendants
-        // whose deepest segment is also numeric. Non-numeric ancestors live.
-        let files = vec![file_with_module("csharp", "a.123.c")];
-        let modules = build_modules(&files);
-        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
-        assert!(qnames.contains(&"a"));
-        assert!(qnames.contains(&"a.123.c")); // c is alphanumeric — kept
-        assert!(!qnames.contains(&"a.123")); // numeric leaf — dropped
-    }
-
-    #[test]
-    fn build_modules_keeps_alphanumeric() {
-        let files = vec![file_with_module("csharp", "Foo.Bar.V2")];
-        let modules = build_modules(&files);
-        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
-        assert!(qnames.contains(&"Foo"));
-        assert!(qnames.contains(&"Foo.Bar"));
-        assert!(qnames.contains(&"Foo.Bar.V2"));
-    }
-
-    #[test]
-    fn is_numeric_segment_detection() {
-        assert!(is_numeric_segment("0"));
-        assert!(is_numeric_segment("125042"));
-        assert!(!is_numeric_segment(""));
-        assert!(!is_numeric_segment("v2"));
-        assert!(!is_numeric_segment("Runtime_125042"));
-        assert!(!is_numeric_segment("12.5")); // dot is not a digit
-    }
-}
-
 fn pick_sep(language: &str) -> &'static str {
     match language {
         "rust" | "cpp" | "c" => "::",
@@ -2503,5 +2436,72 @@ impl Clone for super::other_edges::FfiExposesEdge {
             target_type: self.target_type,
             py_name: self.py_name.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_tree::models::FileInfo;
+
+    fn file_with_module(language: &str, module_path: &str) -> FileInfo {
+        FileInfo {
+            path: format!("{}/dummy", module_path),
+            filename: "dummy".into(),
+            loc: 0,
+            module_path: module_path.into(),
+            language: language.into(),
+            submodule_declarations: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            annotations: None,
+            is_test: false,
+            skip_reason: None,
+        }
+    }
+
+    #[test]
+    fn build_modules_skips_numeric_leaf() {
+        // dotnet-style path with a numeric bug-id directory.
+        let files = vec![file_with_module("csharp", "tests.JIT.Regression.125042")];
+        let modules = build_modules(&files);
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["tests", "JIT", "Regression"]);
+        // The qualified ancestor "tests.JIT.Regression.125042" should NOT exist.
+        assert!(!modules
+            .iter()
+            .any(|m| m.qualified_name == "tests.JIT.Regression.125042"));
+    }
+
+    #[test]
+    fn build_modules_skips_numeric_intermediate() {
+        // A numeric mid-segment must drop only itself and any descendants
+        // whose deepest segment is also numeric. Non-numeric ancestors live.
+        let files = vec![file_with_module("csharp", "a.123.c")];
+        let modules = build_modules(&files);
+        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
+        assert!(qnames.contains(&"a"));
+        assert!(qnames.contains(&"a.123.c")); // c is alphanumeric — kept
+        assert!(!qnames.contains(&"a.123")); // numeric leaf — dropped
+    }
+
+    #[test]
+    fn build_modules_keeps_alphanumeric() {
+        let files = vec![file_with_module("csharp", "Foo.Bar.V2")];
+        let modules = build_modules(&files);
+        let qnames: Vec<&str> = modules.iter().map(|m| m.qualified_name.as_str()).collect();
+        assert!(qnames.contains(&"Foo"));
+        assert!(qnames.contains(&"Foo.Bar"));
+        assert!(qnames.contains(&"Foo.Bar.V2"));
+    }
+
+    #[test]
+    fn is_numeric_segment_detection() {
+        assert!(is_numeric_segment("0"));
+        assert!(is_numeric_segment("125042"));
+        assert!(!is_numeric_segment(""));
+        assert!(!is_numeric_segment("v2"));
+        assert!(!is_numeric_segment("Runtime_125042"));
+        assert!(!is_numeric_segment("12.5")); // dot is not a digit
     }
 }

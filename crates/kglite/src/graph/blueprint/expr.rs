@@ -1105,6 +1105,7 @@ fn parse_date_field(v: &Value, range: std::ops::Range<usize>) -> ExprResult<i64>
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use std::collections::HashMap;

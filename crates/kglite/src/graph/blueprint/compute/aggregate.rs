@@ -560,9 +560,11 @@ mod tests {
     }
 
     fn make_bp(csv_rel: &str, pk: &str, props: &[(&str, &str)]) -> Blueprint {
-        let mut spec = NodeSpec::default();
-        spec.csv = Some(csv_rel.to_string());
-        spec.pk = Some(pk.to_string());
+        let mut spec = NodeSpec {
+            csv: Some(csv_rel.to_string()),
+            pk: Some(pk.to_string()),
+            ..Default::default()
+        };
         for (k, v) in props {
             spec.properties.insert(k.to_string(), v.to_string());
         }

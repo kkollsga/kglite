@@ -72,7 +72,7 @@ mod tests {
         let json = r#"{"0": {"cik_str": 1, "ticker": "tsla"}}"#;
         let map = parse_tickers_json(json).unwrap();
         assert_eq!(map.get("TSLA"), Some(&1));
-        assert!(map.get("tsla").is_none());
+        assert!(!map.contains_key("tsla"));
     }
 
     #[test]

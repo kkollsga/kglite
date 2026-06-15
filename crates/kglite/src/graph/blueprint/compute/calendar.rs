@@ -502,9 +502,11 @@ mod tests {
             "id,date\n1,2025-01-02\n2,2025-01-04\n",
         )
         .unwrap();
-        let mut spec = NodeSpec::default();
-        spec.csv = Some("tx.csv".to_string());
-        spec.pk = Some("id".to_string());
+        let mut spec = NodeSpec {
+            csv: Some("tx.csv".to_string()),
+            pk: Some("id".to_string()),
+            ..Default::default()
+        };
         spec.properties
             .insert("date".to_string(), "string".to_string());
         let mut bp = Blueprint::default();
@@ -589,9 +591,11 @@ mod tests {
             "id,date\n1,2025-01-02\n2,not-a-date\n3,\n",
         )
         .unwrap();
-        let mut spec = NodeSpec::default();
-        spec.csv = Some("tx.csv".to_string());
-        spec.pk = Some("id".to_string());
+        let mut spec = NodeSpec {
+            csv: Some("tx.csv".to_string()),
+            pk: Some("id".to_string()),
+            ..Default::default()
+        };
         spec.properties
             .insert("date".to_string(), "string".to_string());
         let mut bp = Blueprint::default();

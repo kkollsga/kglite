@@ -118,7 +118,7 @@ fmt-py:
 
 ## Run clippy lints
 clippy:
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 ## Run Python lint checks
 lint-py:
@@ -127,7 +127,7 @@ lint-py:
 ## Run all lint checks (Rust + Python + stubs) — use before pushing
 lint:
 	cargo fmt -- --check
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 	$(ACTIVATE) && ruff format --check . && ruff check .
 	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt
 

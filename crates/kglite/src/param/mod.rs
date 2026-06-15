@@ -58,6 +58,7 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

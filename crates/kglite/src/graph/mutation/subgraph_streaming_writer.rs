@@ -953,6 +953,7 @@ fn value_kind(v: &Value) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use crate::graph::schema::TypeSchema;
@@ -991,7 +992,7 @@ mod tests {
         let key_active = interner.get_or_intern("active");
         let key_score = interner.get_or_intern("score");
 
-        let names = vec!["Alice", "Bob", "Carla-with-a-longer-name", "", "Dee"];
+        let names = ["Alice", "Bob", "Carla-with-a-longer-name", "", "Dee"];
         for i in 0..5u32 {
             let id = Value::String(format!("id-{i}"));
             let title = Value::String(format!("Title {i}"));
@@ -1114,7 +1115,7 @@ mod tests {
             "string",
         )
         .unwrap();
-        let values = vec![
+        let values = [
             Value::Int64(42),
             Value::String("hello".into()),
             Value::Float64(3.14),

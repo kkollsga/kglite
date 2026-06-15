@@ -182,7 +182,7 @@ mod tests {
             m.get("metadata.scope"),
             Some(&Value::String("project".into()))
         );
-        assert!(m.get("metadata").is_none());
+        assert!(!m.contains_key("metadata"));
     }
 
     #[test]

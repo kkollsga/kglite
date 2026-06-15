@@ -440,6 +440,12 @@ fn is_exhibit21_attachment_name(name: &str) -> bool {
     n.contains("ex21") || n.contains("exhibit21") || n.contains("ex-21") || n.contains("exhibit-21")
 }
 
+// expose for the integration test below — read by env-gated helper
+#[allow(dead_code)]
+pub(crate) fn raw_master_idx_path(workdir: &Workdir, year: u16, q: u8) -> PathBuf {
+    workdir.raw_master_idx(year, q)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,10 +515,4 @@ mod tests {
         // No request should be issued; result is "skipped".
         assert!(matches!(result, Ok(false)));
     }
-}
-
-// expose for the integration test below — read by env-gated helper
-#[allow(dead_code)]
-pub(crate) fn raw_master_idx_path(workdir: &Workdir, year: u16, q: u8) -> PathBuf {
-    workdir.raw_master_idx(year, q)
 }

@@ -214,9 +214,11 @@ mod tests {
     }
 
     fn make_blueprint(csv_rel: &str, props: &[(&str, &str)]) -> Blueprint {
-        let mut spec = crate::graph::blueprint::schema::NodeSpec::default();
-        spec.csv = Some(csv_rel.to_string());
-        spec.pk = Some("id".to_string());
+        let mut spec = crate::graph::blueprint::schema::NodeSpec {
+            csv: Some(csv_rel.to_string()),
+            pk: Some("id".to_string()),
+            ..Default::default()
+        };
         for (k, v) in props {
             spec.properties.insert(k.to_string(), v.to_string());
         }
@@ -330,12 +332,16 @@ mod tests {
             "tx_id,person_nid,shares,price\n1,P1,100,10.0\n2,P1,50,20.0\n",
         );
         let mut bp = Blueprint::default();
-        let mut parent = crate::graph::blueprint::schema::NodeSpec::default();
-        parent.csv = Some("persons.csv".to_string());
-        parent.pk = Some("person_nid".to_string());
-        let mut sub = crate::graph::blueprint::schema::NodeSpec::default();
-        sub.csv = Some("tx.csv".to_string());
-        sub.pk = Some("tx_id".to_string());
+        let mut parent = crate::graph::blueprint::schema::NodeSpec {
+            csv: Some("persons.csv".to_string()),
+            pk: Some("person_nid".to_string()),
+            ..Default::default()
+        };
+        let mut sub = crate::graph::blueprint::schema::NodeSpec {
+            csv: Some("tx.csv".to_string()),
+            pk: Some("tx_id".to_string()),
+            ..Default::default()
+        };
         sub.properties
             .insert("shares".to_string(), "int".to_string());
         sub.properties
