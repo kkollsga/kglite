@@ -1,10 +1,12 @@
-//! Bundle directory walk: enumerate concept `.md` files.
+//! Bundle directory walk: enumerate concept `.md` files and per-directory
+//! `index.md` files.
 //!
-//! Reserved filenames (`index.md`, `log.md`) are not concepts — they're skipped
-//! here (the directory hierarchy is captured separately as structural `CONTAINS`
-//! edges in the builder). Hidden directories (`.git`, `.obsidian`, …) are
-//! pruned, mirroring `code_tree`'s `walk_filter`.
+//! Reserved filenames (`index.md`, `log.md`) are not concepts. `index.md` is
+//! captured per directory (it describes the directory — it enriches the `Folder`
+//! node in the builder); `log.md` is skipped. Hidden directories (`.git`,
+//! `.obsidian`, …) are pruned, mirroring `code_tree`'s `walk_filter`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -17,8 +19,17 @@ pub struct DiscoveredFile {
     pub abs_path: PathBuf,
 }
 
-/// Filenames that carry structural meaning and are never concepts.
-const RESERVED: &[&str] = &["index.md", "log.md"];
+/// Result of a bundle walk: concept files + each directory's `index.md`.
+#[derive(Debug, Clone, Default)]
+pub struct WalkResult {
+    pub concepts: Vec<DiscoveredFile>,
+    /// Bundle-relative directory path (`""` = root) → that directory's
+    /// `index.md` absolute path.
+    pub index_files: HashMap<String, PathBuf>,
+}
+
+/// `log.md` carries no structure we use; `index.md` is handled specially.
+const SKIPPED: &[&str] = &["log.md"];
 
 fn is_ignored_dir(name: &str) -> bool {
     // Hidden dirs (.git, .obsidian, .venv, …) plus the usual build noise.
@@ -29,9 +40,9 @@ fn is_ignored_dir(name: &str) -> bool {
         )
 }
 
-/// Walk `root`, returning every non-reserved `.md` concept file. Errors only on
-/// an unreadable root.
-pub fn discover(root: &Path) -> Result<Vec<DiscoveredFile>, String> {
+/// Walk `root`, returning concept `.md` files plus per-directory `index.md`
+/// files. Errors only on an unreadable root.
+pub fn discover(root: &Path) -> Result<WalkResult, String> {
     if !root.exists() {
         return Err(format!(
             "OKF bundle path does not exist: {}",
@@ -46,6 +57,7 @@ pub fn discover(root: &Path) -> Result<Vec<DiscoveredFile>, String> {
     }
 
     let mut out = Vec::new();
+    let mut index_files: HashMap<String, PathBuf> = HashMap::new();
     let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
         // Never prune the root itself (depth 0) — the bundle directory may
         // legitimately be hidden (e.g. a `.tmpXXXX` temp dir, or a path under
@@ -67,7 +79,7 @@ pub fn discover(root: &Path) -> Result<Vec<DiscoveredFile>, String> {
             Some(n) => n,
             None => continue,
         };
-        if !name.ends_with(".md") || RESERVED.contains(&name) {
+        if !name.ends_with(".md") || SKIPPED.contains(&name) {
             continue;
         }
         let rel = match entry.path().strip_prefix(root) {
@@ -79,6 +91,15 @@ pub fn discover(root: &Path) -> Result<Vec<DiscoveredFile>, String> {
             .filter_map(|c| c.as_os_str().to_str())
             .collect::<Vec<_>>()
             .join("/");
+        if name == "index.md" {
+            // Record per directory (bundle-relative dir path; "" = root).
+            let dir = rel_path
+                .rfind('/')
+                .map(|i| rel_path[..i].to_string())
+                .unwrap_or_default();
+            index_files.insert(dir, entry.path().to_path_buf());
+            continue;
+        }
         out.push(DiscoveredFile {
             rel_path,
             abs_path: entry.path().to_path_buf(),
@@ -87,5 +108,8 @@ pub fn discover(root: &Path) -> Result<Vec<DiscoveredFile>, String> {
     // Deterministic order (parallelism happens at parse time, but a stable file
     // list keeps id-collision resolution and tests reproducible).
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    Ok(out)
+    Ok(WalkResult {
+        concepts: out,
+        index_files,
+    })
 }

@@ -16,24 +16,170 @@ use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::mutation::maintain;
 use crate::graph::DirGraph;
 use crate::okf::model::{
-    BuildOptions, ConceptDoc, Link, CONTAINS_CONN_TYPE, DEFAULT_LABEL, SOURCE_LABEL,
+    BuildOptions, ConceptDoc, Link, CONTAINS_CONN_TYPE, DEFAULT_LABEL, FOLDER_LABEL, SOURCE_LABEL,
     TAGGED_CONN_TYPE, TAG_LABEL,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// `(source_label, target_label, conn_type)` → `[(source_id, target_id)]`.
+type EdgeGroups = HashMap<(String, String, String), Vec<(String, String)>>;
 
 /// Build a knowledge graph from an OKF bundle directory.
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Arc<DirGraph>, String> {
-    let docs = super::parse_bundle(root, opts)?;
+    let walked = super::walk::discover(root)?;
+    let docs = super::parse_concepts(&walked.concepts, opts);
     let mut graph = DirGraph::new();
     if docs.is_empty() {
         return Ok(Arc::new(graph));
     }
     build_nodes(&mut graph, &docs, opts)?;
     build_aux_nodes(&mut graph, &docs)?;
+    build_folders(&mut graph, &docs, &walked.index_files)?;
     build_edges(&mut graph, &docs)?;
     Ok(Arc::new(graph))
+}
+
+/// Emit grouped edges: one `add_connections` per `(src_label, tgt_label, conn)`
+/// so every call has correctly-typed endpoints.
+fn emit_groups(graph: &mut DirGraph, groups: EdgeGroups) -> Result<(), String> {
+    for ((src_label, tgt_label, conn), pairs) in groups {
+        let rows: Vec<Vec<Value>> = pairs
+            .into_iter()
+            .map(|(s, t)| vec![Value::String(s), Value::String(t)])
+            .collect();
+        let df = DataFrame::from_cypher_rows(
+            vec!["source_id".to_string(), "target_id".to_string()],
+            rows,
+        )?;
+        maintain::add_connections(
+            graph,
+            df,
+            conn,
+            src_label,
+            "source_id".to_string(),
+            tgt_label,
+            "target_id".to_string(),
+            None,
+            None,
+            Some("update".to_string()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Materialize the directory hierarchy as `Folder` nodes:
+/// `(:Folder)-[:CONTAINS]->(:Concept)` and `(:Folder)-[:CONTAINS]->(:Folder)`.
+/// A directory's `index.md` enriches its Folder node's title/description (so the
+/// reserved file is recovered as structure rather than discarded). Co-located
+/// concepts gain a 2-hop hub, capturing the taxonomic meaning of the layout.
+fn build_folders(
+    graph: &mut DirGraph,
+    docs: &[ConceptDoc],
+    index_files: &HashMap<String, PathBuf>,
+) -> Result<(), String> {
+    // Every directory holding a concept, plus all ancestor directories.
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    for d in docs {
+        let mut p = super::parent_dir(&d.concept_id).to_string();
+        while !p.is_empty() {
+            let parent = super::parent_dir(&p).to_string();
+            dirs.insert(p);
+            p = parent;
+        }
+    }
+    if dirs.is_empty() {
+        return Ok(());
+    }
+
+    // Folder nodes (id = dir path; title/description from index.md if present).
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(dirs.len());
+    for dir in &dirs {
+        let (title, desc) = index_files
+            .get(dir)
+            .map(|p| folder_meta(p))
+            .unwrap_or((None, None));
+        let title = title.unwrap_or_else(|| dir.rsplit('/').next().unwrap_or(dir).to_string());
+        rows.push(vec![
+            Value::String(dir.clone()),
+            Value::String(title),
+            desc.map(Value::String).unwrap_or(Value::Null),
+        ]);
+    }
+    let df = DataFrame::from_cypher_rows(
+        vec![
+            "id".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+        ],
+        rows,
+    )?;
+    maintain::add_nodes(
+        graph,
+        df,
+        FOLDER_LABEL.to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        Some("update".to_string()),
+    )?;
+
+    // CONTAINS edges: folder → immediate child concepts and subfolders.
+    let mut groups: EdgeGroups = HashMap::new();
+    for d in docs {
+        let dir = super::parent_dir(&d.concept_id);
+        if !dir.is_empty() {
+            groups
+                .entry((
+                    FOLDER_LABEL.to_string(),
+                    d.label.clone(),
+                    CONTAINS_CONN_TYPE.to_string(),
+                ))
+                .or_default()
+                .push((dir.to_string(), d.concept_id.clone()));
+        }
+    }
+    for dir in &dirs {
+        let parent = super::parent_dir(dir);
+        if !parent.is_empty() {
+            groups
+                .entry((
+                    FOLDER_LABEL.to_string(),
+                    FOLDER_LABEL.to_string(),
+                    CONTAINS_CONN_TYPE.to_string(),
+                ))
+                .or_default()
+                .push((parent.to_string(), dir.clone()));
+        }
+    }
+    emit_groups(graph, groups)
+}
+
+/// Extract a `(title, description)` for a Folder node from its `index.md`:
+/// the first heading is the title, the first prose line the description.
+fn folder_meta(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let mut title = None;
+    let mut desc = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(h) = t.strip_prefix('#') {
+            if title.is_none() {
+                title = Some(h.trim_start_matches('#').trim().to_string());
+            }
+        } else if desc.is_none() {
+            desc = Some(t.to_string());
+        }
+        if title.is_some() && desc.is_some() {
+            break;
+        }
+    }
+    (title.filter(|s| !s.is_empty()), desc)
 }
 
 /// Synthesize `Tag` and `Source` nodes from the concepts' tags and external
@@ -190,15 +336,12 @@ fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-/// Build edges: semantic links (typed via the ladder) plus structural `CONTAINS`
-/// edges (parent concept → child concept). Grouped by endpoint labels + type so
-/// each `add_connections` call is correctly typed.
+/// Build the concept-level edges: semantic links (typed via the ladder; internal
+/// → concept, external → Source) and tag membership. Directory `CONTAINS` edges
+/// are built in [`build_folders`].
 fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> {
     let resolver = Resolver::new(docs);
-
-    // (source_label, target_label, conn_type) -> [(source_id, target_id)]
-    type EdgeKey = (String, String, String);
-    let mut groups: HashMap<EdgeKey, Vec<(String, String)>> = HashMap::new();
+    let mut groups: EdgeGroups = HashMap::new();
 
     // Semantic links: internal → concept edges (resolved), external → Source.
     for d in docs {
@@ -230,46 +373,7 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
         }
     }
 
-    // Structural CONTAINS: a concept whose parent directory is itself a concept.
-    for d in docs {
-        if let Some(idx) = d.concept_id.rfind('/') {
-            let parent = &d.concept_id[..idx];
-            if let Some(plabel) = resolver.id_to_label.get(parent) {
-                groups
-                    .entry((
-                        plabel.to_string(),
-                        d.label.clone(),
-                        CONTAINS_CONN_TYPE.to_string(),
-                    ))
-                    .or_default()
-                    .push((parent.to_string(), d.concept_id.clone()));
-            }
-        }
-    }
-
-    for ((src_label, tgt_label, conn), pairs) in groups {
-        let rows: Vec<Vec<Value>> = pairs
-            .into_iter()
-            .map(|(s, t)| vec![Value::String(s), Value::String(t)])
-            .collect();
-        let df = DataFrame::from_cypher_rows(
-            vec!["source_id".to_string(), "target_id".to_string()],
-            rows,
-        )?;
-        maintain::add_connections(
-            graph,
-            df,
-            conn,
-            src_label,
-            "source_id".to_string(),
-            tgt_label,
-            "target_id".to_string(),
-            None,
-            None,
-            Some("update".to_string()),
-        )?;
-    }
-    Ok(())
+    emit_groups(graph, groups)
 }
 
 /// Normalize a name/path for forgiving link resolution: lowercase, unify
@@ -425,22 +529,46 @@ mod tests {
     }
 
     #[test]
-    fn contains_edge_for_parent_concept() {
+    fn folder_nodes_and_contains_edges() {
         let dir = tempdir().unwrap();
+        write(dir.path(), "tables/orders.md", "---\ntype: Table\n---\nx");
         write(
             dir.path(),
-            "sales.md",
-            "---\ntype: Dataset\n---\nthe sales area",
+            "tables/customers.md",
+            "---\ntype: Table\n---\ny",
         );
         write(
             dir.path(),
-            "sales/detail.md",
-            "---\ntype: Table\n---\nnested under sales",
+            "tables/index.md",
+            "# All Tables\nStructured data tables.",
         );
         let g = build(dir.path(), &BuildOptions::default()).unwrap();
-        assert_eq!(g.graph.node_indices().count(), 2);
-        // exactly one CONTAINS edge: sales → sales/detail
-        assert_eq!(g.graph.edge_count(), 1);
+        // 2 concepts + 1 Folder("tables")
+        assert_eq!(count_label(&g, "Folder"), 1);
+        assert_eq!(g.graph.node_indices().count(), 3);
+        // Folder(tables) CONTAINS both concepts = 2 edges (no links in bodies)
+        assert_eq!(g.graph.edge_count(), 2);
+        // index.md enriches the folder title (stored as the node title field).
+        let folder_title = g
+            .graph
+            .node_indices()
+            .find(|&n| {
+                g.get_node(n)
+                    .is_some_and(|nd| nd.node_type_str(&g.interner) == "Folder")
+            })
+            .and_then(|n| g.get_node(n).map(|nd| nd.title().into_owned()));
+        assert_eq!(folder_title, Some(Value::String("All Tables".to_string())));
+    }
+
+    #[test]
+    fn nested_folders_chain_contains() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "a/b/c.md", "---\ntype: Note\n---\ndeep");
+        let g = build(dir.path(), &BuildOptions::default()).unwrap();
+        // folders a, a/b ; concept a/b/c
+        assert_eq!(count_label(&g, "Folder"), 2);
+        // CONTAINS: a→a/b, a/b→a/b/c = 2
+        assert_eq!(g.graph.edge_count(), 2);
     }
 
     #[test]

@@ -44,14 +44,24 @@ pub fn read_body(path: &Path) -> Result<String, String> {
 /// and parsed in parallel; a file with malformed frontmatter degrades to a
 /// body-only `Concept` rather than being dropped (permissive consumption).
 pub fn parse_bundle(root: &Path, opts: &BuildOptions) -> Result<Vec<ConceptDoc>, String> {
-    let files = walk::discover(root)?;
+    let walked = walk::discover(root)?;
+    Ok(parse_concepts(&walked.concepts, opts))
+}
+
+/// Parse already-discovered concept files into [`ConceptDoc`]s (parallel). Used
+/// by both [`parse_bundle`] and the builder (which walks once and also needs the
+/// `index.md` map).
+pub(crate) fn parse_concepts(
+    files: &[walk::DiscoveredFile],
+    opts: &BuildOptions,
+) -> Vec<ConceptDoc> {
     let mut docs: Vec<ConceptDoc> = files
         .par_iter()
         .filter_map(|f| parse_file(f, opts).ok())
         .collect();
     // Stable order for reproducible builds / tests.
     docs.sort_by(|a, b| a.concept_id.cmp(&b.concept_id));
-    Ok(docs)
+    docs
 }
 
 /// Parse one discovered file into a [`ConceptDoc`].

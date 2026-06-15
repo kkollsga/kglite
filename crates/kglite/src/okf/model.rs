@@ -111,3 +111,5 @@ pub const TAG_LABEL: &str = "Tag";
 pub const TAGGED_CONN_TYPE: &str = "TAGGED";
 /// Node label for synthesized external-source (URL) nodes.
 pub const SOURCE_LABEL: &str = "Source";
+/// Node label for synthesized directory nodes (the bundle's folder hierarchy).
+pub const FOLDER_LABEL: &str = "Folder";

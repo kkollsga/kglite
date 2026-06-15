@@ -25,9 +25,9 @@ CORPUS = Path(__file__).parent / "fixtures" / "okf" / "google"
 # Captured shape of the vendored bundles, with the default-on enrichment
 # (concepts + Tag + Source nodes; link / TAGGED / CITES edges).
 EXPECTED = {
-    "stackoverflow": {"nodes": 130, "edges": 328},
-    "ga4": {"nodes": 23, "edges": 34},
-    "crypto_bitcoin": {"nodes": 24, "edges": 49},
+    "stackoverflow": {"nodes": 133, "edges": 377},
+    "ga4": {"nodes": 28, "edges": 47},
+    "crypto_bitcoin": {"nodes": 26, "edges": 54},
 }
 
 

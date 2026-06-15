@@ -38,10 +38,12 @@ class TestOkfGoldenBundle:
 
     def test_node_count_and_labels(self):
         g = okf.build(str(OKF_BUNDLE))
-        # 9 concepts + 1 `tables/ghost` stub + 2 Tag nodes (sales, orders) +
-        # 1 Source node (the external citation) = 13.
-        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 13
+        # 9 concepts + 1 `tables/ghost` stub + 2 Tag (sales, orders) +
+        # 1 Source (external citation) + 6 Folder (tables, datasets, references,
+        # playbooks, meta, guide) = 19.
+        assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 19
         labels = _labels(g)
+        assert labels["Folder"] == 6
         assert labels["BigQuery Table"] == 2
         assert labels["BigQuery Dataset"] == 1
         assert labels["Reference"] == 1
@@ -82,14 +84,16 @@ class TestOkfGoldenBundle:
         assert et["PART_OF"] == 1  # explicit link title
         assert et["CITES"] == 2  # "# Citations": internal note + external Source
         assert et["LINKS_TO"] == 1  # untyped (the dangling ghost link)
-        assert et["CONTAINS"] == 1  # structural: guide → guide/intro
+        assert et["CONTAINS"] == 7  # folder → concept across the 6 dirs
         assert et["TAGGED"] == 3  # orders→{sales,orders}, customers→sales
 
         # spot-check endpoints of the typed edges
         joins = g.cypher("MATCH (a)-[:JOINS_WITH]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
         assert joins == [{"a": "tables/orders", "b": "tables/customers"}]
-        contains = g.cypher("MATCH (a)-[:CONTAINS]->(b) RETURN a.concept_id AS a, b.concept_id AS b").to_list()
-        assert contains == [{"a": "guide", "b": "guide/intro"}]
+        contains = g.cypher("MATCH (f:Folder)-[:CONTAINS]->(c) RETURN f.id AS f, c.concept_id AS c").to_list()
+        pairs = {(r["f"], r["c"]) for r in contains}
+        assert ("tables", "tables/orders") in pairs
+        assert ("guide", "guide/intro") in pairs
 
     def test_tag_nodes_connect_concepts(self):
         g = okf.build(str(OKF_BUNDLE))
@@ -104,6 +108,15 @@ class TestOkfGoldenBundle:
         src = g.cypher("MATCH (a {concept_id:'tables/orders'})-[:CITES]->(s:Source) RETURN s.id AS url").to_list()
         assert any("cloud.google.com" in r["url"] for r in src)
 
+    def test_folder_nodes_and_index_enrichment(self):
+        g = okf.build(str(OKF_BUNDLE))
+        # the tables/ directory is a Folder containing its concepts...
+        contained = g.cypher("MATCH (:Folder {id:'tables'})-[:CONTAINS]->(c) RETURN c.concept_id AS c").to_list()
+        assert {r["c"] for r in contained} == {"tables/orders", "tables/customers"}
+        # ...and its title comes from tables/index.md (reserved file recovered).
+        title = g.cypher("MATCH (f:Folder {id:'tables'}) RETURN f.title AS t").to_list()
+        assert title == [{"t": "All Tables"}]
+
     def test_dangling_link_becomes_provisional_stub(self):
         g = okf.build(str(OKF_BUNDLE))
         stubs = g.cypher("MATCH (n {_provisional:true}) RETURN n.concept_id AS id").to_list()
@@ -111,9 +124,13 @@ class TestOkfGoldenBundle:
 
     def test_orphan_detectable(self):
         g = okf.build(str(OKF_BUNDLE))
-        # the playbook is deliberately unlinked → degree 0
+        # With Folder nodes every concept has a structural CONTAINS edge, so a
+        # meaningful "orphan" is one with no *semantic* edge (exclude the
+        # structural CONTAINS/TAGGED). The playbook is deliberately unlinked.
         deg = g.cypher(
-            "MATCH (n {concept_id:'playbooks/incident'}) OPTIONAL MATCH (n)-[r]-(m) RETURN count(r) AS d"
+            "MATCH (n {concept_id:'playbooks/incident'}) "
+            "OPTIONAL MATCH (n)-[r]-(m) WHERE NOT type(r) IN ['CONTAINS', 'TAGGED'] "
+            "RETURN count(r) AS d"
         ).to_list()
         assert deg[0]["d"] == 0
 
