@@ -15,7 +15,7 @@
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::mutation::maintain;
 use crate::graph::DirGraph;
-use crate::okf::model::{BuildOptions, ConceptDoc, CONTAINS_CONN_TYPE, DEFAULT_LABEL};
+use crate::okf::model::{BuildOptions, ConceptDoc, Link, CONTAINS_CONN_TYPE, DEFAULT_LABEL};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
@@ -130,13 +130,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
 /// edges (parent concept → child concept). Grouped by endpoint labels + type so
 /// each `add_connections` call is correctly typed.
 fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> {
-    let mut id_to_label: HashMap<&str, &str> = HashMap::new();
-    let mut stem_to_id: HashMap<&str, &str> = HashMap::new();
-    for d in docs {
-        id_to_label.insert(d.concept_id.as_str(), d.label.as_str());
-        let stem = d.concept_id.rsplit('/').next().unwrap_or(&d.concept_id);
-        stem_to_id.entry(stem).or_insert(d.concept_id.as_str());
-    }
+    let resolver = Resolver::new(docs);
 
     // (source_label, target_label, conn_type) -> [(source_id, target_id)]
     type EdgeKey = (String, String, String);
@@ -145,13 +139,9 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
     // Semantic links.
     for d in docs {
         for link in &d.links {
-            let (target_id, target_label) = resolve_link_target(link, &id_to_label, &stem_to_id);
+            let (target_id, target_label) = resolver.resolve(link);
             groups
-                .entry((
-                    d.label.clone(),
-                    target_label.to_string(),
-                    link.conn_type.clone(),
-                ))
+                .entry((d.label.clone(), target_label, link.conn_type.clone()))
                 .or_default()
                 .push((d.concept_id.clone(), target_id));
         }
@@ -161,7 +151,7 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
     for d in docs {
         if let Some(idx) = d.concept_id.rfind('/') {
             let parent = &d.concept_id[..idx];
-            if let Some(plabel) = id_to_label.get(parent) {
+            if let Some(plabel) = resolver.id_to_label.get(parent) {
                 groups
                     .entry((
                         plabel.to_string(),
@@ -199,23 +189,99 @@ fn build_edges(graph: &mut DirGraph, docs: &[ConceptDoc]) -> Result<(), String> 
     Ok(())
 }
 
-/// Resolve a link's `(target_id, target_label)`. Wikilinks resolve by file stem;
-/// path links by concept-id. Unresolved targets keep their raw id and the
-/// default label — `add_connections` vivifies them as `_provisional` stubs.
-fn resolve_link_target(
-    link: &crate::okf::model::Link,
-    id_to_label: &HashMap<&str, &str>,
-    stem_to_id: &HashMap<&str, &str>,
-) -> (String, String) {
-    if link.is_wikilink {
-        if let Some(id) = stem_to_id.get(link.target.as_str()) {
-            let label = id_to_label.get(id).copied().unwrap_or(DEFAULT_LABEL);
-            return ((*id).to_string(), label.to_string());
+/// Normalize a name/path for forgiving link resolution: lowercase, unify
+/// `_`/` `→`-`, collapse repeats, trim. So `Project-0-10` / `project_0_10` /
+/// `Project 0 10` all match. Slashes are preserved (paths stay paths).
+fn normalize_slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for ch in s.chars() {
+        let c = ch.to_ascii_lowercase();
+        let c = if c == '_' || c == ' ' { '-' } else { c };
+        if c == '-' {
+            if prev_dash {
+                continue;
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
         }
-    } else if let Some(label) = id_to_label.get(link.target.as_str()) {
-        return (link.target.clone(), label.to_string());
+        out.push(c);
     }
-    (link.target.clone(), DEFAULT_LABEL.to_string())
+    out.trim_matches('-').to_string()
+}
+
+/// Forgiving link/wikilink → concept resolver. Tries, most-specific first:
+/// exact concept-id (path links) → exact file stem → normalized slug (full path
+/// or last segment) → normalized title. Unresolved targets keep their raw id and
+/// the default label — `add_connections` vivifies them as `_provisional` stubs.
+struct Resolver<'a> {
+    id_to_label: HashMap<&'a str, &'a str>,
+    stem_to_id: HashMap<&'a str, &'a str>,
+    slug_to_id: HashMap<String, &'a str>,
+    title_to_id: HashMap<String, &'a str>,
+}
+
+impl<'a> Resolver<'a> {
+    fn new(docs: &'a [ConceptDoc]) -> Self {
+        let mut id_to_label = HashMap::new();
+        let mut stem_to_id = HashMap::new();
+        let mut slug_to_id = HashMap::new();
+        let mut title_to_id = HashMap::new();
+        for d in docs {
+            id_to_label.insert(d.concept_id.as_str(), d.label.as_str());
+            let stem = d.concept_id.rsplit('/').next().unwrap_or(&d.concept_id);
+            stem_to_id.entry(stem).or_insert(d.concept_id.as_str());
+            slug_to_id
+                .entry(normalize_slug(&d.concept_id))
+                .or_insert(d.concept_id.as_str());
+            slug_to_id
+                .entry(normalize_slug(stem))
+                .or_insert(d.concept_id.as_str());
+            title_to_id
+                .entry(normalize_slug(&d.title))
+                .or_insert(d.concept_id.as_str());
+        }
+        Self {
+            id_to_label,
+            stem_to_id,
+            slug_to_id,
+            title_to_id,
+        }
+    }
+
+    fn label_of(&self, id: &str) -> String {
+        self.id_to_label
+            .get(id)
+            .copied()
+            .unwrap_or(DEFAULT_LABEL)
+            .to_string()
+    }
+
+    fn resolve(&self, link: &Link) -> (String, String) {
+        let t = link.target.as_str();
+        if !link.is_wikilink {
+            if let Some(lbl) = self.id_to_label.get(t) {
+                return (t.to_string(), lbl.to_string());
+            }
+        }
+        if let Some(id) = self.stem_to_id.get(t) {
+            return ((*id).to_string(), self.label_of(id));
+        }
+        let norm = normalize_slug(t);
+        if let Some(id) = self.slug_to_id.get(&norm) {
+            return ((*id).to_string(), self.label_of(id));
+        }
+        if let Some(seg) = t.rsplit('/').next() {
+            if let Some(id) = self.slug_to_id.get(&normalize_slug(seg)) {
+                return ((*id).to_string(), self.label_of(id));
+            }
+        }
+        if let Some(id) = self.title_to_id.get(&norm) {
+            return ((*id).to_string(), self.label_of(id));
+        }
+        (t.to_string(), DEFAULT_LABEL.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +370,60 @@ mod tests {
         let dir = tempdir().unwrap();
         let g = build(dir.path(), &BuildOptions::default()).unwrap();
         assert_eq!(g.graph.node_indices().count(), 0);
+    }
+
+    #[test]
+    fn slug_normalization_unifies_separators() {
+        assert_eq!(
+            normalize_slug("Project_0-10 Shipped"),
+            "project-0-10-shipped"
+        );
+        assert_eq!(
+            normalize_slug("feedback_cypher_first"),
+            "feedback-cypher-first"
+        );
+        assert_eq!(normalize_slug("--A__B--"), "a-b");
+    }
+
+    #[test]
+    fn resolves_slug_and_title_variants_without_dangling() {
+        let dir = tempdir().unwrap();
+        // file uses underscores; wikilinks use hyphen-slug and the human title.
+        write(
+            dir.path(),
+            "feedback_cypher_first.md",
+            "---\ntype: Note\ntitle: Cypher First\n---\nleaf",
+        );
+        write(
+            dir.path(),
+            "a.md",
+            "---\ntype: Note\n---\nsee [[feedback-cypher-first]] and [[Cypher First]]",
+        );
+        let opts = BuildOptions {
+            dialect: crate::okf::model::Dialect::Loose,
+            with_body: false,
+            embed: false,
+        };
+        let g = build(dir.path(), &opts).unwrap();
+        // both wikilinks resolve to the one file → 2 nodes, no provisional stub.
+        assert_eq!(g.graph.node_indices().count(), 2);
+        assert_eq!(provisional_count(&g), 0);
+    }
+
+    #[test]
+    fn genuinely_missing_target_still_dangles() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.md",
+            "---\ntype: Note\n---\nsee [[truly-absent]]",
+        );
+        let opts = BuildOptions {
+            dialect: crate::okf::model::Dialect::Loose,
+            with_body: false,
+            embed: false,
+        };
+        let g = build(dir.path(), &opts).unwrap();
+        assert_eq!(provisional_count(&g), 1);
     }
 }
