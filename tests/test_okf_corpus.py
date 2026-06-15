@@ -32,7 +32,7 @@ EXPECTED = {
 
 
 def _build(name: str):
-    return okf.build(str(CORPUS / name))
+    return okf.build(str(CORPUS / name), respect_skip=False)
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))

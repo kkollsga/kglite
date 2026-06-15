@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: Reference
 resource: https://archive.org/details/stackexchange
 title: Creative Commons Attribution-ShareAlike 4.0 International License

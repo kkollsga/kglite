@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: Reference
 resource: https://developers.google.com/analytics/bigquery/basic-queries
 title: New User Count

@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: Reference
 resource: https://meta.stackexchange.com/questions/2677/database-schema-documentation-for-the-public-data-dump-and-sede
 title: Vote Types

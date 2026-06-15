@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: Section
 title: Intro
 ---

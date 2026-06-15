@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: BigQuery Dataset
 resource: https://bigquery.googleapis.com/v2/projects/bigquery-public-data/datasets/ga4_obfuscated_sample_ecommerce
 title: BigQuery sample dataset for Google Analytics ecommerce web implementation

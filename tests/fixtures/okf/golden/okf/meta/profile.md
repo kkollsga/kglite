@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 name: User Profile
 metadata:
   type: user

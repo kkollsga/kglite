@@ -1,4 +1,5 @@
 ---
+kg_skip: true
 type: BigQuery Table
 resource: https://bigquery.googleapis.com/v2/projects/bigquery-public-data/datasets/stackoverflow/tables/posts_questions
 title: Stack Overflow Questions
