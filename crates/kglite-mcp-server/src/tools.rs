@@ -35,6 +35,12 @@ pub struct GraphState {
     /// lazily, never on the watcher thread. N FS events between two
     /// tool calls → 1 rebuild (the slot just holds the latest target).
     pending_rebuild: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// Whether `build_code_tree` also ingests the repo's markdown as
+    /// `:Doc` nodes (and links them to code via `MENTIONS`/`DOCUMENTS`).
+    /// On for the github-workspace (open-source) mode; off for local /
+    /// file modes. Set once at startup; carried by every clone so the
+    /// lazy watch-rebuild uses the same setting.
+    include_docs: bool,
 }
 
 struct ActiveGraph {
@@ -43,8 +49,13 @@ struct ActiveGraph {
 }
 
 impl GraphState {
-    pub fn new() -> Self {
-        Self::default()
+    /// `include_docs`: build with the markdown docs pass (github-workspace
+    /// mode on, local/file modes off).
+    pub fn new(include_docs: bool) -> Self {
+        Self {
+            include_docs,
+            ..Self::default()
+        }
     }
 
     /// Tag a directory as needing rebuild. Called from the watch
@@ -88,9 +99,16 @@ impl GraphState {
         Ok(())
     }
 
+    /// Whether this state builds with the markdown docs pass (so the watch
+    /// predicate also treats `.md` changes as graph-relevant).
+    pub fn include_docs(&self) -> bool {
+        self.include_docs
+    }
+
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
         // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
-        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None, false)
+        // include_docs is mode-dependent (github-workspace on, local off).
+        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None, self.include_docs)
             .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *self.inner.write().unwrap() = Some(ActiveGraph {

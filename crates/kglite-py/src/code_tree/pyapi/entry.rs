@@ -18,8 +18,14 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
 }
 
 /// Parse a directory into a KnowledgeGraph.
+///
+/// Set ``include_docs=True`` to also ingest the repo's markdown as ``:Doc``
+/// nodes and link them to the code they describe
+/// (``(:Doc)-[:MENTIONS]->(:Function|:Class|…)`` and
+/// ``(:Doc)-[:DOCUMENTS]->(:Doc|:File)``). Off by default (code-only graph).
 #[pyfunction]
-#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None))]
+#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None, include_docs=false))]
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     py: Python<'_>,
     src_dir: PathBuf,
@@ -27,6 +33,7 @@ pub fn build(
     verbose: bool,
     include_tests: bool,
     max_loc_per_file: Option<usize>,
+    include_docs: bool,
 ) -> PyResult<KnowledgeGraph> {
     py.detach(|| {
         crate::code_tree::builder::run_with_options(
@@ -35,7 +42,7 @@ pub fn build(
             include_tests,
             save_to.as_deref(),
             max_loc_per_file,
-            false,
+            include_docs,
         )
     })
     .map(KnowledgeGraph::from_arc)
@@ -77,6 +84,9 @@ pub fn read_manifest<'py>(
 }
 
 /// Clone a GitHub repo and build its KnowledgeGraph.
+///
+/// Set ``include_docs=True`` to also ingest the repo's markdown as ``:Doc``
+/// nodes linked to the code they describe (see :func:`build`).
 #[pyfunction]
 #[pyo3(signature = (
     repo,
@@ -88,6 +98,7 @@ pub fn read_manifest<'py>(
     verbose=false,
     include_tests=true,
     max_loc_per_file=None,
+    include_docs=false,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn repo_tree(
@@ -100,6 +111,7 @@ pub fn repo_tree(
     verbose: bool,
     include_tests: bool,
     max_loc_per_file: Option<usize>,
+    include_docs: bool,
 ) -> PyResult<KnowledgeGraph> {
     py.detach(|| {
         crate::code_tree::repo::clone_and_build(
@@ -111,7 +123,7 @@ pub fn repo_tree(
             verbose,
             include_tests,
             max_loc_per_file,
-            false,
+            include_docs,
         )
     })
     .map(KnowledgeGraph::from_arc)

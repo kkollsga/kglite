@@ -110,6 +110,17 @@ fn pick_mode(cli: &Cli) -> Mode {
     }
 }
 
+/// Whether a changed path should tag a code_tree rebuild: any file a parser
+/// handles, plus `.md` files when the docs pass is enabled (so editing a
+/// README re-links it to the code).
+fn is_graph_relevant(p: &std::path::Path, include_docs: bool) -> bool {
+    kglite::api::language_for_path(p).is_some()
+        || (include_docs
+            && p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+}
+
 fn fallback_name(mode: &Mode) -> &'static str {
     match mode {
         Mode::Graph { .. } => "KGLite (single-graph)",
@@ -219,7 +230,12 @@ async fn main() -> Result<()> {
         options.name = cli.name.clone();
     }
 
-    let graph_state = GraphState::new();
+    // The github-workspace (open-source) mode ingests each cloned repo's
+    // markdown as `:Doc` nodes and links them to code (MENTIONS/DOCUMENTS) —
+    // a repo's prose is part of its intelligence. Local / file / graph modes
+    // keep the lean code-only graph.
+    let include_docs = matches!(mode, Mode::Workspace { .. });
+    let graph_state = GraphState::new(include_docs);
 
     // Shared "active root" slot for local-workspace mode. Populated
     // by the post-activate hook on each `set_root_dir`; read by the
@@ -466,7 +482,7 @@ async fn main() -> Result<()> {
                 // tag a rebuild. Cheap predicate (just an ext lookup).
                 let any_code = paths
                     .iter()
-                    .any(|p| kglite::api::language_for_path(p).is_some());
+                    .any(|p| is_graph_relevant(p, gs.include_docs()));
                 if !any_code {
                     return;
                 }
@@ -509,7 +525,7 @@ async fn main() -> Result<()> {
                 // rebuild for changes the parser doesn't see.
                 let any_under_active_and_code = paths
                     .iter()
-                    .any(|p| p.starts_with(&active) && kglite::api::language_for_path(p).is_some());
+                    .any(|p| p.starts_with(&active) && is_graph_relevant(p, gs.include_docs()));
                 if !any_under_active_and_code {
                     return;
                 }
