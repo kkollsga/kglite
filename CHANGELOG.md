@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.22] — 2026-06-15 — OKF: structured-only sweeps + memory-aware labels
+
+### Changed
+
+- **`okf.build` now ingests only structured `.md` by default** — files with a
+  YAML frontmatter block (`require_frontmatter=True`). This is the discriminator
+  between *structured* knowledge (OKF concepts, Claude memories) and plain
+  markdown (READMEs, notes), so you can point at a **parent of many projects**
+  and sweep out only the structured knowledge across all of them in one pass —
+  each project's tree becomes `Folder` nodes; concept ids stay path-relative.
+  (Measured: ~2,000 nodes from a whole multi-project code tree in ~4 s.) Pass
+  `require_frontmatter=False` for vault-style ingestion of every `.md`.
+- **Memory-aware labels and titles.** Node label falls back `type` →
+  `metadata.type` → `Concept`, and title falls back `title` → `name` → file
+  stem. Claude memory files (which carry `metadata.type` and `name`, not a
+  top-level `type`/`title`) therefore land as `:feedback` / `:project` /
+  `:user` / `:reference` nodes titled by their `name`, queryable as
+  `MATCH (m:feedback) …`.
+
+### Fixed
+
+- **Dangling-reference stubs now carry `concept_id`** (and `_provisional`),
+  matching real concepts, so "references not yet written" are queryable
+  uniformly via `MATCH (n {_provisional: true}) RETURN n.concept_id` regardless
+  of whether the bundle has any bare `Concept` nodes.
+
 ## [0.10.21] — 2026-06-15 — richer OKF graphs (folders, tags, sources)
 
 ### Changed
