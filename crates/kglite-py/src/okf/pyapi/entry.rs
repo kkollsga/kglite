@@ -14,17 +14,21 @@ use crate::okf::{BuildOptions, Dialect};
 /// structured-knowledge vs plain-markdown discriminator; set `False` to ingest
 /// every `.md`. `respect_skip` (default `True`): honor the `kg_skip: true`
 /// frontmatter marker that opts a file out of the sweep; set `False` to ingest
-/// skip-marked files anyway. `with_body`: store each concept's markdown body as a
-/// `body` property (off by default — bodies are read on demand via the
+/// skip-marked files anyway. `skip_dirs`: directory names / bundle-relative
+/// paths to prune from the walk (the directory and its whole subtree) — for
+/// excluding cloned / vendored trees. `with_body`: store each concept's markdown
+/// body as a `body` property (off by default — bodies are read on demand via the
 /// `file_path` pointer).
 #[pyfunction]
-#[pyo3(signature = (path, *, dialect=None, require_frontmatter=true, respect_skip=true, with_body=false, embed=false))]
+#[pyo3(signature = (path, *, dialect=None, require_frontmatter=true, respect_skip=true, skip_dirs=None, with_body=false, embed=false))]
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     py: Python<'_>,
     path: PathBuf,
     dialect: Option<String>,
     require_frontmatter: bool,
     respect_skip: bool,
+    skip_dirs: Option<Vec<String>>,
     with_body: bool,
     embed: bool,
 ) -> PyResult<KnowledgeGraph> {
@@ -32,6 +36,7 @@ pub fn build(
         dialect: Dialect::parse(dialect.as_deref()),
         require_frontmatter,
         respect_skip,
+        skip_dirs: skip_dirs.unwrap_or_default(),
         with_body,
         embed,
     };

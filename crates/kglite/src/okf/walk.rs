@@ -40,9 +40,26 @@ fn is_ignored_dir(name: &str) -> bool {
         )
 }
 
+/// True if a directory at bundle-relative path `rel` (basename `name`) matches a
+/// caller `skip_dirs` entry: bare name → match at any depth; entry with `/` →
+/// anchored relative-path prefix (the dir and its subtree).
+fn matches_skip(rel: &str, name: &str, skip_dirs: &[String]) -> bool {
+    skip_dirs.iter().any(|raw| {
+        let entry = raw.trim_matches('/');
+        if entry.is_empty() {
+            false
+        } else if entry.contains('/') {
+            rel == entry || rel.starts_with(&format!("{entry}/"))
+        } else {
+            name == entry
+        }
+    })
+}
+
 /// Walk `root`, returning concept `.md` files plus per-directory `index.md`
-/// files. Errors only on an unreadable root.
-pub fn discover(root: &Path) -> Result<WalkResult, String> {
+/// files. `skip_dirs` prunes matching directories (and their subtrees). Errors
+/// only on an unreadable root.
+pub fn discover(root: &Path, skip_dirs: &[String]) -> Result<WalkResult, String> {
     if !root.exists() {
         return Err(format!(
             "OKF bundle path does not exist: {}",
@@ -61,14 +78,33 @@ pub fn discover(root: &Path) -> Result<WalkResult, String> {
     let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
         // Never prune the root itself (depth 0) — the bundle directory may
         // legitimately be hidden (e.g. a `.tmpXXXX` temp dir, or a path under
-        // `.claude/`). Only prune *descendant* hidden / build dirs.
+        // `.claude/`). Only prune *descendant* hidden / build / skip dirs.
         if e.depth() == 0 || !e.file_type().is_dir() {
             return true;
         }
-        e.file_name()
-            .to_str()
-            .map(|n| !is_ignored_dir(n))
-            .unwrap_or(true)
+        let Some(name) = e.file_name().to_str() else {
+            return true;
+        };
+        if is_ignored_dir(name) {
+            return false;
+        }
+        if !skip_dirs.is_empty() {
+            let rel = e
+                .path()
+                .strip_prefix(root)
+                .ok()
+                .map(|r| {
+                    r.components()
+                        .filter_map(|c| c.as_os_str().to_str())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_default();
+            if matches_skip(&rel, name, skip_dirs) {
+                return false;
+            }
+        }
+        true
     });
 
     for entry in walker.filter_map(Result::ok) {

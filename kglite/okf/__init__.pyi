@@ -10,6 +10,7 @@ def build(
     dialect: str | None = ...,
     require_frontmatter: bool = ...,
     respect_skip: bool = ...,
+    skip_dirs: list[str] | None = ...,
     with_body: bool = ...,
     embed: bool = ...,
 ) -> KnowledgeGraph:
@@ -52,6 +53,12 @@ def build(
         respect_skip: When ``True`` (default), honor a ``kg_skip: true``
             frontmatter marker that opts a file out of the sweep. Set ``False``
             to ingest skip-marked files anyway.
+        skip_dirs: Directories to prune from the walk (the directory and its
+            whole subtree). gitignore-style: an entry without a ``/`` matches a
+            directory by **name** at any depth (``"node_modules"``); an entry
+            with a ``/`` is an anchored **bundle-relative path**
+            (``"vendor/repos"``). Use it to exclude cloned / vendored trees you
+            don't own.
         with_body: Store each concept's markdown body as a ``body`` property
             (off by default — bodies are read on demand).
         embed: Reserved for the opt-in embedder pass (body vectors for

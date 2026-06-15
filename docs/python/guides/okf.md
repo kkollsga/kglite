@@ -54,7 +54,14 @@ Node labels fall back `type` → `metadata.type` → `Concept`, so Claude memori
 
 To exclude an individual file from sweeps, add `kg_skip: true` to its
 frontmatter — it's honored by default (pass `respect_skip=False` to ingest
-skip-marked files anyway).
+skip-marked files anyway). To exclude whole directories you don't own (cloned /
+vendored trees), pass `skip_dirs` — gitignore-style: a bare name matches a
+directory at any depth, a `path/with/slashes` is an anchored bundle-relative
+subtree:
+
+```python
+g = okf.build("~/code", skip_dirs=["node_modules", "vendor/repos", "mistral.rs"])
+```
 
 ## How a bundle maps to a graph
 

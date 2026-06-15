@@ -44,7 +44,7 @@ pub fn read_body(path: &Path) -> Result<String, String> {
 /// and parsed in parallel; a file with malformed frontmatter degrades to a
 /// body-only `Concept` rather than being dropped (permissive consumption).
 pub fn parse_bundle(root: &Path, opts: &BuildOptions) -> Result<Vec<ConceptDoc>, String> {
-    let walked = walk::discover(root)?;
+    let walked = walk::discover(root, &opts.skip_dirs)?;
     Ok(parse_concepts(&walked.concepts, opts))
 }
 
@@ -255,6 +255,34 @@ mod tests {
         };
         let docs = parse_bundle(dir.path(), &opts).unwrap();
         assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn skip_dirs_prunes_by_name_and_by_path() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "keep/a.md", "---\ntype: Note\n---\nkeep");
+        write(
+            dir.path(),
+            "vendor/repos/b.md",
+            "---\ntype: Note\n---\nclone",
+        );
+        write(dir.path(), "deep/cache/c.md", "---\ntype: Note\n---\ndep");
+
+        // bare name matches at any depth; path entry is anchored to the subtree.
+        let opts = BuildOptions {
+            skip_dirs: vec!["cache".to_string(), "vendor/repos".to_string()],
+            ..BuildOptions::default()
+        };
+        let ids: Vec<String> = parse_bundle(dir.path(), &opts)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.concept_id)
+            .collect();
+        assert_eq!(ids, vec!["keep/a"]);
+
+        // without skip_dirs all three are ingested.
+        let all = parse_bundle(dir.path(), &BuildOptions::default()).unwrap();
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

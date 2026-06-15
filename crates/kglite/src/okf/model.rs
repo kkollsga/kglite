@@ -51,6 +51,12 @@ pub struct BuildOptions {
     /// Honor the `kg_skip: true` frontmatter marker (exclude that file from the
     /// sweep). On by default; set false to ingest skip-marked files anyway.
     pub respect_skip: bool,
+    /// Directories to prune from the walk (the directory **and its whole
+    /// subtree**). gitignore-style: an entry without a `/` matches a directory by
+    /// **name** at any depth (`"node_modules"`, `"target"`); an entry with a `/`
+    /// is an anchored **bundle-relative path** (`"vendor/repos"`). For excluding
+    /// cloned / vendored trees you don't own.
+    pub skip_dirs: Vec<String>,
     /// Store each concept's markdown body as a `body` property. Off by default
     /// (partial ingestion — read bodies on demand via the file pointer).
     pub with_body: bool,
@@ -65,6 +71,7 @@ impl Default for BuildOptions {
             dialect: Dialect::Okf,
             require_frontmatter: true,
             respect_skip: true,
+            skip_dirs: Vec::new(),
             with_body: false,
             embed: false,
         }

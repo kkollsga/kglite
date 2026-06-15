@@ -28,7 +28,7 @@ type EdgeGroups = HashMap<(String, String, String), Vec<(String, String)>>;
 
 /// Build a knowledge graph from an OKF bundle directory.
 pub fn build(root: &Path, opts: &BuildOptions) -> Result<Arc<DirGraph>, String> {
-    let walked = super::walk::discover(root)?;
+    let walked = super::walk::discover(root, &opts.skip_dirs)?;
     let docs = super::parse_concepts(&walked.concepts, opts);
     let mut graph = DirGraph::new();
     if docs.is_empty() {

@@ -207,6 +207,18 @@ def test_empty_directory_builds_empty_graph(tmp_path):
     assert g.cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"] == 0
 
 
+def test_skip_dirs_prunes_subtrees(tmp_path):
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "keep" / "a.md").write_text("---\ntype: Note\n---\nkeep")
+    (tmp_path / "vendor" / "repos").mkdir(parents=True)
+    (tmp_path / "vendor" / "repos" / "b.md").write_text("---\ntype: Note\n---\nclone")
+    (tmp_path / "deep" / "cache").mkdir(parents=True)
+    (tmp_path / "deep" / "cache" / "c.md").write_text("---\ntype: Note\n---\ndep")
+    g = okf.build(str(tmp_path), skip_dirs=["cache", "vendor/repos"])
+    ids = {r["id"] for r in g.cypher("MATCH (n) WHERE n.concept_id IS NOT NULL RETURN n.concept_id AS id").to_list()}
+    assert ids == {"keep/a"}
+
+
 def test_kg_skip_excludes_by_default(tmp_path):
     (tmp_path / "keep.md").write_text("---\ntype: Note\n---\nkeep me")
     (tmp_path / "scratch.md").write_text("---\ntype: Note\nkg_skip: true\n---\nignore me")

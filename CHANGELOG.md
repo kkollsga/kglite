@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OKF `skip_dirs` directory ignore.** `okf.build(..., skip_dirs=[...])` prunes whole directories (and their subtrees) from the walk — gitignore-style: a bare name matches a directory at any depth, a `path/with/slashes` is an anchored bundle-relative subtree. For excluding cloned / vendored trees you don't own.
 - **OKF `kg_skip` opt-out marker.** A file with `kg_skip: true` in its
   frontmatter is excluded from `okf.build` sweeps by default — drop it into
   scratch notes or a project you don't want in a cross-project graph. Honored by
