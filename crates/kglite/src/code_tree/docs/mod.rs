@@ -381,19 +381,53 @@ fn markdown_headings(body: &str) -> Vec<String> {
 
 // ── Symbol index + MENTIONS ────────────────────────────────────────────────
 
-/// Resolvable code symbols: exact `qualified_name` → label, and bare `name` →
-/// the (unique) qualified_name + label. Ambiguous bare names are dropped so they
-/// can never produce a (false) edge.
+/// Code node labels that *contain* methods. A symbol whose parent qualified-name
+/// is one of these is a method (not module-level) — used to prefer a free
+/// function over class methods when a bare name is ambiguous.
+const CONTAINER_LABELS: &[&str] = &["Class", "Struct", "Enum", "Trait", "Interface"];
+
+/// One resolvable code symbol: its qualified name + label, with a `method` flag
+/// (parent qname is a container) so the resolver can prefer module-level defs.
+#[derive(Clone)]
+struct Symbol {
+    qname: String,
+    label: &'static str,
+    method: bool,
+}
+
+/// Split a qualified name on both `.` (Python) and `::` (Rust) separators.
+fn qname_segments(qname: &str) -> Vec<&str> {
+    qname.split("::").flat_map(|s| s.split('.')).collect()
+}
+
+/// Resolvable code symbols, indexed for three matching strategies (most precise
+/// first): exact `qualified_name`, dotted-suffix of a doc-supplied path, and
+/// bare last-segment `name` (with module-level preference to disambiguate).
 struct SymbolIndex {
     qname_to_label: HashMap<String, &'static str>,
-    /// bare name → unique (qualified_name, label); absent if 0 or >1 candidates.
-    name_unique: HashMap<String, (String, &'static str)>,
+    /// bare name → every same-named symbol (the disambiguation candidate set).
+    by_name: HashMap<String, Vec<Symbol>>,
 }
 
 impl SymbolIndex {
     fn build(graph: &DirGraph) -> Self {
         let mut qname_to_label = HashMap::new();
-        let mut name_counts: HashMap<String, Vec<(String, &'static str)>> = HashMap::new();
+        let mut by_name: HashMap<String, Vec<Symbol>> = HashMap::new();
+        // Container qnames (Class/Struct/…) — a symbol whose parent is one of
+        // these is a method. Collected first so the `method` flag is exact.
+        let mut container_qnames: BTreeSet<String> = BTreeSet::new();
+        for &label in CONTAINER_LABELS {
+            if let Some(nodes) = graph.type_indices.get(label) {
+                for idx in nodes.iter() {
+                    if let Some(nd) = graph.get_node(idx) {
+                        if let Value::String(q) = &*nd.id() {
+                            container_qnames.insert(q.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         for &label in SYMBOL_LABELS {
             let Some(nodes) = graph.type_indices.get(label) else {
                 continue;
@@ -409,21 +443,20 @@ impl SymbolIndex {
                 qname_to_label.entry(qname.clone()).or_insert(label);
                 if let Value::String(name) = &*nd.title() {
                     if !name.is_empty() {
-                        name_counts
-                            .entry(name.clone())
-                            .or_default()
-                            .push((qname.clone(), label));
+                        let method =
+                            parent_qname(&qname).is_some_and(|p| container_qnames.contains(p));
+                        by_name.entry(name.clone()).or_default().push(Symbol {
+                            qname: qname.clone(),
+                            label,
+                            method,
+                        });
                     }
                 }
             }
         }
-        let name_unique = name_counts
-            .into_iter()
-            .filter_map(|(name, mut v)| (v.len() == 1).then(|| (name, v.pop().unwrap())))
-            .collect();
         SymbolIndex {
             qname_to_label,
-            name_unique,
+            by_name,
         }
     }
 
@@ -432,8 +465,15 @@ impl SymbolIndex {
     }
 
     /// Resolve one candidate token to a `(qualified_name, label)` target, or
-    /// `None`. `allow_name_fallback` enables the unique-bare-name match (used for
-    /// strong code signals, which beat bare prose).
+    /// `None`. `allow_name_fallback` enables the bare-name strategies (used for
+    /// strong code signals — backtick spans, RST roles — which beat bare prose).
+    ///
+    /// Strategies, most precise first: (1) exact qualified-name; (2) when the
+    /// token is itself a dotted path, a segment-aligned **suffix** match against
+    /// a qualified name (`Dataset.mean` → `…core.dataset.Dataset.mean`); (3) a
+    /// **unique** bare last-segment name; (4) when the bare name is ambiguous, a
+    /// unique **module-level** def (free function over class methods — recovers
+    /// re-exported top-level API like `concat` / `merge`).
     fn resolve(&self, token: &str, allow_name_fallback: bool) -> Option<(String, &'static str)> {
         if let Some(&label) = self.qname_to_label.get(token) {
             return Some((token.to_string(), label));
@@ -441,17 +481,61 @@ impl SymbolIndex {
         if !allow_name_fallback {
             return None;
         }
-        // Last segment of a `Type::method` / `mod.Class` path, else the token.
-        let last = token
-            .rsplit("::")
-            .next()
-            .and_then(|s| s.rsplit('.').next())
-            .unwrap_or(token);
+        let segs = qname_segments(token);
+        let last = *segs.last()?;
         if last.len() < 3 || STOP_WORDS.contains(&last.to_ascii_lowercase().as_str()) {
             return None;
         }
-        self.name_unique.get(last).cloned()
+        let cands = self.by_name.get(last)?;
+
+        // (2) Dotted-suffix: the doc gave a path like `Type.method` — match it
+        // segment-aligned against a single qualified name.
+        if segs.len() > 1 {
+            let mut hits = cands.iter().filter(|s| qname_ends_with(&s.qname, &segs));
+            if let Some(first) = hits.next() {
+                if hits.next().is_none() {
+                    return Some((first.qname.clone(), first.label));
+                }
+            }
+        }
+
+        // (3) Unique bare name.
+        if cands.len() == 1 {
+            return Some((cands[0].qname.clone(), cands[0].label));
+        }
+
+        // (4) Ambiguous bare name → prefer a unique module-level def.
+        let mut module_level = cands.iter().filter(|s| !s.method);
+        if let Some(first) = module_level.next() {
+            if module_level.next().is_none() {
+                return Some((first.qname.clone(), first.label));
+            }
+        }
+        None
     }
+}
+
+/// Parent qualified-name (strip the last `.`/`::` segment), or `None` at the
+/// top level. The separator is whichever is rightmost (`::` for Rust, `.` for
+/// Python).
+fn parent_qname(qname: &str) -> Option<&str> {
+    let dot = qname.rfind('.');
+    let colon = qname.rfind("::");
+    match (dot, colon) {
+        (Some(d), Some(c)) => Some(&qname[..d.max(c)]),
+        (Some(d), None) => Some(&qname[..d]),
+        (None, Some(c)) => Some(&qname[..c]),
+        (None, None) => None,
+    }
+}
+
+/// Whether `qname`'s trailing segments equal `suffix` (segment-aligned).
+fn qname_ends_with(qname: &str, suffix: &[&str]) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    let segs = qname_segments(qname);
+    segs.len() >= suffix.len() && segs[segs.len() - suffix.len()..] == *suffix
 }
 
 /// Leading identifier path of a code span: `parse_wkt`, `Type::method`,
@@ -879,6 +963,60 @@ mod tests {
         assert!(mentioned.contains("DataArray"), ":class: role links");
         // index.rst :doc:`io` → doc/io  => one DOCUMENTS (Doc) edge.
         assert!(count_conn(&g, "DOCUMENTS") >= 1, ":doc: ref links doc->doc");
+    }
+
+    #[test]
+    fn ambiguous_name_resolves_via_module_level_and_dotted_suffix() {
+        // `concat` exists as a free function *and* as methods on two classes;
+        // the free (module-level) def wins. `Dataset.mean` is a method — the
+        // dotted path resolves it by segment-aligned suffix even though `mean`
+        // alone would be ambiguous (two `mean` methods).
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join("pkg")).unwrap();
+        fs::write(
+            root.join("pkg/core.py"),
+            "def concat():\n    pass\n\n\n\
+             class Dataset:\n    def concat(self):\n        pass\n    def mean(self):\n        pass\n\n\n\
+             class DataArray:\n    def concat(self):\n        pass\n    def mean(self):\n        pass\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("guide.rst"),
+            "Guide\n=====\n\nUse :func:`concat` and :meth:`Dataset.mean`.\n",
+        )
+        .unwrap();
+
+        let g = run_with_options(&root, false, true, None, None, true).unwrap();
+        let targets: BTreeSet<String> = g
+            .graph
+            .edge_indices()
+            .filter(|&e| {
+                g.graph
+                    .edge_weight(e)
+                    .is_some_and(|w| w.connection_type_str(&g.interner) == "MENTIONS")
+            })
+            .filter_map(|e| g.graph.edge_endpoints(e).map(|(_, t)| t))
+            .filter_map(|t| g.get_node(t))
+            .filter_map(|nd| match &*nd.id() {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        // module-level `concat` (free fn), not a method.
+        assert!(
+            targets.iter().any(|q| q.ends_with("core.concat")),
+            "module-level concat resolved, got {targets:?}"
+        );
+        // `Dataset.mean` via dotted suffix (not the DataArray.mean).
+        assert!(
+            targets.iter().any(|q| q.ends_with("Dataset.mean")),
+            "Dataset.mean resolved by suffix, got {targets:?}"
+        );
+        assert!(
+            !targets.iter().any(|q| q.ends_with("DataArray.mean")),
+            "the other mean must not link"
+        );
     }
 
     #[test]

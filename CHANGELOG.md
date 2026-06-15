@@ -16,9 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `(:Doc)-[:MENTIONS]->(:Function|:Class|:Struct|:Enum|:Trait|:Interface|:Constant)`
     — symbols named in the prose, resolved conservatively from strong code
     signals only (Markdown backtick spans / `::`-qualified names; reStructuredText
-    `:func:`/`:class:`/… cross-reference roles and double-backtick literals),
-    matched to an exact `qualified_name` or a *unique* bare `name`; ambiguous
-    names and common words never link.
+    `:func:`/`:class:`/… cross-reference roles and double-backtick literals).
+    Resolution tries, most precise first: exact `qualified_name`; a segment-
+    aligned **dotted-suffix** match when the doc gives a path (`Dataset.mean`);
+    a *unique* bare `name`; and — when a bare name is overloaded — a unique
+    **module-level** definition (a free function beats class methods, recovering
+    re-exported top-level API like `concat` / `apply_ufunc`). Ambiguous names and
+    common words never link.
   - `(:Doc)-[:DOCUMENTS]->(:Doc|:File)` — links to another doc (Markdown
     `[..](other.md)` / RST `:doc:`other``, by `concept_id`) or a source file
     (by unique basename).
