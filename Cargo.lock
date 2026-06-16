@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.10.24"
+version = "0.10.25"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-mcp-server"
-version = "0.10.15"
+version = "0.10.16"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.10.24"
+version = "0.10.25"
 dependencies = [
  "bincode",
  "chrono",

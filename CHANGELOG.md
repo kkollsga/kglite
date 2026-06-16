@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.25] — 2026-06-16 — code-graph ergonomics, algorithm scoping, single Rust MCP server
+
 ### Added
 
 - **MCP server: bundled `code_graph_analysis` + `code_graph_views` skills.**
@@ -93,13 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kglite-mcp-server`. **Breaking for users who ran `pip install kglite` and
   relied on the bundled `kglite-mcp-server` command** — switch to the cargo
   install (the agent-facing tool surface is unchanged).
-- **The wheel's MCP runtime dependencies** — `mcp`, `pyyaml`, `aiohttp`,
-  `watchdog` (default deps) and the `[embed]` extra (`fastembed`) — plus the
-  internal `kglite._mcp_internal` mcp-methods bridge. `pip install kglite` no
-  longer pulls any of these; the wheel is the engine + `code_tree` extension
-  only. To run a Python embedder with `g.set_embedder(...)`, install
-  `fastembed` directly and pass a duck-typed embedder (see the `Embedder`
-  protocol in `kglite/__init__.pyi`).
+- **The wheel's MCP runtime default dependencies** — `mcp`, `pyyaml`,
+  `aiohttp`, `watchdog` — plus the internal `kglite._mcp_internal` mcp-methods
+  bridge. `pip install kglite` no longer pulls any of these; the wheel is the
+  engine + `code_tree` extension only. (The optional `[embed]` extra
+  — `fastembed` for engine-level `set_embedder`/`text_score` — is unchanged
+  and still available.)
 
 ## [0.10.24] — 2026-06-16 — smaller .kgl files, faster CREATE
 
