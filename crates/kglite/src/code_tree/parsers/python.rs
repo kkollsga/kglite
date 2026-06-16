@@ -438,7 +438,16 @@ impl PythonParser {
         let pkg = src_root.file_name().and_then(|o| o.to_str()).unwrap_or("");
         if parts.is_empty() {
             pkg.to_string()
-        } else if pkg.is_empty() {
+        } else if pkg.is_empty() || parts.first().map(String::as_str) == Some(pkg) {
+            // Don't double the package name. In the common clone layout the
+            // source root's own directory name *is* the top-level package
+            // (`<repo>/xarray/xarray/core/...`, where the clone dir and the
+            // package share a name), so the relative path already begins with
+            // `pkg`. Prepending it again yields `xarray.xarray.core`; the file
+            // path stays clean (`xarray/core/...`) and the import-derived root
+            // Module node is the single `xarray`, so the doubled form is the
+            // odd one out. Emit the relative path as-is when it already leads
+            // with the package.
             parts.join(".")
         } else {
             format!("{}.{}", pkg, parts.join("."))
@@ -1179,5 +1188,52 @@ impl LanguageParser for PythonParser {
         result.files.push(file_info);
 
         result
+    }
+}
+
+#[cfg(test)]
+mod module_path_tests {
+    use super::PythonParser;
+    use std::path::Path;
+
+    fn module_of(file: &str, root: &str) -> String {
+        PythonParser::file_to_module_path(Path::new(file), Path::new(root))
+    }
+
+    #[test]
+    fn package_name_not_doubled_when_root_dir_is_the_package() {
+        // The standard `<repo>/<pkg>/<pkg>/...` clone layout: the clone dir
+        // and the package share a name. The relative path already starts
+        // with the package, so the module path must not be doubled.
+        assert_eq!(
+            module_of("/clone/xarray/xarray/core/dataset.py", "/clone/xarray"),
+            "xarray.core.dataset"
+        );
+        // The package root __init__ collapses to the bare package name, not
+        // `xarray.xarray`.
+        assert_eq!(
+            module_of("/clone/xarray/xarray/__init__.py", "/clone/xarray"),
+            "xarray"
+        );
+        // A nested sub-package likewise stays single-rooted.
+        assert_eq!(
+            module_of("/clone/xarray/xarray/tutorial.py", "/clone/xarray"),
+            "xarray.tutorial"
+        );
+    }
+
+    #[test]
+    fn package_name_still_prepended_when_root_dir_differs() {
+        // When the root dir name is genuinely the top package and the
+        // relative path does not repeat it, prepend as before. (Mirrors the
+        // demo_proj/demo_mod smoke-test expectation.)
+        assert_eq!(
+            module_of("/tmp/demo_proj/demo_mod.py", "/tmp/demo_proj"),
+            "demo_proj.demo_mod"
+        );
+        assert_eq!(
+            module_of("/tmp/demo_proj/sub/mod.py", "/tmp/demo_proj"),
+            "demo_proj.sub.mod"
+        );
     }
 }

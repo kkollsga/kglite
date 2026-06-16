@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Code-graph: `is_external` is now `false` on internal nodes, not null.**
+  Internal `Class` / `Struct` / `Trait` / `Interface` nodes left `is_external`
+  unset, so only external stubs carried the property and the intuitive filter
+  `WHERE c.is_external = false` silently matched nothing. Internal definitions
+  now emit `is_external = false` explicitly, sharing one boolean column with the
+  external stubs (which stay `true`).
+- **Code-graph: `qualified_name` / `module` no longer double the package name.**
+  In the common clone layout where the directory the graph is built from shares
+  its name with the top-level package (`<repo>/xarray/xarray/core/...`), the
+  module path was prepended twice (`xarray.xarray.core`). The package prefix is
+  now skipped when the relative path already begins with it, so
+  `qualified_name` round-trips with the obvious module path (`xarray.core...`)
+  and `read_code_source(qualified_name=...)` takes the un-doubled form.
+
+### Changed
+
+- **`graph_overview` / `describe()` no longer pads the schema with
+  uniformly-`false` boolean columns.** On a single-language code graph the
+  other frontends' flags (`flutter_build`, `is_ffi`, `is_pymethod`,
+  `is_pymodule`, `is_factory`, …) were emitted false on every node and printed
+  in both the `<properties>` and `<samples>` sections. They're now suppressed
+  from the overview (a boolean that is actually mixed still shows); the columns
+  remain present in the graph and queryable via Cypher.
+- **`graph_overview` / `describe()` never truncates identifier columns.** The
+  node `id` and its alias (e.g. `qualified_name`) are the join key copied into
+  follow-up tool calls, so they're now emitted in full regardless of the
+  `sample_truncate` setting; other long string values still truncate.
+
 ## [0.10.24] — 2026-06-16 — smaller .kgl files, faster CREATE
 
 ### Performance

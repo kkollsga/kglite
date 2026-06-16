@@ -727,6 +727,22 @@ fn write_exploration_hints(xml: &mut String, graph: &DirGraph, conn_stats: &[Con
     xml.push_str("  </exploration_hints>\n");
 }
 
+/// True when a property is a boolean whose every observed value is `false`.
+/// Such columns carry no signal for the type — on a single-language code graph
+/// they are the other frontends' flags (`flutter_build`, `is_ffi`,
+/// `is_pymethod`, `is_factory`, …) emitted uniformly false — so they are
+/// suppressed from the schema-overview display. A boolean that is genuinely
+/// mixed (`unique > 1`) or whose value set isn't `{false}` is kept. The column
+/// remains present in the graph and queryable via Cypher; only the display
+/// drops it.
+fn is_uninformative_false_bool(p: &PropertyStatInfo) -> bool {
+    matches!(p.type_string.as_str(), "bool" | "Boolean" | "boolean")
+        && p.unique == 1
+        && p.values
+            .as_deref()
+            .is_some_and(|vs| vs.iter().all(|v| matches!(v, Value::Boolean(false))))
+}
+
 fn write_type_detail(
     xml: &mut String,
     graph: &DirGraph,
@@ -742,8 +758,11 @@ fn write_type_detail(
         .map(|v| v.len())
         .unwrap_or(0);
 
+    // The id alias (e.g. "qualified_name" on code-tree nodes) is the join key
+    // agents copy into follow-up tool calls — it must never be truncated.
+    let id_alias: Option<&str> = graph.id_field_aliases.get(node_type).map(String::as_str);
     let mut alias_attrs = String::new();
-    if let Some(id_alias) = graph.id_field_aliases.get(node_type) {
+    if let Some(id_alias) = id_alias {
         alias_attrs.push_str(&format!(" id_alias=\"{}\"", xml_escape(id_alias)));
     }
     if let Some(title_alias) = graph.title_field_aliases.get(node_type) {
@@ -802,10 +821,26 @@ fn write_type_detail(
             .iter()
             .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))
             .filter(|p| p.non_null > 0)
+            // Suppress uniformly-`false` boolean columns: these are the
+            // cross-language frontend flags (`flutter_build`, `is_ffi`,
+            // `is_pymethod`, `is_factory`, …) emitted false on every node of a
+            // single-language graph. They carry no signal for the type and only
+            // pad the schema the agent has to read. Display-only — the column
+            // stays present and queryable; a boolean that is actually mixed
+            // (e.g. `is_external` once internal nodes are false and external
+            // stubs true) keeps showing.
+            .filter(|p| !is_uninformative_false_bool(p))
             .collect();
         if !filtered.is_empty() {
             xml.push_str(&format!("{}  <properties>\n", indent));
             for prop in &filtered {
+                // Identifier columns are the copy-into-tool-call join key —
+                // never truncate them.
+                let prop_truncate = if id_alias == Some(prop.property_name.as_str()) {
+                    None
+                } else {
+                    truncate_at
+                };
                 let mut attrs = format!(
                     "name=\"{}\" type=\"{}\" unique=\"{}\"",
                     xml_escape(&prop.property_name),
@@ -828,7 +863,7 @@ fn write_type_detail(
                     if !vals.is_empty() {
                         let val_strs: Vec<String> = vals
                             .iter()
-                            .map(|v| value_display_compact(v, truncate_at))
+                            .map(|v| value_display_compact(v, prop_truncate))
                             .collect();
                         attrs.push_str(&format!(" vals=\"{}\"", xml_escape(&val_strs.join("|"))));
                     }
@@ -838,7 +873,7 @@ fn write_type_detail(
                     // looks like instead of guessing from the name.
                     attrs.push_str(&format!(
                         " sample=\"{}\"",
-                        xml_escape(&value_display_compact(s, truncate_at))
+                        xml_escape(&value_display_compact(s, prop_truncate))
                     ));
                 }
                 xml.push_str(&format!("{}    <prop {}/>\n", indent, attrs));
@@ -1012,7 +1047,9 @@ fn write_type_detail(
             for node in samples {
                 let mut attrs = format!(
                     "id=\"{}\" title=\"{}\"",
-                    xml_escape(&value_display_compact(&node.id(), truncate_at)),
+                    // The id is the copy-into-tool-call join key (e.g.
+                    // read_code_source(qualified_name=...)); never truncate it.
+                    xml_escape(&value_display_compact(&node.id(), None)),
                     xml_escape(&value_display_compact(&node.title(), truncate_at))
                 );
                 // Include up to 4 non-null custom properties
@@ -1021,7 +1058,16 @@ fn write_type_detail(
                     node.property_iter(&graph.interner).collect();
                 sorted_props.sort_by_key(|(k, _)| *k);
                 for (k, v) in sorted_props {
-                    if !is_null_value(v) && prop_count < 4 {
+                    // Skip nulls and uninformative `false` booleans: the latter
+                    // are mostly the cross-language frontend flags
+                    // (flutter_build, is_ffi, …) that would otherwise crowd the
+                    // 4-property preview with no signal. A `true` boolean still
+                    // shows. (Consistent with the all-false suppression in the
+                    // <properties> block above.)
+                    if is_null_value(v) || matches!(v, Value::Boolean(false)) {
+                        continue;
+                    }
+                    if prop_count < 4 {
                         attrs.push_str(&format!(
                             " {}=\"{}\"",
                             xml_escape(k),

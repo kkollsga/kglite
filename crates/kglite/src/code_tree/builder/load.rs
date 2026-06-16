@@ -622,6 +622,18 @@ fn classes_df(
                     .collect(),
             ),
         ),
+        // Internal definitions are explicitly `false`, not absent: external
+        // stubs (bases resolved from imports/stdlib) are added later by
+        // `external_nodes_df` with `is_external = true` onto this same Class /
+        // Struct node type via skip-on-conflict. Emitting `false` here means
+        // `WHERE n.is_external = false` selects in-repo nodes — without it the
+        // property is null on internal nodes and the intuitive filter matches
+        // nothing.
+        (
+            "is_external",
+            ColumnType::Boolean,
+            bool_col(classes.iter().map(|_| Some(false)).collect()),
+        ),
         // Dart Flutter pass: "stateless" / "stateful" / "state" for a
         // widget subclass, absent otherwise.
         (
@@ -778,6 +790,14 @@ fn interfaces_df(ifs: &[InterfaceInfo], file_to_module: &HashMap<&str, &str>) ->
             "type_parameters",
             ColumnType::String,
             str_col(ifs.iter().map(|i| i.type_parameters.clone()).collect()),
+        ),
+        // See classes_df: explicit `false` so external Trait stubs (added with
+        // `is_external = true`) and internal interfaces share one boolean
+        // column rather than leaving internal nodes null.
+        (
+            "is_external",
+            ColumnType::Boolean,
+            bool_col(ifs.iter().map(|_| Some(false)).collect()),
         ),
     ])
 }
