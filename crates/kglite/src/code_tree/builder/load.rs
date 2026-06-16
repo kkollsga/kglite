@@ -22,6 +22,7 @@ pub struct ModuleRecord {
     pub name: String,
     pub language: String,
     pub is_test: bool,
+    pub is_benchmark: bool,
 }
 
 /// Synthesize Module nodes from parsed files.
@@ -55,6 +56,7 @@ pub fn build_modules(files: &[FileInfo]) -> Vec<ModuleRecord> {
                 name,
                 language: f.language.clone(),
                 is_test: f.is_test && end == parts.len(),
+                is_benchmark: path_is_benchmark(&f.path) && end == parts.len(),
             });
         }
     }
@@ -134,6 +136,25 @@ fn class_meta_bool(c: &ClassInfo, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Path-based benchmark-suite provenance — the benchmark analogue of the
+/// `is_test` heuristic. Directory-based (not filename-based) because benchmark
+/// runners reuse `test_`-style function names: ASV's `asv_bench/` and the
+/// conventional `benchmarks/` / `bench/` directories are the reliable signal.
+/// Computed from the file path so every node type (File / Module / Function /
+/// Class) tags consistently without threading a flag through every parser.
+fn path_is_benchmark(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let seg = |needle: &str| p.starts_with(needle) || p.contains(&format!("/{needle}"));
+    seg("asv_bench/") || seg("benchmarks/") || seg("bench/")
+}
+
+/// A file whose contents were skipped as machine-produced (generated or
+/// minified). `too_large` is a size cap, not a provenance signal, so it does
+/// not count as generated.
+fn skip_reason_is_generated(skip_reason: Option<&str>) -> bool {
+    matches!(skip_reason, Some("generated") | Some("minified"))
+}
+
 // ── Entity → DataFrame builders ─────────────────────────────────────
 
 fn files_df(files: &[FileInfo]) -> DataFrame {
@@ -143,6 +164,14 @@ fn files_df(files: &[FileInfo]) -> DataFrame {
     let module_path = files.iter().map(|f| Some(f.module_path.clone())).collect();
     let language = files.iter().map(|f| Some(f.language.clone())).collect();
     let is_test = files.iter().map(|f| Some(f.is_test)).collect();
+    let is_benchmark = files
+        .iter()
+        .map(|f| Some(path_is_benchmark(&f.path)))
+        .collect();
+    let is_generated = files
+        .iter()
+        .map(|f| Some(skip_reason_is_generated(f.skip_reason.as_deref())))
+        .collect();
     let annotations = files
         .iter()
         .map(|f| {
@@ -159,6 +188,8 @@ fn files_df(files: &[FileInfo]) -> DataFrame {
         ("module", ColumnType::String, str_col(module_path)),
         ("language", ColumnType::String, str_col(language)),
         ("is_test", ColumnType::Boolean, bool_col(is_test)),
+        ("is_benchmark", ColumnType::Boolean, bool_col(is_benchmark)),
+        ("is_generated", ColumnType::Boolean, bool_col(is_generated)),
         ("annotations", ColumnType::String, str_col(annotations)),
         ("skip_reason", ColumnType::String, str_col(skip_reason)),
     ])
@@ -205,6 +236,11 @@ fn modules_df(modules: &[ModuleRecord]) -> DataFrame {
             "is_test",
             ColumnType::Boolean,
             bool_col(modules.iter().map(|m| Some(m.is_test)).collect()),
+        ),
+        (
+            "is_benchmark",
+            ColumnType::Boolean,
+            bool_col(modules.iter().map(|m| Some(m.is_benchmark)).collect()),
         ),
     ])
 }
@@ -322,6 +358,15 @@ fn functions_df(
                             .unwrap_or(false);
                         Some(meta_bool(f, "is_test") || in_test_file)
                     })
+                    .collect(),
+            ),
+        ),
+        (
+            "is_benchmark",
+            ColumnType::Boolean,
+            bool_col(
+                fns.iter()
+                    .map(|f| Some(path_is_benchmark(&f.file_path)))
                     .collect(),
             ),
         ),
@@ -495,6 +540,7 @@ fn classes_df(
     classes: &[ClassInfo],
     attrs_by_owner: &HashMap<String, Vec<&AttributeInfo>>,
     file_to_module: &HashMap<&str, &str>,
+    file_is_test: &HashMap<&str, bool>,
 ) -> DataFrame {
     build_df(vec![
         (
@@ -619,6 +665,36 @@ fn classes_df(
                 classes
                     .iter()
                     .map(|c| Some(class_meta_bool(c, "is_pyclass")))
+                    .collect(),
+            ),
+        ),
+        // Provenance — same path-based signals as Function/File, so a class
+        // defined in a test or benchmark file (e.g. xarray's PlotTestCase)
+        // can be excluded from fan-out / centrality queries.
+        (
+            "is_test",
+            ColumnType::Boolean,
+            bool_col(
+                classes
+                    .iter()
+                    .map(|c| {
+                        Some(
+                            file_is_test
+                                .get(c.file_path.as_str())
+                                .copied()
+                                .unwrap_or(false),
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "is_benchmark",
+            ColumnType::Boolean,
+            bool_col(
+                classes
+                    .iter()
+                    .map(|c| Some(path_is_benchmark(&c.file_path)))
                     .collect(),
             ),
         ),
@@ -1528,12 +1604,14 @@ pub fn load_into_graph(
         )
         .map_err(py_err)?;
     }
+    // file_path → is_test, shared by Function and Class node construction so a
+    // class defined in a test file inherits the file's test provenance.
+    let file_is_test: HashMap<&str, bool> = result
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.is_test))
+        .collect();
     if !result.functions.is_empty() {
-        let file_is_test: HashMap<&str, bool> = result
-            .files
-            .iter()
-            .map(|f| (f.path.as_str(), f.is_test))
-            .collect();
         maintain::add_nodes(
             graph,
             functions_df(&result.functions, &file_is_test, &file_to_module),
@@ -1553,7 +1631,7 @@ pub fn load_into_graph(
         let structs_owned: Vec<ClassInfo> = structs.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&structs_owned, &attrs_by_owner, &file_to_module),
+            classes_df(&structs_owned, &attrs_by_owner, &file_to_module, &file_is_test),
             "Struct".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1565,7 +1643,7 @@ pub fn load_into_graph(
         let mixins_owned: Vec<ClassInfo> = mixins.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&mixins_owned, &attrs_by_owner, &file_to_module),
+            classes_df(&mixins_owned, &attrs_by_owner, &file_to_module, &file_is_test),
             "Mixin".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1577,7 +1655,7 @@ pub fn load_into_graph(
         let classes_owned: Vec<ClassInfo> = classes.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&classes_owned, &attrs_by_owner, &file_to_module),
+            classes_df(&classes_owned, &attrs_by_owner, &file_to_module, &file_is_test),
             "Class".into(),
             "qualified_name".into(),
             Some("name".into()),
