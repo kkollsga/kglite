@@ -50,8 +50,8 @@ mod code_source;
 mod csv_http;
 mod cypher_tools;
 mod explore;
-mod preprocessor;
 mod tools;
+mod value_codecs;
 use crate::tools::GraphState;
 
 #[derive(Parser, Debug)]
@@ -301,26 +301,21 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     // a repo's prose is part of its intelligence. Local / file / graph modes
     // keep the lean code-only graph.
     let include_docs = matches!(mode, Mode::Workspace { .. });
-    // extensions.cypher_preprocessor: build the manifest-declared query
-    // rewriter (regex rules and/or a subprocess command), trust-gated. None
-    // when absent. Errors here surface at boot rather than per-query.
-    let preprocessor = match manifest.as_ref() {
-        Some(m) => {
-            let base_dir = m
-                .yaml_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            preprocessor::Preprocessor::from_manifest(
-                m.extensions.get("cypher_preprocessor"),
-                m.trust.allow_query_preprocessor,
-                base_dir,
-            )
-            .context("extensions.cypher_preprocessor parse failed")?
-            .map(Arc::new)
-        }
-        None => None,
+    // extensions.value_codecs: build the manifest-declared, position-scoped
+    // literal codecs (prefix / map / regex). Passed to the engine via
+    // ExecuteOptions per query — decode on the way in, encode on the way out.
+    // Empty when absent; a malformed block errors at boot, not per-query.
+    let value_codecs = match manifest.as_ref() {
+        Some(m) => value_codecs::from_manifest(m.extensions.get("value_codecs"))
+            .context("extensions.value_codecs parse failed")?,
+        None => Vec::new(),
     };
-    let graph_state = GraphState::new(include_docs).with_preprocessor(preprocessor);
+    let value_codecs = if value_codecs.is_empty() {
+        None
+    } else {
+        Some(Arc::new(value_codecs))
+    };
+    let graph_state = GraphState::new(include_docs).with_value_codecs(value_codecs);
 
     // Shared "active root" slot for local-workspace mode. Populated
     // by the post-activate hook on each `set_root_dir`; read by the

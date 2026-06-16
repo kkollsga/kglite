@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use kglite::api::cypher;
+use kglite::api::cypher::ValueCodec;
 use kglite::api::{
     compute_description, compute_schema, load_file, ConnectionDetail, CypherDetail, Embedder,
     FluentDetail, KnowledgeGraph, Value,
@@ -41,11 +42,12 @@ pub struct GraphState {
     /// file modes. Set once at startup; carried by every clone so the
     /// lazy watch-rebuild uses the same setting.
     include_docs: bool,
-    /// Manifest-declared query preprocessor (`extensions.cypher_preprocessor`).
-    /// Server-config, set once at boot via [`with_preprocessor`] and carried by
-    /// every clone; applied to each `cypher_query` / `tools[].cypher` query
-    /// before it reaches `graph.cypher(...)`.
-    preprocessor: Option<Arc<crate::preprocessor::Preprocessor>>,
+    /// Manifest-declared value codecs (`extensions.value_codecs`). Server-
+    /// config, set once at boot via [`with_value_codecs`] and carried by every
+    /// clone; passed to `ExecuteOptions::value_codecs` on each `cypher_query` /
+    /// `tools[].cypher` run so the engine decodes query-side literals and
+    /// encodes result columns (`'Q42'` ↔ `42`) — safely, after parsing.
+    value_codecs: Option<Arc<Vec<ValueCodec>>>,
 }
 
 struct ActiveGraph {
@@ -63,25 +65,17 @@ impl GraphState {
         }
     }
 
-    /// Attach the manifest-declared query preprocessor. Builder form so it's
+    /// Attach the manifest-declared value codecs. Builder form so they're
     /// set once at boot, before the tool closures clone the state.
-    pub fn with_preprocessor(
-        mut self,
-        preprocessor: Option<Arc<crate::preprocessor::Preprocessor>>,
-    ) -> Self {
-        self.preprocessor = preprocessor;
+    pub fn with_value_codecs(mut self, codecs: Option<Arc<Vec<ValueCodec>>>) -> Self {
+        self.value_codecs = codecs;
         self
     }
 
-    /// Apply the query preprocessor (if configured) to a query string before
-    /// execution. Returns the query unchanged when none is set; an `Err`
-    /// surfaces to the agent as a `Cypher error:` rather than silently running
-    /// the un-rewritten query.
-    pub fn preprocess(&self, query: &str) -> Result<String, String> {
-        match &self.preprocessor {
-            Some(p) => p.rewrite(query),
-            None => Ok(query.to_string()),
-        }
+    /// The configured value codecs as a slice for `ExecuteOptions::value_codecs`
+    /// (`None` when unconfigured — the common case).
+    pub fn value_codecs(&self) -> Option<&[ValueCodec]> {
+        self.value_codecs.as_deref().map(|v| v.as_slice())
     }
 
     /// Tag a directory as needing rebuild. Called from the watch
@@ -269,12 +263,9 @@ impl GraphState {
         for (k, v) in args {
             params.insert(k.clone(), json_to_value(v));
         }
-        // extensions.cypher_preprocessor applies to manifest cypher tools too.
-        let template = match self.preprocess(template) {
-            Ok(q) => q,
-            Err(e) => return format!("Cypher error: {e}"),
-        };
-        match run_cypher_inner(&active.kg, &template, params, csv_http) {
+        // extensions.value_codecs apply to manifest cypher tools too (passed
+        // through ExecuteOptions, not by rewriting the template text).
+        match run_cypher_inner(&active.kg, template, params, self.value_codecs(), csv_http) {
             Ok(body) => body,
             Err(e) => format!("Cypher error: {e}"),
         }
@@ -299,6 +290,7 @@ fn run_cypher_inner(
     kg: &KnowledgeGraph,
     query: &str,
     params: std::collections::HashMap<String, Value>,
+    value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
     // Phase E.3 — delegate to kglite::api::session for the canonical
@@ -327,6 +319,9 @@ fn run_cypher_inner(
     // `text_score()` queries); otherwise None.
     let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
     opts.embedder = kg.embedder().cloned();
+    // extensions.value_codecs: decode query-side literals bound to a codec'd
+    // property + encode result columns. None/empty → no transform.
+    opts.value_codecs = value_codecs;
     let outcome = kglite::api::session::execute_read(kg.dir(), query, &opts)
         .map_err(|e| format!("Cypher execution error: {e}"))?;
     let result = outcome.result;
@@ -510,13 +505,10 @@ pub fn register(
         // Lazy rebuild: if the watcher tagged the graph dirty
         // since the last call, rebuild now before serving the query.
         s.ensure_code_tree_fresh();
-        // extensions.cypher_preprocessor: rewrite the agent's query before
-        // execution (no-op when unconfigured).
-        let query = match s.preprocess(&args.query) {
-            Ok(q) => q,
-            Err(e) => return format!("Cypher error: {e}"),
-        };
-        s.with_active(|g| run_cypher_tool(g, &query, csv.as_deref()))
+        // extensions.value_codecs: passed via ExecuteOptions (decoded after
+        // parsing), not by rewriting the query text. No-op when unconfigured.
+        let codecs = s.value_codecs();
+        s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()))
     });
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
@@ -587,9 +579,16 @@ fn wipe_temp_dir(dir: &std::path::Path) {
 fn run_cypher_tool(
     graph: &ActiveGraph,
     query: &str,
+    value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> String {
-    match run_cypher_inner(&graph.kg, query, std::collections::HashMap::new(), csv_http) {
+    match run_cypher_inner(
+        &graph.kg,
+        query,
+        std::collections::HashMap::new(),
+        value_codecs,
+        csv_http,
+    ) {
         Ok(s) => s,
         Err(e) => format!("Cypher error: {e}"),
     }

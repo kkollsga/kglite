@@ -120,6 +120,12 @@ impl ValueCodec {
                 stored_type,
             } => match (stored_type, v) {
                 (StoredType::Int, Value::Int64(n)) => Some(Value::String(format!("{prefix}{n}"))),
+                // The node `id` property projects as `UniqueId(u32)`, not
+                // `Int64` (see executor helpers `"id" => node.id()`), so an
+                // int-prefix codec on `id` must encode it too.
+                (StoredType::Int, Value::UniqueId(u)) => {
+                    Some(Value::String(format!("{prefix}{u}")))
+                }
                 (StoredType::Float, Value::Float64(f)) => {
                     Some(Value::String(format!("{prefix}{f}")))
                 }
@@ -423,6 +429,15 @@ mod tests {
         assert_eq!(
             prefix_codec().encode_value(&Value::String("x".into())),
             None
+        );
+    }
+
+    #[test]
+    fn prefix_encode_handles_unique_id() {
+        // `RETURN n.id` projects the node id as UniqueId, not Int64 — encode it.
+        assert_eq!(
+            prefix_codec().encode_value(&Value::UniqueId(1)),
+            Some(Value::String("Q1".into()))
         );
     }
 

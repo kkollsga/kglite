@@ -894,34 +894,91 @@ class TestExploreAndSkills:
         assert "is_benchmark" in tools["cypher_query"]
 
 
-# ── Test: extensions.cypher_preprocessor (query rewriting) ────────────────
+# ── Test: extensions.value_codecs (position-scoped literal codecs) ────────
 
 
-class TestCypherPreprocessor:
-    """`extensions.cypher_preprocessor` rewrites the agent's Cypher before
-    execution — the native replacement for a bespoke FastMCP rewriting server.
-    Trust-gated by `trust.allow_query_preprocessor`."""
+class TestValueCodecs:
+    """`extensions.value_codecs` decode query-side literals bound to a codec'd
+    property (`'Q1'` → `1`) and encode result columns back (`1` → `'Q1'`) — the
+    safe, post-parse replacement for the retired cypher_preprocessor."""
 
-    def test_declarative_rules_rewrite_query(self, graph_fixture: Path, tmp_path: Path):
-        manifest = tmp_path / "pp_mcp.yaml"
+    def test_prefix_codec_decode_and_encode_round_trip(self, graph_fixture: Path, tmp_path: Path):
+        manifest = tmp_path / "vc_mcp.yaml"
         manifest.write_text(
-            "name: pp\n"
-            "trust:\n  allow_query_preprocessor: true\n"
+            "name: vc\n"
             "extensions:\n"
-            "  cypher_preprocessor:\n"
-            "    rules:\n"
-            '      - pattern: "999"\n'
-            '        replace: "1"\n'
+            "  value_codecs:\n"
+            "    - property: id\n"
+            "      kind: prefix\n"
+            '      prefix: "Q"\n'
+            "      stored_type: int\n"
         )
         client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
         try:
-            # The agent's `999` is rewritten to `1` before execution.
-            out = _text_content(client.call_tool("cypher_query", {"query": "RETURN 999 AS x"}))
+            # Agent types the Q-form; the codec decodes 'Q1' → 1 to match the
+            # integer id, then encodes the projected id 1 → 'Q1' on the way back.
+            out = _text_content(
+                client.call_tool(
+                    "cypher_query",
+                    {"query": "MATCH (p:Person {id: 'Q1'}) RETURN p.title AS name, p.id AS id"},
+                )
+            )
         finally:
             client.shutdown()
-        assert "x" in out
-        assert "\t1" in out or " 1" in out or out.strip().endswith("1"), out
-        assert "999" not in out, f"preprocessor rule did not rewrite the query: {out!r}"
+        assert "Alice" in out, out  # decode matched node id=1 (Alice)
+        assert "Q1" in out, out  # encode round-tripped the projected id
+
+    def test_codec_leaves_other_property_uncoerced(self, graph_fixture: Path, tmp_path: Path):
+        """A `Q`-codec on `id` must not touch a `'Q1'` compared against a
+        different (string) property — no coercion, no error, just 0 rows."""
+        manifest = tmp_path / "vc2_mcp.yaml"
+        manifest.write_text(
+            "name: vc2\n"
+            "extensions:\n"
+            "  value_codecs:\n"
+            '    - property: id\n      kind: prefix\n      prefix: "Q"\n      stored_type: int\n'
+        )
+        client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        try:
+            out = _text_content(
+                client.call_tool(
+                    "cypher_query",
+                    {"query": "MATCH (p:Person) WHERE p.city = 'Q1' RETURN p.title"},
+                )
+            )
+        finally:
+            client.shutdown()
+        assert "error" not in out.lower()[:40], out
+        assert "Alice" not in out, out  # 'Q1' is not a city, so nothing matches
+
+    def test_malformed_codec_refuses_to_boot(self, graph_fixture: Path, tmp_path: Path):
+        """A malformed value_codecs block (here: a non-bijective map) is a boot
+        error — the server must not start and silently ignore it."""
+        manifest = tmp_path / "vc_bad_mcp.yaml"
+        manifest.write_text(
+            "name: vc_bad\n"
+            "extensions:\n"
+            "  value_codecs:\n"
+            "    - property: status\n      kind: map\n      map: { a: 1, b: 1 }\n"
+        )
+        proc = subprocess.Popen(
+            [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            rc = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError("server should have exited (malformed value_codecs) but kept running")
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        assert rc != 0, "server should fail to boot on a malformed value_codecs block"
+        assert "value_codecs" in stderr or "bijective" in stderr, stderr[:400]
+
+
+class TestEmbedderBackends:
+    """`extensions.embedder.backend` selection."""
 
     def test_python_embedder_backend_rejected_by_cargo_binary(self, graph_fixture: Path, tmp_path: Path):
         """`extensions.embedder.backend: python` is a pip-wheel-only path (it
@@ -944,33 +1001,6 @@ class TestCypherPreprocessor:
         stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         assert rc != 0, "cargo binary should fail to boot on backend: python"
         assert "pip-hosted server" in stderr or "python" in stderr.lower(), stderr[:400]
-
-    def test_preprocessor_without_trust_refuses_to_boot(self, graph_fixture: Path, tmp_path: Path):
-        """A preprocessor declared without the trust gate is a boot error —
-        the server must not start and silently ignore it."""
-        manifest = tmp_path / "pp_notrust_mcp.yaml"
-        manifest.write_text(
-            "name: pp_notrust\n"
-            "extensions:\n"
-            "  cypher_preprocessor:\n"
-            "    rules:\n"
-            '      - pattern: "a"\n'
-            '        replace: "b"\n'
-        )
-        proc = subprocess.Popen(
-            [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            rc = proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            raise AssertionError("server should have exited (trust gate) but kept running")
-        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-        assert rc != 0, "server should fail to boot without trust.allow_query_preprocessor"
-        assert "allow_query_preprocessor" in stderr, stderr[:400]
 
 
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────
