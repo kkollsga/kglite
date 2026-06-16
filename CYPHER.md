@@ -698,6 +698,37 @@ graph.cypher("""
 """)
 ```
 
+## JSON Parsing
+
+`parse_json(s)` (alias `from_json(s)`) parses a JSON string into a structured
+value — an object becomes a map, an array a list, with scalars typed as
+int / float / bool / string. Invalid JSON or a non-string argument returns
+`null` (never an error). This lets you predicate over data that is *stored* as
+a JSON string rather than as graph structure.
+
+The code graph keeps `Function.parameters`, `Class.fields`, and
+`Function.signature` as JSON (the columnar store holds scalars only), so
+`parse_json` is how you query inside them:
+
+```python
+# Functions that take a parameter typed `Dataset`. Each parsed element is a
+# map with keys name / type_annotation / default / kind.
+graph.cypher("""
+    MATCH (f:Function)
+    WHERE any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset')
+    RETURN f.qualified_name
+""")
+
+# Index into the parsed structure with bracket subscript (works on lists and
+# maps). To reach a map field after a list index, chain brackets — or bind the
+# parsed value with WITH and use dot access (arr[0].name).
+graph.cypher("RETURN parse_json('[{\"name\":\"x\"}]')[0]['name'] AS first")  # "x"
+graph.cypher("RETURN parse_json('{\"a\":1}')['a'] AS a")                      # 1
+```
+
+Combine with `any` / `all` / list comprehensions to filter or project the
+parsed elements.
+
 ## List Slicing
 
 `expr[start..end]` syntax — slice lists with optional start/end bounds and negative indices:

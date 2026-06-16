@@ -20,6 +20,31 @@ Either pass column_types={'<col>': 'geometry'} (or 'location.lat'/'location.lon'
 add_nodes(), or store the data under a conventional property name (wkt_geometry, geometry, \
 geom, or wkt for WKT; latitude+longitude or lat+lon for points).";
 
+/// Recursively convert a parsed `serde_json::Value` into a kglite `Value`.
+/// Objects become `Value::Map`, arrays `Value::List`; integers that fit i64
+/// stay `Int64`, other numbers become `Float64`. Backs the `parse_json()`
+/// Cypher function.
+pub(super) fn json_to_value(j: &serde_json::Value) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else {
+                Value::Float64(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(a) => Value::List(a.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(o) => Value::Map(
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Which wall-clock "now" shape a `local*`/`time` function produces.
 /// KGLite has no time-of-day Value variant, so these emit ISO-8601
 /// strings (see the `localdatetime`/`localtime`/`time` arms).
@@ -2262,6 +2287,27 @@ impl<'a> CypherExecutor<'a> {
                 "text_score() requires set_embedder(). Call g.set_embedder(model) first."
                     .to_string(),
             ),
+            // parse_json(s) — recursively parse a JSON string into structured
+            // Value (Map / List / scalars) so Cypher can predicate over data
+            // that is stored as a JSON string. The code graph keeps
+            // Function.parameters / Class.fields as JSON arrays-of-objects
+            // (the columnar store is scalar-only), so this unlocks queries like
+            //   MATCH (f:Function)
+            //   WHERE any(p IN parse_json(f.parameters) WHERE p.type = 'Dataset')
+            // Returns Null on a non-string arg or on invalid JSON (Neo4j-style
+            // lenient: bad input is null, not an error).
+            "parse_json" | "from_json" => {
+                if args.len() != 1 {
+                    return Err("parse_json() requires exactly 1 argument".to_string());
+                }
+                match self.evaluate_expression(&args[0], row)? {
+                    Value::String(s) => Ok(serde_json::from_str::<serde_json::Value>(&s)
+                        .map(|j| json_to_value(&j))
+                        .unwrap_or(Value::Null)),
+                    Value::Null => Ok(Value::Null),
+                    _ => Ok(Value::Null),
+                }
+            }
             _ => Err(format!("Unknown function: {}", name)),
         }
     }
