@@ -73,11 +73,12 @@ operator extension (documented here so you don't go looking for a hook):
 Skills load from four layers. On a name collision the **higher** layer wins, so
 you can override a bundled skill by shipping one of the same `name`:
 
-1. **kglite-bundled** (lowest) — shipped in the wheel
-   (`kglite/mcp_server/skills/`). Auto-discovered: every `*.md` whose
-   frontmatter parses is a skill (files prefixed `_` or `.` are skipped). The
-   bundled set today: `cypher_query`, `graph_overview`, `read_code_source`,
-   `save_graph`, `explore`, `code_graph_analysis`, `code_graph_views`.
+1. **kglite-bundled** (lowest) — compiled into the `kglite-mcp-server` binary
+   from `crates/kglite-mcp-server/skills/` (registered explicitly in
+   `main.rs`). The bundled set today: `cypher_query`, `graph_overview`,
+   `read_code_source`, `save_graph`, `explore`, `code_graph_analysis`,
+   `code_graph_views`. Adding to this set is a kglite change; **operators add
+   their own skills via the project layer below — no rebuild.**
 2. **framework defaults** — from the mcp-methods crate.
 3. **project layer** — a `<basename>.skills/` directory **next to your
    manifest**. For `my_graph_mcp.yaml` that's `my_graph_mcp.skills/`. This is
@@ -98,7 +99,7 @@ you can override a bundled skill by shipping one of the same `name`:
 
 ## Frontmatter schema
 
-Frontmatter is YAML between `---` fences. The loader reads exactly these keys;
+Frontmatter is YAML between `---` fences. mcp-methods parses exactly these keys;
 **everything else is ignored** (see "load-bearing vs decorative" below).
 
 | Key | Type | Required | Meaning |
@@ -153,7 +154,7 @@ tool **and** every tool in `references_tools`:
 ```text
 <the tool's own description>
 
-<!-- kglite-skill:find_papers -->
+<!-- mcp-skill:find_papers -->
 
 ## When to use
 

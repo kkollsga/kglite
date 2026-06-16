@@ -9,19 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **MCP server: `explore` tool.** One-call codebase exploration — lexically
-  ranks Function/Class/… nodes against a query, 2-hop traverses
-  CALLS/USES_TYPE/HAS_METHOD/DEFINES/REFERENCES_FN, and returns entry points +
-  a neighborhood + grouped source slices (the `graph.explore()` engine method,
-  previously unwired in the Python server). Replaces the typical grep+read
-  chain for "how does X work" questions.
-- **MCP server: bundled orchestration + views skills.** `code_graph_analysis`
-  (graph-first sequencing: map structure with `graph_overview`/`cypher_query`/
-  `explore`, drop to grep/read only to confirm) and `code_graph_views` (how to
-  get library-only views and query JSON-string `parameters`/`fields` with the
-  new provenance filters + `parse_json`). Both gate on `graph_has_node_type:
-  [Function, Class]`, so they stay silent on non-code graphs. This is the
-  guidance operators previously hand-rolled into `instructions:`.
+- **MCP server: bundled `code_graph_analysis` + `code_graph_views` skills.**
+  Cross-tool skills (attached via `references_tools`, gated
+  `graph_has_node_type: [Function, Class]`) that teach graph-first analysis —
+  map structure with `graph_overview`/`cypher_query`/`explore`, drop to
+  grep/read only to confirm — and library-only views (the `is_test` /
+  `is_benchmark` / `is_external` filters, `{where:'…'}` algorithm scoping, and
+  `parse_json` for `parameters`/`fields`). This is the guidance operators
+  previously hand-rolled into `instructions:`. Requires mcp-methods **0.3.42**
+  (the `serve_prompts` pass that injects a skill's `description` under
+  `## When to use` and honors `references_tools`); the pin was bumped this
+  release.
 - **MCP skill-authoring guide** (`docs/python/guides/mcp-skills.md`): the
   frontmatter schema, the `<basename>.skills/` project-layer convention, the
   `skills:` value shapes, `applies_when` gating, the three text channels
@@ -69,20 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **MCP server: skill `description` (TRIGGER/SKIP routing) now rides the live
-  tool-description channel.** Previously only the skill *body* was injected into
-  tool descriptions; the routing heuristic reached only `prompts/list`, which
-  mainstream agent clients (Claude Code / Desktop / Cursor / Continue) don't
-  expose. It's now injected under a `## When to use` header alongside the
-  `## Methodology` body.
-- **MCP server: `references_tools` is load-bearing.** A skill injects into its
-  own-named tool **and** every tool listed in `references_tools`, so a
-  cross-tool skill (e.g. `code_graph_analysis`) rides several tools at once; a
-  tool can carry multiple skills (per-skill idempotency markers).
-- **MCP server: bundled skills are auto-discovered** from the wheel's `skills/`
-  directory instead of a hand-maintained allowlist — dropping a `<name>.md`
-  there is all it takes to bundle it (`_`/`.`-prefixed files skipped). Fixes
-  `explore.md` shipping inert for several releases.
+- **MCP server consolidated on a single pure-Rust binary.** `kglite-mcp-server`
+  is now exclusively the Rust binary (`cargo install kglite-mcp-server`). The
+  parallel Python MCP server was retired — the two implementations had begun to
+  drift (duplicate skill directories, tool descriptions, and `applies_when`
+  logic), and the Rust binary was already the more complete one. `pip install
+  kglite` is now the engine + `code_tree` only. (Anti-drift regression tests
+  now fail the build if a second MCP server or a second skill source reappears.)
 - **`graph_overview` / `describe()` no longer pads the schema with
   uniformly-`false` boolean columns.** On a single-language code graph the
   other frontends' flags (`flutter_build`, `is_ffi`, `is_pymethod`,
@@ -94,6 +85,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   node `id` and its alias (e.g. `qualified_name`) are the join key copied into
   follow-up tool calls, so they're now emitted in full regardless of the
   `sample_truncate` setting; other long string values still truncate.
+
+### Removed
+
+- **The Python MCP server (`kglite.mcp_server`) and its `pip`-installed
+  `kglite-mcp-server` console script.** Install the server with `cargo install
+  kglite-mcp-server`. **Breaking for users who ran `pip install kglite` and
+  relied on the bundled `kglite-mcp-server` command** — switch to the cargo
+  install (the agent-facing tool surface is unchanged).
+- **The wheel's MCP runtime dependencies** — `mcp`, `pyyaml`, `aiohttp`,
+  `watchdog` (default deps) and the `[embed]` extra (`fastembed`) — plus the
+  internal `kglite._mcp_internal` mcp-methods bridge. `pip install kglite` no
+  longer pulls any of these; the wheel is the engine + `code_tree` extension
+  only. To run a Python embedder with `g.set_embedder(...)`, install
+  `fastembed` directly and pass a duck-typed embedder (see the `Embedder`
+  protocol in `kglite/__init__.pyi`).
 
 ## [0.10.24] — 2026-06-16 — smaller .kgl files, faster CREATE
 

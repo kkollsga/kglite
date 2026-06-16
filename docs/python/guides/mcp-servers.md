@@ -6,16 +6,20 @@
 > the agent gets Cypher access to your data through ordinary tool
 > calls — no API to learn, no infrastructure to manage.
 
-KGLite ships `kglite-mcp-server` as a Python entry point on top of
-the pure-Rust [mcp-methods] framework (rmcp + manifest-driven tool
-registration in Rust; Python orchestration thin enough that hot-path
-dispatch is sub-microsecond per call). Install with
-`pip install kglite`; the server lands on PATH and the agent
-gets `graph_overview` + `cypher_query` over MCP stdio. For
-project-specific tools — semantic search, source-file access,
-parameterised Cypher lookups, query preprocessing — drop a YAML
-manifest next to your graph and the bundled server picks it up
-automatically. **No fork required for most customisation.**
+`kglite-mcp-server` is a **single, pure-Rust binary** built on the
+[mcp-methods] framework (rmcp + manifest-driven tool registration; no
+Python runtime, no libpython link). It exposes your graph as
+`graph_overview` + `cypher_query` over MCP stdio. For project-specific
+tools — semantic search, source-file access, parameterised Cypher
+lookups, query preprocessing — drop a YAML manifest next to your graph
+and the server picks it up automatically. **No fork required for most
+customisation.**
+
+> **0.10.25:** the MCP server is now Rust-only. Through 0.10.24 the wheel
+> also shipped a Python `kglite-mcp-server` console script; that second
+> implementation was retired to consolidate on one server. `pip install
+> kglite` is now the engine + `code_tree` only — install the server with
+> `cargo install kglite-mcp-server`.
 
 [mcp-methods]: https://github.com/kkollsga/mcp-methods
 
@@ -24,16 +28,14 @@ automatically. **No fork required for most customisation.**
 ### 1. Install
 
 ```bash
-pip install kglite
+cargo install kglite-mcp-server
 ```
 
-`kglite-mcp-server` ships with the wheel as a Python console-script
-entry point. Run `kglite-mcp-server --help` to confirm.
-
-The default install pulls everything the server needs — `mcp` (the
-official Python SDK), `aiohttp`, `pyyaml`, and `watchdog`. For
-semantic search you'll also want local embedding models: add
-`pip install 'kglite[embed]'` to pull `fastembed`.
+The binary lands on PATH with no Python dependency. Run
+`kglite-mcp-server --help` to confirm. For semantic search, build with
+the embedder feature: `cargo install kglite-mcp-server --features fastembed`
+(uses the Rust fastembed-rs backend; same `~/.cache/fastembed/` model
+cache as the engine).
 
 ### 2. Point it at a graph file
 
@@ -451,7 +453,7 @@ of hardcoding thousands of rows into the artifact source.
 
 Whichever CLI mode the server is in
 (`--graph` / `--workspace` / `--watch` / `--source-root` / bare /
-local-workspace via manifest), the Python entry prepends a per-mode
+local-workspace via manifest), the server prepends a per-mode
 **banner** to two surfaces:
 
 - the `instructions` block returned during MCP `initialize` (read
@@ -688,7 +690,7 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | `extensions.cypher_preprocessor` | ✓ | ✓ | ✓ | — (no graph) | — |
 | `extensions.<other>` (passthrough) | parsed, opaque to framework | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
 | legacy top-level `embedder:` (pre-0.9.18) | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored |
-| `tools[].python:` (pre-0.9.18) | not loaded by Python entry point; mcp-methods Rust framework still parses it | (same) | (same) | (same) | (same) |
+| `tools[].python:` (pre-0.9.18) | not loaded; mcp-methods (Rust) still parses it | (same) | (same) | (same) | (same) |
 
 Unknown keys at the top level (or under `builtins:` / `workspace:` /
 `trust:` / `tools[]` / `embedder:`) fail validation at boot with a
@@ -793,9 +795,9 @@ extensions:
 | `cooldown` | int | 900 | seconds; `0` disables auto-release. bge-m3 only — other models ignore this field. |
 
 The legacy `embedder:` block (top-level, 0.9.17 and earlier) is
-parsed by the framework but the kglite Python entry point does not
-load Python embedder factories — use `extensions.embedder:` and an
-in-catalog model.
+parsed by the framework but ignored — use `extensions.embedder:` with
+an in-catalog model (the server's Rust fastembed backend, built via
+`--features fastembed`).
 
 #### `extensions.csv_http_server`
 
@@ -944,9 +946,9 @@ catalog:
 
 | Model name | Dimension | Internal backend |
 |---|:---:|---|
-| `BAAI/bge-m3` | 1024 | Direct ONNX wrapper (`kglite.mcp_server.bge_m3.BgeM3Embedder`) — fastembed-python's catalog doesn't carry bge-m3, so we go through a hand-written ONNX inference path with HuggingFace Hub downloads. |
-| `BAAI/bge-small-en-v1.5`, `bge-small-en-v1.5` | 384 | fastembed-python (`fastembed.TextEmbedding`). |
-| `BAAI/bge-base-en-v1.5`, `bge-base-en-v1.5` | 768 | fastembed-python. |
+| `BAAI/bge-m3` | 1024 | Rust fastembed-rs backend (a dedicated ONNX inference path with HuggingFace Hub downloads). |
+| `BAAI/bge-small-en-v1.5`, `bge-small-en-v1.5` | 384 | Rust fastembed-rs backend. |
+| `BAAI/bge-base-en-v1.5`, `bge-base-en-v1.5` | 768 | Rust fastembed-rs backend. |
 | `BAAI/bge-large-en-v1.5`, `bge-large-en-v1.5` | 1024 | fastembed-python. |
 | `sentence-transformers/all-MiniLM-L6-v2`, `all-MiniLM-L6-v2` | 384 | fastembed-python. |
 | `intfloat/multilingual-e5-large`, `multilingual-e5-large` | 1024 | fastembed-python. |
@@ -1015,11 +1017,11 @@ problem.
 #### Conda + multiple Pythons
 
 `pip install kglite` against a conda env's Python (`conda
-activate myenv && pip install kglite`) Just Works post-0.9.20 —
-no `PYO3_PYTHON=`, no `install_name_tool` patching. If your shell
-PATH lifts an older `kglite-mcp-server` from a different env, run
-`which kglite-mcp-server` to confirm which install the script points
-at.
+activate myenv && pip install kglite`) Just Works — no `PYO3_PYTHON=`,
+no `install_name_tool` patching. (The MCP server itself is a separate
+`cargo install kglite-mcp-server` binary on PATH, independent of the
+active Python env; `which kglite-mcp-server` confirms which install
+you're running.)
 
 #### Watch mode rebuild costs
 
