@@ -270,6 +270,86 @@ def run_save(state: GraphState) -> str:
     return f"Saved {active.source_path} ({nodes} nodes, {edges} edges)."
 
 
+def run_explore(
+    state: GraphState,
+    query: str,
+    max_entities: int = 10,
+    max_depth: int = 2,
+    include_source: bool = True,
+    source_roots: list[str] | None = None,
+) -> str:
+    """One-call codebase exploration: rank entry points + 2-hop
+    neighborhood + grouped source slices. Thin wrapper over the kglite
+    `graph.explore()` Python API (Rust-side ranking + traversal +
+    slicing); the MCP layer only validates args and forwards source
+    roots. Non-code graphs / empty queries get a no-match message from
+    the engine, not an error."""
+    active = state.active()
+    if active is None:
+        return NO_GRAPH
+    if not isinstance(query, str) or not query.strip():
+        return "explore: missing required argument `query` (a free-text topic, e.g. 'authenticate')."
+    try:
+        return active.graph.explore(
+            query=query,
+            max_entities=max_entities,
+            max_depth=max_depth,
+            include_source=include_source,
+            source_roots=source_roots or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"explore error: {e}"
+
+
+EXPLORE_DESCRIPTION = (
+    "One-call codebase exploration for code-tree graphs. Lexically ranks "
+    "Function/Class/Interface/Struct/Trait/Protocol/Enum nodes against "
+    "`query` (name > signature > docstring), takes the top entries, 2-hop "
+    "traverses CALLS/USES_TYPE/HAS_METHOD/DEFINES/REFERENCES_FN, and returns "
+    "a markdown report: entry points, a 2-hop neighborhood, and grouped "
+    "source slices for the entry points — replacing the typical grep + read "
+    "chain for 'how does X work' / 'where is Y' / 'trace the Z flow' "
+    "questions. Returns a no-match message on non-code graphs."
+)
+
+EXPLORE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Free-text topic. Short, specific terms beat sentences "
+                "('authenticate' beats 'how does login work'); the ranker is "
+                "lexical, not semantic. A symbol name you've already seen "
+                "always works."
+            ),
+        },
+        "max_entities": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "Top N entry points after ranking (default 10).",
+        },
+        "max_depth": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "description": (
+                "Neighborhood hops (default 2): 1 = direct neighbors only, 2 = "
+                "neighbours' neighbours. Past 3 the neighborhood explodes on "
+                "well-connected code."
+            ),
+        },
+        "include_source": {
+            "type": ["boolean", "null"],
+            "description": (
+                "Include source slices for entry points (default true). Set "
+                "false for a smaller, faster symbol+location-only response."
+            ),
+        },
+    },
+    "required": ["query"],
+}
+
+
 def _wipe_dir(dir_path: Path) -> None:
     """Best-effort directory wipe — log on errors, never raise. Matches
     the Rust shim's `wipe_temp_dir` semantics."""

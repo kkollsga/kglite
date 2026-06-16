@@ -1,20 +1,36 @@
 """Skill loading + applies_when filtering for the Python entry point.
 
-0.9.31: ships methodology for kglite's four custom tools
-(`cypher_query`, `graph_overview`, `save_graph`, `read_code_source`)
-as bundled markdown files inside the wheel. At boot the Python entry
-point merges them with the framework's `SkillRegistry.from_manifest`
-output (which carries framework defaults + manifest's `<basename>.skills/`
-project layer + operator-declared paths), filters by `applies_when:`
-against the active graph's schema, and registers them as MCP
-`prompts/list` + `prompts/get` handlers.
+kglite ships per-tool and cross-tool methodology as bundled markdown files
+inside the wheel (`kglite/mcp_server/skills/*.md`). At boot the Python entry
+point discovers them (see `load_kglite_bundled_skills`), merges them with the
+framework's `SkillRegistry.from_manifest` output (which carries framework
+defaults + the manifest's `<basename>.skills/` project layer + operator-
+declared paths), filters by `applies_when:` against the active graph's schema,
+and surfaces each active skill two ways: injected into the tool descriptions it
+attaches to (the live, agent-reachable channel — see `_apply_skill_hint` in
+`server.py`) and as MCP `prompts/list` + `prompts/get` handlers (a fallback for
+the rare clients that expose prompts to agents).
 
-Why this lives in Python rather than calling into Rust: kglite's
-Python entry point uses `mcp.server.lowlevel.Server` (the lowlevel
-MCP shape), not FastMCP. mcp-methods 0.3.36's
-`register_skills_as_prompts` only wires the FastMCP shape, so we
-implement the lowlevel handlers ourselves. The `Skill` dataclass +
-loader is the minimum surface to do that.
+Why the load/merge/filter logic lives in Python rather than calling into Rust
+(the 4.2 consolidation the operator proposal raises):
+
+    kglite's Python entry point uses `mcp.server.lowlevel.Server`, not FastMCP.
+    The mcp-methods crate (pinned 0.3.41; see crates/kglite-py/Cargo.toml)
+    exposes only a FastMCP prompt registrar (`register_skills_as_prompts`) —
+    there is NO lowlevel registrar. So the orchestration (layering, frontmatter
+    parse, `applies_when` evaluation) is still owned upstream and reached via
+    `kglite._mcp_internal.SkillRegistry.from_manifest`; this module only adds
+    the kglite-bundled layer and re-evaluates `applies_when` against the LIVE
+    graph at request time (the Rust registry can't, since the graph mutates
+    post-boot in workspace mode). The `AppliesWhen`/`Skill` replica here can be
+    deleted only once mcp-methods ships a lowlevel-server skill/prompt
+    registrar (track for >=0.3.42); until then it is a deliberate, minimal
+    lowlevel shim, not migration debt.
+
+No standalone `mcp_methods` PyPI wheel is imported (dropped in 0.9.40);
+everything goes through the vendored-via-Cargo Rust crate at one pinned
+version. See docs/python/guides/mcp-skills.md for the operator-facing
+skill-authoring guide.
 """
 
 from __future__ import annotations
@@ -26,18 +42,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 log = logging.getLogger("kglite.mcp_server.skills_loader")
-
-# Names of skills shipped inside the kglite wheel. Adding a file under
-# `kglite/mcp_server/skills/` is not enough — add the bare stem here too
-# so the loader picks it up. (Explicit-list rather than glob keeps
-# spurious markdown files in the data dir from being interpreted as
-# skills.)
-KGLITE_BUNDLED_SKILL_NAMES: tuple[str, ...] = (
-    "cypher_query",
-    "graph_overview",
-    "save_graph",
-    "read_code_source",
-)
 
 
 @dataclass
@@ -175,22 +179,39 @@ def _skill_from_text(text: str, path_for_error: str, provenance: str) -> Skill:
 
 
 def load_kglite_bundled_skills() -> list[Skill]:
-    """Read the four kglite-bundled skill markdown files from the
-    wheel's package data. Skills are listed explicitly in
-    `KGLITE_BUNDLED_SKILL_NAMES`."""
+    """Discover and load every kglite-bundled skill from the wheel's
+    `skills/` package-data directory — one `Skill` per `*.md` file whose
+    frontmatter parses.
+
+    0.10.25: switched from a hand-maintained `KGLITE_BUNDLED_SKILL_NAMES`
+    allowlist to directory discovery. The allowlist silently orphaned any
+    skill file added to `skills/` but not also added to the tuple (e.g.
+    `explore.md` shipped inert for several releases). Discovery means
+    dropping a `<name>.md` into `skills/` is all it takes to bundle it.
+    A file that doesn't parse as a skill (bad/empty frontmatter — e.g. a
+    stray README) is logged and skipped, so the directory tolerates
+    non-skill markdown without the manual gate.
+
+    To exclude a skill file from bundling without deleting it, prefix its
+    name with an underscore (`_draft.md`) — discovery skips dotfiles and
+    underscore-prefixed files."""
     skills: list[Skill] = []
     base = importlib.resources.files("kglite.mcp_server").joinpath("skills")
-    for name in KGLITE_BUNDLED_SKILL_NAMES:
-        path = base.joinpath(f"{name}.md")
+    paths = sorted(
+        (p for p in base.iterdir() if p.name.endswith(".md") and not p.name.startswith((".", "_"))),
+        key=lambda p: p.name,
+    )
+    for path in paths:
+        name = path.name[: -len(".md")]
         try:
             text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            log.warning("kglite bundled skill %r not found in wheel data", name)
+        except (FileNotFoundError, OSError) as e:
+            log.warning("kglite bundled skill %r unreadable: %s", name, e)
             continue
         try:
             skill = _skill_from_text(text, f"<bundled:{name}>", "kglite-bundled")
         except ValueError as e:
-            log.warning("kglite bundled skill %r failed to parse: %s", name, e)
+            log.warning("kglite bundled skill file %r skipped (not a skill): %s", name, e)
             continue
         skills.append(skill)
     return skills
@@ -246,10 +267,11 @@ def load_framework_skills(manifest_path: Path) -> list[Skill]:
     absent) — the framework registry yields no entries in that case.
 
     0.9.40+: dropped the dependency on the `mcp_methods` PyPI wheel.
-    `kglite._mcp_internal` is built from `src/mcp_tools.rs` and
-    delegates to `mcp_methods::server::SkillRegistry::from_manifest`
-    (mcp-methods 0.3.38 Rust crate) — same orchestration upstream
-    ships, no kglite-side replica."""
+    `kglite._mcp_internal` is built from `src/mcp_tools.rs` and delegates to
+    `mcp_methods::server::SkillRegistry::from_manifest` (the Rust crate pinned
+    in crates/kglite-py/Cargo.toml — currently 0.3.41; `from_manifest` landed
+    in 0.3.38) — same layering orchestration upstream ships, no kglite-side
+    replica of it."""
     try:
         from kglite import _mcp_internal as mcp_internal
     except ImportError:

@@ -564,7 +564,14 @@ def _build_server(
     from kglite.mcp_server.code_source import read as read_code_source
     from kglite.mcp_server.cypher_tools import build_tool_attrs as cypher_tool_attrs
     from kglite.mcp_server.cypher_tools import call_cypher_tool
-    from kglite.mcp_server.tools import run_cypher, run_overview, run_save
+    from kglite.mcp_server.tools import (
+        EXPLORE_DESCRIPTION,
+        EXPLORE_SCHEMA,
+        run_cypher,
+        run_explore,
+        run_overview,
+        run_save,
+    )
 
     fallback = _fallback_name(mode["kind"])
     server_name = (manifest.name if manifest else None) or fallback
@@ -743,7 +750,7 @@ def _build_server(
     from kglite.mcp_server.skills_loader import Skill, build_active_skill_set
 
     def _registered_tool_names() -> set[str]:
-        names = {"cypher_query", "graph_overview", "read_code_source", "ping"}
+        names = {"cypher_query", "graph_overview", "read_code_source", "explore", "ping"}
         if save_graph_enabled:
             names.add("save_graph")
         if source_roots:
@@ -796,7 +803,22 @@ def _build_server(
         extensions=manifest_extensions,
         skills_opted_in=skills_opted_in,
     )
-    skill_auto_hint_names: set[str] = {s.name for s in active_skills.values() if s.auto_inject_hint}
+    # Map each tool name → the ordered skills whose routing + methodology
+    # ride that tool's description. A skill with auto_inject_hint attaches to
+    # (a) the tool of the same name AND (b) every tool named in its
+    # `references_tools` — so a cross-tool skill (e.g. code_graph_analysis)
+    # can ride cypher_query + graph_overview without being named after either.
+    # 0.10.25 made `references_tools` load-bearing for this; before, injection
+    # was name-only and `references_tools` was decorative. Per tool the
+    # same-named skill leads, then referencing skills by name (deterministic).
+    tool_skill_hints: dict[str, list[Skill]] = {}
+    for _s in active_skills.values():
+        if not _s.auto_inject_hint:
+            continue
+        for _t in {_s.name, *_s.references_tools}:
+            tool_skill_hints.setdefault(_t, []).append(_s)
+    for _t, _lst in tool_skill_hints.items():
+        _lst.sort(key=lambda sk, t=_t: (sk.name != t, sk.name))
 
     # 0.9.32: cap auto-injected skill bodies to match the framework's
     # lint thresholds — 16 KB hard ceiling, 4 KB soft target. Beyond
@@ -808,47 +830,63 @@ def _build_server(
     _SKILL_INJECT_HARD_LIMIT = 16 * 1024
     _SKILL_INJECT_TRUNCATE_MARKER = "\n\n[skill body truncated — full text via prompts/get]"
 
-    # Marker the injected `## Methodology` section carries so we don't
-    # duplicate it if `_apply_skill_hint` runs twice for any reason.
     _SKILL_INJECT_HEADER = "\n\n## Methodology\n\n"
+    # Per-skill idempotency marker (a tool may carry several skills now, so a
+    # single section header no longer suffices). Suppresses re-injection of
+    # the same skill if `_apply_skill_hint` runs twice.
+    _SKILL_INJECT_MARKER_FMT = "\n\n<!-- kglite-skill:{} -->"
+    # 0.10.25: the skill `description` (its TRIGGER/SKIP routing heuristic) now
+    # also rides the live tool-description channel under this header. Before,
+    # `description` reached ONLY prompts/list — unreachable by agents in
+    # Claude Code / Desktop / Cursor / Continue — so the single most useful
+    # half of every skill (when to reach for the tool vs a sibling) reached no
+    # agent. It's small and high-value, so it leads and is never truncated.
+    _SKILL_INJECT_ROUTING_HEADER = "\n\n## When to use\n\n"
 
     def _apply_skill_hint(tool: types.Tool) -> types.Tool:
-        """Inject the active skill's full body into a tool's
-        description when an active skill with auto_inject_hint=True
+        """Inject an active skill's routing heuristic + methodology into a
+        tool's description when an active skill with auto_inject_hint=True
         shares the tool's name.
 
-        Embeds the body verbatim under a `## Methodology` header.
-        Reachable in every MCP client (every client exposes
-        tools/list to the agent). Operators who want the smaller
-        payload can set `auto_inject_hint: false` per-skill; the
-        skill still surfaces via prompts/list for clients that DO
-        expose prompts to agents (custom MCP integrations building
-        on the protocol directly).
+        Two sections are appended to the tool description (the only plane
+        every MCP client exposes to agents):
 
-        This matches the framework's canonical `serve_prompts`
-        auto-inject pass (mcp-methods 0.3.37+) which adopted the
-        same shape after operator finding that `prompts/get` is
-        unreachable by agents in Claude Code / Claude Desktop /
-        Cursor / Continue. The MCP `prompts/*` plane was designed
-        for human slash commands in chat UIs, not agentic retrieval.
-        Pre-0.9.32 kglite emitted a bracketed pointer (`[See
-        prompts/get NAME for full methodology.]`) — a dangling
-        reference in those clients.
+        - `## When to use` — the skill `description`, i.e. its TRIGGER/SKIP
+          routing text. Small, high-value, never truncated.
+        - `## Methodology` — the skill `body`, capped at 16 KB (4 KB soft
+          target) with a truncation marker beyond the ceiling.
 
-        Idempotent: a header marker in the existing description
-        suppresses re-injection."""
-        if tool.name not in skill_auto_hint_names:
-            return tool
-        skill = active_skills.get(tool.name)
-        if skill is None:
+        Operators who want the smaller payload can set `auto_inject_hint:
+        false` per-skill; the skill still surfaces via prompts/list for the
+        rare custom integrations that expose prompts to agents. The MCP
+        `prompts/*` plane was designed for human slash commands in chat UIs,
+        not agentic retrieval, so it is NOT the path to rely on.
+
+        A tool may carry several skills (its own + any that reference it);
+        each is injected once, guarded by a per-skill marker comment."""
+        skills = tool_skill_hints.get(tool.name)
+        if not skills:
             return tool
         existing = tool.description or ""
-        if _SKILL_INJECT_HEADER in existing:
+        addition = ""
+        for skill in skills:
+            marker = _SKILL_INJECT_MARKER_FMT.format(skill.name)
+            if marker in existing or marker in addition:
+                continue
+            body = skill.body
+            if len(body) > _SKILL_INJECT_HARD_LIMIT:
+                body = (
+                    body[: _SKILL_INJECT_HARD_LIMIT - len(_SKILL_INJECT_TRUNCATE_MARKER)]
+                    + _SKILL_INJECT_TRUNCATE_MARKER
+                )
+            routing = skill.description.strip()
+            addition += marker
+            if routing:
+                addition += _SKILL_INJECT_ROUTING_HEADER + routing
+            addition += _SKILL_INJECT_HEADER + body
+        if not addition:
             return tool
-        body = skill.body
-        if len(body) > _SKILL_INJECT_HARD_LIMIT:
-            body = body[: _SKILL_INJECT_HARD_LIMIT - len(_SKILL_INJECT_TRUNCATE_MARKER)] + _SKILL_INJECT_TRUNCATE_MARKER
-        return tool.model_copy(update={"description": existing + _SKILL_INJECT_HEADER + body})
+        return tool.model_copy(update={"description": existing + addition})
 
     @server.list_tools()
     async def _list() -> list[types.Tool]:
@@ -899,6 +937,11 @@ def _build_server(
                 name="read_code_source",
                 description=CODE_SOURCE_DESC,
                 inputSchema=CODE_SOURCE_SCHEMA,
+            ),
+            types.Tool(
+                name="explore",
+                description=EXPLORE_DESCRIPTION,
+                inputSchema=EXPLORE_SCHEMA,
             ),
         ]
         if save_graph_enabled:
@@ -951,13 +994,12 @@ def _build_server(
         # only).
         tools.extend(cypher_tool_attrs(manifest_cypher_tools))
 
-        # 0.9.31: auto-inject "see prompts/get <name>" hint into
-        # matching tool descriptions when a skill exists for the tool
-        # name AND has auto_inject_hint=True. Mirrors the framework's
-        # auto-inject pass for the Rust binary path. Agents that
-        # discover tools first (tools/list) get a discoverability
-        # pointer to the skill body.
-        if skill_auto_hint_names:
+        # 0.9.31 / 0.10.25: inject each active skill's routing (## When to use)
+        # + methodology (## Methodology) into the descriptions of the tools it
+        # attaches to (own name + references_tools), so agents that discover
+        # tools first (tools/list — the only plane mainstream clients expose)
+        # get the full skill, not a dangling prompts/get pointer.
+        if tool_skill_hints:
             tools = [_apply_skill_hint(t) for t in tools]
 
         return tools
@@ -988,7 +1030,7 @@ def _build_server(
         # Lazy rebuild gate: every graph-touching tool checks whether
         # the watcher tagged a rebuild since the last call. Cheap
         # (single lock-acquire + None check) when nothing's pending.
-        if name in {"cypher_query", "graph_overview", "save_graph", "read_code_source"}:
+        if name in {"cypher_query", "graph_overview", "save_graph", "read_code_source", "explore"}:
             graph_state.ensure_code_tree_fresh()
         if name == "cypher_query":
             body = run_cypher(
@@ -1016,6 +1058,15 @@ def _build_server(
             body = run_save(graph_state)
         elif name == "read_code_source":
             body = read_code_source(graph_state, args, source_roots)
+        elif name == "explore":
+            body = run_explore(
+                graph_state,
+                args.get("query", ""),
+                max_entities=args.get("max_entities") or 10,
+                max_depth=args.get("max_depth") if args.get("max_depth") is not None else 2,
+                include_source=args.get("include_source") if args.get("include_source") is not None else True,
+                source_roots=_live_source_roots() or None,
+            )
         # ── framework tools, forward to Rust wrappers ────────────────
         elif name == "ping":
             body = mcp_internal.ping(args.get("message"))
