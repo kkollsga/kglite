@@ -21,8 +21,19 @@ pub use super::centrality::*;
 /// not converge within the default 20s).
 pub fn algorithm_timeout_err() -> String {
     "CALL procedure timed out. Pass timeout_ms=N to cypher() to extend, \
-     or timeout_ms=0 to disable the deadline. Subgraph scoping is not \
-     yet supported — large graphs may not converge within the default 20s."
+     or timeout_ms=0 to disable the deadline. Scope to a subgraph with \
+     {node_type: '...', where: '...'} to run on fewer nodes."
+        .to_string()
+}
+
+/// Error when subgraph scoping (`node_type` / `where`) is requested on a
+/// disk- or mapped-backed graph. Scoping materialises a filtered node set,
+/// which is an in-memory-only feature; the streaming community path exists
+/// precisely for graphs too large for that.
+pub fn scope_unsupported_err() -> String {
+    "Subgraph scoping ({node_type, where}) is only supported for in-memory \
+     graphs; this graph is disk- or mapped-backed. Run on an in-memory copy, \
+     or filter with a preceding MATCH instead."
         .to_string()
 }
 
@@ -35,6 +46,33 @@ pub(crate) fn intern_connection_types(
     connection_types: Option<&[String]>,
 ) -> Option<Vec<InternedKey>> {
     connection_types.map(|types| types.iter().map(|t| InternedKey::from_str(t)).collect())
+}
+
+/// Optional subgraph scope for the centrality / community procedures: the set
+/// of node indices the algorithm is allowed to consider. `None` means the whole
+/// graph (the unscoped fast path — every loop below short-circuits the scope
+/// check on the `None` discriminant, so there is no per-edge cost when absent).
+/// Built in the Cypher CALL dispatcher from `{node_type, where}` so an analysis
+/// can run e.g. PageRank over non-test, non-external functions only.
+pub(crate) type NodeScope = std::collections::HashSet<NodeIndex>;
+
+/// The working node set, honoring an optional subgraph scope. Preserves graph
+/// (index) order so compact-index mappings stay deterministic.
+pub(crate) fn scoped_node_set(graph: &DirGraph, scope: Option<&NodeScope>) -> Vec<NodeIndex> {
+    let g = &graph.graph;
+    match scope {
+        Some(s) => g.node_indices().filter(|n| s.contains(n)).collect(),
+        None => g.node_indices().collect(),
+    }
+}
+
+/// True when an edge lies within scope — both endpoints in the set, or no scope.
+#[inline]
+pub(crate) fn edge_in_scope(scope: Option<&NodeScope>, src: NodeIndex, tgt: NodeIndex) -> bool {
+    match scope {
+        Some(s) => s.contains(&src) && s.contains(&tgt),
+        None => true,
+    }
 }
 
 /// Get undirected neighbors filtered by edge connection type.
@@ -1187,11 +1225,9 @@ fn build_weighted_adjacency(
     graph: &DirGraph,
     weight_property: Option<&str>,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
 ) -> (Vec<NodeIndex>, Adjacency, f64) {
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
     let bound = graph.graph.node_bound();
     let mut node_to_idx = vec![0usize; bound];
@@ -1210,6 +1246,9 @@ fn build_weighted_adjacency(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         let w = edge_weight(graph, edge.id(), weight_property);
         let src_i = node_to_idx[edge.source().index()];
@@ -1774,22 +1813,34 @@ pub fn louvain_communities(
     weight_property: Option<&str>,
     resolution: f64,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-    if nodes.is_empty() {
-        return Ok(empty_community_result());
-    }
     // Disk/mapped: stream level 0 from the CSR (O(nodes) heap). In-memory: keep
-    // the materialised fast path unchanged.
-    let (levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+    // the materialised fast path. Subgraph scoping (node_type / where) is an
+    // in-memory-only feature — the streaming path is the bounded-memory escape
+    // hatch for graphs too large to scope a copy of, so reject scope there.
+    let (nodes, levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+        if scope.is_some() {
+            return Err(scope_unsupported_err());
+        }
+        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
         let src = CsrSource::new(graph, weight_property, connection_types);
         let m = src.total_weight();
-        (louvain_levels(&src, resolution, deadline)?, m)
+        let levels = louvain_levels(&src, resolution, deadline)?;
+        (nodes, levels, m)
     } else {
-        let (_n, adj, m) = build_weighted_adjacency(graph, weight_property, connection_types);
+        let (nodes, adj, m) =
+            build_weighted_adjacency(graph, weight_property, connection_types, scope);
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
         let src = MaterializedAdj { adj: &adj, m };
-        (louvain_levels(&src, resolution, deadline)?, m)
+        let levels = louvain_levels(&src, resolution, deadline)?;
+        (nodes, levels, m)
     };
     Ok(build_community_result(
         graph,
@@ -1950,20 +2001,30 @@ pub fn leiden_communities(
     weight_property: Option<&str>,
     resolution: f64,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-    if nodes.is_empty() {
-        return Ok(empty_community_result());
-    }
-    let (levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+    let (nodes, levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
+        if scope.is_some() {
+            return Err(scope_unsupported_err());
+        }
+        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
         let src = CsrSource::new(graph, weight_property, connection_types);
         let m = src.total_weight();
-        (leiden_levels(&src, resolution, deadline)?, m)
+        let levels = leiden_levels(&src, resolution, deadline)?;
+        (nodes, levels, m)
     } else {
-        let (_n, adj, m) = build_weighted_adjacency(graph, weight_property, connection_types);
+        let (nodes, adj, m) =
+            build_weighted_adjacency(graph, weight_property, connection_types, scope);
+        if nodes.is_empty() {
+            return Ok(empty_community_result());
+        }
         let src = MaterializedAdj { adj: &adj, m };
-        (leiden_levels(&src, resolution, deadline)?, m)
+        let levels = leiden_levels(&src, resolution, deadline)?;
+        (nodes, levels, m)
     };
     Ok(build_community_result(
         graph,
@@ -1985,18 +2046,20 @@ pub fn label_propagation(
     graph: &DirGraph,
     max_iterations: usize,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
     // Disk/mapped: stream the deduped neighbours (bounded memory) instead of
     // materialising the whole adjacency. In-memory keeps the materialised path.
+    // Subgraph scoping is in-memory-only (see louvain_communities).
     if graph.graph.is_disk() || graph.graph.is_mapped() {
+        if scope.is_some() {
+            return Err(scope_unsupported_err());
+        }
         return label_propagation_streaming(graph, max_iterations, connection_types, deadline);
     }
 
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
     if n == 0 {
@@ -2021,6 +2084,9 @@ pub fn label_propagation(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];

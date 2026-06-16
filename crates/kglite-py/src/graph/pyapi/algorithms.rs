@@ -807,6 +807,7 @@ impl KnowledgeGraph {
                     normalized,
                     sample_size,
                     connection_types.as_deref(),
+                    None,
                     deadline,
                 )
             })
@@ -881,6 +882,7 @@ impl KnowledgeGraph {
                     max_iter,
                     tol,
                     connection_types.as_deref(),
+                    None,
                     deadline,
                 )
             })
@@ -945,6 +947,7 @@ impl KnowledgeGraph {
                     &inner,
                     normalized,
                     connection_types.as_deref(),
+                    None,
                     deadline,
                 )
             })
@@ -1016,6 +1019,7 @@ impl KnowledgeGraph {
                     normalized,
                     sample_size,
                     connection_types.as_deref(),
+                    None,
                     deadline,
                 )
             })
@@ -1069,6 +1073,7 @@ impl KnowledgeGraph {
             weight_property.as_deref(),
             res,
             connection_types.as_deref(),
+            None,
             deadline,
         )
         .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
@@ -1100,6 +1105,7 @@ impl KnowledgeGraph {
             &self.inner,
             max_iter,
             connection_types.as_deref(),
+            None,
             deadline,
         )
         .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;

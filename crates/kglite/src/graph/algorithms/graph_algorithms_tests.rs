@@ -434,7 +434,7 @@ fn test_node_degree() {
 #[test]
 fn test_betweenness_centrality_chain() {
     let (graph, indices) = build_chain_graph();
-    let results = betweenness_centrality(&graph, false, None, None, None).unwrap();
+    let results = betweenness_centrality(&graph, false, None, None, None, None).unwrap();
     assert_eq!(results.len(), 5);
     // Middle node (index 2) should have highest betweenness in a chain
     let middle_score = results
@@ -454,7 +454,7 @@ fn test_betweenness_centrality_chain() {
 fn test_betweenness_centrality_with_sampling() {
     let (graph, indices) = build_chain_graph();
     // With sample_size, stride-based sampling should still find the middle node
-    let results = betweenness_centrality(&graph, false, Some(3), None, None).unwrap();
+    let results = betweenness_centrality(&graph, false, Some(3), None, None, None).unwrap();
     assert_eq!(results.len(), 5);
     // Middle node should still have a non-zero betweenness score
     let middle_score = results
@@ -471,7 +471,7 @@ fn test_betweenness_centrality_with_sampling() {
 #[test]
 fn test_degree_centrality() {
     let (graph, indices) = build_chain_graph();
-    let results = degree_centrality(&graph, false, None, None).unwrap();
+    let results = degree_centrality(&graph, false, None, None, None).unwrap();
     assert_eq!(results.len(), 5);
     // Middle nodes should have degree 2, end nodes degree 1
     let middle = results.iter().find(|r| r.node_idx == indices[2]).unwrap();
@@ -483,7 +483,7 @@ fn test_degree_centrality() {
 #[test]
 fn test_pagerank_basic() {
     let (graph, _) = build_triangle_graph();
-    let results = pagerank(&graph, 0.85, 100, 1e-6, None, None).unwrap();
+    let results = pagerank(&graph, 0.85, 100, 1e-6, None, None, None).unwrap();
     assert_eq!(results.len(), 3);
     // All nodes in a symmetric triangle should have roughly equal PageRank
     let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
@@ -498,7 +498,7 @@ fn test_pagerank_basic() {
 #[test]
 fn test_closeness_centrality_chain() {
     let (graph, indices) = build_chain_graph();
-    let results = closeness_centrality(&graph, false, None, None, None).unwrap();
+    let results = closeness_centrality(&graph, false, None, None, None, None).unwrap();
     assert_eq!(results.len(), 5);
     // Middle node should have highest closeness
     let middle = results
@@ -515,9 +515,31 @@ fn test_closeness_centrality_chain() {
 }
 
 #[test]
+fn test_centrality_scope_restricts_nodes_and_edges() {
+    // Chain 0-1-2-3-4. Scope to {1,2,3}: edges 0-1 and 3-4 leave scope and are
+    // dropped, leaving the sub-chain 1-2-3.
+    let (graph, indices) = build_chain_graph();
+    let scope: std::collections::HashSet<_> =
+        [indices[1], indices[2], indices[3]].into_iter().collect();
+
+    let deg = degree_centrality(&graph, false, None, Some(&scope), None).unwrap();
+    assert_eq!(deg.len(), 3, "only scoped nodes returned");
+    let score_of = |idx| deg.iter().find(|r| r.node_idx == idx).unwrap().score;
+    // Within the sub-chain, the middle node (2) has degree 2; the ends (1,3) have 1.
+    assert_eq!(score_of(indices[2]), 2.0);
+    assert_eq!(score_of(indices[1]), 1.0);
+    assert_eq!(score_of(indices[3]), 1.0);
+
+    // Excluded nodes never appear in any scoped algorithm's output.
+    let pr = pagerank(&graph, 0.85, 100, 1e-6, None, Some(&scope), None).unwrap();
+    let pr_nodes: std::collections::HashSet<_> = pr.iter().map(|r| r.node_idx).collect();
+    assert_eq!(pr_nodes, scope);
+}
+
+#[test]
 fn test_pagerank_empty_graph() {
     let graph = DirGraph::new();
-    let results = pagerank(&graph, 0.85, 100, 1e-6, None, None).unwrap();
+    let results = pagerank(&graph, 0.85, 100, 1e-6, None, None, None).unwrap();
     assert!(results.is_empty());
 }
 
@@ -590,7 +612,7 @@ fn community_of(result: &CommunityResult, idx: petgraph::graph::NodeIndex) -> us
 #[test]
 fn test_louvain_multilevel_two_communities() {
     let (graph, ix) = build_two_triangle_bridge();
-    let r = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    let r = louvain_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert_eq!(r.num_communities, 2, "two triangles → two communities");
     assert!(
         r.modularity > 0.0,
@@ -608,7 +630,7 @@ fn test_louvain_multilevel_two_communities() {
 #[test]
 fn test_louvain_exposes_hierarchy_levels() {
     let (graph, _) = build_two_triangle_bridge();
-    let r = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    let r = louvain_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert!(!r.levels.is_empty(), "hierarchy levels present");
     // last level == flat assignments (best partition)
     assert_eq!(r.levels.last().unwrap().len(), r.assignments.len());
@@ -621,8 +643,8 @@ fn test_louvain_exposes_hierarchy_levels() {
 #[test]
 fn test_louvain_deterministic() {
     let (graph, _) = build_two_triangle_bridge();
-    let a = louvain_communities(&graph, None, 1.0, None, None).unwrap();
-    let b = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    let a = louvain_communities(&graph, None, 1.0, None, None, None).unwrap();
+    let b = louvain_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert_eq!(a.num_communities, b.num_communities);
     let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
     let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
@@ -633,7 +655,7 @@ fn test_louvain_deterministic() {
 fn test_louvain_empty_and_isolated() {
     // empty
     let g = DirGraph::new();
-    let r = louvain_communities(&g, None, 1.0, None, None).unwrap();
+    let r = louvain_communities(&g, None, 1.0, None, None, None).unwrap();
     assert_eq!(r.num_communities, 0);
     assert!(r.levels.is_empty());
     // isolated nodes (no edges) → each its own community, modularity 0
@@ -651,7 +673,7 @@ fn test_louvain_empty_and_isolated() {
             .entry_or_default("Node".to_string())
             .push(idx);
     }
-    let r3 = louvain_communities(&g3, None, 1.0, None, None).unwrap();
+    let r3 = louvain_communities(&g3, None, 1.0, None, None, None).unwrap();
     assert_eq!(r3.num_communities, 3);
     assert_eq!(r3.modularity, 0.0);
 }
@@ -705,7 +727,7 @@ fn assert_all_communities_connected(graph: &DirGraph, result: &CommunityResult) 
 #[test]
 fn test_leiden_two_communities() {
     let (graph, ix) = build_two_triangle_bridge();
-    let r = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let r = leiden_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert_eq!(r.num_communities, 2);
     assert!(r.modularity > 0.0);
     assert_eq!(community_of(&r, ix[0]), community_of(&r, ix[1]));
@@ -716,20 +738,20 @@ fn test_leiden_two_communities() {
 #[test]
 fn test_leiden_communities_well_connected() {
     let (graph, _) = build_two_triangle_bridge();
-    let r = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let r = leiden_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert_all_communities_connected(&graph, &r);
 
     // also on a chain and a triangle — the invariant must always hold
     let (chain, _) = build_chain_graph();
-    let rc = leiden_communities(&chain, None, 1.0, None, None).unwrap();
+    let rc = leiden_communities(&chain, None, 1.0, None, None, None).unwrap();
     assert_all_communities_connected(&chain, &rc);
 }
 
 #[test]
 fn test_leiden_deterministic() {
     let (graph, _) = build_two_triangle_bridge();
-    let a = leiden_communities(&graph, None, 1.0, None, None).unwrap();
-    let b = leiden_communities(&graph, None, 1.0, None, None).unwrap();
+    let a = leiden_communities(&graph, None, 1.0, None, None, None).unwrap();
+    let b = leiden_communities(&graph, None, 1.0, None, None, None).unwrap();
     let ca: Vec<usize> = a.assignments.iter().map(|x| x.community_id).collect();
     let cb: Vec<usize> = b.assignments.iter().map(|x| x.community_id).collect();
     assert_eq!(ca, cb);
@@ -738,8 +760,8 @@ fn test_leiden_deterministic() {
 #[test]
 fn test_leiden_hierarchy_and_modularity_vs_louvain() {
     let (graph, _) = build_two_triangle_bridge();
-    let lei = leiden_communities(&graph, None, 1.0, None, None).unwrap();
-    let lou = louvain_communities(&graph, None, 1.0, None, None).unwrap();
+    let lei = leiden_communities(&graph, None, 1.0, None, None, None).unwrap();
+    let lou = louvain_communities(&graph, None, 1.0, None, None, None).unwrap();
     assert!(!lei.levels.is_empty());
     assert_eq!(lei.levels.last().unwrap().len(), lei.assignments.len());
     // Leiden modularity should be competitive with Louvain (≥ within fp slack).
@@ -754,7 +776,7 @@ fn test_leiden_hierarchy_and_modularity_vs_louvain() {
 #[test]
 fn test_leiden_empty_and_isolated() {
     let g = DirGraph::new();
-    let r = leiden_communities(&g, None, 1.0, None, None).unwrap();
+    let r = leiden_communities(&g, None, 1.0, None, None, None).unwrap();
     assert_eq!(r.num_communities, 0);
     assert!(r.levels.is_empty());
 }

@@ -50,7 +50,82 @@ fn string_list_param(params: &HashMap<String, Value>, key: &str) -> Option<Vec<S
     }
 }
 
+/// Parse a node-scope `where` predicate (using `n` as the node variable) into a
+/// [`Predicate`], by running the full Cypher parser over a throwaway
+/// `MATCH (n) WHERE <src> RETURN n`. Reusing the real parser means the scope
+/// predicate supports exactly the operators a normal WHERE clause does.
+fn parse_scope_predicate(src: &str) -> Result<Predicate, String> {
+    let wrapped = format!("MATCH (n) WHERE {src} RETURN n");
+    let query = crate::graph::languages::cypher::parser::parse_cypher(&wrapped)
+        .map_err(|e| format!("invalid `where` predicate '{src}': {e}"))?;
+    query
+        .clauses
+        .into_iter()
+        .find_map(|c| match c {
+            Clause::Where(w) => Some(w.predicate),
+            _ => None,
+        })
+        .ok_or_else(|| format!("`where` predicate '{src}' did not parse to a condition"))
+}
+
 impl<'a> CypherExecutor<'a> {
+    /// Build an optional subgraph scope from the `{node_type, where}` procedure
+    /// params (centrality / community algorithms). Returns `None` when neither
+    /// is present — the whole-graph fast path. Otherwise the candidate universe
+    /// is the union of the requested node types (or every node), filtered by the
+    /// `where` predicate evaluated per node with `n` bound, e.g.
+    /// `where: 'n.is_test = false AND n.is_external = false'`.
+    fn build_node_scope(
+        &self,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<HashSet<NodeIndex>>, String> {
+        let node_types = string_list_param(params, "node_type");
+        let where_src = match params.get("where") {
+            Some(Value::String(s)) if !s.trim().is_empty() => Some(s.as_str()),
+            _ => None,
+        };
+        if node_types.is_none() && where_src.is_none() {
+            return Ok(None);
+        }
+
+        // Candidate universe: union of the requested node types, or every node.
+        let candidates: Vec<NodeIndex> = match &node_types {
+            Some(types) => {
+                let mut v = Vec::new();
+                for t in types {
+                    if let Some(idxs) = self.graph.type_indices.get(t.as_str()) {
+                        v.extend(idxs.iter());
+                    }
+                }
+                v
+            }
+            None => self.graph.graph.node_indices().collect(),
+        };
+
+        let predicate = match where_src {
+            Some(src) => Some(parse_scope_predicate(src)?),
+            None => None,
+        };
+
+        let mut scope = HashSet::with_capacity(candidates.len());
+        for (i, idx) in candidates.into_iter().enumerate() {
+            // Bound the per-node predicate evaluation so a `where` over a huge
+            // graph still honours the query deadline.
+            if i & 0xFFFF == 0 {
+                self.check_deadline()?;
+            }
+            if let Some(pred) = &predicate {
+                let mut row = ResultRow::new();
+                row.node_bindings.insert("n".to_string(), idx);
+                if !self.evaluate_predicate(pred, &row)? {
+                    continue;
+                }
+            }
+            scope.insert(idx);
+        }
+        Ok(Some(scope))
+    }
+
     pub(super) fn execute_unwind(
         &self,
         clause: &UnwindClause,
@@ -255,20 +330,34 @@ impl<'a> CypherExecutor<'a> {
             "louvain" | "louvain_communities" | "leiden" | "leiden_communities"
         ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
 
-        if needs_scope && self.deadline.is_some() && !streaming_community {
+        // Extract parameters
+        let params = self.extract_call_params(&clause.parameters)?;
+
+        // Optional subgraph scope for the centrality / community procedures:
+        // `{node_type: '...', where: 'n.<prop> ...'}` restricts the algorithm
+        // to a property-filtered node set (e.g. non-test, non-external
+        // functions). Built once here so the algorithms stay free of the
+        // executor / parser. None ⇒ whole-graph (unchanged behaviour).
+        let scope = if needs_scope {
+            self.build_node_scope(&params)?
+        } else {
+            None
+        };
+
+        // Fail-fast guard against unscoped full-graph walks (see above). An
+        // explicit scope is the user opting into a bounded run, so it bypasses
+        // the refusal — that is the intended escape hatch.
+        if needs_scope && self.deadline.is_some() && !streaming_community && scope.is_none() {
             let n = self.graph.graph.node_count();
             if n > PROC_FULL_GRAPH_LIMIT {
                 return Err(format!(
                     "CALL {}() on a graph with {n} nodes would scan the whole graph. \
-                     Subgraph scoping is not yet supported — try a smaller graph, \
-                     or pass timeout_ms=0 to override this guard.",
+                     Scope it with {{node_type: '...', where: '...'}}, try a smaller \
+                     graph, or pass timeout_ms=0 to override this guard.",
                     clause.procedure_name
                 ));
             }
         }
-
-        // Extract parameters
-        let params = self.extract_call_params(&clause.parameters)?;
 
         // Dispatch to algorithm
         let rows = match proc_name.as_str() {
@@ -283,6 +372,7 @@ impl<'a> CypherExecutor<'a> {
                     max_iter,
                     tolerance,
                     conn.as_deref(),
+                    scope.as_ref(),
                     self.deadline,
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
@@ -296,6 +386,7 @@ impl<'a> CypherExecutor<'a> {
                     normalized,
                     sample_size,
                     conn.as_deref(),
+                    scope.as_ref(),
                     self.deadline,
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
@@ -307,6 +398,7 @@ impl<'a> CypherExecutor<'a> {
                     self.graph,
                     normalized,
                     conn.as_deref(),
+                    scope.as_ref(),
                     self.deadline,
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
@@ -320,6 +412,7 @@ impl<'a> CypherExecutor<'a> {
                     normalized,
                     sample_size,
                     conn.as_deref(),
+                    scope.as_ref(),
                     self.deadline,
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
@@ -333,6 +426,7 @@ impl<'a> CypherExecutor<'a> {
                     weight_prop.as_deref(),
                     resolution,
                     conn.as_deref(),
+                    scope.as_ref(),
                     if streaming_community {
                         None
                     } else {
@@ -350,6 +444,7 @@ impl<'a> CypherExecutor<'a> {
                     weight_prop.as_deref(),
                     resolution,
                     conn.as_deref(),
+                    scope.as_ref(),
                     if streaming_community {
                         None
                     } else {
@@ -365,6 +460,7 @@ impl<'a> CypherExecutor<'a> {
                     self.graph,
                     max_iter,
                     conn.as_deref(),
+                    scope.as_ref(),
                     self.deadline,
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?

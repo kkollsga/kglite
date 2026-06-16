@@ -1130,6 +1130,42 @@ from a Bolt client or inside a Cypher pipeline; use `list_indexes()`
 from Python code where you'd rather have a Python list of dicts than
 a `cypher()` result.
 
+## Scoping graph algorithms to a subgraph
+
+The centrality (`pagerank`, `degree`, `betweenness`, `closeness`) and community
+(`louvain`, `leiden`, `label_propagation`) procedures accept two optional
+parameters that restrict the algorithm to a **property-filtered subgraph**,
+so test / benchmark / external nodes don't pollute the result:
+
+| Param | Meaning |
+|-------|---------|
+| `node_type` | string or list of node labels to include (e.g. `'Function'`) |
+| `where` | a predicate over the node variable `n` — the same expression grammar as a `WHERE` clause |
+
+```python
+# PageRank over non-test, non-external functions only — the library's real hubs
+graph.cypher("""
+    CALL pagerank({node_type: 'Function', connection_types: 'CALLS',
+                   where: 'n.is_test = false AND n.is_external = false'})
+    YIELD node, score
+    RETURN node.name, score ORDER BY score DESC LIMIT 15
+""")
+
+# Louvain over a subsystem, excluding benchmark code
+graph.cypher("""
+    CALL louvain({node_type: 'File', where: 'n.is_benchmark = false'})
+    YIELD node, community
+    RETURN community, count(*) AS size ORDER BY size DESC
+""")
+```
+
+Only edges with **both** endpoints in scope are traversed, so scores and
+communities reflect the subgraph, not the whole graph filtered afterward. An
+explicit scope also lifts the large-graph refusal guard (you've bounded the
+run yourself). Scoping is an **in-memory-only** feature; on disk/mapped graphs
+the procedures reject `node_type` / `where` (filter with a preceding `MATCH`
+instead).
+
 ## CREATE / SET / DELETE / REMOVE / MERGE
 
 ```python

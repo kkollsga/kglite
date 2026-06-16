@@ -299,7 +299,7 @@ impl CypherParser {
 
         // Parse optional {key: expr, ...}
         if self.check(&CypherToken::LBrace) {
-            properties = self.parse_create_properties()?;
+            properties = self.parse_create_properties(false)?;
         }
 
         self.expect(&CypherToken::RParen)?;
@@ -311,14 +311,27 @@ impl CypherParser {
         })
     }
 
-    /// Parse CREATE properties: {key: expr, key: expr, ...}
-    pub(super) fn parse_create_properties(&mut self) -> Result<Vec<(String, Expression)>, String> {
+    /// Parse a `{key: expr, ...}` property/parameter map. `allow_where_key`
+    /// permits the reserved `where` keyword as a key — used for CALL procedure
+    /// params (the `{where: '...'}` subgraph-scope predicate), but NOT for
+    /// CREATE properties, where `where` stays reserved so a bare `{where: 1}`
+    /// errors rather than silently misparsing (it must also stay reserved for
+    /// the pattern re-serializer; see `keyword_name_token`).
+    pub(super) fn parse_create_properties(
+        &mut self,
+        allow_where_key: bool,
+    ) -> Result<Vec<(String, Expression)>, String> {
         self.expect(&CypherToken::LBrace)?;
         let mut props = Vec::new();
 
         if !self.check(&CypherToken::RBrace) {
             loop {
-                let key = self.expect_name("property key")?;
+                let key = if allow_where_key && self.check(&CypherToken::Where) {
+                    self.advance();
+                    "where".to_string()
+                } else {
+                    self.expect_name("property key")?
+                };
                 self.expect(&CypherToken::Colon)?;
                 let value_expr = self.parse_expression()?;
                 props.push((key, value_expr));
@@ -377,7 +390,7 @@ impl CypherParser {
 
         // Parse optional properties
         if self.check(&CypherToken::LBrace) {
-            properties = self.parse_create_properties()?;
+            properties = self.parse_create_properties(false)?;
         }
 
         self.expect(&CypherToken::RBracket)?;
@@ -652,7 +665,7 @@ impl CypherParser {
         // Parse argument list: ( [{key: val, ...}] )
         self.expect(&CypherToken::LParen)?;
         let parameters = if self.check(&CypherToken::LBrace) {
-            self.parse_create_properties()?
+            self.parse_create_properties(true)?
         } else if !self.check(&CypherToken::RParen) {
             return Err(format!(
                 "CALL parameters must use map syntax: CALL {}({{key: value, ...}}). \

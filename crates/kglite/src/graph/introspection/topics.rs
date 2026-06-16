@@ -348,10 +348,13 @@ pub(super) fn write_topic_pagerank(xml: &mut String) {
     xml.push_str("      <param name=\"max_iterations\" type=\"int\" default=\"100\">Convergence iteration limit.</param>\n");
     xml.push_str("      <param name=\"tolerance\" type=\"float\" default=\"1e-6\">Convergence threshold.</param>\n");
     xml.push_str("      <param name=\"connection_types\" type=\"string|list\">Filter to specific relationship types.</param>\n");
+    xml.push_str("      <param name=\"node_type\" type=\"string|list\">Scope to a node label (subgraph). In-memory graphs only.</param>\n");
+    xml.push_str("      <param name=\"where\" type=\"string\">Scope to nodes matching a predicate over the node variable `n` (e.g. 'n.is_test = false AND n.is_external = false'). In-memory graphs only. Applies to all centrality + community procedures (pagerank/degree/betweenness/closeness/louvain/leiden/label_propagation).</param>\n");
     xml.push_str("    </params>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"basic\">CALL pagerank() YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 10</ex>\n");
     xml.push_str("      <ex desc=\"filtered\">CALL pagerank({connection_types: 'CITES'}) YIELD node, score RETURN node.name, score ORDER BY score DESC</ex>\n");
+    xml.push_str("      <ex desc=\"scoped to library functions\">CALL pagerank({node_type: 'Function', connection_types: 'CALLS', where: 'n.is_test = false'}) YIELD node, score RETURN node.name, score ORDER BY score DESC LIMIT 15</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </pagerank>\n");
 }

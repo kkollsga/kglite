@@ -4,7 +4,9 @@
 //! `graph_algorithms::betweenness_centrality` / `CentralityResult` paths keep
 //! working.
 
-use super::graph_algorithms::{algorithm_timeout_err, intern_connection_types};
+use super::graph_algorithms::{
+    algorithm_timeout_err, edge_in_scope, intern_connection_types, scoped_node_set, NodeScope,
+};
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
@@ -38,15 +40,13 @@ pub fn betweenness_centrality(
     normalized: bool,
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<Vec<CentralityResult>, String> {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
     if n <= 2 {
@@ -79,6 +79,9 @@ pub fn betweenness_centrality(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
@@ -335,12 +338,10 @@ pub fn pagerank(
     max_iterations: usize,
     tolerance: f64,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<Vec<CentralityResult>, String> {
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
     if n == 0 {
@@ -368,6 +369,9 @@ pub fn pagerank(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
@@ -494,12 +498,10 @@ pub fn degree_centrality(
     graph: &DirGraph,
     normalized: bool,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<Vec<CentralityResult>, String> {
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
     if n == 0 {
@@ -535,6 +537,9 @@ pub fn degree_centrality(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         degrees[edge.source().index()] += 1; // out-degree
         degrees[edge.target().index()] += 1; // in-degree
@@ -575,14 +580,12 @@ pub fn closeness_centrality(
     normalized: bool,
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
+    scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<Vec<CentralityResult>, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let nodes: Vec<NodeIndex> = {
-        let g = &graph.graph;
-        g.node_indices().collect()
-    };
+    let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
     if n == 0 {
@@ -608,6 +611,9 @@ pub fn closeness_centrality(
             if !types.iter().any(|t| *t == edge.connection_type()) {
                 continue;
             }
+        }
+        if !edge_in_scope(scope, edge.source(), edge.target()) {
+            continue;
         }
         let src_i = node_to_idx[edge.source().index()];
         let tgt_i = node_to_idx[edge.target().index()];
