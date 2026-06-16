@@ -18,14 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn opts<'a>(params: &'a HashMap<String, kglite::api::Value>) -> ExecuteOptions<'a> {
-    ExecuteOptions {
-        params,
-        deadline: None,
-        max_rows: None,
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder: None,
-    }
+    ExecuteOptions::eager(params)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

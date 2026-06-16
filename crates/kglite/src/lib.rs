@@ -132,6 +132,12 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::result::CypherResult;
+        /// Operator-declared value codecs — position-scoped, bidirectional
+        /// literal conversions (`'Q42'` ↔ `42`) bound to a property. Bindings
+        /// build a `Vec<ValueCodec>` (e.g. from a YAML manifest) and pass it via
+        /// `session::ExecuteOptions::value_codecs`. See `value_codec` module
+        /// docs for the safety model.
+        pub use crate::graph::languages::cypher::value_codec::{CodecKind, StoredType, ValueCodec};
     }
 
     /// Canonical query + transaction surface — single source of

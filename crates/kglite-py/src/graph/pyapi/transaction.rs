@@ -188,6 +188,7 @@ impl Transaction {
             lazy_eligible: false,
             disabled_passes: None,
             embedder: None,
+            value_codecs: None,
         };
 
         let result = if is_mut {

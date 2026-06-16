@@ -25,6 +25,7 @@ use crate::graph::embedder::Embedder;
 use crate::graph::languages::cypher;
 use crate::graph::languages::cypher::ast::{CypherQuery, OutputFormat};
 use crate::graph::languages::cypher::result::CypherResult;
+use crate::graph::languages::cypher::value_codec::ValueCodec;
 
 /// Per-query knobs. Borrowed for the duration of one execute call.
 /// Default values match the kg_core.rs Python boundary's defaults
@@ -63,6 +64,13 @@ pub struct ExecuteOptions<'a> {
     /// uses `text_score()` and this is `None`, execute returns
     /// `KgError::Argument("text_score requires embedder ...")`.
     pub embedder: Option<Arc<dyn Embedder>>,
+    /// Optional operator-declared value codecs. When set, query-side
+    /// literals bound to a codec'd property are decoded before
+    /// validation/optimization (`'Q42'` → `42`), and result columns
+    /// that are direct projections of a codec'd property are encoded
+    /// back (`42` → `'Q42'`). `None`/empty = no transform (the common
+    /// case; zero hot-path cost). See `cypher::value_codec`.
+    pub value_codecs: Option<&'a [ValueCodec]>,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -99,6 +107,7 @@ impl<'a> ExecuteOptions<'a> {
             lazy_eligible: false,
             disabled_passes: None,
             embedder: None,
+            value_codecs: None,
         }
     }
 }
@@ -136,7 +145,7 @@ pub fn execute_read(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let (parsed, params) = prepare(graph, query, opts)?;
+    let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
 
     // EXPLAIN: render plan rows, skip execution.
@@ -158,7 +167,7 @@ pub fn execute_read(
         ));
     }
 
-    let result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
+    let mut result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
         .with_max_rows(opts.max_rows)
         .with_streaming(opts.lazy_eligible)
         .execute(&parsed)
@@ -166,6 +175,11 @@ pub fn execute_read(
             message,
             position: None,
         })?;
+    // value_codecs: encode codec'd-property result columns back to the typed
+    // form (`42` → `'Q42'`). Applies to eager rows; lazy results (Python's
+    // streaming path) materialize later and aren't covered — the configured
+    // consumer (mcp-server) runs eager.
+    cypher::value_codec::apply_encode(&mut result, &encode_plan);
 
     Ok(ExecuteOutcome {
         result,
@@ -188,7 +202,7 @@ pub fn execute_mut(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<ExecuteOutcome, KgError> {
-    let (parsed, params) = prepare(graph, query, opts)?;
+    let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
 
     if parsed.explain {
@@ -201,7 +215,7 @@ pub fn execute_mut(
         });
     }
 
-    let result = if is_mutation {
+    let mut result = if is_mutation {
         cypher::execute_mutable(graph, &parsed, params, opts.deadline).map_err(|message| {
             KgError::CypherExecution {
                 message,
@@ -218,6 +232,9 @@ pub fn execute_mut(
                 position: None,
             })?
     };
+    // Encode codec'd-property result columns (e.g. `CREATE (...) RETURN n.id`
+    // reads back `'Q42'`). Eager path only; see execute_read.
+    cypher::value_codec::apply_encode(&mut result, &encode_plan);
 
     Ok(ExecuteOutcome {
         result,
@@ -243,12 +260,28 @@ pub fn execute_mut(
 /// (Python's `py.detach`). The embed call inside this fn will then
 /// re-acquire the GIL briefly to invoke Python; if you forget to
 /// release first, it deadlocks.
+/// Output of [`prepare`]: the parsed+optimized query, the (possibly
+/// embedding-augmented) param map, and the column-indexed value-codec encode
+/// plan (empty when no codecs apply).
+type PreparedQuery = (CypherQuery, HashMap<String, Value>, Vec<Option<ValueCodec>>);
+
 fn prepare(
     graph: &DirGraph,
     query: &str,
     opts: &ExecuteOptions<'_>,
-) -> Result<(CypherQuery, HashMap<String, Value>), KgError> {
+) -> Result<PreparedQuery, KgError> {
     let mut parsed = cypher::parse_cypher(query)?;
+
+    // value_codecs: decode operator-declared literals bound to a codec'd
+    // property (`{id:'Q42'}` / `WHERE n.id = 'Q42'` → `42`) BEFORE anything
+    // else, so validation, optimization, and execution all treat the decoded
+    // form as canonical. No-op (one is_empty check) when none are configured.
+    let codecs = opts.value_codecs.unwrap_or(&[]);
+    cypher::value_codec::apply_decode(&mut parsed, codecs);
+    // Build the result-side encode plan now, while the RETURN clause is a clean
+    // pre-optimize projection (fusion later rewrites *how* columns are computed,
+    // not the output schema). Column-indexed; empty when no codecs / no RETURN.
+    let encode_plan = cypher::value_codec::build_encode_plan(&parsed, codecs);
 
     // Schema validation — property typos in pattern literals
     // (`{ttle: 'Alice'}`) get caught with a "did you mean?" hint.
@@ -294,7 +327,7 @@ fn prepare(
         cypher::mark_lazy_eligibility(&mut parsed);
     }
 
-    Ok((parsed, params.into_owned()))
+    Ok((parsed, params.into_owned(), encode_plan))
 }
 
 /// Run the embedder on collected texts; inject the JSON-encoded

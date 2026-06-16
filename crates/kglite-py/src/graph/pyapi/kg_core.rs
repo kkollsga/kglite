@@ -1406,6 +1406,9 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
+                // value_codecs are an MCP-manifest feature; the Python API
+                // doesn't configure them (the engine path uses native types).
+                value_codecs: None,
             };
 
             let outcome = crate::graph::session::execute_mut(graph, query, &opts)
@@ -1473,6 +1476,9 @@ impl KnowledgeGraph {
                 lazy_eligible: streaming,
                 disabled_passes: disabled_owned.as_ref(),
                 embedder: embedder_for_opts,
+                // value_codecs are an MCP-manifest feature; the Python API
+                // doesn't configure them (the engine path uses native types).
+                value_codecs: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
             py.detach(move || -> Result<crate::graph::languages::cypher::result::CypherResult, crate::error::KgError> {

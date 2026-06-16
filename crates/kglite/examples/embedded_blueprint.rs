@@ -37,14 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 2. Inspect the graph schema via Cypher ────────────────────
     let params = HashMap::new();
-    let opts = session::ExecuteOptions {
-        params: &params,
-        deadline: None,
-        max_rows: None,
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder: None,
-    };
+    let opts = session::ExecuteOptions::eager(&params);
 
     let outcome = session::execute_read(
         &graph,

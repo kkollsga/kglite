@@ -19,6 +19,7 @@ pub mod parser;
 pub mod planner;
 pub mod result;
 pub mod tokenizer;
+pub mod value_codec;
 mod window;
 
 // Re-exports for convenience.

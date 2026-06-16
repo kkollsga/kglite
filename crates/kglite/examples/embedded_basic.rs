@@ -42,14 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The session module is the canonical query pipeline — same
     // path Python, Bolt, and MCP all flow through (Phase E).
     let params = HashMap::new();
-    let opts = session::ExecuteOptions {
-        params: &params,
-        deadline: None,
-        max_rows: None,
-        lazy_eligible: false,
-        disabled_passes: None,
-        embedder: None,
-    };
+    let opts = session::ExecuteOptions::eager(&params);
     let outcome = session::execute_read(&graph, "MATCH (n) RETURN count(n) AS total", &opts)?;
     for row in &outcome.result.rows {
         if let Some(Value::Int64(n)) = row.first() {
