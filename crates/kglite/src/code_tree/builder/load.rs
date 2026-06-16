@@ -1631,7 +1631,12 @@ pub fn load_into_graph(
         let structs_owned: Vec<ClassInfo> = structs.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&structs_owned, &attrs_by_owner, &file_to_module, &file_is_test),
+            classes_df(
+                &structs_owned,
+                &attrs_by_owner,
+                &file_to_module,
+                &file_is_test,
+            ),
             "Struct".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1643,7 +1648,12 @@ pub fn load_into_graph(
         let mixins_owned: Vec<ClassInfo> = mixins.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&mixins_owned, &attrs_by_owner, &file_to_module, &file_is_test),
+            classes_df(
+                &mixins_owned,
+                &attrs_by_owner,
+                &file_to_module,
+                &file_is_test,
+            ),
             "Mixin".into(),
             "qualified_name".into(),
             Some("name".into()),
@@ -1655,7 +1665,12 @@ pub fn load_into_graph(
         let classes_owned: Vec<ClassInfo> = classes.into_iter().cloned().collect();
         maintain::add_nodes(
             graph,
-            classes_df(&classes_owned, &attrs_by_owner, &file_to_module, &file_is_test),
+            classes_df(
+                &classes_owned,
+                &attrs_by_owner,
+                &file_to_module,
+                &file_is_test,
+            ),
             "Class".into(),
             "qualified_name".into(),
             Some("name".into()),
