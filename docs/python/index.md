@@ -26,6 +26,7 @@ guides/index
 guides/data-loading
 guides/cypher
 guides/mcp-servers
+guides/mcp-skills
 guides/durable-apps
 guides/datasets
 guides/blueprints

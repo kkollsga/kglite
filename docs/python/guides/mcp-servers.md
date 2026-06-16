@@ -249,6 +249,7 @@ normalisation, multi-tenant scoping, etc. Worked example at
 name: My Graph                        # Server display name (optional)
 instructions: |                       # Replaces default instructions (optional)
   Custom prompt shown to the agent at server-info time.
+skills: true                          # Turn on the skill system (see below)
 source_root: ./data                   # OR source_roots: [./data, ../alt]
 builtins:
   save_graph: false                   # Default false — gate write-back tool.
@@ -266,6 +267,18 @@ tools:
 
 Anything else fails fast at load time with the offending key
 listed.
+
+### `skills:` — teach agents how to use the tools
+
+`skills: true` turns on the **skill system**: bundled and operator-authored
+markdown that injects per-tool and cross-tool methodology (and TRIGGER/SKIP
+routing) directly into tool descriptions, gated per-graph. Reach for this
+instead of stuffing everything into `instructions:` — skills re-surface in
+`tools/list`, attach to specific tools, and stay silent on graphs they don't
+fit. Drop files into a `<basename>.skills/` directory beside the manifest.
+
+The full authoring spec — frontmatter schema, `applies_when` gating, the
+three text channels, size limits — is its own guide: {doc}`mcp-skills`.
 
 ### Common boot errors
 
