@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kglite.readthedocs.io/schemas/extensions/value_codecs.json",
+  "title": "extensions.value_codecs",
+  "description": "Operator-declared, position-scoped literal conversions applied AFTER parsing — never as raw-text substitution. Each codec binds to a stored property; query-side literals in that property's position are decoded ('Q42'->42), and direct result-column projections of it are encoded back (42->'Q42'). Applies to cypher_query and tools[].cypher. No trust gate (pure declarative data transformation, no code execution). Replaces the removed extensions.cypher_preprocessor (0.10.27).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["property", "kind"],
+    "properties": {
+      "property": {
+        "type": "string",
+        "description": "The stored column the codec governs (e.g. 'id'). Literals compared against this property are decoded; direct projections of it are encoded."
+      },
+      "kind": {
+        "type": "string",
+        "enum": ["prefix", "map", "regex"],
+        "description": "prefix: strip/add a fixed prefix. map: a fixed bijective lookup table. regex: full-match rewrite of the literal string."
+      },
+      "prefix": {
+        "type": "string",
+        "description": "(kind=prefix) The prefix to strip on decode / add on encode, e.g. 'Q'."
+      },
+      "stored_type": {
+        "type": "string",
+        "enum": ["int", "float", "str"],
+        "default": "int",
+        "description": "(kind=prefix) The type the remainder must parse as on decode. Decode is total: a non-parsing remainder leaves the literal unchanged."
+      },
+      "map": {
+        "type": "object",
+        "description": "(kind=map) Mapping of input string -> stored value. Must be bijective (no two keys map to the same value), else the server fails to boot.",
+        "additionalProperties": true
+      },
+      "match": {
+        "type": "string",
+        "description": "(kind=regex) Regex matched as a full-match against the single literal (anchor it). Captures feed the decode template."
+      },
+      "decode": {
+        "type": "string",
+        "description": "(kind=regex) Replacement template (e.g. '$3-$2-$1') producing the stored form."
+      },
+      "encode": {
+        "type": "object",
+        "description": "(kind=regex) Optional reverse: { match, replace } applied to the stored value on result projection.",
+        "required": ["match", "replace"],
+        "properties": {
+          "match": { "type": "string" },
+          "replace": { "type": "string" }
+        }
+      }
+    }
+  }
+}

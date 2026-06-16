@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`extensions.value_codecs` — position-scoped, bidirectional literal codecs.**
+  An operator declares a transform (`prefix` / `map` / `regex`) bound to a
+  stored property; the engine decodes query-side literals in that property's
+  position (`{id:'Q42'}`, `WHERE n.id = 'Q42'`, `n.id IN [...]`, `CREATE/SET`)
+  and encodes direct result-column projections back (`RETURN n.id` → `'Q42'`).
+  Applied **after parsing** by a new `cypher::value_codec` pass, reached via
+  `ExecuteOptions::value_codecs` and configured from the MCP manifest. Five
+  safety invariants: position-scoped (a `'Q42'` in `CONTAINS` / a different
+  property / a `RETURN` alias is untouched), full-match (never query-text
+  substitution), decode-is-total (any non-match leaves the literal as-is, so
+  the 0.10.10 over-eager coercion stays dead), bidirectional, and typed (decode
+  lands a real `Value`, hitting the same index path as a native literal). No
+  trust gate — a Tier-1 codec is pure declarative data transformation. New
+  `kglite::api::cypher::{ValueCodec, CodecKind, StoredType}`. See
+  `docs/python/examples/manifest_value_codecs.md`.
+
+### Removed
+
+- **`extensions.cypher_preprocessor` (both `rules:` and `command:`) — removed.**
+  Introduced in 0.10.26, it rewrote the raw query *text* before parsing — blind
+  substitution that could mangle string literals, `RETURN` aliases, or anything
+  that merely contained the pattern (re-creating the over-eager-match failure
+  0.10.10 deliberately killed). `value_codecs` does the conversion at a safe,
+  post-parse, position-scoped site instead. No deprecation window (0.10.26 had
+  no released consumers). `trust.allow_query_preprocessor` is now unused by
+  kglite.
+
 ## [0.10.26] — 2026-06-16 — MCP server bundled into the wheel + native query preprocessor
 
 ### Added

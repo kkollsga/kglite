@@ -137,7 +137,7 @@ A manifest can declare several kinds of additions, all optional:
 | `tools[].cypher` | Parameterised Cypher templates as named MCP tools | None — read-only |
 | `extensions.embedder` | Registers an embedder so `text_score()` works inside Cypher | `trust.allow_embedder: true` |
 | `extensions.csv_http_server` | Localhost listener that serves `FORMAT CSV` exports as URLs | None |
-| `extensions.cypher_preprocessor` | Manifest-declared Python hook that rewrites queries before execution | `trust.allow_query_preprocessor: true` |
+| `extensions.value_codecs` | Position-scoped literal conversions (`'Q42'↔42`) bound to a property, applied after parsing | none (declarative; presence is opt-in) |
 | `workspace:` | Bind a local directory (or clone-and-track GitHub repos) as the active source root | None |
 | `builtins.save_graph: true` | Registers `save_graph` so the agent can persist mutations | None |
 
@@ -257,22 +257,26 @@ inside `cypher_query`. Worked example at
 {doc}`../examples/manifest_with_embedder`. Reference under
 [`extensions:` schema reference](#extensions-schema-reference) below.
 
-### `extensions.cypher_preprocessor` — rewrite agent input
+### `extensions.value_codecs` — convert literals in/out
 
-Rewrite the agent's Cypher before every `cypher_query` and
-`tools[].cypher` invocation — domain-specific identifier coercion
-(Wikidata Q-numbers → integers), date normalisation, multi-tenant
-scoping. Two shapes, both gated by `trust.allow_query_preprocessor:
-true` and neither needing a bespoke FastMCP server:
+Map the agent's natural input onto your stored types — and read it back in
+the form the agent typed — for one declared property at a time. Bound to a
+property and applied **after parsing** (never as raw-text substitution), so
+it's position-scoped and can't mangle unrelated literals. Three kinds:
 
-- **`rules:`** — ordered regex substitutions (replacement supports
-  `$1` backrefs). Covers most id/token normalisation with zero code.
-- **`command:`** — a subprocess (query on stdin → rewritten query on
-  stdout), run with the manifest dir as its cwd, for arbitrary logic
-  in any language.
+- **`prefix`** — strip/add a fixed prefix (Wikidata `'Q42'↔42`, `gene:BRCA1`).
+- **`map`** — a fixed bijective lookup table (enum `'active'↔1`).
+- **`regex`** — full-match rewrite of the literal (date `'31.12.2020'→'2020-12-31'`).
 
-Worked example at {doc}`../examples/manifest_cypher_preprocessor`.
-Reference below.
+Decode runs on query-side literals in the property's position; encode runs on
+direct result-column projections of it. No trust gate — a codec is pure
+declarative data transformation. Worked example at
+{doc}`../examples/manifest_value_codecs`. Reference below.
+
+> Replaces `extensions.cypher_preprocessor` (removed in 0.10.27) — that hook
+> rewrote raw query *text* before parsing, which could corrupt string
+> literals / RETURN aliases. `value_codecs` does the conversion at a safe,
+> post-parse, position-scoped site instead.
 
 ### Top-level fields
 
@@ -324,8 +328,8 @@ startup with a non-zero exit code. The recurring ones:
 | `ERROR: <path>: cypher tool 'foo': cypher references $params ['bar'] not declared in parameters.properties` | A `$param` in the Cypher template isn't in the JSON Schema. | Add it under `parameters.properties` (and to `required:` if it's mandatory). |
 | `ERROR: <path>: cypher tool 'foo': invalid parameters schema: ...` | The `parameters:` block isn't valid JSON Schema (Draft 2020-12). | Check `type`, nested types in `properties`, and `required:` list. |
 | `ERROR: --mcp-config path does not exist: <path>` | Explicit `--mcp-config` value points at a missing file. | Check the path. Sibling auto-detect is `<basename>_mcp.yaml`. |
-| `ERROR: extensions.cypher_preprocessor requires trust.allow_query_preprocessor: true` | Preprocessor declared without the trust gate. | Add `trust:\n  allow_query_preprocessor: true` to the manifest. |
-| `ERROR: extensions.cypher_preprocessor.module file does not exist: <path>` | Preprocessor module path is wrong (paths are manifest-relative). | Check that the `.py` file exists at the configured path. |
+| `ERROR: extensions.value_codecs ... is not bijective` | A `map` codec has two keys mapping to the same value, so encode is ambiguous. | Make the `map:` one-to-one. |
+| `ERROR: value_codecs[i].match ... is not a valid regex` | A `regex` codec's `match` doesn't compile. | Fix the regex (anchor it for a full match). |
 
 Exit code 3 is reserved for manifest / validation errors; exit 1 for
 graph-file-not-found and for missing runtime dependencies. Wrapping
@@ -403,11 +407,10 @@ Tools registered (visible in any MCP-aware agent):
 - `similar_sessions` — inline Cypher
 - `session_detail` — inline Cypher
 
-That's seven tools from ~35 lines of YAML, zero Python. For shapes
-that need real Python logic (HTTP fetch, file parse, custom
-identifier rewriting), see {doc}`../examples/manifest_cypher_preprocessor`
-for the query-preprocessor hook, or **Building a downstream binary**
-below for full Rust integration.
+That's seven tools from ~35 lines of YAML, zero Python. For mapping the
+agent's input onto your stored types (Wikidata `'Q42'↔42`, enum codes, date
+formats), see {doc}`../examples/manifest_value_codecs`. For full Rust
+integration, see **Building a downstream binary** below.
 
 ## Building a downstream binary
 
@@ -595,19 +598,16 @@ the graph dir:
 
 ```yaml
 name: Wikidata
-trust:
-  allow_query_preprocessor: true
 extensions:
-  cypher_preprocessor:
-    rules:
-      - pattern: "'Q(\\d+)'"   # 'Q42' → 42 (strip quotes + prefix)
-        replace: "$1"
-    # or, for arbitrary logic:
-    # command: ["./wikidata_rewrite.py"]   # query on stdin → stdout
+  value_codecs:
+    - property: id          # integer-keyed column
+      kind: prefix
+      prefix: "Q"           # decode 'Q42' → 42 ; encode 42 → 'Q42'
+      stored_type: int
 ```
 
-See {doc}`../examples/manifest_cypher_preprocessor` for the full
-Wikidata example (Q-number → integer rewriting).
+See {doc}`../examples/manifest_value_codecs` for the full Wikidata example
+(Q-number ↔ integer, plus the `map` and `regex` kinds).
 
 ## Troubleshooting
 
@@ -714,12 +714,12 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
 | `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |
 | `tools[].cypher` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
-| `trust.allow_python_tools` / `allow_embedder` / `allow_query_preprocessor` | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension |
+| `trust.allow_python_tools` / `allow_embedder` | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension |
 | `builtins.save_graph: true` | ✓ (registers `save_graph`) | — (multiple graphs) | — | — | — |
 | `builtins.temp_cleanup: on_overview` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.embedder` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
 | `extensions.csv_http_server` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `extensions.cypher_preprocessor` | ✓ | ✓ | ✓ | — (no graph) | — |
+| `extensions.value_codecs` | ✓ | ✓ | ✓ | — (no graph) | — |
 | `extensions.<other>` (passthrough) | parsed, opaque to framework | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
 | legacy top-level `embedder:` (pre-0.9.18) | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored |
 | `tools[].python:` (pre-0.9.18) | not loaded; mcp-methods (Rust) still parses it | (same) | (same) | (same) | (same) |
@@ -796,7 +796,7 @@ repo:
 
 - [`csv_http_server.json`][schema-csv]
 - [`embedder.json`][schema-embedder]
-- [`cypher_preprocessor.json`][schema-preprocessor]
+- [`value_codecs.json`][schema-value-codecs]
 
 The schemas are anchored to the Python parsers by the regression
 test `tests/test_extensions_schemas.py` — any drift between
@@ -806,7 +806,7 @@ as a test failure on the next CI run.
 [schemas-dir]: https://github.com/kkollsga/kglite/tree/main/docs/schemas/extensions
 [schema-csv]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/csv_http_server.json
 [schema-embedder]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/embedder.json
-[schema-preprocessor]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/cypher_preprocessor.json
+[schema-value-codecs]: https://github.com/kkollsga/kglite/blob/main/docs/schemas/extensions/value_codecs.json
 
 #### `extensions.embedder`
 
@@ -863,47 +863,43 @@ Only GETs of flat filenames inside `dir` are served. No directory
 listings, no write surface from the HTTP layer (writes only come
 from the Cypher executor via `FORMAT CSV`).
 
-#### `extensions.cypher_preprocessor` (0.9.25+)
+#### `extensions.value_codecs` (0.10.27+)
 
-Manifest-declarable hook fired before every `cypher_query` and
-`tools[].cypher` invocation. Optionally rewrites query + params
-before they reach `graph.cypher(...)`.
+A list of operator-declared literal codecs, each bound to a stored property.
+Query-side literals in that property's position are decoded before execution;
+direct result-column projections of it are encoded back. Applied **after
+parsing** (never as raw-text substitution), for `cypher_query` and
+`tools[].cypher` only — not `graph_overview`, `read_source`, etc.
 
 ```yaml
-trust:
-  allow_query_preprocessor: true    # required gate; mirrors allow_embedder
-
 extensions:
-  cypher_preprocessor:
-    module: ./wikidata_preprocessor.py   # path; relative to manifest, or absolute
-    class: WikidataPreprocessor          # callable class OR
-    # function: rewrite                  # alternative: module-level free function
-    kwargs:                              # optional, passed to constructor
-      log_rewrites: false
+  value_codecs:
+    - property: id
+      kind: prefix            # prefix | map | regex
+      prefix: "Q"             # 'Q42' ↔ 42
+      stored_type: int        # int (default) | float | str
+    - property: status
+      kind: map
+      map: { active: 1, archived: 2 }    # must be bijective
+    - property: event_date
+      kind: regex
+      match: '^(\d{2})\.(\d{2})\.(\d{4})$'
+      decode: '$3-$2-$1'
+      encode: { match: '^(\d{4})-(\d{2})-(\d{2})$', replace: '$3.$2.$1' }  # optional
 ```
-
-Protocol the loaded callable must implement:
-
-```python
-class CypherPreprocessor(Protocol):
-    def rewrite(self, query: str, params: dict | None) -> tuple[str, dict | None]:
-        """Rewrite the query and/or params before execution.
-        Either may be returned unchanged.
-        Raising ValueError / TypeError surfaces to the agent as
-        'preprocessor: <msg>' inside the tool response."""
-```
-
-The hook fires for `cypher_query` and `tools[].cypher` only. It is
-**not** called for `graph_overview`, `read_source`, `grep`,
-`list_source`, `read_code_source`, `repo_management`, `set_root_dir`,
-`github_issues`, `github_api`, `ping`, or `save_graph`.
 
 | Field | Type | Default | Constraint |
 |---|---|---|---|
-| `module` | string | (required) | Path to a `.py` file. Manifest-relative or absolute. |
-| `class` | string | one of `class`/`function` required | Importable class name; instantiated with `kwargs`. |
-| `function` | string | one of `class`/`function` required | Module-level function with signature `(query, params) -> (query, params)`. |
-| `kwargs` | mapping | `{}` | Passed to the class constructor (ignored for `function:`). |
+| `property` | string | (required) | Stored column the codec governs. |
+| `kind` | string | (required) | `prefix` \| `map` \| `regex`. |
+| `prefix` | string | (required for `prefix`) | Stripped on decode, added on encode. |
+| `stored_type` | string | `int` | `int` \| `float` \| `str` (for `prefix`). |
+| `map` | mapping | (required for `map`) | string → value; must be bijective. |
+| `match` / `decode` | string | (required for `regex`) | Full-match regex + replacement template. |
+| `encode` | `{match, replace}` | none | Optional reverse for `regex`. |
+
+No trust gate — a codec is pure declarative data transformation (no code
+execution). A malformed block (bad regex, non-bijective map) is a boot error.
 
 #### `extensions.<other>` (passthrough)
 
@@ -999,9 +995,8 @@ which case the kglite-side change is a one-line addition to
 
 **Relative paths in manifests resolve against the manifest's own
 directory.** This applies to `source_root`, `env_file`, every
-entry in `source_roots`, `workspace.root`,
-`extensions.csv_http_server.dir`, and
-`extensions.cypher_preprocessor.module`. The rule is unconditional:
+entry in `source_roots`, `workspace.root`, and
+`extensions.csv_http_server.dir`. The rule is unconditional:
 no path is interpreted relative to `cwd` unless explicitly
 absolute.
 
@@ -1082,5 +1077,5 @@ End-to-end manifest snippets, each focused on one feature:
 ../examples/manifest_cypher_tool
 ../examples/manifest_with_embedder
 ../examples/manifest_workspace
-../examples/manifest_cypher_preprocessor
+../examples/manifest_value_codecs
 ```
