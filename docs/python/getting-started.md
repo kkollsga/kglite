@@ -13,7 +13,7 @@ an MCP server for Claude / Cursor / agents and to parse Python / Rust
 Optional extras:
 
 ```bash
-pip install "kglite[embed]"  # local embedding models (fastembed) for semantic search
+pip install fastembed        # or sentence-transformers — embedding models for semantic search (bring your own)
 pip install "kglite[neo4j]"  # round-trip with Neo4j
 ```
 

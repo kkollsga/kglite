@@ -140,7 +140,7 @@ server-mode Cypher and want the in-process driver for tests.
 pip install kglite
 
 # Optional extras
-pip install 'kglite[embed]'      # fastembed + onnxruntime for text_score()
+pip install fastembed            # (or sentence-transformers) embedding models for text_score() — bring your own
 pip install 'kglite[neo4j]'      # Neo4j Python driver for Bolt-server tests
 ```
 
@@ -340,8 +340,8 @@ graph.cypher("""
 """, params={"query_vec": query_embedding})
 ```
 
-Vector embeddings via `pip install 'kglite[embed]'` (adds fastembed +
-onnxruntime). **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
+Vector embeddings via a bring-your-own embedder — `pip install fastembed` (or
+`sentence-transformers`) and pass it to `g.set_embedder(...)`. **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
 
 ### Structural validators — surface data-integrity gaps
 
@@ -519,7 +519,7 @@ Quick reference. Each links into the appropriate guide.
 | Feature | Description |
 |---|---|
 | **[Cypher](https://kglite.readthedocs.io/en/latest/python/guides/cypher.html)** | MATCH, CREATE, SET, DELETE, MERGE, UNION/INTERSECT/EXCEPT, aggregations (incl. `median`, `percentile_cont`, `variance`), `reduce()`, ORDER BY, LIMIT, SKIP |
-| **[Semantic search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html)** | Vector embeddings + `text_score()` for similarity ranking. Opt-in via `pip install 'kglite[embed]'`. |
+| **[Semantic search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html)** | Vector embeddings + `text_score()` for similarity ranking. Bring your own embedder (`pip install fastembed` or `sentence-transformers`). |
 | **Text predicates** | `text_edit_distance`, `text_normalize`, `text_jaccard`, `text_ngrams`, `text_contains_any` / `text_starts_with_any` |
 | **[Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html)** | Shortest path (BFS or Dijkstra), centrality, community detection, clustering |
 | **Structural validators** | 14 `CALL` procedures: `orphan_node`, `missing_required_edge`, `cycle_2step`, `inverse_violation`, `cardinality_violation`, `parallel_edges`, `null_property`, more — agent-discoverable integrity checks composable with Cypher |

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP server embedder is now `library`-based and bring-your-own.** Replaced
+  the `extensions.embedder.backend` field with `library` (the engine you name):
+  `sentence-transformers` / `fastembed` (Python, wheel-hosted) or `fastembed-rs`
+  (Rust, cargo `--features fastembed`), plus a `factory: module:attr` escape for
+  any custom embedder. The Rust server hands the whole config to the Python side
+  (`kglite._mcp_embed`), so adding a library never touches Rust. This **unlocks
+  `bge-m3` on the pip server** via `library: sentence-transformers` — fastembed-py
+  (the previous hardwired choice) doesn't have bge-m3; fastembed-rs and
+  sentence-transformers do. Unknown library / not-installed / host-mismatch all
+  produce actionable boot errors. (Supersedes the `backend: python` shape added
+  hours earlier in 0.10.27.)
+
+### Removed
+
+- **The `kglite[embed]` extra.** Embedding is bring-your-own: `pip install kglite`
+  pins no embedding library; install whichever you name (`pip install fastembed`
+  / `sentence-transformers`), matching the engine's `g.set_embedder(...)`
+  philosophy. `pip install 'kglite[embed]'` no longer resolves.
+
 ## [0.10.27] — 2026-06-16 — value_codecs (safe literal conversions); cypher_preprocessor removed
 
 ### Added

@@ -41,21 +41,21 @@ cargo install kglite-mcp-server
 Either way the `kglite-mcp-server` command lands on PATH running the same
 Rust server. Run `kglite-mcp-server --help` to confirm.
 
-For semantic search (`text_score()`) in the server via a manifest
-`extensions.embedder` block, pick the backend that matches your install:
+For semantic search (`text_score()`) in the server, name an embedding engine in
+the manifest `extensions.embedder` block — you provide the `library` and the
+`model`, and install that library:
 
-- **pip wheel** → `backend: python` + `pip install 'kglite[embed]'`. The
-  bundled server builds a fastembed-py model on demand — no Rust
-  toolchain, no `ort-sys` download.
-- **standalone cargo binary** → `backend: fastembed` +
-  `cargo install kglite-mcp-server --features fastembed` (the Rust
-  fastembed-rs backend; no Python in the deployment).
+- **pip wheel** → a Python library: `library: sentence-transformers` (`pip
+  install sentence-transformers` — has `bge-m3` + all of HuggingFace) or
+  `library: fastembed` (`pip install fastembed` — light, but no `bge-m3`).
+- **standalone cargo binary** → `library: fastembed-rs` +
+  `cargo install kglite-mcp-server --features fastembed` (no Python in the
+  deployment; has `bge-m3`).
 
-Both produce the same vectors. See the
-[embedder example](../examples/manifest_with_embedder.md). (The default
-wheel and default cargo binary omit fastembed-rs because its `ort-sys`
-dependency has a flaky binary download — that's why the wheel uses the
-Python backend instead.)
+See the [embedder example](../examples/manifest_with_embedder.md). Note the two
+fastembeds are *separate* libraries with different catalogs (bge-m3 is in
+fastembed-rs + sentence-transformers, **not** fastembed-py), and the runtime
+model must match the one the graph was embedded with.
 
 ### 2. Point it at a graph file
 
@@ -291,7 +291,7 @@ builtins:
   temp_cleanup: on_overview           # Wipe temp/ on every bare graph_overview().
 extensions:                           # kglite-specific addons (see matrix below).
   embedder:
-    backend: fastembed
+    library: sentence-transformers    # or fastembed (py) / fastembed-rs (cargo)
     model: BAAI/bge-m3
   csv_http_server:
     port: 8765
@@ -815,16 +815,17 @@ Registers an embedder so `text_score()` works inside Cypher.
 ```yaml
 extensions:
   embedder:
-    backend: fastembed              # required; only "fastembed" is currently supported
-    model: BAAI/bge-m3              # required; see "Embedder backend × model catalog" below
-    cooldown: 900                   # optional; seconds (default 900). 0 = never release.
+    library: sentence-transformers  # the engine; host (Python/Rust) inferred from it
+    model: BAAI/bge-m3              # required (passed to the library)
+    # cooldown: 900                 # fastembed-rs only; seconds (default 900). 0 = never release.
 ```
 
 | Field | Type | Default | Constraint |
 |---|---|---|---|
-| `backend` | string | (required) | Must be `"fastembed"`. |
-| `model` | string | (required) | Must be in the catalog table below. |
-| `cooldown` | int | 900 | seconds; `0` disables auto-release. bge-m3 only — other models ignore this field. |
+| `library` | string | `fastembed` | `fastembed` / `sentence-transformers` (Python, wheel) · `fastembed-rs` (Rust, cargo). |
+| `model` | string | (required) | Passed to the chosen library; must be in *its* catalog. |
+| `factory` | string | — | `module:attr` returning an `EmbeddingModel` — any custom Python embedder. |
+| `cooldown` | int | 900 | `fastembed-rs` only; `0` disables auto-release. |
 
 The legacy `embedder:` block (top-level, 0.9.17 and earlier) is
 parsed by the framework but ignored — use `extensions.embedder:` with
@@ -965,31 +966,28 @@ not at agent call time.
 Worked examples — see `docs/examples/manifest_cypher_tool.md`
 through `docs/examples/manifest_wikidata.md`.
 
-### Embedder backend × model catalog
+### Embedder `library` × model catalog
 
-`extensions.embedder.backend: fastembed` is currently the only
-supported backend (build the server with `cargo install
-kglite-mcp-server --features fastembed`). The `model:` string selects
-a model from the Rust fastembed-rs catalog:
+The valid `model:` values depend on the `library:` you pick — the catalogs are
+**not** shared:
 
-| Model name | Dimension | Internal backend |
-|---|:---:|---|
-| `BAAI/bge-m3` | 1024 | Rust fastembed-rs backend (a dedicated ONNX inference path with HuggingFace Hub downloads). |
-| `BAAI/bge-small-en-v1.5`, `bge-small-en-v1.5` | 384 | Rust fastembed-rs backend. |
-| `BAAI/bge-base-en-v1.5`, `bge-base-en-v1.5` | 768 | Rust fastembed-rs backend. |
-| `BAAI/bge-large-en-v1.5`, `bge-large-en-v1.5` | 1024 | fastembed-python. |
-| `sentence-transformers/all-MiniLM-L6-v2`, `all-MiniLM-L6-v2` | 384 | fastembed-python. |
-| `intfloat/multilingual-e5-large`, `multilingual-e5-large` | 1024 | fastembed-python. |
-| `intfloat/multilingual-e5-base`, `multilingual-e5-base` | 768 | fastembed-python. |
+| `library:` | Catalog | `bge-m3`? |
+|---|---|---|
+| `sentence-transformers` (pip) | any HuggingFace embedding model | ✅ |
+| `fastembed` (pip, fastembed-py) | `bge-*-en-v1.5`, `bge-small-zh-v1.5`, `multilingual-e5-large`, `all-MiniLM-L6-v2`, … (`TextEmbedding.list_supported_models()`) | ❌ |
+| `fastembed-rs` (cargo) | `bge-m3`, `bge-{small,base,large}-en-v1.5`, `multilingual-e5-{large,base}`, `all-MiniLM-L6-v2` | ✅ |
+| `factory: mod:attr` | whatever your builder loads | — |
 
-Both internal backends cache ONNX weights at `~/.cache/fastembed/`
-(or `FASTEMBED_CACHE_PATH` if set). First call downloads; subsequent
-calls re-use the cache.
+**`bge-m3` is in fastembed-rs and sentence-transformers, but not fastembed-py**
+— if you set `library: fastembed, model: BAAI/bge-m3` the server fails to boot
+(fastembed-py rejects the unknown model). And the runtime model must match the
+one the graph was embedded with, or `text_score()` rankings are meaningless.
 
-Adding a new model: open an issue with the HuggingFace identifier
-and target dimension. fastembed-python adds models periodically, in
-which case the kglite-side change is a one-line addition to
-`kglite/mcp_server/embedder.py::KNOWN_MODELS`.
+fastembed (both ports) caches ONNX weights at `~/.cache/fastembed/`;
+sentence-transformers uses the HuggingFace cache. First call downloads.
+
+Adding support for a model outside the curated Python libraries doesn't need a
+kglite change — use `factory: module:attr` pointing at your own builder.
 
 ### Path resolution and manifest discovery
 

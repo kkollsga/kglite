@@ -6,17 +6,28 @@ embedder path. (For engine-level semantic search from Python, pass your
 own embedder to `graph.set_embedder(...)` instead — see the
 semantic-search guide.)
 
-## Two backends — pick by how you install the server
+## You name the engine (`library`) and the `model`; you install the engine
 
-| `backend:` | Embedding engine | Install | When |
+The `library` field selects the embedding engine; the host (Python vs Rust)
+is inferred from it, and you `pip install` (or `cargo install`) whichever you
+name:
+
+| `library:` | Engine | Install | Notes |
 |---|---|---|---|
-| `python` | fastembed-**py** (the `fastembed` PyPI package) | `pip install 'kglite[embed]'` | You run the **pip-bundled** server (`pip install kglite`). No Rust toolchain, no `ort-sys` download. |
-| `fastembed` | fastembed-**rs** (Rust, cargo feature) | `cargo install kglite-mcp-server --features fastembed` | You run the **standalone** binary (no Python in the deployment). |
+| `sentence-transformers` | sentence-transformers (any HF model) | `pip install sentence-transformers` | **Has `bge-m3`** + the whole HF catalog. Heaviest (torch). |
+| `fastembed` | fastembed-**py** | `pip install fastembed` | Light ONNX runtime. Catalog is `bge-*-en-v1.5`, `e5`, etc. — **no `bge-m3`**. |
+| `fastembed-rs` | fastembed-**rs** (Rust) | `cargo install kglite-mcp-server --features fastembed` | The standalone-binary path (no Python). **Has `bge-m3`.** |
+| `factory: mod:attr` | anything you build | (your own deps) | A `module:attr` returning an `EmbeddingModel`. |
 
-Both produce the same vectors from the same bge models — they're two
-ports of fastembed over the same ONNX Runtime. Choose the one matching
-your install path; the rest of the manifest and all `text_score()`
-queries are identical.
+> **The two fastembeds are *separate* libraries with *different* catalogs.**
+> fastembed-rs has `bge-m3`; fastembed-py does not. So `library: fastembed` +
+> `model: BAAI/bge-m3` **fails** — use `sentence-transformers` (pip) or
+> `fastembed-rs` (cargo) for bge-m3.
+>
+> **And the runtime engine must match the model your graph was embedded with.**
+> `text_score()` compares the query vector against the stored node vectors; if
+> they're from different models the rankings are meaningless. Embed at build
+> time and serve at query time with the *same* model.
 
 ## Manifest
 
@@ -27,38 +38,35 @@ instructions: |
   Article corpus with bge-m3 embeddings. Use text_score() inside
   cypher_query for semantic relevance scoring.
 
-# pip-bundled server (pip install 'kglite[embed]'):
+# Python (the wheel server) — sentence-transformers has bge-m3:
 extensions:
   embedder:
-    backend: python
-    model: BAAI/bge-m3        # 1024-d, via the fastembed-py package
+    library: sentence-transformers
+    model: BAAI/bge-m3            # 1024-d
 
 # — or, on the standalone cargo binary (--features fastembed):
 # extensions:
 #   embedder:
-#     backend: fastembed
-#     model: BAAI/bge-m3      # 1024-d, via the Rust fastembed-rs backend
-#     cooldown: 1800          # release session after 30 min idle (default 900)
+#     library: fastembed-rs
+#     model: BAAI/bge-m3          # 1024-d, via the Rust fastembed-rs engine
+#     cooldown: 1800              # release session after 30 min idle (default 900)
 ```
 
-> `cooldown:` (lazy session release) applies to the Rust `fastembed`
-> backend. The `python` backend's lifecycle follows whatever the
+> `cooldown:` (lazy session release) applies to the Rust `fastembed-rs`
+> engine. A Python library's lifecycle follows whatever the
 > fastembed-py model does (it stays resident for the server's life).
 
 ## What happens at boot
 
-1. The server (`kglite-mcp-server --features fastembed`) parses the
-   manifest, validates `extensions.embedder`, and registers the Rust
-   fastembed-rs embedder against the active graph.
-2. The embedder is lazy — no model weights are downloaded or loaded
-   into memory until the first `text_score()` call.
-3. On first call, the ONNX session and tokenizer cold-load
-   (~1 second). Subsequent warm calls run ~20 ms.
-4. After `cooldown` seconds of inactivity, the embedder releases the
-   session — ~2 GB of RAM goes back. Next call cold-loads again.
-
-Set `cooldown: 0` to disable the auto-release (heavy-use mode —
-session stays resident forever).
+1. The server parses the manifest, validates `extensions.embedder`, builds the
+   chosen `library`'s model, and registers it against the active graph.
+2. The model loads at boot (the wheel server builds the Python model then;
+   fastembed-rs lazy-loads weights on the first `text_score()` call).
+3. Warm calls then run fast (fastembed-rs ~20 ms; sentence-transformers depends
+   on the model + device).
+4. For `library: fastembed-rs`, `cooldown` seconds of inactivity releases the
+   ONNX session (RAM returns; next call cold-loads). `cooldown: 0` keeps it
+   resident.
 
 ## Calling it
 
@@ -81,15 +89,16 @@ embedding of `query_text`. Both embeddings are computed on demand
 (the property's text is embedded lazily, then cached against the
 node for the lifetime of the graph in memory).
 
-## Multi-model: switching to a fastembed-catalog model
+## Multi-model: switching to a smaller model
 
 For `text_score()` use cases where bge-m3's 1.5 GB weights are
-overkill, use the smaller fastembed-catalog models:
+overkill, a smaller English model is lighter (these are in both the
+fastembed-py and fastembed-rs catalogs):
 
 ```yaml
 extensions:
   embedder:
-    backend: fastembed
+    library: fastembed                 # or fastembed-rs (cargo)
     model: BAAI/bge-small-en-v1.5      # 384-d, ~130 MB
 ```
 
@@ -112,13 +121,17 @@ and don't pay the same ~1 s session-init cost).
 
 ## Failure modes
 
-- **Boot** (`extensions.embedder.backend` neither `"python"` nor
-  `"fastembed"`): `extensions.embedder.backend = '<value>' is not supported.`
-- **Boot** (`backend: python` on the standalone cargo binary): refuses
-  to boot — `backend = "python" requires the pip-hosted server …`. Use
-  `backend: fastembed` there, or run the pip wheel.
-- **Boot** (unknown `model:`):
-  `unsupported fastembed model name: '<value>'. Known: [...]`.
+- **Boot** (a Python `library:` on the standalone cargo binary): refuses to
+  boot — *"… is a Python embedding library, but the standalone binary has no
+  Python …"*. Use `library: fastembed-rs`, or run the pip wheel.
+- **Boot** (`library: fastembed-rs` on the wheel / a binary without the
+  feature): *"… requires `--features fastembed`"*. Use a Python `library:` on
+  the wheel.
+- **Boot** (library not installed): *"`library: sentence-transformers` is not
+  installed: `pip install sentence-transformers`"*.
+- **Boot** (unknown `library:`): lists the known libraries + suggests `factory:`.
+- **Boot** (unknown `model:` for the chosen library): the library raises (e.g.
+  fastembed-py has no `bge-m3` → use `sentence-transformers`).
 - **Boot** (`cooldown:` negative or non-int):
   `extensions.embedder.cooldown must be a non-negative integer`.
 - **Runtime** (`text_score()` against a node without the named
