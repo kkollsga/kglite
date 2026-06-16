@@ -82,13 +82,12 @@ def test_bundled_server_runs_cypher_on_graph(tmp_path: Path) -> None:
     assert "4" in out
 
 
-def test_python_backend_embedder_powers_text_score(tmp_path: Path) -> None:
-    """`extensions.embedder.backend: python` lets the bundled server run
-    `text_score()` via a Python embedder handed in by `_run_mcp_server`'s
-    factory — the path that makes `pip install kglite[embed]` work without the
-    fastembed cargo feature. Uses a deterministic stub embedder (no network, no
-    real model): identical text → identical vector, so the exact-match node
-    ranks top."""
+def test_python_library_embedder_powers_text_score(tmp_path: Path) -> None:
+    """A Python embedder library (`extensions.embedder.library: …`) lets the
+    bundled server run `text_score()` via a Python embedder handed in by
+    `_run_mcp_server`'s factory (which receives the config JSON). Uses a
+    deterministic stub (no network, no real model): identical text → identical
+    vector, so the exact-match node ranks top."""
     # A stub embedder shared by build-time (g.embed_texts) and serve-time (the
     # factory), so the stored node vectors and the query vector use one scheme.
     stub_mod = tmp_path / "stub_embed.py"
@@ -116,17 +115,18 @@ def test_python_backend_embedder_powers_text_score(tmp_path: Path) -> None:
         sys.path.remove(str(tmp_path))
 
     manifest = tmp_path / "docs_mcp.yaml"
-    manifest.write_text("name: stub\nextensions:\n  embedder:\n    backend: python\n    model: stub\n")
+    # `library: stub` (anything but fastembed-rs) routes to the Python factory.
+    manifest.write_text("name: stub\nextensions:\n  embedder:\n    library: stub\n    model: stub\n")
 
     # Launch the bundled server with the same stub via the factory arg — the
-    # real console-script path uses the fastembed factory; here we inject the
-    # stub so the test is deterministic and offline.
+    # real console-script path dispatches on library; here we inject the stub
+    # (ignoring the config JSON) so the test is deterministic and offline.
     launcher = tmp_path / "launch.py"
     launcher.write_text(
         "import sys\n"
         f"sys.path.insert(0, {str(tmp_path)!r})\n"
         "import kglite, stub_embed\n"
-        "kglite._run_mcp_server(sys.argv[1:], embedder_factory=lambda m: stub_embed.StubEmbedder())\n"
+        "kglite._run_mcp_server(sys.argv[1:], embedder_factory=lambda cfg: stub_embed.StubEmbedder())\n"
     )
     proc = subprocess.Popen(
         [sys.executable, str(launcher), "--graph", str(kgl), "--mcp-config", str(manifest)],

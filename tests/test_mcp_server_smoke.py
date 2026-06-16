@@ -977,16 +977,18 @@ class TestValueCodecs:
         assert "value_codecs" in stderr or "bijective" in stderr, stderr[:400]
 
 
-class TestEmbedderBackends:
-    """`extensions.embedder.backend` selection."""
+class TestEmbedderLibrary:
+    """`extensions.embedder.library` selection — the engine the user names."""
 
-    def test_python_embedder_backend_rejected_by_cargo_binary(self, graph_fixture: Path, tmp_path: Path):
-        """`extensions.embedder.backend: python` is a pip-wheel-only path (it
-        needs a Python interpreter to host fastembed-py). The standalone cargo
-        binary has none, so it must refuse to boot with a clear message rather
-        than start without semantic search."""
+    def test_python_library_rejected_by_cargo_binary(self, graph_fixture: Path, tmp_path: Path):
+        """A Python embedding library (`library: sentence-transformers`) needs a
+        Python interpreter to host it. The standalone cargo binary has none, so
+        it must refuse to boot with a clear message pointing at the wheel or
+        `library: fastembed-rs`."""
         manifest = tmp_path / "py_embed_mcp.yaml"
-        manifest.write_text("name: py_embed\nextensions:\n  embedder:\n    backend: python\n    model: BAAI/bge-m3\n")
+        manifest.write_text(
+            "name: py_embed\nextensions:\n  embedder:\n    library: sentence-transformers\n    model: BAAI/bge-m3\n"
+        )
         proc = subprocess.Popen(
             [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
             stdin=subprocess.PIPE,
@@ -997,10 +999,10 @@ class TestEmbedderBackends:
             rc = proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
-            raise AssertionError("server should have exited (backend: python on the binary) but kept running")
+            raise AssertionError("server should have exited (Python library on the binary) but kept running")
         stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-        assert rc != 0, "cargo binary should fail to boot on backend: python"
-        assert "pip-hosted server" in stderr or "python" in stderr.lower(), stderr[:400]
+        assert rc != 0, "cargo binary should fail to boot on a Python embedder library"
+        assert "Python embedding library" in stderr or "fastembed-rs" in stderr, stderr[:400]
 
 
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────

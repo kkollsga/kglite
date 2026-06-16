@@ -49,14 +49,13 @@ neo4j = ["neo4j>=5.0"]
 # module load. `from_networkx` also uses pandas (already required by the
 # DataFrame loaders), so only networkx is declared here.
 networkx = ["networkx>=3.0"]
-# Optional fastembed install for engine-level semantic search: lets a Python
-# user back `g.set_embedder(...)` / `text_score()` with fastembed without
-# pulling it by hand. Bring-your-own-embedder is the general path — any
-# duck-typed object works (see the `Embedder` protocol in
-# kglite/__init__.pyi, and the semantic-search guide's sentence-transformers
-# example). (The MCP server's own embedder is separate: the Rust
-# `kglite-mcp-server --features fastembed` backend, not this wheel extra.)
-embed = ["fastembed>=0.4"]
+# No `embed` extra (removed in 0.10.28). Embedding is bring-your-own: the user
+# installs whatever embedding library they want and names it. For engine-level
+# semantic search, pass any duck-typed object to `g.set_embedder(...)` (see the
+# `Embedder` protocol in kglite/__init__.pyi). For the MCP server, declare
+# `extensions.embedder: {library: fastembed | sentence-transformers | …, model: …}`
+# and `pip install` that library (or `cargo install --features fastembed` for
+# the Rust `library: fastembed-rs`). The wheel pins no embedding library.
 
 # `kglite-mcp-server` console script. As of 0.10.26 the Rust MCP server is
 # bundled into the wheel (statically linked into the extension via the

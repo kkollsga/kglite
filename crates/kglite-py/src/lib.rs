@@ -251,14 +251,15 @@ fn cypher_pass_names() -> Vec<String> {
 /// the entire run (the Python process simply *becomes* the MCP server).
 ///
 /// `embedder_factory`, when given, is a Python callable
-/// `factory(model_name: str) -> EmbeddingModel`. It is invoked **only**
-/// if the manifest declares `extensions.embedder.backend: python` — the
-/// server then wraps the returned object in a `PyEmbedderAdapter` (which
-/// re-acquires the GIL just for the per-query embed) so `text_score()`
-/// runs against a fastembed-py model with no Rust toolchain and no
-/// `ort-sys` download. This is what makes `pip install 'kglite[embed]'`
-/// power semantic search in the bundled server. The standalone cargo
-/// binary supplies no factory, so `backend: python` errors there.
+/// `factory(config_json: str) -> EmbeddingModel`, where `config_json` is the
+/// manifest's whole `extensions.embedder` object. It is invoked **only** for a
+/// Python-hosted embedder library (`library: fastembed` / `sentence-transformers`
+/// / a `factory:` escape — anything that isn't `fastembed-rs`). The factory
+/// (`kglite._mcp_embed`) picks the library, builds the model, and returns an
+/// `EmbeddingModel`; the server wraps it in a `PyEmbedderAdapter` (GIL
+/// re-acquired just for the per-query embed) so `text_score()` runs against it
+/// with no Rust toolchain. The standalone cargo binary supplies no factory, so
+/// a Python library errors there (use `library: fastembed-rs`).
 #[pyfunction]
 #[pyo3(signature = (argv, embedder_factory=None))]
 fn _run_mcp_server(
@@ -273,12 +274,13 @@ fn _run_mcp_server(
     // Bridge the Python factory into the libpython-free server library as a
     // Rust closure producing an `Arc<dyn Embedder>`. The closure re-acquires
     // the GIL (`Python::attach`) only when the server actually calls it — at
-    // boot, if the manifest asks for `backend: python`.
+    // boot, if the manifest declares a Python embedder library. The argument is
+    // the `extensions.embedder` config as JSON, so Python owns library choice.
     let factory: Option<kglite_mcp_server::PyEmbedderFactory> = embedder_factory.map(|f| {
-        Box::new(move |model: &str| -> Result<Arc<dyn kglite_core::api::Embedder>, String> {
+        Box::new(move |config_json: &str| -> Result<Arc<dyn kglite_core::api::Embedder>, String> {
             Python::attach(|py| {
                 let instance = f
-                    .call1(py, (model,))
+                    .call1(py, (config_json,))
                     .map_err(|e| format!("embedder factory raised: {e}"))?;
                 let adapter = graph::embedder::py_adapter::PyEmbedderAdapter::new(py, instance)
                     .map_err(|e| {

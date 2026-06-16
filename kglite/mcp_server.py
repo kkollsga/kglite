@@ -14,10 +14,11 @@ Equivalent invocations::
 
 Both run the identical Rust server. Argument parsing happens Rust-side (clap),
 so this shim stays a forwarder. The one thing it supplies is an embedder
-*factory*: the server calls it only if a manifest declares
-``extensions.embedder.backend: python``, at which point the factory lazily
-builds a fastembed-py model (so ``pip install 'kglite[embed]'`` powers
-``text_score()`` in the bundled server — see :mod:`kglite._mcp_embed`).
+*factory*: the server calls it only when a manifest declares a Python embedder
+library (`extensions.embedder.library: fastembed` / `sentence-transformers` /
+a `factory:` escape), handing it the config as JSON; the factory lazily builds
+the model (see :mod:`kglite._mcp_embed`). The user installs whichever library
+they name (`pip install sentence-transformers`, etc.).
 """
 
 from __future__ import annotations
@@ -25,15 +26,16 @@ from __future__ import annotations
 import sys
 
 
-def _embedder_factory(model_name: str):
-    """Build a fastembed-py embedder for ``extensions.embedder.backend: python``.
+def _embedder_factory(config_json: str):
+    """Build a Python embedder from the `extensions.embedder` config (JSON).
 
-    Imported lazily — only the Rust server, on seeing that manifest backend,
-    calls this; a plain server with no embedder never touches ``fastembed``.
+    Imported lazily — only the Rust server, on seeing a Python embedder library
+    in the manifest, calls this; a plain server with no embedder never imports
+    any embedding library.
     """
     from kglite._mcp_embed import build_embedder
 
-    return build_embedder(model_name)
+    return build_embedder(config_json)
 
 
 def main(argv: list[str] | None = None) -> int:

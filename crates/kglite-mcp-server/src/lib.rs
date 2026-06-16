@@ -174,18 +174,22 @@ fn load_manifest(cli: &Cli, mode: &Mode) -> Result<Option<Manifest>, ManifestErr
     }
 }
 
-/// Builds a graph embedder from a model name, on demand.
+/// Builds a graph embedder from the manifest's `extensions.embedder` config
+/// (passed as a JSON string), on demand.
 ///
-/// This is the seam that lets the **pip-hosted** server use a Python
-/// embedder (`extensions.embedder.backend: python`) without the
-/// libpython-free library knowing anything about Python: the kglite-py
-/// wrapper supplies a factory that wraps a fastembed-py model in a
-/// `PyEmbedderAdapter` (which re-acquires the GIL only for the embed
-/// call). The standalone cargo binary passes no factory, so
-/// `backend: python` errors there with a clear message; it uses
-/// `backend: fastembed` (the Rust `FastEmbedAdapter`) instead.
+/// This is the seam that lets the **pip-hosted** server use *any* Python
+/// embedding library (`extensions.embedder.library: sentence-transformers`,
+/// `fastembed`, or a `factory:` escape) without the libpython-free library
+/// knowing anything about Python: the kglite-py wrapper hands the config JSON
+/// to a Python factory (`kglite._mcp_embed`) which picks the library, builds
+/// the model, and wraps it in a `PyEmbedderAdapter` (GIL re-acquired only for
+/// the embed call). The standalone cargo binary passes no factory, so a Python
+/// library errors there with a clear message; it uses `library: fastembed-rs`
+/// (the Rust `FastEmbedAdapter`) instead.
 ///
-/// `Send` because `run_with_embedder_factory` may move it into the
+/// The argument is the whole `extensions.embedder` JSON object, so new fields
+/// (library / model / factory / kwargs / …) flow through to Python without any
+/// Rust change. `Send` because `run_with_embedder_factory` may move it into the
 /// tokio runtime's future.
 pub type PyEmbedderFactory =
     Box<dyn Fn(&str) -> Result<Arc<dyn kglite::api::Embedder>, String> + Send>;
@@ -740,18 +744,20 @@ impl SkillPredicateEvaluator for KglitePredicateEvaluator {
     }
 }
 
-/// Read `manifest.extensions.embedder.{backend, model, …}` and build the
+/// Read `manifest.extensions.embedder.{library, model, …}` and build the
 /// corresponding [`kglite::api::Embedder`]. Returns `Ok(None)` when no
-/// `embedder:` is declared, `Err` on validation failures (unknown
-/// backend, missing fields, `python` without a factory).
+/// `embedder:` is declared, `Err` on validation failures.
 ///
-/// Two backends:
-/// - `fastembed` — the Rust-native fastembed-rs adapter (cargo
-///   `--features fastembed`). The only option for the standalone binary.
-/// - `python` — a fastembed-py model built by `py_embedder_factory`
-///   (supplied only by the pip-hosted server). Lets `pip install
-///   kglite[embed]` power `text_score()` with no Rust toolchain and no
-///   `ort-sys` download.
+/// The `library` field names the embedding engine; the host (Rust vs Python)
+/// is inferred from it:
+/// - `fastembed-rs` — the Rust-native fastembed-rs adapter (cargo
+///   `--features fastembed`; the only option on the standalone binary).
+/// - any other value, or a `factory:` escape — a Python embedding library
+///   (`fastembed`, `sentence-transformers`, …) built by `py_embedder_factory`
+///   (supplied only by the pip-hosted server). The whole config object is
+///   handed to Python as JSON, so the library set + its options live entirely
+///   on the Python side (`kglite._mcp_embed`) — adding a library never touches
+///   this function.
 fn build_embedder_from_manifest(
     manifest: &Manifest,
     py_embedder_factory: Option<&PyEmbedderFactory>,
@@ -762,61 +768,61 @@ fn build_embedder_from_manifest(
     let obj = raw
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("extensions.embedder must be a mapping (got: {raw:?})"))?;
-    let backend = obj
-        .get("backend")
-        .and_then(|v| v.as_str())
-        .unwrap_or("fastembed");
-    match backend {
-        // The pip-hosted server's path: build a fastembed-py model via the
-        // wrapper-supplied factory and wrap it in a PyEmbedderAdapter. The
-        // factory acquires the GIL only for the (per-query) embed call.
-        "python" => {
-            let model = obj.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
-                anyhow::anyhow!("extensions.embedder.model is required for the python backend")
-            })?;
-            let factory = py_embedder_factory.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "extensions.embedder.backend = \"python\" requires the pip-hosted \
-                     server (the kglite wheel). The standalone `cargo install \
-                     kglite-mcp-server` binary has no Python interpreter, so it cannot \
-                     host a fastembed-py model. Either run the server from the wheel \
-                     (`pip install 'kglite[embed]'`, then `kglite-mcp-server …`), or use \
-                     `backend: fastembed` with `cargo install kglite-mcp-server \
-                     --features fastembed`."
-                )
-            })?;
-            let embedder = factory(model)
-                .map_err(|e| anyhow::anyhow!("python embedder construction failed: {e}"))?;
-            tracing::info!(model, backend, "registered python (fastembed-py) embedder");
-            Ok(Some(embedder))
-        }
-        #[cfg(feature = "fastembed")]
-        "fastembed" => {
-            let model = obj.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
-                anyhow::anyhow!("extensions.embedder.model is required for the fastembed backend")
-            })?;
-            let adapter = kglite::api::FastEmbedAdapter::new(model)
-                .map_err(|e| anyhow::anyhow!("fastembed init failed: {e}"))?;
-            tracing::info!(model, backend, "registered Rust-native embedder");
-            Ok(Some(Arc::new(adapter)))
-        }
-        #[cfg(not(feature = "fastembed"))]
-        "fastembed" => anyhow::bail!(
-            "extensions.embedder.backend = \"fastembed\" requires this binary \
-             to be built with the `fastembed` feature enabled. Rebuild with: \
-             `cargo install kglite-mcp-server --features fastembed`. The \
-             default build excludes fastembed because its ort-sys dependency \
-             has a flaky upstream binary download — opt in only when you need \
-             text_score() semantic search. (If you are running the pip wheel, \
-             use `backend: python` instead, backed by `pip install \
-             'kglite[embed]'`.)"
-        ),
-        other => anyhow::bail!(
-            "extensions.embedder.backend = {other:?} is not supported. Known: \
-             `python` (pip wheel, fastembed-py) and `fastembed` (cargo \
-             `--features fastembed`, fastembed-rs)."
-        ),
+    // `fastembed-rs` is the only Rust-hosted engine; everything else (and any
+    // `factory:`) is a Python library hosted by the wheel. Default to a Python
+    // library so the common pip case needs only `library: + model:`.
+    let library = obj.get("library").and_then(|v| v.as_str());
+    let is_rust = library == Some("fastembed-rs");
+
+    if is_rust {
+        let model = obj.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("extensions.embedder.model is required for library: fastembed-rs")
+        })?;
+        return build_rust_embedder(model);
     }
+
+    // Python-hosted: hand the whole config object to the Python factory, which
+    // picks the library, builds the model, and wraps it. The cargo binary
+    // supplies no factory.
+    let factory = py_embedder_factory.ok_or_else(|| {
+        let lib = library.unwrap_or("<a Python library>");
+        anyhow::anyhow!(
+            "extensions.embedder.library = {lib:?} is a Python embedding library, but the \
+             standalone `cargo install kglite-mcp-server` binary has no Python interpreter to \
+             host it. Either run the server from the kglite wheel (`pip install kglite`, then \
+             `pip install {lib}`), or use `library: fastembed-rs` with `cargo install \
+             kglite-mcp-server --features fastembed`."
+        )
+    })?;
+    let config_json = serde_json::to_string(raw)
+        .map_err(|e| anyhow::anyhow!("serializing extensions.embedder failed: {e}"))?;
+    let embedder = factory(&config_json)
+        .map_err(|e| anyhow::anyhow!("python embedder construction failed: {e}"))?;
+    tracing::info!(library = ?library, "registered python embedder");
+    Ok(Some(embedder))
+}
+
+/// Build the Rust-native fastembed-rs embedder (`library: fastembed-rs`).
+/// Gated on the `fastembed` cargo feature; the default build errors with a
+/// rebuild hint (the feature is off by default because ort-sys has a flaky
+/// upstream binary download).
+#[cfg(feature = "fastembed")]
+fn build_rust_embedder(model: &str) -> Result<Option<Arc<dyn kglite::api::Embedder>>> {
+    let adapter = kglite::api::FastEmbedAdapter::new(model)
+        .map_err(|e| anyhow::anyhow!("fastembed-rs init failed: {e}"))?;
+    tracing::info!(model, "registered Rust-native (fastembed-rs) embedder");
+    Ok(Some(Arc::new(adapter)))
+}
+
+#[cfg(not(feature = "fastembed"))]
+fn build_rust_embedder(_model: &str) -> Result<Option<Arc<dyn kglite::api::Embedder>>> {
+    anyhow::bail!(
+        "extensions.embedder.library = \"fastembed-rs\" requires this binary to be built with \
+         the `fastembed` feature: `cargo install kglite-mcp-server --features fastembed`. The \
+         default build excludes it because its ort-sys dependency has a flaky upstream binary \
+         download. (If you are running the pip wheel, use a Python library instead — e.g. \
+         `library: sentence-transformers` with `pip install sentence-transformers`.)"
+    )
 }
 
 fn print_boot_summary(
