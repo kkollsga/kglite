@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.27] — 2026-06-16 — value_codecs (safe literal conversions); cypher_preprocessor removed
+
 ### Added
 
 - **`extensions.value_codecs` — position-scoped, bidirectional literal codecs.**

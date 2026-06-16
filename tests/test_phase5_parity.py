@@ -211,7 +211,8 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 39_319_984,  # 0.10.26 macOS libkglite_py.dylib. Jump from the 0.10.1
+    "darwin": 39_320_032,  # 0.10.27 macOS libkglite_py.dylib (value_codecs: +48 B
+    # over 0.10.26's 39,319,984 — noise). The 0.10.26 jump from the 0.10.1
     # baseline (36,173,664, +8.6%) is dominated by 0.10.26 bundling the
     # kglite-mcp-server *library* into the wheel (its `run` is statically linked
     # into the extension so `pip install kglite` ships the MCP server) — that
