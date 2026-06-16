@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.28] — 2026-06-16 — bring-your-own embedder (library + model); `[embed]` extra removed
+
 ### Changed
 
 - **MCP server embedder is now `library`-based and bring-your-own.** Replaced

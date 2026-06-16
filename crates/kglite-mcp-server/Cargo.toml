@@ -1,6 +1,6 @@
 [package]
 name = "kglite-mcp-server"
-version = "0.10.27"
+version = "0.10.28"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
