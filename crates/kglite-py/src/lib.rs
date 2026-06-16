@@ -30,6 +30,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 mod code_tree;
 mod datatypes;
@@ -233,6 +235,64 @@ fn cypher_pass_names() -> Vec<String> {
     kglite_core::graph::languages::cypher::planner::all_pass_names()
 }
 
+/// Run the bundled MCP server in-process and block until it exits.
+///
+/// This is the exact same server as the standalone `kglite-mcp-server`
+/// binary — it lives in the `kglite-mcp-server` *library* (pure Rust, no
+/// libpython link) and is statically linked into this wheel, sharing the
+/// one `kglite` engine. The `kglite-mcp-server` console script (a thin
+/// `kglite/mcp_server.py` shim) is the public entry point; it forwards
+/// `sys.argv[1:]` here.
+///
+/// `argv` is the argument vector **without** the program name; clap
+/// expects `argv[0]` to be the program name, so we synthesise it. The
+/// server serves over stdio and runs its own tokio runtime, so this
+/// blocks for the process lifetime — `py.detach` releases the GIL for
+/// the entire run (the Python process simply *becomes* the MCP server).
+///
+/// `embedder_factory`, when given, is a Python callable
+/// `factory(model_name: str) -> EmbeddingModel`. It is invoked **only**
+/// if the manifest declares `extensions.embedder.backend: python` — the
+/// server then wraps the returned object in a `PyEmbedderAdapter` (which
+/// re-acquires the GIL just for the per-query embed) so `text_score()`
+/// runs against a fastembed-py model with no Rust toolchain and no
+/// `ort-sys` download. This is what makes `pip install 'kglite[embed]'`
+/// power semantic search in the bundled server. The standalone cargo
+/// binary supplies no factory, so `backend: python` errors there.
+#[pyfunction]
+#[pyo3(signature = (argv, embedder_factory=None))]
+fn _run_mcp_server(
+    py: Python<'_>,
+    argv: Vec<String>,
+    embedder_factory: Option<Py<PyAny>>,
+) -> PyResult<()> {
+    let mut full = Vec::with_capacity(argv.len() + 1);
+    full.push("kglite-mcp-server".to_string());
+    full.extend(argv);
+
+    // Bridge the Python factory into the libpython-free server library as a
+    // Rust closure producing an `Arc<dyn Embedder>`. The closure re-acquires
+    // the GIL (`Python::attach`) only when the server actually calls it — at
+    // boot, if the manifest asks for `backend: python`.
+    let factory: Option<kglite_mcp_server::PyEmbedderFactory> = embedder_factory.map(|f| {
+        Box::new(move |model: &str| -> Result<Arc<dyn kglite_core::api::Embedder>, String> {
+            Python::attach(|py| {
+                let instance = f
+                    .call1(py, (model,))
+                    .map_err(|e| format!("embedder factory raised: {e}"))?;
+                let adapter = graph::embedder::py_adapter::PyEmbedderAdapter::new(py, instance)
+                    .map_err(|e| {
+                        format!("embedder factory returned an object missing the EmbeddingModel protocol (need `dimension` + `embed`): {e}")
+                    })?;
+                Ok(Arc::new(adapter) as Arc<dyn kglite_core::api::Embedder>)
+            })
+        }) as kglite_mcp_server::PyEmbedderFactory
+    });
+
+    py.detach(|| kglite_mcp_server::run_with_embedder_factory(full, factory))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{e:#}")))
+}
+
 #[pymodule]
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -240,6 +300,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;

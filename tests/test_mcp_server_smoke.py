@@ -894,6 +894,85 @@ class TestExploreAndSkills:
         assert "is_benchmark" in tools["cypher_query"]
 
 
+# ── Test: extensions.cypher_preprocessor (query rewriting) ────────────────
+
+
+class TestCypherPreprocessor:
+    """`extensions.cypher_preprocessor` rewrites the agent's Cypher before
+    execution — the native replacement for a bespoke FastMCP rewriting server.
+    Trust-gated by `trust.allow_query_preprocessor`."""
+
+    def test_declarative_rules_rewrite_query(self, graph_fixture: Path, tmp_path: Path):
+        manifest = tmp_path / "pp_mcp.yaml"
+        manifest.write_text(
+            "name: pp\n"
+            "trust:\n  allow_query_preprocessor: true\n"
+            "extensions:\n"
+            "  cypher_preprocessor:\n"
+            "    rules:\n"
+            '      - pattern: "999"\n'
+            '        replace: "1"\n'
+        )
+        client = _spawn(["--graph", str(graph_fixture), "--mcp-config", str(manifest)])
+        try:
+            # The agent's `999` is rewritten to `1` before execution.
+            out = _text_content(client.call_tool("cypher_query", {"query": "RETURN 999 AS x"}))
+        finally:
+            client.shutdown()
+        assert "x" in out
+        assert "\t1" in out or " 1" in out or out.strip().endswith("1"), out
+        assert "999" not in out, f"preprocessor rule did not rewrite the query: {out!r}"
+
+    def test_python_embedder_backend_rejected_by_cargo_binary(self, graph_fixture: Path, tmp_path: Path):
+        """`extensions.embedder.backend: python` is a pip-wheel-only path (it
+        needs a Python interpreter to host fastembed-py). The standalone cargo
+        binary has none, so it must refuse to boot with a clear message rather
+        than start without semantic search."""
+        manifest = tmp_path / "py_embed_mcp.yaml"
+        manifest.write_text("name: py_embed\nextensions:\n  embedder:\n    backend: python\n    model: BAAI/bge-m3\n")
+        proc = subprocess.Popen(
+            [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            rc = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError("server should have exited (backend: python on the binary) but kept running")
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        assert rc != 0, "cargo binary should fail to boot on backend: python"
+        assert "pip-hosted server" in stderr or "python" in stderr.lower(), stderr[:400]
+
+    def test_preprocessor_without_trust_refuses_to_boot(self, graph_fixture: Path, tmp_path: Path):
+        """A preprocessor declared without the trust gate is a boot error —
+        the server must not start and silently ignore it."""
+        manifest = tmp_path / "pp_notrust_mcp.yaml"
+        manifest.write_text(
+            "name: pp_notrust\n"
+            "extensions:\n"
+            "  cypher_preprocessor:\n"
+            "    rules:\n"
+            '      - pattern: "a"\n'
+            '        replace: "b"\n'
+        )
+        proc = subprocess.Popen(
+            [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            rc = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise AssertionError("server should have exited (trust gate) but kept running")
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        assert rc != 0, "server should fail to boot without trust.allow_query_preprocessor"
+        assert "allow_query_preprocessor" in stderr, stderr[:400]
+
+
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────
 
 

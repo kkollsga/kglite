@@ -31,18 +31,27 @@ kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 
 The `kglite-mcp-server` binary exposes Cypher queries + schema
 introspection over MCP for use with Claude Code / other MCP
-clients. It's a **single, pure-Rust implementation**:
+clients. It's a **single, pure-Rust implementation** — reachable two
+ways, both running the identical server:
 
 ```bash
+# Standalone binary (no Python at all — this operators track's default):
 cargo install kglite-mcp-server
+kglite-mcp-server --graph my-graph.kgl --mcp-config my_graph_mcp.yaml
+
+# Or, for Python users, the same server ships inside the wheel (0.10.26+):
+pip install kglite
 kglite-mcp-server --graph my-graph.kgl --mcp-config my_graph_mcp.yaml
 ```
 
-No Python runtime is required to run the server. (Through 0.10.24 the
-wheel also shipped a Python `kglite-mcp-server` console script; that
-second implementation was retired in 0.10.25 to consolidate on one
-server and stop the two surfaces drifting. `pip install kglite` now
-installs the engine + `code_tree` only.)
+No Python runtime is required for the `cargo install` binary. The
+`pip install` path bundles the Rust server *inside* the wheel
+(statically linked into the extension, sharing the one engine — no
+separate wheel, no duplicated engine) and exposes the same
+`kglite-mcp-server` command via a thin console-script shim. (History:
+through 0.10.24 the wheel shipped a *Python* server; 0.10.25 retired it
+for cargo-only to stop two implementations drifting; 0.10.26 brought the
+command back to `pip` as the bundled Rust server.)
 
 Setup, manifest, and tool customization details live in the
 [MCP servers guide](../python/guides/mcp-servers.md); skill authoring

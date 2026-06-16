@@ -1,6 +1,6 @@
 [package]
 name = "kglite-mcp-server"
-version = "0.10.16"
+version = "0.10.26"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
@@ -11,6 +11,14 @@ homepage = "https://github.com/kkollsga/kglite"
 documentation = "https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html"
 keywords = ["mcp", "knowledge-graph", "cypher", "kglite", "graph"]
 categories = ["database", "command-line-utilities"]
+
+# The server body lives in the library (`run`) so two frontends share
+# one build: this crate's thin binary (`cargo install`, libpython-free)
+# and the `kglite` Python wheel's PyO3 wrapper (which calls `run` inside
+# `py.detach`). No duplicated engine, no separate wheel.
+[lib]
+name = "kglite_mcp_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "kglite-mcp-server"
@@ -50,6 +58,7 @@ rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "schem
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "fs", "sync", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+regex = "1"
 schemars = "1"
 
 # Error handling + CLI

@@ -211,13 +211,19 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 36_173_664,  # 0.10.1 macOS libkglite_py.dylib (+757 KB over 0.10.0 — Phase E
-    # added the session module + new public types; Phase G G.4 widened DirGraph visibility
-    # for cross-crate access (~23 fields + 6 helpers promoted pub); Phase F added TLS
-    # scaffolding behind boltr's tls feature. Wheel artifact (cdylib) is libkglite_py.dylib
-    # post-G.4 — pre-G.4 was libkglite.dylib at the same path.)
-    "linux": 59_529_016,  # 0.9.52 Linux .so (captured from CI run 26328166598;
-    # 0.10.0/0.10.1 Linux baseline still pending — refresh on next CI run)
+    "darwin": 39_319_984,  # 0.10.26 macOS libkglite_py.dylib. Jump from the 0.10.1
+    # baseline (36,173,664, +8.6%) is dominated by 0.10.26 bundling the
+    # kglite-mcp-server *library* into the wheel (its `run` is statically linked
+    # into the extension so `pip install kglite` ships the MCP server) — that
+    # pulls mcp-methods + rmcp + hyper/hyper-util + clap + tracing-subscriber
+    # into the cdylib. They share the one kglite engine (no duplication), so on
+    # macOS (aggressive linker strip) the net add is ~3 MB. The rest is
+    # 0.10.2–0.10.25 incremental growth folded into this first recapture since
+    # 0.10.1. Measured locally via `maturin develop --release`.
+    "linux": 64_656_000,  # 0.10.26 estimate: 0.9.52 Linux .so (59,529,016) scaled by
+    # the same +8.6% as the macOS recapture. Linux has no strip so the bundled
+    # server likely adds more in absolute terms — refresh with the real value on
+    # the next CI run (the 0.10.0–0.10.25 Linux baseline was never recaptured).
 }
 
 
@@ -245,6 +251,15 @@ def test_binary_size_regression():
                         * mcp-methods 0.3.x server-feature evolution;
                         * sodir / wikidata workspace crates with
                           their own dependency closures.
+      - 0.10.26:      39,319,984 bytes (≈37.5 MB, macOS .dylib).
+                      The kglite-mcp-server *library* is now bundled
+                      into the wheel (its `run` statically linked into
+                      the extension, so `pip install kglite` ships the
+                      MCP server). It shares the one kglite engine — no
+                      duplication — but pulls the server's own closure
+                      (mcp-methods, rmcp, hyper/hyper-util, clap,
+                      tracing-subscriber) into the cdylib: ~3 MB net on
+                      macOS after strip, more on Linux (no strip).
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise

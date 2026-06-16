@@ -6,7 +6,7 @@
 > the agent gets Cypher access to your data through ordinary tool
 > calls — no API to learn, no infrastructure to manage.
 
-`kglite-mcp-server` is a **single, pure-Rust binary** built on the
+`kglite-mcp-server` is a **single, pure-Rust server** built on the
 [mcp-methods] framework (rmcp + manifest-driven tool registration; no
 Python runtime, no libpython link). It exposes your graph as
 `graph_overview` + `cypher_query` over MCP stdio. For project-specific
@@ -15,11 +15,16 @@ lookups, query preprocessing — drop a YAML manifest next to your graph
 and the server picks it up automatically. **No fork required for most
 customisation.**
 
-> **0.10.25:** the MCP server is now Rust-only. Through 0.10.24 the wheel
-> also shipped a Python `kglite-mcp-server` console script; that second
-> implementation was retired to consolidate on one server. `pip install
-> kglite` is now the engine + `code_tree` only — install the server with
-> `cargo install kglite-mcp-server`.
+> **0.10.26:** the server is reachable two ways, both running the
+> identical Rust implementation. `pip install kglite` bundles it *inside*
+> the wheel (statically linked into the extension, sharing the one engine
+> — no separate wheel, no duplicated engine) and exposes the
+> `kglite-mcp-server` command via a thin console-script shim;
+> `cargo install kglite-mcp-server` gives the same command as a
+> standalone libpython-free binary. (Through 0.10.24 the wheel shipped a
+> *Python* server; 0.10.25 retired it for cargo-only to stop two
+> implementations drifting; 0.10.26 brought the command back to `pip` as
+> the bundled Rust server.)
 
 [mcp-methods]: https://github.com/kkollsga/mcp-methods
 
@@ -28,14 +33,29 @@ customisation.**
 ### 1. Install
 
 ```bash
+pip install kglite          # ships the kglite-mcp-server command in the wheel
+# — or, for a standalone binary with no Python at all:
 cargo install kglite-mcp-server
 ```
 
-The binary lands on PATH with no Python dependency. Run
-`kglite-mcp-server --help` to confirm. For semantic search, build with
-the embedder feature: `cargo install kglite-mcp-server --features fastembed`
-(uses the Rust fastembed-rs backend; same `~/.cache/fastembed/` model
-cache as the engine).
+Either way the `kglite-mcp-server` command lands on PATH running the same
+Rust server. Run `kglite-mcp-server --help` to confirm.
+
+For semantic search (`text_score()`) in the server via a manifest
+`extensions.embedder` block, pick the backend that matches your install:
+
+- **pip wheel** → `backend: python` + `pip install 'kglite[embed]'`. The
+  bundled server builds a fastembed-py model on demand — no Rust
+  toolchain, no `ort-sys` download.
+- **standalone cargo binary** → `backend: fastembed` +
+  `cargo install kglite-mcp-server --features fastembed` (the Rust
+  fastembed-rs backend; no Python in the deployment).
+
+Both produce the same vectors. See the
+[embedder example](../examples/manifest_with_embedder.md). (The default
+wheel and default cargo binary omit fastembed-rs because its `ort-sys`
+dependency has a flaky binary download — that's why the wheel uses the
+Python backend instead.)
 
 ### 2. Point it at a graph file
 
@@ -239,11 +259,20 @@ inside `cypher_query`. Worked example at
 
 ### `extensions.cypher_preprocessor` — rewrite agent input
 
-Manifest-declared Python hook that fires before every `cypher_query`
-and `tools[].cypher` invocation. Useful for domain-specific
-identifier coercion (Wikidata Q-numbers → integers), date format
-normalisation, multi-tenant scoping, etc. Worked example at
-{doc}`../examples/manifest_cypher_preprocessor`. Reference below.
+Rewrite the agent's Cypher before every `cypher_query` and
+`tools[].cypher` invocation — domain-specific identifier coercion
+(Wikidata Q-numbers → integers), date normalisation, multi-tenant
+scoping. Two shapes, both gated by `trust.allow_query_preprocessor:
+true` and neither needing a bespoke FastMCP server:
+
+- **`rules:`** — ordered regex substitutions (replacement supports
+  `$1` backrefs). Covers most id/token normalisation with zero code.
+- **`command:`** — a subprocess (query on stdin → rewritten query on
+  stdout), run with the manifest dir as its cwd, for arbitrary logic
+  in any language.
+
+Worked example at {doc}`../examples/manifest_cypher_preprocessor`.
+Reference below.
 
 ### Top-level fields
 
@@ -570,8 +599,11 @@ trust:
   allow_query_preprocessor: true
 extensions:
   cypher_preprocessor:
-    module: ./wikidata_preprocessor.py
-    class: WikidataPreprocessor
+    rules:
+      - pattern: "'Q(\\d+)'"   # 'Q42' → 42 (strip quotes + prefix)
+        replace: "$1"
+    # or, for arbitrary logic:
+    # command: ["./wikidata_rewrite.py"]   # query on stdin → stdout
 ```
 
 See {doc}`../examples/manifest_cypher_preprocessor` for the full
@@ -1018,10 +1050,11 @@ problem.
 
 `pip install kglite` against a conda env's Python (`conda
 activate myenv && pip install kglite`) Just Works — no `PYO3_PYTHON=`,
-no `install_name_tool` patching. (The MCP server itself is a separate
-`cargo install kglite-mcp-server` binary on PATH, independent of the
-active Python env; `which kglite-mcp-server` confirms which install
-you're running.)
+no `install_name_tool` patching. It also installs the `kglite-mcp-server`
+command into that env (the bundled Rust server). If you *also* ran
+`cargo install kglite-mcp-server`, both land on PATH — `which
+kglite-mcp-server` confirms which install you're running (they run the
+same server, so it rarely matters).
 
 #### Watch mode rebuild costs
 

@@ -41,6 +41,11 @@ pub struct GraphState {
     /// file modes. Set once at startup; carried by every clone so the
     /// lazy watch-rebuild uses the same setting.
     include_docs: bool,
+    /// Manifest-declared query preprocessor (`extensions.cypher_preprocessor`).
+    /// Server-config, set once at boot via [`with_preprocessor`] and carried by
+    /// every clone; applied to each `cypher_query` / `tools[].cypher` query
+    /// before it reaches `graph.cypher(...)`.
+    preprocessor: Option<Arc<crate::preprocessor::Preprocessor>>,
 }
 
 struct ActiveGraph {
@@ -55,6 +60,27 @@ impl GraphState {
         Self {
             include_docs,
             ..Self::default()
+        }
+    }
+
+    /// Attach the manifest-declared query preprocessor. Builder form so it's
+    /// set once at boot, before the tool closures clone the state.
+    pub fn with_preprocessor(
+        mut self,
+        preprocessor: Option<Arc<crate::preprocessor::Preprocessor>>,
+    ) -> Self {
+        self.preprocessor = preprocessor;
+        self
+    }
+
+    /// Apply the query preprocessor (if configured) to a query string before
+    /// execution. Returns the query unchanged when none is set; an `Err`
+    /// surfaces to the agent as a `Cypher error:` rather than silently running
+    /// the un-rewritten query.
+    pub fn preprocess(&self, query: &str) -> Result<String, String> {
+        match &self.preprocessor {
+            Some(p) => p.rewrite(query),
+            None => Ok(query.to_string()),
         }
     }
 
@@ -243,7 +269,12 @@ impl GraphState {
         for (k, v) in args {
             params.insert(k.clone(), json_to_value(v));
         }
-        match run_cypher_inner(&active.kg, template, params, csv_http) {
+        // extensions.cypher_preprocessor applies to manifest cypher tools too.
+        let template = match self.preprocess(template) {
+            Ok(q) => q,
+            Err(e) => return format!("Cypher error: {e}"),
+        };
+        match run_cypher_inner(&active.kg, &template, params, csv_http) {
             Ok(body) => body,
             Err(e) => format!("Cypher error: {e}"),
         }
@@ -479,7 +510,13 @@ pub fn register(
         // Lazy rebuild: if the watcher tagged the graph dirty
         // since the last call, rebuild now before serving the query.
         s.ensure_code_tree_fresh();
-        s.with_active(|g| run_cypher_tool(g, &args.query, csv.as_deref()))
+        // extensions.cypher_preprocessor: rewrite the agent's query before
+        // execution (no-op when unconfigured).
+        let query = match s.preprocess(&args.query) {
+            Ok(q) => q,
+            Err(e) => return format!("Cypher error: {e}"),
+        };
+        s.with_active(|g| run_cypher_tool(g, &query, csv.as_deref()))
     });
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;

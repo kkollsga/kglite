@@ -2,10 +2,21 @@
 
 Wire bge-m3 (or any catalog model) into the active graph so
 `text_score()` works inside Cypher. This is the **MCP server's**
-embedder path — build the server with `cargo install kglite-mcp-server
---features fastembed`. (For engine-level semantic search from Python,
-pass your own embedder to `graph.set_embedder(...)` instead — see the
+embedder path. (For engine-level semantic search from Python, pass your
+own embedder to `graph.set_embedder(...)` instead — see the
 semantic-search guide.)
+
+## Two backends — pick by how you install the server
+
+| `backend:` | Embedding engine | Install | When |
+|---|---|---|---|
+| `python` | fastembed-**py** (the `fastembed` PyPI package) | `pip install 'kglite[embed]'` | You run the **pip-bundled** server (`pip install kglite`). No Rust toolchain, no `ort-sys` download. |
+| `fastembed` | fastembed-**rs** (Rust, cargo feature) | `cargo install kglite-mcp-server --features fastembed` | You run the **standalone** binary (no Python in the deployment). |
+
+Both produce the same vectors from the same bge models — they're two
+ports of fastembed over the same ONNX Runtime. Choose the one matching
+your install path; the rest of the manifest and all `text_score()`
+queries are identical.
 
 ## Manifest
 
@@ -16,12 +27,23 @@ instructions: |
   Article corpus with bge-m3 embeddings. Use text_score() inside
   cypher_query for semantic relevance scoring.
 
+# pip-bundled server (pip install 'kglite[embed]'):
 extensions:
   embedder:
-    backend: fastembed
-    model: BAAI/bge-m3        # 1024-d, via the Rust fastembed-rs backend
-    cooldown: 1800            # release session after 30 min idle (default 900)
+    backend: python
+    model: BAAI/bge-m3        # 1024-d, via the fastembed-py package
+
+# — or, on the standalone cargo binary (--features fastembed):
+# extensions:
+#   embedder:
+#     backend: fastembed
+#     model: BAAI/bge-m3      # 1024-d, via the Rust fastembed-rs backend
+#     cooldown: 1800          # release session after 30 min idle (default 900)
 ```
+
+> `cooldown:` (lazy session release) applies to the Rust `fastembed`
+> backend. The `python` backend's lifecycle follows whatever the
+> fastembed-py model does (it stays resident for the server's life).
 
 ## What happens at boot
 
@@ -90,8 +112,11 @@ and don't pay the same ~1 s session-init cost).
 
 ## Failure modes
 
-- **Boot** (`extensions.embedder.backend` not `"fastembed"`):
-  `extensions.embedder.backend = '<value>' is not supported.`
+- **Boot** (`extensions.embedder.backend` neither `"python"` nor
+  `"fastembed"`): `extensions.embedder.backend = '<value>' is not supported.`
+- **Boot** (`backend: python` on the standalone cargo binary): refuses
+  to boot — `backend = "python" requires the pip-hosted server …`. Use
+  `backend: fastembed` there, or run the pip wheel.
 - **Boot** (unknown `model:`):
   `unsupported fastembed model name: '<value>'. Known: [...]`.
 - **Boot** (`cooldown:` negative or non-int):

@@ -519,6 +519,23 @@ def cypher_pass_names() -> list[str]:
     """
     ...
 
+def _run_mcp_server(argv: list[str], embedder_factory: Optional[Callable[[str], EmbeddingModel]] = None) -> None:
+    """Run the bundled `kglite-mcp-server` in-process; block until it exits.
+
+    Internal entry point for the ``kglite-mcp-server`` console script (see
+    ``kglite/mcp_server.py``). Not part of the public Python API — use the
+    ``kglite-mcp-server`` command, not this function directly. ``argv`` is the
+    server's arguments *without* the program name (e.g.
+    ``["--graph", "foo.kgl"]``); argument parsing happens Rust-side (clap).
+    The GIL is released for the server's lifetime.
+
+    ``embedder_factory(model_name) -> EmbeddingModel`` is invoked only when a
+    manifest declares ``extensions.embedder.backend: python``; the returned
+    model backs ``text_score()`` (called once per query, GIL re-acquired just
+    for the embed).
+    """
+    ...
+
 def from_blueprint(
     blueprint_path: Union[str, Path],
     *,

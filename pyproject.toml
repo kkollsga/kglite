@@ -32,12 +32,13 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # 0.10.25: the wheel has no required Python runtime deps. The MCP server
-    # runtime deps (mcp / pyyaml / aiohttp / watchdog) were removed when the
-    # Python MCP server was retired — the MCP server is now the pure-Rust
-    # `kglite-mcp-server` binary (`cargo install kglite-mcp-server`). The
-    # engine + code_tree are the compiled extension; nothing here links a
-    # Python package at import time.
+    # The wheel has no required Python runtime deps. The former Python MCP
+    # server's deps (mcp / pyyaml / aiohttp / watchdog) are gone — the MCP
+    # server is the pure-Rust `kglite-mcp-server`, and as of 0.10.26 it ships
+    # *inside* this wheel (statically linked into the extension, sharing the
+    # one engine; the `kglite-mcp-server` console script just forwards argv to
+    # it). The engine + code_tree + server are all the compiled extension;
+    # nothing here links a Python package at import time.
 ]
 dynamic = ["version"]
 
@@ -57,11 +58,17 @@ networkx = ["networkx>=3.0"]
 # `kglite-mcp-server --features fastembed` backend, not this wheel extra.)
 embed = ["fastembed>=0.4"]
 
-# No `[project.scripts]`: `kglite-mcp-server` is a Rust binary installed via
-# `cargo install kglite-mcp-server`, not a Python console script. (Through
-# 0.10.24 the wheel shipped a Python `kglite-mcp-server` entry point; the
-# Python server was removed in 0.10.25 to consolidate on the single Rust
-# implementation. See docs/operators/index.md and the CHANGELOG.)
+# `kglite-mcp-server` console script. As of 0.10.26 the Rust MCP server is
+# bundled into the wheel (statically linked into the extension via the
+# `kglite-mcp-server` *library*, sharing the one engine — no separate wheel,
+# no duplicated engine). This entry point is a thin shim that forwards
+# `sys.argv[1:]` into the Rust `run` via `kglite._run_mcp_server`. So
+# `pip install kglite` gives you the same `kglite-mcp-server` command as
+# `cargo install kglite-mcp-server`. (Through 0.10.24 this was a Python
+# server; 0.10.25 dropped it for cargo-only; 0.10.26 brings it back pip-native
+# as the bundled Rust server.)
+[project.scripts]
+kglite-mcp-server = "kglite.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"

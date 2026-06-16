@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.26] — 2026-06-16 — MCP server bundled into the wheel + native query preprocessor
+
+### Added
+
+- **`pip install kglite` now ships the `kglite-mcp-server` command.** The
+  pure-Rust MCP server moved into the wheel: its server body lives in the
+  `kglite-mcp-server` *library* (`run`), is statically linked into the
+  compiled extension (sharing the one `kglite` engine — no separate wheel, no
+  duplicated engine, ~6 MB added to the extension), and is exposed to Python as
+  `kglite._run_mcp_server`. A thin `kglite/mcp_server.py` console-script shim
+  forwards argv into it, so `pip install kglite && kglite-mcp-server …` runs the
+  identical server as `cargo install kglite-mcp-server`. This restores the
+  pip-native entry point retired in 0.10.25, now backed by the single Rust
+  implementation rather than a parallel Python server. The standalone cargo
+  binary is unchanged (it's now a thin `main.rs` over the same library).
+  (Semantic search via `extensions.embedder` still needs the fastembed cargo
+  feature, which neither the default wheel nor the default cargo binary ships —
+  build the standalone binary with `--features fastembed`.)
+- **`extensions.cypher_preprocessor` — rewrite agent Cypher before execution.**
+  Trust-gated (`trust.allow_query_preprocessor: true`, mirroring
+  `trust.allow_embedder`), in two shapes: declarative `rules:` (ordered regex
+  substitutions with `$1` backrefs) and a `command:` subprocess hook (query on
+  stdin → rewritten query on stdout, run with the manifest dir as cwd). Applies
+  to every `cypher_query` and manifest `tools[].cypher` invocation. The
+  motivating case is Wikidata Q-number rewriting (`'Q42'` → `42`, since the
+  engine stopped auto-coercing prefixed ids in 0.10.10); it natively replaces
+  the bespoke FastMCP rewriting server an operator would otherwise hand-roll.
+  A boot error (not a silent no-op) when declared without the trust gate. See
+  `docs/python/examples/manifest_cypher_preprocessor.md`.
+- **`extensions.embedder.backend: python` — semantic search in the bundled
+  server with no Rust toolchain.** The pip-hosted server can now back
+  `text_score()` with a fastembed-**py** model (`pip install 'kglite[embed]'`)
+  instead of the fastembed-**rs** cargo feature. `kglite._run_mcp_server` takes
+  an embedder factory; when a manifest declares `backend: python`, the server
+  builds the Python model and wraps it in the existing `PyEmbedderAdapter`,
+  which re-acquires the GIL only for the (once-per-query) embed — the ranking
+  over the graph still runs in Rust with the GIL released, so non-`text_score`
+  queries are unaffected. This closes the one gap from the wheel-bundling work:
+  embedder MCP servers (e.g. semantic-search corpora) no longer need
+  `cargo install --features fastembed` — `pip install 'kglite[embed]'` suffices.
+  The standalone cargo binary has no Python, so it rejects `backend: python`
+  with a clear message and keeps using `backend: fastembed` (fastembed-rs). See
+  `docs/python/examples/manifest_with_embedder.md`.
+
 ## [0.10.25] — 2026-06-16 — code-graph ergonomics, algorithm scoping, single Rust MCP server
 
 ### Added
