@@ -48,12 +48,14 @@ neo4j = ["neo4j>=5.0"]
 # module load. `from_networkx` also uses pandas (already required by the
 # DataFrame loaders), so only networkx is declared here.
 networkx = ["networkx>=3.0"]
-# The MCP server (and its Python `extensions.embedder` fastembed path) was
-# retired in 0.10.25 — the server is now `cargo install kglite-mcp-server`
-# (pure Rust; embedder via the Rust fastembed-rs feature). To run a Python
-# embedder with the engine's `g.set_embedder(...)`, install fastembed
-# directly and pass a duck-typed embedder (see the Embedder protocol in
-# kglite/__init__.pyi); kglite no longer ships an `[embed]` extra.
+# Optional fastembed install for engine-level semantic search: lets a Python
+# user back `g.set_embedder(...)` / `text_score()` with fastembed without
+# pulling it by hand. Bring-your-own-embedder is the general path — any
+# duck-typed object works (see the `Embedder` protocol in
+# kglite/__init__.pyi, and the semantic-search guide's sentence-transformers
+# example). (The MCP server's own embedder is separate: the Rust
+# `kglite-mcp-server --features fastembed` backend, not this wheel extra.)
+embed = ["fastembed>=0.4"]
 
 # No `[project.scripts]`: `kglite-mcp-server` is a Rust binary installed via
 # `cargo install kglite-mcp-server`, not a Python console script. (Through

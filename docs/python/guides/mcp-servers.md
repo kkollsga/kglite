@@ -940,9 +940,9 @@ through `docs/examples/manifest_wikidata.md`.
 ### Embedder backend × model catalog
 
 `extensions.embedder.backend: fastembed` is currently the only
-supported backend. The `model:` string routes internally to one of
-two implementations depending on what's in fastembed-python's
-catalog:
+supported backend (build the server with `cargo install
+kglite-mcp-server --features fastembed`). The `model:` string selects
+a model from the Rust fastembed-rs catalog:
 
 | Model name | Dimension | Internal backend |
 |---|:---:|---|

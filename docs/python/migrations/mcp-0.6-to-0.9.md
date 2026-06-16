@@ -10,6 +10,13 @@ release-by-release.
 If you're on 0.9.19 or later and want the smaller hops, see
 {doc}`mcp-pre-0.9.20`.
 
+```{note}
+Historical. As of **0.10.25** the MCP server is the standalone pure-Rust
+`kglite-mcp-server` binary (`cargo install kglite-mcp-server`); the
+bundled Python entry point this page targets has been retired. New
+setups should follow {doc}`../guides/mcp-servers`.
+```
+
 ## High-level shift
 
 **Before (0.6.x – 0.8.x):** each MCP server was a hand-written

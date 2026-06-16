@@ -2,9 +2,9 @@
 
 The Python track. `pip install kglite`, then `import kglite`. This
 is the headline distribution path — the wheel ships a compiled
-extension (PyO3 wrapper over the pure-Rust `kglite` engine) plus a
-pure-Python `kglite.mcp_server` and a console script
-`kglite-mcp-server`.
+extension (PyO3 wrapper over the pure-Rust `kglite` engine) plus the
+`code_tree` codebase parser. The MCP server is a separate pure-Rust
+binary (`cargo install kglite-mcp-server`); see {doc}`guides/mcp-servers`.
 
 If you're embedding the engine directly in a Rust binary, the
 [Rust guide](../rust/index.md) is for you.

@@ -1,8 +1,11 @@
 # Example: enabling semantic search with `extensions.embedder`
 
 Wire bge-m3 (or any catalog model) into the active graph so
-`text_score()` works inside Cypher. The catalog maps to one of two
-internal backends — see the embedder section in the reference docs.
+`text_score()` works inside Cypher. This is the **MCP server's**
+embedder path — build the server with `cargo install kglite-mcp-server
+--features fastembed`. (For engine-level semantic search from Python,
+pass your own embedder to `graph.set_embedder(...)` instead — see the
+semantic-search guide.)
 
 ## Manifest
 
@@ -16,15 +19,15 @@ instructions: |
 extensions:
   embedder:
     backend: fastembed
-    model: BAAI/bge-m3        # 1024-d, routed through the direct ONNX backend
+    model: BAAI/bge-m3        # 1024-d, via the Rust fastembed-rs backend
     cooldown: 1800            # release session after 30 min idle (default 900)
 ```
 
 ## What happens at boot
 
-1. The server parses the manifest, validates `extensions.embedder`,
-   and registers a `BgeM3Embedder` against the active graph via
-   `graph.set_embedder(embedder)`.
+1. The server (`kglite-mcp-server --features fastembed`) parses the
+   manifest, validates `extensions.embedder`, and registers the Rust
+   fastembed-rs embedder against the active graph.
 2. The embedder is lazy — no model weights are downloaded or loaded
    into memory until the first `text_score()` call.
 3. On first call, the ONNX session and tokenizer cold-load

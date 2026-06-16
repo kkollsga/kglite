@@ -4,6 +4,13 @@ Historical migration notes for operators upgrading from
 kglite-mcp-server releases prior to 0.9.20. New users should follow
 the current setup flow in {doc}`../guides/mcp-servers` instead.
 
+```{note}
+**As of 0.10.25 the MCP server is again a standalone pure-Rust binary**
+(`cargo install kglite-mcp-server`) — the Python entry point described
+below (the 0.9.20 era) was retired when the two implementations were
+consolidated. This page is kept for historical context only.
+```
+
 ## Migration: 0.9.19 → 0.9.20
 
 `kglite-mcp-server` is now a Python entry point instead of a bundled
