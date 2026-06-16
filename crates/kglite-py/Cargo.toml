@@ -71,20 +71,15 @@ pyo3 = { version = "0.28", features = ["multiple-pymethods"] }
 # the wheel's `kglite.abi3.so`).
 kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata", "okf"] }
 
-# Generic MCP framework tools (ping, read_source, grep, list_source,
-# github_issues, github_api, workspace). 0.9.21+: depend on the
-# pure-Rust mcp-methods crate (split into a three-crate workspace
-# in 0.3.26) and expose its functions to Python via pyo3 wrappers
-# in `src/mcp_tools.rs`. The `server` feature pulls the framework
-# half (manifest parser + tool implementations) without any pyo3
-# dep.
-mcp-methods = { version = "0.3.41", default-features = false, features = ["server"] }
+# 0.10.25: dropped the `mcp-methods` (and its `anyhow`) dependency. They
+# backed the `kglite._mcp_internal` bridge (pyo3 wrappers in the former
+# `src/mcp_tools.rs`) used only by the Python MCP server, which was retired
+# this release — the MCP server is now the standalone `kglite-mcp-server`
+# Rust binary (which depends on mcp-methods on its own). The wheel no longer
+# links mcp-methods or its transitive deps.
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-# Required by the `PostActivateHook` signature in mcp-methods'
-# Workspace API. Used only by the pyo3 wrappers in `src/mcp_tools.rs`.
-anyhow = "1"
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 bincode = "1.3"
 chrono = { version = "0.4.43", features = ["serde"] }

@@ -826,6 +826,74 @@ class TestBareBoot:
             client.shutdown()
 
 
+# ── Test: explore tool + skills (the single Rust server) ──────────────────
+
+
+class TestExploreAndSkills:
+    """`explore` is registered and callable, and bundled skills inject their
+    methodology into the matching tool description (mcp-methods serve_prompts).
+    These exercise the now-single MCP server (the Rust binary) on a code
+    graph; the Python server was retired in 0.10.25."""
+
+    @pytest.fixture
+    def code_graph_fixture(self, tmp_path: Path) -> Path:
+        try:
+            from kglite import code_tree
+        except ImportError:
+            pytest.skip("kglite.code_tree (tree-sitter) not installed")
+        project = tmp_path / "demo_proj"
+        project.mkdir()
+        (project / "demo_mod.py").write_text(
+            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
+        )
+        g = code_tree.build(str(project))
+        kgl = project / "demo_code.kgl"
+        g.save(str(kgl))
+        manifest = project / "demo_mcp.yaml"
+        manifest.write_text("name: explore_smoke\nskills: true\n")
+        return kgl
+
+    def test_explore_registered_and_callable(self, code_graph_fixture):
+        client = _spawn(["--graph", str(code_graph_fixture)])
+        try:
+            assert "explore" in {t["name"] for t in client.list_tools()}
+            text = _text_content(client.call_tool("explore", {"query": "hub"}))
+        finally:
+            client.shutdown()
+        assert "Entry points" in text and "hub" in text
+
+    def test_explore_skill_injected_into_tool_description(self, code_graph_fixture):
+        """skills: true → the bundled `explore` skill body is injected into the
+        explore tool's description (serve_prompts auto-inject)."""
+        kgl = code_graph_fixture
+        client = _spawn(["--graph", str(kgl), "--mcp-config", str(kgl.parent / "demo_mcp.yaml")])
+        try:
+            tools = {t["name"]: (t.get("description") or "") for t in client.list_tools()}
+        finally:
+            client.shutdown()
+        assert "## Methodology" in tools["explore"], tools["explore"][:200]
+
+    def test_cross_tool_skills_inject_via_references_tools(self, code_graph_fixture):
+        """code_graph_analysis / code_graph_views are cross-tool skills (named
+        after no tool). With mcp-methods >=0.3.42 serve_prompts honors
+        references_tools and injects the `description` under `## When to use`,
+        so they surface on the tools they reference — on a code graph."""
+        kgl = code_graph_fixture
+        client = _spawn(["--graph", str(kgl), "--mcp-config", str(kgl.parent / "demo_mcp.yaml")])
+        try:
+            tools = {t["name"]: (t.get("description") or "") for t in client.list_tools()}
+        finally:
+            client.shutdown()
+        # code_graph_analysis references cypher_query / graph_overview / explore.
+        for tool in ("cypher_query", "graph_overview", "explore"):
+            assert "mcp-skill:code_graph_analysis" in tools[tool], f"{tool} missing orchestration skill"
+            assert "## When to use" in tools[tool], f"{tool} missing description routing (0.3.42)"
+            assert "Never grep to discover" in tools[tool], f"{tool} missing skill body"
+        # code_graph_views references cypher_query.
+        assert "mcp-skill:code_graph_views" in tools["cypher_query"]
+        assert "is_benchmark" in tools["cypher_query"]
+
+
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────
 
 

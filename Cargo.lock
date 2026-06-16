@@ -1982,11 +1982,9 @@ dependencies = [
 name = "kglite-py"
 version = "0.10.24"
 dependencies = [
- "anyhow",
  "bincode",
  "chrono",
  "kglite",
- "mcp-methods",
  "mimalloc",
  "petgraph",
  "pyo3",
@@ -2148,9 +2146,9 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.41"
+version = "0.3.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0ec5d4b35007f5c1e14713d7304018d4d4317c830982044fac61a6599a030b"
+checksum = "8bc73889e7214811a99acc6734a8e8a3438e19b17183a84d28e836d883a0b1fe"
 dependencies = [
  "anyhow",
  "clap",

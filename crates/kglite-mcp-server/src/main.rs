@@ -549,14 +549,12 @@ async fn main() -> Result<()> {
     // so it stays out of prompts/list when the active graph isn't a
     // code-tree (legal-corpus / o&g / etc. deployments).
     if let Some(m) = manifest.as_ref() {
-        // Skill `.md` bodies live at `crates/kglite-mcp-server/skills/`
-        // — copies of the wheel's `kglite/mcp_server/skills/`. The
-        // duplication exists because `cargo publish` only packages
-        // files inside the crate dir; `include_str!` with paths
-        // pointing outside (`../../../kglite/...`) breaks the publish
-        // verify step. Tracked: consolidate into a single canonical
-        // location with both sides reading via path; for now, keep
-        // the two copies in sync manually when editing.
+        // Skill `.md` bodies live at `crates/kglite-mcp-server/skills/` — the
+        // single canonical home since 0.10.25, when the Python MCP server (and
+        // its duplicate `kglite/mcp_server/skills/`) was retired and this Rust
+        // binary became the one MCP server. `cargo publish` only packages
+        // files inside the crate dir, so they must live here (not behind a
+        // `../../../kglite/...` `include_str!` path).
         let registry_result = SkillRegistry::new()
             .add_bundled(BundledSkill {
                 name: "cypher_query",
@@ -577,6 +575,19 @@ async fn main() -> Result<()> {
             .add_bundled(BundledSkill {
                 name: "explore",
                 body: include_str!("../skills/explore.md"),
+            })
+            // Cross-tool skills: named after no tool, they attach via
+            // `references_tools` and lead with the `description` routing —
+            // both rely on the serve_prompts injection added in mcp-methods
+            // 0.3.42 (## When to use + references_tools), so they only became
+            // active with that pin bump.
+            .add_bundled(BundledSkill {
+                name: "code_graph_analysis",
+                body: include_str!("../skills/code_graph_analysis.md"),
+            })
+            .add_bundled(BundledSkill {
+                name: "code_graph_views",
+                body: include_str!("../skills/code_graph_views.md"),
             })
             .merge_framework_defaults()
             .auto_detect_project_layer(&m.yaml_path)

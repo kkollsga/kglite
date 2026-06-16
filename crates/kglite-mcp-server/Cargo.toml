@@ -22,7 +22,9 @@ path = "src/main.rs"
 # there as of 0.3.30. Cargo.lock locks the exact version; bumps are
 # explicit via `cargo update -p mcp-methods`. We still depend on the
 # pure-Rust crate only (no pyo3 in tree, no libpython link).
-mcp-methods = { version = "0.3", default-features = false, features = ["server"] }
+# 0.3.42 required: serve_prompts injects skill `description` (## When to
+# use) + honors `references_tools`, which the cross-tool skills below need.
+mcp-methods = { version = "0.3.42", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +

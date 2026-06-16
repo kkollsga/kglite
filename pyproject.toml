@@ -32,19 +32,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # 0.9.41+: MCP server runtime deps (~6 MB total) moved out of the
-    # old `[mcp]` extras into default. `pip install kglite` now gets
-    # a working `kglite-mcp-server` console script with no extras-dance.
-    # Each dep is small and used by the MCP server: `mcp` for stdio
-    # protocol, `pyyaml` for manifest parsing, `aiohttp` for the
-    # optional `extensions.csv_http_server`, `watchdog` for `--watch`
-    # mode. (The 0.9.40 drop of the `mcp-methods` PyPI wheel made
-    # this feasible — the remaining footprint is ~6 MB rather than the
-    # prior ~23 MB.)
-    "mcp>=1.0",
-    "pyyaml>=6.0",
-    "aiohttp>=3.9",
-    "watchdog>=4.0",
+    # 0.10.25: the wheel has no required Python runtime deps. The MCP server
+    # runtime deps (mcp / pyyaml / aiohttp / watchdog) were removed when the
+    # Python MCP server was retired — the MCP server is now the pure-Rust
+    # `kglite-mcp-server` binary (`cargo install kglite-mcp-server`). The
+    # engine + code_tree are the compiled extension; nothing here links a
+    # Python package at import time.
 ]
 dynamic = ["version"]
 
@@ -55,25 +48,18 @@ neo4j = ["neo4j>=5.0"]
 # module load. `from_networkx` also uses pandas (already required by the
 # DataFrame loaders), so only networkx is declared here.
 networkx = ["networkx>=3.0"]
-# Semantic search via `text_score()` and the manifest-declared
-# `extensions.embedder`. Heavy install (~100 MB) because of
-# fastembed → onnxruntime + tokenizers + pillow + huggingface-hub —
-# kept opt-in for users who don't need embeddings. Same ONNX backend
-# as the 0.9.18/0.9.19 Rust fastembed-rs path, same
-# `~/.cache/fastembed/` model cache.
-embed = ["fastembed>=0.4"]
+# The MCP server (and its Python `extensions.embedder` fastembed path) was
+# retired in 0.10.25 — the server is now `cargo install kglite-mcp-server`
+# (pure Rust; embedder via the Rust fastembed-rs feature). To run a Python
+# embedder with the engine's `g.set_embedder(...)`, install fastembed
+# directly and pass a duck-typed embedder (see the Embedder protocol in
+# kglite/__init__.pyi); kglite no longer ships an `[embed]` extra.
 
-# `pip install kglite` → `kglite-mcp-server` on PATH. 0.9.20+: the
-# entry point resolves to the Python implementation under
-# `kglite.mcp_server.server:main`. Pre-0.9.20 this pointed at a
-# launcher that exec'd a bundled Rust binary — that approach was
-# retired because it forced a per-Python-version wheel matrix (no
-# abi3 escape for binaries linking pyo3). The Python entry point
-# wraps the existing kglite Python API; Cypher execution still
-# happens under the GIL release inside `cypher()`, so hot-path
-# performance is unchanged.
-[project.scripts]
-kglite-mcp-server = "kglite.mcp_server.server:main"
+# No `[project.scripts]`: `kglite-mcp-server` is a Rust binary installed via
+# `cargo install kglite-mcp-server`, not a Python console script. (Through
+# 0.10.24 the wheel shipped a Python `kglite-mcp-server` entry point; the
+# Python server was removed in 0.10.25 to consolidate on the single Rust
+# implementation. See docs/operators/index.md and the CHANGELOG.)
 
 [project.urls]
 Homepage = "https://github.com/kkollsga/kglite"
