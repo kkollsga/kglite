@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cypher can predicate over data stored as a JSON string — notably the code
   graph's `Function.parameters` and `Class.fields`:
   `WHERE any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset')`.
+- **Subgraph scoping for the centrality + community procedures.** `pagerank`,
+  `degree`, `betweenness`, `closeness`, `louvain`, `leiden`, and
+  `label_propagation` now accept optional `{node_type, where}` parameters that
+  restrict the algorithm to a property-filtered subgraph, so test / benchmark /
+  external nodes no longer pollute centrality and community results:
+  `CALL pagerank({node_type:'Function', connection_types:'CALLS', where:'n.is_test = false'})`.
+  `where` is a predicate over the node variable `n` (full WHERE grammar); only
+  edges with both endpoints in scope are traversed, and an explicit scope lifts
+  the large-graph refusal guard. In-memory graphs only (disk/mapped reject
+  scope — filter with a preceding `MATCH`).
 
 ### Fixed
 
