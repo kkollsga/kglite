@@ -27,6 +27,27 @@ impl DiskGraph {
         edge_count: usize,
         verbose: bool,
     ) {
+        // Production reads chunking config from the environment. Tests use
+        // `build_csr_merge_sort_with_config` with an explicit config instead,
+        // so they never touch the process-global env vars (which would race
+        // across the test harness's parallel threads — see the flake fix).
+        self.build_csr_merge_sort_with_config(
+            node_bound,
+            edge_count,
+            verbose,
+            csr_build::BuilderConfig::from_env(),
+        )
+    }
+
+    /// As [`Self::build_csr_merge_sort`] but with an explicit chunking config
+    /// rather than reading env vars — the deterministic path for tests.
+    pub(super) fn build_csr_merge_sort_with_config(
+        &mut self,
+        node_bound: usize,
+        edge_count: usize,
+        verbose: bool,
+        config: csr_build::BuilderConfig,
+    ) {
         let phase3_start = std::time::Instant::now();
 
         let now_nanos = std::time::SystemTime::now()
@@ -47,7 +68,7 @@ impl DiskGraph {
             node_bound,
             &build_dir,
             &tmp_dir,
-            &csr_build::BuilderConfig::from_env(),
+            &config,
             verbose,
         );
 
@@ -946,6 +967,7 @@ mod tests {
         dir: &TempDir,
         num_nodes: usize,
         edges: &[(usize, usize, &str)],
+        force_chunks: Option<usize>,
     ) -> (DiskGraph, StringInterner) {
         let mut interner = StringInterner::new();
         let mut dg = DiskGraph::new_at_path(dir.path()).expect("create disk graph");
@@ -958,7 +980,13 @@ mod tests {
         }
         let pending_len = dg.pending_edges.get_mut().len();
         let node_bound = dg.node_slots.len();
-        dg.build_csr_merge_sort(node_bound, pending_len, false);
+        // Explicit config (no env var) keeps these tests deterministic under
+        // the harness's parallel threads.
+        let config = super::csr_build::BuilderConfig {
+            chunk_mb_override: None,
+            force_chunks,
+        };
+        dg.build_csr_merge_sort_with_config(node_bound, pending_len, false, config);
         dg.defer_csr = false;
         (dg, interner)
     }
@@ -1132,7 +1160,7 @@ mod tests {
         let (dg_partitioned, _) = build_graph(&dir_a, 4, &edges);
 
         let dir_b = TempDir::new().unwrap();
-        let (dg_merge_sort, _) = build_graph_merge_sort(&dir_b, 4, &edges);
+        let (dg_merge_sort, _) = build_graph_merge_sort(&dir_b, 4, &edges, None);
 
         assert_eq!(
             collect_index(&dg_partitioned),
@@ -1155,15 +1183,11 @@ mod tests {
     /// graph so we exercise the k-way merge path even at unit-test scale.
     #[test]
     fn merge_sort_multi_chunk_via_force_chunks() {
-        // SAFETY: env vars are process-global. This test is sequentially
-        // scoped (set/clear within the same test) and the cargo test
-        // harness runs each test in a thread but env reads happen
-        // synchronously at start-of-build so collisions are unlikely. If
-        // flakes appear, move to a single-threaded test target.
-        unsafe {
-            std::env::set_var("KGLITE_CSR_FORCE_CHUNKS", "4");
-        }
-
+        // Force 4 chunks via an explicit config (not the process-global
+        // `KGLITE_CSR_FORCE_CHUNKS` env var). The env-var route raced with
+        // other disk-build tests reading `BuilderConfig::from_env()` on the
+        // harness's parallel threads — an occasional flake. The explicit
+        // config is thread-local to this test.
         let edges = [
             (0, 1, "A"),
             (2, 3, "B"),
@@ -1176,16 +1200,9 @@ mod tests {
         ];
 
         let dir = TempDir::new().unwrap();
-        let (dg, _) = build_graph_merge_sort(&dir, 4, &edges);
+        let (dg, _) = build_graph_merge_sort(&dir, 4, &edges, Some(4));
 
-        // SAFETY: paired cleanup for the `set_var` above; same
-        // single-test-scope contract — the build call is sequential
-        // and no concurrent env reads are outstanding here.
-        unsafe {
-            std::env::remove_var("KGLITE_CSR_FORCE_CHUNKS");
-        }
-
-        // Build expected via partitioned path (no env override needed).
+        // Build expected via partitioned path (no chunk override needed).
         let dir_ref = TempDir::new().unwrap();
         let (dg_ref, _) = build_graph(&dir_ref, 4, &edges);
 
