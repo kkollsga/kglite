@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP server: `explore` tool.** One-call codebase exploration — lexically
+  ranks Function/Class/… nodes against a query, 2-hop traverses
+  CALLS/USES_TYPE/HAS_METHOD/DEFINES/REFERENCES_FN, and returns entry points +
+  a neighborhood + grouped source slices (the `graph.explore()` engine method,
+  previously unwired in the Python server). Replaces the typical grep+read
+  chain for "how does X work" questions.
+- **MCP server: bundled orchestration + views skills.** `code_graph_analysis`
+  (graph-first sequencing: map structure with `graph_overview`/`cypher_query`/
+  `explore`, drop to grep/read only to confirm) and `code_graph_views` (how to
+  get library-only views and query JSON-string `parameters`/`fields` with the
+  new provenance filters + `parse_json`). Both gate on `graph_has_node_type:
+  [Function, Class]`, so they stay silent on non-code graphs. This is the
+  guidance operators previously hand-rolled into `instructions:`.
+- **MCP skill-authoring guide** (`docs/python/guides/mcp-skills.md`): the
+  frontmatter schema, the `<basename>.skills/` project-layer convention, the
+  `skills:` value shapes, `applies_when` gating, the three text channels
+  (`instructions:` vs `overview_prefix:` vs skills), the injection size caps,
+  and which frontmatter keys are load-bearing vs decorative.
 - **Code-graph provenance flags `is_benchmark` and `is_generated`.**
   `is_benchmark` (path-based — `asv_bench/`, `benchmarks/`, `bench/`) joins the
   existing `is_test` on `File` / `Module` / `Function` / `Class`, and `is_test`
@@ -51,6 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MCP server: skill `description` (TRIGGER/SKIP routing) now rides the live
+  tool-description channel.** Previously only the skill *body* was injected into
+  tool descriptions; the routing heuristic reached only `prompts/list`, which
+  mainstream agent clients (Claude Code / Desktop / Cursor / Continue) don't
+  expose. It's now injected under a `## When to use` header alongside the
+  `## Methodology` body.
+- **MCP server: `references_tools` is load-bearing.** A skill injects into its
+  own-named tool **and** every tool listed in `references_tools`, so a
+  cross-tool skill (e.g. `code_graph_analysis`) rides several tools at once; a
+  tool can carry multiple skills (per-skill idempotency markers).
+- **MCP server: bundled skills are auto-discovered** from the wheel's `skills/`
+  directory instead of a hand-maintained allowlist — dropping a `<name>.md`
+  there is all it takes to bundle it (`_`/`.`-prefixed files skipped). Fixes
+  `explore.md` shipping inert for several releases.
 - **`graph_overview` / `describe()` no longer pads the schema with
   uniformly-`false` boolean columns.** On a single-language code graph the
   other frontends' flags (`flutter_build`, `is_ffi`, `is_pymethod`,
