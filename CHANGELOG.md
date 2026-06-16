@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Code-graph provenance flags `is_benchmark` and `is_generated`.**
+  `is_benchmark` (path-based — `asv_bench/`, `benchmarks/`, `bench/`) joins the
+  existing `is_test` on `File` / `Module` / `Function` / `Class`, and `is_test`
+  is now also emitted on `Class` (so test classes like `PlotTestCase` can be
+  excluded from fan-out / centrality queries). `File` nodes carry
+  `is_generated` (true for machine-produced files skipped as generated /
+  minified). Lets analysis queries scope to library-only code:
+  `WHERE c.is_test = false AND c.is_benchmark = false`.
+- **`parse_json(s)` Cypher function** (alias `from_json`). Recursively parses a
+  JSON string into a structured map / list / scalar (null on invalid input), so
+  Cypher can predicate over data stored as a JSON string — notably the code
+  graph's `Function.parameters` and `Class.fields`:
+  `WHERE any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset')`.
+
 ### Fixed
 
 - **Code-graph: `is_external` is now `false` on internal nodes, not null.**
