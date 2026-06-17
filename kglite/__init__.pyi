@@ -4350,6 +4350,7 @@ class KnowledgeGraph:
         top_k: int = 10,
         metric: str = "cosine",
         to_df: bool = False,
+        returning: list[str] | None = None,
     ) -> list[dict[str, Any]] | pd.DataFrame:
         """Vector similarity search within the current selection.
 
@@ -4364,22 +4365,32 @@ class KnowledgeGraph:
                 If omitted, uses the metric stored via ``set_embeddings(metric=...)``,
                 or falls back to ``'cosine'``.
             to_df: If ``True``, return a pandas DataFrame instead of list of dicts.
+            returning: Optional list of fields to project onto each hit. Omitted
+                (default) → each hit carries ``id``, ``title``, ``type``, ``score``
+                and **all** node properties. Given → each hit carries ``id`` +
+                ``score`` plus only the named fields (a property name, or a
+                structural field like ``title``/``type``). Use it to trim the
+                payload on wide nodes or ranking-only paths.
 
         Returns:
-            List of dicts with ``id``, ``title``, ``type``, ``score``, and all
-            node properties. Or a DataFrame if ``to_df=True``.
-
-            ``score`` is always present (for every metric). Properties are read
-            live from the node at query time, so a hit carries the same fields
-            before and after ``save()`` + reload — no follow-up
-            ``MATCH ... WHERE id IN [...]`` join is needed to recover them.
+            List of dicts (or a DataFrame if ``to_df=True``). By default a hit has
+            ``id``, ``title``, ``type``, ``score``, and all node properties —
+            ``score`` always present, properties read live so a hit is identical
+            before/after ``save()`` + reload (no follow-up
+            ``MATCH ... WHERE id IN [...]`` join needed). With ``returning=[...]``
+            a hit has ``id`` + ``score`` + the requested fields only.
 
         Example::
 
+            # full hit (default)
             results = (graph
                 .select('Article')
                 .where({'category': 'politics'})
                 .vector_search('summary', query_vec, top_k=10))
+
+            # ranking-only / slim payload
+            ranked = graph.select('Article').vector_search(
+                'summary', query_vec, top_k=50, returning=['title'])
         """
         ...
 
@@ -4643,6 +4654,7 @@ class KnowledgeGraph:
         top_k: int = 10,
         metric: str = "cosine",
         to_df: bool = False,
+        returning: list[str] | None = None,
     ) -> list[dict[str, Any]] | pd.DataFrame:
         """Search embeddings using a text query.
 
@@ -4657,6 +4669,9 @@ class KnowledgeGraph:
             top_k: Number of results (default 10).
             metric: ``'cosine'`` (default), ``'dot_product'``, ``'euclidean'``, or ``'poincare'``.
             to_df: If True, return a pandas DataFrame.
+            returning: Optional field projection — see :meth:`vector_search`.
+                Omitted → full hit (all properties); given → ``id`` + ``score`` +
+                the named fields only.
 
         Returns:
             Same format as ``vector_search()`` — list of dicts or DataFrame.

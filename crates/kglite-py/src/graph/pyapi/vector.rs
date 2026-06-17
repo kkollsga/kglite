@@ -269,13 +269,22 @@ impl KnowledgeGraph {
     ///            If omitted, uses the metric stored with set_embeddings(), or 'cosine'.
     ///     to_df: If True, return a pandas DataFrame instead of list of dicts
     ///
+    ///     returning: Optional list of fields to project onto each hit. When
+    ///            omitted (default), a hit carries ``id``, ``title``, ``type``,
+    ///            ``score``, and **all** node properties — so no follow-up join
+    ///            is needed to recover them. When given, a hit carries only
+    ///            ``id`` + ``score`` plus the named fields (each a property or a
+    ///            structural field like ``title``/``type``) — trim the payload
+    ///            for ranking-heavy or wide-node workloads.
+    ///
     /// Returns:
-    ///     List of dicts, each with ``id``, ``title``, ``type``, ``score``, and
-    ///     all node properties. ``score`` is always present (every metric);
-    ///     properties are read live from the node at query time, so a hit
-    ///     carries the same fields before and after save/reload — no follow-up
-    ///     join is needed to recover them.
-    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None))]
+    ///     List of dicts. By default each has ``id``, ``title``, ``type``,
+    ///     ``score``, and all node properties (``score`` always present, every
+    ///     metric; properties read live so a hit is identical before/after
+    ///     save/reload). With ``returning=[...]`` each has ``id`` + ``score`` +
+    ///     the requested fields only.
+    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None, returning=None))]
+    #[allow(clippy::too_many_arguments)]
     fn vector_search(
         &self,
         py: Python<'_>,
@@ -284,9 +293,16 @@ impl KnowledgeGraph {
         top_k: Option<usize>,
         metric: Option<&str>,
         to_df: Option<bool>,
+        returning: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let top_k = top_k.unwrap_or(10);
         let embedding_property = format!("{}_emb", text_column);
+        // Projection set: None = include everything (default). Some = include
+        // only these fields; `id` and `score` are always kept (identity + rank).
+        let keep: Option<std::collections::HashSet<String>> =
+            returning.map(|v| v.into_iter().collect());
+        let want =
+            |k: &str| k == "id" || k == "score" || keep.as_ref().is_none_or(|set| set.contains(k));
 
         // Resolve metric: explicit arg > stored metric > cosine default
         let effective_metric = match metric {
@@ -338,14 +354,21 @@ impl KnowledgeGraph {
                     self.inner.graph.node_weight(r.node_idx).map(|node| {
                         let dict = PyDict::new(py);
                         let _ = dict.set_item("id", py_out::value_to_py(py, &node.id()).ok());
-                        let _ = dict.set_item("title", py_out::value_to_py(py, &node.title()).ok());
-                        let _ = dict.set_item("type", node.node_type_str(&self.inner.interner));
+                        if want("title") {
+                            let _ =
+                                dict.set_item("title", py_out::value_to_py(py, &node.title()).ok());
+                        }
+                        if want("type") {
+                            let _ = dict.set_item("type", node.node_type_str(&self.inner.interner));
+                        }
                         let _ = dict.set_item("score", r.score);
                         // properties_cloned reads from PropertyStorage::Columnar
                         // (the post-reload variant); property_iter yields
                         // nothing for that variant.
                         for (k, v) in node.properties_cloned(&self.inner.interner) {
-                            let _ = dict.set_item(k, py_out::value_to_py(py, &v).ok());
+                            if want(&k) {
+                                let _ = dict.set_item(k, py_out::value_to_py(py, &v).ok());
+                            }
                         }
                         dict.into()
                     })
@@ -362,14 +385,20 @@ impl KnowledgeGraph {
             if let Some(node) = self.inner.graph.node_weight(r.node_idx) {
                 let dict = PyDict::new(py);
                 dict.set_item("id", py_out::value_to_py(py, &node.id())?)?;
-                dict.set_item("title", py_out::value_to_py(py, &node.title())?)?;
-                dict.set_item("type", node.node_type_str(&self.inner.interner))?;
+                if want("title") {
+                    dict.set_item("title", py_out::value_to_py(py, &node.title())?)?;
+                }
+                if want("type") {
+                    dict.set_item("type", node.node_type_str(&self.inner.interner))?;
+                }
                 dict.set_item("score", r.score)?;
                 // properties_cloned reads from PropertyStorage::Columnar
                 // (the post-reload variant); property_iter yields nothing
                 // for that variant.
                 for (k, v) in node.properties_cloned(&self.inner.interner) {
-                    dict.set_item(k, py_out::value_to_py(py, &v)?)?;
+                    if want(&k) {
+                        dict.set_item(k, py_out::value_to_py(py, &v)?)?;
+                    }
                 }
                 py_list.append(dict)?;
             }
@@ -1204,7 +1233,8 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Same format as ``vector()`` — list of dicts or DataFrame.
-    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None))]
+    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None, returning=None))]
+    #[allow(clippy::too_many_arguments)]
     fn search_text(
         &self,
         py: Python<'_>,
@@ -1213,6 +1243,7 @@ impl KnowledgeGraph {
         top_k: Option<usize>,
         metric: Option<&str>,
         to_df: Option<bool>,
+        returning: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error()?;
 
@@ -1237,6 +1268,14 @@ impl KnowledgeGraph {
         let query_vector = embeddings.into_iter().next().unwrap();
 
         // Delegate to existing vector_search
-        self.vector_search(py, text_column, query_vector, top_k, metric, to_df)
+        self.vector_search(
+            py,
+            text_column,
+            query_vector,
+            top_k,
+            metric,
+            to_df,
+            returning,
+        )
     }
 }

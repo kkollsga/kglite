@@ -26,6 +26,13 @@ as three phases:
 
 ### Added
 
+- **`search_text` / `vector_search` gain a `returning=[...]` field projection.**
+  By default a hit already carries `id`, `title`, `type`, `score`, **and every
+  node property** (read live — identical before/after save/reload, so no
+  follow-up `MATCH … WHERE id IN […]` hydrate is needed). `returning=['title']`
+  trims a hit to `id` + `score` + the named fields, for ranking-heavy or
+  wide-node workloads. Documents the default hit contract (operator note: search
+  hits + harvest N1).
 - **`embed_texts(mode='changed')` + per-node text-hash + model provenance.**
   `embed_texts` now records, per node, a content hash of the embedded text and
   (when the embedder exposes a `model_id`/`model_name`) the model identity.
