@@ -447,7 +447,12 @@ impl KnowledgeGraph {
                 d.set_item("dimension", store.dimension)?;
                 d.set_item("count", store.len())?;
                 d.set_item("model", store.model_id.clone())?;
-                d.set_item("metric", store.metric.clone())?;
+                // Report the *effective* metric: a store created by `embed_texts`
+                // (or imported pre-provenance) carries no explicit metric, but
+                // search falls back to cosine — so report what search actually
+                // uses rather than a bare `None` (operator note: the metric blank
+                // was confusing even though ranking was correct).
+                d.set_item("metric", store.metric.as_deref().unwrap_or("cosine"))?;
                 d.set_item("hashed", store.text_hashes.len())?;
                 d.into_py_any(py)
             }

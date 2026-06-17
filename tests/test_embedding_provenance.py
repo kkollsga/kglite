@@ -172,3 +172,83 @@ def test_roundtrip_via_to_bytes_preserves_provenance():
     info = g2.embedding_info("Doc", "summary")
     assert info["model"] == "m/2"
     assert info["hashed"] == 2
+
+
+# ── 0.11.1 (A): embedding_info reports the *effective* metric ─────────────────
+
+
+class TestEffectiveMetricReporting:
+    """embedding_info().metric must report what search actually uses — the
+    explicit metric if set, else the cosine default — never a bare None for an
+    existing store (operator: the None was confusing though ranking was correct)."""
+
+    def test_embed_texts_store_reports_cosine_default(self):
+        g = _docs()
+        g.set_embedder(_Embedder(model_id="m"))
+        g.embed_texts("Doc", "summary", show_progress=False)
+        # No explicit metric was set -> effective default is cosine.
+        assert g.embedding_info("Doc", "summary")["metric"] == "cosine"
+
+    def test_set_embeddings_without_metric_reports_cosine(self):
+        g = _docs()
+        g.set_embeddings("Doc", "summary", {0: [1.0, 0.0], 1: [0.0, 1.0]})
+        assert g.embedding_info("Doc", "summary")["metric"] == "cosine"
+
+    def test_explicit_metric_reported_verbatim(self):
+        g = _docs()
+        g.set_embeddings("Doc", "summary", {0: [1.0, 0.0], 1: [0.0, 1.0]}, metric="euclidean")
+        assert g.embedding_info("Doc", "summary")["metric"] == "euclidean"
+        # Consistent with list_embeddings.
+        row = next(r for r in g.list_embeddings() if r["text_column"] == "summary")
+        assert row["metric"] == "euclidean"
+
+
+# ── 0.11.1 (B): .kgle export/import carries provenance ────────────────────────
+
+
+class TestKgleProvenanceRoundTrip:
+    """export_embeddings/import_embeddings must carry model_id + per-node
+    text_hashes + metric (KGLE v2), so a rebuild-from-.kgle pipeline keeps
+    provenance and embed_texts(mode='changed') re-embeds nothing unchanged."""
+
+    def test_roundtrip_preserves_model_metric_and_hashes(self, tmp_path):
+        import os
+
+        src = _docs(3)
+        src.set_embedder(_Embedder(model_id="prov/model-v2"))
+        src.embed_texts("Doc", "summary", show_progress=False)
+        src.set_embeddings(  # set an explicit metric on a second store
+            "Doc", "title", {0: [1.0, 0.0], 1: [0.0, 1.0], 2: [1.0, 1.0]}, metric="euclidean"
+        )
+        kgle = os.path.join(tmp_path, "prov.kgle")
+        src.export_embeddings(kgle)
+
+        # Fresh graph with the same nodes; import the .kgle.
+        dst = _docs(3)
+        dst.import_embeddings(kgle)
+
+        info = dst.embedding_info("Doc", "summary")
+        assert info["model"] == "prov/model-v2"
+        assert info["metric"] == "cosine"  # effective default, carried as None
+        assert info["hashed"] == 3  # per-node text hashes survived
+
+        title_info = dst.embedding_info("Doc", "title")
+        assert title_info["metric"] == "euclidean"  # explicit metric survived
+
+    def test_imported_provenance_enables_mode_changed(self, tmp_path):
+        import os
+
+        src = _docs(3)
+        src.set_embedder(_Embedder(model_id="prov/model-v2"))
+        src.embed_texts("Doc", "summary", show_progress=False)
+        kgle = os.path.join(tmp_path, "prov.kgle")
+        src.export_embeddings(kgle)
+
+        dst = _docs(3)
+        dst.import_embeddings(kgle)
+        # The whole point: with hashes carried, mode='changed' re-embeds nothing
+        # (no text changed since export).
+        dst.set_embedder(_Embedder(model_id="prov/model-v2"))
+        res = dst.embed_texts("Doc", "summary", mode="changed", show_progress=False)
+        assert res.get("reembedded_changed", 0) == 0
+        assert res.get("embedded", 0) == 0

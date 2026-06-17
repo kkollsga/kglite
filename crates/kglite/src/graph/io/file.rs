@@ -2333,15 +2333,37 @@ use crate::datatypes::values::Value;
 
 /// Magic bytes for the embedding export format.
 const KGLE_MAGIC: [u8; 4] = *b"KGLE";
-const KGLE_VERSION: u32 = 1;
+/// v2 (0.11.1): carries store `metric` + `model_id` + per-node `text_hash`
+/// alongside each vector, so a rebuild-from-`.kgle` pipeline retains provenance
+/// and can use `embed_texts(mode='changed')`. v1 files (no provenance) still
+/// read — see the version branch in `import_embeddings_from_file`.
+const KGLE_VERSION: u32 = 2;
+
+/// v1 `.kgle` store shape (no provenance) — kept solely to deserialize files
+/// produced by kglite ≤ 0.11.0.
+#[derive(Deserialize)]
+struct ExportedEmbeddingStoreV1 {
+    node_type: String,
+    text_column: String,
+    dimension: usize,
+    entries: Vec<(Value, Vec<f32>)>,
+}
 
 /// A single embedding store serialized with node IDs (not internal indices).
+/// v2 adds provenance: the store `metric`/`model_id` and a per-entry text hash,
+/// so `import_embeddings` round-trips what `embed_texts(mode='changed')` needs.
 #[derive(Serialize, Deserialize)]
 struct ExportedEmbeddingStore {
     node_type: String,
     text_column: String, // e.g. "summary" (without _emb suffix)
     dimension: usize,
-    entries: Vec<(Value, Vec<f32>)>, // (node_id, embedding) pairs
+    /// Store default metric (`set_embeddings(metric=…)`), `None` if unset.
+    metric: Option<String>,
+    /// Embedder id stamped by `embed_texts`, `None` for raw-vector stores.
+    model_id: Option<String>,
+    /// (node_id, embedding, optional source-text hash). The hash is `Some` only
+    /// for vectors produced by `embed_texts` (drives `mode='changed'`).
+    entries: Vec<(Value, Vec<f32>, Option<u64>)>,
 }
 
 /// Filter for selective embedding export.
@@ -2407,15 +2429,16 @@ pub fn export_embeddings_to_file(
             }
         }
 
-        // Resolve node indices → node IDs
-        let mut entries: Vec<(Value, Vec<f32>)> = Vec::with_capacity(store.len());
+        // Resolve node indices → node IDs, carrying each node's text hash.
+        let mut entries: Vec<(Value, Vec<f32>, Option<u64>)> = Vec::with_capacity(store.len());
         for &node_index in &store.slot_to_node {
             if let Some(node) = graph
                 .graph
                 .node_weight(petgraph::graph::NodeIndex::new(node_index))
             {
                 if let Some(embedding) = store.get_embedding(node_index) {
-                    entries.push((node.id().into_owned(), embedding.to_vec()));
+                    let hash = store.text_hashes.get(&node_index).copied();
+                    entries.push((node.id().into_owned(), embedding.to_vec(), hash));
                 }
             }
         }
@@ -2425,6 +2448,8 @@ pub fn export_embeddings_to_file(
             node_type: node_type.clone(),
             text_column: text_column.to_string(),
             dimension: store.dimension,
+            metric: store.metric.clone(),
+            model_id: store.model_id.clone(),
             entries,
         });
     }
@@ -2475,11 +2500,29 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         )));
     }
 
-    // Decompress and deserialize
+    // Decompress and deserialize. bincode is positional, so the v1 shape
+    // (no provenance) must be read with its own struct and lifted to v2.
     let gz = GzDecoder::new(&buf[8..]);
-    let exported_stores: Vec<ExportedEmbeddingStore> = bincode_options()
-        .deserialize_from(gz)
-        .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?;
+    let exported_stores: Vec<ExportedEmbeddingStore> = if version >= 2 {
+        bincode_options()
+            .deserialize_from(gz)
+            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?
+    } else {
+        let v1: Vec<ExportedEmbeddingStoreV1> =
+            bincode_options().deserialize_from(gz).map_err(|e| {
+                io::Error::other(format!("Failed to deserialize embedding data: {}", e))
+            })?;
+        v1.into_iter()
+            .map(|s| ExportedEmbeddingStore {
+                node_type: s.node_type,
+                text_column: s.text_column,
+                dimension: s.dimension,
+                metric: None,
+                model_id: None,
+                entries: s.entries.into_iter().map(|(id, v)| (id, v, None)).collect(),
+            })
+            .collect()
+    };
 
     let mut total_imported = 0usize;
     let mut total_skipped = 0usize;
@@ -2491,6 +2534,9 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         graph.build_id_index(&exported.node_type);
 
         let mut store = crate::graph::schema::EmbeddingStore::new(exported.dimension);
+        // Restore store-level provenance (v2+; `None` for v1 files).
+        store.metric = exported.metric.clone();
+        store.model_id = exported.model_id.clone();
         store
             .data
             .reserve(exported.entries.len() * exported.dimension);
@@ -2498,10 +2544,15 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         let mut imported = 0usize;
         let mut skipped = 0usize;
 
-        for (id, vec) in &exported.entries {
+        for (id, vec, hash) in &exported.entries {
             match graph.lookup_by_id(&exported.node_type, id) {
                 Some(node_idx) => {
                     store.set_embedding(node_idx.index(), vec);
+                    // Restore the per-node text hash so embed_texts(mode='changed')
+                    // can diff against it (the whole point of v2 provenance).
+                    if let Some(h) = hash {
+                        store.set_text_hash(node_idx.index(), *h);
+                    }
                     imported += 1;
                 }
                 None => {

@@ -4458,6 +4458,12 @@ class KnowledgeGraph:
         ``embed_texts(mode='changed')`` for change-detection). Detect a model swap
         or a partially-hashed store without external bookkeeping.
 
+        ``metric`` is the store's **effective** distance metric: the one set via
+        ``set_embeddings(metric=...)`` if any, else ``'cosine'`` (the default
+        search applies). It is never ``None`` for an existing store — a store with
+        no explicit metric reports ``'cosine'`` (consistent with
+        :meth:`list_embeddings`).
+
         The ``model`` is populated when the embedder exposes a ``model_id`` /
         ``model_name`` attribute (or is the built-in fastembed backend).
         """
