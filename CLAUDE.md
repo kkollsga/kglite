@@ -370,6 +370,25 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 - **Guide content**: `docs/guides/*.md`.
 - **README.md**: landing page only — don't duplicate guide content.
 
+## Inbox hygiene
+
+`inbox/unread/` holds incoming feedback/bug/coordination notes (named
+`YYYY-MM-DD-from-<sender>-<topic>.md`); `inbox/read/` is the archive. The
+inbox is gitignored — it's local working state, not committed.
+
+**When a message has been actioned, move it from `inbox/unread/` to
+`inbox/read/`.** "Actioned" means the work shipped, the bug was verified
+fixed, or it's a no-action acknowledgement — not merely read. `unread/`
+must reflect only what still needs doing, so a stale "you still have unread
+mail" never hides a genuinely open item among resolved ones. Append a
+one-line `## Status (kglite, <date>): …` footer to substantive work-items
+before moving, so `read/` carries the resolution record.
+
+**Route to the party who can act.** A note only belongs in another project's
+inbox (e.g. `../mcp-servers/inbox/`, `../mcp-methods/inbox/`) if it carries an
+*actionable* task for them. If there's nothing for them to do, don't file it —
+their `unread/` should hold only things that need their action.
+
 ## Commits & releases
 
 Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
