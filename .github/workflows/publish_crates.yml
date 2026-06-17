@@ -145,11 +145,21 @@ jobs:
       # against this ref, exiting..." because the rendered per-matrix
       # names (e.g. `Build wheel - ubuntu-latest - x86_64-...`) only
       # exist when the workflow actually ran.
+      #
+      # The negative lookahead excludes the *best-effort* Linux-aarch64
+      # cross-build legs (`build-linux-arm`, `continue-on-error: true` —
+      # "absent until the next release fixes it"). Their `failure`
+      # conclusion must NOT block crates.io, exactly as the PyPI publish
+      # tolerates them (it gates on build-native/build-linux only). Without
+      # this, a flaky aarch64 cross-build (e.g. `ring` failing to assemble
+      # in the manylinux2014-cross:aarch64 image) wedges the whole
+      # crates.io publish. macOS aarch64 (a must-pass `build-native` leg)
+      # is NOT excluded — only `aarch64-unknown-linux`.
       - name: Wait for wheel build matrix
         uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
-          check-regexp: '^Build wheel - .*$'
+          check-regexp: '^Build wheel - (?!.*aarch64-unknown-linux).*$'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 30
           allowed-conclusions: success,skipped
