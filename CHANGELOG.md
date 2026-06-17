@@ -26,6 +26,13 @@ as three phases:
 
 ### Added
 
+- **Public `code_tree` build API.** Code-graph building now has a stable public
+  entry point — top-level `kglite.build_code_tree(path, …)` and
+  `kglite.code_tree.build` — and `kglite._kglite_code_tree` is documented as an
+  internal implementation detail (consumers were importing from the
+  underscore-prefixed module directly). The top-level `from_bytes`,
+  `build_code_tree`, and `FrozenGraph` are now advertised in `kglite.__all__`
+  (operator note #3).
 - **`copy_embeddings_from(other)`** — one-call, id-keyed cross-graph vector
   carry. The dominant embedding workflow rebuilds a *fresh* graph from a source
   of truth on each load; `embed_texts(mode='changed')` can't help an empty fresh

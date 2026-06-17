@@ -1,12 +1,16 @@
 """Parse codebases into KGLite knowledge graphs.
 
 All functionality is implemented in Rust (with bundled tree-sitter
-grammars) and exposed through the native `_kglite_code_tree` submodule.
-No optional dependencies are required.
+grammars). No optional dependencies are required.
+
+**Public API:** ``kglite.code_tree.build`` (here) or the top-level
+``kglite.build_code_tree``. The native ``kglite._kglite_code_tree`` module is
+an internal implementation detail — import from ``kglite.code_tree`` or the
+top level, never the underscore-prefixed module (it may change without notice).
 
 Usage::
 
-    from kglite.code_tree import build
+    from kglite.code_tree import build   # or: import kglite; kglite.build_code_tree(...)
 
     graph = build("/path/to/project")
 

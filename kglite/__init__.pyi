@@ -477,6 +477,20 @@ def from_bytes(data: bytes) -> KnowledgeGraph:
     """
     ...
 
+def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
+    """Parse a codebase at ``path`` into a :class:`KnowledgeGraph`.
+
+    The stable, public entry point for code-graph building (tree-sitter grammars
+    are bundled in the Rust extension — no extra to install). Equivalent to
+    ``kglite.code_tree.build``; prefer either over the internal
+    ``kglite._kglite_code_tree`` module, which may change without notice.
+
+    Pass ``include_docs=True`` to also ingest markdown as ``:Doc`` nodes linked
+    to the code they mention. See ``kglite.code_tree.build`` for the full
+    keyword set.
+    """
+    ...
+
 def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
