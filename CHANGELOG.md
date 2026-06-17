@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A WHERE predicate on a property absent from the matched label now warns**
+  (non-fatal, stderr — same channel as the unknown-label/relationship warnings)
+  instead of silently filtering out every row. `MATCH (f:Function) WHERE
+  f.nonexistent = false …` previously returned `No results` indistinguishably
+  from a genuine empty match (`null = false` → false); now it emits
+  *"WHERE references property 'nonexistent' which no Function node has …"* with a
+  did-you-mean. A warning, not an error, so legitimately-sparse (sometimes-null)
+  properties — which are in the type's metadata — never trip it (operator A1b).
 - **Code-graph: `is_external` is now emitted on `Function` (= `false`), not just
   `Class`/`File`.** Previously `f.is_external` was null on functions, so the
   documented library-only filter `WHERE n.is_external = false` silently matched
