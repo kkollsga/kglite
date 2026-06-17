@@ -152,8 +152,9 @@ as three phases:
   (`borrow()`), and mutations surfaced a cryptic `Already borrowed`. The read
   paths now raise a `RuntimeError` explaining the single-owner contract and
   pointing to the fix (give each worker its own `copy()` — cheap — or serialize
-  access). A frozen, concurrently-readable snapshot is coming next (operator
-  concurrency note, Tier 1).
+  access; or share a read-only `freeze()` snapshot — see Added). This is the
+  operator's concurrency note Tier 1; the `freeze()` snapshot (Tier 2) ships in
+  the same release.
 - **`create_index` now reports `created` honestly.** Re-creating an existing
   index is still idempotent (no error), but the returned dict now carries
   `created=false` when an index for `(node_type, property)` already existed and

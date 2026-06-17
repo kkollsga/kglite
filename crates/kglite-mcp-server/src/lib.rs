@@ -214,9 +214,9 @@ where
 }
 
 /// Like [`run`], but with an optional Python-embedder factory for the
-/// `extensions.embedder.backend: python` path. The standalone binary
-/// calls [`run`] (no factory); the kglite wheel passes a factory that
-/// builds a fastembed-py embedder.
+/// `extensions.embedder.library` Python path (`sentence-transformers` /
+/// `fastembed`). The standalone binary calls [`run`] (no factory); the
+/// kglite wheel passes a factory that builds the named Python embedder.
 pub fn run_with_embedder_factory<I, T>(args: I, factory: Option<PyEmbedderFactory>) -> Result<()>
 where
     I: IntoIterator<Item = T>,
