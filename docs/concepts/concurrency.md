@@ -249,9 +249,9 @@ near-linear speedup up to the physical core count.
 
 ## See also
 
-- [`transactions.md`](transactions.md) — `begin()` / `commit()` /
+- [`transactions.md`](../python/transactions.md) — `begin()` / `commit()` /
   OCC semantics + per-call cost reference.
-- [`error-handling.md`](error-handling.md) — typed exception
+- [`error-handling.md`](../python/error-handling.md) — typed exception
   hierarchy.
 - `tests/test_concurrency.py` — the executable contract for the
   guarantees above.

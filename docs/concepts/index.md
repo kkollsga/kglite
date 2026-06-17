@@ -18,8 +18,9 @@ or [Rust guide](../rust/index.md).
 - **[Cypher conformance](cypher-conformance.md)** — what subset
   of Cypher kglite supports + three-valued logic + the
   conformance harness.
-- **[Concurrency](concurrency.md)** — thread-safety,
-  `Arc<DirGraph>`, mutation semantics, GIL handling.
+- **[Concurrency](concurrency.md)** — the single-owner contract,
+  `freeze()` snapshots for lock-free concurrent reads, `Arc<DirGraph>`
+  mutation semantics, and GIL handling.
 
 ## Extending
 

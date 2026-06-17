@@ -15,7 +15,7 @@ If you're using the Python wheel (`pip install kglite`), the
 # Cargo.toml
 [dependencies]
 # Path dep within this workspace; post-publish:
-#   kglite = "0.10"
+#   kglite = "0.11"
 kglite = { path = "../kglite/crates/kglite" }
 ```
 

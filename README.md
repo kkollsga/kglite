@@ -581,7 +581,7 @@ Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) |
 
 ## Stability
 
-KGLite is `v0.10.x` (Beta), versioned under [SemVer](https://semver.org/).
+KGLite is `v0.11.x` (Beta), versioned under [SemVer](https://semver.org/).
 The Python API surface and the supported Cypher dialect have been
 largely stable across the `0.9` → `0.10` line; the occasional breaking
 change (e.g. the `0.10.10` node-id semantics unification) is called out

@@ -113,7 +113,10 @@ Concurrency / durability / embeddings, at a glance:
   pipe, a checksum, a custom atomic-write) instead of being limited to
   `save(path)`. `from_bytes` raises a classifiable error on a corrupt/truncated
   or non-`.kgl` buffer (operator durability note §4). Default/mapped modes only
-  (a disk graph is a directory, not a byte stream).
+  (a disk graph is a directory, not a byte stream). The Rust api surface gains
+  the backing serializers — `kglite::api::{write_kgl, write_kgl_with, write_kgl_to,
+  load_kgl_bytes}` — so non-Python bindings get the same atomic-write + byte
+  round-trip.
 - **`replace_connections(...)`** — an atomic edge upsert. For every source node
   present in the input (`data` DataFrame or `query` result), its existing edges
   *of that connection type* are pruned, then the supplied edges are added — in

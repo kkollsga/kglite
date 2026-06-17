@@ -417,9 +417,9 @@ void kglite_free_string(const char* s);
 KgliteAbiVersion kglite_abi_version(void);
 ```
 
-That's the H.2 surface — 12 functions actually (lifecycle 3 + session
-3 + Cypher 2 + result 3 + error 3 + ABI 1 = 15). Enough to demonstrate
-the binding pattern end-to-end with the H.4 Go PoC.
+That's the H.2 surface — 15 functions (lifecycle 3 + session 3 +
+Cypher 2 + result 3 + error 3 + ABI 1). Enough to demonstrate the
+binding pattern end-to-end with the H.4 Go PoC.
 
 ---
 

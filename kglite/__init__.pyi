@@ -478,9 +478,11 @@ def from_bytes(data: bytes) -> KnowledgeGraph:
         A new KnowledgeGraph with the loaded data.
 
     Raises:
-        IOError: If ``data`` is not a valid ``.kgl`` buffer (bad magic,
-            truncated, or an incompatible/older format) — classifiable and
-            distinct from a successful load of an empty graph.
+        FileFormatError: If ``data`` is not a valid ``.kgl`` buffer (bad magic,
+            truncated, or an incompatible/older format) — a typed
+            ``kglite.KgError`` subclass, distinct from a successful load of an
+            empty graph. (``kglite.load`` raises the same on a corrupt file, or
+            ``FileError`` when the path is missing.)
     """
     ...
 

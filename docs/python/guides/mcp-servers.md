@@ -963,8 +963,9 @@ documented under "Tool response formats."
 must appear in `parameters.properties`. Mismatch fails at boot,
 not at agent call time.
 
-Worked examples — see `docs/examples/manifest_cypher_tool.md`
-through `docs/examples/manifest_wikidata.md`.
+Worked examples — see the `docs/python/examples/manifest_*.md` pages
+(`manifest_cypher_tool`, `manifest_value_codecs`, `manifest_with_embedder`,
+`manifest_workspace`).
 
 ### Embedder `library` × model catalog
 

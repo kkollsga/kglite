@@ -71,6 +71,8 @@ graph.embed_texts("Article", "summary", mode="changed")
 # Inspect provenance (dimension, count, model id, metric, #hashed):
 graph.embedding_info("Article", "summary")
 # → {'dimension': 384, 'count': 1050, 'model': 'all-MiniLM-L6-v2', 'metric': 'cosine', 'hashed': 1050}
+# Or just the dimension (cheap; None if no store) — handy to detect a model swap:
+graph.embedding_dim("Article", "summary")   # → 384
 
 # Combine with filters
 results = (graph
@@ -242,6 +244,12 @@ graph.cypher("""
     ORDER BY score DESC LIMIT 5
 """)
 ```
+
+To score against a **pre-computed vector** instead of a text query (no
+`set_embedder()` needed), use `vector_score(n, 'summary_emb', $vec)` — the Cypher
+counterpart of the fluent `vector_search()` method. Note the surfaces differ:
+`text_score()`/`vector_score()` are **Cypher functions** (used in `RETURN`/`WHERE`);
+`search_text()`/`vector_search()` are **fluent methods** on a selection.
 
 ### Embedding Norm in Cypher
 

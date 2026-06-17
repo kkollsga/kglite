@@ -90,7 +90,9 @@ pub mod api {
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
-    pub use crate::graph::io::file::{load_file, save_graph};
+    pub use crate::graph::io::file::{
+        load_file, load_kgl_bytes, save_graph, write_kgl, write_kgl_to, write_kgl_with,
+    };
     pub use crate::graph::{SourceLocation, SourceLookup};
 
     /// Parameter-shape helpers for bindings — wire-shaped values

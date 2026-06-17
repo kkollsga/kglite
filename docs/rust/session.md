@@ -115,7 +115,7 @@ Bolt-server passes `true`.
 
 ```rust
 let opts = ExecuteOptions {
-    params: Cow::Borrowed(&params),     // borrow; clone-on-write when text_score needs to inject embedder vectors
+    params: &params,                    // borrowed &HashMap<String, Value>
     deadline: Some(Instant::now() + Duration::from_secs(30)),
     max_rows: Some(10_000),
     lazy_eligible: false,                // true only if the binding has a lazy materializer (pyapi's ResultView does; bolt-server doesn't)

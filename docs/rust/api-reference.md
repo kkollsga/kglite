@@ -16,7 +16,7 @@ This page is the curated inventory.
 | `DirGraph` | `kglite::api::DirGraph` | The in-memory graph. Owned by your binding's "graph handle". |
 | `Value` | `kglite::api::Value` | Every value Cypher can return: scalars, `List`, `Map`, `Node`, `Relationship`, `Path`, …. |
 | `NodeValue` / `PathValue` / `RelValue` | `kglite::api::*` | Per-variant carriers; pattern-match into them without deriving accessors. |
-| `KgError` / `KgErrorCode` | `kglite::api::KgError`, `KgErrorCode` | Typed error enum (16 variants). Map to your binding's error idiom. |
+| `KgError` / `KgErrorCode` | `kglite::api::KgError`, `KgErrorCode` | Typed error enum (16 variants). Map to your binding's error idiom. File I/O: `FileNotFound` / `FileFormat` (corrupt/wrong-format `.kgl`) / `FileIo` (→ Python `FileError`/`FileFormatError`/`FileIoError`). |
 | `Embedder` (trait) | `kglite::api::Embedder` | Pluggable text-embedding backend for `text_score()` Cypher. |
 | `FastEmbedAdapter` (feature `fastembed`) | `kglite::api::FastEmbedAdapter` | Rust-native ONNX embedder. |
 | `SourceLocation` / `SourceLookup` | `kglite::api::*` | Code-entity location lookup result types. |
@@ -26,9 +26,18 @@ This page is the curated inventory.
 
 | Item | Path | Purpose |
 |---|---|---|
-| `load_file(path)` | `kglite::api::load_file` | Read a `.kgl` file → `io::Result<Arc<DirGraph>>`. |
+| `load_file(path)` | `kglite::api::load_file` | Read a `.kgl` file (or disk dir) → `io::Result<Arc<DirGraph>>`. |
+| `load_kgl_bytes(&[u8])` | `kglite::api::load_kgl_bytes` | Load an in-memory graph from a `.kgl` byte buffer (counterpart of `write_kgl_to`). |
 | `save_graph(&mut arc, path)` | `kglite::api::save_graph` | Write an `Arc<DirGraph>` → `Result<(), String>`. |
+| `write_kgl` / `write_kgl_with(..., fsync)` | `kglite::api::write_kgl*` | Atomic (temp+rename) + durable (`fsync`) `.kgl` write. `write_kgl_with` toggles the flush. |
+| `write_kgl_to(&graph, &mut writer)` | `kglite::api::write_kgl_to` | Serialize the `.kgl` byte stream into any `Write` (backs `to_bytes`). |
 | `build_code_tree(...)` | `kglite::api::build_code_tree` | Parse a source tree → `Result<Arc<DirGraph>, String>`. |
+
+`DirGraph::copy_embeddings_from(&src)` carries embedding stores across a rebuild
+by node id (the core behind the Python `copy_embeddings_from`). The other new
+0.11.0 methods — `embedding_info` / `embedding_dim`, `replace_connections`,
+`embed_texts(mode=…)`, `freeze` — are binding-surface (Python `KnowledgeGraph`)
+methods, documented in the Python track, not raw `kglite::api` functions.
 
 ## Schema introspection
 
@@ -108,9 +117,9 @@ move freely between minor releases.
 
 | Change kind | Bumps |
 |---|---|
-| New item in `api::*` | Minor (`0.10.0` → `0.11.0`) |
-| Breaking change to an item already in `api::*` | Major (`0.x.y` → `1.0.0` once we hit 1.0; for now any 0.x bump may break, but we try to keep additions additive within 0.10.x) |
-| Internal rearrangement (non-api items) | Patch (`0.10.0` → `0.10.1`) |
+| New item in `api::*` | Minor (`0.11.0` → `0.12.0`) |
+| Breaking change to an item already in `api::*` | Major (`0.x.y` → `1.0.0` once we hit 1.0; for now any 0.x bump may break, but we try to keep additions additive within a `0.x` line) |
+| Internal rearrangement (non-api items) | Patch (`0.11.0` → `0.11.1`) |
 
 The `.kgl` file format has its own version (`v3`, `v4`, …)
 tracked separately. Format bumps land with their decoder and

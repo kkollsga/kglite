@@ -238,22 +238,22 @@ between forward- and dotted-paths in C, dropping the file portion of
 a Python module path — invalidates the keys in a `.kgle` file
 exported under the older format.
 
-**0.9.15 surfaces the mismatch automatically.** When `import_embeddings`
+**The mismatch surfaces automatically.** When `import_embeddings`
 finds zero matches against the file's keys, it raises a
 `UserWarning` naming the file and the counts; when only some stores
 fail, the result dict's `dropped_stores` field reports how many. Use
-that warning to detect when the format has drifted under you. The
-`embedding_diagnostics()` companion (planned, see CHANGELOG) will
-add per-type reasons.
+that warning to detect when the format has drifted under you.
 
 ### Stability commitment
 
 The qualified-name format is **stable within a kglite minor release**
-(0.9.x → 0.9.y will not change the format). Cross-minor changes will
-be called out in the CHANGELOG with a clear "rebuild embeddings"
-note. Existing graph files (`.kgl`) are not affected — they carry
-the IDs that match their build, and embeddings exported from the
-same graph round-trip without warning.
+(`0.x.y` → `0.x.z` won't change it). Cross-minor changes are called
+out in the CHANGELOG with a clear "rebuild embeddings" note. Existing
+graph files (`.kgl`) are not affected — they carry the IDs that match
+their build, and embeddings exported from the same graph round-trip
+without warning. (Carrying vectors across a rebuild is now one call:
+`new_graph.copy_embeddings_from(old_graph)` — see
+{doc}`/python/guides/semantic-search`.)
 
 ### Recovering from a format change
 

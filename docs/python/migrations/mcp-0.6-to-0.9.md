@@ -40,10 +40,12 @@ pip install --upgrade kglite
 ```
 
 The default install pulls everything the server needs: `mcp`,
-`pyyaml`, `aiohttp`, and `watchdog` (for semantic search, add the
-`[embed]` extra to pull `fastembed`). There is no separate
-`[code-tree]` extras — tree-sitter grammars are bundled into the
-Rust extension and load with kglite itself.
+`pyyaml`, `aiohttp`, and `watchdog`. (Historical: this era used an
+`[embed]` extra for `fastembed`; it was **removed in 0.10.28** —
+embedding is now bring-your-own, `pip install` whatever library you
+name in `extensions.embedder.library`.) There is no `[code-tree]`
+extra — tree-sitter grammars are bundled into the Rust extension and
+load with kglite itself.
 
 After install, `kglite-mcp-server` is on PATH.
 

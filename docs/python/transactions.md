@@ -135,14 +135,14 @@ All three backends (`Memory`, `Mapped`, `Disk`) support `begin()`:
 ## Concurrency
 
 For thread-safety guarantees and the WKT-cache / `Arc::make_mut` CoW
-contract, see [`concurrency.md`](concurrency.md).
+contract, see [`concurrency.md`](../concepts/concurrency.md).
 
 A `KnowledgeGraph` is single-owner: don't share one instance across threads while
 a thread mutates it (that raises a clear `RuntimeError`). For concurrent *reads*,
 the cleanest pattern is **not** a per-session transaction but a `graph.freeze()`
 snapshot — an immutable, lock-free read view shared across all reader threads;
 build/reload and `freeze()` again when the data changes (see
-[`concurrency.md`](concurrency.md)).
+[`concurrency.md`](../concepts/concurrency.md)).
 
 For a Bolt server running multiple sessions in parallel:
 
@@ -210,7 +210,7 @@ the Bolt agent's typical hot-loop pattern.
 
 - [`error-handling.md`](error-handling.md) — the `kglite.KgError`
   taxonomy.
-- [`concurrency.md`](concurrency.md) — multi-thread / multi-session
+- [`concurrency.md`](../concepts/concurrency.md) — multi-thread / multi-session
   contracts.
 - `tests/test_transaction_bolt_patterns.py` — the executable
   contract this document explains.

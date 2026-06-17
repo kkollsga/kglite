@@ -43,7 +43,7 @@ no marshalling, no glue.
 
 ```toml
 [dependencies]
-kglite = "0.10"
+kglite = "0.11"
 ```
 
 Everything in this guide still applies, but the FFI sections are
@@ -110,7 +110,7 @@ version:
 ```toml
 # Cargo.toml of an in-Rust consumer
 [dependencies]
-kglite-c = "0.10"     # cdylib + staticlib + rlib
+kglite-c = "0.11"     # cdylib + staticlib + rlib
 ```
 
 For non-Rust consumers, link against `libkglite_c.{so,dylib,dll}`
@@ -325,7 +325,11 @@ or user-supplied embedder callbacks as bindings ask.
 Every kglite API call returns `Result<T, KgError>`. `KgError` is a
 typed enum with 16 variants; each variant has a stable
 `KgErrorCode` discriminant. Your binding maps these to its target
-language's idiomatic error types.
+language's idiomatic error types. The file-I/O variants are worth
+surfacing distinctly: `FileNotFound`, `FileFormat` (corrupt /
+truncated / wrong-format `.kgl` — what `load_file` / `load_kgl_bytes`
+return on a bad file), and `FileIo` (permission, mid-read) — so a
+consumer can tell "rebuild from source" from "create new".
 
 The table below is the recommended mapping. The "Recoverable?"
 column is from the agent's POV — should the binding's caller
@@ -367,13 +371,14 @@ KGLite's `text_score()` Cypher function needs to embed user queries
 at lookup time. The engine doesn't ship a specific embedder — you
 plug in your own via the `kglite::api::Embedder` trait.
 
-The trait has three methods:
+The trait has two required methods plus three optional ones:
 
 ```rust
 pub trait Embedder: Send + Sync {
     fn dimension(&self) -> usize;
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String>;
-    fn load(&self) -> Result<(), String> { Ok(()) }    // optional
+    fn model_id(&self) -> Option<String> { None }       // optional (provenance)
+    fn load(&self) -> Result<(), String> { Ok(()) }     // optional
     fn unload(&self) {}                                  // optional
 }
 ```
@@ -387,6 +392,10 @@ The contract:
 - **`embed(texts)`** — embed a batch. Return one vector per input
   text, each of length `dimension()`. Errors go back to the user via
   `KgError::CypherExecution`.
+- **`model_id`** — optional (defaults to `None`). The model's stable id
+  (e.g. `"BAAI/bge-m3"`); when present it's stamped onto the embedding
+  store as provenance and surfaced via `embedding_info()`. Implement it
+  if your embedder can name its model.
 - **`load` / `unload`** — optional lifecycle hooks. Called before /
   after each embedding pass. Use these for lazy model loading + idle
   cooldown if your embedder is expensive to keep resident.
@@ -496,7 +505,7 @@ to answer "what functions call X" queries about a codebase.
 
 ```toml
 [dependencies]
-kglite = { version = "0.10", features = ["sec", "sodir", "wikidata"] }
+kglite = { version = "0.11", features = ["sec", "sodir", "wikidata"] }
 ```
 
 Each loader is opt-in via its Cargo feature; the building blocks

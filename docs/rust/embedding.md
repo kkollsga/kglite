@@ -16,7 +16,7 @@ pattern as polars / pydantic-core / many published pyo3 projects:
 | `kglite` (`crates/kglite/`) | Pure-Rust engine. Publishable on crates.io. | **No** |
 | `kglite-py` (`crates/kglite-py/`) | PyO3 wrapper. Built by maturin into the `kglite` Python wheel. | Yes |
 | `kglite-bolt-server` (`crates/kglite-bolt-server/`) | Bolt v5.x protocol binary. Wraps the kglite engine directly. | No |
-| `kglite-mcp-server` (`crates/kglite-mcp-server/`) | MCP protocol binary. Currently depends on `kglite-py` for a few `KnowledgeGraph` methods; follow-up to switch to direct engine dep. | (yes for now) |
+| `kglite-mcp-server` (`crates/kglite-mcp-server/`) | MCP protocol binary. Depends on the pure-Rust `kglite` core directly — no pyo3 in the resulting binary. (Also bundled into the Python wheel, statically linked via the `kglite-py` crate, sharing the one engine.) | **No** |
 
 The end-state design that any future binding (Go via cgo,
 TypeScript via napi, JVM via JNI) follows: a sibling crate that
@@ -32,7 +32,7 @@ Add `kglite` to your `Cargo.toml`:
 # Pre-crates.io-publish: path dependency from within the workspace.
 kglite = { path = "../kglite/crates/kglite" }
 # Post-publish: crates.io coordinate.
-# kglite = "0.10"
+# kglite = "0.11"
 ```
 
 Then load a `.kgl` file written by any kglite binding and query it:
@@ -110,10 +110,13 @@ use kglite::api::Embedder;
   (`Node`, `Relationship`, `Path`).
 - **`KgError`** — typed error enum (16 variants) every engine
   function can return. Map to your binding's error idiom at the
-  boundary.
+  boundary. File I/O surfaces as `FileError` (not found),
+  `FileFormatError` (corrupt / wrong-format `.kgl` — what `load`
+  raises on a bad file), and `FileIoError` (permission / mid-read).
 - **`Embedder`** trait — pluggable text-embedding backend. Bind
   via `kglite::api::FastEmbedAdapter` (with the
-  `fastembed` feature) or implement your own.
+  `fastembed` feature) or implement your own (`dimension`, `embed`,
+  and optional `model_id` for store provenance + `load`/`unload`).
 
 ### Cypher pipeline
 

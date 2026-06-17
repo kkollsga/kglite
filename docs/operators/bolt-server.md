@@ -199,11 +199,12 @@ server, one driver, fresh 10k-Person + 30k-KNOWS graph:
 
 ## See also
 
-- [`docs/python/transactions.md`](transactions.md) — how the
+- [`docs/python/transactions.md`](../python/transactions.md) — how the
   Python `Transaction` class works, including the OCC + CoW pattern
   that bolt-server mirrors.
-- [`docs/concepts/concurrency.md`](concurrency.md) — the
-  underlying `Arc<DirGraph>` + GIL-release model.
+- [`docs/concepts/concurrency.md`](../concepts/concurrency.md) — the
+  single-owner contract, `freeze()` snapshots, and the underlying
+  `Arc<DirGraph>` + GIL-release model.
 - [`bolt_implementation.md`](../../bolt_implementation.md) — Phase
   plan and status, including the boltr v0.2 dependency rationale.
 - [`tests/test_bolt_server_*.py`](../../tests) — the 226+ tests

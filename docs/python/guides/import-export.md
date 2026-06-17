@@ -3,9 +3,18 @@
 ## Saving and Loading
 
 ```python
-graph.save("my_graph.kgl")
+graph.save("my_graph.kgl")          # atomic (temp + rename) + fsync by default
+graph.save("my_graph.kgl", fsync=False)   # skip the flush for speed (still atomic)
 loaded_graph = kglite.load("my_graph.kgl")
 ```
+
+`save()` is **atomic and crash-safe**: it writes to a sibling temp file and
+atomically renames it over the target, so a crash mid-save can't leave a torn
+`.kgl` — a reader always sees the old file or the complete new one. With
+`fsync=True` (default) the file + directory are flushed before returning; pass
+`fsync=False` to skip that for speed. `load()` raises a typed
+`kglite.FileFormatError` on a corrupt file (see [Threading](#threading) and the
+{doc}`durable apps guide </python/guides/durable-apps>`).
 
 Save files (`.kgl`) use a pinned binary format (bincode with explicit little-endian, fixed-int encoding). Files are forward-compatible within the same major version. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
 
