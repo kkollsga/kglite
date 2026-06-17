@@ -76,6 +76,8 @@ parsed codebase.
   similarity with Cypher traversal — *"find court cases semantically
   similar to my fact pattern, then walk one hop to related
   precedents"* — hybrid retrieval in one query, no second vector DB.
+  Scale to large corpora with an opt-in HNSW index
+  (`build_vector_index()`).
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
 - 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 13
   languages into Function / Class / Module / Route nodes with

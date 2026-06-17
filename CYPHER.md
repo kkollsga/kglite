@@ -254,6 +254,12 @@ The embedding store key is `{text_column}_emb` (set via
 `set_embeddings(node_type, text_column, {id: vector})`), so embeddings set on
 the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 
+> **Exact scan.** `vector_score` / `text_score` always score every candidate
+> exactly. The opt-in HNSW approximate index (`build_vector_index`) accelerates
+> the fluent `vector_search()` / `search_text()` API for whole-corpus top-k;
+> wiring it into this Cypher path is a planned follow-up. For now, use the
+> fluent API when you need indexed (sub-linear) search over a large corpus.
+
 ## Spatial Functions
 
 Built-in spatial functions for geographic queries. All node-aware functions auto-resolve geometry and location via [spatial types](https://kglite.readthedocs.io/en/latest/guides/spatial.html).

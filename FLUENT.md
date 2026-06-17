@@ -429,6 +429,37 @@ results = (graph
 # `returning=[...]` trims each hit to id + score + the named fields (see search_text).
 ```
 
+### Index for scale (HNSW)
+
+By default search is an **exact** brute-force scan. For large corpora, build an
+opt-in HNSW approximate-nearest-neighbour index (like `create_index`); once built
+it's used automatically for whole-corpus queries, and `exact=True` forces the
+exact scan.
+
+```python
+graph.build_vector_index('Article', 'summary')           # opt in (persists in .kgl)
+graph.build_vector_index('Article', 'summary',
+                         m=16, ef_construction=200, ef_search=64, metric='cosine')
+
+# auto-used for whole-corpus queries on large stores:
+graph.select('Article').search_text('summary', 'AI', top_k=10)
+# force exact (guaranteed-exact results):
+graph.select('Article').vector_search('summary', query_vec, top_k=10, exact=True)
+
+graph.has_vector_index('Article', 'summary')   # -> True
+graph.drop_vector_index('Article', 'summary')   # revert to exact
+```
+
+- Auto-use applies to whole-corpus queries (≥256 candidates); a selective
+  `.where(...)` falls back to an exact scan automatically.
+- cosine / dot_product / euclidean are indexable; `poincare` always uses the
+  exact path. Recall depends on data + `ef_search` (raise it for higher recall).
+- The index is **dropped automatically** when the store's vectors change
+  (`add_embeddings`, `embed_texts`) or slots are remapped (`vacuum`) — rebuild
+  after. It **persists in the `.kgl`** (and `to_bytes()`).
+- The Cypher `text_score()` / `vector_score()` path currently always scans
+  exactly; the index accelerates this fluent API.
+
 ### Semantic Search via Cypher
 
 ```python
@@ -1355,7 +1386,8 @@ graph.report_history()    # all reports
 | **Timeseries — extract** | `timeseries()`, `time_index()` | `ts_series()` |
 | **Timeseries — aggregate** | N/A (use Cypher) | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_at`, `ts_delta` |
 | **Vector — load** | `set_embeddings`, `embed_texts`, `set_embedder` | N/A (load via fluent) |
-| **Vector — search** | `vector_search()`, `search_text()` | `text_score()` in RETURN/WHERE |
+| **Vector — search** | `vector_search()`, `search_text()` (`exact=` to force brute) | `text_score()` in RETURN/WHERE |
+| **Vector — index (HNSW)** | `build_vector_index()`, `drop_vector_index()`, `has_vector_index()` | N/A (auto-used by fluent search) |
 | **Path finding** | `shortest_path`, `all_paths` + 3 variants | `shortestPath()` in MATCH |
 | **Centrality** | `betweenness_centrality`, `pagerank`, `degree_centrality`, `closeness_centrality` | `CALL pagerank() YIELD ...` etc. |
 | **Community** | `louvain_communities`, `label_propagation` | `CALL louvain() YIELD ...` etc. |
