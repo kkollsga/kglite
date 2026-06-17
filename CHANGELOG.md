@@ -139,6 +139,12 @@ as three phases:
 
 ### Fixed
 
+- **`load()` / `from_bytes()` raise a classifiable `FileFormatError` on a corrupt
+  file/buffer**, not a generic `IOError`. A caller can now reliably distinguish
+  "this `.kgl` is corrupt → rebuild from source" (`FileFormatError`) from "it
+  isn't there" (`FileError`) or a genuine IO fault (`FileIoError`), instead of a
+  broad `except IOError`. (Both already detected corruption; the type is now
+  typed end-to-end — operator note #4.)
 - **A cross-thread borrow conflict now raises a clear, actionable error
   instead of panicking.** Sharing one `KnowledgeGraph` across threads while a
   thread mutates it (`add_nodes` / `embed_texts` / a `CREATE` query / `save`)

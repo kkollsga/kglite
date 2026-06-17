@@ -143,6 +143,27 @@ impl crate::graph::KnowledgeGraph {
     }
 }
 
+/// Map a load failure (`load_file` / `load_kgl_bytes`, which return
+/// `io::Error`) to a *classifiable* typed exception, so callers can reliably
+/// distinguish "this `.kgl` is corrupt → rebuild from source" (`FileFormatError`)
+/// from "it isn't there" (`FileError`) or a genuine IO fault (`FileIoError`),
+/// instead of catching a broad `IOError`. A load that fails for any reason
+/// other than not-found / permission is treated as a format/corruption error
+/// (bad magic, truncated section, version mismatch, zstd/bincode failure).
+fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
+    use std::io::ErrorKind;
+    let pb = || std::path::PathBuf::from(path.unwrap_or(""));
+    let kg = match e.kind() {
+        ErrorKind::NotFound => crate::error::KgError::FileNotFound(pb()),
+        ErrorKind::PermissionDenied => crate::error::KgError::FileIo(e),
+        _ => crate::error::KgError::FileFormat {
+            path: pb(),
+            message: e.to_string(),
+        },
+    };
+    crate::error_py::kg_to_pyerr(kg)
+}
+
 #[pyfunction]
 fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     py.detach(|| load_file(&path))
@@ -151,7 +172,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
             kg.source_path = Some(std::path::PathBuf::from(&path));
             kg
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+        .map_err(|e| load_err_to_pyerr(e, Some(&path)))
 }
 
 /// Load an in-memory graph from a `.kgl` byte buffer produced by
@@ -164,7 +185,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
     py.detach(|| kglite_core::graph::io::file::load_kgl_bytes(data))
         .map(KnowledgeGraph::from_arc)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+        .map_err(|e| load_err_to_pyerr(e, None))
 }
 
 /// Open a graph at `path`, loading it if the file/directory exists or
@@ -192,7 +213,7 @@ fn open(
     let mut kg = if std::path::Path::new(&path).exists() {
         py.detach(|| load_file(&path))
             .map(KnowledgeGraph::from_arc)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?
+            .map_err(|e| load_err_to_pyerr(e, Some(&path)))?
     } else {
         KnowledgeGraph::construct(storage, Some(&path))?
     };

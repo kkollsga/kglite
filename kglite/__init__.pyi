@@ -94,6 +94,13 @@ class EmbeddingModel(Protocol):
     - ``load()`` is called before each ``embed_texts()`` / ``search_text()`` call.
     - ``unload()`` is called after each call completes (even on error).
 
+    **Optional — ``model_id`` / ``model_name``** (a ``str`` attribute): if present,
+    its value is stamped onto the embedding store as provenance and surfaced via
+    :meth:`KnowledgeGraph.embedding_info` (``model``). An embedder *without* it
+    works exactly the same, but the store records ``model=None`` — so a model
+    swap can't be detected from the store alone. Add a ``model_id`` to your
+    embedder to light up provenance / model-swap detection.
+
     This lets models manage heavyweight resources (GPU memory, large weights)
     on demand.  A common pattern is to implement a cooldown in ``unload()``
     so the model stays warm across rapid successive calls but eventually
