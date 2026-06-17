@@ -137,6 +137,13 @@ All three backends (`Memory`, `Mapped`, `Disk`) support `begin()`:
 For thread-safety guarantees and the WKT-cache / `Arc::make_mut` CoW
 contract, see [`concurrency.md`](concurrency.md).
 
+A `KnowledgeGraph` is single-owner: don't share one instance across threads while
+a thread mutates it (that raises a clear `RuntimeError`). For concurrent *reads*,
+the cleanest pattern is **not** a per-session transaction but a `graph.freeze()`
+snapshot — an immutable, lock-free read view shared across all reader threads;
+build/reload and `freeze()` again when the data changes (see
+[`concurrency.md`](concurrency.md)).
+
 For a Bolt server running multiple sessions in parallel:
 
 - **One `KnowledgeGraph` Arc shared across all tasks.**

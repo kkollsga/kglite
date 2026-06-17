@@ -162,6 +162,25 @@ To connect same-type nodes (org charts, taxonomies), set both to
 the same value — see the [Hierarchies](#hierarchies-explicit-edges-vs-set_parent_type)
 section for when this is the right move.
 
+### `replace_connections` — atomic edge upsert
+
+`add_connections` is add-only. To **re-sync** a node's edges of a given type to
+exactly a new set — "the current `MENTIONS` of these documents is now this list"
+— use `replace_connections`. For every source node present in the input, it
+prunes that source's existing edges *of `connection_type`*, then adds the
+supplied ones, in one call (validate-before-prune, so a malformed input leaves
+the graph intact). Edges from sources not in the input, and edges of other types
+from the same sources, are untouched. It takes the same arguments as
+`add_connections` (including `query=` mode).
+
+```python
+# First sync: doc 1 → [A, B]
+g.replace_connections(df_ab, "MENTIONS", "Doc", "doc", "Entity", "ent")
+# Re-sync doc 1 → [B, C]: the stale 1→A edge is pruned, 1→C added — idempotent,
+# no race-prone manual DELETE-then-re-add.
+g.replace_connections(df_bc, "MENTIONS", "Doc", "doc", "Entity", "ent")
+```
+
 ## Loading in passes
 
 Real graphs rarely come from one DataFrame. Two patterns dominate:

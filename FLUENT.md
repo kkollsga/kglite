@@ -365,7 +365,20 @@ graph.set_embedder(my_model)
 
 # Compute embeddings for a text column
 graph.embed_texts('Article', 'summary', batch_size=256, show_progress=True)
-# Only embeds nodes that don't have embeddings yet; pass replace=True to re-embed all
+# mode='missing' (default): only nodes without an embedding yet.
+# mode='changed':            re-embed nodes whose text changed since last time
+#                            (a per-node content hash is stored to detect this).
+# mode='all' (= replace=True): re-embed every node, rebuilding the store.
+graph.embed_texts('Article', 'summary', mode='changed')
+
+# Inspect a store's provenance (dimension, count, model id, metric, #hashed):
+graph.embedding_info('Article', 'summary')
+# -> {'dimension': 1024, 'count': 5000, 'model': 'BAAI/bge-m3', 'metric': 'cosine', 'hashed': 5000}
+# `model` is populated when the embedder exposes a `model_id`/`model_name` attribute.
+
+# Carry vectors across a fresh rebuild (the disposable-cache workflow) in one call,
+# matched by node id — instead of snapshot → add_embeddings → embed_texts:
+new_graph.copy_embeddings_from(old_graph)
 
 # Or provide pre-computed embeddings
 graph.set_embeddings('Article', 'summary', {
@@ -391,6 +404,11 @@ results = graph.select('Article').search_text(
 # As DataFrame
 df = graph.select('Article').search_text(
     'summary', 'AI safety', top_k=10, to_df=True)
+
+# By default each hit carries id, title, type, score AND every node property
+# (read live — no follow-up query needed). Trim the payload with returning=:
+ranked = graph.select('Article').search_text(
+    'summary', 'AI safety', top_k=50, returning=['title'])   # -> id, score, title only
 ```
 
 ### Vector Search (pre-computed query vector)
@@ -408,6 +426,7 @@ results = (graph
 
 # Metrics: 'cosine' (default), 'dot_product', 'euclidean', 'poincare'
 # If a stored metric was set via set_embeddings(..., metric=), it is used as default
+# `returning=[...]` trims each hit to id + score + the named fields (see search_text).
 ```
 
 ### Semantic Search via Cypher
@@ -1138,9 +1157,43 @@ graph.export_csv('output/')
 ## Persistence
 
 ```python
-graph.save('graph.kgl')
+graph.save('graph.kgl')          # atomic (temp + rename) + fsync by default —
+                                 # a crash mid-save can't leave a torn .kgl
+graph.save('graph.kgl', fsync=False)   # skip the flush for speed (still atomic)
 graph = kglite.load('graph.kgl')
+
+# In-memory serialization (no filesystem path) — for object storage, a pipe,
+# a checksum, or a custom write:
+blob = graph.to_bytes()
+graph = kglite.from_bytes(blob)
 ```
+
+A corrupt / truncated / wrong-format file raises a typed, classifiable
+`kglite.FileFormatError` (a `kglite.KgError`); a missing file raises
+`kglite.FileError` — so a consumer can branch "corrupt → rebuild" vs
+"missing → create" without a broad `except`.
+
+---
+
+## Concurrency
+
+A `KnowledgeGraph` is **single-owner**: it is not safe to share one instance
+across threads while any thread mutates it (touching a shared graph mid-mutation
+raises a clear `RuntimeError`, not a crash). Two safe patterns:
+
+```python
+# Per-worker: give each thread its own graph (copy() is cheap; builds are fast)
+worker_graph = graph.copy()
+
+# Shared reads: freeze() → an immutable snapshot, lock-free for concurrent readers
+snapshot = graph.freeze()        # O(1) — shares data, no deep copy
+snapshot.cypher('MATCH (n:Doc) RETURN count(n)')   # safe from many threads at once
+# Mutating the source afterwards leaves the snapshot unchanged (copy-on-write).
+# Build → freeze → serve readers → swap in a new freeze() when data changes.
+```
+
+`FrozenGraph` is read-only — mutations (`CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE`)
+raise; semantic search works via `text_score()`/`vector_score()` in `cypher()`.
 
 ---
 

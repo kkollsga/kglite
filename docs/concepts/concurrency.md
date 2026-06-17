@@ -19,6 +19,12 @@ the two documented contention quirks.
 - **Read-only transactions are free.** `begin_read()` takes an `Arc`
   reference (no clone). Use them for long-running read sessions to
   guarantee a stable snapshot.
+- **A `KnowledgeGraph` is single-owner (Python).** Sharing one instance
+  across threads is safe for concurrent *reads*, but a read that overlaps
+  a *mutation* on the same object raises a clear `RuntimeError` (it never
+  panics or corrupts). For shared concurrent reads, take an immutable
+  `graph.freeze()` snapshot; for per-worker mutation, give each thread its
+  own cheap `copy()`. See the next section.
 
 ## How the read path parallelizes
 
@@ -45,6 +51,46 @@ Existing test coverage at `tests/test_concurrency.py`:
   parallelism.
 - `test_no_panic_under_high_contention` — 32 threads (16 readers +
   16 mutators) for 500 ms. Asserts zero panics and zero errors.
+
+## The single-owner contract & `freeze()` snapshots (0.11.0)
+
+The parallelism above is about the *engine*. At the **Python binding** there
+is one more rule: a `KnowledgeGraph` object is **single-owner**. PyO3 guards
+each `#[pyclass]` with a `RefCell`-style borrow; a method that mutates
+(`add_nodes`, `add_connections`, `replace_connections`, `embed_texts`, a
+`CREATE`/`SET`/`DELETE`/`MERGE` query, `save`) holds the exclusive borrow for
+its duration. Concurrent *reads* coexist fine (each `cypher()` borrows only
+momentarily to clone the `Arc`, then releases and runs GIL-free); a read or
+mutation that overlaps another thread's in-flight mutation on the **same
+object** now raises a clear `RuntimeError` naming the contract — never a panic,
+never silent corruption.
+
+Two safe shared-graph patterns, both leaning on kglite's cheap builds:
+
+- **Per-worker (`copy()`).** Give each thread its own graph. `graph.copy()`
+  is a deep copy, but builds are fast and the copies are independent — fine for
+  worker pools that each mutate.
+
+- **Frozen snapshot (`freeze()`) — for concurrent reads.** `graph.freeze()`
+  returns a `FrozenGraph`: an immutable view that shares the source graph's
+  data via an **O(1) `Arc` clone** (no deep copy) and exposes *only* read
+  methods. Because it has no mutating method, no exclusive borrow can ever
+  fire, so any number of threads can run `FrozenGraph.cypher()` (including
+  `text_score()` / `vector_score()` semantic search) against the same snapshot
+  in parallel, lock-free, with the GIL released. The snapshot is stable under
+  copy-on-write: mutating the *source* graph afterwards leaves the frozen view
+  on the original data.
+
+  ```python
+  snapshot = graph.freeze()          # O(1); share across reader threads
+  snapshot.cypher("MATCH (n:Doc) RETURN count(n)")   # safe from N threads at once
+  # build → freeze → serve readers → swap in a fresh freeze() when data changes
+  ```
+
+This is the recommended model for a read-heavy server that occasionally
+rebuilds: build a new graph, `freeze()` it, serve readers off the snapshot, and
+atomically swap in the next snapshot when the data changes — rather than a
+global lock around a single mutable instance.
 
 ## How the mutation path is isolated
 
@@ -142,7 +188,9 @@ async fn handle_bolt_session(graph: Arc<KnowledgeGraph>) {
 
 - **Lock-free MVCC.** kglite uses `Arc::make_mut` for isolation, not
   a versioned multi-snapshot store. Each mutation that races a held
-  reference pays a clone; we accept that for simplicity.
+  reference pays a clone; we accept that for simplicity. (`freeze()`
+  gives a *single* immutable, lock-free read snapshot via copy-on-write
+  — not a continuously-versioned multi-snapshot store.)
 - **Cross-process concurrency.** kglite is embedded. For multi-
   process workloads, use the Bolt server as the coordination point.
 - **Lock-free reads of mutating fields.** Caches like `wkt_cache`

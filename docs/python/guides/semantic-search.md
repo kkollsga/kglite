@@ -54,24 +54,43 @@ results = graph.select("Article").search_text("summary", "machine learning", top
 **Key details:**
 
 - **Auto-naming:** text column `"summary"` → embedding store key `"summary_emb"` (auto-derived)
-- **Incremental:** re-running `embed_texts` skips nodes that already have embeddings — only new nodes get embedded. Pass `replace=True` to force re-embed.
+- **Incremental, three modes:** `embed_texts(mode=…)` — `'missing'` (default) embeds only nodes without a vector; `'changed'` also re-embeds nodes whose **text changed** since the last pass (a per-node content hash is stored to detect this); `'all'` rebuilds the whole store. (The old `replace=True`/`False` booleans still work — `True` ≡ `mode='all'`, `False` ≡ `mode='missing'`.)
 - **Progress bar:** shows a tqdm progress bar by default. Disable with `show_progress=False`.
 - **Load/unload lifecycle:** if the model has optional `load()` / `unload()` methods, they are called automatically before and after each embedding operation.
-- **Not serialized:** the model is not saved with `save()` — call `set_embedder()` again after deserializing.
+- **Provenance:** if the embedder exposes a `model_id` / `model_name` attribute, it's stamped onto the store; `embedding_info()` surfaces it so a model swap is detectable. The model object itself is **not** saved with `save()` — call `set_embedder()` again after deserializing.
 
 ```python
 # Add new articles, then re-embed — only new ones are processed
 graph.embed_texts("Article", "summary")
-# → {'embedded': 50, 'skipped': 0, 'skipped_existing': 1000, ...}
+# → {'embedded': 50, 'skipped': 0, 'skipped_existing': 1000, 'reembedded_changed': 0, ...}
 
-# Force full re-embed
-graph.embed_texts("Article", "summary", replace=True)
+# Edit some article summaries, then re-embed ONLY what changed:
+graph.embed_texts("Article", "summary", mode="changed")
+# → {'embedded': 12, 'reembedded_changed': 12, 'skipped_existing': 1038, ...}
+
+# Inspect provenance (dimension, count, model id, metric, #hashed):
+graph.embedding_info("Article", "summary")
+# → {'dimension': 384, 'count': 1050, 'model': 'all-MiniLM-L6-v2', 'metric': 'cosine', 'hashed': 1050}
 
 # Combine with filters
 results = (graph
     .select("Article")
     .where({"category": "politics"})
     .search_text("summary", "foreign policy", top_k=10))
+```
+
+### Carrying vectors across a rebuild
+
+The common "rebuild a fresh graph from a source of truth on each load" workflow
+needs the vectors carried forward. `copy_embeddings_from` does it in one call,
+matched by node id (carrying dimension, metric, model id, and the per-node text
+hashes — so a following `mode='changed'` only re-embeds genuinely new text):
+
+```python
+new_graph = build_from_source()              # fresh, no vectors yet
+new_graph.copy_embeddings_from(old_graph)    # carry every store by node id
+new_graph.embed_texts("Article", "summary", mode="changed")  # fill only the new/changed
+# → {'stores_copied': 1, 'vectors_copied': 1050, 'vectors_skipped': 0}  (from copy_embeddings_from)
 ```
 
 ## Low-Level Vector API
@@ -131,9 +150,15 @@ read live from the node — so a hit carries the same fields before and after
 to recover properties.
 
 ```python
-# Basic search — returns list of dicts sorted by similarity
+# Basic search — each hit carries id, title, type, score AND every node
+# property (read live, so no follow-up MATCH...WHERE id IN [...] hydrate needed).
 results = graph.select('Article').vector_search('summary', query_vec, top_k=10)
-# [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...}, ...]
+# [{'id': 5, 'title': '...', 'type': 'Article', 'score': 0.95, ...all props...}, ...]
+
+# Trim the payload with returning= → id + score + only the named fields
+# (ranking-heavy or wide-node workloads):
+ranked = graph.select('Article').vector_search(
+    'summary', query_vec, top_k=50, returning=['title'])   # → {'id', 'score', 'title'}
 
 # Filtered search — only search within a subset
 results = (graph

@@ -70,10 +70,17 @@ df = graph.cypher(
     to_df=True,
 )
 
-# Persist + reload.
+# Persist + reload. save() is atomic + fsync (crash-safe); load() raises a typed
+# kglite.FileFormatError on a corrupt file. Or round-trip via bytes:
 graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
+loaded = kglite.from_bytes(graph.to_bytes())   # no filesystem path
 ```
+
+Building a code graph? `kglite.build_code_tree("path/to/repo")` parses a codebase
+into a graph (see {doc}`guides/code-tree`). Serving concurrent readers? Share a
+`graph.freeze()` snapshot — immutable and lock-free across threads (see
+{doc}`/concepts/concurrency`).
 
 That's the loop: shape DataFrames → `add_nodes` / `add_connections` →
 Cypher → save. {doc}`guides/data-loading` covers conflict handling

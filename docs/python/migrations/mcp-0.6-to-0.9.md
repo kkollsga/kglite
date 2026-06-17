@@ -62,7 +62,7 @@ the equivalent flag, this maps the most common patterns:
 | Exposes only `read_source` / `grep` / `list_source` (no graph) | `--source-root path/`               |
 | Reads `.env` walked-up from the manifest                   | `env_file:` field in your manifest (manifest-relative) |
 | Spawns its own CSV-over-HTTP listener                      | `extensions.csv_http_server: true` (auto-port since 0.9.29) |
-| Wires a custom embedder for `text_score`                   | `extensions.embedder.backend: fastembed` (or pre-compute via `g.embed_texts(...)` at build time) |
+| Wires a custom embedder for `text_score`                   | `extensions.embedder: {library: fastembed, model: …}` (renamed from `backend:` in 0.10.28; or pre-compute via `g.embed_texts(...)` at build time) |
 
 A complete custom server typically maps onto one mode + a manifest
 with one or two `extensions:` entries. The "extra Python" you used

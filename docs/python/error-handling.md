@@ -75,6 +75,30 @@ except kglite.KgError as e:
 `kglite.KgError` is `Exception`-derived, so a bare `except Exception:`
 still works as the last-resort net.
 
+## Load failures: corrupt vs missing (disposable-cache branch)
+
+`kglite.load(path)` and `kglite.from_bytes(data)` raise **typed, classifiable**
+errors (0.11.0): `kglite.FileFormatError` on a corrupt / truncated / wrong-format
+input, and `kglite.FileError` on a missing file. A consumer treating the `.kgl`
+as a rebuildable cache can branch cleanly:
+
+```python
+try:
+    g = kglite.load("cache.kgl")
+except kglite.FileError:
+    g = build_from_source()          # missing → build fresh
+except kglite.FileFormatError:
+    g = build_from_source()          # corrupt/old format → rebuild, don't trust it
+```
+
+## Sharing a graph across threads
+
+A `KnowledgeGraph` is single-owner. If one thread mutates it (`add_nodes`,
+`embed_texts`, a `CREATE`/`SET`/`DELETE` query, `save`, …) while another touches
+the same object, the second call raises a clear `RuntimeError` — never a panic
+or silent corruption. Give each worker its own `g.copy()`, or share a read-only
+`g.freeze()` snapshot for concurrent reads (see {doc}`/concepts/concurrency`).
+
 ## Migration from pre-A.2
 
 Before A.2, kglite raised the Python built-in exceptions directly:

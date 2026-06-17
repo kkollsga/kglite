@@ -263,6 +263,24 @@ The Python GIL is released during heavy Rust operations, allowing other Python t
 | `add_nodes()` | No | DataFrame conversion requires GIL throughout |
 | `cypher()` (mutations) | No | Must hold exclusive lock on graph |
 
+A `KnowledgeGraph` is single-owner: concurrent reads are fine, but a read that
+overlaps a mutation on the same instance raises a `RuntimeError`. For lock-free
+concurrent reads across threads, serve from an immutable `graph.freeze()`
+snapshot (see {doc}`/concepts/concurrency`).
+
+## Serialize to/from bytes
+
+`save()`/`load()` go through a filesystem path. To own the write — push to object
+storage, a socket, a checksum — serialize the whole graph to a `.kgl` **byte
+buffer** instead:
+
+```python
+blob = graph.to_bytes()              # bytes (the same format save() writes)
+graph = kglite.from_bytes(blob)      # round-trips; raises FileFormatError if corrupt
+```
+
+In-memory / mapped graphs only (a disk-mode graph is a directory, not a stream).
+
 ## Graph Maintenance
 
 After heavy mutation workloads (DELETE, REMOVE), internal storage accumulates tombstones. Monitor with `graph_info()`.

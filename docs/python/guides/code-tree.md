@@ -10,10 +10,15 @@ pip install kglite
 
 ## Quick Start
 
-```python
-from kglite.code_tree import build
+Two equivalent public entry points — `kglite.build_code_tree(path)` (top-level)
+or `kglite.code_tree.build(path)`. (The native `kglite._kglite_code_tree` module
+is internal; don't import from it directly.)
 
-graph = build(".")  # auto-detects pyproject.toml / Cargo.toml
+```python
+import kglite
+
+graph = kglite.build_code_tree(".")  # auto-detects pyproject.toml / Cargo.toml
+# equivalently: from kglite.code_tree import build; build(".")
 
 # What are the most-called functions?
 graph.cypher("""

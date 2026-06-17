@@ -8,7 +8,9 @@
 
 **Selections** (fluent API) are lightweight views — a set of node indices that flow through chained operations like `select().where().traverse()`. They don't copy data.
 
-**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. For multi-statement atomicity, use `graph.begin()` transactions. Durability only via explicit `save()`.
+**Atomicity.** Each `cypher()` call is atomic — if any clause fails, the graph remains unchanged. For multi-statement atomicity, use `graph.begin()` transactions. Durability only via explicit `save()` (which is itself atomic + `fsync` — no torn file on a crash).
+
+**Single-owner.** A `KnowledgeGraph` is owned by one thread at a time: concurrent reads are fine, but a read overlapping a mutation on the same instance raises a clear `RuntimeError`. For multi-threaded use, give each worker its own `copy()`, or share a read-only `graph.freeze()` snapshot for lock-free concurrent reads. See {doc}`/concepts/concurrency`.
 
 ## How It Works
 

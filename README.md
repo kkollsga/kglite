@@ -180,9 +180,16 @@ for row in graph.cypher("""
 # Or get a pandas DataFrame directly.
 df = graph.cypher("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age", to_df=True)
 
-# Persist to disk and reload.
+# Persist to disk and reload. save() is atomic + fsync by default (crash-safe —
+# no torn file); load() raises a typed kglite.FileFormatError on a corrupt file.
 graph.save("my_graph.kgl")
 loaded = kglite.load("my_graph.kgl")
+
+# Or serialize to/from bytes (no filesystem path):
+blob = graph.to_bytes(); loaded = kglite.from_bytes(blob)
+
+# Share read-only across threads with an immutable, lock-free snapshot:
+snapshot = graph.freeze()        # concurrent snapshot.cypher(...) from many threads
 ```
 
 **→ [Getting Started guide](https://kglite.readthedocs.io/en/latest/python/getting-started.html) ·

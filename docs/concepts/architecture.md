@@ -163,3 +163,8 @@ KGLite uses copy-on-write (`Arc::make_mut`) throughout:
   modified selection but the same underlying graph data
 - **Mutations**: Only the mutating operation pays the copy cost (and only
   if there are other references)
+- **Immutable snapshots** (0.11.0): `graph.freeze()` returns a `FrozenGraph` —
+  a read-only view sharing the graph's data via an O(1) `Arc` clone, with no
+  mutating methods. Many threads can `FrozenGraph.cypher()` concurrently and
+  lock-free; the snapshot stays on the original data even if the source is
+  mutated afterwards (copy-on-write). See [concurrency.md](concurrency.md).

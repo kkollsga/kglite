@@ -15,10 +15,25 @@ accepts writes between restarts.
 | Call | What it does |
 |---|---|
 | `kglite.open(path)` | **Load-or-create.** Opens the graph at `path` if it exists, creates a fresh one bound to `path` if it doesn't. The database-style entry point. |
-| `kglite.load(path)` | Load an existing `.kgl` file (or disk-mode directory). Raises if it's missing. |
-| `g.save(path=None)` | Write a full checkpoint. With no argument, saves back to the path the graph was opened from ("remembered path"). |
+| `kglite.load(path)` | Load an existing `.kgl` file (or disk-mode directory). Raises `kglite.FileError` if missing, `kglite.FileFormatError` if corrupt (see below). |
+| `g.save(path=None, *, fsync=True)` | Write a full checkpoint, **atomically and durably**. With no `path`, saves back to the remembered path. |
+| `g.to_bytes()` / `kglite.from_bytes(data)` | Serialize/deserialize the graph to/from a `.kgl` **byte buffer** — own the write (object storage, a pipe, a checksum) instead of a filesystem path. |
 | `g.close()` | Persist to the remembered path. The graph stays usable afterwards. |
 | `with kglite.open(...) as g:` | Auto-saves on clean block exit; **skips** the save if the block raises, preserving the last good file. |
+
+**Every `save()` is atomic and torn-proof**, even in non-durable mode: it writes
+to a sibling temp file and atomically renames it over the target, so a crash
+mid-save can never leave a half-written `.kgl` — a reader always sees the old
+file or the complete new one. With `fsync=True` (default) the file and its
+directory are flushed to physical storage before returning; pass `fsync=False`
+to skip that flush for speed in a hot loop (still atomic). This removes the
+temp-file + `os.replace` + dir-fsync dance consumers used to hand-roll.
+
+**Corrupt-file detection is typed.** `load()` / `from_bytes()` raise
+`kglite.FileFormatError` (a subclass of `kglite.KgError`) on a corrupt,
+truncated, or wrong-format input, and `kglite.FileError` on a missing file — so
+a disposable-cache consumer can branch "corrupt → rebuild from source" vs
+"missing → create new" cleanly, without a broad `except IOError`.
 
 The thread that ties these together is the **remembered path**: `open()` and
 `load()` record where the graph came from, so a later bare `save()` — or the
@@ -121,6 +136,21 @@ makes traversal and multi-hop queries fast. `durable=True` adds crash-safety on
 top of that model without changing the in-memory read path. `storage="disk"`
 (see {doc}`/python/core-concepts`) is the separate answer for *larger-than-RAM*
 graphs and cheap cold-open; it is not combined with the WAL.
+
+## Serving concurrent reads
+
+A `KnowledgeGraph` is single-owner — don't share one instance across threads
+while a thread mutates it (that raises a clear `RuntimeError`). For a read-heavy
+server, take an immutable snapshot with `g.freeze()` → a `FrozenGraph` that
+shares the data via an O(1) clone and serves `cypher()` from many threads at
+once, lock-free. When the data changes, build/reload, `freeze()` again, and swap
+the snapshot in. See {doc}`/concepts/concurrency` for the full model.
+
+```python
+snapshot = g.freeze()
+# hand `snapshot` to N reader threads — concurrent, lock-free
+snapshot.cypher("MATCH (o:Order) RETURN count(o)")
+```
 
 ## Cost and tuning
 
