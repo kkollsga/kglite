@@ -87,7 +87,13 @@ jobs:
   # no per-Python matrix. See docs/guides/mcp-servers.md.
   build-native:
     name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }}
-    needs: [ci-gate, version-check]
+    # Build in PARALLEL with CI (don't wait on ci-gate). The `publish` job
+    # still gates on ci-gate succeeding, so nothing reaches PyPI before CI is
+    # green — this just overlaps the slow wheel compile with CI instead of
+    # starting it ~12m later. `if` keeps builds release-only (previously the
+    # skipped ci-gate cascaded a skip onto the build jobs).
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -160,7 +166,9 @@ jobs:
   # set missing the primary glibc wheel.
   build-linux:
     name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
-    needs: [ci-gate, version-check]
+    # Build in parallel with CI; publish stays gated on ci-gate (see build-native).
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -199,7 +207,9 @@ jobs:
   # absent until the next release fixes it.
   build-linux-arm:
     name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
-    needs: [ci-gate, version-check]
+    # Build in parallel with CI; publish stays gated on ci-gate (see build-native).
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
@@ -223,6 +233,17 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out wheels
+          # `ring` (pulled via reqwest's rustls TLS) compiles pre-generated
+          # ARM `.S` assembly whose `asm_base.h` `#error`s unless `__ARM_ARCH`
+          # is defined. The manylinux2014-cross:aarch64 gcc doesn't emit it
+          # when assembling `.S` (the musllinux cross image does — that leg
+          # builds fine), which broke the gnu-aarch64 wheel in 0.11.0. Define
+          # it explicitly for the gnu target's compiler — the `cc` crate reads
+          # the target-scoped `CFLAGS_<target>`. aarch64 is always armv8+, so
+          # `=8` matches what gcc would emit. (No-op for the musl leg: the var
+          # is gnu-target-scoped.)
+          before-script-linux: |
+            export CFLAGS_aarch64_unknown_linux_gnu="${CFLAGS_aarch64_unknown_linux_gnu:-} -D__ARM_ARCH=8"
       - name: List build directory
         run: ls -la wheels
       - name: Upload wheels as artifact
@@ -233,15 +254,19 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [version-check, build-native, build-linux, build-linux-arm]
-    # Run once the must-pass builds are green, regardless of the
-    # best-effort aarch64 job's result — a `continue-on-error` job that
-    # fails still counts as a failed dependency, which would otherwise
-    # *skip* publish. `always()` + explicit gates let publish proceed
-    # with whatever wheels exist (skip-existing handles partial sets).
+    needs: [version-check, ci-gate, build-native, build-linux, build-linux-arm]
+    # Run once CI has passed (ci-gate) AND the must-pass builds are green,
+    # regardless of the best-effort aarch64 job's result — a `continue-on-error`
+    # job that fails still counts as a failed dependency, which would otherwise
+    # *skip* publish. `always()` + explicit gates let publish proceed with
+    # whatever wheels exist (skip-existing handles partial sets). The
+    # `ci-gate.result == 'success'` term is the safety wall: builds now run in
+    # parallel with CI, so this is the single point that keeps an un-CI'd commit
+    # from ever reaching PyPI.
     if: >-
       always() &&
       needs.version-check.outputs.should_publish == 'true' &&
+      needs.ci-gate.result == 'success' &&
       needs.build-native.result == 'success' &&
       needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
