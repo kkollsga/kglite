@@ -370,6 +370,16 @@ fn functions_df(
                     .collect(),
             ),
         ),
+        // Every Function is in-repo (parsed from a source file) — there is no
+        // external Function stub the way Class/Struct get `is_external = true`
+        // bases merged in. Emit `false` explicitly so the documented
+        // `WHERE n.is_external = false` library-only filter works uniformly on
+        // Function as it does on Class/File (A1a, operator feedback 2026-06-17).
+        (
+            "is_external",
+            ColumnType::Boolean,
+            bool_col(fns.iter().map(|_| Some(false)).collect()),
+        ),
         (
             "is_pymethod",
             ColumnType::Boolean,

@@ -99,3 +99,27 @@ def test_is_generated_on_file(tmp_path: Path) -> None:
     min_files = [p for p in gen if p.endswith(".min.js")]
     for p in min_files:
         assert gen[p] is True, (p, gen[p])
+
+
+def test_is_external_on_function(tmp_path: Path) -> None:
+    """A1a (operator report 2026-06-17): `is_external` must be emitted on
+    Function (= false; every Function is in-repo), uniform with Class/File, so
+    the advertised `WHERE n.is_external = false` library-only filter works on
+    Function instead of silently matching nothing (null = false)."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    _make_repo(root)
+    g = _build(root)
+
+    # Every Function reports is_external explicitly false — never null.
+    rows = g.cypher("MATCH (f:Function) RETURN f.name AS n, f.is_external AS ext")
+    assert rows, "expected Function nodes"
+    for r in rows:
+        assert r["ext"] is False, f"{r['n']} has is_external={r['ext']!r} (expected False, not null)"
+
+    # The documented library-only filter selects in-repo functions (not empty).
+    lib_only = {
+        r["n"]
+        for r in g.cypher("MATCH (f:Function) WHERE f.is_external = false AND f.is_test = false RETURN f.name AS n")
+    }
+    assert "real" in lib_only, lib_only

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Code-graph: `is_external` is now emitted on `Function` (= `false`), not just
+  `Class`/`File`.** Previously `f.is_external` was null on functions, so the
+  documented library-only filter `WHERE n.is_external = false` silently matched
+  zero rows on `Function` (`null = false` → false). Now uniform across labels.
+
 ## [0.10.28] — 2026-06-16 — bring-your-own embedder (library + model); `[embed]` extra removed
 
 ### Changed
