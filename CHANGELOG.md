@@ -205,6 +205,12 @@ Concurrency / durability / embeddings, at a glance:
   vectors and **not** persisted — it's rebuilt on load, so the `.kgl` format and
   on-disk bytes are identical. Dot-product / Euclidean / Poincaré are unaffected
   (they need the raw magnitudes and fall through to the existing kernels).
+- **HNSW vector index scales whole-corpus search sub-linearly** (see
+  `build_vector_index` under Added). Stored-vector-query benchmark (cosine,
+  top-10, exact vs indexed): 10k×128 → 4.1× faster (recall@10 0.99); 50k×128 →
+  5.6× (0.92); 100k×256 → 8.8× (0.72 at default `ef_search`, raise it for higher
+  recall). The speedup widens with corpus size; the index is built once and
+  persists in the `.kgl`. Repro: `python tests/benchmarks/bench_vector_index.py`.
 
 ### Fixed
 

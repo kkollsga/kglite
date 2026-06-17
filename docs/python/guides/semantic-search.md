@@ -176,6 +176,65 @@ results = graph.select('Article').vector_search(
     'summary', query_vec, top_k=10, metric='dot_product')
 ```
 
+### Scaling search with an index (HNSW)
+
+By default vector search is an **exact** brute-force scan: every candidate is
+scored. That's the right thing for small/medium stores and for filtered
+searches — but on a large corpus, scoring every vector on every query doesn't
+scale. Build an **HNSW** approximate-nearest-neighbour index once, and
+whole-corpus queries become sub-linear:
+
+```python
+graph.embed_texts('Article', 'summary')          # produce vectors
+graph.build_vector_index('Article', 'summary')    # opt in (like create_index)
+
+# vector_search / search_text now auto-use the index for whole-corpus queries:
+hits = graph.select('Article').search_text('summary', 'machine learning', top_k=10)
+
+# Force an exact scan when you need guaranteed-exact results:
+hits = graph.select('Article').vector_search('summary', query_vec, top_k=10, exact=True)
+```
+
+It behaves like `create_index`: **opt-in**, and once built it's used
+automatically. Key points:
+
+- **Auto-use, with an escape hatch.** A whole-corpus query on a large indexed
+  store (≥256 candidates) uses the index; `exact=True` always forces the exact
+  scan. The scores returned are on the exact same scale as the brute-force path
+  (the index only narrows *which* nodes get scored).
+- **Filtered queries stay exact.** A selective `.where(...)` before the search
+  falls back to an exact scan automatically — correctness over speed when a
+  filter is tight. (So an index helps "search the whole corpus", not "search a
+  small filtered slice".)
+- **Approximate.** Recall depends on your data and `ef_search`: well-structured
+  embeddings (sentence-transformers, etc.) typically get ≥0.9 recall@10 at the
+  defaults; raise `ef_search` for higher recall at some latency cost, or use
+  `exact=True` when you can't tolerate any miss. Structureless data (e.g. random
+  vectors) is a poor fit for *any* ANN — prefer `exact=True` there.
+- **Metrics.** cosine / dot_product / euclidean are indexable; `poincare` always
+  uses the exact path.
+- **Lifecycle.** The index is **dropped automatically** whenever the store's
+  vectors change (`add_embeddings`, `embed_texts`) or slots are remapped
+  (`vacuum`) — rebuild it after such changes. Check with
+  `has_vector_index(...)`, remove with `drop_vector_index(...)`.
+- **Persisted.** The index is saved inside the `.kgl` (and `to_bytes()`), so a
+  reloaded graph keeps it — no rebuild on load.
+
+```python
+graph.build_vector_index(
+    'Article', 'summary',
+    m=16,                 # neighbours per node (higher → better recall, larger index)
+    ef_construction=200,  # build-time search width
+    ef_search=64,         # default query-time width (higher → better recall, slower)
+)
+graph.has_vector_index('Article', 'summary')   # True
+graph.save('articles.kgl')                       # index travels with the file
+```
+
+> The Cypher `text_score()` / `vector_score()` path currently always uses the
+> exact scan; the index accelerates the fluent `vector_search` / `search_text`
+> API.
+
 ### Choosing a Distance Metric
 
 | Metric | Best for | Why |
