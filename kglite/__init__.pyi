@@ -916,7 +916,10 @@ class KnowledgeGraph:
 
         Args:
             data: DataFrame containing edge data, or ``None`` when using ``query``.
-            connection_type: Label for this edge type (e.g. ``'KNOWS'``).
+            connection_type: Label for this edge type (e.g. ``'KNOWS'``). Any
+                characters are accepted here — including hyphens/dots/spaces
+                (``'supports-claim'``). Such a type only needs backtick-quoting
+                when *named inside a Cypher query* (``[r:`supports-claim`]``).
             source_type: Node type of source nodes.
             source_id_field: Column with source node IDs (must appear in DataFrame or query RETURN).
             target_type: Node type of target nodes.

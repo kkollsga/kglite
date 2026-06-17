@@ -1441,6 +1441,31 @@ CREATE (n:Doc {`where`: 1, `null`: 'x'})
 RETURN n.`where`
 ```
 
+### Identifier charset & special characters (hyphens, dots, spaces)
+
+A **bare** identifier (label, relationship type, property key, variable) must
+match `[A-Za-z_][A-Za-z0-9_]*` — a letter or underscore followed by letters,
+digits, or underscores. Anything outside that set — a hyphen, dot, space, or
+leading digit — must be **backtick-quoted**. This matters most for
+relationship types like `supports-claim` or `refines-idea`: written bare, the
+`-` is parsed as the relationship-arrow token and you get a syntax error, so
+backtick them:
+
+```cypher
+// Hyphenated / dotted / spaced rel types and labels — backtick them:
+CREATE (a)-[:`supports-claim`]->(b)
+MATCH  (a)-[r:`refines-idea`]->(b) RETURN a, b
+MATCH  (n:`Legal Document`)       RETURN n
+RETURN n.`dc.title`
+```
+
+The **string-typed APIs do not need escaping** — they take the type/label as a
+plain string, so `add_connections(df, "supports-claim", …)`,
+`add_nodes(df, "Legal Document", …)`, and `create_index("Doc", "dc.title")`
+all accept arbitrary characters directly. Backticks are only a *Cypher-surface*
+concern: escape when you name such a type/label/key inside a query, not when
+you create it through the Python API.
+
 ### Structural accessors vs stored properties
 
 Every node answers four convenience accessors:

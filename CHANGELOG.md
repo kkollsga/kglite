@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documented library-only filter `WHERE n.is_external = false` silently matched
   zero rows on `Function` (`null = false` → false). Now uniform across labels.
 
+### Documentation
+
+- **Identifier charset & escaping** is now documented in `CYPHER.md` (operator
+  B2). Hyphenated/dotted/spaced relationship types and labels (`supports-claim`,
+  `refines-idea`, `Legal Document`) have always worked; they just need
+  backtick-quoting *inside a Cypher query* (`[r:`supports-claim`]`). The
+  string-typed Python APIs (`add_connections`/`replace_connections`/`add_nodes`/
+  `create_index`) accept arbitrary characters directly — no escaping. The bare-
+  identifier rule (`[A-Za-z_][A-Za-z0-9_]*`, else backtick) is now spelled out.
+
 ## [0.10.28] — 2026-06-16 — bring-your-own embedder (library + model); `[embed]` extra removed
 
 ### Changed

@@ -79,29 +79,28 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
 
-  build:
+  # Windows + macOS build natively (one abi3 wheel per target). macOS
+  # builds both arm64 (native on the arm runner) and x86_64 (cross —
+  # Apple ships both SDKs, so `--target x86_64-apple-darwin` just works).
+  # 0.9.20: the bundled binary was retired for a Python entry point, so
+  # the abi3-py310 cdylib serves all Python 3.10+ — one wheel per target,
+  # no per-Python matrix. See docs/guides/mcp-servers.md.
+  build-native:
     name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }}
     needs: [ci-gate, version-check]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
-    # 0.9.20: the bundled binary was retired in favour of a Python
-    # entry point (kglite.mcp_server.server:main). With no binary in
-    # the wheel, there's nothing forcing a per-Python-version build —
-    # the kglite cdylib uses pyo3's abi3-py310 feature and the same
-    # `.so` serves all Python 3.10+. Matrix collapses back to 3 cells
-    # (one per OS). See `docs/guides/mcp-servers.md` for the
-    # architectural rationale.
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -132,12 +131,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          # 0.9.22: bump cache key to nuke stale 0.9.18/0.9.19 entries
-          # (those builds had fastembed-rs + ort + tokenizers in the
-          # binary's link graph; the new entries are smaller and
-          # incompatible). The deserialization warning that's appeared
-          # since the architecture shift is harmless but noisy — a
-          # fresh key suppresses it cleanly.
           shared-key: "wheel-${{ matrix.target }}-0922"
       - name: Install Maturin
         run: pip install maturin
@@ -155,9 +148,102 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: wheels/*.whl
 
+  # Linux builds inside the manylinux2014 container (glibc 2.17) via
+  # maturin-action, NOT a bare `maturin build` on the runner — a bare
+  # build tags the wheel with the runner's glibc (0.10.28 shipped
+  # `manylinux_2_39`, which pip refuses to install on anything older than
+  # Ubuntu 24.04, forcing downstreams to self-host; operator B8). The
+  # container also cross-builds aarch64 (Graviton / Apple-via-Docker) and
+  # the musllinux_1_2 wheels for Alpine.
+  # x86_64 Linux — the must-pass cells (gnu manylinux2014 + musl). A
+  # failure here blocks the release; we never publish a Linux-x86_64
+  # set missing the primary glibc wheel.
+  build-linux:
+    name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
+    needs: [ci-gate, version-check]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel (manylinux/musllinux container)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out wheels
+      - name: List build directory
+        run: ls -la wheels
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+
+  # aarch64 Linux — extra coverage built via QEMU/cross. These are the
+  # fragile combos (native C deps cross-compiling to aarch64, esp.
+  # musl), so the job is best-effort: `continue-on-error` keeps a
+  # cross-build failure from blocking the release. Any cell that *does*
+  # build uploads its wheel and gets published; a broken one is simply
+  # absent until the next release fixes it.
+  build-linux-arm:
+    name: Build wheel - linux - ${{ matrix.target }} (${{ matrix.manylinux }})
+    needs: [ci-gate, version-check]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            manylinux: '2014'
+          - target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel (manylinux/musllinux container)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out wheels
+      - name: List build directory
+        run: ls -la wheels
+      - name: Upload wheels as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+
   publish:
     name: Publish to PyPI
-    needs: [version-check, build]
+    needs: [version-check, build-native, build-linux, build-linux-arm]
+    # Run once the must-pass builds are green, regardless of the
+    # best-effort aarch64 job's result — a `continue-on-error` job that
+    # fails still counts as a failed dependency, which would otherwise
+    # *skip* publish. `always()` + explicit gates let publish proceed
+    # with whatever wheels exist (skip-existing handles partial sets).
+    if: >-
+      always() &&
+      needs.version-check.outputs.should_publish == 'true' &&
+      needs.build-native.result == 'success' &&
+      needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
