@@ -153,6 +153,19 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
 }
 
+/// Load an in-memory graph from a `.kgl` byte buffer produced by
+/// `graph.to_bytes()` — the in-memory counterpart of `kglite.load(path)`.
+/// The returned graph has no `source_path` (it didn't come from a file),
+/// so a bare `save()` will ask for an explicit path. A corrupt/truncated
+/// or non-`.kgl` buffer raises a classifiable error (bad magic / truncated
+/// section), distinct from a successful empty graph.
+#[pyfunction]
+fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
+    py.detach(|| kglite_core::graph::io::file::load_kgl_bytes(data))
+        .map(KnowledgeGraph::from_arc)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+}
+
 /// Open a graph at `path`, loading it if the file/directory exists or
 /// creating a fresh one if it doesn't (load-or-create) — the embedded-DB
 /// lifecycle entry point. The returned graph remembers `path`, so a later
@@ -299,6 +312,7 @@ fn _run_mcp_server(
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;

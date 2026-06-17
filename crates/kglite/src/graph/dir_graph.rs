@@ -2023,7 +2023,7 @@ impl DirGraph {
             &self.interner,
         )?;
 
-        // Save embeddings if any (matches write_graph_v3 behavior for in-memory saves)
+        // Save embeddings if any (matches write_kgl behavior for in-memory saves)
         if !self.embeddings.is_empty() {
             let emb_bytes = bincode::serialize(&self.embeddings)
                 .map_err(|e| format!("embeddings serialization failed: {}", e))?;

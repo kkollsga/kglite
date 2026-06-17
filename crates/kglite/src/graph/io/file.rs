@@ -44,6 +44,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Return a pinned bincode configuration that is identical to the legacy
@@ -1157,11 +1159,100 @@ fn debug_assert_column_keys_registered(graph: &DirGraph) {
     }
 }
 
-/// Serialize, compress, and write graph data to v3 file. Heavy I/O, safe to run without GIL.
+/// Atomic, durable counterpart of [`write_kgl`]: serialize to a sibling
+/// temp file, fsync it (when `fsync`), then atomically rename it over
+/// `path`. A crash at any point leaves either the old file or the new one
+/// — never a torn/truncated `.kgl`. The temp name embeds the pid and a
+/// per-process counter so two processes saving the same path can't
+/// clobber each other's in-flight temp (last *rename* wins, cleanly).
+///
+/// `fsync = true` (the default via [`write_kgl`]) flushes the file and
+/// its parent directory to disk before returning, so the bytes survive an
+/// OS/power crash. `fsync = false` keeps the atomic rename (still no torn
+/// file) but skips the durability barrier for speed.
+pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<()> {
+    let dest = Path::new(path);
+    let dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
+
+    // Sibling temp path (same directory → rename is atomic on one fs).
+    static SAVE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nonce = SAVE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(
+        "{}.tmp.{}.{}",
+        dest.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "graph.kgl".to_string()),
+        std::process::id(),
+        nonce
+    );
+    let tmp = match dir {
+        Some(d) => d.join(&tmp_name),
+        None => Path::new(&tmp_name).to_path_buf(),
+    };
+
+    // Write the bytes to the temp file, then flush + (optionally) fsync.
+    // Scope the writer so the File is closed before the rename.
+    let write_result = (|| -> io::Result<()> {
+        let file = File::create(&tmp)?;
+        let mut writer = BufWriter::new(file);
+        write_kgl_to(graph, &mut writer)?;
+        writer.flush()?;
+        // Recover the File from the BufWriter to fsync it.
+        let file = writer
+            .into_inner()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if fsync {
+            file.sync_all()?;
+        }
+        Ok(())
+    })();
+
+    // On any write error, remove the temp so a failed save leaves no litter.
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Atomic publish: rename temp → dest. On the same filesystem this is a
+    // single atomic operation; readers see either the old or the new file.
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // fsync the directory so the rename itself is durable (the rename can
+    // otherwise be lost on a crash even though the file bytes are synced).
+    if fsync {
+        if let Some(d) = dir {
+            if let Ok(dirfile) = File::open(d) {
+                let _ = dirfile.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Serialize, compress, and write the graph to a `.kgl` file, atomically
+/// and durably (temp + fsync + rename — see [`write_kgl_with`]). Heavy
+/// I/O, safe to run without the GIL.
+///
+/// (Despite the long-standing `v3` names elsewhere, the bytes written are
+/// the v4 container — `V4_MAGIC` + `CURRENT_CORE_DATA_VERSION`; the loader
+/// is [`load_v4`]. This writer is named for the artifact to avoid the
+/// stale version label.)
 ///
 /// The graph MUST have columnar storage enabled before calling this function.
 /// The caller (Python `save()`) handles auto-enable/disable.
-pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
+pub fn write_kgl(graph: &DirGraph, path: &str) -> io::Result<()> {
+    write_kgl_with(graph, path, true)
+}
+
+/// Serialize the graph's `.kgl` byte stream (header + topology + column /
+/// embedding / timeseries / secondary-label sections) into any writer.
+/// Factored out of the file path so the same bytes back the atomic file
+/// save, an in-memory `to_bytes()`, and a caller-supplied writer — none of
+/// them duplicate the section layout.
+pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()> {
     #[cfg(debug_assertions)]
     debug_assert_column_keys_registered(graph);
 
@@ -1263,9 +1354,7 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
     let metadata_value = serde_json::to_value(&metadata).map_err(io::Error::other)?;
     let metadata_json = serde_json::to_vec(&metadata_value).map_err(io::Error::other)?;
 
-    // 6. Write file
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+    // 6. Write the byte stream into the caller's writer.
 
     // Header: magic (4B) + core_data_version (4B) + metadata_length (4B)
     // Phase A.1 / C5 — write the v4 magic. v3 files become unloadable
@@ -1299,17 +1388,20 @@ pub fn write_graph_v3(graph: &DirGraph, path: &str) -> io::Result<()> {
         writer.write_all(sl_data)?;
     }
 
+    // Flush the writer's own buffer. The atomic-save wrapper additionally
+    // fsyncs the underlying file; for an in-memory `Vec<u8>` writer this is
+    // a harmless no-op.
     writer.flush()?;
     Ok(())
 }
 
 /// In-memory save composing `prepare_save` + `enable_columnar` +
-/// `write_graph_v3`. Public so non-pyo3 consumers (e.g.
+/// `write_kgl`. Public so non-pyo3 consumers (e.g.
 /// `kglite-mcp-server`) can save in-memory graphs without
 /// duplicating the dispatch logic from
 /// `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`.
 ///
-/// Callers under the GIL should release it around `write_graph_v3`
+/// Callers under the GIL should release it around `write_kgl`
 /// for parallelism with other Python threads — see `kg_core.rs::save`
 /// for the canonical split. Rust-only callers (no GIL) just call
 /// this directly.
@@ -1319,7 +1411,7 @@ pub fn save_inmemory(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
         let dir = Arc::make_mut(graph);
         dir.enable_columnar();
     }
-    write_graph_v3(graph, path)
+    write_kgl(graph, path)
 }
 
 /// Mode-aware save: dispatches to `DirGraph::save_disk` for
@@ -1391,6 +1483,30 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
              Please rebuild the graph with the current version and save again.",
+        ))
+    }
+}
+
+/// Load an in-memory graph from a `.kgl` byte buffer — the counterpart of
+/// [`write_kgl_to`] / `KnowledgeGraph.to_bytes()`. Same magic/version
+/// validation and error classification as [`load_file`]'s small-file
+/// branch, but with no filesystem access (the caller already holds the
+/// bytes). Disk-mode graphs are a directory, not a byte stream, so this
+/// only handles the single-file in-memory format.
+pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
+    if data.len() < 4 {
+        return Err(io::Error::other(
+            "Byte buffer is too small to be a valid kglite graph.",
+        ));
+    }
+    if data[..4] == V4_MAGIC {
+        load_v4(data)
+    } else if data[..4] == V3_MAGIC {
+        Err(io::Error::other(V3_HARD_BREAK_MSG))
+    } else {
+        Err(io::Error::other(
+            "Unrecognized byte buffer — not a kglite graph (bad magic). It may be \
+             truncated, from an incompatible version, or not a .kgl payload at all.",
         ))
     }
 }
@@ -2268,4 +2384,138 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         skipped: total_skipped,
         dropped_stores,
     })
+}
+
+#[cfg(test)]
+mod atomic_save_tests {
+    use super::*;
+    use crate::datatypes::{DataFrame, Value};
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::storage::GraphRead;
+
+    /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
+    fn tiny_graph(n: i64) -> Arc<DirGraph> {
+        let mut g = DirGraph::new();
+        let rows: Vec<Vec<Value>> = (1..=n)
+            .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
+            .collect();
+        let df =
+            DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
+        crate::graph::mutation::maintain::add_nodes(
+            &mut g,
+            df,
+            "Doc".to_string(),
+            "id".to_string(),
+            Some("title".to_string()),
+            None,
+        )
+        .unwrap();
+        let mut arc = Arc::new(g);
+        prepare_save(&mut arc);
+        Arc::make_mut(&mut arc).enable_columnar();
+        arc
+    }
+
+    #[test]
+    fn atomic_save_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let g = tiny_graph(5);
+        let want = g.graph.node_count();
+        write_kgl(&g, path.to_str().unwrap()).unwrap();
+        let loaded = load_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.graph.node_count(), want);
+    }
+
+    #[test]
+    fn save_with_fsync_false_still_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let g = tiny_graph(3);
+        write_kgl_with(&g, path.to_str().unwrap(), false).unwrap();
+        let loaded = load_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    #[test]
+    fn to_bytes_roundtrips_via_load_kgl_bytes() {
+        let g = tiny_graph(4);
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&g, &mut buf).unwrap();
+        assert_eq!(&buf[..4], &V4_MAGIC, "buffer must carry the v4 magic");
+        let loaded = load_kgl_bytes(&buf).unwrap();
+        assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    #[test]
+    fn load_kgl_bytes_rejects_bad_magic() {
+        let err = match load_kgl_bytes(b"NOPE and some trailing bytes that are long enough") {
+            Ok(_) => panic!("expected an error for a bad-magic buffer"),
+            Err(e) => e.to_string().to_lowercase(),
+        };
+        assert!(
+            err.contains("magic") || err.contains("unrecognized"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_kgl_bytes_rejects_too_small() {
+        assert!(load_kgl_bytes(b"RG").is_err());
+        assert!(load_kgl_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn load_kgl_bytes_rejects_truncated() {
+        let g = tiny_graph(6);
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&g, &mut buf).unwrap();
+        // Keep the valid magic+header but cut the body — a torn file.
+        let truncated = &buf[..buf.len() / 2];
+        assert!(
+            load_kgl_bytes(truncated).is_err(),
+            "a truncated buffer must be rejected, not silently half-loaded"
+        );
+    }
+
+    #[test]
+    fn atomic_save_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        let p = path.to_str().unwrap();
+        write_kgl(&tiny_graph(2), p).unwrap();
+        write_kgl(&tiny_graph(9), p).unwrap();
+        let loaded = load_file(p).unwrap();
+        assert_eq!(loaded.graph.node_count(), tiny_graph(9).graph.node_count());
+    }
+
+    #[test]
+    fn successful_save_leaves_no_temp_litter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.kgl");
+        write_kgl(&tiny_graph(3), path.to_str().unwrap()).unwrap();
+        // Only the destination should remain — no `.tmp.<pid>.<n>` siblings.
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["g.kgl".to_string()], "temp file must be gone");
+    }
+
+    #[test]
+    fn failed_save_to_bad_dir_leaves_dest_untouched() {
+        // Write a good file first, then attempt a save into a path whose
+        // parent doesn't exist — the temp create fails, and the existing
+        // good file must be left intact (no partial overwrite).
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("g.kgl");
+        write_kgl(&tiny_graph(4), good.to_str().unwrap()).unwrap();
+        let before = std::fs::read(&good).unwrap();
+
+        let bad = dir.path().join("missing_subdir").join("g.kgl");
+        assert!(write_kgl(&tiny_graph(7), bad.to_str().unwrap()).is_err());
+
+        // The original file is byte-for-byte unchanged.
+        assert_eq!(std::fs::read(&good).unwrap(), before);
+    }
 }

@@ -17,7 +17,7 @@ use crate::graph::schema::{
 use crate::graph::storage::GraphRead;
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -87,6 +87,29 @@ impl ProgressSink for PyProgressSink {
 /// Format an integer with comma thousands separators ("1234567" → "1,234,567").
 /// Used by `KnowledgeGraph::__repr__` — keeps large-graph summaries legible
 /// without pulling a dep just for `num-format`.
+/// Clear, actionable error for a cross-thread borrow conflict on a shared
+/// `KnowledgeGraph`. PyO3's `#[pyclass]` is `RefCell`-guarded: while one
+/// thread mutates the graph (`add_nodes` / `embed_texts` / a `CREATE`
+/// query / `save`) it holds the exclusive borrow, and a second thread
+/// touching the *same* instance hits the guard. The raw symptom is either
+/// a cryptic `RuntimeError: Already borrowed` or — at the hand-written
+/// `slf.borrow()` sites — a panic. We turn both into this one message.
+///
+/// Kept in the Python wrapper (not core `KgError`): the borrow guard is a
+/// PyO3/GIL concern, so a non-Python binding never raises it. Raised as a
+/// `RuntimeError` so existing `except RuntimeError` handlers still catch
+/// it (`PyBorrowError` is itself a `RuntimeError`).
+fn concurrent_access_pyerr() -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+        "KnowledgeGraph accessed concurrently from another thread while it was being \
+         used elsewhere. A KnowledgeGraph is single-owner: it is not safe to share one \
+         instance across threads while any thread mutates it (add_nodes, add_connections, \
+         embed_texts, a CREATE/SET/DELETE query, or save). Give each worker its own \
+         copy() (cheap — builds are fast) or serialize all access behind a lock. See the \
+         concurrency model in the docs.",
+    )
+}
+
 fn fmt_with_commas(n: usize) -> String {
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -509,8 +532,8 @@ impl KnowledgeGraph {
         })
     }
 
-    #[pyo3(signature = (path=None))]
-    fn save(&mut self, py: Python<'_>, path: Option<&str>) -> PyResult<()> {
+    #[pyo3(signature = (path=None, *, fsync=true))]
+    fn save(&mut self, py: Python<'_>, path: Option<&str>, fsync: bool) -> PyResult<()> {
         // Resolve the target: explicit path wins; otherwise fall back to the
         // origin file this graph was opened from (`kglite.open`/`load`). A
         // graph built in memory with no origin and no explicit path has
@@ -554,10 +577,12 @@ impl KnowledgeGraph {
             graph.enable_columnar();
         }
 
-        // Heavy phase: serialize, compress, write — release GIL for other Python threads
+        // Heavy phase: serialize, compress, write — release GIL for other Python threads.
+        // The write is atomic (temp + rename) and, with fsync=True (default),
+        // durable (file + directory fsync) — a crash mid-save can't tear the .kgl.
         let inner = self.inner.clone();
         let path_owned = path.to_string();
-        py.detach(move || io::file::write_graph_v3(&inner, &path_owned))
+        py.detach(move || io::file::write_kgl_with(&inner, &path_owned, fsync))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
         // Durable checkpoint: the .kgl now holds the full current state, so
@@ -581,6 +606,46 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Serialize the in-memory graph to a `.kgl` byte buffer (the same
+    /// bytes `save()` writes to disk) and return them as `bytes`.
+    ///
+    /// Lets a caller own the write — hand the bytes to object storage, a
+    /// pipe, a checksum, or a custom atomic-write routine — instead of
+    /// being limited to a filesystem path. Round-trips through
+    /// `kglite.from_bytes(data)`.
+    ///
+    /// In-memory / mapped graphs only: a `disk`-mode graph is a directory,
+    /// not a single byte stream, so this raises for disk graphs (use
+    /// `save(dir)` there).
+    // `&mut self` (not the `to_*`-convention `&self`): like `save()`, this
+    // consolidates node properties into column stores before serializing,
+    // which mutates the graph in place (it stays columnar afterwards).
+    #[allow(clippy::wrong_self_convention)]
+    fn to_bytes(&mut self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
+        if self.inner.graph.is_disk() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "to_bytes() is not supported for disk-mode graphs (a disk graph is a \
+                 directory, not a single byte stream). Use save('dir/') instead.",
+            ));
+        }
+        // Same prep as save(): stamp metadata + consolidate to columnar.
+        io::file::prepare_save(&mut self.inner);
+        {
+            let graph = Arc::make_mut(&mut self.inner);
+            graph.enable_columnar();
+        }
+        // Serialize off the GIL into an owned buffer.
+        let inner = self.inner.clone();
+        let bytes = py
+            .detach(move || -> std::io::Result<Vec<u8>> {
+                let mut buf: Vec<u8> = Vec::new();
+                io::file::write_kgl_to(&inner, &mut buf)?;
+                Ok(buf)
+            })
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+        Ok(PyBytes::new(py, &bytes).unbind())
+    }
+
     /// Persist the graph to its remembered origin path and release nothing
     /// else (the graph stays usable). No-op if the graph has no associated
     /// path (built in memory, never opened/saved to a file) — there is
@@ -589,7 +654,7 @@ impl KnowledgeGraph {
     /// need an explicit target.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.source_path.is_some() {
-            self.save(py, None)?;
+            self.save(py, None, true)?;
         }
         Ok(())
     }
@@ -618,7 +683,7 @@ impl KnowledgeGraph {
         _traceback: &Bound<'_, pyo3::PyAny>,
     ) -> PyResult<bool> {
         if exc_type.is_none() && self.source_path.is_some() {
-            self.save(py, None)?;
+            self.save(py, None, true)?;
         }
         Ok(false)
     }
@@ -1325,7 +1390,7 @@ impl KnowledgeGraph {
         disable_optimizer: bool,
         disabled_passes: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
-        let self_ref = slf.borrow();
+        let self_ref = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
         let effective_timeout = timeout_ms
             .or(self_ref.default_timeout_ms)
             .or_else(|| backend_default_timeout_ms(&self_ref.inner));
@@ -1372,7 +1437,7 @@ impl KnowledgeGraph {
         // (Separate from per-transaction read_only — this is a
         // graph-wide flag set via kg.read_only(True).)
         if is_mutation {
-            let this = slf.borrow();
+            let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             if this.inner.read_only {
                 return Err(crate::error_py::kg_to_pyerr(
                     crate::error::KgError::CypherExecution {
@@ -1390,7 +1455,9 @@ impl KnowledgeGraph {
 
         if is_mutation {
             // Mutation path: needs exclusive borrow of the graph.
-            let mut this = slf.borrow_mut();
+            let mut this = slf
+                .try_borrow_mut()
+                .map_err(|_| concurrent_access_pyerr())?;
             let graph = get_graph_mut(&mut this.inner);
 
             // Embedder snapshot for text_score() — borrow ends before
@@ -1461,11 +1528,11 @@ impl KnowledgeGraph {
         // inside py.detach so the GIL is free during parse / optimize
         // / execute / resolve_noderefs.
         let inner = {
-            let this = slf.borrow();
+            let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             this.inner.clone()
         };
         let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> = {
-            let this = slf.borrow();
+            let this = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
             this.embedder.clone()
         };
         let result = {

@@ -295,7 +295,7 @@ def test_kgl_v3_save_is_deterministic(tmp_path: Path):
 
     Covers two levels of determinism the golden-hash test depends on:
     1. Saving the SAME graph object twice — catches per-call randomness
-       in the save path (e.g. HashMap iteration inside write_graph_v3).
+       in the save path (e.g. HashMap iteration inside write_kgl).
     2. Saving two FRESHLY-BUILT copies — catches per-HashMap RandomState
        leaking into save output across graph instances. Phase 4 fixed
        this by canonicalizing JSON metadata (sort object keys) and
@@ -309,7 +309,7 @@ def test_kgl_v3_save_is_deterministic(tmp_path: Path):
     kg.save(str(path_a))
     kg.save(str(path_b))
     assert path_a.read_bytes() == path_b.read_bytes(), (
-        "save() on the same graph is non-deterministic — something in write_graph_v3 depends on per-call randomness."
+        "save() on the same graph is non-deterministic — something in write_kgl depends on per-call randomness."
     )
 
     # Two fresh builds, one save each — exercises cross-instance HashMap

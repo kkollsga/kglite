@@ -455,7 +455,7 @@ pub fn save_subset(
     })?;
 
     // 3. Choose the right serializer based on graph size. The single-file
-    //    v3 format (`write_graph_v3`) bincode-serializes the whole
+    //    v3 format (`write_kgl`) bincode-serializes the whole
     //    DirGraph in one go and trips bincode's size limit at scale —
     //    Wikidata-class extracts (~17 M nodes / 35 M edges) hit it.
     //    Above the threshold, convert to disk mode and write the
@@ -473,8 +473,8 @@ pub fn save_subset(
         // Single .kgl file path — small subgraphs.
         let mut arc = std::sync::Arc::new(extracted);
         crate::graph::io::file::prepare_save(&mut arc);
-        crate::graph::io::file::write_graph_v3(&arc, path_str)
-            .map_err(|e| format!("save_subset: write_graph_v3 failed: {}", e))
+        crate::graph::io::file::write_kgl(&arc, path_str)
+            .map_err(|e| format!("save_subset: write_kgl failed: {}", e))
     } else {
         // Directory format — large subgraphs. enable_disk_mode builds CSR
         // files in a temp dir; save_disk renames them into `path_str`.
@@ -868,7 +868,7 @@ pub fn save_subset_streaming_disk(
         }
     } else if !writers.is_empty() {
         // Streaming primitives only target disk sources. In-memory /
-        // mapped sources route through extract_subgraph + write_graph_v3
+        // mapped sources route through extract_subgraph + write_kgl
         // earlier in the public save_subset.
         return Err(
             "save_subset_streaming_disk currently requires a disk-backed source".to_string(),

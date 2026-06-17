@@ -456,6 +456,27 @@ def load(path: str) -> KnowledgeGraph:
     """
     ...
 
+def from_bytes(data: bytes) -> KnowledgeGraph:
+    """Load an in-memory graph from a ``.kgl`` byte buffer.
+
+    The in-memory counterpart of :func:`load` — deserialises the bytes
+    produced by :meth:`KnowledgeGraph.to_bytes`. The returned graph has no
+    remembered path (it didn't come from a file), so a bare ``save()`` will
+    require an explicit path.
+
+    Args:
+        data: A ``.kgl`` byte buffer from :meth:`KnowledgeGraph.to_bytes`.
+
+    Returns:
+        A new KnowledgeGraph with the loaded data.
+
+    Raises:
+        IOError: If ``data`` is not a valid ``.kgl`` buffer (bad magic,
+            truncated, or an incompatible/older format) — classifiable and
+            distinct from a successful load of an empty graph.
+    """
+    ...
+
 def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.
@@ -2810,12 +2831,22 @@ class KnowledgeGraph:
     # Persistence
     # ====================================================================
 
-    def save(self, path: str | None = None) -> None:
-        """Serialise the graph to disk.
+    def save(self, path: str | None = None, *, fsync: bool = True) -> None:
+        """Serialise the graph to disk, atomically and durably.
 
-        For default/mapped modes: saves to a ``.kgl`` v3 binary file.
+        For default/mapped modes: saves to a ``.kgl`` binary file.
         For disk mode: saves to a directory containing CSR files and
         compressed node/edge data. The directory IS the saved graph.
+
+        **Crash-safety (default/mapped modes).** The file is written to a
+        sibling temp file and then atomically renamed over the target, so a
+        crash mid-write can never leave a torn/truncated ``.kgl`` — a reader
+        always sees either the previous file or the complete new one. With
+        ``fsync=True`` (default) the file and its directory are flushed to
+        physical storage before returning, so a committed save survives an
+        OS/power crash. The temp name is unique per process, so two
+        processes saving the same path won't corrupt each other's in-flight
+        write (last rename wins, cleanly — keep one writer per file).
 
         Uses columnar storage internally for efficient compression and
         larger-than-RAM loading. If the graph is not already in columnar
@@ -2831,6 +2862,25 @@ class KnowledgeGraph:
                 in which case it defaults to that origin file. Passing a path
                 updates the remembered target ("save as"). Raises ``ValueError``
                 if omitted and there is no remembered path.
+            fsync: When ``True`` (default), flush the file and its parent
+                directory to disk before returning (durable against an OS/power
+                crash). Set ``False`` to skip the flush for speed — the write is
+                still atomic (temp + rename, no torn file), just not guaranteed
+                flushed to physical media when the call returns.
+        """
+        ...
+
+    def to_bytes(self) -> bytes:
+        """Serialise the in-memory graph to a ``.kgl`` byte buffer.
+
+        Returns the same bytes :meth:`save` writes to disk, so a caller can own
+        the write — push to object storage, a pipe, a checksum, or a custom
+        atomic-write routine — instead of being limited to a filesystem path.
+        Round-trips through :func:`kglite.from_bytes`.
+
+        Default/mapped modes only: a ``disk``-mode graph is a directory, not a
+        single byte stream, so this raises ``ValueError`` for disk graphs (use
+        ``save('dir/')`` there).
         """
         ...
 

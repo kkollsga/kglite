@@ -14,6 +14,13 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Added
 
+- **`KnowledgeGraph.to_bytes()` + `kglite.from_bytes(data)`** — serialise an
+  in-memory graph to a `.kgl` byte buffer and load it back, without going
+  through a filesystem path. Lets a caller own the write (object storage, a
+  pipe, a checksum, a custom atomic-write) instead of being limited to
+  `save(path)`. `from_bytes` raises a classifiable error on a corrupt/truncated
+  or non-`.kgl` buffer (operator durability note §4). Default/mapped modes only
+  (a disk graph is a directory, not a byte stream).
 - **`replace_connections(...)`** — an atomic edge upsert. For every source node
   present in the input (`data` DataFrame or `query` result), its existing edges
   *of that connection type* are pruned, then the supplied edges are added — in
@@ -31,6 +38,18 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Changed
 
+- **`save()` is now atomic and durable by default.** The `.kgl` is written to a
+  sibling temp file and atomically renamed over the target, so a crash mid-save
+  can never leave a torn/truncated file — a reader always sees either the old
+  file or the complete new one. With the new `fsync=True` default, the file and
+  its parent directory are flushed to physical storage before returning (durable
+  against an OS/power crash); pass `save(path, fsync=False)` to skip the flush
+  for speed (still atomic, just not guaranteed on-disk at return). The temp name
+  is unique per process so two writers to one path can't corrupt each other's
+  in-flight write. Removes the temp-file + `os.replace` + dir-fsync dance
+  consumers were hand-rolling (operator durability note §4). Every existing
+  caller (including `to_subgraph().save()` and code-graph builds) gets this for
+  free.
 - **`embed_texts(replace=False)` now rejects a model/store dimension mismatch**
   instead of silently mixing dimensions (which corrupts similarity search). On a
   model swap, re-embed the whole column with `replace=True` (deterministic —
@@ -47,6 +66,15 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Fixed
 
+- **A cross-thread borrow conflict now raises a clear, actionable error
+  instead of panicking.** Sharing one `KnowledgeGraph` across threads while a
+  thread mutates it (`add_nodes` / `embed_texts` / a `CREATE` query / `save`)
+  trips PyO3's `RefCell` guard; the hand-written read paths previously *panicked*
+  (`borrow()`), and mutations surfaced a cryptic `Already borrowed`. The read
+  paths now raise a `RuntimeError` explaining the single-owner contract and
+  pointing to the fix (give each worker its own `copy()` — cheap — or serialize
+  access). A frozen, concurrently-readable snapshot is coming next (operator
+  concurrency note, Tier 1).
 - **`create_index` now reports `created` honestly.** Re-creating an existing
   index is still idempotent (no error), but the returned dict now carries
   `created=false` when an index for `(node_type, property)` already existed and

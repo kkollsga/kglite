@@ -388,7 +388,7 @@ fn finalize_and_load(
         crate::graph::io::file::prepare_save(&mut graph);
         std::sync::Arc::make_mut(&mut graph).enable_columnar();
         let dest_str = dest.to_string_lossy();
-        crate::graph::io::file::write_graph_v3(&graph, &dest_str).map_err(|e| e.to_string())?;
+        crate::graph::io::file::write_kgl(&graph, &dest_str).map_err(|e| e.to_string())?;
         return Ok(graph);
     }
     Ok(graph)

@@ -663,7 +663,7 @@ fn run_save(graph: &ActiveGraph) -> String {
     // `kglite::api::save_graph` dispatches on storage mode (mirrors
     // `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`):
     //   - disk-backed → `save_disk(path)` (the folder IS the graph)
-    //   - in-memory  → `prepare_save` → `enable_columnar` → `write_graph_v3`
+    //   - in-memory  → `prepare_save` → `enable_columnar` → `write_kgl`
     // The pre-0.9.45 inline `save_disk` call errored "save_disk requires
     // disk mode" for in-memory `.kgl` graphs — see CHANGELOG [0.9.45].
     let mut dir_arc = graph.kg.dir().clone();
