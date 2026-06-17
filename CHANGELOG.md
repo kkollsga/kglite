@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.29] — 2026-06-17 — edge upsert, embedding-dim guard, algorithm-config robustness, portable wheels
+
+Operator-feedback batch (graph-engine limitations & Cypher footguns): A1, A2,
+B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
+
 ### Added
 
 - **`replace_connections(...)`** — an atomic edge upsert. For every source node
