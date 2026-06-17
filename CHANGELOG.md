@@ -14,6 +14,20 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Added
 
+- **`embed_texts(mode='changed')` + per-node text-hash + model provenance.**
+  `embed_texts` now records, per node, a content hash of the embedded text and
+  (when the embedder exposes a `model_id`/`model_name`) the model identity.
+  `mode='changed'` re-embeds exactly the nodes whose text changed since the last
+  pass (or are missing), instead of all (`mode='all'`, = `replace=True`) or only
+  the missing ones (`mode='missing'`, the default, = `replace=False`). This
+  subsumes the per-node `text_hash` machinery consumers were hand-rolling for
+  the rebuild-from-source-cache workflow (operator embedding note #1). The new
+  `Embedder::model_id()` trait method defaults to `None`, so any bring-your-own
+  embedder works unchanged; a Python embedder can opt in with a `model_id` /
+  `model_name` attribute. The result dict gains `reembedded_changed`.
+- **`embedding_info(node_type, text_column)`** — provenance for an embedding
+  store: `{dimension, count, model, metric, hashed}`. Detect a model swap or a
+  partially-hashed store without a sidecar (operator embedding note #2).
 - **`KnowledgeGraph.freeze()` → `FrozenGraph`** — an immutable, concurrently-
   readable snapshot. Sharing a live `KnowledgeGraph` across threads is unsafe
   (single-owner; a mutation mid-read trips the borrow guard). `freeze()` returns
@@ -50,6 +64,14 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Changed
 
+- **`.kgl` embedding section format bumped (core-data-version 3).** The embedding
+  store now persists per-vector `model_id` + per-node `text_hashes` (positional
+  bincode fields), so a `.kgl` *with embeddings* saved by an older version can't
+  be loaded by this binary — it's rejected with a clear "reload, re-embed, save
+  again" message. The graph's **nodes/edges/columns are unaffected** and a `.kgl`
+  *without* embeddings loads unchanged; only the rebuildable vector cache breaks.
+  This is a deliberate, contained break (embeddings are a rebuildable cache),
+  not a whole-graph format break.
 - **`save()` is now atomic and durable by default.** The `.kgl` is written to a
   sibling temp file and atomically renamed over the target, so a crash mid-save
   can never leave a torn/truncated file — a reader always sees either the old

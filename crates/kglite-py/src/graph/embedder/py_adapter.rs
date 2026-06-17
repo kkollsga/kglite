@@ -24,17 +24,30 @@ use super::Embedder;
 pub struct PyEmbedderAdapter {
     instance: Py<PyAny>,
     dimension: usize,
+    model_id: Option<String>,
 }
 
 impl PyEmbedderAdapter {
     /// Build an adapter around the user's embedder instance.
-    /// Eagerly reads `instance.dimension` at construction so subsequent
-    /// `dimension()` calls don't need the GIL.
+    /// Eagerly reads `instance.dimension` (and an optional `model_id` /
+    /// `model_name` string attribute) at construction so subsequent
+    /// `dimension()` / `model_id()` calls don't need the GIL.
     pub fn new(py: Python<'_>, instance: Py<PyAny>) -> PyResult<Self> {
-        let dimension: usize = instance.bind(py).getattr("dimension")?.extract()?;
+        let bound = instance.bind(py);
+        let dimension: usize = bound.getattr("dimension")?.extract()?;
+        // Optional, duck-typed: a `model_id` or `model_name` str attribute
+        // names the model so it can be stamped onto the embedding store.
+        let model_id = ["model_id", "model_name"].iter().find_map(|attr| {
+            bound
+                .getattr(*attr)
+                .ok()
+                .and_then(|v| v.extract::<String>().ok())
+                .filter(|s| !s.is_empty())
+        });
         Ok(Self {
             instance,
             dimension,
+            model_id,
         })
     }
 
@@ -50,6 +63,10 @@ impl PyEmbedderAdapter {
 impl Embedder for PyEmbedderAdapter {
     fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    fn model_id(&self) -> Option<String> {
+        self.model_id.clone()
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {

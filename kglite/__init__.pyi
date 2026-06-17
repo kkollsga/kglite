@@ -4407,6 +4407,22 @@ class KnowledgeGraph:
         """
         ...
 
+    def embedding_info(self, node_type: str, text_column: str) -> dict[str, Any] | None:
+        """Provenance for the ``(node_type, text_column)`` embedding store, or
+        ``None`` if no store exists.
+
+        Returns a dict with ``dimension``, ``count`` (vectors stored), ``model``
+        (the embedder id stamped at ``embed_texts`` time, or ``None`` for vectors
+        supplied directly via ``add_embeddings``), ``metric``, and ``hashed`` (how
+        many vectors carry a source-text hash, used by
+        ``embed_texts(mode='changed')`` for change-detection). Detect a model swap
+        or a partially-hashed store without external bookkeeping.
+
+        The ``model`` is populated when the embedder exposes a ``model_id`` /
+        ``model_name`` attribute (or is the built-in fastembed backend).
+        """
+        ...
+
     def embedding_diagnostics(self, node_type: Optional[str] = None) -> list[dict[str, Any]]:
         """Diagnose embedding coverage per (node_type, text_column).
 
@@ -4575,6 +4591,7 @@ class KnowledgeGraph:
         batch_size: int = 256,
         show_progress: bool = True,
         replace: bool = False,
+        mode: str | None = None,
     ) -> dict[str, int]:
         """Embed a text column for all nodes of a given type.
 
@@ -4583,8 +4600,10 @@ class KnowledgeGraph:
         stores the resulting vectors as ``{text_column}_emb``.
         Nodes with missing or non-string text are skipped.
 
-        By default, nodes that already have an embedding are skipped.
-        Pass ``replace=True`` to re-embed everything.
+        The store also records, per node, a hash of the embedded text and (when
+        the embedder names it) the model id — so a later
+        ``embed_texts(mode='changed')`` can re-embed exactly the nodes whose
+        text changed, and :meth:`embedding_info` can report provenance.
 
         Shows a tqdm progress bar by default (requires ``tqdm``).
 
@@ -4594,11 +4613,17 @@ class KnowledgeGraph:
             batch_size: Number of texts per ``model.embed()`` call (default 256).
             show_progress: Show a tqdm progress bar (default ``True``).
                 Silently falls back to no bar if ``tqdm`` is not installed.
-            replace: Re-embed all nodes, even those with existing embeddings
-                (default ``False``).
+            replace: Legacy alias for ``mode``. ``True`` → ``mode='all'``,
+                ``False`` → ``mode='missing'``. Ignored when ``mode`` is given.
+            mode: Which nodes to embed — ``'missing'`` (default): only nodes
+                without an embedding; ``'changed'``: nodes missing an embedding
+                *or* whose text changed since the last embed (via the stored
+                content hash) — the incremental re-embed; ``'all'``: re-embed
+                every node, rebuilding the store fresh.
 
         Returns:
-            Dict with ``embedded``, ``skipped``, ``skipped_existing``, and ``dimension``.
+            Dict with ``embedded``, ``skipped``, ``skipped_existing``,
+            ``reembedded_changed``, and ``dimension``.
 
         Example::
 
@@ -4606,8 +4631,8 @@ class KnowledgeGraph:
             g.embed_texts("Article", "summary")
             # Embedding Article.summary: 100%|████████| 1000/1000 [00:05<00:00]
 
-            # Add new articles, then re-run — only new ones get embedded:
-            g.embed_texts("Article", "summary")  # skips already-embedded nodes
+            # Add/edit articles, then re-embed only what changed:
+            g.embed_texts("Article", "summary", mode="changed")
         """
         ...
 

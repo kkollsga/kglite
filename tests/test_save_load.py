@@ -146,7 +146,8 @@ class TestV3Format:
                 metadata_len = struct.unpack("<I", f.read(4))[0]
 
             assert magic == b"RGF\x04"
-            assert core_version == 2  # Phase A.1 — bumped for Value enum extension
+            # 2 — Phase A.1 (Value enum); 3 — 0.10.29 (embedding model_id + text_hashes)
+            assert core_version == 3
             assert metadata_len > 0  # metadata should not be empty
         finally:
             os.unlink(path)

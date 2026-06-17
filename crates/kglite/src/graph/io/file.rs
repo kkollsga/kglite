@@ -81,7 +81,20 @@ const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 ///
 /// 0.9.52 / Phase A.1: bumped to 2 — the `Value` enum gained five
 /// structured variants (Node, Relationship, Path, List, Map).
-const CURRENT_CORE_DATA_VERSION: u32 = 2;
+///
+/// 0.10.29: bumped to 3 — `EmbeddingStore` gained `model_id` +
+/// `text_hashes` (positional bincode fields), so an embeddings section
+/// written by core-version ≤ 2 can't be deserialized by this binary.
+/// Files *without* embeddings load unchanged; a ≤ 2 file *with*
+/// embeddings is rejected with a rebuild-and-re-embed message (see
+/// `EMBED_FORMAT_BREAK_MSG`). Embeddings are a rebuildable cache, so this
+/// is a deliberate, contained break — not a whole-graph format break.
+const CURRENT_CORE_DATA_VERSION: u32 = 3;
+
+/// The first core-data version whose embeddings section carries the
+/// `model_id` + `text_hashes` fields. A file below this with a non-empty
+/// embeddings section can't be read by this binary.
+const EMBED_PROVENANCE_MIN_VERSION: u32 = 3;
 
 /// Column section metadata for v3 format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1511,6 +1524,16 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     }
 }
 
+/// Contained break message for a pre-v3 embeddings section (model_id +
+/// text_hashes added in core-version 3). Only files *with* embeddings hit
+/// this; everything else loads. Embeddings are a rebuildable cache.
+const EMBED_FORMAT_BREAK_MSG: &str =
+    "This .kgl was saved with an older embedding format (before per-vector model \
+     id + text-hash provenance, kglite 0.10.29). Its embeddings can't be loaded by \
+     this binary. The graph's nodes/edges are fine — reload, re-run \
+     embed_texts()/add_embeddings() to rebuild the vectors, and save again. \
+     (Embeddings are a rebuildable cache; only the vector section broke.)";
+
 /// Hard-break message for v3 files in a v4 binary. Per the
 /// Phase A.1 user-decision in bolt_implementation.md: no read-compat
 /// path; rebuild the graph from source. Message gives the operator
@@ -2146,6 +2169,14 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
 
     // Load embeddings if present
     if embeddings_compressed_size > 0 {
+        // Contained format break: the embeddings section layout changed in
+        // core-version 3 (model_id + text_hashes). An older file's embeddings
+        // can't be deserialized positionally, so reject with a clear rebuild
+        // message rather than silently corrupting. The rest of the graph
+        // (nodes/edges/columns) is unaffected — only embeddings broke.
+        if core_version < EMBED_PROVENANCE_MIN_VERSION {
+            return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
+        }
         let emb_end = section_offset + embeddings_compressed_size as usize;
         if buf.len() >= emb_end {
             let emb_compressed = &buf[section_offset..emb_end];

@@ -28,6 +28,7 @@ use super::Embedder;
 /// `load()` or `embed()` so construction is cheap.
 pub struct FastEmbedAdapter {
     model: EmbeddingModel,
+    model_name: String,
     dimension: usize,
     inner: Mutex<Option<TextEmbedding>>,
 }
@@ -41,6 +42,7 @@ impl FastEmbedAdapter {
         let (model, dimension) = resolve_model(model_name)?;
         Ok(Self {
             model,
+            model_name: model_name.to_string(),
             dimension,
             inner: Mutex::new(None),
         })
@@ -64,6 +66,10 @@ impl FastEmbedAdapter {
 impl Embedder for FastEmbedAdapter {
     fn dimension(&self) -> usize {
         self.dimension
+    }
+
+    fn model_id(&self) -> Option<String> {
+        Some(self.model_name.clone())
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {

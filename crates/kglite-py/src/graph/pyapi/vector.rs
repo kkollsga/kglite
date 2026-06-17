@@ -390,6 +390,38 @@ impl KnowledgeGraph {
         self.inner.embeddings.get(&key).map(|s| s.dimension)
     }
 
+    /// Provenance for the `(node_type, text_column)` embedding store, or
+    /// ``None`` if no store exists.
+    ///
+    /// Returns a dict with ``dimension``, ``count`` (vectors stored),
+    /// ``model`` (the embedder id stamped at `embed_texts` time, or ``None``
+    /// for vectors supplied directly), ``metric``, and ``hashed`` (how many
+    /// vectors carry a source-text hash for `embed_texts(mode='changed')`
+    /// change-detection). Lets a caller detect a model swap or a partially-
+    /// hashed store without external bookkeeping.
+    fn embedding_info(
+        &self,
+        py: Python<'_>,
+        node_type: &str,
+        text_column: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let key = (node_type.to_string(), format!("{text_column}_emb"));
+        match self.inner.embeddings.get(&key) {
+            None => Ok(py.None()),
+            Some(store) => {
+                let d = PyDict::new(py);
+                d.set_item("node_type", node_type)?;
+                d.set_item("text_column", text_column)?;
+                d.set_item("dimension", store.dimension)?;
+                d.set_item("count", store.len())?;
+                d.set_item("model", store.model_id.clone())?;
+                d.set_item("metric", store.metric.clone())?;
+                d.set_item("hashed", store.text_hashes.len())?;
+                d.into_py_any(py)
+            }
+        }
+    }
+
     /// List all embedding stores in the graph.
     ///
     /// Returns:
@@ -914,12 +946,20 @@ impl KnowledgeGraph {
     ///     show_progress: Show a tqdm progress bar (default ``True``).
     ///         Requires ``tqdm`` to be installed; silently falls back to no
     ///         progress bar if it is not available.
-    ///     replace: If ``True``, re-embed all nodes even if they already have
-    ///         embeddings.  Default ``False`` (skip nodes with existing embeddings).
+    ///     replace: Legacy alias for ``mode``. ``True`` → ``mode='all'``,
+    ///         ``False`` → ``mode='missing'``. Ignored if ``mode`` is given.
+    ///     mode: Which nodes to embed —
+    ///         ``'missing'`` (default): only nodes without an embedding yet;
+    ///         ``'changed'``: nodes missing an embedding *or* whose text changed
+    ///         since the last embed (detected via a stored per-node content
+    ///         hash) — the incremental re-embed;
+    ///         ``'all'``: re-embed every node, rebuilding the store fresh.
     ///
     /// Returns:
-    ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``, and ``dimension``.
-    #[pyo3(signature = (node_type, text_column, batch_size=None, show_progress=None, replace=None))]
+    ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``,
+    ///     ``reembedded_changed``, and ``dimension``.
+    #[pyo3(signature = (node_type, text_column, batch_size=None, show_progress=None, replace=None, mode=None))]
+    #[allow(clippy::too_many_arguments)]
     fn embed_texts(
         &mut self,
         py: Python<'_>,
@@ -928,11 +968,32 @@ impl KnowledgeGraph {
         batch_size: Option<usize>,
         show_progress: Option<bool>,
         replace: Option<bool>,
+        mode: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error()?;
         let embedding_property = format!("{}_emb", text_column);
         let batch_size = batch_size.unwrap_or(256);
-        let replace = replace.unwrap_or(false);
+        // Resolve the embed mode. `mode` wins; else fall back to the legacy
+        // `replace` bool (True→all, False→missing).
+        let mode = match mode {
+            Some(m) => match m {
+                "missing" | "changed" | "all" => m.to_string(),
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "embed_texts(mode={other:?}): unknown mode. Use 'missing' (default), \
+                         'changed' (re-embed nodes whose text changed), or 'all'."
+                    )));
+                }
+            },
+            None => {
+                if replace.unwrap_or(false) {
+                    "all".to_string()
+                } else {
+                    "missing".to_string()
+                }
+            }
+        };
+        let replace = mode == "all";
 
         // Load model if it has a load() lifecycle method
         model
@@ -941,10 +1002,11 @@ impl KnowledgeGraph {
 
         let dimension: usize = model.dimension();
 
-        // Collect (node_index, text) for nodes that need embedding
-        let mut node_texts: Vec<(NodeIndex, String)> = Vec::new();
+        // Collect (node_index, text, text_hash) for nodes that need embedding
+        let mut node_texts: Vec<(NodeIndex, String, u64)> = Vec::new();
         let mut skipped = 0usize;
         let mut skipped_existing = 0usize;
+        let mut reembedded_changed = 0usize;
 
         let emb_key = (node_type.to_string(), embedding_property.clone());
         let existing_store = if replace {
@@ -978,18 +1040,33 @@ impl KnowledgeGraph {
             .map(|v| v.to_vec())
             .unwrap_or_default();
 
+        let changed_mode = mode == "changed";
         for &node_idx in &node_indices {
             if let Some(node) = self.inner.graph.node_weight(node_idx) {
                 match node.get_property(text_column).as_deref() {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
-                        // Skip nodes that already have an embedding
-                        if existing_store
-                            .map(|s| s.get_embedding(node_idx.index()).is_some())
-                            .unwrap_or(false)
-                        {
+                        let hash = schema::EmbeddingStore::text_hash(s);
+                        let has_emb = existing_store
+                            .map(|st| st.get_embedding(node_idx.index()).is_some())
+                            .unwrap_or(false);
+                        if changed_mode {
+                            // Re-embed nodes that are missing OR whose text changed.
+                            let stale = existing_store
+                                .map(|st| st.is_stale(node_idx.index(), hash))
+                                .unwrap_or(true);
+                            if stale {
+                                if has_emb {
+                                    reembedded_changed += 1;
+                                }
+                                node_texts.push((node_idx, s.clone(), hash));
+                            } else {
+                                skipped_existing += 1;
+                            }
+                        } else if has_emb {
+                            // 'missing' mode: skip nodes that already have one.
                             skipped_existing += 1;
                         } else {
-                            node_texts.push((node_idx, s.clone()));
+                            node_texts.push((node_idx, s.clone(), hash));
                         }
                     }
                     _ => {
@@ -1005,6 +1082,7 @@ impl KnowledgeGraph {
             result.set_item("embedded", 0)?;
             result.set_item("skipped", skipped)?;
             result.set_item("skipped_existing", skipped_existing)?;
+            result.set_item("reembedded_changed", reembedded_changed)?;
             result.set_item("dimension", dimension)?;
             return Ok(result.into());
         }
@@ -1034,7 +1112,7 @@ impl KnowledgeGraph {
         };
 
         for batch in node_texts.chunks(batch_size) {
-            let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+            let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
 
             // Release the GIL while embedding — PyEmbedderAdapter
             // reacquires inside, fastembed never needs it.
@@ -1074,6 +1152,7 @@ impl KnowledgeGraph {
                     )));
                 }
                 store.set_embedding(batch[i].0.index(), vec);
+                store.set_text_hash(batch[i].0.index(), batch[i].2);
             }
 
             // Update progress bar
@@ -1090,6 +1169,12 @@ impl KnowledgeGraph {
         // Unload model after embedding is complete
         model.unload();
 
+        // Stamp the model identity onto the store (provenance) when the
+        // embedder names its model — leaves a prior id intact otherwise.
+        if let Some(mid) = model.model_id() {
+            store.model_id = Some(mid);
+        }
+
         let embedded = node_texts.len();
         let g = Arc::make_mut(&mut self.inner);
         g.embeddings.insert(emb_key, store);
@@ -1098,6 +1183,7 @@ impl KnowledgeGraph {
         result.set_item("embedded", embedded)?;
         result.set_item("skipped", skipped)?;
         result.set_item("skipped_existing", skipped_existing)?;
+        result.set_item("reembedded_changed", reembedded_changed)?;
         result.set_item("dimension", dimension)?;
         Ok(result.into())
     }

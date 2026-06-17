@@ -37,6 +37,16 @@ pub trait Embedder: Send + Sync {
     /// text); each inner Vec has length [`Self::dimension`].
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String>;
 
+    /// Stable identifier of the model producing these vectors (e.g.
+    /// `"BAAI/bge-m3"`, `"sentence-transformers/all-MiniLM-L6-v2"`).
+    /// Stamped onto the embedding store so a model swap is detectable
+    /// after a save/load without external bookkeeping, and surfaced via
+    /// `embedding_info()`. Default `None` — a backend that can't name
+    /// its model simply leaves the store's `model_id` unset.
+    fn model_id(&self) -> Option<String> {
+        None
+    }
+
     /// Optional lifecycle hook. Called by `embed_texts` /
     /// `search_text` before each embedding pass so the
     /// implementation can lazily materialise heavy resources

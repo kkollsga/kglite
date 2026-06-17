@@ -1340,6 +1340,19 @@ pub struct EmbeddingStore {
     /// Used when no explicit metric is provided at query time.
     #[serde(default)]
     pub metric: Option<String>,
+    /// Identity of the model that produced these vectors (e.g. "BAAI/bge-m3").
+    /// Set from the embedder's `model_id()` during `embed_texts`; `None` for
+    /// vectors supplied directly via `add_embeddings`/`set_embeddings` or by a
+    /// backend that doesn't name its model. Surfaced via `embedding_info()`.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Per-node content hash of the embedded text (`NodeIndex.index()` → hash),
+    /// stamped during `embed_texts`. Lets `embed_texts(mode='changed')`
+    /// re-embed exactly the nodes whose text changed since the last pass,
+    /// instead of every node or only the missing ones. Empty for stores built
+    /// from raw vectors (no source text to hash).
+    #[serde(default)]
+    pub text_hashes: HashMap<usize, u64>,
 }
 
 impl EmbeddingStore {
@@ -1350,6 +1363,8 @@ impl EmbeddingStore {
             node_to_slot: HashMap::new(),
             slot_to_node: Vec::new(),
             metric: None,
+            model_id: None,
+            text_hashes: HashMap::new(),
         }
     }
 
@@ -1360,6 +1375,41 @@ impl EmbeddingStore {
             node_to_slot: HashMap::new(),
             slot_to_node: Vec::new(),
             metric: Some(metric.to_string()),
+            model_id: None,
+            text_hashes: HashMap::new(),
+        }
+    }
+
+    /// FNV-1a 64-bit hash of an embedded text — the content fingerprint
+    /// stored in `text_hashes` for change detection. Deterministic across
+    /// processes (same rationale as `InternedKey::from_str`), so a hash
+    /// persisted in one process matches a re-hash in another after reload.
+    pub fn text_hash(text: &str) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+        let mut h = FNV_OFFSET;
+        for &byte in text.as_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+        h
+    }
+
+    /// Record the source-text hash for a node (by `NodeIndex.index()`).
+    pub fn set_text_hash(&mut self, node_index: usize, hash: u64) {
+        self.text_hashes.insert(node_index, hash);
+    }
+
+    /// `true` if the node has no embedding yet, or its stored text hash
+    /// differs from `current_hash` (the text changed since it was embedded),
+    /// or it was embedded without a recorded hash. Drives `mode='changed'`.
+    pub fn is_stale(&self, node_index: usize, current_hash: u64) -> bool {
+        if !self.node_to_slot.contains_key(&node_index) {
+            return true;
+        }
+        match self.text_hashes.get(&node_index) {
+            Some(&stored) => stored != current_hash,
+            None => true,
         }
     }
 
@@ -2655,5 +2705,56 @@ mod maintenance_tests {
 
         // Properties should survive the round-trip
         assert!(node0.get_property("age").is_some());
+    }
+}
+
+#[cfg(test)]
+mod embedding_store_tests {
+    use super::*;
+
+    #[test]
+    fn text_hash_is_deterministic_and_distinguishing() {
+        assert_eq!(
+            EmbeddingStore::text_hash("hello"),
+            EmbeddingStore::text_hash("hello"),
+            "same text must hash identically (cross-process stable)"
+        );
+        assert_ne!(
+            EmbeddingStore::text_hash("hello"),
+            EmbeddingStore::text_hash("world"),
+        );
+        assert_ne!(
+            EmbeddingStore::text_hash("hello"),
+            EmbeddingStore::text_hash("Hello"),
+        );
+    }
+
+    #[test]
+    fn is_stale_covers_missing_changed_and_unhashed() {
+        let mut store = EmbeddingStore::new(2);
+        let h = EmbeddingStore::text_hash("v1");
+
+        // No embedding yet → stale.
+        assert!(store.is_stale(7, h));
+
+        // Embedding present + matching hash → not stale.
+        store.set_embedding(7, &[1.0, 2.0]);
+        store.set_text_hash(7, h);
+        assert!(!store.is_stale(7, h));
+
+        // Text changed (different hash) → stale.
+        assert!(store.is_stale(7, EmbeddingStore::text_hash("v2")));
+
+        // Embedding present but no recorded hash (e.g. add_embeddings) → stale,
+        // so mode='changed' will (re)hash it on the next pass.
+        store.set_embedding(9, &[3.0, 4.0]);
+        assert!(store.is_stale(9, EmbeddingStore::text_hash("anything")));
+    }
+
+    #[test]
+    fn new_store_has_empty_provenance() {
+        let store = EmbeddingStore::new(4);
+        assert_eq!(store.model_id, None);
+        assert!(store.text_hashes.is_empty());
     }
 }
