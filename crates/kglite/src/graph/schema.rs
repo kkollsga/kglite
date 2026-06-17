@@ -1353,6 +1353,40 @@ pub struct EmbeddingStore {
     /// from raw vectors (no source text to hash).
     #[serde(default)]
     pub text_hashes: HashMap<usize, u64>,
+    /// Cached L2 norm (‖v‖) per slot, parallel to `slot_to_node` — `norms[slot]`
+    /// is the Euclidean norm of the vector at `data[slot*dimension..]`. A derived
+    /// acceleration structure: cosine search reads it instead of recomputing the
+    /// stored vector's norm on every query (collapsing cosine's inner loop to a
+    /// single dot product). Deliberately NOT serialized (`#[serde(skip)]`) — it
+    /// is fully determined by `data`, so persisting it would bloat the `.kgl`
+    /// file and risk drift. Rebuilt from `data` after load via `rebuild_norms`.
+    #[serde(skip)]
+    pub norms: Vec<f32>,
+}
+
+/// Squared L2 norm of a vector, computed with the same 4-accumulator
+/// `chunks_exact(8)` pattern the cosine kernel uses for the stored vector, so a
+/// cached norm matches the value cosine would have computed inline (within fp
+/// rounding). Auto-vectorizes (SSE2/AVX2/NEON) on the hot rebuild path.
+#[inline]
+fn l2_norm_sq(v: &[f32]) -> f32 {
+    let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let chunks = v.chunks_exact(8);
+    let rem = chunks.remainder();
+    for c in chunks {
+        s0 += c[0] * c[0];
+        s1 += c[1] * c[1];
+        s2 += c[2] * c[2];
+        s3 += c[3] * c[3];
+        s0 += c[4] * c[4];
+        s1 += c[5] * c[5];
+        s2 += c[6] * c[6];
+        s3 += c[7] * c[7];
+    }
+    for &x in rem {
+        s0 += x * x;
+    }
+    (s0 + s1) + (s2 + s3)
 }
 
 impl EmbeddingStore {
@@ -1365,6 +1399,7 @@ impl EmbeddingStore {
             metric: None,
             model_id: None,
             text_hashes: HashMap::new(),
+            norms: Vec::new(),
         }
     }
 
@@ -1377,6 +1412,7 @@ impl EmbeddingStore {
             metric: Some(metric.to_string()),
             model_id: None,
             text_hashes: HashMap::new(),
+            norms: Vec::new(),
         }
     }
 
@@ -1414,11 +1450,14 @@ impl EmbeddingStore {
     }
 
     /// Add or replace an embedding for a node. Returns the slot index.
+    /// Keeps the cached L2 norm (`norms[slot]`) in sync with `data`.
     pub fn set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize {
+        let norm = l2_norm_sq(embedding).sqrt();
         if let Some(&slot) = self.node_to_slot.get(&node_index) {
             // Replace existing embedding in-place
             let start = slot * self.dimension;
             self.data[start..start + self.dimension].copy_from_slice(embedding);
+            self.norms[slot] = norm;
             slot
         } else {
             // Append new embedding
@@ -1426,6 +1465,7 @@ impl EmbeddingStore {
             self.node_to_slot.insert(node_index, slot);
             self.slot_to_node.push(node_index);
             self.data.extend_from_slice(embedding);
+            self.norms.push(norm);
             slot
         }
     }
@@ -1437,6 +1477,31 @@ impl EmbeddingStore {
             let start = slot * self.dimension;
             &self.data[start..start + self.dimension]
         })
+    }
+
+    /// Get the embedding slice and its cached L2 norm for a node, in one lookup.
+    /// The norm lets cosine scoring skip recomputing the stored vector's norm.
+    #[inline]
+    pub fn get_embedding_with_norm(&self, node_index: usize) -> Option<(&[f32], f32)> {
+        self.node_to_slot.get(&node_index).map(|&slot| {
+            let start = slot * self.dimension;
+            (&self.data[start..start + self.dimension], self.norms[slot])
+        })
+    }
+
+    /// Recompute every cached norm from `data`. Call after any wholesale
+    /// replacement of `data` that bypasses `set_embedding` — deserialization
+    /// (`norms` is `#[serde(skip)]`, so it loads empty) and slot remapping
+    /// during compaction. Idempotent.
+    pub fn rebuild_norms(&mut self) {
+        let n = self.slot_to_node.len();
+        self.norms.clear();
+        self.norms.reserve(n);
+        for slot in 0..n {
+            let start = slot * self.dimension;
+            self.norms
+                .push(l2_norm_sq(&self.data[start..start + self.dimension]).sqrt());
+        }
     }
 
     /// Number of stored embeddings.

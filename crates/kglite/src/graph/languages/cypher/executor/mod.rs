@@ -29,7 +29,7 @@ struct VectorScoreFilterSpec {
     variable: String,
     prop_name: String,
     query_vec: Vec<f32>,
-    similarity_fn: fn(&[f32], &[f32]) -> f32,
+    scorer: crate::graph::algorithms::vector::Scorer,
     threshold: f64,
     greater_than: bool,
     inclusive: bool,
@@ -146,7 +146,7 @@ impl Ord for ScoredRowRef {
 struct VectorScoreCache {
     prop_name: String,
     query_vec: Vec<f32>,
-    similarity_fn: fn(&[f32], &[f32]) -> f32,
+    scorer: crate::graph::algorithms::vector::Scorer,
 }
 
 /// Human-readable name for a Clause variant, used in PROFILE and EXPLAIN output.

@@ -273,11 +273,11 @@ impl<'a> CypherExecutor<'a> {
                     Some(s) => s,
                     None => return false,
                 };
-                let embedding = match store.get_embedding(idx.index()) {
+                let (embedding, norm) = match store.get_embedding_with_norm(idx.index()) {
                     Some(e) => e,
                     None => return false,
                 };
-                let score = (spec.similarity_fn)(&spec.query_vec, embedding) as f64;
+                let score = spec.scorer.score(&spec.query_vec, embedding, norm) as f64;
                 if spec.greater_than {
                     if spec.inclusive {
                         score >= spec.threshold
@@ -847,26 +847,23 @@ impl<'a> CypherExecutor<'a> {
             _ => return None,
         };
 
-        // Arg 3: optional metric (default cosine)
-        let similarity_fn = if args.len() > 3 {
+        // Arg 3: optional metric (default cosine). An unrecognized name bails the
+        // fast path (None) so the general evaluator handles it.
+        let metric = if args.len() > 3 {
             match &args[3] {
-                Expression::Literal(Value::String(s)) => match s.as_str() {
-                    "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
-                    "dot_product" => vs::dot_product,
-                    "euclidean" => vs::neg_euclidean_distance,
-                    _ => return None,
-                },
-                _ => vs::cosine_similarity,
+                Expression::Literal(Value::String(s)) => vs::DistanceMetric::from_name(s)?,
+                _ => vs::DistanceMetric::Cosine,
             }
         } else {
-            vs::cosine_similarity
+            vs::DistanceMetric::Cosine
         };
+        let scorer = vs::Scorer::new(metric, &query_vec);
 
         Some(VectorScoreFilterSpec {
             variable,
             prop_name,
             query_vec,
-            similarity_fn,
+            scorer,
             threshold,
             greater_than,
             inclusive,

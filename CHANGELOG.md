@@ -171,6 +171,21 @@ Concurrency / durability / embeddings, at a glance:
   `where` predicate-scope (added 0.10.25) was already working — it was the key
   name, not the feature, that tripped callers up.
 
+### Performance
+
+- **Cosine vector search ~1.25× faster (≈21% on a 50k×128 top-10 scan).** Each
+  `EmbeddingStore` now caches a per-vector L2 norm alongside the vectors, so
+  cosine scoring no longer recomputes the stored vector's norm (plus a `sqrt`)
+  on every query — the per-candidate work collapses from "dot + two norm sweeps
+  + sqrt" to a single dot product and one divide, with the query norm computed
+  once per query. Shared by both the fluent `vector_search` path and the Cypher
+  `vector_score()` / `text_score()` scalar (so the fused top-K semantic-search
+  path benefits too), and by the all-pairs `link_similar` traversal. Results are
+  unchanged (exact within floating-point epsilon). The cache is derived from the
+  vectors and **not** persisted — it's rebuilt on load, so the `.kgl` format and
+  on-disk bytes are identical. Dot-product / Euclidean / Poincaré are unaffected
+  (they need the raw magnitudes and fall through to the existing kernels).
+
 ### Fixed
 
 - **`load()` / `from_bytes()` raise a classifiable `FileFormatError` on a corrupt

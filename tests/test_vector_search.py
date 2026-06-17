@@ -1855,3 +1855,76 @@ class TestEmbeddingDiagnosticsLengthStats:
         assert status_row["length_stats"]["mean_length"] < 5
         assert status_row["length_stats"]["distinct_count"] == 2
         assert status_row["length_stats"]["distinct_ratio"] == pytest.approx(0.5)
+
+
+class TestNormCacheParity:
+    """The cosine fast path reads a per-vector L2 norm cached in the
+    EmbeddingStore instead of recomputing it on every query. The cache is
+    derived from the vectors (``#[serde(skip)]``), so it must be rebuilt on
+    load — these tests pin that the cached-norm path matches a from-scratch
+    reference and survives a ``.kgl`` round-trip identically."""
+
+    @staticmethod
+    def _ref_cosine(q, v):
+        dot = sum(a * b for a, b in zip(q, v))
+        na = math.sqrt(sum(a * a for a in q))
+        nb = math.sqrt(sum(b * b for b in v))
+        return dot / (na * nb) if na * nb > 0 else 0.0
+
+    def _build(self, n=300, d=48, seed=11):
+        import random
+
+        rng = random.Random(seed)
+        rows = {
+            "id": list(range(n)),
+            "title": [f"n{i}" for i in range(n)],
+            "summary": [f"text {i}" for i in range(n)],
+        }
+        g = kglite.KnowledgeGraph()
+        g.add_nodes(pd.DataFrame(rows), "Doc", "id", "title")
+        emb = {i: [rng.gauss(0, 1) for _ in range(d)] for i in range(n)}
+        g.set_embeddings("Doc", "summary", emb, metric="cosine")
+        q = [rng.gauss(0, 1) for _ in range(d)]
+        return g, emb, q
+
+    def _topk(self, g, q, k=10):
+        rows = g.cypher(
+            "MATCH (d:Doc) RETURN d.id AS id, vector_score(d, 'summary_emb', $q) AS s ORDER BY s DESC LIMIT $k",
+            params={"q": q, "k": k},
+        )
+        return [(r["id"], r["s"]) for r in rows]
+
+    def test_cosine_matches_reference(self):
+        g, emb, q = self._build()
+        got = self._topk(g, q)
+        ref = sorted(((i, self._ref_cosine(q, emb[i])) for i in emb), key=lambda t: -t[1])[:10]
+        assert [i for i, _ in got] == [i for i, _ in ref]
+        for (_, gs), (_, rs) in zip(got, ref):
+            assert abs(gs - rs) < 1e-4
+
+    def test_roundtrip_identical(self):
+        g, _emb, q = self._build()
+        before = self._topk(g, q)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "g.kgl")
+            g.save(p)
+            g2 = kglite.load(p)
+        after = self._topk(g2, q)
+        assert [i for i, _ in before] == [i for i, _ in after]
+        for (_, b), (_, a) in zip(before, after):
+            assert abs(b - a) < 1e-6
+
+    def test_compact_preserves_results(self):
+        """compact() remaps embedding slots wholesale; the norm cache must be
+        rebuilt so cosine results are unchanged after a delete + compact."""
+        g, emb, q = self._build(n=120)
+        before = self._topk(g, q, k=5)
+        # Delete a node that is NOT in the top-5, then compact.
+        keep_ids = {i for i, _ in before}
+        victim = next(i for i in emb if i not in keep_ids)
+        g.cypher("MATCH (d:Doc) WHERE d.id = $v DETACH DELETE d", params={"v": victim})
+        g.compact()
+        after = self._topk(g, q, k=5)
+        assert [i for i, _ in before] == [i for i, _ in after]
+        for (_, b), (_, a) in zip(before, after):
+            assert abs(b - a) < 1e-6

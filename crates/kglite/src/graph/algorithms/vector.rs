@@ -15,6 +15,21 @@ pub enum DistanceMetric {
     Poincare,
 }
 
+impl DistanceMetric {
+    /// Parse the Cypher-facing metric name (`'cosine'`, `'dot_product'`,
+    /// `'euclidean'`, `'poincare'`). Single source of truth so every
+    /// `vector_score` / `text_score` call site agrees on the spelling.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "cosine" => Some(DistanceMetric::Cosine),
+            "dot_product" => Some(DistanceMetric::DotProduct),
+            "euclidean" => Some(DistanceMetric::Euclidean),
+            "poincare" => Some(DistanceMetric::Poincare),
+            _ => None,
+        }
+    }
+}
+
 /// A single vector search result: node index + similarity score.
 #[derive(Clone, Debug)]
 pub struct VectorSearchResult {
@@ -75,16 +90,16 @@ pub fn vector_search(
             ));
         }
 
-        let similarity_fn = get_similarity_fn(metric);
+        let scorer = Scorer::new(metric, query_vector);
 
         if candidates.len() > PARALLEL_THRESHOLD {
-            parallel_search(&candidates, store, query_vector, top_k, similarity_fn)
+            parallel_search(&candidates, store, query_vector, top_k, &scorer)
         } else {
-            sequential_search(&candidates, store, query_vector, top_k, similarity_fn)
+            sequential_search(&candidates, store, query_vector, top_k, &scorer)
         }
     } else {
         // Multi-type path: group by node type
-        let similarity_fn = get_similarity_fn(metric);
+        let scorer = Scorer::new(metric, query_vector);
         let mut heap = MinHeap::with_capacity(top_k);
 
         for &node_idx in &candidates {
@@ -109,8 +124,8 @@ pub fn vector_search(
                 ));
             }
 
-            if let Some(embedding) = store.get_embedding(node_idx.index()) {
-                let score = similarity_fn(query_vector, embedding);
+            if let Some((embedding, norm)) = store.get_embedding_with_norm(node_idx.index()) {
+                let score = scorer.score(query_vector, embedding, norm);
                 heap.push_if_better(node_idx, score, top_k);
             }
         }
@@ -125,12 +140,63 @@ pub fn vector_search(
 
 type SimilarityFn = fn(&[f32], &[f32]) -> f32;
 
-fn get_similarity_fn(metric: DistanceMetric) -> SimilarityFn {
-    match metric {
-        DistanceMetric::Cosine => cosine_similarity,
-        DistanceMetric::DotProduct => dot_product,
-        DistanceMetric::Euclidean => neg_euclidean_distance,
-        DistanceMetric::Poincare => neg_poincare_distance,
+/// A query-bound scorer. Built once per search (the query vector is constant
+/// across all candidates), then applied to each candidate alongside its cached
+/// L2 norm.
+///
+/// Cosine is special-cased: with the query's norm precomputed once and each
+/// stored vector's norm cached in the `EmbeddingStore`, the per-candidate work
+/// collapses from "dot + two norm sweeps + sqrt" to a single dot product and a
+/// divide. Every other metric needs the raw vectors (dot, euclidean) or their
+/// magnitudes recomputed per pair (Poincaré is non-linear in the norms), so
+/// they fall through to the plain kernel and the cached norm is ignored.
+///
+/// Build once per query via [`Scorer::new`] (the query vector is constant across
+/// all candidates), then call [`Scorer::score`] per candidate. Shared by the
+/// fluent `vector_search` path and the Cypher `vector_score` / `text_score`
+/// scalar function so all cosine scoring benefits from the cached norm.
+#[derive(Clone, Copy)]
+pub struct Scorer {
+    kind: ScorerKind,
+}
+
+#[derive(Clone, Copy)]
+enum ScorerKind {
+    Cosine { query_norm: f32 },
+    Generic(SimilarityFn),
+}
+
+impl Scorer {
+    pub fn new(metric: DistanceMetric, query: &[f32]) -> Self {
+        let kind = match metric {
+            // dot_product(q, q) reuses the cosine kernel's accumulator layout,
+            // so query_norm matches the norm cosine_similarity would compute inline.
+            DistanceMetric::Cosine => ScorerKind::Cosine {
+                query_norm: dot_product(query, query).sqrt(),
+            },
+            DistanceMetric::DotProduct => ScorerKind::Generic(dot_product),
+            DistanceMetric::Euclidean => ScorerKind::Generic(neg_euclidean_distance),
+            DistanceMetric::Poincare => ScorerKind::Generic(neg_poincare_distance),
+        };
+        Scorer { kind }
+    }
+
+    /// Score a candidate. `emb_norm` is the candidate's cached L2 norm
+    /// (`EmbeddingStore::get_embedding_with_norm`); it is consumed only by the
+    /// cosine path and ignored by the others.
+    #[inline]
+    pub fn score(&self, query: &[f32], emb: &[f32], emb_norm: f32) -> f32 {
+        match self.kind {
+            ScorerKind::Cosine { query_norm } => {
+                let denom = query_norm * emb_norm;
+                if denom > 0.0 {
+                    dot_product(query, emb) / denom
+                } else {
+                    0.0
+                }
+            }
+            ScorerKind::Generic(f) => f(query, emb),
+        }
     }
 }
 
@@ -432,13 +498,13 @@ fn sequential_search(
     store: &EmbeddingStore,
     query: &[f32],
     top_k: usize,
-    similarity_fn: SimilarityFn,
+    scorer: &Scorer,
 ) -> Vec<VectorSearchResult> {
     let mut heap = MinHeap::with_capacity(top_k);
 
     for &node_idx in candidates {
-        if let Some(embedding) = store.get_embedding(node_idx.index()) {
-            let score = similarity_fn(query, embedding);
+        if let Some((embedding, norm)) = store.get_embedding_with_norm(node_idx.index()) {
+            let score = scorer.score(query, embedding, norm);
             heap.push_if_better(node_idx, score, top_k);
         }
     }
@@ -451,7 +517,7 @@ fn parallel_search(
     store: &EmbeddingStore,
     query: &[f32],
     top_k: usize,
-    similarity_fn: SimilarityFn,
+    scorer: &Scorer,
 ) -> Vec<VectorSearchResult> {
     use rayon::prelude::*;
 
@@ -459,7 +525,7 @@ fn parallel_search(
 
     let per_thread_results: Vec<Vec<VectorSearchResult>> = candidates
         .par_chunks(chunk_size)
-        .map(|chunk| sequential_search(chunk, store, query, top_k, similarity_fn))
+        .map(|chunk| sequential_search(chunk, store, query, top_k, scorer))
         .collect();
 
     // Merge per-thread top-k results
@@ -657,6 +723,97 @@ mod tests {
         let score = neg_poincare_distance(&a, &b);
         assert!(score < 0.0, "different vectors should have negative score");
         assert!(score.is_finite(), "score should be finite");
+    }
+
+    /// The cached-norm cosine path (Scorer) must match the standalone
+    /// `cosine_similarity` kernel within floating-point epsilon, across vector
+    /// shapes (chunked + remainder), through the real EmbeddingStore norm cache.
+    #[test]
+    fn test_scorer_cosine_matches_kernel() {
+        let cases: Vec<(Vec<f32>, Vec<f32>)> = vec![
+            (vec![1.0, 2.0, 3.0, 4.0], vec![4.0, 3.0, 2.0, 1.0]),
+            (vec![0.1; 16], vec![0.2; 16]),
+            (
+                (0..100).map(|i| i as f32).collect(),
+                (0..100).map(|i| (i as f32 * 0.37).sin()).collect(),
+            ),
+            (vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]),
+            (vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]),
+            // Non-multiple-of-8 length to exercise the remainder loop.
+            (vec![0.5, 1.5, 2.5, 3.5, 4.5], vec![5.5, 4.5, 3.5, 2.5, 1.5]),
+        ];
+        for (q, v) in cases {
+            let mut store = EmbeddingStore::new(q.len());
+            store.set_embedding(0, &v);
+            let (emb, norm) = store.get_embedding_with_norm(0).unwrap();
+
+            let scorer = Scorer::new(DistanceMetric::Cosine, &q);
+            let got = scorer.score(&q, emb, norm);
+            let expected = cosine_similarity(&q, &v);
+            assert!(
+                (got - expected).abs() < 1e-5,
+                "cosine parity failed: scorer={}, kernel={}",
+                got,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_scorer_cosine_zero_vectors() {
+        // Zero query or zero stored vector → 0.0, matching cosine_similarity.
+        let mut store = EmbeddingStore::new(3);
+        store.set_embedding(0, &[0.0, 0.0, 0.0]);
+        let (emb, norm) = store.get_embedding_with_norm(0).unwrap();
+        let scorer = Scorer::new(DistanceMetric::Cosine, &[1.0, 2.0, 3.0]);
+        assert_eq!(scorer.score(&[1.0, 2.0, 3.0], emb, norm), 0.0);
+
+        store.set_embedding(0, &[1.0, 2.0, 3.0]);
+        let (emb, norm) = store.get_embedding_with_norm(0).unwrap();
+        let scorer = Scorer::new(DistanceMetric::Cosine, &[0.0, 0.0, 0.0]);
+        assert_eq!(scorer.score(&[0.0, 0.0, 0.0], emb, norm), 0.0);
+    }
+
+    #[test]
+    fn test_scorer_generic_metrics_match_kernels() {
+        // Non-cosine metrics route through Generic and ignore the cached norm,
+        // so Scorer::score must equal the bare kernel.
+        let q = vec![1.0, 2.0, 3.0, 4.0];
+        let v = vec![4.0, 3.0, 2.0, 1.0];
+        let mut store = EmbeddingStore::new(4);
+        store.set_embedding(0, &v);
+        let (emb, norm) = store.get_embedding_with_norm(0).unwrap();
+
+        let dot = Scorer::new(DistanceMetric::DotProduct, &q);
+        assert!((dot.score(&q, emb, norm) - dot_product(&q, &v)).abs() < 1e-6);
+        let euc = Scorer::new(DistanceMetric::Euclidean, &q);
+        assert!((euc.score(&q, emb, norm) - neg_euclidean_distance(&q, &v)).abs() < 1e-6);
+        let poi = Scorer::new(DistanceMetric::Poincare, &q);
+        assert!((poi.score(&q, emb, norm) - neg_poincare_distance(&q, &v)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_embedding_store_norm_cache() {
+        let mut store = EmbeddingStore::new(3);
+        store.set_embedding(0, &[3.0, 4.0, 0.0]); // norm 5
+        store.set_embedding(7, &[0.0, 0.0, 0.0]); // norm 0
+        let (_, n0) = store.get_embedding_with_norm(0).unwrap();
+        let (_, n7) = store.get_embedding_with_norm(7).unwrap();
+        assert!((n0 - 5.0).abs() < 1e-6);
+        assert_eq!(n7, 0.0);
+
+        // Replace must update the cached norm in place.
+        store.set_embedding(0, &[5.0, 12.0, 0.0]); // norm 13
+        let (_, n0b) = store.get_embedding_with_norm(0).unwrap();
+        assert!((n0b - 13.0).abs() < 1e-6);
+
+        // rebuild_norms (the post-load / post-compaction path) reproduces them.
+        store.norms.clear();
+        store.rebuild_norms();
+        let (_, n0c) = store.get_embedding_with_norm(0).unwrap();
+        let (_, n7c) = store.get_embedding_with_norm(7).unwrap();
+        assert!((n0c - 13.0).abs() < 1e-6);
+        assert_eq!(n7c, 0.0);
     }
 
     #[test]

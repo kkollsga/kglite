@@ -1357,20 +1357,6 @@ fn semantic_score_traversal(
             )
         })?;
 
-    let similarity_fn = match metric {
-        crate::graph::algorithms::vector::DistanceMetric::Cosine => {
-            crate::graph::algorithms::vector::cosine_similarity
-        }
-        crate::graph::algorithms::vector::DistanceMetric::DotProduct => {
-            crate::graph::algorithms::vector::dot_product
-        }
-        crate::graph::algorithms::vector::DistanceMetric::Euclidean => {
-            crate::graph::algorithms::vector::neg_euclidean_distance
-        }
-        crate::graph::algorithms::vector::DistanceMetric::Poincare => {
-            crate::graph::algorithms::vector::neg_poincare_distance
-        }
-    };
     let threshold_f32 = threshold as f32;
 
     let mut matches: HashMap<NodeIndex, Vec<NodeIndex>> =
@@ -1382,14 +1368,21 @@ fn semantic_score_traversal(
             None => continue,
         };
 
+        // The source vector is constant across the inner target loop, so bind a
+        // Scorer to it once (precomputing its norm for cosine); each target then
+        // contributes only a dot product + its cached norm.
+        let scorer = crate::graph::algorithms::vector::Scorer::new(metric, src_embedding);
+
         let mut matched = Vec::new();
         for &tgt_idx in &target_candidates {
             // Skip self-matches
             if tgt_idx == src_idx {
                 continue;
             }
-            if let Some(tgt_embedding) = tgt_store.get_embedding(tgt_idx.index()) {
-                let score = similarity_fn(src_embedding, tgt_embedding);
+            if let Some((tgt_embedding, tgt_norm)) =
+                tgt_store.get_embedding_with_norm(tgt_idx.index())
+            {
+                let score = scorer.score(src_embedding, tgt_embedding, tgt_norm);
                 if score >= threshold_f32 {
                     matched.push(tgt_idx);
                 }

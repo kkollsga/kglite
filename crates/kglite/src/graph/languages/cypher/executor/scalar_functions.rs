@@ -1676,22 +1676,17 @@ impl<'a> CypherExecutor<'a> {
                                 .and_then(|(_, store)| store.metric.clone())
                                 .unwrap_or_else(|| "cosine".to_string())
                         };
-                        let similarity_fn = match metric_name.as_str() {
-                            "cosine" => vs::cosine_similarity as fn(&[f32], &[f32]) -> f32,
-                            "dot_product" => vs::dot_product,
-                            "euclidean" => vs::neg_euclidean_distance,
-                            "poincare" => vs::neg_poincare_distance,
-                            other => {
-                                return Err(format!(
-                                    "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
-                                    other
-                                ))
-                            }
-                        };
+                        let metric = vs::DistanceMetric::from_name(&metric_name).ok_or_else(|| {
+                            format!(
+                                "vector_score(): unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
+                                metric_name
+                            )
+                        })?;
+                        let scorer = vs::Scorer::new(metric, &query_vec);
                         let _ = self.vs_cache.set(VectorScoreCache {
                             prop_name,
                             query_vec,
-                            similarity_fn,
+                            scorer,
                         });
                         self.vs_cache.get().unwrap()
                     }
@@ -1721,9 +1716,9 @@ impl<'a> CypherExecutor<'a> {
                     ));
                 }
 
-                match store.get_embedding(node_idx.index()) {
-                    Some(embedding) => {
-                        let score = (c.similarity_fn)(&c.query_vec, embedding);
+                match store.get_embedding_with_norm(node_idx.index()) {
+                    Some((embedding, norm)) => {
+                        let score = c.scorer.score(&c.query_vec, embedding, norm);
                         Ok(Value::Float64(score as f64))
                     }
                     None => Ok(Value::Null),

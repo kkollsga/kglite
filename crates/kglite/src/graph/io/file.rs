@@ -1850,9 +1850,13 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     if emb_path.exists() {
         if let Ok(compressed) = std::fs::read(&emb_path) {
             if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                if let Ok(embeddings) =
+                if let Ok(mut embeddings) =
                     bincode::deserialize::<HashMap<(String, String), EmbeddingStore>>(&bytes)
                 {
+                    // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
+                    for store in embeddings.values_mut() {
+                        store.rebuild_norms();
+                    }
                     graph.embeddings = embeddings;
                 }
             }
@@ -2181,7 +2185,12 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
         if buf.len() >= emb_end {
             let emb_compressed = &buf[section_offset..emb_end];
             let emb_raw = zstd_decompress(emb_compressed)?;
-            let embeddings: HashMap<(String, String), EmbeddingStore> = bincode_deser(&emb_raw)?;
+            let mut embeddings: HashMap<(String, String), EmbeddingStore> =
+                bincode_deser(&emb_raw)?;
+            // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
+            for store in embeddings.values_mut() {
+                store.rebuild_norms();
+            }
             dir_graph.embeddings = embeddings;
             section_offset = emb_end;
         }
