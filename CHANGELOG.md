@@ -7,22 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.29] — 2026-06-17 — concurrency snapshots, durable save, embedding provenance, edge upsert, portable wheels
+## [0.11.0] — 2026-06-17 — concurrency snapshots, durable save, embedding provenance, edge upsert, portable wheels
 
-Two operator-feedback batches (2026-06-17). The first — graph-engine
-limitations & Cypher footguns: A1, A2, B2–B8 (edge upsert, embedding-dim guard,
-algorithm-config robustness, portable manylinux2014/macOS-x86_64/musllinux/
-aarch64 wheels). The second — a concurrency/durability/embedding roadmap, worked
-as three phases:
+Cut as a **minor** (0.11.0), not a patch: this release adds new public API
+(`freeze()`/`FrozenGraph`, `to_bytes()`/`from_bytes()`, `replace_connections()`,
+`embedding_info()`/`embedding_dim()`, `embed_texts(mode=…)`, `copy_embeddings_from()`,
+`search_text`/`vector_search` `returning=`, public `build_code_tree`), changes a
+default (`save()` is now atomic + `fsync`), and makes a scoped on-disk format
+break (embeddings section — core-data-version 3). See **Migration** below.
+
+Folds three operator-feedback rounds (2026-06-17): graph-engine limitations &
+Cypher footguns (edge upsert, algorithm-config robustness, portable wheels); a
+concurrency/durability/embedding roadmap (freeze snapshot, durable save,
+embedding provenance + incremental re-embed); and the way-forward shortlist
+(search-hit projection, cross-graph vector carry, public code-tree API, typed
+load error).
+
+### Migration (0.10.x → 0.11.0)
+
+- **`save()` is atomic + `fsync` by default.** No code change needed; you get
+  crash-safety for free. If you do high-frequency saves where durability isn't
+  required, pass `save(path, fsync=False)` (still atomic, just no flush).
+- **`.kgl` with embeddings from an older binary won't load** (embeddings section
+  format changed — core-data-version 3). The graph's nodes/edges/columns are
+  unaffected; only the (rebuildable) vector cache broke. **Action:** reload the
+  graph, re-run `embed_texts()` / `add_embeddings()`, and `save()` again — or use
+  `new.copy_embeddings_from(old)` once both are on 0.11.0. A `.kgl` *without*
+  embeddings loads unchanged.
+- **`load()` / `from_bytes()` raise `kglite.FileFormatError` (not `IOError`) on a
+  corrupt file.** Code with `except IOError:` around a load should catch
+  `kglite.FileError` / `kglite.FileFormatError` (both subclass `kglite.KgError`).
+- **Sharing one graph across threads** raises a clear `RuntimeError` instead of
+  panicking. Give each worker its own `copy()`, serialize access, or share a
+  read-only `freeze()` snapshot for concurrent reads.
+- **MCP/binary consumers:** rebuild/republish `kglite-mcp-server` against 0.11.0
+  (the format bump means an old binary can't read a 0.11.0 `.kgl`).
+
+Concurrency / durability / embeddings, at a glance:
 
 - **Concurrency** — a clear cross-thread error (no more borrow panics) and
   `freeze()` → `FrozenGraph`, an immutable O(1) snapshot with lock-free
-  concurrent reads (the thread-safety item B1, addressed via the "build → freeze
+  concurrent reads (the thread-safety item, addressed via the "build → freeze
   → share → swap" model rather than a global lock).
 - **Durability** — atomic + `fsync` save (no torn `.kgl`), `to_bytes()` /
-  `from_bytes()`.
+  `from_bytes()`, typed `FileFormatError` on corrupt load.
 - **Embeddings** — model + text-hash provenance, `embed_texts(mode='changed')`
-  incremental re-embedding, `embedding_info()`.
+  incremental re-embedding, `embedding_info()`, `copy_embeddings_from()`,
+  `search_text`/`vector_search` `returning=` projection.
 
 ### Added
 

@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "78a8fef6a959b3cc970f6e342e7808b55038033fd1aa7e2ce6b172d1cd978e50"
+GOLDEN_V3_DIGEST = "0dc6371b4fb4730e7a337c4c0ab4b25a0be381056b1e0352b25eabd2e9b6de5e"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -215,6 +215,8 @@ ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
         "d3f935e3c32e3435bdb50115cabc2527be0f81d0a9500690423fe8ac7b19bcdd",
         # Demoted from GOLDEN_V3_DIGEST when 0.10.29 took over.
         "09515ec598bac9e0b78c519df7b785853dd4373b170bef81ac0bfe8333eb99c2",
+        # Demoted from GOLDEN_V3_DIGEST when 0.11.0 took over.
+        "78a8fef6a959b3cc970f6e342e7808b55038033fd1aa7e2ce6b172d1cd978e50",
     }
 )
 
@@ -281,7 +283,9 @@ def test_kgl_v3_file_rejected_with_clear_error(tmp_path: Path):
         + (0).to_bytes(4, "little")  # metadata_length = 0
     )
 
-    with pytest.raises((OSError, RuntimeError, ValueError)) as exc_info:
+    # 0.11.0: load() raises the typed, classifiable kglite.FileFormatError on a
+    # bad/old format (a subclass of kglite.KgError), not a bare OSError.
+    with pytest.raises(kglite.FileFormatError) as exc_info:
         kglite.load(str(v3_file))
 
     msg = str(exc_info.value)

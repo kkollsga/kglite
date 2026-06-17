@@ -1,6 +1,6 @@
 [package]
 name = "kglite-bolt-server"
-version = "0.10.29"
+version = "0.11.0"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
@@ -32,7 +32,7 @@ path = "src/main.rs"
 # back to the version requirement (so this crate publishes against
 # the crates.io kglite). The version must be kept in sync with
 # `crates/kglite/Cargo.toml`'s package.version on each release.
-kglite = { version = "0.10", path = "../kglite", default-features = false }
+kglite = { version = "0.11", path = "../kglite", default-features = false }
 
 # Bolt v5.x protocol library. Implements PackStream framing, message
 # dispatch, session state machine, handshake. We implement BoltBackend

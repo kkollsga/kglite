@@ -16,6 +16,7 @@ pub mod blueprint;
 pub mod core;
 pub mod dir_graph;
 pub mod embedder;
+pub mod embedding_carry;
 pub mod explore;
 pub mod features;
 pub mod handle;

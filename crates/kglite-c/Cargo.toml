@@ -1,6 +1,6 @@
 [package]
 name = "kglite-c"
-version = "0.10.29"
+version = "0.11.0"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
@@ -34,7 +34,7 @@ wikidata = ["kglite/wikidata", "dep:chrono"]
 # opted into here per the [features] block above. Path dep for
 # workspace builds; `cargo publish` strips the path and falls back
 # to the version requirement.
-kglite = { version = "0.10", path = "../kglite", default-features = false }
+kglite = { version = "0.11", path = "../kglite", default-features = false }
 
 # Serde stack — needed to serialize Value to JSON at the C
 # boundary (the design doc fixes JSON-at-boundary for nested
