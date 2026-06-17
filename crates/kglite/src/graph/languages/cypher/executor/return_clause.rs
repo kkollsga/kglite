@@ -1329,6 +1329,197 @@ impl<'a> CypherExecutor<'a> {
     /// Fused path: compute vector_score for all rows using a min-heap of size k,
     /// then project RETURN expressions only for the k surviving rows.
     /// O(n log k) instead of O(n log n) sort + O(n) full projection.
+    /// HNSW-backed variant of the fused top-k. Returns `Some(result_set)` when
+    /// the score is `vector_score(var, prop, query [, metric])` over a single
+    /// indexed node type and the index can serve the query; otherwise `None`,
+    /// signalling the caller to run the exact per-row scan. The ANN step only
+    /// narrows *which* nodes get scored — survivors are re-scored with the same
+    /// `Scorer` as the exact path, so scores are on an identical scale.
+    ///
+    /// Only fires when an index exists (so it's the same opt-in approximate
+    /// behaviour the fluent API auto-uses — a graph with no `build_vector_index`
+    /// keeps exact Cypher search), and bails to exact for any shape it can't
+    /// faithfully serve: ASC order, mixed/unbound types, duplicate node
+    /// bindings, the Poincaré metric, a dimension mismatch, or a filtered row
+    /// set whose survivors underfill `limit`.
+    fn try_hnsw_fused_top_k(
+        &self,
+        score_expr: &Expression,
+        descending: bool,
+        limit: usize,
+        result_set: &ResultSet,
+        return_clause: &ReturnClause,
+        score_item_index: usize,
+    ) -> Result<Option<ResultSet>, String> {
+        use crate::graph::algorithms::vector as vs;
+        use std::collections::HashMap;
+
+        // ANN models "top-k most similar" — descending score, non-empty limit.
+        if !descending || limit == 0 {
+            return Ok(None);
+        }
+
+        // Extract vector_score(var, prop, query [, metric]).
+        let (var, prop_expr, query_expr, metric_arg) = match score_expr {
+            Expression::FunctionCall { name, args, .. }
+                if name == "vector_score" && (3..=4).contains(&args.len()) =>
+            {
+                let var = match &args[0] {
+                    Expression::Variable(v) => v.clone(),
+                    _ => return Ok(None),
+                };
+                (var, &args[1], &args[2], args.get(3))
+            }
+            _ => return Ok(None),
+        };
+
+        // Constant args — evaluate against the first row (they don't vary).
+        let first_row = match result_set.rows.first() {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let prop = match self.evaluate_expression(prop_expr, first_row)? {
+            Value::String(s) => s,
+            _ => return Ok(None),
+        };
+        let query_vec = self.extract_float_list(query_expr, first_row)?;
+        let explicit_metric = match metric_arg {
+            Some(e) => match self.evaluate_expression(e, first_row)? {
+                Value::String(s) => Some(s),
+                _ => None,
+            },
+            None => None,
+        };
+
+        // Membership + node→row map. Bail on a row that doesn't bind `var`, a
+        // mixed type, or a duplicate node (the exact path handles those).
+        let mut node_to_row: HashMap<usize, usize> = HashMap::with_capacity(result_set.rows.len());
+        let mut node_type: Option<String> = None;
+        for (ri, row) in result_set.rows.iter().enumerate() {
+            let idx = match row.node_bindings.get(&var) {
+                Some(&i) => i,
+                None => return Ok(None),
+            };
+            let nt = match self.graph.graph.node_weight(idx) {
+                Some(n) => n.node_type_str(&self.graph.interner).to_string(),
+                None => return Ok(None),
+            };
+            match &node_type {
+                None => node_type = Some(nt),
+                Some(t) if *t != nt => return Ok(None),
+                _ => {}
+            }
+            if node_to_row.insert(idx.index(), ri).is_some() {
+                return Ok(None); // duplicate node binding
+            }
+        }
+        let node_type = node_type.unwrap(); // rows are non-empty here
+
+        let store = match self.graph.embedding_store(&node_type, &prop) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let index = match store.index.as_ref() {
+            Some(i) => i,
+            None => return Ok(None), // no index → exact path
+        };
+        if query_vec.len() != store.dimension {
+            return Ok(None); // let the exact path raise the dimension error
+        }
+        // Resolve metric: explicit > stored > cosine; Poincaré → exact.
+        let metric_name = explicit_metric
+            .or_else(|| store.metric.clone())
+            .unwrap_or_else(|| "cosine".to_string());
+        let metric = match vs::DistanceMetric::from_name(&metric_name) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        if crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric).is_none() {
+            return Ok(None);
+        }
+
+        // HNSW search → membership filter → re-score for exact score scale.
+        let scorer = vs::Scorer::new(metric, &query_vec);
+        let query_norm = vs::dot_product(&query_vec, &query_vec).sqrt();
+        let whole_store = node_to_row.len() >= store.len();
+        let k_fetch = limit.saturating_mul(4).max(limit).min(store.len());
+        let ef = k_fetch.max(index.params().ef_search);
+        let raw = index.search(
+            &query_vec,
+            query_norm,
+            k_fetch,
+            Some(ef),
+            &store.data,
+            &store.norms,
+        );
+
+        let mut scored: Vec<(usize, f64)> = Vec::with_capacity(limit.min(raw.len()));
+        for (slot, _dist) in raw {
+            let node_raw = store.slot_to_node[slot as usize];
+            if let Some(&ri) = node_to_row.get(&node_raw) {
+                let start = slot as usize * store.dimension;
+                let emb = &store.data[start..start + store.dimension];
+                let norm = store.norms[slot as usize];
+                scored.push((ri, scorer.score(&query_vec, emb, norm) as f64));
+            }
+        }
+        // Stable sort: ties keep row order (matches the exact path's behaviour
+        // closely enough; ANN is approximate by contract anyway).
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        // Filtered + underfilled (a tight WHERE ate the over-fetch) → exact scan.
+        if !whole_store && scored.len() < limit {
+            return Ok(None);
+        }
+
+        // Project RETURN items for the winners (mirrors the exact Phase 3).
+        let columns: Vec<String> = return_clause
+            .items
+            .iter()
+            .map(return_item_column_name)
+            .collect();
+        let folded_exprs: Vec<Expression> = return_clause
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == score_item_index {
+                    score_expr.clone()
+                } else {
+                    self.fold_constants_expr(&item.expression)
+                }
+            })
+            .collect();
+
+        let mut rows = Vec::with_capacity(scored.len());
+        for (ri, score) in scored {
+            let row = &result_set.rows[ri];
+            let mut projected = Bindings::with_capacity(return_clause.items.len());
+            for (j, item) in return_clause.items.iter().enumerate() {
+                let key = return_item_column_name(item);
+                let val = if j == score_item_index {
+                    Value::Float64(score)
+                } else {
+                    self.evaluate_expression(&folded_exprs[j], row)?
+                };
+                projected.insert(key, val);
+            }
+            rows.push(ResultRow {
+                node_bindings: row.node_bindings.clone(),
+                edge_bindings: row.edge_bindings.clone(),
+                path_bindings: row.path_bindings.clone(),
+                projected,
+            });
+        }
+
+        Ok(Some(ResultSet {
+            rows,
+            columns,
+            lazy_return_items: None,
+        }))
+    }
+
     pub(super) fn execute_fused_vector_score_top_k(
         &self,
         return_clause: &ReturnClause,
@@ -1352,6 +1543,23 @@ impl<'a> CypherExecutor<'a> {
 
         let score_expr =
             self.fold_constants_expr(&return_clause.items[score_item_index].expression);
+
+        // HNSW fast path: when the score is `vector_score` over a single type
+        // whose store carries a built index, search the index instead of scoring
+        // every row (the same opt-in approximate path the fluent API auto-uses).
+        // Returns None — and we fall through to the exact scan below — whenever
+        // it isn't applicable (no index, unsupported metric, filtered+underfilled,
+        // mixed types, duplicate node bindings, ASC order).
+        if let Some(rs) = self.try_hnsw_fused_top_k(
+            &score_expr,
+            descending,
+            limit,
+            &result_set,
+            return_clause,
+            score_item_index,
+        )? {
+            return Ok(rs);
+        }
 
         // Phase 1: Score all rows, keep top-k in a min-heap
         self.check_deadline()?;
