@@ -7,10 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.29] — 2026-06-17 — edge upsert, embedding-dim guard, algorithm-config robustness, portable wheels
+## [0.10.29] — 2026-06-17 — concurrency snapshots, durable save, embedding provenance, edge upsert, portable wheels
 
-Operator-feedback batch (graph-engine limitations & Cypher footguns): A1, A2,
-B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
+Two operator-feedback batches (2026-06-17). The first — graph-engine
+limitations & Cypher footguns: A1, A2, B2–B8 (edge upsert, embedding-dim guard,
+algorithm-config robustness, portable manylinux2014/macOS-x86_64/musllinux/
+aarch64 wheels). The second — a concurrency/durability/embedding roadmap, worked
+as three phases:
+
+- **Concurrency** — a clear cross-thread error (no more borrow panics) and
+  `freeze()` → `FrozenGraph`, an immutable O(1) snapshot with lock-free
+  concurrent reads (the thread-safety item B1, addressed via the "build → freeze
+  → share → swap" model rather than a global lock).
+- **Durability** — atomic + `fsync` save (no torn `.kgl`), `to_bytes()` /
+  `from_bytes()`.
+- **Embeddings** — model + text-hash provenance, `embed_texts(mode='changed')`
+  incremental re-embedding, `embedding_info()`.
 
 ### Added
 
@@ -83,7 +95,10 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
   in-flight write. Removes the temp-file + `os.replace` + dir-fsync dance
   consumers were hand-rolling (operator durability note §4). Every existing
   caller (including `to_subgraph().save()` and code-graph builds) gets this for
-  free.
+  free. Cost: the atomic temp+rename adds a fixed ~one-file-create+rename per
+  save (negligible on real graphs; the `fsync` flush is the larger, optional
+  cost — `fsync=False` for the hot-loop case). Serialization throughput itself
+  is unchanged.
 - **`embed_texts(replace=False)` now rejects a model/store dimension mismatch**
   instead of silently mixing dimensions (which corrupts similarity search). On a
   model swap, re-embed the whole column with `replace=True` (deterministic —

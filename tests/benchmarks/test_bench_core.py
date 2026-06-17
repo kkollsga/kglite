@@ -164,18 +164,24 @@ def test_bench_columnar_cypher_match(benchmark, bench_graph_columnar):
 
 @pytest.mark.benchmark
 def test_bench_columnar_save_kgl(benchmark, bench_graph_columnar, tmp_path):
-    """Save columnar graph as standard .kgl file."""
+    """Save columnar graph as standard .kgl file.
+
+    fsync=False: this tracks columnar *serialization + write* throughput, the
+    thing kglite controls. The fsync durability barrier (default in save()) is a
+    fixed OS-level cost orthogonal to serialization — including it would make a
+    µs-scale bench dominated by ms-scale disk-flush latency.
+    """
     path = str(tmp_path / "bench.kgl")
-    benchmark(bench_graph_columnar.save, path)
+    benchmark(lambda: bench_graph_columnar.save(path, fsync=False))
 
 
 @pytest.mark.benchmark
 def test_bench_save_v3(benchmark, bench_graph_columnar, tmp_path):
-    """Save columnar graph as v3 .kgl file."""
+    """Save columnar graph as a .kgl file (fsync=False — see save_kgl bench)."""
     counter = [0]
 
     def save():
-        bench_graph_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"))
+        bench_graph_columnar.save(str(tmp_path / f"v3_{counter[0]}.kgl"), fsync=False)
         counter[0] += 1
 
     benchmark(save)
