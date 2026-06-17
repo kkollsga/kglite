@@ -2,6 +2,7 @@
 # PyO3 classes cannot be subclassed (@final) and are disjoint bases.
 # These are structural PyO3 artifacts, not stub errors.
 kglite.KnowledgeGraph
+kglite.FrozenGraph
 kglite.ResultIter
 kglite.ResultView
 kglite.Transaction

@@ -14,6 +14,18 @@ B2–B6, B8. Thread-safety (B1) is deferred to its own effort.
 
 ### Added
 
+- **`KnowledgeGraph.freeze()` → `FrozenGraph`** — an immutable, concurrently-
+  readable snapshot. Sharing a live `KnowledgeGraph` across threads is unsafe
+  (single-owner; a mutation mid-read trips the borrow guard). `freeze()` returns
+  a read-only view that shares the graph's data via an O(1) `Arc` clone — no
+  deep copy — and has *no* mutating method, so any number of threads can run
+  `FrozenGraph.cypher()` against the same snapshot in parallel, lock-free
+  (the GIL is released during execution). The snapshot is stable under
+  copy-on-write: mutating the source graph afterwards leaves the frozen view on
+  the original data. This is the "build → freeze → share → swap" model the
+  operator's concurrency note recommends (Tier 2). `FrozenGraph.cypher` is
+  read-only — `CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE` raise; semantic search
+  works via `text_score()`/`vector_score()` in the query.
 - **`KnowledgeGraph.to_bytes()` + `kglite.from_bytes(data)`** — serialise an
   in-memory graph to a `.kgl` byte buffer and load it back, without going
   through a filesystem path. Lets a caller own the write (object storage, a

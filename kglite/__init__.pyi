@@ -2884,6 +2884,23 @@ class KnowledgeGraph:
         """
         ...
 
+    def freeze(self) -> "FrozenGraph":
+        """Take an immutable, concurrently-readable snapshot of the graph.
+
+        Returns a :class:`FrozenGraph` that shares this graph's data (an O(1)
+        clone — no deep copy) and exposes only read methods. A live
+        ``KnowledgeGraph`` is single-owner and raises if a second thread touches
+        it while another mutates it; a ``FrozenGraph`` has no mutating method, so
+        any number of threads can run ``cypher()`` against the same snapshot in
+        parallel, lock-free.
+
+        The snapshot is stable: mutating the source graph afterwards
+        copy-on-writes a fresh copy, leaving the frozen view on the original
+        data — the "build → freeze → share → swap" model for serving concurrent
+        readers while a new snapshot is built in the background.
+        """
+        ...
+
     def close(self) -> None:
         """Persist the graph to its remembered origin path (the file it was
         opened from via :func:`kglite.open` / :func:`kglite.load`, or last
@@ -4669,6 +4686,48 @@ class KnowledgeGraph:
                 result = tx.cypher("MATCH (n:Person) RETURN n.name")
                 # auto-closes on exit (no commit needed)
         """
+        ...
+
+class FrozenGraph:
+    """An immutable, concurrently-readable snapshot of a graph.
+
+    Created via :meth:`KnowledgeGraph.freeze`. Shares the source graph's data
+    (an O(1) clone — no deep copy) and exposes only read methods, so any number
+    of threads can query the same ``FrozenGraph`` in parallel without the
+    single-owner borrow conflict a live :class:`KnowledgeGraph` raises. Use the
+    "build → freeze → share → swap" model: build a graph, freeze it, serve
+    concurrent readers, and atomically swap in a new ``freeze()`` when the data
+    changes.
+    """
+
+    def cypher(
+        self,
+        query: str,
+        to_df: bool = False,
+        params: dict[str, Any] | None = None,
+        timeout_ms: int | None = None,
+        max_rows: int | None = None,
+    ) -> Any:
+        """Run a read-only Cypher query against the snapshot.
+
+        Same read semantics as :meth:`KnowledgeGraph.cypher` —
+        ``MATCH`` / ``WHERE`` / ``RETURN`` / aggregations, and semantic search
+        via ``text_score()`` / ``vector_score()``. A mutation query
+        (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
+        ``ValueError`` — a frozen snapshot is immutable; mutate the source graph
+        and take a fresh :meth:`KnowledgeGraph.freeze`.
+
+        Safe to call concurrently from many threads on the same snapshot.
+        """
+        ...
+
+    def node_count(self) -> int:
+        """Number of nodes in the snapshot."""
+        ...
+
+    @property
+    def node_types(self) -> list[str]:
+        """Node type names present in the snapshot."""
         ...
 
 class Transaction:

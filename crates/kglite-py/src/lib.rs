@@ -49,6 +49,7 @@ mod wikidata;
 pub use kglite_core::error;
 
 use graph::pyapi::blueprint::from_blueprint_rust;
+use graph::pyapi::frozen::FrozenGraph;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::{KnowledgeGraph, Transaction};
 use kglite_core::graph::io::file::load_file;
@@ -318,6 +319,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
+    m.add_class::<FrozenGraph>()?;
     m.add_class::<Transaction>()?;
     m.add_class::<ResultView>()?;
     m.add_class::<ResultIter>()?;

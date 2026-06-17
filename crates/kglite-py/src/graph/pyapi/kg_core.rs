@@ -646,6 +646,27 @@ impl KnowledgeGraph {
         Ok(PyBytes::new(py, &bytes).unbind())
     }
 
+    /// Take an immutable, concurrently-readable snapshot of the graph.
+    ///
+    /// Returns a `FrozenGraph` that shares this graph's data (an O(1)
+    /// clone — no deep copy) and exposes only read methods. Unlike a live
+    /// `KnowledgeGraph` — which is single-owner and raises if a second
+    /// thread touches it mid-mutation — a `FrozenGraph` has no mutating
+    /// method, so any number of threads can run `cypher()` against the same
+    /// snapshot in parallel, lock-free.
+    ///
+    /// The snapshot is stable: mutating the source graph afterwards
+    /// copy-on-writes a fresh copy, leaving the frozen view on the original
+    /// data. This is the "build → freeze → share → swap" model — build a
+    /// graph cheaply, freeze it, serve concurrent readers, and swap in a new
+    /// `freeze()` when the data changes.
+    fn freeze(&self) -> crate::graph::pyapi::frozen::FrozenGraph {
+        crate::graph::pyapi::frozen::FrozenGraph::new(
+            std::sync::Arc::clone(&self.inner),
+            self.embedder.clone(),
+        )
+    }
+
     /// Persist the graph to its remembered origin path and release nothing
     /// else (the graph stays usable). No-op if the graph has no associated
     /// path (built in memory, never opened/saved to a file) — there is
