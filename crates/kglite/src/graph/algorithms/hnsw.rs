@@ -18,7 +18,9 @@
 //! stays on the brute-force path.
 
 use super::vector::{dot_product, neg_euclidean_distance, DistanceMetric};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 
 /// Metric subset HNSW navigates over. A strict subset of [`DistanceMetric`] —
 /// Poincaré has no entry here on purpose.
@@ -66,9 +68,9 @@ impl Default for HnswParams {
 }
 
 /// A deterministic, seedable PRNG (SplitMix64) used only for HNSW level
-/// assignment. Deterministic so a build is reproducible (and so tests are
-/// stable); the project bans `Math.random`-style nondeterminism in
-/// reproducibility-sensitive paths for the same reason.
+/// assignment. The seeded levels are reproducible for a given seed (the
+/// concurrent build's link graph is not — see `build`), which keeps the
+/// per-slot layer structure stable and tests on it deterministic.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -235,8 +237,15 @@ impl HnswIndex {
 
     /// Build an index over slots `0..n` of `data` (a flat `n*dim` buffer) with
     /// matching `norms` (length `n`; used by cosine, ignored otherwise).
-    /// Insertion order is slot order, which — paired with the seeded level PRNG
-    /// — makes the build deterministic.
+    ///
+    /// Inserts run **concurrently** (rayon): the per-slot level assignment is
+    /// deterministic (seeded), but the vectors are immutable during the build —
+    /// only the link graph mutates — so each insert reads the growing graph
+    /// through per-node read locks and writes only its own + its neighbours'
+    /// link lists, never holding two link locks at once (deadlock-free). The
+    /// resulting graph differs run-to-run (concurrency), but recall is
+    /// statistically equivalent to a sequential build; the index is a
+    /// rebuildable cache, so bit-for-bit reproducibility isn't a contract.
     pub fn build(
         data: &[f32],
         norms: &[f32],
@@ -246,28 +255,61 @@ impl HnswIndex {
         seed: u64,
     ) -> Self {
         let n = data.len().checked_div(dim).unwrap_or(0);
-        let mut index = HnswIndex {
-            params,
-            metric,
-            dim,
-            len: 0,
-            node_levels: Vec::with_capacity(n),
-            links: Vec::with_capacity(n),
-            entry_point: None,
-            max_level: 0,
-            seed,
-            insert_counter: 0,
-        };
+        if n == 0 {
+            return HnswIndex {
+                params,
+                metric,
+                dim,
+                len: 0,
+                node_levels: Vec::new(),
+                links: Vec::new(),
+                entry_point: None,
+                max_level: 0,
+                seed,
+                insert_counter: 0,
+            };
+        }
+
+        // Deterministic level per slot — the same sequence the sequential
+        // `insert` path would assign (insert_counter == slot).
+        let node_levels: Vec<u8> = (0..n as u64)
+            .map(|i| level_for(seed, i, params.m) as u8)
+            .collect();
+        // Per-node link store, behind a lock each (only the graph mutates).
+        let links: Vec<RwLock<Vec<Vec<u32>>>> = node_levels
+            .iter()
+            .map(|&lvl| RwLock::new(vec![Vec::new(); lvl as usize + 1]))
+            .collect();
+        // Slot 0 seeds the entry point; taller nodes take over as they land.
+        let ep_state = RwLock::new((0u32, node_levels[0] as usize));
         let ctx = DistCtx {
             data,
             norms,
             dim,
             metric,
         };
-        for slot in 0..n as u32 {
-            index.insert_with_ctx(slot, &ctx);
+
+        (1..n as u32).into_par_iter().for_each(|slot| {
+            insert_concurrent(slot, &ctx, &params, &node_levels, &links, &ep_state);
+        });
+
+        let links: Vec<Vec<Vec<u32>>> = links
+            .into_iter()
+            .map(|l| l.into_inner().unwrap_or_default())
+            .collect();
+        let (entry_point, max_level) = *ep_state.read().unwrap();
+        HnswIndex {
+            params,
+            metric,
+            dim,
+            len: n,
+            node_levels,
+            links,
+            entry_point: Some(entry_point),
+            max_level,
+            seed,
+            insert_counter: n as u64,
         }
-        index
     }
 
     /// Insert a single slot incrementally. `data`/`norms`/`dim` must describe the
@@ -283,14 +325,13 @@ impl HnswIndex {
         self.insert_with_ctx(slot, &ctx);
     }
 
-    /// Draw a level from the exponential distribution `floor(-ln(U) * mL)`,
-    /// `mL = 1/ln(M)` — the standard HNSW assignment.
+    /// Draw the next level for the sequential `insert` path (advances the
+    /// per-index insert counter). Delegates to the shared [`level_for`] so the
+    /// sequential and concurrent builds assign identical levels for a seed.
     fn random_level(&mut self) -> usize {
-        let mut rng =
-            SplitMix64(self.seed ^ self.insert_counter.wrapping_mul(0x2545_F491_4F6C_DD1D));
+        let lvl = level_for(self.seed, self.insert_counter, self.params.m);
         self.insert_counter += 1;
-        let m_l = 1.0 / (self.params.m as f64).max(2.0).ln();
-        (-rng.unit().ln() * m_l).floor() as usize
+        lvl
     }
 
     fn insert_with_ctx(&mut self, slot: u32, ctx: &DistCtx) {
@@ -335,7 +376,7 @@ impl HnswIndex {
         for lc in (0..=start).rev() {
             let w = self.search_layer(ctx, &ep, self.params.ef_construction, lc, &df);
             let m_max = self.m_max(lc);
-            let selected = self.select_neighbors(ctx, slot, &w, self.params.m);
+            let selected = select_neighbors(ctx, slot, &w, self.params.m);
 
             // Bidirectional links.
             self.links[slot as usize][lc] = selected.clone();
@@ -350,7 +391,7 @@ impl HnswIndex {
                             dist: ctx.dist_ids(e, id),
                         })
                         .collect();
-                    let pruned = self.select_neighbors(ctx, e, &cands, m_max);
+                    let pruned = select_neighbors(ctx, e, &cands, m_max);
                     self.links[e as usize][lc] = pruned;
                 }
             }
@@ -429,48 +470,6 @@ impl HnswIndex {
         w.into_vec()
     }
 
-    /// HNSW neighbour-selection heuristic (algorithm 4). Picks up to `m`
-    /// candidates that are each closer to `base` than to any already-picked
-    /// neighbour — favouring spread-out links over a tight cluster, which is
-    /// what gives HNSW its long-range connectivity. Falls back to filling with
-    /// the next-closest leftovers if the heuristic under-fills.
-    fn select_neighbors(
-        &self,
-        ctx: &DistCtx,
-        base: u32,
-        candidates: &[Cand],
-        m: usize,
-    ) -> Vec<u32> {
-        let mut sorted: Vec<Cand> = candidates
-            .iter()
-            .copied()
-            .filter(|c| c.id != base)
-            .collect();
-        sorted.sort_unstable();
-
-        let mut result: Vec<u32> = Vec::with_capacity(m);
-        let mut deferred: Vec<u32> = Vec::new();
-        for c in &sorted {
-            if result.len() >= m {
-                break;
-            }
-            let closer_to_base = result.iter().all(|&r| ctx.dist_ids(c.id, r) > c.dist);
-            if closer_to_base {
-                result.push(c.id);
-            } else {
-                deferred.push(c.id);
-            }
-        }
-        // Backfill from deferred (closest-first, already sorted) if under-filled.
-        for id in deferred {
-            if result.len() >= m {
-                break;
-            }
-            result.push(id);
-        }
-        result
-    }
-
     /// Approximate top-`k` search for an external query vector. `ef` is the
     /// search width (clamped to at least `k`); pass `None` for the configured
     /// default. Returns `(slot, distance)` ascending by distance (closer first);
@@ -515,6 +514,190 @@ impl HnswIndex {
         w.sort_unstable();
         w.truncate(k);
         w.into_iter().map(|c| (c.id, c.dist)).collect()
+    }
+}
+
+// ─── Shared / concurrent-build free functions ───────────────────────────────
+
+/// Level for a slot from the exponential distribution `floor(-ln(U) * mL)`,
+/// `mL = 1/ln(M)`. Seeded by `(seed, counter)` so the sequential `insert` path
+/// (counter == insert order) and the concurrent `build` (counter == slot)
+/// assign identical levels for a given seed.
+fn level_for(seed: u64, counter: u64, m: usize) -> usize {
+    let mut rng = SplitMix64(seed ^ counter.wrapping_mul(0x2545_F491_4F6C_DD1D));
+    let m_l = 1.0 / (m as f64).max(2.0).ln();
+    (-rng.unit().ln() * m_l).floor() as usize
+}
+
+/// HNSW neighbour-selection heuristic (algorithm 4). Picks up to `m` candidates
+/// each closer to `base` than to any already-picked neighbour — favouring
+/// spread-out links over a tight cluster (HNSW's long-range connectivity).
+/// Backfills with the next-closest leftovers if the heuristic under-fills.
+/// Pure over `ctx` (distance only) — no link access — so it is shared by the
+/// sequential and concurrent build paths.
+fn select_neighbors(ctx: &DistCtx, base: u32, candidates: &[Cand], m: usize) -> Vec<u32> {
+    let mut sorted: Vec<Cand> = candidates
+        .iter()
+        .copied()
+        .filter(|c| c.id != base)
+        .collect();
+    sorted.sort_unstable();
+
+    let mut result: Vec<u32> = Vec::with_capacity(m);
+    let mut deferred: Vec<u32> = Vec::new();
+    for c in &sorted {
+        if result.len() >= m {
+            break;
+        }
+        let closer_to_base = result.iter().all(|&r| ctx.dist_ids(c.id, r) > c.dist);
+        if closer_to_base {
+            result.push(c.id);
+        } else {
+            deferred.push(c.id);
+        }
+    }
+    for id in deferred {
+        if result.len() >= m {
+            break;
+        }
+        result.push(id);
+    }
+    result
+}
+
+/// SEARCH-LAYER over a concurrent (lock-guarded) link store — the build-time
+/// twin of `HnswIndex::search_layer`. Reads each visited node's neighbour list
+/// under a brief read lock (cloned, then released), so it never holds a lock
+/// while computing distances. Used only during the one-time concurrent build,
+/// where the per-node clone is negligible; the query path keeps the
+/// borrow-only method (no clone).
+fn search_layer_locked(
+    links: &[RwLock<Vec<Vec<u32>>>],
+    entry_points: &[u32],
+    ef: usize,
+    layer: usize,
+    df: &impl Fn(u32) -> f32,
+) -> Vec<Cand> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let mut visited = std::collections::HashSet::with_capacity(ef * 4);
+    let mut candidates: BinaryHeap<Reverse<Cand>> = BinaryHeap::new();
+    let mut w: BinaryHeap<Cand> = BinaryHeap::new();
+
+    for &e in entry_points {
+        if visited.insert(e) {
+            let c = Cand { id: e, dist: df(e) };
+            candidates.push(Reverse(c));
+            w.push(c);
+        }
+    }
+    while w.len() > ef {
+        w.pop();
+    }
+
+    while let Some(Reverse(c)) = candidates.pop() {
+        let farthest = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
+        if c.dist > farthest && w.len() >= ef {
+            break;
+        }
+        // Clone this node's layer neighbours under a brief read lock.
+        let neighbours: Vec<u32> = match links.get(c.id as usize) {
+            Some(lock) => lock.read().unwrap().get(layer).cloned().unwrap_or_default(),
+            None => continue,
+        };
+        for e in neighbours {
+            if visited.insert(e) {
+                let d = df(e);
+                let farthest = w.peek().map(|f| f.dist).unwrap_or(f32::INFINITY);
+                if d < farthest || w.len() < ef {
+                    let cand = Cand { id: e, dist: d };
+                    candidates.push(Reverse(cand));
+                    w.push(cand);
+                    if w.len() > ef {
+                        w.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    w.into_vec()
+}
+
+/// Insert one slot into the concurrent build. Mirrors `insert_with_ctx` but
+/// over the lock-guarded link store, taking a snapshot of the entry point /
+/// max level. Lock discipline: at most one link write lock is held at a time
+/// (own node, then each neighbour in turn), and distance computation reads only
+/// the immutable vector data — so there is no lock nesting and no deadlock.
+fn insert_concurrent(
+    slot: u32,
+    ctx: &DistCtx,
+    params: &HnswParams,
+    node_levels: &[u8],
+    links: &[RwLock<Vec<Vec<u32>>>],
+    ep_state: &RwLock<(u32, usize)>,
+) {
+    let level = node_levels[slot as usize] as usize;
+    let df = |id: u32| ctx.dist_ids(slot, id);
+    let (entry, top) = *ep_state.read().unwrap();
+
+    // Phase 1: greedy-descend the layers above `level` with ef=1.
+    let mut ep = vec![entry];
+    if top > level {
+        for lc in (level + 1..=top).rev() {
+            let w = search_layer_locked(links, &ep, 1, lc, &df);
+            if let Some(best) = w.into_iter().min() {
+                ep = vec![best.id];
+            }
+        }
+    }
+
+    // Phase 2: connect from min(top, level) down to 0.
+    let start = top.min(level);
+    for lc in (0..=start).rev() {
+        let w = search_layer_locked(links, &ep, params.ef_construction, lc, &df);
+        let m_max = if lc == 0 { params.m * 2 } else { params.m };
+        let selected = select_neighbors(ctx, slot, &w, params.m);
+
+        // Own links (this slot is owned solely by this thread — no contention).
+        {
+            let mut g = links[slot as usize].write().unwrap();
+            if lc < g.len() {
+                g[lc] = selected.clone();
+            }
+        }
+        // Bidirectional links + prune, one neighbour lock at a time.
+        for &e in &selected {
+            let mut eg = links[e as usize].write().unwrap();
+            if lc >= eg.len() {
+                continue; // defensive: e doesn't participate in this layer
+            }
+            eg[lc].push(slot);
+            if eg[lc].len() > m_max {
+                let cands: Vec<Cand> = eg[lc]
+                    .iter()
+                    .map(|&id| Cand {
+                        id,
+                        dist: ctx.dist_ids(e, id),
+                    })
+                    .collect();
+                eg[lc] = select_neighbors(ctx, e, &cands, m_max);
+            }
+        }
+
+        ep = w.iter().map(|c| c.id).collect();
+        if ep.is_empty() {
+            ep = vec![entry];
+        }
+    }
+
+    // Took a new top layer → become the entry point.
+    if level > top {
+        let mut g = ep_state.write().unwrap();
+        if level > g.1 {
+            *g = (slot, level);
+        }
     }
 }
 
@@ -699,8 +882,12 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_build() {
-        let (data, norms) = make_data(300, 16, 55);
+    fn test_deterministic_levels_concurrent_build() {
+        // The build is now concurrent (rayon), so the link graph differs
+        // run-to-run — but the level assignment is seeded and must be identical,
+        // and both builds must reach the same len. (Recall stability across
+        // builds is covered by the recall tests, which call `build`.)
+        let (data, norms) = make_data(400, 16, 55);
         let a = HnswIndex::build(
             &data,
             &norms,
@@ -717,9 +904,26 @@ mod tests {
             HnswParams::default(),
             7,
         );
-        assert_eq!(a.node_levels, b.node_levels);
-        assert_eq!(a.links, b.links);
-        assert_eq!(a.entry_point, b.entry_point);
+        assert_eq!(
+            a.node_levels, b.node_levels,
+            "seeded levels must be deterministic"
+        );
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.len(), 400);
+        // Every node's links are bounded by m_max at each layer (valid graph).
+        for (slot, layers) in a.links.iter().enumerate() {
+            for (lc, nbrs) in layers.iter().enumerate() {
+                let m_max = if lc == 0 { a.params.m * 2 } else { a.params.m };
+                assert!(
+                    nbrs.len() <= m_max,
+                    "node {} layer {} over m_max: {} > {}",
+                    slot,
+                    lc,
+                    nbrs.len(),
+                    m_max
+                );
+            }
+        }
     }
 
     #[test]
