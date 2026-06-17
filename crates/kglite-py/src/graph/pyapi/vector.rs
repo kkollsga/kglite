@@ -451,6 +451,40 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Copy every embedding store from `other` into this graph, matching
+    /// vectors by node id.
+    ///
+    /// The one-call answer to the "rebuild a fresh graph from a source of
+    /// truth on each load, keep the vectors" workflow: build the new graph,
+    /// then `new.copy_embeddings_from(old)`. Vectors land on the new nodes that
+    /// share an id, carrying each store's dimension, metric, model id, and
+    /// per-node text hashes — so a following `embed_texts(mode='changed')`
+    /// re-embeds only genuinely-new/changed text. Vectors whose id has no
+    /// matching node here are skipped (counted). Replaces the manual
+    /// `embeddings()` → `add_embeddings()` → `embed_texts()` carry.
+    ///
+    /// Returns a dict with ``stores_copied``, ``vectors_copied``, and
+    /// ``vectors_skipped``.
+    fn copy_embeddings_from(
+        &mut self,
+        py: Python<'_>,
+        other: &Bound<'_, KnowledgeGraph>,
+    ) -> PyResult<Py<PyAny>> {
+        // Mirror extend()'s safe shape: clone the source Arc first (so a
+        // self-copy doesn't double-borrow), then mutate self.
+        let src_arc = match other.try_borrow() {
+            Ok(o) => Arc::clone(&o.inner),
+            Err(_) => Arc::clone(&self.inner),
+        };
+        let g = crate::graph::get_graph_mut(&mut self.inner);
+        let (stores, vectors, skipped) = g.copy_embeddings_from(&src_arc);
+        let d = PyDict::new(py);
+        d.set_item("stores_copied", stores)?;
+        d.set_item("vectors_copied", vectors)?;
+        d.set_item("vectors_skipped", skipped)?;
+        d.into_py_any(py)
+    }
+
     /// List all embedding stores in the graph.
     ///
     /// Returns:

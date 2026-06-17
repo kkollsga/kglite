@@ -4434,6 +4434,29 @@ class KnowledgeGraph:
         """
         ...
 
+    def copy_embeddings_from(self, other: "KnowledgeGraph") -> dict[str, int]:
+        """Copy every embedding store from ``other`` into this graph, by node id.
+
+        The one-call answer to the "rebuild a fresh graph from a source of truth
+        on each load, keep the vectors" workflow: build the new graph, then
+        ``new.copy_embeddings_from(old)``. Vectors land on the new nodes that
+        share an id, carrying each store's dimension, metric, model id, and
+        per-node text hashes — so a following ``embed_texts(mode='changed')``
+        re-embeds only genuinely new/changed text. Vectors whose id has no
+        matching node here are skipped (counted). Replaces the manual
+        ``embeddings()`` → ``add_embeddings()`` → ``embed_texts()`` carry.
+
+        Returns:
+            Dict with ``stores_copied``, ``vectors_copied``, ``vectors_skipped``.
+
+        Example::
+
+            new = build_graph_from_source()          # fresh, no vectors
+            new.copy_embeddings_from(old)             # carry vectors by id
+            new.embed_texts("Doc", "summary", mode="changed")  # fill only the new/changed
+        """
+        ...
+
     def embedding_diagnostics(self, node_type: Optional[str] = None) -> list[dict[str, Any]]:
         """Diagnose embedding coverage per (node_type, text_column).
 

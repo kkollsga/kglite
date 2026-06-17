@@ -26,6 +26,16 @@ as three phases:
 
 ### Added
 
+- **`copy_embeddings_from(other)`** — one-call, id-keyed cross-graph vector
+  carry. The dominant embedding workflow rebuilds a *fresh* graph from a source
+  of truth on each load; `embed_texts(mode='changed')` can't help an empty fresh
+  graph, so vectors had to be hand-carried (`embeddings()` snapshot →
+  `add_embeddings()` → `embed_texts`). Now: build the new graph, then
+  `new.copy_embeddings_from(old)` — vectors land on the nodes that share an id,
+  carrying dimension, metric, model id, and per-node text hashes (so a following
+  `embed_texts(mode='changed')` re-embeds only genuinely new/changed text).
+  Implemented in core (`DirGraph::copy_embeddings_from`), so every binding
+  reaches it (operator embedding note #2).
 - **`search_text` / `vector_search` gain a `returning=[...]` field projection.**
   By default a hit already carries `id`, `title`, `type`, `score`, **and every
   node property** (read live — identical before/after save/reload, so no
