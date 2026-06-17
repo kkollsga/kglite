@@ -941,6 +941,67 @@ class KnowledgeGraph:
         """
         ...
 
+    def replace_connections(
+        self,
+        data: Optional[pd.DataFrame],
+        connection_type: str,
+        source_type: str,
+        source_id_field: str,
+        target_type: str,
+        target_id_field: str,
+        source_title_field: Optional[str] = None,
+        target_title_field: Optional[str] = None,
+        columns: Optional[list[str]] = None,
+        skip_columns: Optional[list[str]] = None,
+        conflict_handling: Optional[str] = None,
+        column_types: Optional[dict[str, str]] = None,
+        query: Optional[str] = None,
+        extra_properties: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Replace a node's outgoing edges of a given type, then add new ones — an atomic edge upsert.
+
+        Unlike :meth:`add_connections` (add-only), this **prunes first**: for
+        every source node present in ``data`` (or the ``query`` result), its
+        existing edges *of* ``connection_type`` are removed, then the edges the
+        input describes are added. Edges from sources not in the input, and
+        edges of *other* types from the same sources, are left untouched. The
+        prune and add happen in one call, so there is no clear-then-add window
+        that could leave a node edgeless if a separate re-add step failed.
+
+        Use it to re-sync a derived edge set idempotently — "the current
+        ``MENTIONS`` of exactly these documents is this list"::
+
+            # First sync: doc 1 -> [A, B]
+            graph.replace_connections(df_ab, 'MENTIONS', 'Doc', 'doc', 'Entity', 'ent')
+            # Re-sync doc 1 -> [B, C]: the stale 1->A edge is pruned, 1->C added.
+            graph.replace_connections(df_bc, 'MENTIONS', 'Doc', 'doc', 'Entity', 'ent')
+
+        Accepts every argument :meth:`add_connections` does (including ``query``
+        mode and ``extra_properties``), with identical semantics; only the
+        prune-first behaviour differs.
+
+        Args:
+            data: DataFrame containing edge data, or ``None`` when using ``query``.
+            connection_type: Edge type to replace (e.g. ``'MENTIONS'``).
+            source_type: Node type of source nodes.
+            source_id_field: Column with source node IDs.
+            target_type: Node type of target nodes.
+            target_id_field: Column with target node IDs.
+            source_title_field: Optional title column for source nodes.
+            target_title_field: Optional title column for target nodes.
+            columns: Whitelist of property columns to include (data mode only).
+            skip_columns: Columns to exclude (data mode only).
+            conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
+                ``'preserve'``, or ``'sum'``.
+            column_types: Override column dtypes (data mode only).
+            query: Cypher query string (alternative to ``data``). Must be read-only.
+            extra_properties: Static properties stamped onto every edge (query mode only).
+
+        Returns:
+            Operation report dict with ``connections_created``, ``connections_skipped``, etc.
+        """
+        ...
+
     def extend(
         self,
         other: "KnowledgeGraph",
@@ -3434,12 +3495,17 @@ class KnowledgeGraph:
         Indexes are automatically maintained by Cypher mutations
         (CREATE, SET, REMOVE, DELETE, MERGE).
 
+        Idempotent — re-creating an existing index rebuilds it without error;
+        ``created`` is then ``False``. It is ``True`` only when this call made
+        a new index.
+
         Args:
             node_type: Node type to index.
             property: Property name to index.
 
         Returns:
-            Dict with ``type``, ``property``, ``unique_values``, ``created``.
+            Dict with ``node_type``, ``property``, ``unique_values``,
+            ``persistent``, and ``created`` (``False`` if the index already existed).
         """
         ...
 

@@ -38,6 +38,310 @@ struct InlineConfig {
     column_list: Vec<String>,
 }
 
+/// Build the internal DataFrame for a connection ingest from a pandas
+/// frame (the `data` mode shared by `add_connections` and
+/// `replace_connections`). Returns the columnar DataFrame plus any
+/// temporal-edge config auto-detected from `validFrom`/`validTo` column
+/// types — the caller merges that into `graph.temporal_edge_configs`.
+#[allow(clippy::too_many_arguments)]
+fn build_connection_df_from_pandas(
+    data: &Bound<'_, PyAny>,
+    source_id_field: &str,
+    target_id_field: &str,
+    source_title_field: Option<&str>,
+    target_title_field: Option<&str>,
+    columns: Option<&Bound<'_, PyList>>,
+    skip_columns: Option<&Bound<'_, PyList>>,
+    column_types: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(DataFrame, Option<schema::TemporalConfig>)> {
+    let df_cols = data.getattr("columns")?;
+    let all_columns: Vec<String> = df_cols.extract()?;
+
+    let mut default_cols = vec![source_id_field, target_id_field];
+    if let Some(src_title) = source_title_field {
+        default_cols.push(src_title);
+    }
+    if let Some(tgt_title) = target_title_field {
+        default_cols.push(tgt_title);
+    }
+
+    // Auto-include columns mentioned in column_types (e.g. temporal date columns)
+    let mut column_type_cols: Vec<String> = Vec::new();
+    if let Some(type_dict) = column_types {
+        for key in type_dict.keys() {
+            column_type_cols.push(key.extract()?);
+        }
+    }
+    for col in &column_type_cols {
+        default_cols.push(col.as_str());
+    }
+
+    // enforce_columns=true: connection ingests whitelist their edge props.
+    let column_list = py_in::ensure_columns(
+        &all_columns,
+        &default_cols,
+        columns,
+        skip_columns,
+        Some(true),
+    )?;
+
+    // Parse temporal column_types (validFrom/validTo → datetime)
+    let py = data.py();
+    let (temporal_cfg, cleaned_types) = if let Some(type_dict) = column_types {
+        let (tcfg, cleaned) = parse_temporal_column_types(py, type_dict)?;
+        (tcfg, Some(cleaned))
+    } else {
+        (None, None)
+    };
+    let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
+
+    let df_result = py_in::pandas_to_dataframe(
+        data,
+        &[source_id_field.to_string(), target_id_field.to_string()],
+        &column_list,
+        effective_types.as_ref(),
+    )?;
+    Ok((df_result, temporal_cfg))
+}
+
+/// Shared body of `add_connections` (replace=false) and
+/// `replace_connections` (replace=true). The two methods are identical
+/// except for the core call: `replace` first prunes the existing edges
+/// of `connection_type` from the source nodes present in the input, so
+/// the result is "set this node's edges of this type to exactly this
+/// list" rather than "add to them". Both modes (`data` DataFrame /
+/// `query` Cypher) and every option behave the same across the two.
+#[allow(clippy::too_many_arguments)]
+fn write_connections(
+    kg: &mut KnowledgeGraph,
+    replace: bool,
+    data: Option<&Bound<'_, PyAny>>,
+    connection_type: String,
+    source_type: String,
+    source_id_field: String,
+    target_type: String,
+    target_id_field: String,
+    source_title_field: Option<String>,
+    target_title_field: Option<String>,
+    columns: Option<&Bound<'_, PyList>>,
+    skip_columns: Option<&Bound<'_, PyList>>,
+    conflict_handling: Option<String>,
+    column_types: Option<&Bound<'_, PyDict>>,
+    query: Option<String>,
+    extra_properties: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    use crate::datatypes::values::DataFrame as KgDataFrame;
+
+    // Validate: exactly one of data or query must be provided
+    let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
+
+    if has_data && query.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Cannot specify both 'data' and 'query'. Use one or the other.",
+        ));
+    }
+    if !has_data && query.is_none() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
+        ));
+    }
+    if has_data && extra_properties.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "extra_properties is only supported with query mode, not data mode.",
+        ));
+    }
+    if query.is_some() {
+        if columns.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'columns' is only supported with data mode, not query mode.",
+            ));
+        }
+        if skip_columns.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'skip_columns' is only supported with data mode, not query mode.",
+            ));
+        }
+        if column_types.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'column_types' is only supported with data mode, not query mode.",
+            ));
+        }
+    }
+
+    // ── Query path: run Cypher, convert to internal DataFrame ──
+    if let Some(query_str) = query {
+        // Parse the cypher query
+        let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| -> PyErr {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                "Cypher syntax error in query: {}",
+                e
+            )))
+        })?;
+
+        // Reject mutation queries — the query must be read-only
+        if cypher::is_mutation_query(&parsed) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "The 'query' parameter must be a read-only query (MATCH...RETURN). \
+                 CREATE/SET/DELETE/MERGE are not allowed here.",
+            ));
+        }
+
+        // Execute read-only: clone Arc, execute without holding mutable borrow
+        let inner_clone = kg.inner.clone();
+        let empty_params = HashMap::new();
+        // Run the same planner optimizations as g.cypher() — otherwise
+        // pushdowns (including correlated-equality) don't fire here.
+        cypher::optimize(&mut parsed, &inner_clone, &empty_params);
+        let cypher_result = {
+            let executor = cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
+            executor.execute(&parsed)
+        }
+        .map_err(|e| {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::CypherExecution {
+                message: format!("Cypher execution error in connection query: {}", e),
+                position: None,
+            })
+        })?;
+
+        // Resolve NodeRef values to actual IDs/titles
+        let mut rows = cypher_result.rows;
+        resolve_noderefs(&inner_clone.graph, &mut rows);
+
+        // Convert row-oriented Cypher result to columnar DataFrame
+        let mut df_result =
+            KgDataFrame::from_cypher_rows(cypher_result.columns, rows).map_err(|e| -> PyErr {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                    "Failed to convert query results to DataFrame: {}",
+                    e
+                )))
+            })?;
+
+        // Apply extra_properties as constant columns
+        if let Some(props_dict) = extra_properties {
+            for (key, val) in props_dict.iter() {
+                let col_name: String = key.extract()?;
+                let value = py_in::py_value_to_value(&val)?;
+                df_result
+                    .add_constant_column(col_name.clone(), value)
+                    .map_err(|e| -> PyErr {
+                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
+                            "Failed to add extra_property '{}': {}",
+                            col_name, e
+                        )))
+                    })?;
+            }
+        }
+
+        // Drop the Arc clone so Arc::make_mut in get_graph_mut doesn't
+        // need to deep-copy the entire graph (refcount goes back to 1).
+        drop(inner_clone);
+
+        let graph = get_graph_mut(&mut kg.inner);
+
+        let result = if replace {
+            crate::graph::mutation::maintain::replace_connections(
+                graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+        } else {
+            crate::graph::mutation::maintain::add_connections(
+                graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+        }
+        .map_err(|e: String| -> PyErr {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+        })?;
+
+        kg.selection.clear();
+        kg.add_report(OperationReport::ConnectionOperation(result.clone()));
+
+        return KnowledgeGraph::connection_report_to_py(&result, &connection_type);
+    }
+
+    // ── Data path: pandas DataFrame logic ──
+    let data = data.unwrap(); // Safe: validated above that has_data is true
+
+    let (df_result, temporal_cfg) = build_connection_df_from_pandas(
+        data,
+        &source_id_field,
+        &target_id_field,
+        source_title_field.as_deref(),
+        target_title_field.as_deref(),
+        columns,
+        skip_columns,
+        column_types,
+    )?;
+
+    let graph = get_graph_mut(&mut kg.inner);
+
+    let result = if replace {
+        crate::graph::mutation::maintain::replace_connections(
+            graph,
+            df_result,
+            connection_type.clone(),
+            source_type,
+            source_id_field,
+            target_type,
+            target_id_field,
+            source_title_field,
+            target_title_field,
+            conflict_handling,
+        )
+    } else {
+        crate::graph::mutation::maintain::add_connections(
+            graph,
+            df_result,
+            connection_type.clone(),
+            source_type,
+            source_id_field,
+            target_type,
+            target_id_field,
+            source_title_field,
+            target_title_field,
+            conflict_handling,
+        )
+    }
+    .map_err(|e: String| -> PyErr {
+        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+    })?;
+
+    // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
+    if let Some(cfg) = temporal_cfg {
+        graph
+            .temporal_edge_configs
+            .entry(connection_type.clone())
+            .or_default()
+            .push(cfg);
+    }
+
+    kg.selection.clear();
+
+    // Disk mode: build CSR from pending edges so queries work immediately
+    let graph = get_graph_mut(&mut kg.inner);
+    graph.ensure_disk_edges_built();
+
+    kg.add_report(OperationReport::ConnectionOperation(result.clone()));
+
+    KnowledgeGraph::connection_report_to_py(&result, &connection_type)
+}
+
 fn parse_inline_config<'py>(
     data: &Bound<'py, PyAny>,
     unique_id_field: &str,
@@ -857,230 +1161,107 @@ impl KnowledgeGraph {
         query: Option<String>,
         extra_properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::datatypes::values::DataFrame as KgDataFrame;
-
-        // Validate: exactly one of data or query must be provided
-        let has_data = data.as_ref().map(|d| !d.is_none()).unwrap_or(false);
-
-        if has_data && query.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Cannot specify both 'data' and 'query'. Use one or the other.",
-            ));
-        }
-        if !has_data && query.is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Must specify either 'data' (DataFrame) or 'query' (Cypher query string).",
-            ));
-        }
-        if has_data && extra_properties.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "extra_properties is only supported with query mode, not data mode.",
-            ));
-        }
-        if query.is_some() {
-            if columns.is_some() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'columns' is only supported with data mode, not query mode.",
-                ));
-            }
-            if skip_columns.is_some() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'skip_columns' is only supported with data mode, not query mode.",
-                ));
-            }
-            if column_types.is_some() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "'column_types' is only supported with data mode, not query mode.",
-                ));
-            }
-        }
-
-        // ── Query path: run Cypher, convert to internal DataFrame ──
-        if let Some(query_str) = query {
-            // Parse the cypher query
-            let mut parsed = cypher::parse_cypher(&query_str).map_err(|e| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                    "Cypher syntax error in query: {}",
-                    e
-                )))
-            })?;
-
-            // Reject mutation queries — add_connections query must be read-only
-            if cypher::is_mutation_query(&parsed) {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "The 'query' parameter must be a read-only query (MATCH...RETURN). \
-                     CREATE/SET/DELETE/MERGE are not allowed here.",
-                ));
-            }
-
-            // Execute read-only: clone Arc, execute without holding mutable borrow
-            let inner_clone = self.inner.clone();
-            let empty_params = HashMap::new();
-            // Run the same planner optimizations as g.cypher() — otherwise
-            // pushdowns (including correlated-equality) don't fire here.
-            cypher::optimize(&mut parsed, &inner_clone, &empty_params);
-            let cypher_result = {
-                let executor =
-                    cypher::CypherExecutor::with_params(&inner_clone, &empty_params, None);
-                executor.execute(&parsed)
-            }
-            .map_err(|e| {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::CypherExecution {
-                    message: format!("Cypher execution error in add_connections query: {}", e),
-                    position: None,
-                })
-            })?;
-
-            // Resolve NodeRef values to actual IDs/titles
-            let mut rows = cypher_result.rows;
-            resolve_noderefs(&inner_clone.graph, &mut rows);
-
-            // Convert row-oriented Cypher result to columnar DataFrame
-            let mut df_result = KgDataFrame::from_cypher_rows(cypher_result.columns, rows)
-                .map_err(|e| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                        "Failed to convert query results to DataFrame: {}",
-                        e
-                    )))
-                })?;
-
-            // Apply extra_properties as constant columns
-            if let Some(props_dict) = extra_properties {
-                for (key, val) in props_dict.iter() {
-                    let col_name: String = key.extract()?;
-                    let value = py_in::py_value_to_value(&val)?;
-                    df_result
-                        .add_constant_column(col_name.clone(), value)
-                        .map_err(|e| -> PyErr {
-                            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(format!(
-                                "Failed to add extra_property '{}': {}",
-                                col_name, e
-                            )))
-                        })?;
-                }
-            }
-
-            // Drop the Arc clone so Arc::make_mut in get_graph_mut doesn't
-            // need to deep-copy the entire graph (refcount goes back to 1).
-            drop(inner_clone);
-
-            let graph = get_graph_mut(&mut self.inner);
-
-            let result = crate::graph::mutation::maintain::add_connections(
-                graph,
-                df_result,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                source_title_field,
-                target_title_field,
-                conflict_handling,
-            )
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
-
-            self.selection.clear();
-            self.add_report(OperationReport::ConnectionOperation(result.clone()));
-
-            return Self::connection_report_to_py(&result, &connection_type);
-        }
-
-        // ── Data path: existing pandas DataFrame logic ──
-        let data = data.unwrap(); // Safe: validated above that has_data is true
-
-        // Get all columns from the dataframe
-        let df_cols = data.getattr("columns")?;
-        let all_columns: Vec<String> = df_cols.extract()?;
-
-        // Create default columns array
-        let mut default_cols = vec![source_id_field.as_str(), target_id_field.as_str()];
-        if let Some(ref src_title) = source_title_field {
-            default_cols.push(src_title);
-        }
-        if let Some(ref tgt_title) = target_title_field {
-            default_cols.push(tgt_title);
-        }
-
-        // Auto-include columns mentioned in column_types (e.g. temporal date columns)
-        let mut column_type_cols: Vec<String> = Vec::new();
-        if let Some(type_dict) = column_types {
-            for key in type_dict.keys() {
-                let col_name: String = key.extract()?;
-                column_type_cols.push(col_name);
-            }
-        }
-        for col in &column_type_cols {
-            default_cols.push(col.as_str());
-        }
-
-        // Use enforce_columns=true for add_connections
-        let enforce_columns = Some(true);
-
-        // Get the filtered columns
-        let column_list = py_in::ensure_columns(
-            &all_columns,
-            &default_cols,
-            columns,
-            skip_columns,
-            enforce_columns,
-        )?;
-
-        // Parse temporal column_types (validFrom/validTo → datetime)
-        let py = data.py();
-        let (temporal_cfg, cleaned_types) = if let Some(type_dict) = column_types {
-            let (tcfg, cleaned) = parse_temporal_column_types(py, type_dict)?;
-            (tcfg, Some(cleaned))
-        } else {
-            (None, None)
-        };
-        let effective_types = cleaned_types.as_ref().map(|d| d.bind(py).clone());
-
-        let df_result = py_in::pandas_to_dataframe(
+        write_connections(
+            self,
+            false,
             data,
-            &[source_id_field.clone(), target_id_field.clone()],
-            &column_list,
-            effective_types.as_ref(),
-        )?;
-
-        let graph = get_graph_mut(&mut self.inner);
-
-        let result = crate::graph::mutation::maintain::add_connections(
-            graph,
-            df_result,
-            connection_type.clone(),
+            connection_type,
             source_type,
             source_id_field,
             target_type,
             target_id_field,
             source_title_field,
             target_title_field,
+            columns,
+            skip_columns,
             conflict_handling,
+            column_types,
+            query,
+            extra_properties,
         )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
+    }
 
-        // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
-        if let Some(cfg) = temporal_cfg {
-            graph
-                .temporal_edge_configs
-                .entry(connection_type.clone())
-                .or_default()
-                .push(cfg);
-        }
-
-        self.selection.clear();
-
-        // Disk mode: build CSR from pending edges so queries work immediately
-        let graph = get_graph_mut(&mut self.inner);
-        graph.ensure_disk_edges_built();
-
-        self.add_report(OperationReport::ConnectionOperation(result.clone()));
-
-        Self::connection_report_to_py(&result, &connection_type)
+    /// Replace a node's outgoing edges of a given type, then add the
+    /// supplied edges — an atomic edge upsert.
+    ///
+    /// Unlike `add_connections` (add-only), this **prunes** first: for
+    /// every source node that appears in `data` (or the `query` result),
+    /// its existing edges *of `connection_type`* are removed, then the
+    /// edges described by the input are added. Edges from sources not in
+    /// the input, and edges of other types from the same sources, are
+    /// untouched. The prune + add run in one call, so there is no
+    /// clear-then-add window that could leave a node edgeless on failure.
+    ///
+    /// Use it to re-sync a derived edge set — "the current MENTIONS of
+    /// exactly these documents are this list" — idempotently:
+    ///
+    /// ```python
+    /// # First sync: doc 1 → [A, B]
+    /// graph.replace_connections(df_ab, "MENTIONS", "Doc", "doc", "Entity", "ent")
+    /// # Re-sync doc 1 → [B, C]: the stale 1→A edge is pruned, 1→C added.
+    /// graph.replace_connections(df_bc, "MENTIONS", "Doc", "doc", "Entity", "ent")
+    /// ```
+    ///
+    /// Accepts every argument `add_connections` does (including `query`
+    /// mode and `extra_properties`) with identical semantics; only the
+    /// prune-first behaviour differs.
+    ///
+    /// Args:
+    ///     data: DataFrame containing connection data, or None when using query.
+    ///     connection_type: Label for the connection type to replace (e.g. 'MENTIONS').
+    ///     source_type: Node type of the source nodes.
+    ///     source_id_field: Column containing source node IDs.
+    ///     target_type: Node type of the target nodes.
+    ///     target_id_field: Column containing target node IDs.
+    ///     source_title_field: Optional column to update source node titles.
+    ///     target_title_field: Optional column to update target node titles.
+    ///     columns: Whitelist of columns to include as edge properties (data mode only).
+    ///     skip_columns: Columns to exclude from edge properties (data mode only).
+    ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
+    ///     column_types: Override column type detection (data mode only).
+    ///     query: Cypher query string (alternative to data). Must be read-only.
+    ///     extra_properties: Static properties stamped onto every edge (query mode only).
+    ///
+    /// Returns:
+    ///     dict with 'connections_created', 'connections_skipped',
+    ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
+    #[pyo3(signature = (data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn replace_connections(
+        &mut self,
+        data: Option<&Bound<'_, PyAny>>,
+        connection_type: String,
+        source_type: String,
+        source_id_field: String,
+        target_type: String,
+        target_id_field: String,
+        source_title_field: Option<String>,
+        target_title_field: Option<String>,
+        columns: Option<&Bound<'_, PyList>>,
+        skip_columns: Option<&Bound<'_, PyList>>,
+        conflict_handling: Option<String>,
+        column_types: Option<&Bound<'_, PyDict>>,
+        query: Option<String>,
+        extra_properties: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        write_connections(
+            self,
+            true,
+            data,
+            connection_type,
+            source_type,
+            source_id_field,
+            target_type,
+            target_id_field,
+            source_title_field,
+            target_title_field,
+            columns,
+            skip_columns,
+            conflict_handling,
+            column_types,
+            query,
+            extra_properties,
+        )
     }
 
     // ========================================================================

@@ -1195,6 +1195,7 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. column_types maps columns to spatial/temporal types.</m>\n");
     xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, conflict_handling='update', query=None, extra_properties=None)\">Load edges from DataFrame (data=df) or Cypher query (data=None, query='MATCH...RETURN...'). conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. extra_properties stamps static props onto query-mode edges.</m>\n");
+    xml.push_str("      <m sig=\"replace_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing conn_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
     xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
     xml.push_str(
         "      <m sig=\"add_connections_bulk(specs)\">Bulk load multiple connection types.</m>\n",

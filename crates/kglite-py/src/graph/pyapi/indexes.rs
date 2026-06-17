@@ -20,8 +20,15 @@ impl KnowledgeGraph {
     ///     node_type: The type of nodes to index
     ///     property: The property name to index
     ///
+    /// Idempotent — re-creating an existing index rebuilds it without
+    /// error. The returned ``created`` flag is ``False`` when an index
+    /// for ``(node_type, property)`` already existed, ``True`` when this
+    /// call made a new one.
+    ///
     /// Returns:
-    ///     Dictionary with 'unique_values' count and success status
+    ///     Dict with ``node_type``, ``property``, ``unique_values`` (count),
+    ///     ``persistent`` (disk-backed), and ``created`` (False if the index
+    ///     already existed).
     ///
     /// Example:
     ///     ```python
@@ -40,6 +47,11 @@ impl KnowledgeGraph {
         property: &str,
     ) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
+        // Idempotent: re-creating an existing index is not an error, but the
+        // report says so honestly — `created=false` when the index was
+        // already present (checked before the rebuild below mutates it),
+        // so callers can distinguish "I made it" from "it was already there".
+        let already_existed = graph.has_any_index(node_type, property);
         // In-memory backends use the existing HashMap-based property_indices.
         // On the Disk backend that HashMap would silently OOM on large types
         // (~13M rows × String × Vec = multiple GB of heap rebuilt every load);
@@ -74,7 +86,7 @@ impl KnowledgeGraph {
         result_dict.set_item("property", property)?;
         result_dict.set_item("unique_values", unique_values)?;
         result_dict.set_item("persistent", persistent_disk)?;
-        result_dict.set_item("created", true)?;
+        result_dict.set_item("created", !already_existed)?;
 
         Ok(result_dict.into())
     }

@@ -692,6 +692,112 @@ pub(crate) fn detach_delete_nodes(
     (nodes_to_delete.len(), edges_removed)
 }
 
+/// Replace the `connection_type` edges of the source nodes named in
+/// `df_data`, then add the edges the DataFrame describes.
+///
+/// **Per-source semantics.** Only edges that are (a) outgoing from a
+/// source node *present in `df_data`* and (b) of *this* connection type
+/// are removed. Edges from untouched sources, and edges of other types
+/// from the same sources, survive. This makes a re-sync idempotent —
+/// "set the current MENTIONS of exactly these documents to this list" —
+/// without a full-graph wipe.
+///
+/// **Validate-then-mutate.** The id columns are verified to exist
+/// *before* any edge is removed, so a malformed DataFrame can't leave
+/// the graph half-cleared. The add is delegated to [`add_connections`],
+/// so conflict handling, stub vivification of missing endpoints, and the
+/// report shape are identical to a plain add.
+#[allow(clippy::too_many_arguments)]
+pub fn replace_connections(
+    graph: &mut DirGraph,
+    df_data: DataFrame,
+    connection_type: String,
+    source_type: String,
+    source_id_field: String,
+    target_type: String,
+    target_id_field: String,
+    source_title_field: Option<String>,
+    target_title_field: Option<String>,
+    conflict_handling: Option<String>,
+) -> Result<ConnectionOperationReport, String> {
+    // --- Validate column presence BEFORE deleting (atomicity-by-validation) ---
+    let available_cols: Vec<_> = df_data.get_column_names();
+    if !df_data.verify_column(&source_id_field) {
+        return Err(format!(
+            "Source ID column '{}' not found in DataFrame. Available columns: [{}]",
+            source_id_field,
+            available_cols.join(", ")
+        ));
+    }
+    if !df_data.verify_column(&target_id_field) {
+        return Err(format!(
+            "Target ID column '{}' not found in DataFrame. Available columns: [{}]",
+            target_id_field,
+            available_cols.join(", ")
+        ));
+    }
+
+    // --- Collect the distinct, non-null source ids present in the DataFrame ---
+    let source_id_idx = df_data
+        .get_column_index(&source_id_field)
+        .ok_or_else(|| format!("Source ID column '{}' not found", source_id_field))?;
+    let mut seen: HashSet<Value> = HashSet::new();
+    let mut distinct_sources: Vec<Value> = Vec::new();
+    for row in 0..df_data.row_count() {
+        if let Some(id) = df_data.get_value_by_index(row, source_id_idx) {
+            if matches!(id, Value::Null) {
+                continue;
+            }
+            if seen.insert(id.clone()) {
+                distinct_sources.push(id);
+            }
+        }
+    }
+
+    // --- Remove the existing edges of this type from those sources ---
+    // Nothing to clear if the source type was never created — the add
+    // below vivifies it. `lookup_by_id_readonly` self-heals the id index.
+    if graph.has_node_type(&source_type) {
+        let conn_key = InternedKey::from_str(&connection_type);
+        let mut to_remove: Vec<EdgeIndex> = Vec::new();
+        for id in &distinct_sources {
+            if let Some(node_idx) = graph.lookup_by_id_readonly(&source_type, id) {
+                for edge in graph.graph.edges_directed_filtered(
+                    node_idx,
+                    petgraph::Direction::Outgoing,
+                    Some(conn_key),
+                ) {
+                    // Disk pre-filters; memory/mapped still post-filter.
+                    if edge.connection_type() == conn_key {
+                        to_remove.push(edge.id());
+                    }
+                }
+            }
+        }
+        if !to_remove.is_empty() {
+            for edge_idx in to_remove {
+                GraphWrite::remove_edge(&mut graph.graph, edge_idx);
+            }
+            graph.invalidate_edge_type_counts_cache();
+            graph.connection_types.clear();
+        }
+    }
+
+    // --- Add the edges the DataFrame describes ---
+    add_connections(
+        graph,
+        df_data,
+        connection_type,
+        source_type,
+        source_id_field,
+        target_type,
+        target_id_field,
+        source_title_field,
+        target_title_field,
+        conflict_handling,
+    )
+}
+
 /// Delete every node still marked `_provisional` — a stub vivified for
 /// an edge but never promoted by a real node row — along with all its
 /// incident edges. Returns `(nodes_purged, edges_removed)`.
@@ -1792,5 +1898,167 @@ mod id_index_tests {
         assert!(g
             .lookup_by_id_readonly("Person", &Value::Int64(424242))
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod replace_connections_tests {
+    use super::*;
+
+    fn doc_entity_graph() -> DirGraph {
+        let mut g = DirGraph::new();
+        let docs = DataFrame::from_cypher_rows(
+            vec!["id".to_string()],
+            vec![vec![Value::Int64(1)], vec![Value::Int64(2)]],
+        )
+        .unwrap();
+        add_nodes(
+            &mut g,
+            docs,
+            "Doc".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap();
+        let ents = DataFrame::from_cypher_rows(
+            vec!["id".to_string()],
+            vec![
+                vec![Value::String("A".into())],
+                vec![Value::String("B".into())],
+                vec![Value::String("C".into())],
+            ],
+        )
+        .unwrap();
+        add_nodes(
+            &mut g,
+            ents,
+            "Entity".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap();
+        g
+    }
+
+    fn edges_df(pairs: &[(i64, &str)]) -> DataFrame {
+        let rows: Vec<Vec<Value>> = pairs
+            .iter()
+            .map(|(s, t)| vec![Value::Int64(*s), Value::String((*t).into())])
+            .collect();
+        DataFrame::from_cypher_rows(vec!["s".to_string(), "t".to_string()], rows).unwrap()
+    }
+
+    fn count_edges_of_type(g: &DirGraph, node_type: &str, id: i64, conn: &str) -> usize {
+        let idx = g
+            .lookup_by_id_readonly(node_type, &Value::Int64(id))
+            .unwrap();
+        let key = InternedKey::from_str(conn);
+        g.graph
+            .edges_directed_filtered(idx, petgraph::Direction::Outgoing, Some(key))
+            .filter(|e| e.connection_type() == key)
+            .count()
+    }
+
+    fn add_mentions(g: &mut DirGraph, pairs: &[(i64, &str)]) {
+        add_connections(
+            g,
+            edges_df(pairs),
+            "MENTIONS".to_string(),
+            "Doc".to_string(),
+            "s".to_string(),
+            "Entity".to_string(),
+            "t".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    fn replace_mentions(g: &mut DirGraph, pairs: &[(i64, &str)]) {
+        replace_connections(
+            g,
+            edges_df(pairs),
+            "MENTIONS".to_string(),
+            "Doc".to_string(),
+            "s".to_string(),
+            "Entity".to_string(),
+            "t".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    /// The defining behaviour: a source's edges of the named type become
+    /// exactly the supplied set — stale edges are pruned, new ones added.
+    #[test]
+    fn replace_sets_exact_edge_set() {
+        let mut g = doc_entity_graph();
+        add_mentions(&mut g, &[(1, "A"), (1, "B")]);
+        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 2);
+
+        replace_mentions(&mut g, &[(1, "B"), (1, "C")]);
+        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 2);
+    }
+
+    /// Only sources present in the input are pruned; other sources keep
+    /// their edges, and edges of other types from the same source survive.
+    #[test]
+    fn replace_is_scoped_to_input_sources_and_type() {
+        let mut g = doc_entity_graph();
+        add_mentions(&mut g, &[(1, "A"), (2, "A")]);
+        add_connections(
+            &mut g,
+            edges_df(&[(1, "B")]),
+            "CITES".to_string(),
+            "Doc".to_string(),
+            "s".to_string(),
+            "Entity".to_string(),
+            "t".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        replace_mentions(&mut g, &[(1, "C")]);
+
+        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
+        // doc 2 (absent from the input) keeps its MENTIONS edge.
+        assert_eq!(count_edges_of_type(&g, "Doc", 2, "MENTIONS"), 1);
+        // The CITES edge from doc 1 is a different type — untouched.
+        assert_eq!(count_edges_of_type(&g, "Doc", 1, "CITES"), 1);
+    }
+
+    /// Validation runs before any prune — a bad column errors with the
+    /// graph's existing edges intact.
+    #[test]
+    fn replace_validates_before_pruning() {
+        let mut g = doc_entity_graph();
+        add_mentions(&mut g, &[(1, "A")]);
+        let bad = DataFrame::from_cypher_rows(
+            vec!["s".to_string(), "wrong".to_string()],
+            vec![vec![Value::Int64(1), Value::String("B".into())]],
+        )
+        .unwrap();
+        let err = replace_connections(
+            &mut g,
+            bad,
+            "MENTIONS".to_string(),
+            "Doc".to_string(),
+            "s".to_string(),
+            "Entity".to_string(),
+            "t".to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(err.is_err());
+        // The pre-existing edge must not have been pruned.
+        assert_eq!(count_edges_of_type(&g, "Doc", 1, "MENTIONS"), 1);
     }
 }

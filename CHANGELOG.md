@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`replace_connections(...)`** — an atomic edge upsert. For every source node
+  present in the input (`data` DataFrame or `query` result), its existing edges
+  *of that connection type* are pruned, then the supplied edges are added — in
+  one call. Edges from sources not in the input, and edges of other types from
+  the same sources, are untouched. Use it to re-sync a derived edge set
+  idempotently ("the current `MENTIONS` of exactly these documents is this
+  list") without the race-prone manual `DELETE`-then-re-add. Accepts every
+  argument `add_connections` does (including query mode and `extra_properties`);
+  validates the id columns before pruning, so a malformed input leaves the graph
+  intact (operator B3). Implemented in core (`maintain::replace_connections`), so
+  every binding reaches it.
 - **`embedding_dim(node_type, text_column)`** — returns the vector dimension of
   an embedding store (or `None`). A cheap, direct way to detect an embedder/
   model change without iterating `list_embeddings` (operator B4).
@@ -31,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`create_index` now reports `created` honestly.** Re-creating an existing
+  index is still idempotent (no error), but the returned dict now carries
+  `created=false` when an index for `(node_type, property)` already existed and
+  `created=true` only when this call made a new one — previously it was always
+  `true`, so callers couldn't tell "I made it" from "it was already there"
+  (operator B6).
 - **A WHERE predicate on a property absent from the matched label now warns**
   (non-fatal, stderr — same channel as the unknown-label/relationship warnings)
   instead of silently filtering out every row. `MATCH (f:Function) WHERE
