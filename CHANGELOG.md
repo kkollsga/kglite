@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Graph-algorithm procedures: `relationship` and `connection_types` are now
+  interchangeable, and unknown config keys are rejected.** The edge-scope key
+  was inconsistent (centrality/community read `connection_types`; components/
+  k-core read `relationship`); either term now works on any procedure. A
+  genuinely-unknown key (`CALL pagerank({…, bogus:'x'})`) now errors with a
+  did-you-mean instead of silently no-op'ing (operator feedback A2/A2b). The
+  `where` predicate-scope (added 0.10.25) was already working — it was the key
+  name, not the feature, that tripped callers up.
+
 ### Fixed
 
 - **Code-graph: `is_external` is now emitted on `Function` (= `false`), not just

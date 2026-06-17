@@ -103,3 +103,34 @@ def test_invalid_where_predicate_errors(tmp_path: Path) -> None:
                 "CALL pagerank({node_type:'Function', where:'this is not valid ('}) YIELD node, score RETURN node.name"
             )
         )
+
+
+def test_relationship_and_connection_types_are_interchangeable(tmp_path: Path) -> None:
+    """A2 (operator 2026-06-17): the edge-scope key was inconsistent — centrality
+    reads `connection_types`, connected_components reads `relationship`. Both are
+    now aliased, so either term works on any procedure."""
+    g = _code_graph(tmp_path)
+    # `relationship` on pagerank (which natively reads `connection_types`) is now
+    # honored — same scoped result as `connection_types`.
+    via_conn = _names(
+        g,
+        "CALL pagerank({node_type:'Function', connection_types:'CALLS', where:'n.is_test = false'}) "
+        "YIELD node, score RETURN node.name AS n ORDER BY score DESC",
+    )
+    via_rel = _names(
+        g,
+        "CALL pagerank({node_type:'Function', relationship:'CALLS', where:'n.is_test = false'}) "
+        "YIELD node, score RETURN node.name AS n ORDER BY score DESC",
+    )
+    assert via_rel == via_conn, (via_rel, via_conn)
+    assert "assert_identical" not in via_rel
+
+
+def test_unknown_algo_config_key_errors_with_hint(tmp_path: Path) -> None:
+    """A2b: an unknown config key is a clear boot error, not a silent no-op."""
+    g = _code_graph(tmp_path)
+    with pytest.raises(Exception, match="unknown config key 'bogus_key'"):
+        list(g.cypher("CALL pagerank({node_type:'Function', bogus_key:'x'}) YIELD node RETURN node.name"))
+    # A near-miss gets a did-you-mean suggestion.
+    with pytest.raises(Exception, match="Did you mean 'connection_types'"):
+        list(g.cypher("CALL pagerank({node_type:'Function', connection_typ:'CALLS'}) YIELD node RETURN node.name"))

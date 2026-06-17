@@ -68,6 +68,77 @@ fn parse_scope_predicate(src: &str) -> Result<Predicate, String> {
         .ok_or_else(|| format!("`where` predicate '{src}' did not parse to a condition"))
 }
 
+/// Valid config keys for a scoped graph-algorithm procedure, or `None` for any
+/// other procedure (db.*, rule procedures, …) — those skip validation so their
+/// behaviour is unchanged. The shared scoping keys are appended below; the
+/// per-procedure entries are the algorithm-specific params. `where` is listed
+/// only for procedures that actually honour it (centrality + community) — the
+/// components/k_core/clustering group scopes by `node_type` + `relationship`
+/// only, so `where` there is rejected rather than silently ignored.
+fn algo_allowed_keys(proc: &str) -> Option<Vec<&'static str>> {
+    let mut keys: Vec<&'static str> = match proc {
+        "pagerank" => vec!["damping_factor", "max_iterations", "tolerance", "where"],
+        "betweenness" | "betweenness_centrality" => vec!["normalized", "sample_size", "where"],
+        "closeness" | "closeness_centrality" => vec!["normalized", "sample_size", "where"],
+        "degree" | "degree_centrality" => vec!["normalized", "where"],
+        "louvain" | "louvain_communities" | "leiden" | "leiden_communities" => {
+            vec!["resolution", "weight_property", "where"]
+        }
+        "label_propagation" => vec!["max_iterations", "where"],
+        "connected_components"
+        | "weakly_connected_components"
+        | "k_core"
+        | "coreness"
+        | "clustering_coefficient"
+        | "local_clustering_coefficient" => vec![],
+        _ => return None,
+    };
+    // Scoping keys accepted on every algorithm procedure. `relationship` and
+    // `connection_types` are both listed; they're aliased to each other before
+    // validation so the user can use either term on any procedure.
+    keys.extend([
+        "node_type",
+        "node_types",
+        "relationship",
+        "connection_types",
+        "timeout_ms",
+    ]);
+    Some(keys)
+}
+
+/// Alias scoping keys (so `relationship`/`connection_types` are interchangeable
+/// and `node_types` is accepted as `node_type`), then reject any remaining
+/// unknown config key for the graph-algorithm procedures.
+fn normalize_and_validate_algo_params(
+    proc: &str,
+    params: &mut HashMap<String, Value>,
+) -> Result<(), String> {
+    let Some(allowed) = algo_allowed_keys(proc) else {
+        return Ok(());
+    };
+    // Copy a present key onto its absent twin so every procedure finds the key
+    // name it reads (centrality/community read `connection_types`; components/
+    // k_core read `relationship`).
+    fn alias(params: &mut HashMap<String, Value>, from: &str, to: &str) {
+        if !params.contains_key(to) {
+            if let Some(v) = params.get(from).cloned() {
+                params.insert(to.to_string(), v);
+            }
+        }
+    }
+    alias(params, "relationship", "connection_types");
+    alias(params, "connection_types", "relationship");
+    alias(params, "node_types", "node_type");
+
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            let hint = crate::graph::mutation::validation::did_you_mean(key, &allowed);
+            return Err(format!("CALL {proc}(): unknown config key '{key}'.{hint}"));
+        }
+    }
+    Ok(())
+}
+
 impl<'a> CypherExecutor<'a> {
     /// Build an optional subgraph scope from the `{node_type, where}` procedure
     /// params (centrality / community algorithms). Returns `None` when neither
@@ -331,7 +402,13 @@ impl<'a> CypherExecutor<'a> {
         ) && (self.graph.graph.is_disk() || self.graph.graph.is_mapped());
 
         // Extract parameters
-        let params = self.extract_call_params(&clause.parameters)?;
+        let mut params = self.extract_call_params(&clause.parameters)?;
+        // Normalize scoping-key aliases (`relationship` ↔ `connection_types`,
+        // `node_types` → `node_type`) so the terminology is interchangeable
+        // across procedures, and reject genuinely-unknown config keys with a
+        // did-you-mean — so a typo or a wrong-procedure key surfaces an error
+        // instead of silently no-op'ing (operator feedback A2 / A2b 2026-06-17).
+        normalize_and_validate_algo_params(proc_name.as_str(), &mut params)?;
 
         // Optional subgraph scope for the centrality / community procedures:
         // `{node_type: '...', where: 'n.<prop> ...'}` restricts the algorithm

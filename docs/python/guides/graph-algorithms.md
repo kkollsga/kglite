@@ -78,6 +78,16 @@ All three share the same optional `{node_type, relationship}` scoping. Each
 field accepts a string or a list of strings; omit the map to run over the
 whole graph.
 
+> **Edge-scope key:** `relationship` and `connection_types` are interchangeable
+> on every algorithm procedure — the centrality/community procedures historically
+> read `connection_types` and the components/k-core ones read `relationship`, but
+> either term now works anywhere. **Unknown config keys are rejected** with a
+> did-you-mean (`CALL pagerank(): unknown config key 'connection_typ'. Did you
+> mean 'connection_types'?`) rather than silently producing an empty result.
+> (`where` predicate-scoping is supported by the centrality + community
+> procedures; the components/k-core/clustering group scopes by `node_type` +
+> `relationship` only.)
+
 ### Connected components
 
 ```cypher
