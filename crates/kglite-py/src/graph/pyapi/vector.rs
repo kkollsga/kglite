@@ -378,6 +378,18 @@ impl KnowledgeGraph {
         py_list.into_py_any(py)
     }
 
+    /// The vector dimension of the `(node_type, text_column)` embedding store,
+    /// or ``None`` if no store exists for it.
+    ///
+    /// A cheap, direct way to detect an embedder/model change without
+    /// bookkeeping: compare it against your model's dimension before
+    /// `embed_texts`/`add_embeddings` (which reject a mismatch). `text_column`
+    /// is the source column name (stored as ``{text_column}_emb``).
+    fn embedding_dim(&self, node_type: &str, text_column: &str) -> Option<usize> {
+        let key = (node_type.to_string(), format!("{text_column}_emb"));
+        self.inner.embeddings.get(&key).map(|s| s.dimension)
+    }
+
     /// List all embedding stores in the graph.
     ///
     /// Returns:
@@ -940,6 +952,24 @@ impl KnowledgeGraph {
         } else {
             self.inner.embeddings.get(&emb_key)
         };
+
+        // B4/B5 (operator 2026-06-17): an upsert (replace=False) into a store
+        // whose dimension differs from the current model's would silently mix
+        // dimensions and corrupt similarity search. Reject it with a clear
+        // recipe instead. (replace=True is fine — it rebuilds a fresh store at
+        // the new dimension below, so a model swap is deterministic that way.)
+        if let Some(s) = existing_store {
+            if s.dimension != dimension {
+                model.unload();
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "embed_texts(): the model produces {dimension}-d vectors but the existing \
+                     '{node_type}.{text_column}_emb' store is {}-d — embedding the rest would mix \
+                     dimensions and corrupt search. Re-embed the whole column with replace=True to \
+                     rebuild at the new dimension, or remove_embeddings('{node_type}', '{text_column}') first.",
+                    s.dimension
+                )));
+            }
+        }
 
         let node_indices: Vec<NodeIndex> = self
             .inner

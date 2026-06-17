@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`embedding_dim(node_type, text_column)`** — returns the vector dimension of
+  an embedding store (or `None`). A cheap, direct way to detect an embedder/
+  model change without iterating `list_embeddings` (operator B4).
+
 ### Changed
 
+- **`embed_texts(replace=False)` now rejects a model/store dimension mismatch**
+  instead of silently mixing dimensions (which corrupts similarity search). On a
+  model swap, re-embed the whole column with `replace=True` (deterministic —
+  rebuilds the store at the new dimension) or `remove_embeddings` first. (B4/B5;
+  `add_embeddings` already rejected mismatches.)
 - **Graph-algorithm procedures: `relationship` and `connection_types` are now
   interchangeable, and unknown config keys are rejected.** The edge-scope key
   was inconsistent (centrality/community read `connection_types`; components/

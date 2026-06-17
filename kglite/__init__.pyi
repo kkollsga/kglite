@@ -4255,6 +4255,22 @@ class KnowledgeGraph:
         """
         ...
 
+    def embedding_dim(self, node_type: str, text_column: str) -> Optional[int]:
+        """The vector dimension of the ``(node_type, text_column)`` embedding
+        store, or ``None`` if none exists.
+
+        A cheap, direct way to detect an embedder/model change without
+        bookkeeping: compare it against your model's dimension before
+        re-embedding. ``embed_texts`` / ``add_embeddings`` reject a dimension
+        mismatch (re-embed with ``replace=True`` to rebuild at a new dimension).
+
+        Example::
+
+            if g.embedding_dim("Article", "summary") not in (None, model.dimension):
+                g.embed_texts("Article", "summary", replace=True)  # model changed
+        """
+        ...
+
     def embedding_diagnostics(self, node_type: Optional[str] = None) -> list[dict[str, Any]]:
         """Diagnose embedding coverage per (node_type, text_column).
 
