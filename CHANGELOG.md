@@ -69,10 +69,14 @@ Concurrency / durability / embeddings, at a glance:
   speed when a filter is selective). The index is **dropped automatically**
   whenever the store's vectors change (`add_embeddings` / `embed_texts`) or slots
   are remapped (`vacuum`) — rebuild it afterward. Companion methods
-  `drop_vector_index()` and `has_vector_index()`. *(This release: the index is
-  in-memory only — not yet persisted in `.kgl`, and the Cypher
-  `vector_score()` / `text_score()` path still uses the exact scan; both are
-  follow-ups.)*
+  `drop_vector_index()` and `has_vector_index()`. The index **persists in the
+  `.kgl`** (and `to_bytes()`): it rides in a dedicated, self-describing,
+  *skippable* section (own magic + format version), so it's restored on load
+  with byte-identical search results, the on-disk index format can evolve
+  without a core-data-version bump, and an unrecognised/corrupt index is silently
+  dropped (it's a rebuildable cache, never a correctness dependency). *(The
+  Cypher `vector_score()` / `text_score()` path still uses the exact scan — a
+  follow-up.)*
 - **Public `code_tree` build API.** Code-graph building now has a stable public
   entry point — top-level `kglite.build_code_tree(path, …)` and
   `kglite.code_tree.build` — and `kglite._kglite_code_tree` is documented as an

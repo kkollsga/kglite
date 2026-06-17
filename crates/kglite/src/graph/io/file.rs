@@ -20,6 +20,7 @@
 // refuses v3 files outright with a clear "rebuild your graph" message.
 // One file format, one set of in-flight Value semantics.
 
+use crate::graph::algorithms::hnsw::HnswIndex;
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, DirGraph, EmbeddingStore, IndexKey,
@@ -179,6 +180,13 @@ pub(crate) struct FileMetadata {
     /// sidecar. Older `.kgl` files default to 0 (no section to read).
     #[serde(default)]
     secondary_labels_compressed_size: u64,
+    /// 0.11.0: compressed size of the HNSW vector-index section (0 if none).
+    /// The section payload is self-describing (magic + format version), so a
+    /// reader that doesn't recognise it — or sees a newer index format —
+    /// silently skips it and the (rebuildable) index is simply absent. Older
+    /// `.kgl` files default to 0.
+    #[serde(default)]
+    vector_index_compressed_size: u64,
     /// Cached edge type counts (connection_type → count).
     /// Persisted from warm cache on save, restored to cache on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +231,7 @@ impl FileMetadata {
             embeddings_compressed_size: 0,
             timeseries_compressed_size: 0,
             secondary_labels_compressed_size: 0,
+            vector_index_compressed_size: 0,
             // Persist edge type counts if cache is warm (no O(E) scan if cold)
             edge_type_counts: if graph.has_edge_type_counts_cache() {
                 Some(graph.get_edge_type_counts())
@@ -1340,6 +1349,12 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         None => None,
     };
 
+    // 4c. Compress the HNSW vector-index section if any store has one built.
+    let vector_index_compressed = match encode_vector_indexes(graph)? {
+        Some(payload) => Some(zstd_compress(&payload)?),
+        None => None,
+    };
+
     // 5. Build metadata (common fields from graph, then fill in section sizes)
     let mut metadata = FileMetadata::from_graph(graph);
     metadata.topology_compressed_size = topology_compressed.len() as u64;
@@ -1353,6 +1368,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         .map(|b| b.len() as u64)
         .unwrap_or(0);
     metadata.secondary_labels_compressed_size = secondary_labels_compressed
+        .as_ref()
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+    metadata.vector_index_compressed_size = vector_index_compressed
         .as_ref()
         .map(|b| b.len() as u64)
         .unwrap_or(0);
@@ -1399,6 +1418,11 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     // skip this entirely (encode returned None).
     if let Some(sl_data) = &secondary_labels_compressed {
         writer.write_all(sl_data)?;
+    }
+
+    // HNSW vector-index section (0.11.0+). Omitted when no store is indexed.
+    if let Some(vi_data) = &vector_index_compressed {
+        writer.write_all(vi_data)?;
     }
 
     // Flush the writer's own buffer. The atomic-save wrapper additionally
@@ -2064,6 +2088,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     let embeddings_compressed_size = metadata.embeddings_compressed_size;
     let timeseries_compressed_size = metadata.timeseries_compressed_size;
     let secondary_labels_compressed_size = metadata.secondary_labels_compressed_size;
+    let vector_index_compressed_size = metadata.vector_index_compressed_size;
 
     // Reassemble DirGraph
     let mut dir_graph = DirGraph::from_graph(graph);
@@ -2217,10 +2242,89 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
             let sl_compressed = &buf[section_offset..sl_end];
             let sl_raw = zstd_decompress(sl_compressed)?;
             decode_secondary_label_index(&sl_raw, &mut dir_graph)?;
+            section_offset = sl_end;
+        }
+    }
+
+    // Load the HNSW vector-index section if present (0.11.0+). Best-effort:
+    // attach indexes to matching stores; a decode error never fails the load
+    // (the index is a rebuildable cache). Must run after embeddings are loaded
+    // and their norms rebuilt (above).
+    if vector_index_compressed_size > 0 {
+        let vi_end = section_offset + vector_index_compressed_size as usize;
+        if buf.len() >= vi_end {
+            let vi_compressed = &buf[section_offset..vi_end];
+            if let Ok(vi_raw) = zstd_decompress(vi_compressed) {
+                decode_vector_indexes(&vi_raw, &mut dir_graph);
+            }
         }
     }
 
     Ok(Arc::new(dir_graph))
+}
+
+// ─── HNSW vector-index section (0.11.0) ───────────────────────────────────
+//
+// A self-describing, *skippable* `.kgl` sub-section carrying built HNSW
+// indexes. The whole point is robustness against future change: the index is a
+// rebuildable cache, never a correctness dependency, so any version mismatch or
+// corruption is silently dropped (the store loads fine without an index; the
+// user rebuilds, or auto-use just doesn't fire). Bumping
+// `VECTOR_INDEX_FORMAT_VERSION` lets the on-disk index format evolve WITHOUT a
+// core-data-version bump — older readers skip a newer index, newer readers skip
+// an older one.
+//
+//   [0..8]   magic = b"KGLVIDX1"
+//   [8..12]  format_version: u32 LE
+//   [12..]   bincode( Vec<(node_type, embedding_property, HnswIndex)> )
+const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
+const VECTOR_INDEX_FORMAT_VERSION: u32 = 1;
+
+/// Encode every built HNSW index into a self-describing payload. Returns `None`
+/// when no store carries an index (the section is then omitted entirely).
+fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u8>>> {
+    let entries: Vec<(&String, &String, &HnswIndex)> = graph
+        .embeddings
+        .iter()
+        .filter_map(|((nt, prop), s)| s.index.as_ref().map(|idx| (nt, prop, idx)))
+        .collect();
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let body = bincode_ser(&entries)?;
+    let mut payload = Vec::with_capacity(12 + body.len());
+    payload.extend_from_slice(VECTOR_INDEX_MAGIC);
+    payload.extend_from_slice(&VECTOR_INDEX_FORMAT_VERSION.to_le_bytes());
+    payload.extend_from_slice(&body);
+    Ok(Some(payload))
+}
+
+/// Decode the vector-index section and attach indexes to the matching stores.
+/// Best-effort: an unrecognised magic, an unknown format version, a bincode
+/// error, or a shape mismatch against the loaded store all result in the index
+/// being silently skipped — never a load failure. Must run AFTER embeddings are
+/// loaded and their norms rebuilt (cosine navigation needs the norm cache).
+fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
+    if payload.len() < 12 || &payload[..8] != VECTOR_INDEX_MAGIC {
+        return;
+    }
+    let ver = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+    if ver != VECTOR_INDEX_FORMAT_VERSION {
+        return; // newer/older index format — skip, the store rebuilds on demand
+    }
+    let entries: Vec<(String, String, HnswIndex)> = match bincode_deser(&payload[12..]) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for (node_type, prop, idx) in entries {
+        if let Some(store) = graph.embeddings.get_mut(&(node_type, prop)) {
+            // Defensive: only attach an index whose shape still matches the
+            // store it was built over (dimension + vector count).
+            if idx.dim() == store.dimension && idx.len() == store.len() {
+                store.index = Some(idx);
+            }
+        }
+    }
 }
 
 // ─── Embedding Export / Import ────────────────────────────────────────────
@@ -2485,6 +2589,69 @@ mod atomic_save_tests {
         assert_eq!(&buf[..4], &V4_MAGIC, "buffer must carry the v4 magic");
         let loaded = load_kgl_bytes(&buf).unwrap();
         assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    /// Build a tiny graph carrying one HNSW-indexed embedding store.
+    fn tiny_indexed_graph() -> Arc<DirGraph> {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+        use crate::graph::schema::EmbeddingStore;
+
+        let mut g = tiny_graph(40);
+        {
+            let dir = Arc::make_mut(&mut g);
+            let mut store = EmbeddingStore::with_metric(4, "cosine");
+            for i in 0..40usize {
+                let v = [i as f32, (i % 3) as f32, 1.0, (i % 7) as f32];
+                store.set_embedding(i, &v);
+            }
+            store
+                .build_index(DistanceMetric::Cosine, HnswParams::default(), 7)
+                .unwrap();
+            dir.embeddings
+                .insert(("Doc".to_string(), "vec_emb".to_string()), store);
+        }
+        g
+    }
+
+    #[test]
+    fn vector_index_section_roundtrips() {
+        let g = tiny_indexed_graph();
+        let mut buf: Vec<u8> = Vec::new();
+        write_kgl_to(&g, &mut buf).unwrap();
+        let loaded = load_kgl_bytes(&buf).unwrap();
+        let store = loaded
+            .embeddings
+            .get(&("Doc".to_string(), "vec_emb".to_string()))
+            .expect("embedding store survives round-trip");
+        assert!(store.has_index(), "HNSW index must persist in the .kgl");
+        assert_eq!(store.index.as_ref().unwrap().len(), 40);
+    }
+
+    #[test]
+    fn vector_index_decode_skips_unknown_version() {
+        // The section is a rebuildable cache: an unknown format version (or a
+        // corrupt magic) must be skipped silently, never attached, never panic.
+        let g = tiny_indexed_graph();
+        let payload = encode_vector_indexes(&g).unwrap().unwrap();
+
+        let mut bumped = payload.clone();
+        bumped[8] = bumped[8].wrapping_add(1); // mangle the format-version LSB
+        let mut dst = DirGraph::new();
+        dst.embeddings.insert(
+            ("Doc".to_string(), "vec_emb".to_string()),
+            crate::graph::schema::EmbeddingStore::new(4),
+        );
+        decode_vector_indexes(&bumped, &mut dst);
+        assert!(
+            !dst.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index(),
+            "an unknown index format version must be skipped"
+        );
+
+        let mut bad_magic = payload.clone();
+        bad_magic[0] = b'X';
+        decode_vector_indexes(&bad_magic, &mut dst);
+        assert!(!dst.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index());
     }
 
     #[test]

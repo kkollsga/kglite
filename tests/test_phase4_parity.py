@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "0dc6371b4fb4730e7a337c4c0ab4b25a0be381056b1e0352b25eabd2e9b6de5e"
+GOLDEN_V3_DIGEST = "41d4c80fcb113b05ee706ad14b8699577bee16c5aa9b29cb1a8bac7828ebf637"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,11 @@ GOLDEN_V3_DIGEST = "0dc6371b4fb4730e7a337c4c0ab4b25a0be381056b1e0352b25eabd2e9b6
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Demoted from GOLDEN_V3_DIGEST when 0.11.0 added the
+        # `vector_index_compressed_size` metadata field (the HNSW vector-index
+        # section). The field serializes as `:0` even with no index, so every
+        # `.kgl` shifts.
+        "0dc6371b4fb4730e7a337c4c0ab4b25a0be381056b1e0352b25eabd2e9b6de5e",
         "adf955b60f07eaf1fb87e49f4c01e5e685c7236e2f6f562c1738e5ba462e4c67",  # 0.9.52
         "5b728f348d8e98c3c32a9b9262941a2740624c8d9b59f48a2c5ed79fe852a35a",  # 0.9.53 (never pushed)
         # Demoted from GOLDEN_V3_DIGEST when 0.10.1 took over.

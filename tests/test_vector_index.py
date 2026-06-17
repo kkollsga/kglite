@@ -156,17 +156,35 @@ class TestAutoUseAndRecall:
 
 
 class TestIndexRoundTrip:
-    def test_save_load_drops_index_results_unchanged(self):
-        # V3: the index is not yet persisted, so a reloaded graph has no index
-        # but identical (exact) results. (V4 adds persistence.)
-        g, _ = _build_graph(n=1500)
+    def test_index_persists_across_save_load(self):
+        # V4: the HNSW index rides in the .kgl, so a reloaded graph keeps it and
+        # the approximate results are identical (same topology + vectors).
+        g, _ = _build_graph(n=2000)
         g.build_vector_index("Doc", "summary")
         q = _query(64)
-        before = _ids(g.select("Doc").vector_search("summary", q, top_k=10, exact=True))
+        before = [(r["id"], round(r["score"], 6)) for r in g.select("Doc").vector_search("summary", q, top_k=10)]
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "g.kgl")
+            g.save(p)
+            g2 = kglite.load(p)
+        assert g2.has_vector_index("Doc", "summary") is True
+        after = [(r["id"], round(r["score"], 6)) for r in g2.select("Doc").vector_search("summary", q, top_k=10)]
+        assert before == after
+
+    def test_no_index_no_section(self):
+        # Embeddings but no index round-trips fine (no index after).
+        g, _ = _build_graph(n=500)
+        q = _query(64)
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "g.kgl")
             g.save(p)
             g2 = kglite.load(p)
         assert g2.has_vector_index("Doc", "summary") is False
-        after = _ids(g2.select("Doc").vector_search("summary", q, top_k=10))
-        assert before == after
+        assert len(g2.select("Doc").vector_search("summary", q, top_k=5)) == 5
+
+    def test_to_bytes_from_bytes_preserves_index(self):
+        g, _ = _build_graph(n=1500)
+        g.build_vector_index("Doc", "summary")
+        blob = g.to_bytes()
+        g2 = kglite.from_bytes(blob)
+        assert g2.has_vector_index("Doc", "summary") is True
