@@ -1,10 +1,11 @@
 // Vector search module for embedding-based similarity queries.
 // Operates on the current graph selection for filtered vector search.
 
+use super::hnsw::{HnswIndex, HnswMetric};
 use crate::graph::schema::{CurrentSelection, DirGraph, EmbeddingStore};
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 
 /// Distance metric for vector similarity search.
 #[derive(Clone, Copy, Debug)]
@@ -40,11 +41,28 @@ pub struct VectorSearchResult {
 /// Threshold for switching to parallel search via rayon.
 const PARALLEL_THRESHOLD: usize = 10_000;
 
+/// Minimum candidate count before an HNSW index is auto-used. Below this a
+/// brute-force scan is both faster (no index overhead) and exact, so there's no
+/// reason to risk approximate recall.
+const HNSW_AUTO_MIN: usize = 256;
+
+/// Over-fetch factor for HNSW: fetch `top_k * this` candidates so that, after
+/// dropping any that fall outside the (possibly filtered) selection, `top_k`
+/// survive. If too few survive, the caller falls back to an exact scan.
+const HNSW_OVERSAMPLE: usize = 4;
+
 /// Perform vector search over the current selection.
 ///
 /// Gets candidate nodes from the selection's current level, computes similarity
 /// for each candidate that has an embedding, and returns top-k results sorted
 /// by score (descending for cosine/dot, ascending for euclidean).
+///
+/// When `exact` is false and the store carries an HNSW index whose metric
+/// supports it (cosine/dot/euclidean) and the selection covers enough of the
+/// store, search dispatches through the index (approximate, much faster on large
+/// stores). `exact = true` always forces the full linear scan. The Poincaré
+/// metric, small/heavily-filtered selections, and stores without an index all
+/// fall back to the (norm-accelerated) exact scan.
 pub fn vector_search(
     graph: &DirGraph,
     selection: &CurrentSelection,
@@ -52,6 +70,7 @@ pub fn vector_search(
     query_vector: &[f32],
     top_k: usize,
     metric: DistanceMetric,
+    exact: bool,
 ) -> Result<Vec<VectorSearchResult>, String> {
     let level_count = selection.get_level_count();
     if level_count == 0 {
@@ -92,10 +111,30 @@ pub fn vector_search(
 
         let scorer = Scorer::new(metric, query_vector);
 
-        if candidates.len() > PARALLEL_THRESHOLD {
-            parallel_search(&candidates, store, query_vector, top_k, &scorer)
+        // HNSW fast path: use the index when allowed, supported, and the
+        // selection covers enough of the store. Returns None (→ exact fallback)
+        // if a selective filter left fewer than top_k survivors.
+        let hnsw_result = if exact {
+            None
         } else {
-            sequential_search(&candidates, store, query_vector, top_k, &scorer)
+            store.index.as_ref().and_then(|idx| {
+                let eligible = HnswMetric::from_distance(metric).is_some()
+                    && candidates.len() >= HNSW_AUTO_MIN
+                    && candidates.len().saturating_mul(2) >= store.len();
+                if eligible {
+                    hnsw_search(store, idx, &candidates, query_vector, top_k, &scorer)
+                } else {
+                    None
+                }
+            })
+        };
+
+        match hnsw_result {
+            Some(r) => r,
+            None if candidates.len() > PARALLEL_THRESHOLD => {
+                parallel_search(&candidates, store, query_vector, top_k, &scorer)
+            }
+            None => sequential_search(&candidates, store, query_vector, top_k, &scorer),
         }
     } else {
         // Multi-type path: group by node type
@@ -134,6 +173,73 @@ pub fn vector_search(
     };
 
     Ok(results)
+}
+
+/// HNSW-backed top-k over a single store, restricted to `candidates` (the
+/// selection). Fetches an over-sampled candidate set from the index, drops any
+/// whose node falls outside the selection, then re-scores the survivors with the
+/// shared `Scorer` so the returned scores are on the exact same scale as a
+/// brute-force scan (the ANN step only narrows *which* nodes are scored, never
+/// changes the score formula).
+///
+/// Returns `None` to signal "fall back to an exact scan" when a selective filter
+/// leaves fewer than `top_k` survivors — guaranteeing correctness when the
+/// filter is tight enough that the index's over-fetch wasn't sufficient.
+fn hnsw_search(
+    store: &EmbeddingStore,
+    idx: &HnswIndex,
+    candidates: &[NodeIndex],
+    query: &[f32],
+    top_k: usize,
+    scorer: &Scorer,
+) -> Option<Vec<VectorSearchResult>> {
+    let whole_store = candidates.len() >= store.len();
+    // Membership test for the filtered case; skipped when the selection is the
+    // whole store (every slot trivially qualifies).
+    let membership: Option<HashSet<usize>> = if whole_store {
+        None
+    } else {
+        Some(candidates.iter().map(|n| n.index()).collect())
+    };
+
+    let query_norm = dot_product(query, query).sqrt();
+    let k_fetch = top_k
+        .saturating_mul(HNSW_OVERSAMPLE)
+        .min(store.len())
+        .max(top_k);
+    let ef = k_fetch.max(idx.params().ef_search);
+    let raw = idx.search(
+        query,
+        query_norm,
+        k_fetch,
+        Some(ef),
+        &store.data,
+        &store.norms,
+    );
+
+    let mut heap = MinHeap::with_capacity(top_k);
+    for (slot, _dist) in raw {
+        let node_raw = store.slot_to_node[slot as usize];
+        if let Some(set) = &membership {
+            if !set.contains(&node_raw) {
+                continue;
+            }
+        }
+        let start = slot as usize * store.dimension;
+        let emb = &store.data[start..start + store.dimension];
+        let norm = store.norms[slot as usize];
+        let score = scorer.score(query, emb, norm);
+        heap.push_if_better(NodeIndex::new(node_raw), score, top_k);
+    }
+
+    let results = heap.into_sorted_results();
+    // Whole-store: the index's recall is the only limiter and that's the ANN
+    // contract — accept it. Filtered: if the over-fetch didn't survive the
+    // filter down to top_k, bail to an exact scan for a correct result.
+    if !whole_store && results.len() < top_k {
+        return None;
+    }
+    Some(results)
 }
 
 // ─── Similarity Functions ──────────────────────────────────────────────────────

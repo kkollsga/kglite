@@ -1362,6 +1362,17 @@ pub struct EmbeddingStore {
     /// file and risk drift. Rebuilt from `data` after load via `rebuild_norms`.
     #[serde(skip)]
     pub norms: Vec<f32>,
+    /// Optional HNSW approximate-nearest-neighbour index over this store's
+    /// vectors, built on demand via `build_vector_index`. When present (and the
+    /// query isn't `exact`), top-k vector search dispatches through it instead of
+    /// a full linear scan. Indexes nodes by *slot*, so any change to the slot
+    /// layout (in-place vector replacement, `add_embeddings`, compaction)
+    /// invalidates it — callers drop it via `invalidate_index`. NOT serialized
+    /// here (`#[serde(skip)]`): it rides in a dedicated versioned, skippable
+    /// sub-section of the `.kgl` so the on-disk format can evolve independently;
+    /// absent that section it's simply rebuilt.
+    #[serde(skip)]
+    pub index: Option<crate::graph::algorithms::hnsw::HnswIndex>,
 }
 
 /// Squared L2 norm of a vector, computed with the same 4-accumulator
@@ -1400,6 +1411,7 @@ impl EmbeddingStore {
             model_id: None,
             text_hashes: HashMap::new(),
             norms: Vec::new(),
+            index: None,
         }
     }
 
@@ -1413,6 +1425,7 @@ impl EmbeddingStore {
             model_id: None,
             text_hashes: HashMap::new(),
             norms: Vec::new(),
+            index: None,
         }
     }
 
@@ -1450,8 +1463,11 @@ impl EmbeddingStore {
     }
 
     /// Add or replace an embedding for a node. Returns the slot index.
-    /// Keeps the cached L2 norm (`norms[slot]`) in sync with `data`.
+    /// Keeps the cached L2 norm (`norms[slot]`) in sync with `data`, and drops
+    /// any HNSW index — mutating the vectors/slot layout would invalidate its
+    /// topology (rebuild via `build_index` after a batch of edits).
     pub fn set_embedding(&mut self, node_index: usize, embedding: &[f32]) -> usize {
+        self.index = None;
         let norm = l2_norm_sq(embedding).sqrt();
         if let Some(&slot) = self.node_to_slot.get(&node_index) {
             // Replace existing embedding in-place
@@ -1487,6 +1503,44 @@ impl EmbeddingStore {
             let start = slot * self.dimension;
             (&self.data[start..start + self.dimension], self.norms[slot])
         })
+    }
+
+    /// Drop any HNSW index (it must be rebuilt after the vectors change).
+    #[inline]
+    pub fn invalidate_index(&mut self) {
+        self.index = None;
+    }
+
+    /// `true` if an HNSW index is currently built over this store.
+    #[inline]
+    pub fn has_index(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// Build (or rebuild) an HNSW index over this store's vectors for `metric`.
+    /// Errors for Poincaré (unsupported by HNSW — stays brute-force). Ensures
+    /// the norm cache is populated first (cosine navigation needs it).
+    pub fn build_index(
+        &mut self,
+        metric: crate::graph::algorithms::vector::DistanceMetric,
+        params: crate::graph::algorithms::hnsw::HnswParams,
+        seed: u64,
+    ) -> Result<(), String> {
+        let hm = crate::graph::algorithms::hnsw::HnswMetric::from_distance(metric).ok_or_else(
+            || "HNSW does not support the Poincaré metric; it stays on the exact (brute-force) path.".to_string(),
+        )?;
+        if self.norms.len() != self.slot_to_node.len() {
+            self.rebuild_norms();
+        }
+        self.index = Some(crate::graph::algorithms::hnsw::HnswIndex::build(
+            &self.data,
+            &self.norms,
+            self.dimension,
+            hm,
+            params,
+            seed,
+        ));
+        Ok(())
     }
 
     /// Recompute every cached norm from `data`. Call after any wholesale

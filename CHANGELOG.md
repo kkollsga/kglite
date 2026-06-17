@@ -57,6 +57,22 @@ Concurrency / durability / embeddings, at a glance:
 
 ### Added
 
+- **`build_vector_index()` — opt-in HNSW index for scalable vector search.**
+  Brute-force vector search is exact but O(n·d) per query; on large stores that
+  doesn't scale. `g.build_vector_index(node_type, text_column, m=…,
+  ef_construction=…, ef_search=…, metric=…)` builds a hand-rolled HNSW
+  approximate-nearest-neighbour index (cosine / dot-product / Euclidean —
+  Poincaré stays exact). Opt-in like `create_index`: once built,
+  `vector_search` / `search_text` **auto-use** it for whole-corpus queries on
+  large stores (≥256 candidates); pass `exact=True` to force the exact scan.
+  Heavily-filtered selections fall back to exact automatically (correctness over
+  speed when a filter is selective). The index is **dropped automatically**
+  whenever the store's vectors change (`add_embeddings` / `embed_texts`) or slots
+  are remapped (`vacuum`) — rebuild it afterward. Companion methods
+  `drop_vector_index()` and `has_vector_index()`. *(This release: the index is
+  in-memory only — not yet persisted in `.kgl`, and the Cypher
+  `vector_score()` / `text_score()` path still uses the exact scan; both are
+  follow-ups.)*
 - **Public `code_tree` build API.** Code-graph building now has a stable public
   entry point — top-level `kglite.build_code_tree(path, …)` and
   `kglite.code_tree.build` — and `kglite._kglite_code_tree` is documented as an

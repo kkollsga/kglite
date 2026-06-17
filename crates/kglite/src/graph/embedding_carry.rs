@@ -101,8 +101,10 @@ impl DirGraph {
             store.node_to_slot = new_node_to_slot;
             store.slot_to_node = new_slot_to_node;
             store.data = new_data;
-            // Slots were remapped wholesale; resync the cached-norm column.
+            // Slots were remapped wholesale; resync the cached-norm column and
+            // drop any HNSW index (its slot ids are now stale — rebuild on demand).
             store.rebuild_norms();
+            store.invalidate_index();
         }
     }
 }

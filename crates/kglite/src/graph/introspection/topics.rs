@@ -1142,10 +1142,14 @@ pub(super) fn write_fluent_topic_vectors(xml: &mut String) {
     xml.push_str("      <m sig=\"set_embeddings(type, column, embeddings_dict)\">Provide pre-computed embeddings {id: vector}.</m>\n");
     xml.push_str("      <m sig=\"search_text(query, type, column=None, top_k=10, min_score=None)\">Semantic search — auto-embeds query string.</m>\n");
     xml.push_str("      <m sig=\"vector(vector, type, column=None, top_k=10, min_score=None)\">Search with explicit query vector.</m>\n");
+    xml.push_str("      <m sig=\"build_vector_index(type, column, m=16, ef_search=64, metric=None)\">Build an HNSW index so search scales on large stores (opt-in; auto-used; exact=True bypasses). Dropped when vectors change.</m>\n");
     xml.push_str("    </methods>\n");
     xml.push_str("    <examples>\n");
     xml.push_str("      <ex desc=\"setup\">graph.set_embedder('all-MiniLM-L6-v2')</ex>\n");
     xml.push_str("      <ex desc=\"embed\">graph.embed_texts('Paper', 'abstract')</ex>\n");
+    xml.push_str(
+        "      <ex desc=\"index large store\">graph.build_vector_index('Paper', 'abstract')</ex>\n",
+    );
     xml.push_str("      <ex desc=\"text search\">graph.search_text('machine learning for graphs', 'Paper', top_k=5)</ex>\n");
     xml.push_str(
         "      <ex desc=\"min score\">graph.search_text('NLP', 'Paper', min_score=0.7)</ex>\n",

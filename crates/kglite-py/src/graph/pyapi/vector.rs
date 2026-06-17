@@ -283,7 +283,7 @@ impl KnowledgeGraph {
     ///     metric; properties read live so a hit is identical before/after
     ///     save/reload). With ``returning=[...]`` each has ``id`` + ``score`` +
     ///     the requested fields only.
-    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None, returning=None))]
+    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None, returning=None, exact=None))]
     #[allow(clippy::too_many_arguments)]
     fn vector_search(
         &self,
@@ -294,8 +294,10 @@ impl KnowledgeGraph {
         metric: Option<&str>,
         to_df: Option<bool>,
         returning: Option<Vec<String>>,
+        exact: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let top_k = top_k.unwrap_or(10);
+        let exact = exact.unwrap_or(false);
         let embedding_property = format!("{}_emb", text_column);
         // Projection set: None = include everything (default). Some = include
         // only these fields; `id` and `score` are always kept (identity + rank).
@@ -341,6 +343,7 @@ impl KnowledgeGraph {
                     &query_vector,
                     top_k,
                     metric,
+                    exact,
                 )
             })
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
@@ -1267,7 +1270,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Same format as ``vector()`` — list of dicts or DataFrame.
-    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None, returning=None))]
+    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None, returning=None, exact=None))]
     #[allow(clippy::too_many_arguments)]
     fn search_text(
         &self,
@@ -1278,6 +1281,7 @@ impl KnowledgeGraph {
         metric: Option<&str>,
         to_df: Option<bool>,
         returning: Option<Vec<String>>,
+        exact: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let model = self.get_embedder_or_error()?;
 
@@ -1310,6 +1314,140 @@ impl KnowledgeGraph {
             metric,
             to_df,
             returning,
+            exact,
         )
+    }
+
+    /// Build an HNSW approximate-nearest-neighbour index over an embedding store
+    /// so subsequent vector searches scale sub-linearly on large stores.
+    ///
+    /// Opt-in (like ``create_index``): without it, search is an exact brute-force
+    /// scan. Once built, ``vector_search`` / ``search_text`` auto-use the index
+    /// for whole-corpus queries on large stores; pass ``exact=True`` to force an
+    /// exact scan. The index is dropped automatically whenever the store's
+    /// vectors change (``add_embeddings`` / ``embed_texts`` / ``compact``) —
+    /// rebuild it afterwards.
+    ///
+    /// Args:
+    ///     node_type: The node type (e.g. ``'Article'``).
+    ///     text_column: Source column name (e.g. ``'summary'``; the store is
+    ///         ``'{text_column}_emb'``).
+    ///     m: Max neighbours per node on upper layers (default 16). Higher →
+    ///         better recall + larger index.
+    ///     ef_construction: Build-time search width (default 200). Higher →
+    ///         better graph, slower build.
+    ///     ef_search: Default query-time search width (default 64). Higher →
+    ///         better recall, slower query.
+    ///     metric: Distance metric to index for — ``'cosine'`` (default),
+    ///         ``'dot_product'``, or ``'euclidean'``. ``'poincare'`` is not
+    ///         supported (it stays on the exact path). If omitted, uses the
+    ///         store's metric, else ``'cosine'``.
+    ///
+    /// Returns:
+    ///     dict: ``{'indexed': int, 'metric': str, 'm': int}`` — vectors indexed.
+    ///
+    /// Raises:
+    ///     ValueError: if the store doesn't exist or the metric is unsupported.
+    #[pyo3(signature = (node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn build_vector_index(
+        &mut self,
+        py: Python<'_>,
+        node_type: &str,
+        text_column: &str,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        ef_search: Option<usize>,
+        metric: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        use crate::graph::algorithms::hnsw::HnswParams;
+        use crate::graph::algorithms::vector::DistanceMetric;
+
+        let embedding_property = format!("{}_emb", text_column);
+        let key = (node_type.to_string(), embedding_property);
+
+        // Resolve metric: explicit arg > stored metric > cosine.
+        let metric_name = match metric {
+            Some(m) => m.to_string(),
+            None => self
+                .inner
+                .embeddings
+                .get(&key)
+                .and_then(|s| s.metric.clone())
+                .unwrap_or_else(|| "cosine".to_string()),
+        };
+        let dmetric = match metric_name.as_str() {
+            "cosine" => DistanceMetric::Cosine,
+            "dot_product" => DistanceMetric::DotProduct,
+            "euclidean" => DistanceMetric::Euclidean,
+            "poincare" => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "build_vector_index: the 'poincare' metric is not supported by HNSW; \
+                     Poincaré search stays on the exact (brute-force) path.",
+                ));
+            }
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown metric '{}'. Use 'cosine', 'dot_product', or 'euclidean'.",
+                    other
+                )));
+            }
+        };
+
+        let params = HnswParams {
+            m: m.unwrap_or(16).max(2),
+            ef_construction: ef_construction.unwrap_or(200).max(1),
+            ef_search: ef_search.unwrap_or(64).max(1),
+        };
+
+        let g = Arc::make_mut(&mut self.inner);
+        let store = g.embeddings.get_mut(&key).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No embedding store '{}.{}_emb' to index. Call set_embeddings()/embed_texts() first.",
+                node_type, text_column
+            ))
+        })?;
+        let indexed = store.len();
+
+        // Build off the GIL — pure CPU over the contiguous vector buffer.
+        // A deterministic seed keeps builds reproducible.
+        let seed = 0x9E37_79B9_7F4A_7C15 ^ (indexed as u64);
+        let build = py.detach(|| store.build_index(dmetric, params, seed));
+        build.map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+
+        let result = PyDict::new(py);
+        result.set_item("indexed", indexed)?;
+        result.set_item("metric", metric_name)?;
+        result.set_item("m", params.m)?;
+        Ok(result.into())
+    }
+
+    /// Drop the HNSW index for an embedding store (search reverts to exact
+    /// brute-force). No-op if no index exists. Returns ``True`` if one was
+    /// dropped.
+    #[pyo3(signature = (node_type, text_column))]
+    fn drop_vector_index(&mut self, node_type: &str, text_column: &str) -> PyResult<bool> {
+        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        let g = Arc::make_mut(&mut self.inner);
+        match g.embeddings.get_mut(&key) {
+            Some(store) => {
+                let had = store.has_index();
+                store.invalidate_index();
+                Ok(had)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Whether an HNSW index is currently built over an embedding store.
+    #[pyo3(signature = (node_type, text_column))]
+    fn has_vector_index(&self, node_type: &str, text_column: &str) -> PyResult<bool> {
+        let key = (node_type.to_string(), format!("{}_emb", text_column));
+        Ok(self
+            .inner
+            .embeddings
+            .get(&key)
+            .map(|s| s.has_index())
+            .unwrap_or(false))
     }
 }

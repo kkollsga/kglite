@@ -4374,6 +4374,7 @@ class KnowledgeGraph:
         metric: str = "cosine",
         to_df: bool = False,
         returning: list[str] | None = None,
+        exact: bool = False,
     ) -> list[dict[str, Any]] | pd.DataFrame:
         """Vector similarity search within the current selection.
 
@@ -4394,6 +4395,11 @@ class KnowledgeGraph:
                 ``score`` plus only the named fields (a property name, or a
                 structural field like ``title``/``type``). Use it to trim the
                 payload on wide nodes or ranking-only paths.
+            exact: Force an exact brute-force scan even when an HNSW index exists
+                (see ``build_vector_index``). Default ``False`` → a whole-corpus
+                query on a large indexed store uses the approximate index; set
+                ``True`` for guaranteed-exact results. Heavily-filtered selections
+                and the ``'poincare'`` metric are always exact regardless.
 
         Returns:
             List of dicts (or a DataFrame if ``to_df=True``). By default a hit has
@@ -4701,6 +4707,7 @@ class KnowledgeGraph:
         metric: str = "cosine",
         to_df: bool = False,
         returning: list[str] | None = None,
+        exact: bool = False,
     ) -> list[dict[str, Any]] | pd.DataFrame:
         """Search embeddings using a text query.
 
@@ -4718,6 +4725,8 @@ class KnowledgeGraph:
             returning: Optional field projection — see :meth:`vector_search`.
                 Omitted → full hit (all properties); given → ``id`` + ``score`` +
                 the named fields only.
+            exact: Force an exact brute-force scan even when an HNSW index exists
+                — see :meth:`vector_search` and :meth:`build_vector_index`.
 
         Returns:
             Same format as ``vector_search()`` — list of dicts or DataFrame.
@@ -4728,6 +4737,65 @@ class KnowledgeGraph:
                 "summary", "find AI articles", top_k=10
             )
         """
+        ...
+
+    def build_vector_index(
+        self,
+        node_type: str,
+        text_column: str,
+        m: int | None = None,
+        ef_construction: int | None = None,
+        ef_search: int | None = None,
+        metric: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an HNSW approximate-nearest-neighbour index over an embedding
+        store so vector search scales sub-linearly on large stores.
+
+        Opt-in, like :meth:`create_index`: without it, vector search is an exact
+        brute-force scan. Once built, :meth:`vector_search` / :meth:`search_text`
+        auto-use the index for whole-corpus queries on large stores; pass
+        ``exact=True`` to force an exact scan. The index is **dropped
+        automatically** whenever the store's vectors change (``add_embeddings`` /
+        ``embed_texts``) or slots are remapped (``vacuum``) — rebuild it after.
+
+        Args:
+            node_type: The node type (e.g. ``'Article'``).
+            text_column: Source column name (e.g. ``'summary'``; the store is
+                ``'{text_column}_emb'``).
+            m: Max neighbours per node on upper layers (default 16). Higher →
+                better recall, larger index.
+            ef_construction: Build-time search width (default 200). Higher →
+                better graph, slower build.
+            ef_search: Default query-time search width (default 64). Higher →
+                better recall, slower query.
+            metric: ``'cosine'`` (default), ``'dot_product'``, or ``'euclidean'``.
+                ``'poincare'`` is unsupported (stays exact). If omitted, uses the
+                store's metric, else ``'cosine'``.
+
+        Returns:
+            dict: ``{'indexed': int, 'metric': str, 'm': int}``.
+
+        Raises:
+            ValueError: if the store doesn't exist or the metric is unsupported.
+
+        Example::
+
+            g.embed_texts("Article", "summary")
+            g.build_vector_index("Article", "summary")          # opt in
+            hits = g.select("Article").search_text("summary", "AI", top_k=10)
+        """
+        ...
+
+    def drop_vector_index(self, node_type: str, text_column: str) -> bool:
+        """Drop the HNSW index for an embedding store (search reverts to exact).
+
+        Returns ``True`` if an index was dropped, ``False`` if none existed.
+        """
+        ...
+
+    def has_vector_index(self, node_type: str, text_column: str) -> bool:
+        """Whether an HNSW index is currently built over the
+        ``(node_type, text_column)`` embedding store."""
         ...
 
     def begin(self, timeout_ms: Optional[int] = None) -> Transaction:
