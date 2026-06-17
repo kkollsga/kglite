@@ -5,6 +5,8 @@
 //! same crate/module tree); it's the core behind the Python
 //! `KnowledgeGraph.copy_embeddings_from`.
 
+use std::collections::HashMap;
+
 use petgraph::graph::NodeIndex;
 
 use crate::graph::dir_graph::DirGraph;
@@ -69,6 +71,39 @@ impl DirGraph {
         }
 
         (stores_copied, vectors_copied, vectors_skipped)
+    }
+
+    /// Remap every embedding store's internal node indices through `old_to_new`
+    /// after a `vacuum()` rebuilds the graph with contiguous indices. Drops
+    /// vectors whose node was deleted (absent from the map), compacts the data
+    /// buffer to the surviving slots, and resyncs the cached-norm column.
+    /// Extracted from `vacuum()` to keep `dir_graph.rs` under the god-file
+    /// ceiling.
+    pub(crate) fn remap_embedding_slots(&mut self, old_to_new: &HashMap<NodeIndex, NodeIndex>) {
+        for store in self.embeddings.values_mut() {
+            let mut new_node_to_slot = HashMap::with_capacity(store.node_to_slot.len());
+            let mut new_slot_to_node = Vec::with_capacity(store.slot_to_node.len());
+            let mut new_data = Vec::with_capacity(store.data.len());
+
+            for (&old_node_raw, &slot) in &store.node_to_slot {
+                let old_idx = NodeIndex::new(old_node_raw);
+                if let Some(&new_idx) = old_to_new.get(&old_idx) {
+                    let new_slot = new_slot_to_node.len();
+                    new_node_to_slot.insert(new_idx.index(), new_slot);
+                    new_slot_to_node.push(new_idx.index());
+                    let start = slot * store.dimension;
+                    let end = start + store.dimension;
+                    new_data.extend_from_slice(&store.data[start..end]);
+                }
+                // Deleted nodes (not in old_to_new) are dropped.
+            }
+
+            store.node_to_slot = new_node_to_slot;
+            store.slot_to_node = new_slot_to_node;
+            store.data = new_data;
+            // Slots were remapped wholesale; resync the cached-norm column.
+            store.rebuild_norms();
+        }
     }
 }
 

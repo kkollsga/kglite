@@ -8,4 +8,5 @@
 pub mod centrality;
 pub mod clustering;
 pub mod graph_algorithms;
+pub mod hnsw;
 pub mod vector;

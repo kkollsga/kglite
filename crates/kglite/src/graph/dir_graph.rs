@@ -2639,31 +2639,8 @@ impl DirGraph {
         // Replace graph storage
         self.graph = GraphBackend::Memory(MemoryGraph(new_graph));
 
-        // Remap embedding stores to use new node indices
-        for store in self.embeddings.values_mut() {
-            let mut new_node_to_slot = HashMap::with_capacity(store.node_to_slot.len());
-            let mut new_slot_to_node = Vec::with_capacity(store.slot_to_node.len());
-            let mut new_data = Vec::with_capacity(store.data.len());
-
-            for (&old_node_raw, &slot) in &store.node_to_slot {
-                let old_idx = NodeIndex::new(old_node_raw);
-                if let Some(&new_idx) = old_to_new.get(&old_idx) {
-                    let new_slot = new_slot_to_node.len();
-                    new_node_to_slot.insert(new_idx.index(), new_slot);
-                    new_slot_to_node.push(new_idx.index());
-                    let start = slot * store.dimension;
-                    let end = start + store.dimension;
-                    new_data.extend_from_slice(&store.data[start..end]);
-                }
-                // Deleted nodes (not in old_to_new) are dropped
-            }
-
-            store.node_to_slot = new_node_to_slot;
-            store.slot_to_node = new_slot_to_node;
-            store.data = new_data;
-            // Slots were remapped wholesale; resync the cached-norm column.
-            store.rebuild_norms();
-        }
+        // Remap embedding stores to use new node indices (see embedding_carry.rs).
+        self.remap_embedding_slots(&old_to_new);
 
         // Rebuild all indexes from the compacted graph
         self.reindex();
