@@ -92,6 +92,16 @@ rebuilds: build a new graph, `freeze()` it, serve readers off the snapshot, and
 atomically swap in the next snapshot when the data changes — rather than a
 global lock around a single mutable instance.
 
+**How well it scales depends on what the query does.** Independent
+validation across a `freeze()` snapshot measured near-linear scaling for
+**CPU-bound** queries (traversal + aggregation: ~1.95× / 3.6× / 6.3× at
+2 / 4 / 8 threads) and sub-linear scaling for **memory-bandwidth-bound** ones
+(a full-scan `count_edges` over ~1M edges: ~1.5× at 4 threads, tailing off at 8)
+— the latter is the memory bus saturating, not a `freeze()` limit. Practical
+guidance: fan out `freeze()` readers aggressively for compute-heavy work
+(traversals, scoring, aggregation over filtered sets); expect diminishing
+returns when the bottleneck is one big sequential scan of the whole graph.
+
 ## How the mutation path is isolated
 
 `graph.cypher("CREATE ...")` (and any other mutation) needs an

@@ -457,8 +457,9 @@ graph.drop_vector_index('Article', 'summary')   # revert to exact
 - The index is **dropped automatically** when the store's vectors change
   (`add_embeddings`, `embed_texts`) or slots are remapped (`vacuum`) — rebuild
   after. It **persists in the `.kgl`** (and `to_bytes()`).
-- The Cypher `text_score()` / `vector_score()` path currently always scans
-  exactly; the index accelerates this fluent API.
+- The Cypher `text_score()` / `vector_score()` whole-corpus top-k
+  (`... ORDER BY score DESC LIMIT k`) also auto-uses the index; a heavily-
+  filtered Cypher query stays exact.
 
 ### Semantic Search via Cypher
 

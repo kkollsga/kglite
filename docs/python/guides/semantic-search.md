@@ -207,10 +207,17 @@ automatically. Key points:
   filter is tight. (So an index helps "search the whole corpus", not "search a
   small filtered slice".)
 - **Approximate.** Recall depends on your data and `ef_search`: well-structured
-  embeddings (sentence-transformers, etc.) typically get ≥0.9 recall@10 at the
-  defaults; raise `ef_search` for higher recall at some latency cost, or use
-  `exact=True` when you can't tolerate any miss. Structureless data (e.g. random
-  vectors) is a poor fit for *any* ANN — prefer `exact=True` there.
+  embeddings (sentence-transformers, bge, OpenAI, etc.) typically get ≥0.99
+  recall@10 at the defaults; raise `ef_search` for higher recall at some latency
+  cost, or use `exact=True` when you can't tolerate any miss.
+
+  > **Benchmark HNSW on *real* embeddings, not random vectors.** Random unit
+  > vectors in high dimensions have no neighbourhood structure — every pair is
+  > nearly orthogonal (all cosine sims ≈ 0) — so *any* ANN scores terribly on
+  > them (recall can look like ~0.2). That's the curse of dimensionality, not an
+  > engine defect: on real embeddings the same index hits ~0.99. If you must
+  > sanity-check on synthetic data, query with *stored* vectors (which have a
+  > true nearest neighbour) rather than fresh random ones.
 - **Metrics.** cosine / dot_product / euclidean are indexable; `poincare` always
   uses the exact path.
 - **Lifecycle.** The index is **dropped automatically** whenever the store's
@@ -231,9 +238,14 @@ graph.has_vector_index('Article', 'summary')   # True
 graph.save('articles.kgl')                       # index travels with the file
 ```
 
-> The Cypher `text_score()` / `vector_score()` path currently always uses the
-> exact scan; the index accelerates the fluent `vector_search` / `search_text`
-> API.
+> The Cypher `text_score()` / `vector_score()` whole-corpus top-k
+> (`RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k`) auto-uses the
+> index too — so agent/MCP semantic search via Cypher benefits as well. The
+> end-to-end win is smaller than the fluent API's, though: Cypher's fixed
+> per-query cost (parse + plan + projection) is a bigger share of the total, so
+> the index saving shows through less at small/medium corpus sizes and widens as
+> the corpus grows. A heavily-filtered Cypher query (selective `WHERE`) stays
+> exact.
 
 ### Choosing a Distance Metric
 
@@ -367,3 +379,10 @@ graph.export_embeddings("embeddings.kgle", ["Article", "Author"])
 result = graph.import_embeddings("embeddings.kgle")
 # {'stores': 2, 'imported': 4800, 'skipped': 200}
 ```
+
+A `.kgle` carries each store's **provenance** — its `metric`, the embedder
+`model_id`, and per-node text hashes — so a rebuild-from-`.kgle` pipeline keeps
+it: after import, `embedding_info()` reports the model/metric, and
+`embed_texts(mode='changed')` re-embeds only genuinely-changed text instead of
+everything. (Older `.kgle` files written before this — format v1 — still import;
+they simply carry no provenance, so `mode='changed'` treats every node as new.)

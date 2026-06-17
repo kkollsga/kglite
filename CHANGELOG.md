@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-06-17 — HNSW in Cypher, faster index build, embedding-provenance papercuts
+
+Follow-up to 0.11.0, driven by the mcp-servers operator's independent
+validation (exact-search parity + 1.83× speedup, near-linear concurrent-read
+scaling, HNSW 0.997 recall @ 5.6× on a real 46k×1024 store — 15/16 reported
+painpoints verified resolved). This closes the remaining items.
+
+### Added
+
+- **Cypher `vector_score()` / `text_score()` top-k now auto-uses the HNSW
+  index.** A whole-corpus `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC
+  LIMIT k` (and the `text_score` form) dispatches through a built index instead
+  of scoring every row — so agent/MCP semantic search done via Cypher benefits
+  too. Opt-in (only fires when `build_vector_index` was called), re-scores
+  survivors with the exact `Scorer` (identical score scale), and falls back to
+  the exact scan for any shape it can't faithfully serve (ASC order,
+  mixed/unbound types, duplicate node bindings, Poincaré, dimension mismatch, or
+  a selective `WHERE` whose survivors underfill the limit). Independently
+  validated at recall@10 0.994 with exact score parity on a real 46k×1024 store.
+  The end-to-end Cypher speedup is more modest than the fluent API's (~2.3× at
+  46k vs ~5.6×): Cypher's fixed per-query cost (parse + plan + projection) is a
+  larger share of the total at this corpus size, so the index saving shows
+  through less — the gap widens on larger corpora where the scan dominates.
+
+### Changed
+
+- **`embedding_info()` / `list_embeddings()` report the *effective* metric.** A
+  store created by `embed_texts` (which sets no explicit metric) used to report
+  `metric: None` even though search applies cosine. Both methods now report the
+  metric search actually uses — the explicit one if set, else `'cosine'` — and
+  never `None` for an existing store. Pure reporting; no stored-data or format
+  change.
+- **`.kgle` export/import carries embedding provenance (format v2).**
+  `export_embeddings` / `import_embeddings` now round-trip each store's `metric`
+  + embedder `model_id` + per-node text hashes, so a rebuild-from-`.kgle`
+  pipeline keeps provenance and `embed_texts(mode='changed')` re-embeds only
+  changed text instead of everything. Older v1 `.kgle` files still import (they
+  carry no provenance — `mode='changed'` treats every node as new).
+
+### Performance
+
+- **HNSW index build is ~5–6× faster (concurrent).** Build was single-threaded
+  (~43s on a 46k×1024 store — the new engine's one rough edge). Inserts now run
+  on rayon: the vectors are immutable during a build, so each insert reads the
+  growing graph through per-node `RwLock` read locks and writes only its own +
+  its neighbours' link lists (one lock at a time → deadlock-free). Measured on
+  10 cores: 10k×128 1.9s→0.3s (6.3×), 50k×128 16s→2.8s (5.7×), 100k×256 77s→14s
+  (5.4×). Recall and query latency are unchanged. The seeded level assignment
+  stays deterministic; the link graph now differs run-to-run (recall is
+  statistically equivalent — the index is a rebuildable cache).
+
+### Documentation
+
+- semantic-search guide: the Cypher index path, `.kgle` provenance, and a
+  "benchmark HNSW on *real* embeddings, not random vectors" note (random
+  high-dim vectors have no neighbourhood structure → any ANN looks bad; ~0.99 on
+  real data). Concurrency guide: a `freeze()` fan-out scaling note (near-linear
+  for CPU-bound queries, sub-linear for bandwidth-bound full scans).
+
+### CI
+
+- Wheel builds now run in parallel with CI (publish still gated on CI passing) —
+  cuts the release pipeline wall-clock roughly in half — and the
+  aarch64-unknown-linux-gnu (manylinux2014) wheel build is fixed (`ring`'s ARM
+  asm needs `__ARM_ARCH` defined in that cross image).
+
 ## [0.11.0] — 2026-06-17 — concurrency snapshots, durable save, embedding provenance, edge upsert, portable wheels
 
 Cut as a **minor** (0.11.0), not a patch: this release adds new public API

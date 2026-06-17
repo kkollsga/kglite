@@ -254,11 +254,22 @@ The embedding store key is `{text_column}_emb` (set via
 `set_embeddings(node_type, text_column, {id: vector})`), so embeddings set on
 the `summary` column are scored as `vector_score(a, 'summary_emb', …)`.
 
-> **Exact scan.** `vector_score` / `text_score` always score every candidate
-> exactly. The opt-in HNSW approximate index (`build_vector_index`) accelerates
-> the fluent `vector_search()` / `search_text()` API for whole-corpus top-k;
-> wiring it into this Cypher path is a planned follow-up. For now, use the
-> fluent API when you need indexed (sub-linear) search over a large corpus.
+> **`vector_score` takes the store name, `text_score` takes the raw column.**
+> `vector_score` names the store directly — `'summary_emb'`. `text_score` names
+> the source *column* — `'summary'` (it resolves to `summary_emb` and auto-embeds
+> the query for you). That's why the example above uses `text_score(p, 'text', …)`
+> (raw column `text`), not `'text_emb'`. The Python API (`embedding_info`,
+> `vector_search`, `search_text`) likewise uses the raw column name throughout;
+> only Cypher's `vector_score` is in store-name terms.
+
+> **Index-accelerated top-k.** When an HNSW index is built
+> (`build_vector_index`), a whole-corpus top-k —
+> `RETURN vector_score(n, prop, q) AS s ORDER BY s DESC LIMIT k` (and the
+> `text_score` form) — auto-uses it, the same opt-in approximate path the
+> fluent API uses. Without an index, or for a selective `WHERE` that filters
+> the candidates, scoring is the exact brute-force scan. So building an index
+> speeds up "search the whole corpus by similarity"; a heavily-filtered query
+> stays exact.
 
 ## Spatial Functions
 
