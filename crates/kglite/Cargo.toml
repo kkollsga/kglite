@@ -107,6 +107,12 @@ wikidata = [
     # explicitly for the ~10× speedup on M-series hardware.
 ]
 
+# `--cfg loom` is set manually when running the loom interleaving model
+# (tests/loom_session.rs); register it so normal builds don't warn (and
+# `make lint`'s `-D warnings` doesn't fail) on the `#[cfg(loom)]` gate.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [dependencies]
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 fastembed = { version = "5", optional = true, default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
@@ -182,6 +188,13 @@ yaml-rust2 = { version = "0.10", optional = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# loom — exhaustive interleaving model-checker for the Session commit/snapshot
+# lock pattern. Only pulled in under `--cfg loom` (the loom test is
+# `#![cfg(loom)]`), so normal `cargo test` / `cargo build` never compile it.
+# Run: RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
 
 # docs.rs builds with these features so the published API page covers
 # the dataset loaders + fastembed adapter, which would otherwise be
