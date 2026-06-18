@@ -960,8 +960,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         };
 
         // Store the report in the new graph
@@ -1042,8 +1041,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         };
 
         // Record plan step
@@ -1167,8 +1165,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         };
 
         // Store the report
@@ -1295,8 +1292,7 @@ impl KnowledgeGraph {
                         embedder: self.embedder.as_ref().map(Arc::clone),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
-                        source_path: None,
-                        durable: None,
+                        lifecycle: crate::graph::GraphLifecycle::detached(),
                     };
 
                     // Store the calculation report
@@ -1464,8 +1460,7 @@ impl KnowledgeGraph {
                 embedder: self.embedder.as_ref().map(Arc::clone),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
-                source_path: None,
-                durable: None,
+                lifecycle: crate::graph::GraphLifecycle::detached(),
             };
 
             // Add the report
@@ -1712,8 +1707,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         }
     }
 

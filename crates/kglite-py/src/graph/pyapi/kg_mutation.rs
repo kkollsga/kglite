@@ -880,8 +880,7 @@ impl KnowledgeGraph {
             embedder: None,
             default_timeout_ms: None,
             default_max_rows: None,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         })
     }
 }
