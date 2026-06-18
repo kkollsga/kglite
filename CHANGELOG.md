@@ -40,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifecycle now separated into `CursorState` + `GraphLifecycle`; see
   `roadmap.md`).
 
+### Fixed
+
+- **Core `Session::commit` TOCTOU race (concurrent committers could lose a
+  commit or move the version backwards).** The optimistic-concurrency version
+  check read the graph version under one lock acquisition and then swapped the
+  graph under a *separate* one, so two threads committing at once could both
+  pass the check and both swap — losing one commit, and (because the new
+  version was derived from the transaction's possibly-stale base) leaving the
+  monotonic version counter non-monotonic. The check and swap now happen under
+  a single lock guard, and the version bumps from the *current* value, so
+  commits are atomic and the version is monotonic even in last-writer-wins
+  mode. Affects the **bolt-server** (which drives the core `Session` from many
+  connection threads with no serializing lock); the Python `Session` was
+  unaffected (its writer lock already serialized committers). Found by new
+  true-parallel Rust concurrency tests + an opt-in Python stress harness
+  (`-m stress`).
+
 ## [0.11.2] — 2026-06-18 — bundled synthetic-graph generator + public benchmark
 
 ### Added

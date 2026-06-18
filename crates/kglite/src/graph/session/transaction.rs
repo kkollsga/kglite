@@ -125,20 +125,30 @@ impl Session {
             return CommitOutcome::NoWritesNoOp;
         };
 
-        if check_occ {
-            let current_version = self.version();
-            if current_version != base_version {
-                return CommitOutcome::ConflictDetected {
-                    current_version,
-                    base_version,
-                };
-            }
+        // Hold ONE lock guard across both the OCC check and the Arc swap so
+        // check-and-swap is atomic. Reading the version via `self.version()`
+        // (which locks, clones, unlocks) and then swapping under a *separate*
+        // lock acquisition is a TOCTOU race: two concurrent committers could
+        // both pass the check and both swap — losing one commit and even
+        // moving the version backwards. The Python `Session` masks this with a
+        // writer lock (one committer at a time), but the core `Session` is
+        // driven concurrently by the bolt-server, so the atomicity must live
+        // here. (std `Mutex` is not reentrant, so read the version off the
+        // guarded Arc, never via `self.version()`.)
+        let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
+        let current_version = guard.version();
+        if check_occ && current_version != base_version {
+            return CommitOutcome::ConflictDetected {
+                current_version,
+                base_version,
+            };
         }
 
-        // Bump the working DirGraph's version then swap it in.
-        let new_version = base_version + 1;
+        // Bump from the *current* version (not the possibly-stale base) so the
+        // version is monotonic even in last-writer-wins mode (check_occ=false).
+        let new_version = current_version + 1;
         working.set_version(new_version);
-        *self.graph.lock().unwrap_or_else(|p| p.into_inner()) = Arc::new(working);
+        *guard = Arc::new(working);
         CommitOutcome::Committed { new_version }
     }
 
@@ -402,21 +412,19 @@ mod tests {
         let mut tx_b = s.begin();
         let _ = tx_b.working_mut().unwrap();
 
-        // Without OCC, both commits succeed; B's wins because it
-        // landed after A would have.
+        // Without OCC, both commits succeed; B's data wins (it swaps last).
         let outcome_a = s.commit(tx_a, /* check_occ = */ false);
         let outcome_b = s.commit(tx_b, /* check_occ = */ false);
         assert!(matches!(outcome_a, CommitOutcome::Committed { .. }));
         assert!(matches!(outcome_b, CommitOutcome::Committed { .. }));
-        // Two commits → version bumped twice (each commit was a
-        // separate Arc swap; version starts at 0 → 1 → 1 since each
-        // commit reads base_version from the tx, not the shared
-        // graph).
-        //
-        // Actually each tx's base_version is 0 (both began before
-        // any commit). So both bump 0→1. The shared graph ends at
-        // version 1.
-        assert_eq!(s.version(), 1);
+        // Two commits → version 2, monotonic. Each commit bumps from the
+        // *current* version under the lock (0→1→2), NOT from the tx's
+        // (possibly stale) base_version. Monotonicity is required for OCC
+        // soundness: "version changed ⇒ graph changed" must hold, so two
+        // changes must yield two distinct versions even in last-writer-wins
+        // mode. (The prior behaviour bumped from base_version, leaving both at
+        // 1 — a latent bug where a later OCC tx could miss B's change.)
+        assert_eq!(s.version(), 2);
     }
 
     #[test]
@@ -448,5 +456,133 @@ mod tests {
         let tx = s.begin();
         let _ = s.commit(tx, true);
         // Cannot call s.commit(tx, true) again — tx was moved.
+    }
+
+    // ── True-parallel concurrency tests ─────────────────────────────────
+    //
+    // Unlike the Python-level Session stress tests (which the GIL partly
+    // serialises), these drive the core `Session` from real OS threads with
+    // no GIL — so they exercise genuine parallel access to the
+    // `Mutex<Arc<DirGraph>>`, the snapshot/commit Arc-swap, and the OCC
+    // version check. They are the intended targets for `cargo +nightly test
+    // -Z sanitizer=thread` (see docs/rust/concurrency-verification.md): a data
+    // race in the locking/commit path surfaces here, not in single-threaded
+    // tests.
+
+    #[test]
+    fn concurrent_writers_compose_with_occ_retry() {
+        // N threads each commit `per` times via begin → mutate → commit with
+        // OCC, retrying on conflict. Every commit must land exactly once:
+        // final version == N*per. A lost commit (racey Arc-swap or version
+        // bump) would show as version < N*per; a double-apply as version >.
+        const N: u64 = 8;
+        const PER: u64 = 200;
+        let session = Arc::new(Session::new(empty_graph()));
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let s = Arc::clone(&session);
+                std::thread::spawn(move || {
+                    for _ in 0..PER {
+                        loop {
+                            let mut tx = s.begin();
+                            // Materialise a working copy so the commit counts
+                            // as a write (bumps version + swaps).
+                            tx.working_mut().expect("rw tx");
+                            match s.commit(tx, /* check_occ = */ true) {
+                                CommitOutcome::Committed { .. } => break,
+                                CommitOutcome::ConflictDetected { .. } => continue,
+                                CommitOutcome::NoWritesNoOp => {
+                                    panic!("materialised tx must commit as a write")
+                                }
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        assert_eq!(
+            session.version(),
+            N * PER,
+            "OCC-retried commits must compose with no lost or doubled updates"
+        );
+    }
+
+    #[test]
+    fn occ_detects_conflict_between_overlapping_txs() {
+        // Two txs from the same base version: the first commits, the second
+        // must be told it conflicts (its base is now stale).
+        let s = Session::new(empty_graph());
+        let mut tx1 = s.begin();
+        tx1.working_mut().unwrap();
+        let mut tx2 = s.begin();
+        tx2.working_mut().unwrap();
+        assert!(matches!(
+            s.commit(tx1, true),
+            CommitOutcome::Committed { .. }
+        ));
+        assert!(matches!(
+            s.commit(tx2, true),
+            CommitOutcome::ConflictDetected { .. }
+        ));
+        assert_eq!(s.version(), 1, "only the winning commit bumped the version");
+    }
+
+    #[test]
+    fn concurrent_snapshots_consistent_under_commits() {
+        // Readers take snapshots + read the version while writers commit. A
+        // snapshot's version must always be a committed value (0..=total) and
+        // monotonically non-decreasing per reader — the Arc swap is atomic.
+        const WRITERS: u64 = 4;
+        const PER: u64 = 250;
+        const READERS: usize = 4;
+        let total = WRITERS * PER;
+        let session = Arc::new(Session::new(empty_graph()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                let s = Arc::clone(&session);
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut last = 0u64;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let snap = s.snapshot();
+                        let v = snap.version();
+                        assert!(v <= total, "snapshot version {v} exceeds total {total}");
+                        assert!(v >= last, "version went backwards: {v} < {last}");
+                        last = v;
+                    }
+                })
+            })
+            .collect();
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                let s = Arc::clone(&session);
+                std::thread::spawn(move || {
+                    for _ in 0..PER {
+                        loop {
+                            let mut tx = s.begin();
+                            tx.working_mut().unwrap();
+                            if matches!(s.commit(tx, true), CommitOutcome::Committed { .. }) {
+                                break;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in writers {
+            h.join().unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in readers {
+            h.join().unwrap();
+        }
+        assert_eq!(session.version(), total);
     }
 }
