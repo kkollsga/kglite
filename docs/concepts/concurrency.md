@@ -100,7 +100,7 @@ rebuilds: build a new graph, `freeze()` it, serve readers off the snapshot, and
 atomically swap in the next snapshot when the data changes — rather than a
 global lock around a single mutable instance.
 
-## The `Session` handle — shared reads *and* writes (0.12)
+## The `Session` handle — shared reads *and* writes (0.11.3)
 
 `freeze()` solves *shared reads*. When a server must also **mutate** one graph
 from many threads — the shape that forces consumers to wrap every call in a
