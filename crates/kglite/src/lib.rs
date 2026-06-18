@@ -46,6 +46,7 @@ pub mod datasets;
 pub mod datatypes;
 pub mod error;
 pub mod graph;
+pub mod graphgen;
 #[cfg(feature = "okf")]
 pub mod okf;
 pub mod param;
@@ -69,6 +70,10 @@ pub mod api {
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
     pub use crate::graph::explore::{explore_markdown, ExploreOptions};
+    /// Streaming synthetic-graph generator — `generate_to_dir(&config, dir)`
+    /// streams the benchmark/demo graph as CSVs + a manifest in bounded memory.
+    /// Surfaced through the wheel as `kglite.graphgen(...)`.
+    pub use crate::graphgen::{generate_to_dir as graphgen, GraphGenConfig, GraphGenStats};
     // Inline timeseries config types (lifted from kglite-py in 0.10.1).
     pub use crate::graph::features::timeseries::{InlineTimeseriesConfig, TimeSpec};
     // Thin pure-Rust graph handle for embedders + the free function

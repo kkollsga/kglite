@@ -135,6 +135,11 @@ rustworkx** when you want NetworkX's API in Rust with no query
 language. **Pick Neo4j Embedded** when you've standardised on
 server-mode Cypher and want the in-process driver for tests.
 
+📊 **[Benchmarks →](BENCHMARKS.md)** — wall-to-wall time per topic (load,
+filter/aggregate, traversal, pathfinding, algorithms, mutations) vs Kùzu,
+NetworkX, rustworkx, igraph, and DuckDB on one shared synthetic graph.
+Reproduce with `python benchmarks/benchmark.py`.
+
 ## Quick Start
 
 ```bash
