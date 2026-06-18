@@ -685,8 +685,7 @@ impl KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         };
 
         // Create and add a report

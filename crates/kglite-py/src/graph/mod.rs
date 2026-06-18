@@ -194,22 +194,43 @@ pub struct KnowledgeGraph {
     /// explicitly passed. Queries exceeding this limit return an error.
     /// None = no limit (default).
     pub(crate) default_max_rows: Option<usize>,
-    /// Path this graph was opened from / last associated with, if any.
-    /// Set by `kglite.open(path)` and `kglite.load(path)`; lets `save()`
-    /// default to the origin file and powers the context-manager
-    /// auto-save-on-close lifecycle (see `__enter__`/`__exit__`/`close`).
-    /// `None` for graphs built in memory and for derived views — a
-    /// `.select()` / subgraph view does not inherit a save target. A true
-    /// `Clone` preserves it (same graph identity).
+    /// Graph lifecycle / identity — save target + durability session. See
+    /// [`GraphLifecycle`].
+    pub(crate) lifecycle: GraphLifecycle,
+}
+
+/// Graph **lifecycle / identity** state — the save target plus the durability
+/// session. These are the fields that genuinely cannot be shared or cloned
+/// freely: `durable` owns an OS `File` handle (the WAL) so it is `None` on
+/// every clone/derived view, and `source_path` is the graph's save identity
+/// (preserved by a true `Clone`, reset on `copy()` / derived views).
+///
+/// Grouped out of the `KnowledgeGraph` god-object alongside [`CursorState`]
+/// (per-query) and the shared `DirGraph` (storage). This is the surface a
+/// future core-`Session` lifecycle lift would target (see `roadmap.md`).
+pub(crate) struct GraphLifecycle {
+    /// Path this graph was opened from / last associated with, if any. Set by
+    /// `kglite.open(path)` / `kglite.load(path)`; lets `save()` default to the
+    /// origin file and powers the context-manager auto-save-on-close lifecycle.
+    /// `None` for in-memory graphs and derived views.
     pub(crate) source_path: Option<std::path::PathBuf>,
     /// Durability state for a graph opened with `durable=True`: the
-    /// session-scoped WAL handle plus the next log-sequence number.
-    /// `Some` only on the primary durable graph from `kglite.open(...,
-    /// durable=True)`; `None` everywhere else, including on every clone /
-    /// derived view (a `File` handle isn't shareable and a view isn't the
-    /// durable session). When `Some`, the graph's backend is wrapped in
+    /// session-scoped WAL handle plus the next log-sequence number. `Some`
+    /// only on the primary durable graph; `None` everywhere else (a `File`
+    /// handle isn't shareable). When `Some`, the backend is wrapped in
     /// `GraphBackend::Recording` so mutations are captured for the WAL.
     pub(crate) durable: Option<DurableState>,
+}
+
+impl GraphLifecycle {
+    /// A detached lifecycle: no save target, not durable. Used by in-memory
+    /// constructors, `copy()`, and every derived view.
+    pub(crate) fn detached() -> Self {
+        GraphLifecycle {
+            source_path: None,
+            durable: None,
+        }
+    }
 }
 
 /// Session-scoped durability state held by a durable [`KnowledgeGraph`].
@@ -259,8 +280,7 @@ impl KnowledgeGraph {
             embedder: None,
             default_timeout_ms: None,
             default_max_rows: None,
-            source_path: None,
-            durable: None,
+            lifecycle: crate::graph::GraphLifecycle::detached(),
         }
     }
 
@@ -317,11 +337,11 @@ impl KnowledgeGraph {
     /// the `fsync` inside makes the committed mutation crash-safe before
     /// control returns to the caller.
     pub(crate) fn flush_wal(&mut self) -> std::io::Result<()> {
-        if self.durable.is_none() {
+        if self.lifecycle.durable.is_none() {
             return Ok(());
         }
         // Drain + resolve in a scope so the `self.inner` borrow ends before
-        // we touch the `self.durable` field (disjoint, but keep it clean).
+        // we touch the `self.lifecycle.durable` field (disjoint, but keep it clean).
         let ops = {
             let dir = get_graph_mut(&mut self.inner);
             let raw = match &mut dir.graph {
@@ -336,6 +356,7 @@ impl KnowledgeGraph {
             kglite_core::graph::storage::recording::resolve_ops(&raw, &dir.graph, &dir.interner)
         };
         let ds = self
+            .lifecycle
             .durable
             .as_mut()
             .expect("durable checked Some above; not cleared in between");
@@ -354,8 +375,12 @@ impl Clone for KnowledgeGraph {
             embedder: self.embedder.as_ref().map(Arc::clone),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
-            source_path: self.source_path.clone(),
-            durable: None,
+            // A true Clone preserves the save identity (source_path) but never
+            // the durable session (the WAL File handle isn't shareable).
+            lifecycle: GraphLifecycle {
+                source_path: self.lifecycle.source_path.clone(),
+                durable: None,
+            },
         }
     }
 }

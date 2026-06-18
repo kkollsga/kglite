@@ -545,6 +545,7 @@ impl KnowledgeGraph {
         let effective: String = match path {
             Some(p) => p.to_string(),
             None => self
+                .lifecycle
                 .source_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -558,7 +559,7 @@ impl KnowledgeGraph {
         };
         // Remember the target so a later bare save() / auto-save-on-close
         // writes back to the same file ("save as" updates the home path).
-        self.source_path = Some(std::path::PathBuf::from(&effective));
+        self.lifecycle.source_path = Some(std::path::PathBuf::from(&effective));
         let path: &str = &effective;
 
         // Disk mode: save as directory (the folder IS the graph)
@@ -594,13 +595,13 @@ impl KnowledgeGraph {
         // the WAL. Order matters — the .kgl write above succeeded before we
         // truncate, and replay is idempotent, so a crash between the two
         // only costs a harmless re-apply on the next open.
-        if self.durable.is_some() {
+        if self.lifecycle.durable.is_some() {
             if let kglite_core::graph::schema::GraphBackend::Recording(rg) =
                 &mut Arc::make_mut(&mut self.inner).graph
             {
                 let _ = rg.take_ops();
             }
-            if let Some(ds) = self.durable.as_mut() {
+            if let Some(ds) = self.lifecycle.durable.as_mut() {
                 ds.wal
                     .reset()
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
@@ -699,7 +700,7 @@ impl KnowledgeGraph {
     /// raising on a best-effort cleanup call. Pair with `save(path)` if you
     /// need an explicit target.
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.source_path.is_some() {
+        if self.lifecycle.source_path.is_some() {
             self.save(py, None, true)?;
         }
         Ok(())
@@ -728,7 +729,7 @@ impl KnowledgeGraph {
         _exc_value: &Bound<'_, pyo3::PyAny>,
         _traceback: &Bound<'_, pyo3::PyAny>,
     ) -> PyResult<bool> {
-        if exc_type.is_none() && self.source_path.is_some() {
+        if exc_type.is_none() && self.lifecycle.source_path.is_some() {
             self.save(py, None, true)?;
         }
         Ok(false)

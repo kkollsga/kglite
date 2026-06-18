@@ -171,7 +171,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
     py.detach(|| load_file(&path))
         .map(|inner| {
             let mut kg = KnowledgeGraph::from_arc(inner);
-            kg.source_path = Some(std::path::PathBuf::from(&path));
+            kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
             kg
         })
         .map_err(|e| load_err_to_pyerr(e, Some(&path)))
@@ -219,7 +219,7 @@ fn open(
     } else {
         KnowledgeGraph::construct(storage, Some(&path))?
     };
-    kg.source_path = Some(std::path::PathBuf::from(&path));
+    kg.lifecycle.source_path = Some(std::path::PathBuf::from(&path));
     if durable {
         setup_durable(&mut kg, &path)?;
     }
@@ -256,7 +256,7 @@ fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
 
     let walh = wal::Wal::open(wpath)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-    kg.durable = Some(crate::graph::DurableState {
+    kg.lifecycle.durable = Some(crate::graph::DurableState {
         wal: walh,
         next_lsn: max_lsn + 1,
     });
