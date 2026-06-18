@@ -161,6 +161,61 @@ def repo_tree(
     return _repo_tree(repo, **kwargs)
 
 
+def graphgen(
+    scale: str = "medium",
+    *,
+    persons: "int | None" = None,
+    seed: int = 1234,
+    knows_per: int = 8,
+    degree_dist: str = "zipf",
+    zipf_exp: float = 1.6,
+    out: "str | None" = None,
+):
+    """Generate a synthetic org/social knowledge graph (bundled, no extra deps).
+
+    A seed-deterministic graph of Person/Company/Project/Skill/City nodes +
+    KNOWS/WORKS_AT/CONTRIBUTES_TO/HAS_SKILL/OWNS/DEPENDS_ON/LOCATED_IN edges —
+    handy for demos, tests, and benchmarks.
+
+    - ``out=None`` (default): build and return a :class:`KnowledgeGraph`, ready
+      to query. Best for small/medium scales (needs ``pandas``).
+    - ``out=DIR``: stream one CSV per type + ``manifest.json`` into ``DIR`` in
+      **bounded memory** (millions of nodes at flat RAM); returns a stats dict
+      ``{'nodes', 'edges', 'out'}``. Load later with your own pipeline, or with
+      any engine — every backend that reads the same bytes gets the same graph.
+
+    Args:
+        scale: ``tiny`` | ``small`` | ``medium`` (default) | ``large`` |
+            ``huge`` | ``xhuge`` — sets the Person count (everything else scales
+            off it). Ignored if ``persons`` is given.
+        persons: Exact Person count (overrides ``scale``).
+        seed: Deterministic seed.
+        knows_per: Average KNOWS out-degree per person.
+        degree_dist: ``'zipf'`` (default; high-degree hubs — realistic, makes
+            multi-hop traversal interesting) or ``'uniform'``.
+        zipf_exp: Zipf skew exponent (>1 → stronger hubs).
+        out: Output directory for streaming mode, or ``None`` to return a graph.
+
+    Example::
+
+        g = kglite.graphgen("medium")                  # a graph to query now
+        g.cypher("MATCH (p:Person)-[:KNOWS]->(f) RETURN count(f)")
+
+        kglite.graphgen("huge", out="/tmp/g")           # stream 5M persons to CSV
+    """
+    from ._graphgen import generate
+
+    return generate(
+        scale,
+        persons=persons,
+        seed=seed,
+        knows_per=knows_per,
+        degree_dist=degree_dist,
+        zipf_exp=zipf_exp,
+        out=out,
+    )
+
+
 def from_networkx(
     nx_graph,
     *,
@@ -210,6 +265,7 @@ __all__ = [
     "from_blueprint",
     "build_code_tree",
     "repo_tree",
+    "graphgen",
     "to_neo4j",
     "from_networkx",
     "Agg",

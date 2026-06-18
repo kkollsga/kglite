@@ -500,6 +500,41 @@ def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
     """
     ...
 
+def graphgen(
+    scale: str = "medium",
+    *,
+    persons: int | None = None,
+    seed: int = 1234,
+    knows_per: int = 8,
+    degree_dist: str = "zipf",
+    zipf_exp: float = 1.6,
+    out: str | None = None,
+) -> KnowledgeGraph | dict[str, Any]:
+    """Generate a synthetic org/social knowledge graph (bundled, no extra deps).
+
+    Seed-deterministic Person/Company/Project/Skill/City nodes +
+    KNOWS/WORKS_AT/CONTRIBUTES_TO/HAS_SKILL/OWNS/DEPENDS_ON/LOCATED_IN edges —
+    for demos, tests, and benchmarks.
+
+    - ``out=None`` (default): build and return a :class:`KnowledgeGraph` (best
+      for small/medium; needs ``pandas``).
+    - ``out=DIR``: stream one CSV per type + ``manifest.json`` into ``DIR`` in
+      bounded memory (millions of nodes at flat RAM); returns
+      ``{'nodes', 'edges', 'out'}``.
+
+    Args:
+        scale: ``tiny`` | ``small`` | ``medium`` (default) | ``large`` |
+            ``huge`` | ``xhuge`` — sets the Person count. Ignored if ``persons``
+            is given.
+        persons: Exact Person count (overrides ``scale``).
+        seed: Deterministic seed.
+        knows_per: Average KNOWS out-degree per person.
+        degree_dist: ``'zipf'`` (hubs; default) or ``'uniform'``.
+        zipf_exp: Zipf skew exponent (>1 → stronger hubs).
+        out: Output directory for streaming mode, or ``None`` to return a graph.
+    """
+    ...
+
 def open(path: str, *, storage: str | None = None, durable: bool = False) -> KnowledgeGraph:
     """Open a graph at ``path`` — load it if it exists, create a fresh one if
     it doesn't (load-or-create). The embedded-database lifecycle entry point.

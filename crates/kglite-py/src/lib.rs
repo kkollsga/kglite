@@ -37,6 +37,7 @@ mod code_tree;
 mod datatypes;
 mod error_py;
 mod graph;
+mod graphgen;
 mod okf;
 mod sec;
 mod sodir;
@@ -348,6 +349,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // error surfaces as `kglite.KgError` or a more specific subclass.
     error_py::register(py, m)?;
     code_tree::pyapi::register(py, m)?;
+    graphgen::register(py, m)?;
     okf::pyapi::register(py, m)?;
     sec::register(py, m)?;
     sodir::register(py, m)?;
