@@ -25,6 +25,14 @@ the two documented contention quirks.
   panics or corrupts). For shared concurrent reads, take an immutable
   `graph.freeze()` snapshot; for per-worker mutation, give each thread its
   own cheap `copy()`. See the next section.
+- **A `Session` is shareable for reads *and* writes.** When you need many
+  threads to read **and** mutate one graph (an MCP / request server),
+  `graph.session()` returns a `Session` whose methods are all `&self`:
+  `cypher()` reads run lock-free against momentary snapshots, and
+  `execute()` writes serialize behind an internal writer lock so they
+  *compose* (each write begins from the prior writer's committed state — no
+  lost updates). This is the supported alternative to wrapping a single
+  mutable `KnowledgeGraph` in a global lock. See "The `Session` handle".
 
 ## How the read path parallelizes
 
@@ -91,6 +99,45 @@ This is the recommended model for a read-heavy server that occasionally
 rebuilds: build a new graph, `freeze()` it, serve readers off the snapshot, and
 atomically swap in the next snapshot when the data changes — rather than a
 global lock around a single mutable instance.
+
+## The `Session` handle — shared reads *and* writes (0.12)
+
+`freeze()` solves *shared reads*. When a server must also **mutate** one graph
+from many threads — the shape that forces consumers to wrap every call in a
+global lock — use `graph.session()`. A `Session` wraps the engine's
+`Mutex<Arc<DirGraph>>` and exposes only `&self` methods, so it is safe to share
+across a thread pool:
+
+- **Reads (`cypher`, `snapshot`)** take a momentary snapshot (O(1) `Arc`
+  clone), release the lock, and run GIL-free. Unlimited concurrent readers; no
+  blocking during execution.
+- **Writes (`execute`)** take an internal **writer lock** held across the whole
+  `begin → mutate → commit`: a copy-on-write working copy is mutated, then the
+  graph's `Arc` is swapped atomically. The writer lock is what makes concurrent
+  writes **compose** — writer B's `begin()` snapshots writer A's *committed*
+  state, so increments and read-modify-write updates build on each other
+  instead of racing into a lost update. Readers never block on the writer; they
+  keep seeing the pre-commit snapshot until the swap lands.
+
+```python
+store = graph.session()                       # share across the thread pool
+store.cypher("MATCH (n:Doc) RETURN count(n)") # lock-free reads, N threads
+store.execute("CREATE (n:Doc {id: 1})")       # serialized writes, compose
+fz = store.snapshot()                          # stable FrozenGraph view
+```
+
+A `Session` is an **independent owner** seeded from the graph's state at
+`session()` time: it shares the `Arc` at creation, but once either side
+mutates, copy-on-write forks them. Build / load with a `KnowledgeGraph`, then
+`.session()` and serve every thread through the `Session` — don't keep mutating
+the original graph afterward.
+
+**Cost model.** Reads add one momentary mutex acquire (nanoseconds). A write
+with no reader snapshot outstanding mutates in place (refcount 1) — same as a
+`KnowledgeGraph` write. A write that overlaps a held `snapshot()` deep-clones
+the graph (the inherent price of snapshot isolation; ~O(graph size), transient
+~2× memory). Keep snapshots short-lived to stay on the in-place path. Pinned by
+`tests/test_session.py` (mixed reader/writer, concurrent-write compose).
 
 **How well it scales depends on what the query does.** Independent
 validation across a `freeze()` snapshot measured near-linear scaling for
@@ -218,8 +265,10 @@ profiling once the server is live:
    boundary. Not in scope for Phase B/C.
 2. **`Arc::make_mut` clone cost on write-heavy + many-reader
    workloads.** If you see ms-scale write latencies with many
-   open read sessions, consider a write-mutex strategy that fences
-   mutations to a single committer thread. Out of scope.
+   open read sessions, the `Session` handle (see "The `Session`
+   handle") implements exactly the write-mutex-to-a-single-committer
+   strategy: writes serialize behind one lock and compose, while
+   reads stay lock-free off snapshots.
 
 ## Performance reference
 
