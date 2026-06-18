@@ -951,49 +951,49 @@ impl KnowledgeGraph {
     /// Perform union of two selections - combines all nodes from both selections
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::mutation::set_ops::union_selections(
-            &mut new_kg.cursor.selection,
-            &other.cursor.selection,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        Ok(new_kg)
+        self.derive_with(|_inner, cursor| {
+            crate::graph::mutation::set_ops::union_selections(
+                &mut cursor.selection,
+                &other.cursor.selection,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+        })
     }
 
     /// Perform intersection of two selections - keeps only nodes present in both
     /// Returns a new KnowledgeGraph with only nodes that exist in both selections
     fn intersection(&self, other: &Self) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::mutation::set_ops::intersection_selections(
-            &mut new_kg.cursor.selection,
-            &other.cursor.selection,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        Ok(new_kg)
+        self.derive_with(|_inner, cursor| {
+            crate::graph::mutation::set_ops::intersection_selections(
+                &mut cursor.selection,
+                &other.cursor.selection,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+        })
     }
 
     /// Perform difference of two selections - keeps nodes in self but not in other
     /// Returns a new KnowledgeGraph with nodes from self that are not in other
     fn difference(&self, other: &Self) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::mutation::set_ops::difference_selections(
-            &mut new_kg.cursor.selection,
-            &other.cursor.selection,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        Ok(new_kg)
+        self.derive_with(|_inner, cursor| {
+            crate::graph::mutation::set_ops::difference_selections(
+                &mut cursor.selection,
+                &other.cursor.selection,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+        })
     }
 
     /// Perform symmetric difference of two selections - keeps nodes in either but not both
     /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::mutation::set_ops::symmetric_difference_selections(
-            &mut new_kg.cursor.selection,
-            &other.cursor.selection,
-        )
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        Ok(new_kg)
+        self.derive_with(|_inner, cursor| {
+            crate::graph::mutation::set_ops::symmetric_difference_selections(
+                &mut cursor.selection,
+                &other.cursor.selection,
+            )
+            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+        })
     }
 
     // ========================================================================

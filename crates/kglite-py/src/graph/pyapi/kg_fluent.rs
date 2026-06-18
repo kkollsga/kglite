@@ -364,12 +364,7 @@ impl KnowledgeGraph {
     /// Filter current selection to nodes that have at least one connection
     /// of the given type. Equivalent to Cypher's WHERE EXISTS {(n)-[:TYPE]->()}.
     #[pyo3(signature = (connection_type, direction=None))]
-    fn where_connected(
-        &mut self,
-        connection_type: &str,
-        direction: Option<&str>,
-    ) -> PyResult<Self> {
-        let mut new_kg = self.clone();
+    fn where_connected(&self, connection_type: &str, direction: Option<&str>) -> PyResult<Self> {
         let dir = match direction.unwrap_or("any") {
             "outgoing" | "out" => Some(petgraph::Direction::Outgoing),
             "incoming" | "in" => Some(petgraph::Direction::Incoming),
@@ -384,17 +379,15 @@ impl KnowledgeGraph {
             }
         };
 
-        crate::graph::core::filtering::filter_by_connection(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            connection_type,
-            dir,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::filter_by_connection(
+                inner,
+                &mut cursor.selection,
+                connection_type,
+                dir,
+            )
+            .map_err(fluent_arg_err)
+        })
     }
 
     /// Filter nodes that are valid at a specific date
