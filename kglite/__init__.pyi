@@ -2959,6 +2959,24 @@ class KnowledgeGraph:
         """
         ...
 
+    def session(self) -> "Session":
+        """Seed a thread-safe, shareable :class:`Session` from this graph.
+
+        Unlike a live ``KnowledgeGraph`` — which is single-owner and trips a
+        borrow guard when shared across threads mid-mutation — a ``Session``
+        exposes only ``&self`` methods with synchronisation in an internal
+        lock: concurrent ``cypher()`` reads run lock-free, and ``execute()``
+        writes serialise behind the lock with copy-on-write + atomic swap.
+
+        The ``Session`` is an **independent owner**: it shares this graph's
+        data at creation (O(1), no copy), but once either side mutates,
+        copy-on-write forks them and they no longer track each other. The
+        intended model is "build / load with a ``KnowledgeGraph``, then
+        ``.session()`` and serve every thread through the ``Session``" — don't
+        keep mutating the original graph after handing out a ``Session``.
+        """
+        ...
+
     def close(self) -> None:
         """Persist the graph to its remembered origin path (the file it was
         opened from via :func:`kglite.open` / :func:`kglite.load`, or last
@@ -4881,6 +4899,66 @@ class KnowledgeGraph:
                 result = tx.cypher("MATCH (n:Person) RETURN n.name")
                 # auto-closes on exit (no commit needed)
         """
+        ...
+
+class Session:
+    """A thread-safe, shareable concurrency handle over a graph.
+
+    Created via :meth:`KnowledgeGraph.session`. Wraps the engine's
+    ``Mutex<Arc<DirGraph>>`` and exposes only ``&self`` methods, so it can be
+    shared across a thread pool: concurrent :meth:`cypher` reads take a
+    momentary snapshot and run lock-free, while writes serialise behind the
+    internal lock with copy-on-write + atomic swap. This is the supported way
+    to serve one graph to many agent / request threads without the
+    single-owner borrow conflict a live :class:`KnowledgeGraph` raises.
+
+    The ``Session`` is an independent owner seeded from the source graph's
+    state; once either side mutates, copy-on-write forks them. Treat the
+    ``Session`` as the live store after creating it.
+    """
+
+    def cypher(
+        self,
+        query: str,
+        to_df: bool = False,
+        params: dict[str, Any] | None = None,
+        timeout_ms: int | None = None,
+        max_rows: int | None = None,
+    ) -> Any:
+        """Run a read-only Cypher query against a momentary snapshot.
+
+        Takes a snapshot (an O(1) ``Arc`` clone), releases the Session lock,
+        and runs the query GIL-free — so many threads can call ``cypher()`` on
+        the same ``Session`` at once without blocking each other. Each call
+        sees the graph as of the moment the snapshot was taken.
+
+        Read semantics match :meth:`KnowledgeGraph.cypher`. A mutation query
+        (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``) raises
+        ``ValueError`` — use :meth:`execute` for writes.
+        """
+        ...
+
+    def snapshot(self) -> "FrozenGraph":
+        """Take an immutable :class:`FrozenGraph` snapshot of the current state.
+
+        An O(1) ``Arc`` clone that stays stable even if the ``Session`` is
+        later written to (copy-on-write forks the writer). Use it to hold a
+        consistent multi-query view or hand a fixed read snapshot to readers.
+        """
+        ...
+
+    def version(self) -> int:
+        """Monotonic version of the current graph, bumped by each committed
+        write. Useful for cheap "did anything change?" checks."""
+        ...
+
+    def node_count(self) -> int:
+        """Number of nodes in the current snapshot."""
+        ...
+
+    @property
+    def node_types(self) -> list[str]:
+        """Node type names present in the current snapshot."""
         ...
 
 class FrozenGraph:

@@ -5,6 +5,7 @@ kglite.KnowledgeGraph
 kglite.FrozenGraph
 kglite.ResultIter
 kglite.ResultView
+kglite.Session
 kglite.Transaction
 
 # EmbeddingModel is a typing.Protocol defined in stubs for type-checking.

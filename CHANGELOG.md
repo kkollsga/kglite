@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`KnowledgeGraph.session()` → `Session` — thread-safe, shareable graph
+  handle.** A live `KnowledgeGraph` is single-owner: sharing one across a
+  thread pool and mutating it concurrently trips a borrow guard (the failure
+  mode that forces server consumers to wrap every call in a global lock).
+  `Session` is the fix — it wraps the engine's `Mutex<Arc<DirGraph>>` and
+  exposes only `&self` methods, so it can be shared across threads:
+  concurrent `cypher()` reads take a momentary snapshot and run lock-free,
+  while writes serialise behind the internal lock with copy-on-write + atomic
+  swap. `snapshot()` hands out a stable `FrozenGraph` for held multi-query
+  views; `version()` exposes the monotonic commit counter. Build or load with
+  a `KnowledgeGraph`, then `.session()` and serve every thread through the
+  `Session`.
+
 ## [0.11.2] — 2026-06-18 — bundled synthetic-graph generator + public benchmark
 
 ### Added
