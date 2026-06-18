@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] — 2026-06-18 — thread-safe `Session` handle (shared reads + serialized writes)
+
 ### Added
 
 - **`KnowledgeGraph.session()` → `Session` — thread-safe, shareable graph
