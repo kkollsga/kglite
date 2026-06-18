@@ -185,6 +185,74 @@ def test_mixed_readers_and_writers_one_session():
     assert _count(s) == 200
 
 
+def test_cursor_exposes_full_fluent_surface():
+    """Session.cursor() returns a snapshot-bound handle with the WHOLE fluent
+    chain (not just cypher()) — select/where/sort/to_df all work."""
+    s = _graph(6).session()
+    cur = s.cursor()
+    # full fluent chain off the cursor
+    df = cur.select("Doc").where({"id": {"<": 3}}).sort("id").to_df()
+    assert len(df) == 3
+    # cypher read also works
+    assert _count(cur) == 6
+
+
+def test_cursor_snapshot_isolation_and_cow():
+    """A cursor is bound to the snapshot at call time; mutating it is isolated
+    (copy-on-write) and never writes back to the Session."""
+    s = _graph(3).session()
+    cur = s.cursor()
+    cur.cypher("CREATE (n:Doc {id: 99, title: 'x'})")  # mutate the cursor
+    assert _count(cur) == 4  # the cursor saw its own write
+    assert _count(s) == 3  # the session is untouched (CoW isolation)
+    # a fresh cursor reflects the session, not the mutated one
+    assert _count(s.cursor()) == 3
+
+
+def test_per_thread_cursors_off_one_session():
+    """The roadmap's 'flexible' goal: N threads each take their own cursor off
+    one shared Session and run full fluent chains in parallel, lock-free, with
+    no single-owner borrow conflict."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": list(range(100)),
+                "title": [f"d{i}" for i in range(100)],
+                "team": ["A" if i % 2 == 0 else "B" for i in range(100)],
+            }
+        ),
+        "Doc",
+        "id",
+        "title",
+    )
+    s = g.session()
+
+    start = threading.Event()
+    errors: list[Exception] = []
+    bad: list[int] = []
+
+    def worker():
+        start.wait()
+        for _ in range(40):
+            try:
+                n = len(s.cursor().select("Doc").where({"team": "A"}).to_df())
+                if n != 50:
+                    bad.append(n)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"per-thread cursors must not error: {errors[:3]}"
+    assert bad == [], f"per-thread cursor fluent chains returned wrong counts: {bad[:3]}"
+
+
 def test_many_threads_read_one_session_concurrently():
     """Headline guarantee for reads: N threads querying the SAME Session at once
     never raise the single-owner borrow error and always get the right answer."""
