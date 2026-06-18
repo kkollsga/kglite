@@ -1794,19 +1794,18 @@ impl KnowledgeGraph {
         // transactions pay zero clone cost; mutating transactions pay
         // the clone only when needed (and skip it entirely if
         // Arc::try_unwrap succeeds in the materialization path).
-        let (snapshot, version) = Python::attach(|py| {
+        let core_tx = Python::attach(|py| {
             let kg = slf.borrow(py);
-            (Arc::clone(&kg.inner), kg.inner.version)
+            // Seed a core Transaction from the KG's current Arc. The throwaway
+            // Session is dropped immediately; the Transaction owns its snapshot
+            // Arc + base version. The CoW/OCC state machine now lives in core.
+            crate::graph::session::Session::from_arc(Arc::clone(&kg.inner)).begin()
         });
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {
             owner: slf,
-            working: None,
-            committed: false,
-            read_only: false,
-            snapshot: Some(snapshot),
-            base_version: version,
+            inner: Some(core_tx),
             deadline,
         })
     }
@@ -1829,19 +1828,15 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (timeout_ms=None))]
     fn begin_read(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
-        let (snapshot, version) = Python::attach(|py| {
+        let core_tx = Python::attach(|py| {
             let kg = slf.borrow(py);
-            (Arc::clone(&kg.inner), kg.inner.version)
+            crate::graph::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read()
         });
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
         Ok(Transaction {
             owner: slf,
-            working: None,
-            committed: false,
-            read_only: true,
-            snapshot: Some(snapshot),
-            base_version: version,
+            inner: Some(core_tx),
             deadline,
         })
     }
