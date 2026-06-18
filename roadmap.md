@@ -52,7 +52,7 @@ operates on the `Cursor`; the `Session` is the long-lived shared anchor.
 right shape — it just needs to grow into the full lifecycle home (see below).
 The missing piece is extracting the `Cursor` out of `KnowledgeGraph`.
 
-## Why this is deferred (not done now)
+## Why this was deferred until 0.11.3 (historical rationale, now superseded by Status below)
 
 - **Large breaking change.** Splitting the cursor out of `KnowledgeGraph`
   touches every fluent method, the entire `kglite/__init__.pyi` stub surface,
@@ -69,51 +69,97 @@ The missing piece is extracting the `Cursor` out of `KnowledgeGraph`.
   of `KnowledgeGraph` into a `Cursor` that borrows a `Session`" rather than a
   ground-up redesign.
 
-## Prerequisite (near-term, separate work)
+## Status (2026-06-18)
 
-The `Session` pyclass + the Phase-E transaction consolidation (folding
-`pyapi::Transaction` onto core `Session`) land first. They establish:
+**Prerequisite shipped (0.11.3).** The `Session` pyclass + the Phase-E
+transaction consolidation are in: `Session` is the canonical shared,
+thread-safe anchor; there is a single transaction engine (no parallel
+`pyapi::Transaction` copy); `FrozenGraph` is the read snapshot a `Session`
+hands out.
 
-- `Session` as the canonical shared, thread-safe anchor in the wheel.
-- A single transaction engine (no more parallel `pyapi::Transaction` copy).
-- `FrozenGraph` as the read snapshot a `Session` hands out.
+**Decomposition: IN PROGRESS.** Full scope (Stage A + B) approved 2026-06-18.
+The grounding investigation found the seams are unusually clean — the ~25–30
+fluent methods funnel through one uniform `self.clone()` → mutate-`selection`
+pattern, `selection` never escapes into the core query engine (core
+`filtering::*` already takes `&mut CowSelection`), and `FrozenGraph`/`Session`
+already demonstrate "graph handle without a cursor". So the public API need
+not change until a deliberate, opt-in final step.
 
-This roadmap assumes those are in place.
+### End-state correction (de-risks the whole effort)
 
-## Phased decomposition plan (down the line)
+We do **not** wrap the live `KnowledgeGraph` in the `Session`'s
+`Mutex<Arc<DirGraph>>` — that would add lock overhead to the single-owner hot
+path (a perf regression CLAUDE.md forbids). The live `KnowledgeGraph` keeps
+`inner: Arc<DirGraph>` + `make_mut` CoW exactly as today. The decomposition is
+**cursor extraction + lifecycle-field grouping**, not re-homing storage. The
+shareable `Session` (already shipped) remains the multi-thread variant.
 
-Each phase is independently shippable and green; ordered to keep the public
-fluent API working until the final cutover.
+### Cross-cutting risk controls (every phase)
 
-1. **Enrich core `Session` into the lifecycle home.** Migrate the
-   binding-agnostic parts of lifecycle into core `Session`: `version`,
-   embedder registration, source-path tracking, and the durability
-   coordination that is *not* the OS `File` handle. The `File` handle in
-   `DurableState` legitimately stays per-binding (OS lifecycle). Lift follows
-   the CLAUDE.md LIFT posture: generic-and-useful into core, tailored shapes
-   stay in the wrapper.
+1. Characterization/golden tests **before** any production change.
+2. Mechanical (compiler-checked field moves) **before** semantic (logic).
+3. Internal **before** public — `KnowledgeGraph` behaviour is byte-identical
+   through all of Stage A; no breaking change anywhere in this plan.
+4. One commit per phase, each green (lint + full suite + golden + benchmark).
+5. Benchmark gate on structural phases — field indirection must be zero-cost.
+6. Each phase independently valuable.
 
-2. **Introduce `Cursor` internally (non-breaking).** Add a `Cursor` struct
-   carrying `selection`, `default_timeout_ms`, `default_max_rows`,
-   `temporal_context`, `last_mutation_stats`, `reports`, plus an `Arc<DirGraph>`
-   snapshot. Re-implement `KnowledgeGraph`'s fluent methods as thin delegates to
-   an internal `Cursor`. No public API change yet — `KnowledgeGraph` still owns
-   one `Cursor` + one `Session` reference behind the scenes.
+## Stage A — internal restructure (non-breaking; shippable as patches)
 
-3. **Expose `Session` + `Cursor` as the primary surface.** `Session.cursor()`
-   (or `Session.query()`) returns a fresh `Cursor`; the fluent chain lives on
-   `Cursor`. `KnowledgeGraph` becomes a thin convenience facade =
-   `Session` + a default `Cursor`, retained for single-owner ergonomics and
-   back-compat.
+- **Phase 0 — Characterization/golden tests.** No production code. Pin: `Clone`
+  vs `copy()` field preservation (selection/reports/temporal/last_stats/
+  source_path kept; `durable=None`; copy resets selection+source_path); fluent
+  chain selection inheritance; `temporal_context` via `date()`; `reports`
+  accumulation; `last_mutation_stats` lifecycle; `source_path` on derived views;
+  the `update()` special case (mutates `inner` *and* returns a derived handle).
 
-4. **Migrate stubs, introspection, docs.** Update `kglite/__init__.pyi`,
-   `describe()` output, `FLUENT.md`, and guides to teach the
-   `Session`/`Cursor` model. Per the five-place checklist.
+- **Phase 1 — Extract `CursorState` struct (mechanical grouping).** Group
+  `selection`, `temporal_context`, `last_mutation_stats`, `reports` into
+  `cursor: CursorState`. Pure `self.X` → `self.cursor.X`; update `Clone`/
+  `copy()`. High LOC, lowest risk (compiler-checked, behaviour identical).
 
-5. **(Major version) Decide `KnowledgeGraph`'s fate.** Either keep it as the
-   ergonomic single-owner facade indefinitely (likely — it is a good default
-   handle) or deprecate the conflated parts. No back-compat shims per CLAUDE.md;
-   if anything is removed, it is removed in the same PR as its replacement.
+- **Phase 2 — Funnel fluent construction through one factory.** Replace the
+  ~25–30 copy-pasted `let mut new_kg = self.clone(); …mutate
+  new_kg.cursor.selection…` with a single `derive_with` helper — the seam the
+  public `Cursor` reuses.
+
+- **Phase 3 — Group lifecycle fields.** Group `source_path`, `durable`,
+  `default_timeout_ms`, `default_max_rows` (and decide `embedder`) into a
+  `GraphLifecycle` struct. Clarifies storage / lifecycle / cursor and sets up
+  the deferred core-`Session` lifecycle lift.
+
+- **Phase 4 — Promote `CursorState` → `Cursor` type; `KnowledgeGraph`
+  delegates.** `Cursor` owns the fluent ops against a borrowed `&Arc<DirGraph>`,
+  returning a new `Cursor`. `KnowledgeGraph` = `Arc<DirGraph>` + `Cursor` +
+  `GraphLifecycle`; fluent methods delegate then rewrap. Public API still
+  returns `KnowledgeGraph` (non-breaking). Fold in `&mut self` → `&self` on
+  fluent methods (they already clone; the `&mut` is vestigial).
+
+## Stage B — public surface (additive; a minor feature)
+
+- **Phase 5 — Expose `Cursor` + `Session.cursor()`.** Additive: `Session.cursor()`
+  / `graph.cursor()` returns a `Cursor` for per-thread fluent chains against one
+  shared `Session` — the "flexible" goal `Session` alone can't express.
+  `KnowledgeGraph` stays the convenience facade. New concurrency test: N threads,
+  each its own `Cursor` off one shared `Session`.
+
+- **Phase 6 — Docs / stubs / introspection + roadmap update.** Teach the
+  storage → `Session` → `Cursor` model (`FLUENT.md`, `concurrency.md`,
+  `__init__.pyi`, `describe()`), mark phases done here.
+
+## Open decisions (safe defaults; revisit if they read wrong)
+
+- **`reports` home** — default: keep in `CursorState` (preserves clone-on-derive).
+- **`default_timeout_ms/max_rows` home** — default: `GraphLifecycle` (query
+  config, not chain state); Phase 0 pins current inheritance first.
+
+## Deferred (separate major version — NOT in this plan)
+
+- **Enrich core `Session` as the cross-binding lifecycle home** (Go/JVM share
+  durability/embedder logic) — invasive (`durable` owns an OS `File`); do it when
+  a second binding forces it.
+- **Deprecate any conflated `KnowledgeGraph` surface** — no back-compat shims,
+  so a deliberate major-version event.
 
 ## Risks
 
