@@ -144,6 +144,22 @@ snapshot — an immutable, lock-free read view shared across all reader threads;
 build/reload and `freeze()` again when the data changes (see
 [`concurrency.md`](../concepts/concurrency.md)).
 
+For concurrent *writes* on one shared graph — the case where a per-`begin()`/
+`commit()` transaction on a single-owner `KnowledgeGraph` would force a global
+lock — use a `Session` instead of manual transactions:
+
+```python
+store = graph.session()          # or kglite.open_session("graph.kgl")
+store.execute("CREATE (:Person {id: 1})")   # serialized write — composes
+store.cypher("MATCH (n) RETURN count(n)")    # reads stay lock-free
+```
+
+`Session.execute()` is the shared-graph parallel to `begin()`/`commit()`: writers
+serialize behind an internal lock so each begins from the prior writer's
+*committed* state (no lost updates), while readers snapshot the pre-commit graph
+and never block. See [`concurrency.md`](../concepts/concurrency.md) →
+"The `Session` handle".
+
 For a Bolt server running multiple sessions in parallel:
 
 - **One `KnowledgeGraph` Arc shared across all tasks.**

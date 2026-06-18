@@ -96,8 +96,9 @@ except kglite.FileFormatError:
 A `KnowledgeGraph` is single-owner. If one thread mutates it (`add_nodes`,
 `embed_texts`, a `CREATE`/`SET`/`DELETE` query, `save`, …) while another touches
 the same object, the second call raises a clear `RuntimeError` — never a panic
-or silent corruption. Give each worker its own `g.copy()`, or share a read-only
-`g.freeze()` snapshot for concurrent reads (see {doc}`/concepts/concurrency`).
+or silent corruption. Give each worker its own `g.copy()`, share a read-only
+`g.freeze()` snapshot for concurrent reads, or — for shared reads **and** writes
+— use `g.session()` (see {doc}`/concepts/concurrency`).
 
 ## Migration from pre-A.2
 

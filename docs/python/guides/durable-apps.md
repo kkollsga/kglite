@@ -152,6 +152,15 @@ snapshot = g.freeze()
 snapshot.cypher("MATCH (o:Order) RETURN count(o)")
 ```
 
+**Durability and shared concurrent writes don't combine in one handle.** A
+`Session` (`graph.session()` / `kglite.open_session(...)`) serves shared reads
+and serialized writes, but its `execute()` writes land on an in-memory fork and
+are **not** WAL-logged — so a `Session` is *not* durable. For a durable app,
+keep writes on the single durable `KnowledgeGraph` (there they're serialized and
+`fsync`'d), and use `freeze()` snapshots for concurrent reads. Reach for
+`Session` when you need shared concurrent writes but **not** durability. See
+{doc}`/concepts/concurrency` for the full model.
+
 ## Cost and tuning
 
 - **`durable=True` is `fsync`-bound, not engine-bound.** A workload of many
