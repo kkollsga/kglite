@@ -1,14 +1,11 @@
-"""0.9.0 gate item §5 — integer division correctness.
+"""Integer division correctness (openCypher semantics) — regression guard.
 
-Currently `1967 / 10 → 196.7` (always promoted to Float64). Neo4j /
-openCypher: int÷int = int (truncated, → 196). Promote to float only
-when either operand is float.
-
-These tests are xfail-strict: when the implementation lands, pytest
-flips them to XPASS and the strict marker forces removal of the
-`@pytest.mark.xfail` decorator. That is the signal to update the
-gate-item status in `dev_workfolder/dev-documentation/archive/0.9.0-readiness.md` §5
-(local-only; 0.9.0 has shipped).
+`int / int` truncates to int (`1967 / 10 → 196`, matching Neo4j / openCypher);
+a result promotes to float only when either operand is float. This shipped in
+0.9.0 (gate item §5) — these tests now lock the behaviour in so it can't
+regress. (Originally written xfail-strict against the pre-fix behaviour, where
+`1967 / 10` always promoted to `196.7`; the `xfail` markers were removed when
+the fix landed.)
 """
 
 from __future__ import annotations
@@ -16,8 +13,6 @@ from __future__ import annotations
 import pytest
 
 import kglite
-
-NOT_IMPLEMENTED = "0.9.0 §5 — int÷int currently promotes to float; flip when fixed."
 
 
 def test_int_div_int_returns_int():

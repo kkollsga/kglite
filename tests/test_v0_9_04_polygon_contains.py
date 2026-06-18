@@ -1,13 +1,13 @@
-"""0.9.0 gate item §4 — polygon-vs-polygon contains() returns 0
-incorrectly, and MULTIPOLYGON contains() emits duplicate pairs.
+"""Polygon-vs-polygon `contains()` + MULTIPOLYGON dedup — regression guard.
 
-Documented workaround: route every spatial join through `centroid(p)`
-PIP. The Sodir prospect-graph enhance script is built around this
-workaround; the agent flagged it as the gating item for "polygon
-analytics without a thousand `centroid()` calls".
-
-These tests are xfail-strict — see test_v0_9_05_integer_division.py
-header for the workflow.
+`contains(a, b)` for a polygon inside a polygon returns the correct result,
+and MULTIPOLYGON `contains()` emits one row per matched pair (no duplicates).
+Both shipped in 0.9.0 (gate item §4) — these tests now lock the behaviour in so
+it can't regress. (Originally written xfail-strict against the pre-fix
+behaviour, where polygon-vs-polygon `contains()` returned 0 and the documented
+workaround was to route spatial joins through `centroid(p)` PIP; the `xfail`
+markers were removed when the fix landed and the workaround is no longer
+needed.)
 """
 
 from __future__ import annotations
@@ -16,10 +16,6 @@ import pandas as pd
 import pytest
 
 import kglite
-
-NOT_IMPLEMENTED_POLY = "0.9.0 §4 — polygon-vs-polygon contains() returns 0; flip when fixed."
-NOT_IMPLEMENTED_MULTI = "0.9.0 §4 — MULTIPOLYGON contains() emits one row per matched component; flip when deduped."
-
 
 # ---------------------------------------------------------------------------
 # Polygon-inside-polygon
