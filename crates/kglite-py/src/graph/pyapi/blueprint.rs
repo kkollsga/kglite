@@ -159,11 +159,8 @@ pub fn from_blueprint_rust(
 
                 let kg = KnowledgeGraph {
                     inner: Arc::new(graph),
-                    selection: CowSelection::new(),
-                    reports: OperationReports::new(),
-                    last_mutation_stats: None,
+                    cursor: crate::graph::CursorState::new(),
                     embedder: None,
-                    temporal_context: TemporalContext::default(),
                     default_timeout_ms: None,
                     default_max_rows: None,
                     source_path: None,

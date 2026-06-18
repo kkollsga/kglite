@@ -179,7 +179,7 @@ impl KnowledgeGraph {
 
         // Reset selection — indices have changed
         if nodes_remapped > 0 {
-            self.selection = CowSelection::new();
+            self.cursor.selection = CowSelection::new();
         }
 
         Python::attach(|py| {
@@ -207,7 +207,7 @@ impl KnowledgeGraph {
         let (nodes_purged, edges_removed) =
             crate::graph::mutation::maintain::purge_provisional_nodes(graph);
         if nodes_purged > 0 {
-            self.selection = CowSelection::new();
+            self.cursor.selection = CowSelection::new();
         }
         Python::attach(|py| {
             let result = PyDict::new(py);
@@ -416,7 +416,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let connections = crate::graph::core::data_retrieval::get_connections(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             None,
             indices.as_deref(),
             include_node_properties.unwrap_or(true),
@@ -440,7 +440,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let values = crate::graph::core::data_retrieval::get_property_values(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             None,
             &["title"],
             indices.as_deref(),
@@ -456,7 +456,7 @@ impl KnowledgeGraph {
     /// Shows each operation in the query chain with estimated and actual row counts.
     /// Example output: "TYPE_FILTER Prospect (6775 nodes) -> TRAVERSE HAS_ESTIMATE (10954 nodes)"
     fn explain(&self) -> PyResult<String> {
-        let plan = self.selection.get_execution_plan();
+        let plan = self.cursor.selection.get_execution_plan();
         if plan.is_empty() {
             return Ok("No query operations recorded".to_string());
         }
@@ -488,7 +488,7 @@ impl KnowledgeGraph {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
         let values = crate::graph::core::data_retrieval::get_property_values(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             None,
             &property_refs,
             indices.as_deref(),
@@ -511,7 +511,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let values = crate::graph::core::data_retrieval::get_unique_values(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             &property,
             level_index,
             group_by_parent.unwrap_or(true),
@@ -535,7 +535,7 @@ impl KnowledgeGraph {
             })?;
 
             if !keep_selection.unwrap_or(false) {
-                self.selection.clear();
+                self.cursor.selection.clear();
             }
 
             Python::attach(|py| Ok(Py::new(py, self.clone())?.into_any()))
@@ -605,8 +605,9 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection (source nodes) - use node_count() to avoid allocation
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
@@ -710,7 +711,7 @@ impl KnowledgeGraph {
                 })
         } else {
             // Auto: use config + temporal_context
-            match &self.temporal_context {
+            match &self.cursor.temporal_context {
                 TemporalContext::All => None,
                 TemporalContext::Today => self
                     .inner
@@ -746,7 +747,7 @@ impl KnowledgeGraph {
 
         crate::graph::core::traversal::make_traversal(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             connection_type.clone(),
             level_index,
             direction,
@@ -763,11 +764,12 @@ impl KnowledgeGraph {
         })?;
 
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("TRAVERSE", Some(&connection_type), estimated).with_actual_rows(actual),
         );
 
@@ -801,8 +803,9 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
 
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
@@ -835,7 +838,7 @@ impl KnowledgeGraph {
 
         compare_inner(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             resolved_target.as_deref(),
             &config,
             conditions.as_ref(),
@@ -931,7 +934,7 @@ impl KnowledgeGraph {
 
         let result = crate::graph::mutation::maintain::create_connections(
             graph,
-            &self.selection,
+            &self.cursor.selection,
             connection_type,
             conflict_handling,
             copy_properties,
@@ -944,15 +947,17 @@ impl KnowledgeGraph {
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
-            selection: if keep_selection.unwrap_or(false) {
-                self.selection.clone()
-            } else {
-                CowSelection::new()
+            cursor: crate::graph::CursorState {
+                selection: if keep_selection.unwrap_or(false) {
+                    self.cursor.selection.clone()
+                } else {
+                    CowSelection::new()
+                },
+                reports: self.cursor.reports.clone(), // Copy over existing reports
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
             },
-            reports: self.reports.clone(), // Copy over existing reports
-            last_mutation_stats: None,
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
@@ -1016,7 +1021,7 @@ impl KnowledgeGraph {
         }
 
         let graph = get_graph_mut(&mut self.inner);
-        let result = core_add_properties(graph, &self.selection, spec_map).map_err(
+        let result = core_add_properties(graph, &self.cursor.selection, spec_map).map_err(
             |e: String| -> PyErr {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
             },
@@ -1024,15 +1029,17 @@ impl KnowledgeGraph {
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
-            selection: if keep_selection.unwrap_or(true) {
-                self.selection.clone()
-            } else {
-                CowSelection::new()
+            cursor: crate::graph::CursorState {
+                selection: if keep_selection.unwrap_or(true) {
+                    self.cursor.selection.clone()
+                } else {
+                    CowSelection::new()
+                },
+                reports: self.cursor.reports.clone(),
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
             },
-            reports: self.reports.clone(),
-            last_mutation_stats: None,
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
@@ -1040,7 +1047,7 @@ impl KnowledgeGraph {
         };
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("ADD_PROPERTIES", None, result.nodes_updated)
                 .with_actual_rows(result.properties_set),
         );
@@ -1074,7 +1081,7 @@ impl KnowledgeGraph {
 
             crate::graph::core::filtering::filter_nodes(
                 &self.inner,
-                &mut filtered_kg.selection,
+                &mut filtered_kg.cursor.selection,
                 conditions,
                 sort_fields,
                 limit,
@@ -1087,7 +1094,7 @@ impl KnowledgeGraph {
 
             crate::graph::core::filtering::sort_nodes(
                 &self.inner,
-                &mut filtered_kg.selection,
+                &mut filtered_kg.cursor.selection,
                 sort_fields,
             )
             .map_err(|e: String| -> PyErr {
@@ -1097,7 +1104,7 @@ impl KnowledgeGraph {
             if let Some(max) = limit {
                 crate::graph::core::filtering::limit_nodes_per_group(
                     &self.inner,
-                    &mut filtered_kg.selection,
+                    &mut filtered_kg.cursor.selection,
                     max,
                 )
                 .map_err(|e: String| -> PyErr {
@@ -1107,7 +1114,7 @@ impl KnowledgeGraph {
         } else if let Some(max) = limit {
             crate::graph::core::filtering::limit_nodes_per_group(
                 &self.inner,
-                &mut filtered_kg.selection,
+                &mut filtered_kg.cursor.selection,
                 max,
             )
             .map_err(|e: String| -> PyErr {
@@ -1118,7 +1125,7 @@ impl KnowledgeGraph {
         // Generate the property lists with titles already included
         let property_groups = crate::graph::core::traversal::get_children_properties(
             &filtered_kg.inner,
-            &filtered_kg.selection,
+            &filtered_kg.cursor.selection,
             property_name,
         );
 
@@ -1147,15 +1154,17 @@ impl KnowledgeGraph {
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
-            selection: if keep_selection.unwrap_or(false) {
-                self.selection.clone()
-            } else {
-                CowSelection::new()
+            cursor: crate::graph::CursorState {
+                selection: if keep_selection.unwrap_or(false) {
+                    self.cursor.selection.clone()
+                } else {
+                    CowSelection::new()
+                },
+                reports: self.cursor.reports.clone(),
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
             },
-            reports: self.reports.clone(),
-            last_mutation_stats: None,
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
@@ -1179,7 +1188,7 @@ impl KnowledgeGraph {
         // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
             let nodes = crate::graph::core::statistics::collect_selected_nodes(
-                &self.selection,
+                &self.cursor.selection,
                 level_index,
             );
             let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
@@ -1238,8 +1247,10 @@ impl KnowledgeGraph {
             });
         }
 
-        let pairs =
-            crate::graph::core::statistics::get_parent_child_pairs(&self.selection, level_index);
+        let pairs = crate::graph::core::statistics::get_parent_child_pairs(
+            &self.cursor.selection,
+            level_index,
+        );
         let stats =
             crate::graph::core::statistics::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
@@ -1260,7 +1271,7 @@ impl KnowledgeGraph {
 
             let process_result = crate::graph::core::calculations::process_equation(
                 graph,
-                &self.selection,
+                &self.cursor.selection,
                 expression,
                 level_index,
                 Some(target_property),
@@ -1271,15 +1282,17 @@ impl KnowledgeGraph {
                 Ok(crate::graph::core::calculations::EvaluationResult::Stored(report)) => {
                     let mut new_kg = KnowledgeGraph {
                         inner: self.inner.clone(),
-                        selection: if keep_selection.unwrap_or(false) {
-                            self.selection.clone()
-                        } else {
-                            CowSelection::new()
+                        cursor: crate::graph::CursorState {
+                            selection: if keep_selection.unwrap_or(false) {
+                                self.cursor.selection.clone()
+                            } else {
+                                CowSelection::new()
+                            },
+                            reports: self.cursor.reports.clone(), // Copy existing reports
+                            last_mutation_stats: None,
+                            temporal_context: self.cursor.temporal_context.clone(),
                         },
-                        reports: self.reports.clone(), // Copy existing reports
-                        last_mutation_stats: None,
                         embedder: self.embedder.as_ref().map(Arc::clone),
-                        temporal_context: self.temporal_context.clone(),
                         default_timeout_ms: self.default_timeout_ms,
                         default_max_rows: self.default_max_rows,
                         source_path: None,
@@ -1307,7 +1320,7 @@ impl KnowledgeGraph {
             // Just computing without storing - no need to modify graph
             let process_result = crate::graph::core::calculations::process_equation(
                 &mut (*self.inner).clone(), // Create a temporary clone just for calculation
-                &self.selection,
+                &self.cursor.selection,
                 expression,
                 level_index,
                 None,
@@ -1376,7 +1389,7 @@ impl KnowledgeGraph {
         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
             let nodes = crate::graph::core::statistics::collect_selected_nodes(
-                &self.selection,
+                &self.cursor.selection,
                 level_index,
             );
             let mut groups: HashMap<String, usize> = HashMap::new();
@@ -1418,7 +1431,7 @@ impl KnowledgeGraph {
         }
 
         // Default to grouping by parent if we have a nested structure
-        let has_multiple_levels = self.selection.get_level_count() > 1;
+        let has_multiple_levels = self.cursor.selection.get_level_count() > 1;
         // Use the provided group_by_parent if given, otherwise default based on structure
         let use_grouping = group_by_parent.unwrap_or(has_multiple_levels);
 
@@ -1427,7 +1440,7 @@ impl KnowledgeGraph {
 
             let result = match crate::graph::core::calculations::store_count_results(
                 graph,
-                &self.selection,
+                &self.cursor.selection,
                 level_index,
                 use_grouping,
                 target_property,
@@ -1438,15 +1451,17 @@ impl KnowledgeGraph {
 
             let mut new_kg = KnowledgeGraph {
                 inner: self.inner.clone(),
-                selection: if keep_selection.unwrap_or(false) {
-                    self.selection.clone()
-                } else {
-                    CowSelection::new()
+                cursor: crate::graph::CursorState {
+                    selection: if keep_selection.unwrap_or(false) {
+                        self.cursor.selection.clone()
+                    } else {
+                        CowSelection::new()
+                    },
+                    reports: self.cursor.reports.clone(), // Copy existing reports
+                    last_mutation_stats: None,
+                    temporal_context: self.cursor.temporal_context.clone(),
                 },
-                reports: self.reports.clone(), // Copy existing reports
-                last_mutation_stats: None,
                 embedder: self.embedder.as_ref().map(Arc::clone),
-                temporal_context: self.temporal_context.clone(),
                 default_timeout_ms: self.default_timeout_ms,
                 default_max_rows: self.default_max_rows,
                 source_path: None,
@@ -1461,14 +1476,14 @@ impl KnowledgeGraph {
             // Return counts grouped by parent
             let counts = crate::graph::core::calculations::count_nodes_by_parent(
                 &self.inner,
-                &self.selection,
+                &self.cursor.selection,
                 level_index,
             );
             py_out::convert_computation_results_for_python(counts)
         } else {
             // Simple flat count
             let count = crate::graph::core::calculations::count_nodes_in_level(
-                &self.selection,
+                &self.cursor.selection,
                 level_index,
             );
             Python::attach(|py| count.into_py_any(py))
@@ -1670,7 +1685,7 @@ impl KnowledgeGraph {
     fn selection(&self) -> PyResult<String> {
         Ok(introspection::debugging::get_selection_string(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
         ))
     }
 
@@ -1686,11 +1701,15 @@ impl KnowledgeGraph {
     fn copy(&self) -> Self {
         KnowledgeGraph {
             inner: Arc::new((*self.inner).clone()),
-            selection: CowSelection::new(),
-            reports: OperationReports::new(),
-            last_mutation_stats: None,
+            // copy() resets the selection/reports/stats but preserves the
+            // temporal context (the as-of date carries to the independent copy).
+            cursor: crate::graph::CursorState {
+                selection: CowSelection::new(),
+                reports: OperationReports::new(),
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
+            },
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,

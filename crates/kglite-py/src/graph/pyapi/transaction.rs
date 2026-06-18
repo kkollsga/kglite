@@ -277,7 +277,7 @@ impl Transaction {
             let mut kg = self.owner.borrow_mut(py);
             working.set_version(current_version + 1);
             kg.inner = Arc::new(working);
-            kg.selection = CowSelection::new();
+            kg.cursor.selection = CowSelection::new();
         });
         Ok(())
     }

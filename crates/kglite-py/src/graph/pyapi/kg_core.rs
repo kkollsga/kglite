@@ -391,7 +391,7 @@ impl KnowledgeGraph {
         }
 
         // Selection-based: sample from current selection
-        let level_count = self.selection.get_level_count();
+        let level_count = self.cursor.selection.get_level_count();
         if level_count == 0 {
             return Err(crate::error_py::kg_to_pyerr(
                 crate::error::KgError::Argument(
@@ -400,11 +400,15 @@ impl KnowledgeGraph {
             ));
         }
         let last = level_count - 1;
-        let level = self.selection.get_level(last).ok_or_else(|| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
-                "Empty selection".to_string(),
-            ))
-        })?;
+        let level = self
+            .cursor
+            .selection
+            .get_level(last)
+            .ok_or_else(|| -> PyErr {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
+                    "Empty selection".to_string(),
+                ))
+            })?;
         let all_indices = level.get_all_nodes();
         let indices: Vec<_> = all_indices.into_iter().take(count).collect();
         let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
@@ -440,7 +444,7 @@ impl KnowledgeGraph {
     }
 
     fn clear(&mut self) -> PyResult<()> {
-        self.selection.clear();
+        self.cursor.selection.clear();
         Ok(())
     }
 
@@ -781,7 +785,7 @@ impl KnowledgeGraph {
     /// Get the most recent operation report as a Python dictionary
     fn last_report(&self) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
-            if let Some(report) = self.reports.get_last_report() {
+            if let Some(report) = self.cursor.reports.get_last_report() {
                 match report {
                     OperationReport::NodeOperation(node_report) => {
                         let report_dict = PyDict::new(py);
@@ -860,7 +864,7 @@ impl KnowledgeGraph {
 
     /// Get the last operation index (a sequential ID of operations performed)
     fn operation_index(&self) -> usize {
-        self.reports.get_last_operation_index()
+        self.cursor.reports.get_last_operation_index()
     }
 
     /// Get all report history as a list of dictionaries
@@ -869,7 +873,7 @@ impl KnowledgeGraph {
             // Create an empty list with PyList::empty
             let report_list = PyList::empty(py);
 
-            for report in self.reports.get_all_reports() {
+            for report in self.cursor.reports.get_all_reports() {
                 let report_dict = match report {
                     OperationReport::NodeOperation(node_report) => {
                         let dict = PyDict::new(py);
@@ -944,8 +948,11 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::mutation::set_ops::union_selections(&mut new_kg.selection, &other.selection)
-            .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+        crate::graph::mutation::set_ops::union_selections(
+            &mut new_kg.cursor.selection,
+            &other.cursor.selection,
+        )
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
     }
 
@@ -954,8 +961,8 @@ impl KnowledgeGraph {
     fn intersection(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         crate::graph::mutation::set_ops::intersection_selections(
-            &mut new_kg.selection,
-            &other.selection,
+            &mut new_kg.cursor.selection,
+            &other.cursor.selection,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
@@ -966,8 +973,8 @@ impl KnowledgeGraph {
     fn difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         crate::graph::mutation::set_ops::difference_selections(
-            &mut new_kg.selection,
-            &other.selection,
+            &mut new_kg.cursor.selection,
+            &other.cursor.selection,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
@@ -978,8 +985,8 @@ impl KnowledgeGraph {
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
         let mut new_kg = self.clone();
         crate::graph::mutation::set_ops::symmetric_difference_selections(
-            &mut new_kg.selection,
-            &other.selection,
+            &mut new_kg.cursor.selection,
+            &other.cursor.selection,
         )
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         Ok(new_kg)
@@ -1536,9 +1543,9 @@ impl KnowledgeGraph {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
                     && graph.check_auto_vacuum()
                 {
-                    this.selection = schema::CowSelection::new();
+                    this.cursor.selection = schema::CowSelection::new();
                 }
-                this.last_mutation_stats = Some(stats.clone());
+                this.cursor.last_mutation_stats = Some(stats.clone());
             }
 
             // Durability: append + fsync this mutation's WAL frame before
@@ -1744,7 +1751,7 @@ impl KnowledgeGraph {
     /// Returns None if no mutation has been executed yet.
     #[getter]
     fn last_mutation_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.last_mutation_stats {
+        match &self.cursor.last_mutation_stats {
             Some(stats) => {
                 let dict = PyDict::new(py);
                 dict.set_item("nodes_created", stats.nodes_created)?;

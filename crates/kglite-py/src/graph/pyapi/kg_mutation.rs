@@ -269,7 +269,7 @@ fn write_connections(
             crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
         })?;
 
-        kg.selection.clear();
+        kg.cursor.selection.clear();
         kg.add_report(OperationReport::ConnectionOperation(result.clone()));
 
         return KnowledgeGraph::connection_report_to_py(&result, &connection_type);
@@ -331,7 +331,7 @@ fn write_connections(
             .push(cfg);
     }
 
-    kg.selection.clear();
+    kg.cursor.selection.clear();
 
     // Disk mode: build CSR from pending edges so queries work immediately
     let graph = get_graph_mut(&mut kg.inner);
@@ -876,11 +876,8 @@ impl KnowledgeGraph {
 
         Ok(KnowledgeGraph {
             inner: Arc::new(graph),
-            selection: CowSelection::new(),
-            reports: OperationReports::new(),
-            last_mutation_stats: None,
+            cursor: crate::graph::CursorState::new(),
             embedder: None,
-            temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
             source_path: None,
@@ -974,7 +971,7 @@ impl KnowledgeGraph {
             }
         }
 
-        self.selection.clear();
+        self.cursor.selection.clear();
         if graph.graph.is_disk() {
             graph.sync_disk_column_stores();
         }
@@ -1093,7 +1090,7 @@ impl KnowledgeGraph {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
 
-        self.selection.clear();
+        self.cursor.selection.clear();
         build_extend_report_dict(py, &result)
     }
 
@@ -1479,7 +1476,7 @@ impl KnowledgeGraph {
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
         }
 
-        self.selection.clear();
+        self.cursor.selection.clear();
         Ok(result_dict.into())
     }
 
@@ -1663,7 +1660,7 @@ impl KnowledgeGraph {
             result_dict.set_item(&connection_name, report.connections_created)?;
         }
 
-        self.selection.clear();
+        self.cursor.selection.clear();
         Ok(result_dict.into())
     }
 }
