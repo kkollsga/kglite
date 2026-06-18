@@ -77,6 +77,60 @@ def test_session_version_reflects_state():
     assert s.version() == v0
 
 
+def test_session_execute_basic_write():
+    s = _graph(2).session()
+    s.execute("CREATE (n:Doc {id: 99, title: 'new'})")
+    assert _count(s) == 3
+    assert s.version() > 0
+    s.execute("MATCH (n:Doc {id: 99}) SET n.title = 'edited'")
+    title = s.cypher("MATCH (n:Doc {id: 99}) RETURN n.title AS t").to_list()[0]["t"]
+    assert title == "edited"
+    s.execute("MATCH (n:Doc {id: 99}) DELETE n")
+    assert _count(s) == 2
+
+
+def test_session_execute_read_fastpath():
+    """A read passed to execute() is fast-pathed to the read path (no
+    working-copy materialisation) and returns rows."""
+    s = _graph(3).session()
+    rows = s.execute("MATCH (n:Doc) RETURN count(n) AS c").to_list()
+    assert rows[0]["c"] == 3
+
+
+def test_session_snapshot_isolation_under_write():
+    """A snapshot taken before a write does not observe the write (CoW)."""
+    s = _graph(3).session()
+    fz = s.snapshot()
+    s.execute("CREATE (n:Doc {id: 100, title: 'x'})")
+    # the live session sees 4; the snapshot is frozen at 3
+    assert _count(s) == 4
+    assert _count(fz) == 3
+
+
+def test_concurrent_writes_compose_no_lost_updates():
+    """The headline write guarantee: N threads each incrementing a shared
+    counter must compose — every increment lands, none is lost. This is the
+    serialized-writer property that a naive shared mutable handle lacks."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": [1], "title": ["ctr"], "n": [0]}), "Doc", "id", "title"
+    )
+    s = g.session()
+
+    def worker():
+        for _ in range(100):
+            s.execute("MATCH (n:Doc {id: 1}) SET n.n = n.n + 1")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = s.cypher("MATCH (n:Doc {id: 1}) RETURN n.n AS n").to_list()[0]["n"]
+    assert final == 800, f"lost updates: {final} != 800"
+
+
 def test_many_threads_read_one_session_concurrently():
     """Headline guarantee for reads: N threads querying the SAME Session at once
     never raise the single-owner borrow error and always get the right answer."""

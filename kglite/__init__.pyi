@@ -4938,6 +4938,30 @@ class Session:
         """
         ...
 
+    def execute(
+        self,
+        query: str,
+        to_df: bool = False,
+        params: dict[str, Any] | None = None,
+        timeout_ms: int | None = None,
+        max_rows: int | None = None,
+    ) -> Any:
+        """Run a Cypher write against the shared graph, serialized.
+
+        Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
+        take the Session's writer lock for ``begin → mutate → commit``, so
+        concurrent ``execute()`` calls run one at a time and each sees the
+        prior writer's committed changes — no lost updates. The commit is an
+        atomic pointer swap; concurrent :meth:`cypher` readers never block and
+        keep seeing the pre-commit snapshot until the swap lands.
+
+        A read-only query passed here is fast-pathed to the read path (no
+        working-copy materialisation), so mixed traffic can route through
+        ``execute()`` safely. Returns the query result (rows for
+        ``... RETURN``, otherwise mutation stats).
+        """
+        ...
+
     def snapshot(self) -> "FrozenGraph":
         """Take an immutable :class:`FrozenGraph` snapshot of the current state.
 
