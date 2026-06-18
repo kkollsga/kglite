@@ -16,10 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Session` is the fix — it wraps the engine's `Mutex<Arc<DirGraph>>` and
   exposes only `&self` methods, so it can be shared across threads:
   concurrent `cypher()` reads take a momentary snapshot and run lock-free,
-  while writes serialise behind the internal lock with copy-on-write + atomic
-  swap. `snapshot()` hands out a stable `FrozenGraph` for held multi-query
-  views; `version()` exposes the monotonic commit counter. Build or load with
-  a `KnowledgeGraph`, then `.session()` and serve every thread through the
+  while `execute()` writes serialise behind a writer lock held across
+  `begin → mutate → commit` (copy-on-write working copy + atomic swap). The
+  writer lock makes concurrent writes **compose** — each `execute()` begins
+  from the prior writer's committed state, so increments and read-modify-write
+  updates don't clobber each other (the lost-update failure mode that forces
+  naive shared-handle consumers to wrap every call in a global lock).
+  `snapshot()` hands out a stable `FrozenGraph` for held multi-query views;
+  `version()` exposes the monotonic commit counter. Build or load with a
+  `KnowledgeGraph`, then `.session()` and serve every thread through the
   `Session`.
 
 ## [0.11.2] — 2026-06-18 — bundled synthetic-graph generator + public benchmark
