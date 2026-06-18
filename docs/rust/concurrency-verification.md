@@ -13,7 +13,7 @@ timing-dependent and the GIL can mask them at the Python layer.
 | Python stress harness | empirical races end-to-end under sustained load | `tests/test_session_stress.py` (`-m stress`) | `pytest tests/test_session_stress.py -m stress` |
 | ThreadSanitizer | **data** races (unsynchronized memory access) | the same Rust `concurrent_*` tests | see below |
 | `unsafe impl` audit | soundness of the `Send`/`Sync` claims | this doc | review |
-| loom (recommended, not yet done) | **exhaustive** interleaving proof of the lock pattern | — | see below |
+| loom model | **exhaustive** interleaving proof of the lock pattern | `crates/kglite/tests/loom_session.rs` | `RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session` |
 
 The two race classes are different and both matter: TSan finds *data* races
 (two threads touching memory without synchronization); the functional tests
@@ -84,21 +84,34 @@ build-std).
   graph goes through `DirGraph` copy-on-write (clone the working copy). That is
   a cost/support concern for disk + Session writes, not a memory-safety one.
 
-## loom — recommended, not yet done
+## loom — exhaustive interleaving proof (done)
 
-[loom](https://github.com/tokio-rs/loom) exhaustively explores thread
-interleavings for a bounded concurrent model — the strongest possible signal
-for exactly the bug class fixed above. It is **not yet wired**, for a concrete
-reason: loom requires the synchronization primitives under test to be loom's
-instrumented `loom::sync::{Arc, Mutex}`, but `Arc<DirGraph>` is pervasive across
-the whole codebase — it can't be transparently swapped under `#[cfg(loom)]`
-without cfg-gating `Arc` everywhere. The practical path is a **hand-written
-loom model** of just the commit check-and-swap algorithm (using `loom::sync`),
-which proves the *algorithm* but risks drift from the real `commit()`.
+[loom](https://github.com/tokio-rs/loom) exhaustively explores every legal
+thread interleaving of a bounded concurrent model — the strongest possible
+signal for exactly the bug class fixed above. It's wired at
+`crates/kglite/tests/loom_session.rs`.
 
-Given the existing stack already covers logical races (functional tests + 50×
-loop, green), data races (TSan, clean), and empirical load (stress harness,
-30× green), the loom model is deferred as additive exhaustive-proof rigor
-rather than a gap. It is the recommended next step if the locking logic is
-extended (e.g. finer-grained or node-level locks), where interleaving space
-grows beyond what loop-and-pray testing can cover.
+loom requires the synchronization primitives under test to be loom's
+instrumented `loom::sync::{Arc, Mutex}`, and `Arc<DirGraph>` is too pervasive to
+swap under `#[cfg(loom)]`. So the model is a **hand-written model of the
+algorithm**: the monotonic version counter — the value the TOCTOU race
+corrupted — stands in for the graph, and the commit logic mirrors the real
+`Session::commit` exactly (one guard held across the version read and the swap,
+new version derived from current). Three models pass under loom:
+`occ_retry_commits_compose`, `lww_commits_are_monotonic`,
+`snapshot_never_torn_under_commit`. Changing the model to release the lock
+between the read and the swap (the pre-fix shape) makes loom find the
+commit-dropping interleaving and the assertions fail — i.e. loom would have
+caught the original bug.
+
+It's gated behind `--cfg loom` (loom is a `cfg(loom)`-only dev-dependency), so
+normal `cargo test` / `make lint` never compile it. Run:
+
+```bash
+RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session
+```
+
+The one caveat is inherent to the approach: it proves the *algorithm*, and
+must be kept faithful to `Session::commit` by hand (there's no compiler link
+between the two). If the real locking logic is extended (finer-grained or
+node-level locks), update the model to match.
