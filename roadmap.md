@@ -77,7 +77,34 @@ thread-safe anchor; there is a single transaction engine (no parallel
 `pyapi::Transaction` copy); `FrozenGraph` is the read snapshot a `Session`
 hands out.
 
-**Decomposition: IN PROGRESS.** Full scope (Stage A + B) approved 2026-06-18.
+**Decomposition: Stage A + B SHIPPED (0.11.3, 2026-06-18).** `KnowledgeGraph`
+now decomposes into labeled concerns instead of 10 flat fields: `inner`
+(shared `DirGraph` storage) + `cursor: CursorState` (per-query selection /
+temporal / stats / reports) + `lifecycle: GraphLifecycle` (save target +
+durability `File`) + `embedder` + 2 query-default scalars. `derive_with`
+funnels fluent derivation through one choke point. The public capability ships
+as **`Session.cursor()`** — a per-thread, snapshot-bound `KnowledgeGraph` with
+the full fluent surface (see the design note below). All phases behaviour-
+identical: the 10 characterization tests + full suite stayed green byte-for-
+byte; perf showed no regression (most paths faster).
+
+Phase map as executed: P0 characterization tests · P1 `CursorState` ·
+P2 `derive_with` funnel · P3 `GraphLifecycle` · **P4+P5 folded** →
+`Session.cursor()`.
+
+**Design note on P4/P5 (the public Cursor).** The original framing was
+"promote `CursorState` to a distinct `Cursor` pyclass; KG delegates." Building
+that as a separate type with a *full fluent mirror* would mean ~50 hand-written
+delegating methods — re-duplicating the exact monolithic surface this
+decomposition removes, and forcing a Cursor twin for every future KG method. So
+the full mirror is delivered as a snapshot-bound `KnowledgeGraph` (the real
+fluent type) via `Session.cursor()`: per-thread, lock-free, zero surface
+duplication. A nominal distinct `Cursor` type remains an easy follow-up if a
+concrete need for the separate name appears.
+
+---
+
+### Original plan (Stage A + B, approved 2026-06-18 — for reference)
 The grounding investigation found the seams are unusually clean — the ~25–30
 fluent methods funnel through one uniform `self.clone()` → mutate-`selection`
 pattern, `selection` never escapes into the core query engine (core

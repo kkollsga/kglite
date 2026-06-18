@@ -123,8 +123,22 @@ across a thread pool:
 store = graph.session()                       # share across the thread pool
 store.cypher("MATCH (n:Doc) RETURN count(n)") # lock-free reads, N threads
 store.execute("CREATE (n:Doc {id: 1})")       # serialized writes, compose
-fz = store.snapshot()                          # stable FrozenGraph view
+fz = store.snapshot()                          # stable FrozenGraph view (cypher only)
+cur = store.cursor()                           # per-thread FULL fluent handle
+cur.select("Doc").where({"team": "A"}).to_df() # ...select/where/traverse/to_df
 ```
+
+**`snapshot()` vs `cursor()`.** Both hand out a per-call handle bound to the
+session's current state, so both are safe to fan across threads. `snapshot()`
+returns a read-only `FrozenGraph` exposing just `cypher()`. `cursor()` returns a
+`KnowledgeGraph` bound to the same kind of snapshot but with the **whole fluent
+surface** (`select`/`where`/`sort`/`traverse`/`to_df`/`collect`/…) — the
+per-thread fluent analogue. Each `cursor()` call is an independent single-owner
+handle, so N threads run fluent chains in parallel without the borrow conflict a
+*shared* live `KnowledgeGraph` raises. Mutating a cursor is copy-on-write
+isolated (it does not write back to the session); take a fresh `cursor()` to see
+later session writes. Pinned by `tests/test_session.py` (per-thread cursor
+fluent concurrency).
 
 A `Session` is an **independent owner** seeded from the graph's state at
 `session()` time: it shares the `Arc` at creation, but once either side
