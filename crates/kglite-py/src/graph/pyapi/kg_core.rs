@@ -667,6 +667,27 @@ impl KnowledgeGraph {
         )
     }
 
+    /// Seed a thread-safe, shareable `Session` from this graph's current
+    /// state.
+    ///
+    /// Unlike a live `KnowledgeGraph` — which is single-owner and trips a
+    /// borrow guard when shared across threads mid-mutation — a `Session`
+    /// has only `&self` methods, with synchronisation in an internal lock.
+    /// Concurrent `cypher()` reads run lock-free; `execute()` writes
+    /// serialise behind the lock with copy-on-write + atomic swap.
+    ///
+    /// The `Session` is an **independent owner**: it shares this graph's
+    /// `Arc<DirGraph>` at creation (O(1), no copy), but once either side
+    /// mutates, copy-on-write forks them. The intended model is "build /
+    /// load with a `KnowledgeGraph`, then `.session()` and serve every thread
+    /// through the `Session`" — don't keep mutating the original graph after.
+    fn session(&self) -> crate::graph::pyapi::session::Session {
+        crate::graph::pyapi::session::Session::from_arc(
+            std::sync::Arc::clone(&self.inner),
+            self.embedder.clone(),
+        )
+    }
+
     /// Persist the graph to its remembered origin path and release nothing
     /// else (the graph stays usable). No-op if the graph has no associated
     /// path (built in memory, never opened/saved to a file) — there is
