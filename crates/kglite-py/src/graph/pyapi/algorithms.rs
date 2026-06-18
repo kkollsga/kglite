@@ -1138,38 +1138,26 @@ impl KnowledgeGraph {
     ///     expanded = graph.select('Field').where({'name': 'EKOFISK'}).expand(hops=2)
     ///     ```
     #[pyo3(signature = (hops=None))]
-    fn expand(&mut self, hops: Option<usize>) -> PyResult<Self> {
+    fn expand(&self, hops: Option<usize>) -> PyResult<Self> {
         let hops = hops.unwrap_or(1);
-        let mut new_kg = self.clone();
-
-        // Record plan step - use node_count() to avoid allocation
-        let estimated = new_kg
-            .cursor
-            .selection
-            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.node_count())
-            .unwrap_or(0);
-
-        crate::graph::mutation::subgraph::expand_selection(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            hops,
-        )
-        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
-
-        // Record actual result - use node_count() to avoid allocation
-        let actual = new_kg
-            .cursor
-            .selection
-            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.node_count())
-            .unwrap_or(0);
-        new_kg
-            .cursor
-            .selection
-            .add_plan_step(PlanStep::new("EXPAND", None, estimated).with_actual_rows(actual));
-
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            // node_count of the last selection level (avoids allocation).
+            let last_count = |sel: &crate::graph::schema::CowSelection| {
+                sel.get_level(sel.get_level_count().saturating_sub(1))
+                    .map(|l| l.node_count())
+                    .unwrap_or(0)
+            };
+            let estimated = last_count(&cursor.selection);
+            crate::graph::mutation::subgraph::expand_selection(inner, &mut cursor.selection, hops)
+                .map_err(|e: String| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
+            let actual = last_count(&cursor.selection);
+            cursor
+                .selection
+                .add_plan_step(PlanStep::new("EXPAND", None, estimated).with_actual_rows(actual));
+            Ok(())
+        })
     }
 
     /// Extract the currently selected nodes into a new independent subgraph.
