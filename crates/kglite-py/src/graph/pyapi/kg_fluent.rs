@@ -75,7 +75,7 @@ impl KnowledgeGraph {
     #[pyo3(signature = (date_str=None, end_str=None))]
     fn date(&self, date_str: Option<&str>, end_str: Option<&str>) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        new_kg.temporal_context = match (date_str, end_str) {
+        new_kg.cursor.temporal_context = match (date_str, end_str) {
             (Some("all"), _) => TemporalContext::All,
             (Some(start), Some(end)) => {
                 let (start_date, _) = crate::graph::features::timeseries::parse_date_query(start)
@@ -134,7 +134,7 @@ impl KnowledgeGraph {
                 .map(|v| v.len())
                 .unwrap_or(0)
         };
-        new_kg.selection.clear_execution_plan(); // Start fresh plan
+        new_kg.cursor.selection.clear_execution_plan(); // Start fresh plan
 
         let sort_fields = if let Some(spec) = sort {
             match spec.extract::<String>() {
@@ -155,7 +155,7 @@ impl KnowledgeGraph {
             // primary `type == node_type` filter below.
             crate::graph::core::filtering::filter_nodes_by_label(
                 &self.inner,
-                &mut new_kg.selection,
+                &mut new_kg.cursor.selection,
                 &node_type,
                 sort_fields,
                 limit,
@@ -169,7 +169,7 @@ impl KnowledgeGraph {
             );
             crate::graph::core::filtering::filter_nodes(
                 &self.inner,
-                &mut new_kg.selection,
+                &mut new_kg.cursor.selection,
                 conditions,
                 sort_fields,
                 limit,
@@ -178,17 +178,17 @@ impl KnowledgeGraph {
         }
 
         // Apply temporal filtering if configured and not disabled
-        if temporal != Some(false) && !self.temporal_context.is_all() {
+        if temporal != Some(false) && !self.cursor.temporal_context.is_all() {
             if let Some(config) = self.inner.temporal_node_configs.get(&node_type) {
-                let level_idx = new_kg.selection.get_level_count().saturating_sub(1);
-                if let Some(level) = new_kg.selection.get_level_mut(level_idx) {
+                let level_idx = new_kg.cursor.selection.get_level_count().saturating_sub(1);
+                if let Some(level) = new_kg.cursor.selection.get_level_mut(level_idx) {
                     for nodes in level.selections.values_mut() {
                         nodes.retain(|&idx| {
                             if let Some(node) = self.inner.graph.node_weight(idx) {
                                 crate::graph::features::temporal::node_passes_context(
                                     node,
                                     config,
-                                    &self.temporal_context,
+                                    &self.cursor.temporal_context,
                                 )
                             } else {
                                 false
@@ -201,11 +201,12 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("SELECT", Some(&node_type), estimated).with_actual_rows(actual),
         );
 
@@ -224,8 +225,9 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
@@ -237,7 +239,7 @@ impl KnowledgeGraph {
 
         crate::graph::core::filtering::filter_nodes(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             filter_conditions,
             sort_fields,
             limit,
@@ -248,11 +250,13 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
         new_kg
+            .cursor
             .selection
             .add_plan_step(PlanStep::new("WHERE", None, estimated).with_actual_rows(actual));
 
@@ -298,7 +302,7 @@ impl KnowledgeGraph {
 
         crate::graph::core::filtering::filter_nodes_any(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             &condition_sets,
             sort_fields,
             limit,
@@ -328,7 +332,7 @@ impl KnowledgeGraph {
 
         crate::graph::core::filtering::filter_orphan_nodes(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             include,
             sort_fields.as_ref(),
             limit,
@@ -345,10 +349,14 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
 
-        crate::graph::core::filtering::sort_nodes(&self.inner, &mut new_kg.selection, sort_fields)
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+        crate::graph::core::filtering::sort_nodes(
+            &self.inner,
+            &mut new_kg.cursor.selection,
+            sort_fields,
+        )
+        .map_err(|e: String| -> PyErr {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+        })?;
         Ok(new_kg)
     }
 
@@ -356,7 +364,7 @@ impl KnowledgeGraph {
         let mut new_kg = self.clone();
         crate::graph::core::filtering::limit_nodes_per_group(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             max_per_group,
         )
         .map_err(|e: String| -> PyErr {
@@ -371,10 +379,10 @@ impl KnowledgeGraph {
     ///   graph.sort('name').offset(20).limit(10)
     fn offset(&mut self, n: usize) -> PyResult<Self> {
         let mut new_kg = self.clone();
-        crate::graph::core::filtering::offset_nodes(&self.inner, &mut new_kg.selection, n)
+        crate::graph::core::filtering::offset_nodes(&self.inner, &mut new_kg.cursor.selection, n)
             .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+        })?;
         Ok(new_kg)
     }
 
@@ -403,7 +411,7 @@ impl KnowledgeGraph {
 
         crate::graph::core::filtering::filter_by_connection(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             connection_type,
             dir,
         )
@@ -453,7 +461,7 @@ impl KnowledgeGraph {
                 )?;
                 parsed
             }
-            None => match &self.temporal_context {
+            None => match &self.cursor.temporal_context {
                 TemporalContext::At(d) => *d,
                 _ => chrono::Local::now().date_naive(),
             },
@@ -469,14 +477,15 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
         // Filter in-place using temporal validity (handles NULL as unbounded)
-        let current_level = new_kg.selection.get_level_count().saturating_sub(1);
-        if let Some(level) = new_kg.selection.get_level_mut(current_level) {
+        let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
@@ -492,11 +501,13 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
         new_kg
+            .cursor
             .selection
             .add_plan_step(PlanStep::new("VALID_AT", None, estimated).with_actual_rows(actual));
 
@@ -553,14 +564,15 @@ impl KnowledgeGraph {
 
         // Estimate based on current selection
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
         // Filter in-place using temporal overlap (handles NULL as unbounded)
-        let current_level = new_kg.selection.get_level_count().saturating_sub(1);
-        if let Some(level) = new_kg.selection.get_level_mut(current_level) {
+        let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
@@ -579,11 +591,13 @@ impl KnowledgeGraph {
 
         // Record actual result
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
         new_kg
+            .cursor
             .selection
             .add_plan_step(PlanStep::new("VALID_DURING", None, estimated).with_actual_rows(actual));
 
@@ -620,8 +634,9 @@ impl KnowledgeGraph {
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         // Get the current level's nodes
-        let current_index = self.selection.get_level_count().saturating_sub(1);
+        let current_index = self.cursor.selection.get_level_count().saturating_sub(1);
         let level = self
+            .cursor
             .selection
             .get_level(current_index)
             .ok_or_else(|| -> PyErr {
@@ -682,15 +697,17 @@ impl KnowledgeGraph {
         // Create the result KnowledgeGraph (clone the Arc for the new graph)
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
-            selection: if keep_selection.unwrap_or(false) {
-                self.selection.clone()
-            } else {
-                CowSelection::new()
+            cursor: crate::graph::CursorState {
+                selection: if keep_selection.unwrap_or(false) {
+                    self.cursor.selection.clone()
+                } else {
+                    CowSelection::new()
+                },
+                reports: self.cursor.reports.clone(),
+                last_mutation_stats: None,
+                temporal_context: self.cursor.temporal_context.clone(),
             },
-            reports: self.reports.clone(),
-            last_mutation_stats: None,
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: None,
@@ -724,8 +741,12 @@ impl KnowledgeGraph {
     #[pyo3(signature = (limit=None))]
     fn collect(&self, limit: Option<usize>) -> PyResult<Py<PyAny>> {
         let max = limit.unwrap_or(usize::MAX);
-        let node_indices: Vec<petgraph::graph::NodeIndex> =
-            self.selection.current_node_indices().take(max).collect();
+        let node_indices: Vec<petgraph::graph::NodeIndex> = self
+            .cursor
+            .selection
+            .current_node_indices()
+            .take(max)
+            .collect();
         let view = crate::graph::pyapi::result_view::ResultView::from_nodes_with_graph(
             &self.inner,
             &node_indices,
@@ -745,7 +766,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         let nodes = crate::graph::core::data_retrieval::get_nodes(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             None,
             None,
             limit,
@@ -769,7 +790,7 @@ impl KnowledgeGraph {
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         // Collect nodes from the current selection
         let mut nodes_data: Vec<(&str, &schema::NodeData)> = Vec::new();
-        for node_idx in self.selection.current_node_indices() {
+        for node_idx in self.cursor.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
                 nodes_data.push((node.node_type_str(&self.inner.interner), node));
             }
@@ -872,7 +893,7 @@ impl KnowledgeGraph {
     fn to_str(&self, limit: usize) -> PyResult<String> {
         use crate::datatypes::values::format_value;
 
-        let node_indices: Vec<_> = self.selection.current_node_indices().collect();
+        let node_indices: Vec<_> = self.cursor.selection.current_node_indices().collect();
         let total = node_indices.len();
         let show = total.min(limit);
 
@@ -947,7 +968,7 @@ impl KnowledgeGraph {
         use crate::graph::core::value_operations::format_value_compact;
 
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
-        let level_count = self.selection.get_level_count();
+        let level_count = self.cursor.selection.get_level_count();
 
         // Helper: format a single node as Type(val1, val2, ...)
         let fmt_node = |idx: NodeIndex| -> String {
@@ -987,7 +1008,7 @@ impl KnowledgeGraph {
 
         if level_count <= 1 {
             // Single level: format each node on its own line
-            let nodes: Vec<_> = self.selection.current_node_indices().collect();
+            let nodes: Vec<_> = self.cursor.selection.current_node_indices().collect();
             if nodes.is_empty() {
                 return Ok("(empty selection)".to_string());
             }
@@ -1003,7 +1024,7 @@ impl KnowledgeGraph {
             Ok(buf)
         } else {
             // Multi-level: walk traversal chains via DFS
-            let level0 = self.selection.get_level(0).ok_or_else(|| {
+            let level0 = self.cursor.selection.get_level(0).ok_or_else(|| {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::CypherExecution {
                     message: ("no selection levels").to_string(),
                     position: None,
@@ -1027,7 +1048,7 @@ impl KnowledgeGraph {
                         continue;
                     }
 
-                    let level = match self.selection.get_level(level_idx) {
+                    let level = match self.cursor.selection.get_level(level_idx) {
                         Some(l) => l,
                         None => {
                             chains.push(chain);
@@ -1089,8 +1110,8 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(name = "len")]
     fn py_len(&self) -> usize {
-        if self.selection.has_active_selection() {
-            self.selection.current_node_count()
+        if self.cursor.selection.has_active_selection() {
+            self.cursor.selection.current_node_count()
         } else {
             self.inner.graph.node_count()
         }
@@ -1108,7 +1129,8 @@ impl KnowledgeGraph {
     ///     indices = graph.select('User').indices()
     ///     ```
     fn indices(&self) -> Vec<usize> {
-        self.selection
+        self.cursor
+            .selection
             .current_node_indices()
             .map(|idx| idx.index())
             .collect()
@@ -1129,7 +1151,7 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             let result = PyList::empty(py);
 
-            for node_idx in self.selection.current_node_indices() {
+            for node_idx in self.cursor.selection.current_node_indices() {
                 if let Some(node) = self.inner.get_node(node_idx) {
                     result.append(py_out::value_to_py(py, &node.id())?)?;
                 }

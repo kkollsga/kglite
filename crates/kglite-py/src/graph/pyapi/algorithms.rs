@@ -733,14 +733,18 @@ impl KnowledgeGraph {
     fn degrees(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result_dict = PyDict::new(py);
 
-        let level_count = self.selection.get_level_count();
+        let level_count = self.cursor.selection.get_level_count();
         if level_count == 0 {
             return Ok(result_dict.into());
         }
 
-        let level = self.selection.get_level(level_count - 1).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No selection level")
-        })?;
+        let level = self
+            .cursor
+            .selection
+            .get_level(level_count - 1)
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("No selection level")
+            })?;
 
         for node_idx in level.iter_node_indices() {
             if let Some(info) =
@@ -1140,25 +1144,28 @@ impl KnowledgeGraph {
 
         // Record plan step - use node_count() to avoid allocation
         let estimated = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
 
         crate::graph::mutation::subgraph::expand_selection(
             &self.inner,
-            &mut new_kg.selection,
+            &mut new_kg.cursor.selection,
             hops,
         )
         .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
 
         // Record actual result - use node_count() to avoid allocation
         let actual = new_kg
+            .cursor
             .selection
-            .get_level(new_kg.selection.get_level_count().saturating_sub(1))
+            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
         new_kg
+            .cursor
             .selection
             .add_plan_step(PlanStep::new("EXPAND", None, estimated).with_actual_rows(actual));
 
@@ -1189,18 +1196,15 @@ impl KnowledgeGraph {
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
         let extracted =
-            crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.selection)
+            crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.cursor.selection)
                 .map_err(|e: String| {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
 
         Ok(KnowledgeGraph {
             inner: Arc::new(extracted),
-            selection: CowSelection::new(),
-            reports: OperationReports::new(), // Fresh reports for new graph
-            last_mutation_stats: None,
+            cursor: crate::graph::CursorState::new(),
             embedder: None,
-            temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
             source_path: None,
@@ -1231,7 +1235,7 @@ impl KnowledgeGraph {
     ///     ```
     fn save_subset(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         let inner = self.inner.clone();
-        let selection = self.selection.clone();
+        let selection = self.cursor.selection.clone();
         let path_owned = path.to_string();
         py.detach(move || {
             crate::graph::mutation::subgraph_streaming::save_subset(
@@ -1475,11 +1479,11 @@ impl KnowledgeGraph {
     ///         - 'node_types': Dict of node type -> count
     ///         - 'connection_types': Dict of connection type -> count
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let stats =
-            crate::graph::mutation::subgraph::get_subgraph_stats(&self.inner, &self.selection)
-                .map_err(|e: String| {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                })?;
+        let stats = crate::graph::mutation::subgraph::get_subgraph_stats(
+            &self.inner,
+            &self.cursor.selection,
+        )
+        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;

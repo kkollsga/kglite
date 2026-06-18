@@ -60,9 +60,9 @@ impl KnowledgeGraph {
         });
 
         // Determine if we should use selection
-        let use_selection = selection_only.unwrap_or(self.selection.get_level_count() > 0);
+        let use_selection = selection_only.unwrap_or(self.cursor.selection.get_level_count() > 0);
         let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.selection) // Deref coercion: &CowSelection -> &CurrentSelection
+            Some(&self.cursor.selection) // Deref coercion: &CowSelection -> &CurrentSelection
         } else {
             None
         };
@@ -158,9 +158,10 @@ impl KnowledgeGraph {
         // Check if selection actually has nodes (not just levels)
         // Same pattern as export_string() — avoids empty export when
         // add_nodes creates a selection level with 0 nodes.
-        let selection_has_nodes = if self.selection.get_level_count() > 0 {
-            let level_idx = self.selection.get_level_count().saturating_sub(1);
-            self.selection
+        let selection_has_nodes = if self.cursor.selection.get_level_count() > 0 {
+            let level_idx = self.cursor.selection.get_level_count().saturating_sub(1);
+            self.cursor
+                .selection
                 .get_level(level_idx)
                 .map(|l| l.node_count() > 0)
                 .unwrap_or(false)
@@ -173,7 +174,7 @@ impl KnowledgeGraph {
             None => selection_has_nodes,
         };
         let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.selection)
+            Some(&self.cursor.selection)
         } else {
             None
         };
@@ -234,9 +235,10 @@ impl KnowledgeGraph {
     #[pyo3(signature = (format, selection_only=None))]
     fn export_string(&self, format: &str, selection_only: Option<bool>) -> PyResult<String> {
         // Check if selection has actual nodes
-        let selection_has_nodes = if self.selection.get_level_count() > 0 {
-            let level_idx = self.selection.get_level_count().saturating_sub(1);
-            self.selection
+        let selection_has_nodes = if self.cursor.selection.get_level_count() > 0 {
+            let level_idx = self.cursor.selection.get_level_count().saturating_sub(1);
+            self.cursor
+                .selection
                 .get_level(level_idx)
                 .map(|l| l.node_count() > 0)
                 .unwrap_or(false)
@@ -253,7 +255,7 @@ impl KnowledgeGraph {
         };
 
         let selection: Option<&CurrentSelection> = if use_selection {
-            Some(&self.selection) // Deref coercion
+            Some(&self.cursor.selection) // Deref coercion
         } else {
             None
         };

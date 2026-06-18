@@ -153,12 +153,12 @@ impl KnowledgeGraph {
         lon_field: Option<&str>,
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
-            resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
-        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
+            resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
         let matching_nodes = crate::graph::features::spatial::within_bounds(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             lat_field,
             lon_field,
             min_lat,
@@ -171,8 +171,8 @@ impl KnowledgeGraph {
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
-        new_kg.selection.clear(); // clear() already adds a fresh level
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
+        new_kg.cursor.selection.clear(); // clear() already adds a fresh level
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
             if !matching_nodes.is_empty() {
                 level.add_selection(None, matching_nodes.clone());
             }
@@ -182,7 +182,7 @@ impl KnowledgeGraph {
         }
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("WITHIN_BOUNDS", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
@@ -228,12 +228,12 @@ impl KnowledgeGraph {
         lon_field: Option<&str>,
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
-            resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
-        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
+            resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
         let matching_nodes = crate::graph::features::spatial::near_point(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             lat_field,
             lon_field,
             center_lat,
@@ -245,8 +245,8 @@ impl KnowledgeGraph {
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
-        new_kg.selection.clear(); // clear() already adds a fresh level
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
+        new_kg.cursor.selection.clear(); // clear() already adds a fresh level
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
             if !matching_nodes.is_empty() {
                 level.add_selection(None, matching_nodes.clone());
             }
@@ -256,7 +256,7 @@ impl KnowledgeGraph {
         }
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("NEAR_POINT", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
@@ -298,12 +298,12 @@ impl KnowledgeGraph {
         lon_field: Option<&str>,
     ) -> PyResult<Self> {
         let (lat_field, lon_field) =
-            resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
-        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
+            resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
         let matching_nodes = crate::graph::features::spatial::near_point_m(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             lat_field,
             lon_field,
             center_lat,
@@ -315,8 +315,8 @@ impl KnowledgeGraph {
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
-        new_kg.selection.clear();
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
+        new_kg.cursor.selection.clear();
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
             if !matching_nodes.is_empty() {
                 level.add_selection(None, matching_nodes.clone());
             }
@@ -326,7 +326,7 @@ impl KnowledgeGraph {
         }
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("NEAR_POINT_M", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
@@ -362,11 +362,12 @@ impl KnowledgeGraph {
         lon: f64,
         geometry_field: Option<&str>,
     ) -> PyResult<Self> {
-        let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
+        let geometry_field =
+            resolve_geometry_field(&self.inner, &self.cursor.selection, geometry_field);
 
         let matching_nodes = crate::graph::features::spatial::contains_point(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             geometry_field,
             lat,
             lon,
@@ -375,8 +376,8 @@ impl KnowledgeGraph {
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
-        new_kg.selection.clear();
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
+        new_kg.cursor.selection.clear();
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
             if !matching_nodes.is_empty() {
                 level.add_selection(None, matching_nodes.clone());
             }
@@ -386,7 +387,7 @@ impl KnowledgeGraph {
         }
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("CONTAINS_POINT", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
@@ -425,11 +426,12 @@ impl KnowledgeGraph {
         geometry_field: Option<&str>,
     ) -> PyResult<Self> {
         let wkt_string = extract_wkt(query_wkt)?;
-        let geometry_field = resolve_geometry_field(&self.inner, &self.selection, geometry_field);
+        let geometry_field =
+            resolve_geometry_field(&self.inner, &self.cursor.selection, geometry_field);
 
         let matching_nodes = crate::graph::features::spatial::intersects_geometry(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             geometry_field,
             &wkt_string,
         )
@@ -437,8 +439,8 @@ impl KnowledgeGraph {
 
         // Create new selection with matching nodes
         let mut new_kg = self.clone();
-        new_kg.selection.clear(); // clear() already adds a fresh level
-        if let Some(level) = new_kg.selection.get_level_mut(0) {
+        new_kg.cursor.selection.clear(); // clear() already adds a fresh level
+        if let Some(level) = new_kg.cursor.selection.get_level_mut(0) {
             if !matching_nodes.is_empty() {
                 level.add_selection(None, matching_nodes.clone());
             }
@@ -448,7 +450,7 @@ impl KnowledgeGraph {
         }
 
         // Record plan step
-        new_kg.selection.add_plan_step(
+        new_kg.cursor.selection.add_plan_step(
             PlanStep::new("INTERSECTS_GEOMETRY", None, matching_nodes.len())
                 .with_actual_rows(matching_nodes.len()),
         );
@@ -483,12 +485,12 @@ impl KnowledgeGraph {
         as_shapely: bool,
     ) -> PyResult<Py<PyAny>> {
         let (lat_field, lon_field) =
-            resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
-        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
+            resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
         match crate::graph::features::spatial::get_bounds(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             lat_field,
             lon_field,
             geom_fb,
@@ -536,12 +538,12 @@ impl KnowledgeGraph {
         as_shapely: bool,
     ) -> PyResult<Py<PyAny>> {
         let (lat_field, lon_field) =
-            resolve_lat_lon_fields(&self.inner, &self.selection, lat_field, lon_field);
-        let geom_fb = resolve_geom_fallback(&self.inner, &self.selection);
+            resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
+        let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
         match crate::graph::features::spatial::calculate_centroid(
             &self.inner,
-            &self.selection,
+            &self.cursor.selection,
             lat_field,
             lon_field,
             geom_fb,

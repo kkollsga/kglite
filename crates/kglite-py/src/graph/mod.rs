@@ -133,6 +133,41 @@ pub(crate) fn extract_fluent_param(
 /// to change their imports; the engine logic lives in core.
 pub(crate) use kglite_core::graph::session::resolve_noderefs;
 
+/// Per-caller query **cursor** state — the part of a `KnowledgeGraph` that is
+/// specific to one chain of fluent calls, separable from the shared graph
+/// storage and the graph's lifecycle. Carries the fluent `selection`, the
+/// `date()` temporal context, the last cypher-mutation stats, and the
+/// accumulated operation reports.
+///
+/// Cloned onto every derived view (O(1) — `selection`/`reports` are Arc-backed)
+/// and reset by `copy()`. Grouping these into one struct is the first step of
+/// the god-object decomposition (see `roadmap.md`): it is the seam the future
+/// public `Cursor` type is built on. No behaviour change — purely a field
+/// grouping.
+#[derive(Clone)]
+pub(crate) struct CursorState {
+    /// Cow wrapper for copy-on-write selection semantics.
+    pub(crate) selection: CowSelection,
+    pub(crate) reports: OperationReports,
+    pub(crate) last_mutation_stats: Option<cypher::result::MutationStats>,
+    /// Temporal context for auto-filtering temporal nodes/connections.
+    /// Set via `date()`. Default = Today (resolve at query time).
+    pub(crate) temporal_context: TemporalContext,
+}
+
+impl CursorState {
+    /// A fresh cursor: empty selection, no reports, no stats, default temporal
+    /// context. Used by `from_arc`, `copy()`, and other fresh-graph sites.
+    pub(crate) fn new() -> Self {
+        CursorState {
+            selection: CowSelection::new(),
+            reports: OperationReports::new(),
+            last_mutation_stats: None,
+            temporal_context: TemporalContext::default(),
+        }
+    }
+}
+
 /// Main knowledge graph type exposed to Python via PyO3.
 ///
 /// Wraps a `DirGraph` behind an `Arc` for cheap cloning (read-heavy workloads).
@@ -142,9 +177,8 @@ pub(crate) use kglite_core::graph::session::resolve_noderefs;
 #[pyclass(skip_from_py_object)]
 pub struct KnowledgeGraph {
     pub(crate) inner: Arc<DirGraph>,
-    pub(crate) selection: CowSelection, // Using Cow wrapper for copy-on-write semantics
-    pub(crate) reports: OperationReports,
-    pub(crate) last_mutation_stats: Option<cypher::result::MutationStats>,
+    /// Per-caller fluent cursor state — see [`CursorState`].
+    pub(crate) cursor: CursorState,
     /// Registered embedding model (not serialized — re-set after load).
     /// Backend-agnostic via [`embedder::Embedder`] trait: Python
     /// embedders flow through [`embedder::py_adapter::PyEmbedderAdapter`];
@@ -153,9 +187,6 @@ pub struct KnowledgeGraph {
     /// downstream Rust binaries (kglite-mcp-server) don't inherit a
     /// libpython dep transitively.
     pub(crate) embedder: Option<Arc<dyn embedder::Embedder>>,
-    /// Temporal context for auto-filtering temporal nodes/connections.
-    /// Set via `date()` method. Default = Today (resolve at query time).
-    pub(crate) temporal_context: TemporalContext,
     /// Default per-query timeout in milliseconds. Applied to cypher() when
     /// timeout_ms is not explicitly passed. None = no timeout (default).
     pub(crate) default_timeout_ms: Option<u64>,
@@ -224,11 +255,8 @@ impl KnowledgeGraph {
     pub fn from_arc(inner: Arc<DirGraph>) -> Self {
         KnowledgeGraph {
             inner,
-            selection: CowSelection::new(),
-            reports: OperationReports::new(),
-            last_mutation_stats: None,
+            cursor: CursorState::new(),
             embedder: None,
-            temporal_context: TemporalContext::default(),
             default_timeout_ms: None,
             default_max_rows: None,
             source_path: None,
@@ -304,11 +332,8 @@ impl Clone for KnowledgeGraph {
     fn clone(&self) -> Self {
         KnowledgeGraph {
             inner: Arc::clone(&self.inner),
-            selection: self.selection.clone(), // Arc clone - O(1), shares data
-            reports: self.reports.clone(),
-            last_mutation_stats: self.last_mutation_stats.clone(),
+            cursor: self.cursor.clone(), // selection/reports Arc-backed — O(1)
             embedder: self.embedder.as_ref().map(Arc::clone),
-            temporal_context: self.temporal_context.clone(),
             default_timeout_ms: self.default_timeout_ms,
             default_max_rows: self.default_max_rows,
             source_path: self.source_path.clone(),
@@ -346,7 +371,7 @@ Example with sentence-transformers:
 
 impl KnowledgeGraph {
     pub(crate) fn add_report(&mut self, report: OperationReport) -> usize {
-        self.reports.add_report(report)
+        self.cursor.reports.add_report(report)
     }
 
     /// Convert a ConnectionOperationReport to a Python dict and emit a warning
@@ -433,7 +458,7 @@ impl KnowledgeGraph {
     /// Thin delegate to `kglite_core::graph::handle::infer_selection_node_type`.
     /// Engine logic lifted to core in 0.10.1.
     pub(crate) fn infer_selection_node_type(&self) -> Option<String> {
-        kglite_core::graph::handle::infer_selection_node_type(&self.selection, &self.inner)
+        kglite_core::graph::handle::infer_selection_node_type(&self.cursor.selection, &self.inner)
     }
 
     /// Get the registered embedder or return a helpful error with a skeleton.

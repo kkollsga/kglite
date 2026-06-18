@@ -333,7 +333,7 @@ impl KnowledgeGraph {
         };
         // Release GIL during heavy vector similarity computation
         let inner = self.inner.clone();
-        let selection = self.selection.clone();
+        let selection = self.cursor.selection.clone();
         let results = py
             .detach(|| {
                 crate::graph::algorithms::vector::vector_search(
@@ -893,12 +893,13 @@ impl KnowledgeGraph {
         // One-arg form: embeddings(text_column) — selection-based
         let col = node_type_or_text_column;
 
-        let level_count = self.selection.get_level_count();
+        let level_count = self.cursor.selection.get_level_count();
         if level_count == 0 {
             return result.into_py_any(py);
         }
 
         let nodes: Vec<NodeIndex> = self
+            .cursor
             .selection
             .get_level(level_count - 1)
             .map(|l| l.get_all_nodes())
