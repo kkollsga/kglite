@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `version()` exposes the monotonic commit counter. Build or load with a
   `KnowledgeGraph`, then `.session()` and serve every thread through the
   `Session`.
+- **`Session.cursor()` — per-thread fluent query handle.** Returns a
+  `KnowledgeGraph` bound to a snapshot of the session's current state with a
+  fresh cursor. Where `snapshot()` gives a read-only `FrozenGraph` (just
+  `cypher()`), `cursor()` gives the **full fluent surface**
+  (`select`/`where`/`sort`/`traverse`/`to_df`/…) as an independent
+  single-owner handle, so N threads can each take a cursor off one shared
+  `Session` and run fluent chains in parallel, lock-free. Mutations on a
+  cursor are copy-on-write isolated (they don't write back to the session).
+  Part of the `KnowledgeGraph` internal decomposition (storage / cursor /
+  lifecycle now separated into `CursorState` + `GraphLifecycle`; see
+  `roadmap.md`).
 
 ## [0.11.2] — 2026-06-18 — bundled synthetic-graph generator + public benchmark
 

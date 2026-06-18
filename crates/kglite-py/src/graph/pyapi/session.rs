@@ -319,6 +319,29 @@ impl Session {
         FrozenGraph::new(self.inner.snapshot(), self.embedder.clone())
     }
 
+    /// Spawn a per-thread **query cursor**: a `KnowledgeGraph` bound to a
+    /// snapshot of this session's current state, with a fresh fluent cursor.
+    ///
+    /// Where `snapshot()` hands out a read-only `FrozenGraph` (just `cypher()`),
+    /// `cursor()` hands out the **full fluent surface** — `select` / `where` /
+    /// `sort` / `traverse` / `to_df` / `collect` / `cypher` / … — as an
+    /// independent single-owner handle. Each call returns its own handle, so N
+    /// threads can each take a cursor off the same shared `Session` and run
+    /// fluent chains in parallel, lock-free, with no single-owner borrow
+    /// conflict.
+    ///
+    /// The cursor is bound to the snapshot at call time: it observes the graph
+    /// as of now, and any mutation on the cursor is isolated via copy-on-write
+    /// (it does not write back to the `Session`). To pick up later session
+    /// writes, take a fresh `cursor()`.
+    fn cursor(&self) -> crate::graph::KnowledgeGraph {
+        let mut kg = crate::graph::KnowledgeGraph::from_arc(self.inner.snapshot());
+        if let Some(e) = &self.embedder {
+            kg.set_embedder_native(e.clone());
+        }
+        kg
+    }
+
     /// Monotonic version of the current graph. Bumped by each committed
     /// write. Useful for cheap "did anything change?" checks.
     fn version(&self) -> u64 {

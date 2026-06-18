@@ -4971,6 +4971,24 @@ class Session:
         """
         ...
 
+    def cursor(self) -> "KnowledgeGraph":
+        """Spawn a per-thread query cursor over a snapshot of this session.
+
+        Returns a :class:`KnowledgeGraph` bound to a snapshot of the session's
+        current state, with a fresh fluent cursor. Where :meth:`snapshot`
+        hands out a read-only :class:`FrozenGraph` (just ``cypher()``),
+        ``cursor()`` gives the **full fluent surface** — ``select`` / ``where``
+        / ``sort`` / ``traverse`` / ``to_df`` / ``collect`` / ``cypher`` / … —
+        as an independent single-owner handle. Each call returns its own
+        handle, so N threads can each take a cursor off the same shared
+        ``Session`` and run fluent chains in parallel, lock-free.
+
+        The cursor observes the graph as of call time; mutating it is isolated
+        via copy-on-write (it does not write back to the ``Session``). Take a
+        fresh ``cursor()`` to pick up later session writes.
+        """
+        ...
+
     def version(self) -> int:
         """Monotonic version of the current graph, bumped by each committed
         write. Useful for cheap "did anything change?" checks."""
