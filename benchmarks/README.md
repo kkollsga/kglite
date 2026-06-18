@@ -14,11 +14,12 @@ pip install kglite kuzu networkx rustworkx igraph duckdb   # competitors are opt
 python benchmarks/benchmark.py                              # → writes BENCHMARKS.md
 ```
 
-This generates a seed-deterministic synthetic knowledge graph, runs every
-installed backend across a suite of workloads, and (re)writes the
-top-level **[`BENCHMARKS.md`](../BENCHMARKS.md)** — the topic-summed
-comparison table you can link to. `--scale large` for a bigger graph;
-`--report-only` to just rebuild the table from saved results.
+This stages a seed-deterministic synthetic graph with the **bundled**
+`kglite.graphgen` (no Rust toolchain needed — it ships in the wheel), runs
+every installed backend across a suite of workloads on those identical
+bytes, and (re)writes the top-level **[`BENCHMARKS.md`](../BENCHMARKS.md)** —
+the topic-summed comparison table you can link to. `--scale large` for a
+bigger graph; `--report-only` to just rebuild the table from saved results.
 
 ## Layout
 
@@ -26,9 +27,8 @@ comparison table you can link to. `--scale large` for a bigger graph;
 |---|---|
 | `benchmark.py` | The one-command entry point above. |
 | `competitive/graphsuite/` | The engine: 15 workload groups × many backends (kglite ×5 modes, Kùzu, Neo4j, DuckDB, NetworkX, rustworkx, igraph) on one shared graph; accumulates `results.json`. `marketing.py` renders `BENCHMARKS.md`; `report.py` prints the fine-grained per-group matrix. |
-| `competitive/largescale/` | Larger-than-RAM runs (kglite mapped/disk vs Kùzu) on a `graphgen`-staged dataset. |
-| `competitive/embedded_app/`, `competitive/nornic/` | Scenario benchmarks. |
-| `graphgen/` | A standalone, zero-dependency Rust generator that **streams** the same schema at any scale in bounded memory (millions of nodes). Build once: `cd benchmarks/graphgen && cargo build --release`. |
+| `competitive/largescale/`, `competitive/embedded_app/`, `competitive/nornic/` | Scenario / larger-than-RAM benchmarks. Local-only (gitignored); `graphsuite` is the tracked public suite. |
+| `graphgen/` | The standalone Rust CLI form of the generator. The generator now lives in the engine (`crates/kglite/src/graphgen/`) and is bundled in the wheel as **`kglite.graphgen(...)`** — what `benchmark.py` uses, so no `cargo` is required. This CLI is just a thin direct-streaming front-end. |
 
 ## Fairness
 

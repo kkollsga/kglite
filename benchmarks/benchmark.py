@@ -43,14 +43,38 @@ def main() -> int:
     args = ap.parse_args()
 
     if not args.report_only:
-        cmd = [sys.executable, "-m", "benchmarks.competitive.graphsuite.run", "--scale", args.scale]
-        if args.libs:
-            cmd += ["--libs", args.libs]
-        print(f"$ {' '.join(cmd)}\n", flush=True)
-        proc = subprocess.run(cmd, cwd=str(ROOT))
-        if proc.returncode != 0:
-            print("benchmark run failed", file=sys.stderr)
-            return proc.returncode
+        import shutil
+        import tempfile
+
+        import kglite
+
+        # Stage the dataset with the bundled generator — no Rust toolchain
+        # needed, and every backend loads these identical bytes.
+        staged = tempfile.mkdtemp(prefix="kglite_bench_")
+        try:
+            stats = kglite.graphgen(args.scale, seed=1234, out=staged)
+            print(
+                f"[dataset] kglite.graphgen({args.scale!r}) → {stats['nodes']:,} nodes / {stats['edges']:,} edges\n",
+                flush=True,
+            )
+            cmd = [
+                sys.executable,
+                "-m",
+                "benchmarks.competitive.graphsuite.run",
+                "--scale",
+                args.scale,
+                "--staged",
+                staged,
+            ]
+            if args.libs:
+                cmd += ["--libs", args.libs]
+            print(f"$ {' '.join(cmd)}\n", flush=True)
+            proc = subprocess.run(cmd, cwd=str(ROOT))
+            if proc.returncode != 0:
+                print("benchmark run failed", file=sys.stderr)
+                return proc.returncode
+        finally:
+            shutil.rmtree(staged, ignore_errors=True)
 
     # Render the public, topic-summed table.
     from benchmarks.competitive.graphsuite.marketing import render

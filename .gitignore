@@ -9,9 +9,14 @@
 /dev-documentation/
 /bench/
 /inbox/
-# Untracked competitive-library benchmarks (kglite vs NornicDB, kuzu,
-# etc.). Tracked internal benchmarks live alongside in /benchmarks/.
-/benchmarks/competitive/
+# Competitive-library benchmarks. The public, OSS-only `graphsuite` (it powers
+# the linkable BENCHMARKS.md table) IS tracked; the rest stays local —
+# `nornic` (kglite vs NornicDB), `largescale`, `embedded_app` carry private /
+# heavy data. (`/dir/*` + `!/dir/sub/` so a subdir can be re-included.)
+/benchmarks/competitive/*
+!/benchmarks/competitive/graphsuite/
+# but not graphsuite's local run artifacts
+/benchmarks/competitive/graphsuite/__pycache__/
 
 # Ignore Rust build artifacts (keep wheels for distribution)
 /target/
