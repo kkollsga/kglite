@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifecycle now separated into `CursorState` + `GraphLifecycle`; see
   `roadmap.md`).
 
+- **`kglite.open_session(path)` — one-call shared handle.** Loads a saved
+  graph directly as a thread-safe `Session` (equivalent to
+  `kglite.load(path).session()`), so the concurrent-serving path is as easy to
+  reach as the single-owner one. Paired with a clearer single-owner error:
+  when a `KnowledgeGraph` is shared+mutated across threads, the `RuntimeError`
+  now names the fix (`session()` / `freeze()` / `cursor()`) instead of only
+  suggesting `copy()`/a lock.
+
 ### Fixed
 
 - **Core `Session::commit` TOCTOU race (concurrent committers could lose a

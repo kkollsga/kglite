@@ -104,9 +104,12 @@ fn concurrent_access_pyerr() -> PyErr {
         "KnowledgeGraph accessed concurrently from another thread while it was being \
          used elsewhere. A KnowledgeGraph is single-owner: it is not safe to share one \
          instance across threads while any thread mutates it (add_nodes, add_connections, \
-         embed_texts, a CREATE/SET/DELETE query, or save). Give each worker its own \
-         copy() (cheap — builds are fast) or serialize all access behind a lock. See the \
-         concurrency model in the docs.",
+         embed_texts, a CREATE/SET/DELETE query, or save). For concurrent access, reach \
+         for a Session instead of sharing the KnowledgeGraph: `g.session()` returns a \
+         thread-safe handle whose `cypher()` reads run lock-free and `execute()` writes \
+         serialize; `g.freeze()` gives a lock-free read-only snapshot; \
+         `g.session().cursor()` hands each thread its own fluent handle. (Or give each \
+         worker its own `copy()`.) See docs/concepts/concurrency.md.",
     )
 }
 

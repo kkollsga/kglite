@@ -39,6 +39,18 @@ def test_session_reads_match_source():
     assert s.node_types == ["Doc"]
 
 
+def test_open_session_one_call_shared_handle(tmp_path):
+    """kglite.open_session(path) loads a saved graph directly as a Session —
+    the low-friction shared entry point (== load(path).session())."""
+    p = tmp_path / "g.kgl"
+    _graph(5).save(str(p))
+    s = kglite.open_session(str(p))
+    assert type(s).__name__ == "Session"
+    assert _count(s) == 5
+    # full fluent surface via cursor()
+    assert len(s.cursor().select("Doc").to_df()) == 5
+
+
 def test_session_cypher_with_params_and_df():
     s = _graph(5).session()
     rows = s.cypher("MATCH (n:Doc) WHERE n.id >= $lo RETURN n.id AS id", params={"lo": 3}).to_list()
