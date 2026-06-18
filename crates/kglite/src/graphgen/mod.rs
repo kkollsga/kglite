@@ -73,6 +73,11 @@ const SKILL_CATEGORIES: &[&str] = &["lang", "framework", "tool", "domain", "soft
 const PROJECT_STATUS: &[&str] = &["planning", "active", "paused", "done", "cancelled"];
 const REGIONS: &[&str] = &["north", "south", "east", "west", "central"];
 
+/// Embedding-vector width on Person nodes (the `embedding` CSV column). Small
+/// enough to keep the CSV bounded at scale, wide enough for a meaningful
+/// vector-kNN benchmark. Reported in the manifest as `embedding_dim`.
+const EMB_DIM: usize = 16;
+
 /// One node type's CSV layout — the load plan a binding needs to ingest it.
 pub struct NodeType {
     pub name: &'static str,
@@ -308,13 +313,16 @@ fn generate(cfg: &GraphGenConfig, r: &Ranges, dir: &Path) -> io::Result<u64> {
     let mut rng = Rng::new(cfg.seed);
 
     // ---- nodes ----
-    let mut city = Csv::create(dir, "City", "gid,name,population,region")?;
+    // City carries geometry (latitude/longitude) for the geospatial workloads.
+    let mut city = Csv::create(dir, "City", "gid,name,population,region,latitude,longitude")?;
     for i in 0..n_city {
         let gid = r.city.0 + i;
+        let pop = rng.range_i64(5_000, 9_000_000);
+        let region = rng.pick(REGIONS);
+        let lat = rng.f64() * 130.0 - 60.0; // -60 .. 70
+        let lon = rng.f64() * 340.0 - 170.0; // -170 .. 170
         city.row(format_args!(
-            "{gid},City_{i},{},{}",
-            rng.range_i64(5_000, 9_000_000),
-            rng.pick(REGIONS)
+            "{gid},City_{i},{pop},{region},{lat:.5},{lon:.5}"
         ))?;
     }
 
@@ -347,16 +355,29 @@ fn generate(cfg: &GraphGenConfig, r: &Ranges, dir: &Path) -> io::Result<u64> {
         ))?;
     }
 
-    let mut person = Csv::create(dir, "Person", "gid,name,age,city,joined_year,active,score")?;
+    // Person carries an embedding vector (quoted JSON array) for vector-kNN.
+    let mut person = Csv::create(
+        dir,
+        "Person",
+        "gid,name,age,city,joined_year,active,score,embedding",
+    )?;
     for i in 0..n_person {
         let gid = r.person.0 + i;
+        let age = rng.range_i64(18, 80);
+        let city_idx = rng.below(n_city);
+        let joined = rng.range_i64(2000, 2025);
+        let active = rng.below(2);
+        let score = rng.f64() * 100.0;
+        let mut emb = String::from("\"[");
+        for d in 0..EMB_DIM {
+            if d > 0 {
+                emb.push(',');
+            }
+            emb.push_str(&format!("{:.4}", rng.f64() * 2.0 - 1.0));
+        }
+        emb.push_str("]\"");
         person.row(format_args!(
-            "{gid},Person_{i},{},City_{},{},{},{:.4}",
-            rng.range_i64(18, 80),
-            rng.below(n_city),
-            rng.range_i64(2000, 2025),
-            rng.below(2),
-            rng.f64() * 100.0
+            "{gid},Person_{i},{age},City_{city_idx},{joined},{active},{score:.4},{emb}",
         ))?;
     }
 
@@ -526,6 +547,7 @@ fn write_manifest(
   "seed": {seed},
   "degree_dist": "{dist}",
   "zipf_exp": {zexp},
+  "embedding_dim": {emb_dim},
   "counts": {{
     "nodes": {n_nodes},
     "edges": {n_edges},
@@ -553,6 +575,7 @@ fn write_manifest(
         seed = cfg.seed,
         dist = if cfg.zipf { "zipf" } else { "uniform" },
         zexp = cfg.zipf_exp,
+        emb_dim = EMB_DIM,
         np = n_person,
         nco = count(r.company),
         npr = n_project,

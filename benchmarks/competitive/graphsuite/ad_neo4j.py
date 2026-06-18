@@ -18,14 +18,14 @@ from __future__ import annotations
 import os
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, GEO_BBOX, SCORE_MIN, SCORE_RANGE, Dataset
 
 NODE_PROPS = {
     "Person": ["gid", "name", "age", "city", "joined_year", "active", "score"],
     "Company": ["gid", "name", "industry", "size"],
     "Project": ["gid", "name", "budget", "status"],
     "Skill": ["gid", "name", "category"],
-    "City": ["gid", "name", "population", "region"],
+    "City": ["gid", "name", "population", "region", "latitude", "longitude"],
 }
 REL_ENDPOINTS = {
     "KNOWS": ("Person", "Person"),
@@ -130,6 +130,47 @@ class Neo4jAdapter(Adapter):
         rows = self._session.run("MATCH (n:Person) RETURN n.city AS city, count(*) AS c, avg(n.age) AS a")
         return {r["city"]: (r["c"], r["a"]) for r in rows}
 
+    def g_edge_scan(self, ds):
+        return self._scalar("MATCH ()-[r:KNOWS]->() RETURN count(r)")
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        return frozenset(
+            self._col(
+                "MATCH (n:Person) WHERE n.score >= $lo AND n.score <= $hi RETURN n.gid AS g",
+                "g",
+                lo=lo,
+                hi=hi,
+            )
+        )
+
+    def g_year_aggregation(self, ds):
+        rows = self._session.run("MATCH (n:Person) RETURN n.joined_year AS y, count(*) AS c, avg(n.score) AS a")
+        return {r["y"]: (r["c"], r["a"]) for r in rows}
+
+    def g_score_filtered_traversal(self, ds):
+        return frozenset(
+            self._col(
+                "UNWIND $ids AS sid MATCH (p:Person {gid:sid})-[:KNOWS]-(f:Person) "
+                "WHERE f.score > $mn RETURN DISTINCT f.gid AS g",
+                "g",
+                ids=ds.params["seed_persons"],
+                mn=SCORE_MIN,
+            )
+        )
+
+    def g_degree_filter(self, ds):
+        return self._scalar(
+            "MATCH (p:Person)-[:KNOWS]-(x) WITH p, count(*) AS deg WHERE deg >= $k RETURN count(p)",
+            k=DEGREE_MIN,
+        )
+
+    def g_bulk_update(self, ds):
+        return self._scalar(
+            "UNWIND $ids AS i MATCH (n:Person {gid:i}) SET n.active = true RETURN count(n)",
+            ids=ds.params["lookup_ids"],
+        )
+
     def _anchored(self, pat, ids):
         return frozenset(
             self._col(
@@ -183,6 +224,27 @@ class Neo4jAdapter(Adapter):
         return self._scalar(
             "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)"
             "<-[:CONTRIBUTES_TO]-(p) RETURN count(*) AS c"
+        )
+
+    def g_industry_aggregation(self, ds):
+        rows = self._session.run("MATCH (n:Company) RETURN n.industry AS ind, count(n) AS c, avg(n.size) AS a")
+        return {r["ind"]: (r["c"], r["a"]) for r in rows}
+
+    def g_two_step_join(self, ds):
+        return self._scalar("MATCH (:Person)-[:WORKS_AT]->(:Company)-[:OWNS]->(:Project) RETURN count(*) AS c")
+
+    def g_geo_within(self, ds):
+        lat0, lat1, lon0, lon1 = GEO_BBOX
+        return frozenset(
+            self._col(
+                "MATCH (c:City) WHERE c.latitude >= $lat0 AND c.latitude <= $lat1 "
+                "AND c.longitude >= $lon0 AND c.longitude <= $lon1 RETURN c.gid AS g",
+                "g",
+                lat0=lat0,
+                lat1=lat1,
+                lon0=lon0,
+                lon1=lon1,
+            )
         )
 
     def g_degree_topk(self, ds):

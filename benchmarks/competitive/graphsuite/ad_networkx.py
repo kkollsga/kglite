@@ -10,7 +10,7 @@ from __future__ import annotations
 import networkx as nx
 
 from .base import Adapter
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, SCORE_MIN, SCORE_RANGE, Dataset
 
 
 class NetworkXAdapter(Adapter):
@@ -57,6 +57,22 @@ class NetworkXAdapter(Adapter):
                 slot[1] += d["age"]
         return {c: (n, s / n) for c, (n, s) in acc.items()}
 
+    def g_edge_scan(self, ds):
+        return self.K.number_of_edges()
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        return frozenset(n for n, d in self.G.nodes(data=True) if d.get("ntype") == "Person" and lo <= d["score"] <= hi)
+
+    def g_year_aggregation(self, ds):
+        acc: dict[int, list[float]] = {}
+        for _, d in self.G.nodes(data=True):
+            if d.get("ntype") == "Person":
+                slot = acc.setdefault(d["joined_year"], [0, 0.0])
+                slot[0] += 1
+                slot[1] += d["score"]
+        return {y: (n, s / n) for y, (n, s) in acc.items()}
+
     def g_one_hop(self, ds):
         K = self.K
         out = set()
@@ -98,6 +114,16 @@ class NetworkXAdapter(Adapter):
                 out.update(nx.descendants(D, s))
         return frozenset(out)
 
+    def g_score_filtered_traversal(self, ds):
+        K, G = self.K, self.G
+        out = set()
+        for s in ds.params["seed_persons"]:
+            if s in K:
+                for f in K.neighbors(s):
+                    if G.nodes[f]["score"] > SCORE_MIN:
+                        out.add(f)
+        return frozenset(out)
+
     def g_shortest_path(self, ds):
         K = self.K
         lengths = []
@@ -114,7 +140,7 @@ class NetworkXAdapter(Adapter):
     def g_pattern_match(self, ds):
         G = self.G
         count = 0
-        p0, p1 = ds.params["person_range"]
+        p0, p1 = ds.ranges["Person"]  # manifest carries `ranges`, not a `person_range` param
         for p in range(p0, p1):
             for c in G.successors(p):
                 if G[p][c]["etype"] != "WORKS_AT":
@@ -126,6 +152,31 @@ class NetworkXAdapter(Adapter):
                         count += 1
         return count
 
+    def g_industry_aggregation(self, ds):
+        # networkx holds the full typed graph, so it *can* do heterogeneous
+        # aggregation in Python (igraph/rustworkx hold no Company data → skip).
+        acc: dict[str, list[int]] = {}
+        for _, d in self.G.nodes(data=True):
+            if d.get("ntype") == "Company":
+                slot = acc.setdefault(d["industry"], [0, 0])
+                slot[0] += 1
+                slot[1] += d["size"]
+        return {ind: (n, s / n) for ind, (n, s) in acc.items()}
+
+    def g_two_step_join(self, ds):
+        G = self.G
+        count = 0
+        for p, d in G.nodes(data=True):
+            if d.get("ntype") != "Person":
+                continue
+            for c in G.successors(p):
+                if G[p][c]["etype"] != "WORKS_AT":
+                    continue
+                for pr in G.successors(c):
+                    if G[c][pr]["etype"] == "OWNS":
+                        count += 1
+        return count
+
     def g_degree_topk(self, ds):
         deg = sorted((d for _, d in self.K.degree()), reverse=True)
         return tuple(deg[: ds.params["topk"]])
@@ -133,6 +184,22 @@ class NetworkXAdapter(Adapter):
     def g_connected_components(self, ds):
         comps = list(nx.connected_components(self.K))
         return (len(comps), max((len(c) for c in comps), default=0))
+
+    def g_louvain(self, ds):
+        comms = nx.community.louvain_communities(self.K, seed=42)
+        return (len(comms), max((len(c) for c in comms), default=0))
+
+    def g_degree_filter(self, ds):
+        return sum(1 for _, d in self.K.degree() if d >= DEGREE_MIN)
+
+    def g_bulk_update(self, ds):
+        G = self.G
+        c = 0
+        for gid in ds.params["lookup_ids"]:
+            if gid in G:
+                G.nodes[gid]["active"] = True
+                c += 1
+        return c
 
     def g_mutations(self, ds):
         off = ds.params["mut_new_base"] + self._mut * 100_000

@@ -54,7 +54,7 @@ pub enum Clause {
     ///
     /// Phase 1 ships the parser + AST node only; execution and planner
     /// integration land in later phases. See
-    /// `dev-documentation/design/call-subqueries.md`.
+    /// `dev_workfolder/dev-documentation/design/call-subqueries.md`.
     CallSubquery {
         import: Vec<String>,
         body: Box<CypherQuery>,

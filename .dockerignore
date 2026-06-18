@@ -1,0 +1,26 @@
+# Keep the Docker build context small + reproducible. The kglite-bolt-server
+# image (crates/kglite-bolt-server/Dockerfile) only needs the Rust workspace
+# sources to compile; everything below is either huge, host-specific, or
+# irrelevant to the build.
+target/
+**/target/
+.venv/
+.git/
+*.kgl
+*.kgle
+
+# Python build/test detritus
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Docs, benchmarks data, local working state
+docs/_build/
+inbox/
+benchmarks/competitive/graphsuite/results.json

@@ -18,7 +18,7 @@ import kuzu
 import pandas as pd
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, GEO_BBOX, SCORE_MIN, SCORE_RANGE, Dataset
 
 # node type -> (PRIMARY KEY-first ordered (column, kuzu_type) list)
 NODE_SCHEMA = {
@@ -34,7 +34,14 @@ NODE_SCHEMA = {
     "Company": [("gid", "INT64"), ("name", "STRING"), ("industry", "STRING"), ("size", "INT64")],
     "Project": [("gid", "INT64"), ("name", "STRING"), ("budget", "DOUBLE"), ("status", "STRING")],
     "Skill": [("gid", "INT64"), ("name", "STRING"), ("category", "STRING")],
-    "City": [("gid", "INT64"), ("name", "STRING"), ("population", "INT64"), ("region", "STRING")],
+    "City": [
+        ("gid", "INT64"),
+        ("name", "STRING"),
+        ("population", "INT64"),
+        ("region", "STRING"),
+        ("latitude", "DOUBLE"),
+        ("longitude", "DOUBLE"),
+    ],
 }
 # rel type -> (FROM node type, TO node type)
 REL_SCHEMA = {
@@ -124,6 +131,42 @@ class KuzuAdapter(Adapter):
         df = self._df("MATCH (n:Person) RETURN n.city AS city, count(*) AS c, avg(n.age) AS a")
         return {row.city: (int(row.c), float(row.a)) for row in df.itertuples()}
 
+    def g_edge_scan(self, ds):
+        return int(self._scalar("MATCH ()-[r:KNOWS]->() RETURN count(r)"))
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        df = self._df(
+            "MATCH (n:Person) WHERE n.score >= $lo AND n.score <= $hi RETURN n.gid AS gid",
+            {"lo": lo, "hi": hi},
+        )
+        return frozenset(int(x) for x in df["gid"])
+
+    def g_year_aggregation(self, ds):
+        df = self._df("MATCH (n:Person) RETURN n.joined_year AS y, count(*) AS c, avg(n.score) AS a")
+        return {int(row.y): (int(row.c), float(row.a)) for row in df.itertuples()}
+
+    def g_score_filtered_traversal(self, ds):
+        df = self._df(
+            "UNWIND $ids AS sid MATCH (p:Person {gid:sid})-[:KNOWS]-(f:Person) "
+            "WHERE f.score > $mn RETURN DISTINCT f.gid AS gid",
+            {"ids": ds.params["seed_persons"], "mn": SCORE_MIN},
+        )
+        return frozenset(int(x) for x in df["gid"])
+
+    def g_degree_filter(self, ds):
+        return int(
+            self._scalar(
+                "MATCH (p:Person)-[:KNOWS]-(x) WITH p, count(*) AS deg WHERE deg >= $k RETURN count(p)",
+                {"k": DEGREE_MIN},
+            )
+        )
+
+    def g_bulk_update(self, ds):
+        ids = ds.params["lookup_ids"]
+        self.con.execute("UNWIND $ids AS i MATCH (n:Person {gid:i}) SET n.active = 1", {"ids": ids})
+        return int(self._scalar("MATCH (n:Person) WHERE n.gid IN $ids RETURN count(n)", {"ids": ids}))
+
     def _anchored(self, label_pat, ids):
         df = self._df(
             f"UNWIND $ids AS sid MATCH (p:Person {{gid:sid}})-{label_pat}-(f:Person) RETURN DISTINCT f.gid AS gid",
@@ -138,7 +181,13 @@ class KuzuAdapter(Adapter):
         return self._anchored("[:KNOWS*1..2]", ds.params["seed_persons_small"])
 
     def g_three_hop(self, ds):
-        return self._anchored("[:KNOWS*1..3]", ds.params["seed_persons_tiny"])
+        # The dense, hub-heavy KNOWS subgraph can exhaust Kùzu's var-length
+        # path materialisation at 3 hops; degrade to a clean Skip rather than
+        # surfacing a raw engine error (honest "Kùzu can't do this here").
+        try:
+            return self._anchored("[:KNOWS*1..3]", ds.params["seed_persons_tiny"])
+        except Exception as e:
+            raise Skip(f"Kùzu 3-hop var-length exhausts the dense hub graph: {type(e).__name__}") from e
 
     def g_filtered_traversal(self, ds):
         df = self._df(
@@ -172,6 +221,22 @@ class KuzuAdapter(Adapter):
                 "MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project)<-[:CONTRIBUTES_TO]-(p) RETURN count(*)"
             )
         )
+
+    def g_industry_aggregation(self, ds):
+        df = self._df("MATCH (n:Company) RETURN n.industry AS ind, count(*) AS c, avg(n.size) AS a")
+        return {row.ind: (int(row.c), float(row.a)) for row in df.itertuples()}
+
+    def g_two_step_join(self, ds):
+        return int(self._scalar("MATCH (:Person)-[:WORKS_AT]->(:Company)-[:OWNS]->(:Project) RETURN count(*)"))
+
+    def g_geo_within(self, ds):
+        lat0, lat1, lon0, lon1 = GEO_BBOX
+        df = self._df(
+            "MATCH (c:City) WHERE c.latitude >= $lat0 AND c.latitude <= $lat1 "
+            "AND c.longitude >= $lon0 AND c.longitude <= $lon1 RETURN c.gid AS gid",
+            {"lat0": lat0, "lat1": lat1, "lon0": lon0, "lon1": lon1},
+        )
+        return frozenset(int(x) for x in df["gid"])
 
     def g_degree_topk(self, ds):
         df = self._df(

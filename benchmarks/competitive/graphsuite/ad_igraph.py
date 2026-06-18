@@ -14,7 +14,7 @@ from __future__ import annotations
 import igraph as ig
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, SCORE_MIN, SCORE_RANGE, Dataset
 
 
 class IgraphAdapter(Adapter):
@@ -66,6 +66,21 @@ class IgraphAdapter(Adapter):
             slot[1] += age
         return {c: (n, s / n) for c, (n, s) in acc.items()}
 
+    def g_edge_scan(self, ds):
+        return self.K.ecount()
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        return frozenset(r["gid"] for r in self.persons if lo <= r["score"] <= hi)
+
+    def g_year_aggregation(self, ds):
+        acc: dict[int, list[float]] = {}
+        for r in self.persons:
+            slot = acc.setdefault(r["joined_year"], [0, 0.0])
+            slot[0] += 1
+            slot[1] += r["score"]
+        return {y: (n, s / n) for y, (n, s) in acc.items()}
+
     # local vertex indices mapped back to global ids (+ p0) for parity.
     def _khop(self, seeds, k):
         locs = [s - self.p0 for s in seeds]
@@ -103,6 +118,15 @@ class IgraphAdapter(Adapter):
             out |= comp
         return frozenset(d + self.pr0 for d in out)
 
+    def g_score_filtered_traversal(self, ds):
+        K, persons = self.K, self.persons
+        out: set[int] = set()
+        for s in ds.params["seed_persons"]:
+            for f in K.neighbors(s - self.p0):
+                if persons[f]["score"] > SCORE_MIN:
+                    out.add(f)
+        return frozenset(f + self.p0 for f in out)
+
     def g_shortest_path(self, ds):
         K = self.K
         srcs = [a - self.p0 for a, _ in ds.params["sp_pairs"]]
@@ -121,6 +145,23 @@ class IgraphAdapter(Adapter):
         cc = self.K.connected_components()
         sizes = cc.sizes()
         return (len(sizes), max(sizes) if sizes else 0)
+
+    def g_louvain(self, ds):
+        cl = self.K.community_multilevel()
+        sizes = cl.sizes()
+        return (len(sizes), max(sizes) if sizes else 0)
+
+    def g_degree_filter(self, ds):
+        return sum(1 for d in self.K.degree() if d >= DEGREE_MIN)
+
+    def g_bulk_update(self, ds):
+        pbg = self.person_by_gid
+        c = 0
+        for gid in ds.params["lookup_ids"]:
+            if gid in pbg:
+                pbg[gid]["active"] = True
+                c += 1
+        return c
 
     def g_pattern_match(self, ds):
         raise Skip("igraph has no relational pattern-match surface")

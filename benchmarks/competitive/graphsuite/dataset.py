@@ -36,6 +36,7 @@ node also carries its `type` and a per-type local index.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import random
 from typing import Any
@@ -48,6 +49,22 @@ SCALES: dict[str, dict[str, Any]] = {
     "medium": {"persons": 20_000, "knows_per": 6},
     "large": {"persons": 100_000, "knows_per": 8},
 }
+
+# Thresholds for the broadly-runnable workloads (range_filter / degree_filter /
+# score_filtered_traversal / bulk_update). Constants — not per-run params — so
+# both the in-process `generate()` path and the staged `from_staged()` path
+# (which reads params from the core generator's manifest) use identical values
+# across every backend, no manifest plumbing required.
+SCORE_RANGE = (40.0, 60.0)  # range_filter: Persons with score in [lo, hi]
+SCORE_MIN = 50.0  # score_filtered_traversal: KNOWS neighbours with score > this
+DEGREE_MIN = 14  # degree_filter: count Persons with undirected KNOWS-degree ≥ this
+
+# Specialized-tier params (Phase 4). EMB_DIM mirrors the core generator's
+# Person `embedding` width; GEO_BBOX is the geospatial query window over City
+# latitude/longitude; VECTOR_TOPK is the vector-kNN result size.
+EMB_DIM = 16
+GEO_BBOX = (-20.0, 40.0, -50.0, 50.0)  # (lat_lo, lat_hi, lon_lo, lon_hi)
+VECTOR_TOPK = 10
 
 INDUSTRIES = ["tech", "energy", "finance", "health", "retail", "media", "logistics", "gov"]
 SKILL_CATEGORIES = ["lang", "framework", "tool", "domain", "soft"]
@@ -183,6 +200,8 @@ def generate(scale: str = "medium", seed: int = 1234) -> Dataset:
             "name": f"City_{i}",
             "population": rng.randint(5_000, 5_000_000),
             "region": REGIONS[i % len(REGIONS)],
+            "latitude": round(rng.uniform(-60.0, 70.0), 5),
+            "longitude": round(rng.uniform(-170.0, 170.0), 5),
         }
         for i in range(n_city)
     ]
@@ -225,6 +244,9 @@ def generate(scale: str = "medium", seed: int = 1234) -> Dataset:
             "joined_year": rng.randint(2000, 2025),
             "active": rng.random() < 0.7,
             "score": round(rng.uniform(0.0, 100.0), 3),
+            # JSON string to match the core generator's CSV column exactly, so
+            # the kglite vector adapter parses it identically in both paths.
+            "embedding": json.dumps([round(rng.uniform(-1.0, 1.0), 4) for _ in range(EMB_DIM)]),
         }
         for i in range(n_person)
     ]

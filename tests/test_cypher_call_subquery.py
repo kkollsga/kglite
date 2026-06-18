@@ -6,7 +6,7 @@ Phase 1 ships the parser; Phase 2 adds v1 structural validation
 mutation classification). Phase 3 makes the **uncorrelated** form
 (``CALL { ... }`` importing nothing) executable: the body runs exactly
 once and its result rows are cartesian-producted with the outer row
-stream (§1.1 of ``dev-documentation/design/call-subqueries.md``). The
+stream (§1.1 of ``dev_workfolder/dev-documentation/design/call-subqueries.md``). The
 body sees no outer variables (§1.2 rule 1); only its RETURN columns flow
 out (§1.2 rule 3); a RETURN alias colliding with an outer variable is a
 compile/execution error (§1.2 rule 4).

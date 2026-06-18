@@ -616,23 +616,31 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::UniqueId(u));
     }
 
-    // Handle lists (e.g. embedding vectors for Cypher params) — serialize as JSON string
+    // dict → native Map (recursive). Enables `$m.prop`, and
+    // `UNWIND $rows AS r ... r.key` over a parameterised list of dicts — the
+    // common batch-insert/update shape. Without this a dict param became
+    // Value::Null and every `.key` access returned null.
+    if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in dict.iter() {
+            let key: String = k.extract()?;
+            map.insert(key, py_value_to_value(&v)?);
+        }
+        return Ok(Value::Map(map));
+    }
+
+    // list / tuple → native Value::List (recursive). UNWIND, `IN`, and
+    // vector_score all accept the native list shape (the "post-A.1" form;
+    // extract_float_list takes both List and the legacy JSON string), so a
+    // list of dicts now unwinds into real maps instead of stringified nulls.
     if let Ok(list) = value.cast::<pyo3::types::PyList>() {
-        let items: Vec<String> = list
-            .iter()
-            .map(|item| {
-                if let Ok(f) = item.extract::<f64>() {
-                    format!("{}", f)
-                } else if let Ok(s) = item.extract::<String>() {
-                    format!("\"{}\"", s)
-                } else if let Ok(i) = item.extract::<i64>() {
-                    format!("{}", i)
-                } else {
-                    "null".to_string()
-                }
-            })
-            .collect();
-        return Ok(Value::String(format!("[{}]", items.join(", "))));
+        let items: PyResult<Vec<Value>> =
+            list.iter().map(|item| py_value_to_value(&item)).collect();
+        return Ok(Value::List(items?));
+    }
+    if let Ok(tup) = value.cast::<pyo3::types::PyTuple>() {
+        let items: PyResult<Vec<Value>> = tup.iter().map(|item| py_value_to_value(&item)).collect();
+        return Ok(Value::List(items?));
     }
 
     Ok(Value::Null)

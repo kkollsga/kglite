@@ -10,12 +10,12 @@ and v0.7.17 under a worktree), producing comparable JSON artefacts.
 Usage
 -----
     python tests/benchmarks/phase11_harness.py \
-        --json dev-documentation/archive/phase_artifacts/phase11_main.json \
+        --json dev_workfolder/dev-documentation/archive/phase_artifacts/phase11_main.json \
         --n 20
 
     # v0.7.17 replay: memory + mapped only (disk format incompatible)
     python tests/benchmarks/phase11_harness.py \
-        --json dev-documentation/archive/phase_artifacts/phase11_v0_7_17.json \
+        --json dev_workfolder/dev-documentation/archive/phase_artifacts/phase11_v0_7_17.json \
         --n 20 --modes memory,mapped
 
     # Quick dry-run

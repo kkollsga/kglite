@@ -26,17 +26,6 @@ pub fn algorithm_timeout_err() -> String {
         .to_string()
 }
 
-/// Error when subgraph scoping (`node_type` / `where`) is requested on a
-/// disk- or mapped-backed graph. Scoping materialises a filtered node set,
-/// which is an in-memory-only feature; the streaming community path exists
-/// precisely for graphs too large for that.
-pub fn scope_unsupported_err() -> String {
-    "Subgraph scoping ({node_type, where}) is only supported for in-memory \
-     graphs; this graph is disk- or mapped-backed. Run on an in-memory copy, \
-     or filter with a preceding MATCH instead."
-        .to_string()
-}
-
 // ============================================================================
 // Path Filtering Helpers
 // ============================================================================
@@ -363,9 +352,8 @@ pub fn shortest_path_cost_batch(
 /// implementation allocated 500 KB (Vec<bool>) + 2 MB (Vec<u32>) per
 /// call on a 500 K-node graph regardless of actual BFS scope. For a
 /// shallow lookup that visits ~16 nodes the per-call alloc + init
-/// (~30 ms) dominated the operation — see the NornicDB shortestPath
-/// benchmark (`scripts/nornicdb_compare.py`), where this fix moved
-/// d=1 latency from 37 µs → 4 µs on the 500K-node fixture.
+/// (~30 ms) dominated the operation; this fix moved d=1 shortestPath
+/// latency from 37 µs → 4 µs on a 500K-node fixture.
 ///
 /// The HashMap also doubles as the visited set: presence ⇔ visited.
 /// Deep BFS does pay slightly more per-node (~100 ns hash insert vs
@@ -1816,32 +1804,31 @@ pub fn louvain_communities(
     scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    // Disk/mapped: stream level 0 from the CSR (O(nodes) heap). In-memory: keep
-    // the materialised fast path. Subgraph scoping (node_type / where) is an
-    // in-memory-only feature — the streaming path is the bounded-memory escape
-    // hatch for graphs too large to scope a copy of, so reject scope there.
-    let (nodes, levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
-        if scope.is_some() {
-            return Err(scope_unsupported_err());
-        }
-        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-        if nodes.is_empty() {
-            return Ok(empty_community_result());
-        }
-        let src = CsrSource::new(graph, weight_property, connection_types);
-        let m = src.total_weight();
-        let levels = louvain_levels(&src, resolution, deadline)?;
-        (nodes, levels, m)
-    } else {
-        let (nodes, adj, m) =
-            build_weighted_adjacency(graph, weight_property, connection_types, scope);
-        if nodes.is_empty() {
-            return Ok(empty_community_result());
-        }
-        let src = MaterializedAdj { adj: &adj, m };
-        let levels = louvain_levels(&src, resolution, deadline)?;
-        (nodes, levels, m)
-    };
+    // Unscoped disk/mapped: stream level 0 from the CSR (O(nodes) heap) — the
+    // bounded-memory path for whole-graph runs. In-memory, or any *scoped* run:
+    // materialise the (scope-bounded) adjacency. build_weighted_adjacency reads
+    // through GraphRead (scoped_node_set / edge_in_scope), exactly like
+    // connected_components' scoped path, so scoping works on every storage mode.
+    let (nodes, levels, m) =
+        if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
+            let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+            if nodes.is_empty() {
+                return Ok(empty_community_result());
+            }
+            let src = CsrSource::new(graph, weight_property, connection_types);
+            let m = src.total_weight();
+            let levels = louvain_levels(&src, resolution, deadline)?;
+            (nodes, levels, m)
+        } else {
+            let (nodes, adj, m) =
+                build_weighted_adjacency(graph, weight_property, connection_types, scope);
+            if nodes.is_empty() {
+                return Ok(empty_community_result());
+            }
+            let src = MaterializedAdj { adj: &adj, m };
+            let levels = louvain_levels(&src, resolution, deadline)?;
+            (nodes, levels, m)
+        };
     Ok(build_community_result(
         graph,
         &nodes,
@@ -2004,28 +1991,26 @@ pub fn leiden_communities(
     scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    let (nodes, levels, m) = if graph.graph.is_disk() || graph.graph.is_mapped() {
-        if scope.is_some() {
-            return Err(scope_unsupported_err());
-        }
-        let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
-        if nodes.is_empty() {
-            return Ok(empty_community_result());
-        }
-        let src = CsrSource::new(graph, weight_property, connection_types);
-        let m = src.total_weight();
-        let levels = leiden_levels(&src, resolution, deadline)?;
-        (nodes, levels, m)
-    } else {
-        let (nodes, adj, m) =
-            build_weighted_adjacency(graph, weight_property, connection_types, scope);
-        if nodes.is_empty() {
-            return Ok(empty_community_result());
-        }
-        let src = MaterializedAdj { adj: &adj, m };
-        let levels = leiden_levels(&src, resolution, deadline)?;
-        (nodes, levels, m)
-    };
+    let (nodes, levels, m) =
+        if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
+            let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
+            if nodes.is_empty() {
+                return Ok(empty_community_result());
+            }
+            let src = CsrSource::new(graph, weight_property, connection_types);
+            let m = src.total_weight();
+            let levels = leiden_levels(&src, resolution, deadline)?;
+            (nodes, levels, m)
+        } else {
+            let (nodes, adj, m) =
+                build_weighted_adjacency(graph, weight_property, connection_types, scope);
+            if nodes.is_empty() {
+                return Ok(empty_community_result());
+            }
+            let src = MaterializedAdj { adj: &adj, m };
+            let levels = leiden_levels(&src, resolution, deadline)?;
+            (nodes, levels, m)
+        };
     Ok(build_community_result(
         graph,
         &nodes,
@@ -2049,13 +2034,11 @@ pub fn label_propagation(
     scope: Option<&NodeScope>,
     deadline: Option<Instant>,
 ) -> Result<CommunityResult, String> {
-    // Disk/mapped: stream the deduped neighbours (bounded memory) instead of
-    // materialising the whole adjacency. In-memory keeps the materialised path.
-    // Subgraph scoping is in-memory-only (see louvain_communities).
-    if graph.graph.is_disk() || graph.graph.is_mapped() {
-        if scope.is_some() {
-            return Err(scope_unsupported_err());
-        }
+    // Unscoped disk/mapped: stream the deduped neighbours (bounded memory). A
+    // *scoped* run falls through to the materialised path below — the scoped
+    // subgraph is bounded and scoped_node_set reads through GraphRead, so it
+    // works on every storage mode (see louvain_communities).
+    if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
         return label_propagation_streaming(graph, max_iterations, connection_types, deadline);
     }
 

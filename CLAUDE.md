@@ -298,7 +298,7 @@ See `docs/rust/implementing-a-binding.md` → "Wrapping a dataset for
 your binding" for the worked dataset example. (The reverse-audit
 methodology — strict posture, test the signature not the
 consumer count — is recorded in the maintainer's local audit
-under `dev-documentation/audits/`.)
+under `dev_workfolder/dev-documentation/audits/`.)
 
 ## In-memory is the core product
 
@@ -372,17 +372,19 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 
 ## Inbox hygiene
 
-`inbox/unread/` holds incoming feedback/bug/coordination notes (named
-`YYYY-MM-DD-from-<sender>-<topic>.md`); `inbox/read/` is the archive. The
-inbox is gitignored — it's local working state, not committed.
+`dev_workfolder/inbox/unread/` holds incoming feedback/bug/coordination notes
+(named `YYYY-MM-DD-from-<sender>-<topic>.md`); `dev_workfolder/inbox/read/` is
+the archive. The inbox is gitignored — it's local working state, not committed.
+(It lives under the gitignored `dev_workfolder/` alongside `dev-documentation/`,
+local `projects/`, and `bench/`.)
 
-**When a message has been actioned, move it from `inbox/unread/` to
-`inbox/read/`.** "Actioned" means the work shipped, the bug was verified
+**When a message has been actioned, move it from `dev_workfolder/inbox/unread/`
+to `dev_workfolder/inbox/read/`.** "Actioned" means the work shipped, the bug was verified
 fixed, or it's a no-action acknowledgement — not merely read. `unread/`
 must reflect only what still needs doing, so a stale "you still have unread
 mail" never hides a genuinely open item among resolved ones. Append a
 one-line `## Status (kglite, <date>): …` footer to substantive work-items
-before moving, so `read/` carries the resolution record.
+before moving, so `dev_workfolder/inbox/read/` carries the resolution record.
 
 **Route to the party who can act.** A note only belongs in another project's
 inbox (e.g. `../mcp-servers/inbox/`, `../mcp-methods/inbox/`) if it carries an

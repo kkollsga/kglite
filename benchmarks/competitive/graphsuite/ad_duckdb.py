@@ -17,7 +17,7 @@ import duckdb
 import pandas as pd
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, GEO_BBOX, SCORE_MIN, SCORE_RANGE, Dataset
 
 # every edge type is loaded (full-dataset build, fair vs the graph stores);
 # only a subset is queried by the groups.
@@ -90,6 +90,40 @@ class DuckDBAdapter(Adapter):
         rows = self.con.execute("SELECT city, count(*) AS c, avg(age) AS a FROM person GROUP BY city").fetchall()
         return {r[0]: (r[1], r[2]) for r in rows}
 
+    def g_edge_scan(self, ds):
+        return self.con.execute("SELECT count(*) FROM knows").fetchone()[0]
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        rows = self.con.execute("SELECT gid FROM person WHERE score >= ? AND score <= ?", [lo, hi]).fetchall()
+        return frozenset(r[0] for r in rows)
+
+    def g_year_aggregation(self, ds):
+        rows = self.con.execute(
+            "SELECT joined_year, count(*) AS c, avg(score) AS a FROM person GROUP BY joined_year"
+        ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def g_score_filtered_traversal(self, ds):
+        self._seeds(ds.params["seed_persons"])
+        rows = self.con.execute(
+            "SELECT DISTINCT kn.b FROM kn JOIN person p ON kn.b = p.gid "
+            "WHERE kn.a IN (SELECT id FROM seeds) AND p.score > ?",
+            [SCORE_MIN],
+        ).fetchall()
+        return frozenset(r[0] for r in rows)
+
+    def g_degree_filter(self, ds):
+        return self.con.execute(
+            "SELECT count(*) FROM (SELECT a FROM kn GROUP BY a HAVING count(*) >= ?)",
+            [DEGREE_MIN],
+        ).fetchone()[0]
+
+    def g_bulk_update(self, ds):
+        self._seeds(ds.params["lookup_ids"])
+        self.con.execute("UPDATE person SET active = true WHERE gid IN (SELECT id FROM seeds)")
+        return self.con.execute("SELECT count(*) FROM person WHERE gid IN (SELECT id FROM seeds)").fetchone()[0]
+
     def _khop(self, seeds, k):
         self._seeds(seeds)
         # recursive BFS to depth k; every row is at distance >=1 from the seed
@@ -144,6 +178,23 @@ class DuckDBAdapter(Adapter):
             "JOIN owns o ON w.dst = o.src "
             "JOIN contributes c ON c.src = w.src AND c.dst = o.dst"
         ).fetchone()[0]
+
+    def g_industry_aggregation(self, ds):
+        rows = self.con.execute(
+            "SELECT industry, count(*) AS c, avg(size) AS a FROM company GROUP BY industry"
+        ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def g_two_step_join(self, ds):
+        return self.con.execute("SELECT count(*) FROM works_at w JOIN owns o ON w.dst = o.src").fetchone()[0]
+
+    def g_geo_within(self, ds):
+        lat0, lat1, lon0, lon1 = GEO_BBOX
+        rows = self.con.execute(
+            "SELECT gid FROM city WHERE latitude >= ? AND latitude <= ? AND longitude >= ? AND longitude <= ?",
+            [lat0, lat1, lon0, lon1],
+        ).fetchall()
+        return frozenset(r[0] for r in rows)
 
     def g_degree_topk(self, ds):
         rows = self.con.execute(

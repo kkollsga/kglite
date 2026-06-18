@@ -7,7 +7,7 @@ when either operand is float.
 These tests are xfail-strict: when the implementation lands, pytest
 flips them to XPASS and the strict marker forces removal of the
 `@pytest.mark.xfail` decorator. That is the signal to update the
-gate-item status in `dev-documentation/archive/0.9.0-readiness.md` §5
+gate-item status in `dev_workfolder/dev-documentation/archive/0.9.0-readiness.md` §5
 (local-only; 0.9.0 has shipped).
 """
 

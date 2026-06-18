@@ -9,13 +9,14 @@ has no native WCC/PageRank primitive (those belong to igraph/rustworkx).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 
 import kglite
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, GEO_BBOX, SCORE_MIN, SCORE_RANGE, VECTOR_TOPK, Dataset
 
 # edge type -> (source node type, target node type)
 EDGE_ENDPOINTS = {
@@ -88,6 +89,47 @@ class KgliteCypher(Adapter):
         rows = self._q("MATCH (n:Person) RETURN n.city AS city, count(n) AS c, avg(n.age) AS a").to_list()
         return {r["city"]: (r["c"], r["a"]) for r in rows}
 
+    def g_edge_scan(self, ds):
+        return self._q("MATCH ()-[r:KNOWS]->() RETURN count(r) AS c").scalar()
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        ids = self._q(
+            "MATCH (n:Person) WHERE n.score >= $lo AND n.score <= $hi RETURN n.id AS id",
+            lo=lo,
+            hi=hi,
+        ).column("id")
+        return frozenset(ids)
+
+    def g_year_aggregation(self, ds):
+        rows = self._q("MATCH (n:Person) RETURN n.joined_year AS y, count(n) AS c, avg(n.score) AS a").to_list()
+        return {r["y"]: (r["c"], r["a"]) for r in rows}
+
+    def g_score_filtered_traversal(self, ds):
+        return frozenset(
+            self._q(
+                "UNWIND $ids AS sid MATCH (p:Person {id:sid})-[:KNOWS]-(f:Person) "
+                "WHERE f.score > $mn RETURN DISTINCT f.id AS id",
+                ids=ds.params["seed_persons"],
+                mn=SCORE_MIN,
+            ).column("id")
+        )
+
+    def g_degree_filter(self, ds):
+        return self._q(
+            "MATCH (p:Person) WITH p, COUNT { (p)-[:KNOWS]-() } AS deg WHERE deg >= $k RETURN count(p) AS c",
+            k=DEGREE_MIN,
+        ).scalar()
+
+    def g_bulk_update(self, ds):
+        # SET a property (read by no other group) on the 500 lookup Persons;
+        # return the matched count. Runs last (Mutations topic), so it never
+        # perturbs the score/age the read groups measured.
+        return self._q(
+            "UNWIND $ids AS i MATCH (n:Person {id:i}) SET n.active = true RETURN count(n) AS c",
+            ids=ds.params["lookup_ids"],
+        ).scalar()
+
     # Seeded traversals use the UNWIND-anchored form so the id index drives
     # the scan. (The `... WHERE p.id IN $ids` form does NOT anchor on the
     # index in the current planner and is ~240x slower — see README findings.)
@@ -153,6 +195,47 @@ class KgliteCypher(Adapter):
             "<-[:CONTRIBUTES_TO]-(p) RETURN count(*) AS c"
         ).scalar()
 
+    def g_industry_aggregation(self, ds):
+        rows = self._q("MATCH (n:Company) RETURN n.industry AS ind, count(n) AS c, avg(n.size) AS a").to_list()
+        return {r["ind"]: (r["c"], r["a"]) for r in rows}
+
+    def g_two_step_join(self, ds):
+        return self._q("MATCH (p:Person)-[:WORKS_AT]->(c:Company)-[:OWNS]->(pr:Project) RETURN count(*) AS c").scalar()
+
+    def g_vector_knn(self, ds):
+        # Exact (brute-force) vector kNN — set_embeddings provides the vectors;
+        # we deliberately DON'T build the HNSW index so the top-K is
+        # deterministic across storage modes (HNSW is approximate, so its
+        # neighbour set legitimately varies by layout — not a strict-parity
+        # target; the speedup is covered by the engine's own vector tests).
+        # The store is built once (cached); reps then time only the query.
+        if not getattr(self, "_vec_ready", False):
+            embs = {}
+            for r in ds.nodes["Person"]:
+                e = r["embedding"]
+                embs[r["gid"]] = json.loads(e) if isinstance(e, str) else e
+            self.g.set_embeddings("Person", "embedding", embs)
+            self._vec_query = embs[ds.params["seed_persons"][0]]  # deterministic query
+            self._vec_ready = True
+        rows = self._q(
+            "MATCH (n:Person) RETURN n.id AS id, vector_score(n, 'embedding_emb', $q) AS s ORDER BY s DESC LIMIT $k",
+            q=self._vec_query,
+            k=VECTOR_TOPK,
+        ).to_list()
+        return tuple(r["id"] for r in rows)
+
+    def g_geo_within(self, ds):
+        lat0, lat1, lon0, lon1 = GEO_BBOX
+        ids = self._q(
+            "MATCH (c:City) WHERE c.latitude >= $lat0 AND c.latitude <= $lat1 "
+            "AND c.longitude >= $lon0 AND c.longitude <= $lon1 RETURN c.id AS id",
+            lat0=lat0,
+            lat1=lat1,
+            lon0=lon0,
+            lon1=lon1,
+        ).column("id")
+        return frozenset(ids)
+
     def g_degree_topk(self, ds):
         rows = self._q(
             "MATCH (p:Person) WITH p, COUNT { (p)-[:KNOWS]-() } AS deg "
@@ -172,6 +255,16 @@ class KgliteCypher(Adapter):
         num = len(rows)
         largest = max((r["size"] for r in rows), default=0)
         return (num, largest)
+
+    def g_louvain(self, ds):
+        # kglite has native community detection (CALL louvain/leiden), scoped to
+        # the Person/KNOWS social subgraph (the algo libs' target). Scoped
+        # community detection works on every storage mode (memory/mapped/disk).
+        rows = self._q(
+            "CALL louvain({node_type: 'Person', relationship: 'KNOWS'}) "
+            "YIELD node, community RETURN community AS c, count(*) AS size"
+        ).to_list()
+        return (len(rows), max((r["size"] for r in rows), default=0))
 
     def g_mutations(self, ds):
         off = ds.params["mut_new_base"] + self._mut * 100_000
@@ -291,7 +384,26 @@ class KgliteFluent(Adapter):
         self.g.select("Person").where({"id": {"in": [off + i for i in range(n)]}}).update({"age": 99})
         return n
 
-    # explicitly unsupported on the fluent surface
+    def g_year_aggregation(self, ds):
+        stats = self.g.select("Person").statistics("score", group_by="joined_year")
+        return {y: (s["count"], s["mean"]) for y, s in stats.items()}
+
+    def g_score_filtered_traversal(self, ds):
+        sel = (
+            self.g.select("Person")
+            .where({"id": {"in": ds.params["seed_persons"]}})
+            .traverse("KNOWS", where={"score": {">": SCORE_MIN}})
+        )
+        return frozenset(sel.ids())
+
+    def g_bulk_update(self, ds):
+        sel = self.g.select("Person").where({"id": {"in": ds.params["lookup_ids"]}})
+        n = sel.len()
+        sel.update({"active": True})
+        return n
+
+    # explicitly unsupported on the fluent surface (edge_scan / range_filter /
+    # degree_filter fall through to the base-class Skip)
     def g_degree_topk(self, ds):
         raise Skip("fluent API has no degree+rank primitive")
 
@@ -336,6 +448,14 @@ class KgliteBolt(KgliteCypher):
 
         self._teardown_fn = _teardown_bolt_server
         g = build_kglite_graph(ds)
+        # Persist the embedding store into the .kgl so the server loads it —
+        # then vector_score works over the Bolt wire (no in-process API needed).
+        embs = {}
+        for r in ds.nodes["Person"]:
+            e = r["embedding"]
+            embs[r["gid"]] = json.loads(e) if isinstance(e, str) else e
+        g.set_embeddings("Person", "embedding", embs)
+        self._vec_query = embs[ds.params["seed_persons"][0]]
         self._tmpdir = tempfile.mkdtemp(prefix="graphsuite_bolt_")
         fixture = Path(self._tmpdir) / "graph.kgl"
         g.save(str(fixture))
@@ -382,6 +502,35 @@ class KgliteBolt(KgliteCypher):
                 found += 1
         return found
 
+    def g_bulk_update(self, ds):
+        # write → explicit transaction (the server rejects auto-commit writes)
+        tx = self._session.begin_transaction()
+        try:
+            rec = tx.run(
+                "UNWIND $ids AS i MATCH (n:Person {id:i}) SET n.active = true RETURN count(n) AS c",
+                ids=ds.params["lookup_ids"],
+            ).single()
+            c = rec["c"]
+            tx.commit()
+        except Exception:
+            tx.close()
+            raise
+        return c
+
+    def g_vector_knn(self, ds):
+        # The embedding store is persisted in the .kgl the server loaded (see
+        # build), so vector search runs over the Bolt wire — query via
+        # vector_score, no in-process API needed.
+        rows = list(
+            self._session.run(
+                "MATCH (n:Person) RETURN n.id AS id, vector_score(n, 'embedding_emb', $q) AS s "
+                "ORDER BY s DESC LIMIT $k",
+                q=self._vec_query,
+                k=VECTOR_TOPK,
+            )
+        )
+        return tuple(r["id"] for r in rows)
+
     def g_mutations(self, ds):
         # kglite-bolt-server rejects auto-commit writes — mutations must run
         # inside an explicit transaction.
@@ -406,6 +555,155 @@ class KgliteBolt(KgliteCypher):
             tx.close()
             raise
         return len(dels)
+
+
+def _docker_up() -> bool:
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is None:
+        return False
+    return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _ensure_bolt_image(image: str) -> tuple[bool, str]:
+    """Make sure the kglite-bolt-server image exists, building it once if
+    not. Done in available() so the multi-minute first build is never timed
+    as part of the benchmark's `build` (graph-load) step."""
+    import subprocess
+
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0:
+        return True, ""
+    repo_root = Path(__file__).resolve().parents[3]
+    dockerfile = repo_root / "crates" / "kglite-bolt-server" / "Dockerfile"
+    if not dockerfile.exists():
+        return False, f"Dockerfile missing at {dockerfile}"
+    print(
+        f"  [kglite-bolt-docker] building image {image} (one-time; compiles the server inside the container) ...",
+        flush=True,
+    )
+    b = subprocess.run(["docker", "build", "-f", str(dockerfile), "-t", image, str(repo_root)])
+    if b.returncode != 0:
+        return False, "docker build failed (see output above)"
+    return True, ""
+
+
+class KgliteBoltDocker(KgliteBolt):
+    """kglite in-memory mode served over Bolt from a **Docker container** —
+    the containerised analog of `kglite-bolt`, and a like-for-like peer to
+    the `neo4j-docker` backend. Builds the graph in-process, saves a `.kgl`,
+    `docker cp`s it into a `kglite-bolt-server` container, and runs the same
+    Cypher workloads over the wire. Reveals the container + wire tax on top
+    of the engine. Opt-in (needs a running Docker daemon).
+
+    Uses create→cp→start rather than `docker run -v` so it doesn't depend on
+    which host paths the docker backend bind-mounts into its VM (colima only
+    mounts $HOME + /tmp/colima; Docker Desktop differs) — the graph is copied
+    straight into the container instead."""
+
+    name = "kglite-memory-bolt-docker"
+    IMAGE = "kglite-bolt-server:local"
+
+    def available(self) -> tuple[bool, str]:
+        import shutil
+
+        if shutil.which("docker") is None:
+            return False, "no `docker` CLI (install Docker to benchmark kglite-bolt in a container)"
+        if not _docker_up():
+            return False, "docker daemon is not running"
+        try:
+            import neo4j  # noqa: F401
+        except Exception as e:
+            return False, f"neo4j driver missing: {e}"
+        return _ensure_bolt_image(self.IMAGE)
+
+    def build(self, ds: Dataset) -> None:
+        import subprocess
+        import time
+
+        import neo4j
+
+        g = build_kglite_graph(ds)
+        # Persist embeddings into the .kgl so vector_score works over Bolt (see
+        # KgliteBolt.build); the inherited g_vector_knn queries the container.
+        embs = {}
+        for r in ds.nodes["Person"]:
+            e = r["embedding"]
+            embs[r["gid"]] = json.loads(e) if isinstance(e, str) else e
+        g.set_embeddings("Person", "embedding", embs)
+        self._vec_query = embs[ds.params["seed_persons"][0]]
+        self._tmpdir = tempfile.mkdtemp(prefix="graphsuite_bolt_docker_")
+        fixture = Path(self._tmpdir) / "graph.kgl"
+        g.save(str(fixture))
+        port = _free_port()
+        # create (stopped) → copy the graph in → start. Mount-independent.
+        create = subprocess.run(
+            ["docker", "create", "-p", f"{port}:7687", self.IMAGE],
+            capture_output=True,
+            text=True,
+        )
+        if create.returncode != 0:
+            raise RuntimeError(f"`docker create {self.IMAGE}` failed: {create.stderr.strip()}")
+        self._container_id = create.stdout.strip()
+        cp = subprocess.run(
+            ["docker", "cp", str(fixture), f"{self._container_id}:/data/graph.kgl"],
+            capture_output=True,
+            text=True,
+        )
+        if cp.returncode != 0:
+            self.teardown()
+            raise RuntimeError(f"`docker cp` of the graph failed: {cp.stderr.strip()}")
+        start = subprocess.run(["docker", "start", self._container_id], capture_output=True, text=True)
+        if start.returncode != 0:
+            self.teardown()
+            raise RuntimeError(f"`docker start` failed: {start.stderr.strip()}")
+        url = f"bolt://127.0.0.1:{port}"
+        self._driver = neo4j.GraphDatabase.driver(url, auth=("neo4j", "password"))
+        deadline = time.perf_counter() + 60.0
+        last = None
+        while time.perf_counter() < deadline:
+            insp = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", self._container_id],
+                capture_output=True,
+                text=True,
+            )
+            if insp.stdout.strip() != "true":
+                logs = subprocess.run(["docker", "logs", self._container_id], capture_output=True, text=True)
+                raise RuntimeError(f"container exited early:\n{logs.stdout}\n{logs.stderr}")
+            try:
+                self._driver.verify_connectivity()
+                break
+            except Exception as e:
+                last = e
+                time.sleep(0.5)
+        else:
+            raise RuntimeError(f"kglite-bolt-server container not reachable within 60s: {last}")
+        self._session = self._driver.session()
+        self._mut = 0
+        self._session.run("RETURN 1").consume()  # warm
+
+    def teardown(self) -> None:
+        import shutil
+        import subprocess
+
+        try:
+            self._session.close()
+            self._driver.close()
+        except Exception:
+            pass
+        cid = getattr(self, "_container_id", None)
+        if cid:
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True)
+            self._container_id = None
+        shutil.rmtree(getattr(self, "_tmpdir", ""), ignore_errors=True)
 
 
 class KgliteMapped(KgliteCypher):

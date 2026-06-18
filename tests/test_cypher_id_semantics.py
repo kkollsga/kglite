@@ -149,3 +149,65 @@ def test_create_edge_by_matched_id_round_trips():
     kg.cypher("CREATE (:A {id: 'a1'}), (:B {id: 'b1'})")
     kg.cypher("MATCH (a:A {id: 'a1'}), (b:B {id: 'b1'}) CREATE (a)-[:R]->(b)")
     assert kg.cypher("MATCH (:A)-[:R]->(:B) RETURN count(*) AS n").to_list() == [{"n": 1}]
+
+
+def test_unwind_id_match_above_transient_index_threshold():
+    """Regression (0.11.2): `UNWIND $ids AS i MATCH (n {id:i})` must return
+    every match even when the list exceeds the 64-row transient-eq-index
+    activation threshold.
+
+    The transient index (an executor optimisation for cross-MATCH equality
+    joins) was being built over the `id` *virtual* — node identity, not a
+    stored property — producing an empty/partial map. Every probe then missed
+    and the bare point-MATCH silently dropped ALL rows once the unwound list
+    crossed 64 elements. Found via cross-engine benchmark parity (kglite
+    returned 0, every other engine 500). The fix skips id/title in the
+    transient index; identity lookups already have their own seek path. This
+    is invisible to the differential corpus (the bug is in the executor, not a
+    pass — both optimiser-on/off paths returned 0), hence a golden assertion.
+    """
+    kg = KnowledgeGraph()
+    n = 200  # well above the 64 transient-index threshold
+    kg.cypher("UNWIND range(0, $n - 1) AS i CREATE (:Doc {id: i})", params={"n": n})
+    ids = list(range(n))
+    assert kg.cypher("UNWIND $ids AS i MATCH (m:Doc {id: i}) RETURN count(m) AS c", params={"ids": ids}).to_list() == [
+        {"c": n}
+    ]
+    # the write path (SET) must see every match too
+    assert kg.cypher(
+        "UNWIND $ids AS i MATCH (m:Doc {id: i}) SET m.tag = 1 RETURN count(m) AS c",
+        params={"ids": ids},
+    ).to_list() == [{"c": n}]
+
+
+def test_dict_and_list_of_dict_params_marshal_to_native_maps():
+    """Regression (0.11.2): a Python `dict` param, and a list of dicts, must
+    marshal into native `Value::Map`/`Value::List` — not `Value::Null`.
+
+    The PyO3 param converter had no `dict` branch (fell through to `Null`) and
+    flattened lists into a JSON *string*. So `UNWIND $rows AS r ... r.key` saw
+    null rows and a batch-insert wrote nodes with null ids — unmatchable, so the
+    follow-up SET/DELETE no-oped and the graph silently corrupted (memory/mapped
+    showed phantom extra rows; disk dodged it via a different write path). Found
+    via the cross-mode mutation-parity benchmark. The fix gives the converter
+    native dict→Map and list/tuple→List branches.
+    """
+    kg = KnowledgeGraph()
+
+    # 1. bare dict param — property access must resolve, not return null
+    assert kg.cypher("WITH $m AS m RETURN m.a AS a, m.b AS b", params={"m": {"a": 1, "b": "x"}}).to_list() == [
+        {"a": 1, "b": "x"}
+    ]
+
+    # 2. list-of-dicts UNWIND — each row is a real map
+    rows = [{"id": 10, "nm": "a"}, {"id": 11, "nm": "b"}]
+    assert kg.cypher("UNWIND $rows AS r RETURN r.id AS id, r.nm AS nm", params={"rows": rows}).to_list() == [
+        {"id": 10, "nm": "a"},
+        {"id": 11, "nm": "b"},
+    ]
+
+    # 3. the batch-insert shape end-to-end: CREATE from unwound dicts, then the
+    #    nodes must be matchable by the id we wrote (the actual corruption path)
+    kg.cypher("UNWIND $rows AS r CREATE (:Doc {id: r.id, name: r.nm})", params={"rows": rows})
+    matched = kg.cypher("MATCH (d:Doc) WHERE d.id IN $ids RETURN count(d) AS c", params={"ids": [10, 11]}).scalar()
+    assert matched == 2

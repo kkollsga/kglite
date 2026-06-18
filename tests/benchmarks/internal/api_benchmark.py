@@ -604,7 +604,7 @@ def compare(all_results):
 # Captures bytes_written + peak_rss + wall_time across three scenarios
 # (one-shot, incremental, mutation-stream) on disk-backed storage.
 # Streams to benchmarks/ingest_baseline.csv — the measurement gate PR1 and PR2
-# compare against. See dev-documentation/disk-graph-improvement-plan.md.
+# compare against. See dev_workfolder/dev-documentation/disk-graph-improvement-plan.md.
 #
 # Scenarios use a synthetic graph (500k nodes, 1M edges, 10 chunks) for
 # reproducibility. Optional --ingest-dataset wiki5m runs on the N-Triples

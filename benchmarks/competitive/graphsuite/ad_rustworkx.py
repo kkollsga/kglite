@@ -15,7 +15,7 @@ from __future__ import annotations
 import rustworkx as rx
 
 from .base import Adapter, Skip
-from .dataset import Dataset
+from .dataset import DEGREE_MIN, SCORE_MIN, SCORE_RANGE, Dataset
 
 
 class RustworkxAdapter(Adapter):
@@ -65,6 +65,21 @@ class RustworkxAdapter(Adapter):
             slot[1] += r["age"]
         return {c: (n, s / n) for c, (n, s) in acc.items()}
 
+    def g_edge_scan(self, ds):
+        return self.K.num_edges()
+
+    def g_range_filter(self, ds):
+        lo, hi = SCORE_RANGE
+        return frozenset(r["gid"] for r in self.persons if lo <= r["score"] <= hi)
+
+    def g_year_aggregation(self, ds):
+        acc: dict[int, list[float]] = {}
+        for r in self.persons:
+            slot = acc.setdefault(r["joined_year"], [0, 0.0])
+            slot[0] += 1
+            slot[1] += r["score"]
+        return {y: (n, s / n) for y, (n, s) in acc.items()}
+
     # -- graph-algo groups (rustworkx strengths) ---------------------------
     # local vertex indices are mapped back to global ids (+ p0) so the result
     # sets are directly comparable with the property-graph backends.
@@ -113,6 +128,15 @@ class RustworkxAdapter(Adapter):
             out |= rx.descendants(D, s - self.pr0)
         return frozenset(d + self.pr0 for d in out)
 
+    def g_score_filtered_traversal(self, ds):
+        K, persons = self.K, self.persons
+        out: set[int] = set()
+        for s in ds.params["seed_persons"]:
+            for f in K.neighbors(s - self.p0):
+                if persons[f]["score"] > SCORE_MIN:
+                    out.add(f)
+        return frozenset(f + self.p0 for f in out)
+
     def g_shortest_path(self, ds):
         K = self.K
         lengths = []
@@ -133,6 +157,19 @@ class RustworkxAdapter(Adapter):
     def g_connected_components(self, ds):
         comps = rx.connected_components(self.K)
         return (len(comps), max((len(c) for c in comps), default=0))
+
+    def g_degree_filter(self, ds):
+        K = self.K
+        return sum(1 for i in range(self.p1 - self.p0) if K.degree(i) >= DEGREE_MIN)
+
+    def g_bulk_update(self, ds):
+        pbg = self.person_by_gid
+        c = 0
+        for gid in ds.params["lookup_ids"]:
+            if gid in pbg:
+                pbg[gid]["active"] = True
+                c += 1
+        return c
 
     def g_pattern_match(self, ds):
         raise Skip("rustworkx has no relational pattern-match surface")

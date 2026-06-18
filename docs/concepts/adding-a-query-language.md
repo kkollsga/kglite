@@ -236,6 +236,6 @@ A new language should mirror this layout:
 - `src/graph/languages/cypher/executor/mod.rs` — the executor entry point; scroll the file for the clause-submodule glob imports.
 - `src/graph/core/` — the shared primitives; read `mod.rs` files for each sub-module's public API.
 - `src/graph/pyapi/kg_core.rs` — where `cypher` is exposed to Python.
-- `dev-documentation/todo.md` Phase 8 + Phase 9 Report-outs (gitignored,
+- `dev_workfolder/dev-documentation/todo.md` Phase 8 + Phase 9 Report-outs (gitignored,
   repo-checkout only) — the decisions behind the `languages/` umbrella
   and the executor's clause-per-file split.

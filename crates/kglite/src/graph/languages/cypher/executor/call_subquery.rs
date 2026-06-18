@@ -3,7 +3,7 @@
 //! Phase 3 ships the **uncorrelated** path (`import.is_empty()`): the
 //! body runs exactly once via a fresh sub-executor over the same graph,
 //! and its result rows are cartesian-producted with the outer row stream
-//! (§1.1 of `dev-documentation/design/call-subqueries.md`). The body sees
+//! (§1.1 of `dev_workfolder/dev-documentation/design/call-subqueries.md`). The body sees
 //! NO outer variables (§1.2 rule 1 — a fresh, empty executor scope); only
 //! the body's terminal `RETURN` columns flow back into the outer scope.
 //!

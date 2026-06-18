@@ -76,6 +76,20 @@ impl TransientEqIndex {
             return None;
         }
         let (property, matcher) = props.iter().next()?;
+        // The `id` / `title` virtuals are node *identity*, not stored
+        // properties: `resolve_node_property` maps them to `node.id()` /
+        // `node.title()`, and when the id-field column was consumed as
+        // identity at load the stored value is `Null`. Either way, building an
+        // equality hash-index over them is wrong — it yields an empty/partial
+        // map, so every probe misses and the MATCH returns nothing (the bug
+        // that surfaced as `UNWIND $ids MATCH (n {id:i})` dropping all rows
+        // once the list crossed the 64-row activation threshold). Identity
+        // lookups already have their own fast seek path, so bail and let the
+        // per-row matcher handle them.
+        let resolved_prop = graph.resolve_alias(np.node_type.as_deref()?, property);
+        if resolved_prop == "id" || resolved_prop == "title" {
+            return None;
+        }
         let resolution = match matcher {
             PropertyMatcher::EqualsVar(name) => ProbeResolution::Projected(name.clone()),
             PropertyMatcher::EqualsNodeProp { var, prop } => ProbeResolution::NodeProp {

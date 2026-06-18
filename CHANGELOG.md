@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-06-18 — bundled synthetic-graph generator + public benchmark
+
 ### Added
 
 - **`kglite.graphgen()` — bundled synthetic-graph generator.** Generate a
@@ -20,7 +22,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tiny`…`xhuge` (or an exact `persons=`), `degree_dist='zipf'` for realistic
   high-degree hubs. The generator moved from the standalone `benchmarks/graphgen`
   crate into `crates/kglite/src/graphgen/` (core) and is re-exported from
-  `kglite::api` for other bindings.
+  `kglite::api` for other bindings. Nodes now also carry **geometry** (City
+  `latitude`/`longitude`) and a per-Person **embedding vector** (`embedding_dim`
+  in the manifest), so the generated graph exercises geospatial and
+  vector-search workloads out of the box.
+
+### Fixed
+
+- **Cypher `UNWIND $list AS i MATCH (n {id:i})` silently returned no rows once
+  the list exceeded ~64 elements.** A query-local equality index — meant for
+  cross-MATCH joins on *stored* properties — was also being built over the `id`
+  node-identity virtual (which resolves to identity, not a stored column),
+  yielding an empty map so every probe missed and the bare point-MATCH dropped
+  all rows above the index's activation threshold. The index now skips the
+  `id`/`title` virtuals (identity has its own fast seek path), so batched
+  id-lookups via `UNWIND` are correct at any list size. Found via the new
+  cross-engine benchmark parity check.
+- **Subgraph-scoped community detection now works on `mapped`/`disk` graphs.**
+  `CALL louvain/leiden/label_propagation({node_type, relationship})` previously
+  errored on disk/mapped storage ("scoping is in-memory-only"), even though the
+  scoped subgraph is bounded and `connected_components` scoping already worked
+  there. Scoped runs now route through the materialised (storage-agnostic)
+  adjacency path on every mode — identical results across memory/mapped/disk —
+  while unscoped whole-graph runs keep the bounded-memory streaming path.
+- **Python `dict` and list-of-`dict` Cypher params now marshal to native maps
+  and lists instead of `null`.** The PyO3 param converter had no `dict` branch
+  (a dict param became `Value::Null`, so `$m.prop` and `UNWIND $rows AS r …
+  r.key` returned null) and flattened lists into a JSON *string*. The common
+  batch shape `UNWIND $rows AS r CREATE (:T {id: r.id, …})` therefore wrote
+  nodes with null ids — unmatchable, so a following `SET`/`DELETE` silently
+  no-oped and the in-memory/mapped graph diverged from disk (phantom rows, a
+  duplicate-id warning). Params now convert recursively to `Value::Map` /
+  `Value::List`; `vector_score`/`UNWIND`/`IN` over a list are unaffected
+  (`extract_float_list` already accepts the native list). Found via the
+  cross-storage-mode mutation-parity benchmark; storage modes are now
+  byte-identical on the mutation suite.
+
+### Benchmarks / docs
+
+- **A linkable, reproducible benchmark table — [`BENCHMARKS.md`](BENCHMARKS.md).**
+  Wall-to-wall time per category — **26 sub-benchmarks across 9 categories**:
+  scan & lookup / filter & aggregate / traversal / pathfinding / **multi-type
+  queries** / graph algorithms / **community detection** / mutations, plus the
+  KG-specialized **vector search** and **geospatial** tiers — for kglite vs Kùzu,
+  Neo4j, NetworkX, rustworkx, igraph, and DuckDB on one shared synthetic graph
+  every engine loads from identical bytes. A capability matrix ("can it do your
+  workload?") makes the breadth picture instant — **kglite is the only engine
+  covering all 10 categories** (and the only one with vector search), while a
+  `—` shows a real gap (DuckDB has no pathfinding/WCC/community/vector; the
+  algorithm libraries have no query language for the multi-type joins). A
+  *partial* category is percentile-estimated so a within-category skip can't
+  flatter a total, and a sub-bench slower than 10 s is marked `⏱` and excluded
+  (so one ~11 s pure-Python Louvain can't dominate a sum). Regenerate with
+  **`python benchmarks/benchmark.py`** — it stages the dataset with the bundled
+  `kglite.graphgen` (no Rust needed) and runs every installed backend; a
+  cross-storage-mode result-parity check (`tests/test_benchmark_parity.py`) gates
+  every kglite mode to identical results. The public `graphsuite` comparison is
+  tracked in the repo; one-off dev scripts moved to `tests/benchmarks/internal/`
+  (the perf *gates* stay in `tests/benchmarks/`).
+- **Opt-in server backends for the comparison.** Heavy, externally-provisioned
+  backends are requestable via `--libs` and skip cleanly when their prerequisite
+  is absent: **Neo4j** in two deploy flavors — an auto-managed native server
+  (`neo4j-native`, higher-performance) and a `neo4j:5-community` container
+  (`neo4j-docker`) — plus **kglite served over Bolt from a container**
+  (`kglite-bolt-docker`), backed by a new `crates/kglite-bolt-server/Dockerfile`
+  so the Bolt server is one `docker build` away.
 
 ## [0.11.1] — 2026-06-17 — HNSW in Cypher, faster index build, embedding-provenance papercuts
 

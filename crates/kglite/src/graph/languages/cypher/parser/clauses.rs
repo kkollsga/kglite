@@ -747,7 +747,7 @@ impl CypherParser {
         }
 
         // v1 structural validation of the body (§1.4 / §6 decisions in
-        // dev-documentation/design/call-subqueries.md). These are
+        // dev_workfolder/dev-documentation/design/call-subqueries.md). These are
         // body-only checks that need no outer-scope information, so they
         // belong at parse time where they fire uniformly on every path
         // (read / mutate / Python pre-parse / bolt / mcp) before
@@ -830,7 +830,7 @@ fn extract_importing_with(w: &WithClause) -> Result<Vec<String>, String> {
 }
 
 /// v1 structural validation of a `CALL { }` subquery body
-/// (§1.4 / §6 of `dev-documentation/design/call-subqueries.md`).
+/// (§1.4 / §6 of `dev_workfolder/dev-documentation/design/call-subqueries.md`).
 ///
 /// `clauses` is the body *after* the importing `WITH` has been lifted
 /// and dropped. Rejects the shapes excluded from v1:

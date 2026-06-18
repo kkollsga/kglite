@@ -37,15 +37,34 @@ REGISTRY: dict[str, tuple[str, str]] = {
     "kglite-mapped": ("ad_kglite", "KgliteMapped"),
     "kglite-disk": ("ad_kglite", "KgliteDisk"),
     "kglite-bolt": ("ad_kglite", "KgliteBolt"),
+    "kglite-bolt-docker": ("ad_kglite", "KgliteBoltDocker"),
     "networkx": ("ad_networkx", "NetworkXAdapter"),
     "duckdb": ("ad_duckdb", "DuckDBAdapter"),
     "kuzu": ("ad_kuzu", "KuzuAdapter"),
     "rustworkx": ("ad_rustworkx", "RustworkxAdapter"),
     "igraph": ("ad_igraph", "IgraphAdapter"),
+    # Neo4j (all three reuse the one Bolt adapter). `neo4j` talks to a
+    # server you point at via GRAPHSUITE_NEO4J_URI; the two below auto-start
+    # one — `-docker` in a container (baseline), `-native` as a local server
+    # (higher-performance). See neo4j_server.py.
     "neo4j": ("ad_neo4j", "Neo4jAdapter"),
+    "neo4j-docker": ("ad_neo4j", "Neo4jAdapter"),
+    "neo4j-native": ("ad_neo4j", "Neo4jAdapter"),
 }
 
-DEFAULT_LIBS = list(REGISTRY)
+# Keys that auto-provision a server before running -> flavor for neo4j_server.
+PROVISIONERS: dict[str, str] = {
+    "neo4j-docker": "docker",
+    "neo4j-native": "local",
+}
+
+# Heavy / external-process backends are opt-in: a default run stays fast and
+# dependency-free (each still skips cleanly if unavailable). Request them
+# explicitly, e.g. --libs neo4j-native,neo4j-docker,kglite-bolt-docker.
+# kglite-bolt-docker self-provisions its container in its own adapter, so it
+# isn't in PROVISIONERS, but it's just as heavy → opt-in too.
+OPT_IN = set(PROVISIONERS) | {"kglite-bolt-docker"}
+DEFAULT_LIBS = [k for k in REGISTRY if k not in OPT_IN]
 
 
 def _load_adapter(key: str):
@@ -79,6 +98,34 @@ def _time_call(fn, base_reps: int):
 
 
 def run_library(key: str, ds, base_reps: int) -> dict | None:
+    """Run one backend. For provisioned keys (neo4j-docker / neo4j-native),
+    auto-start a server first and tear it down after — degrading to a clean
+    skip when the prerequisite (Docker daemon / Java + neo4j CLI) is absent."""
+    flavor = PROVISIONERS.get(key)
+    if flavor is None:
+        return _run_library_inner(key, ds, base_reps)
+
+    from .neo4j_server import provisioner_for
+
+    prov = provisioner_for(flavor)
+    ok, reason = prov.available()
+    if not ok:
+        print(f"  [{key}] unavailable: {reason}")
+        return None
+    try:
+        print(f"  [{key}] starting {flavor} Neo4j ({prov.flavor}) ...", flush=True)
+        prov.start()
+    except Exception as e:
+        print(f"  [{key}] provision failed: {type(e).__name__}: {e}")
+        prov.stop()
+        return None
+    try:
+        return _run_library_inner(key, ds, base_reps)
+    finally:
+        prov.stop()
+
+
+def _run_library_inner(key: str, ds, base_reps: int) -> dict | None:
     AdapterCls = _load_adapter(key)
     probe = AdapterCls()
     ok, reason = probe.available()
@@ -197,7 +244,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.list:
-        print("Libraries:", ", ".join(DEFAULT_LIBS))
+        print("Libraries (default):", ", ".join(DEFAULT_LIBS))
+        opt_in = [k for k in REGISTRY if k in OPT_IN]
+        print("Libraries (opt-in, pass via --libs):", ", ".join(opt_in))
         print("Groups:")
         for gid, desc, _ in GROUPS:
             print(f"  {gid:<22} {desc}")

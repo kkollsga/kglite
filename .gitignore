@@ -6,13 +6,15 @@
 /.claude/
 /.pytest_cache/
 /data/
-/dev-documentation/
-/bench/
-/inbox/
+# Local development working folder — consolidated out of the repo root.
+# Holds gitignored dev material: `dev-documentation/` (design docs / audits),
+# `inbox/` (feedback/coordination notes), local `projects/`, and `bench/`
+# (one-off bench scripts/data). All local working state, never committed.
+/dev_workfolder/
 # Competitive-library benchmarks. The public, OSS-only `graphsuite` (it powers
 # the linkable BENCHMARKS.md table) IS tracked; the rest stays local —
-# `nornic` (kglite vs NornicDB), `largescale`, `embedded_app` carry private /
-# heavy data. (`/dir/*` + `!/dir/sub/` so a subdir can be re-included.)
+# `largescale`, `embedded_app` carry private / heavy data. (`/dir/*` +
+# `!/dir/sub/` so a subdir can be re-included.)
 /benchmarks/competitive/*
 !/benchmarks/competitive/graphsuite/
 # but not graphsuite's local run artifacts
@@ -50,7 +52,7 @@ coverage.xml
 # …except the small Cat G-N regression fixtures (5.9 KB total, byte-deterministic
 # from tests/fixtures/build_fixtures.py with a seeded RNG). These are tracked
 # in-repo so CI sees them; reproducible via the script in the inbox cover
-# message (inbox/read/2026-05-13-from-mcp-servers-cat-G-N-fixtures.md).
+# message (dev_workfolder/inbox/read/2026-05-13-from-mcp-servers-cat-G-N-fixtures.md).
 !tests/fixtures/*.kgl
 
 # Sphinx docs build output
@@ -59,6 +61,5 @@ docs/autoapi/
 
 # macOS system files
 .DS_Store
-/projects/
 .bench-current.json
 .perf_audit_*.json
