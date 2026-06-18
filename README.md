@@ -197,6 +197,10 @@ blob = graph.to_bytes(); loaded = kglite.from_bytes(blob)
 
 # Share read-only across threads with an immutable, lock-free snapshot:
 snapshot = graph.freeze()        # concurrent snapshot.cypher(...) from many threads
+
+# No data yet? Generate a realistic demo graph in one line (bundled, no extra deps):
+demo = kglite.graphgen("medium")               # ~25k nodes, ready to query
+# kglite.graphgen("huge", out="/tmp/g")        # stream millions of nodes to CSV, bounded memory
 ```
 
 **→ [Getting Started guide](https://kglite.readthedocs.io/en/latest/python/getting-started.html) ·

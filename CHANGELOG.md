@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite.graphgen()` — bundled synthetic-graph generator.** Generate a
+  seed-deterministic org/social knowledge graph (Person/Company/Project/Skill/
+  City + 7 edge types) in one call — for demos, tests, and benchmarks, with no
+  extra dependency or Rust toolchain (it's compiled into the wheel, like
+  `code_tree`). `kglite.graphgen("medium")` returns a ready-to-query
+  `KnowledgeGraph`; `kglite.graphgen("huge", out=DIR)` streams one CSV per type
+  + a `manifest.json` in **bounded memory** (millions of nodes at flat RAM), so
+  any engine that reads the same bytes gets the same graph. Scales
+  `tiny`…`xhuge` (or an exact `persons=`), `degree_dist='zipf'` for realistic
+  high-degree hubs. The generator moved from the standalone `benchmarks/graphgen`
+  crate into `crates/kglite/src/graphgen/` (core) and is re-exported from
+  `kglite::api` for other bindings.
+
 ## [0.11.1] — 2026-06-17 — HNSW in Cypher, faster index build, embedding-provenance papercuts
 
 Follow-up to 0.11.0, driven by the mcp-servers operator's independent
