@@ -121,6 +121,8 @@ across a thread pool:
 
 ```python
 store = graph.session()                       # share across the thread pool
+# ...or load a saved graph straight into a shared handle in one call:
+store = kglite.open_session("graph.kgl")      # == kglite.load(...).session()
 store.cypher("MATCH (n:Doc) RETURN count(n)") # lock-free reads, N threads
 store.execute("CREATE (n:Doc {id: 1})")       # serialized writes, compose
 fz = store.snapshot()                          # stable FrozenGraph view (cypher only)

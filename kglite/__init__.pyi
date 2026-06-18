@@ -459,7 +459,27 @@ def load(path: str) -> KnowledgeGraph:
         A new KnowledgeGraph with the loaded data.
 
     The returned graph remembers ``path``, so a later bare ``save()`` writes
-    back to it. See :func:`open` for load-or-create semantics.
+    back to it. See :func:`open` for load-or-create semantics, or
+    :func:`open_session` to load directly as a thread-safe ``Session``.
+    """
+    ...
+
+def open_session(path: str) -> "Session":
+    """Load a saved graph at ``path`` directly as a thread-safe :class:`Session`.
+
+    The one-call shortcut for the concurrent-serving case — equivalent to
+    ``kglite.load(path).session()``. Share the returned ``Session`` across a
+    thread pool: :meth:`Session.cypher` reads run lock-free,
+    :meth:`Session.execute` writes serialize and compose, and
+    :meth:`Session.cursor` hands each thread its own per-thread fluent handle.
+    The file must already exist.
+
+    For embedding-backed semantic search over a query string, register the
+    model on the ``KnowledgeGraph`` first::
+
+        g = kglite.load(path)
+        g.set_embedder(model)
+        s = g.session()
     """
     ...
 
@@ -761,6 +781,14 @@ def to_neo4j(
 class KnowledgeGraph:
     """A high-performance knowledge graph with typed nodes, connections, and
     a fluent query API backed by Rust.
+
+    **Single-owner / threading.** A ``KnowledgeGraph`` is single-owner: it is
+    not safe to share one instance across threads while any thread mutates it
+    (doing so raises a clear ``RuntimeError``). For concurrent access, don't
+    share the graph — take a thread-safe handle off it: :meth:`session` (shared
+    reads + serialized writes, plus :meth:`Session.cursor` for per-thread
+    fluent chains) or :meth:`freeze` (a lock-free read-only snapshot). See
+    ``docs/concepts/concurrency.md``.
     """
 
     # ====================================================================

@@ -177,6 +177,25 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
         .map_err(|e| load_err_to_pyerr(e, Some(&path)))
 }
 
+/// Load a saved graph at `path` directly as a thread-safe [`Session`] — the
+/// one-call shortcut for the concurrent-serving case (equivalent to
+/// `kglite.load(path).session()`).
+///
+/// Share the returned `Session` across a thread pool: `cypher()` reads run
+/// lock-free, `execute()` writes serialize (and compose), and `cursor()` hands
+/// each thread its own per-thread fluent handle. The file must already exist.
+///
+/// For embedding-backed semantic search (`text_score()` over a query string),
+/// register the model first via the `KnowledgeGraph` path:
+/// `g = kglite.load(path); g.set_embedder(model); s = g.session()`.
+#[pyfunction]
+fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
+    let inner = py
+        .detach(|| load_file(&path))
+        .map_err(|e| load_err_to_pyerr(e, Some(&path)))?;
+    Ok(Session::from_arc(inner, None))
+}
+
 /// Load an in-memory graph from a `.kgl` byte buffer produced by
 /// `graph.to_bytes()` — the in-memory counterpart of `kglite.load(path)`.
 /// The returned graph has no `source_path` (it didn't come from a file),
@@ -336,6 +355,7 @@ fn _run_mcp_server(
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(open_session, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
