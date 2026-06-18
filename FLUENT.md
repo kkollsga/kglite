@@ -1211,7 +1211,7 @@ A corrupt / truncated / wrong-format file raises a typed, classifiable
 
 A `KnowledgeGraph` is **single-owner**: it is not safe to share one instance
 across threads while any thread mutates it (touching a shared graph mid-mutation
-raises a clear `RuntimeError`, not a crash). Two safe patterns:
+raises a clear `RuntimeError`, not a crash). Three safe patterns:
 
 ```python
 # Per-worker: give each thread its own graph (copy() is cheap; builds are fast)
@@ -1222,10 +1222,18 @@ snapshot = graph.freeze()        # O(1) — shares data, no deep copy
 snapshot.cypher('MATCH (n:Doc) RETURN count(n)')   # safe from many threads at once
 # Mutating the source afterwards leaves the snapshot unchanged (copy-on-write).
 # Build → freeze → serve readers → swap in a new freeze() when data changes.
+
+# Shared reads AND writes: session() → a thread-safe handle
+store = graph.session()          # or kglite.open_session('graph.kgl')
+store.execute('CREATE (n:Doc {id: 1})')   # serialized write, composes (no lost updates)
+store.cypher('MATCH (n:Doc) RETURN count(n)')  # reads stay lock-free
+store.cursor().select('Doc').where({'team': 'A'}).to_df()  # per-thread fluent chains
 ```
 
 `FrozenGraph` is read-only — mutations (`CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE`)
 raise; semantic search works via `text_score()`/`vector_score()` in `cypher()`.
+For the full model — write composition, snapshot isolation, cost — see
+[`docs/concepts/concurrency.md`](docs/concepts/concurrency.md).
 
 ---
 
