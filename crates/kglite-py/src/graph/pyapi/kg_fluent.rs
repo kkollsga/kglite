@@ -18,6 +18,12 @@ use pyo3::Bound;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Map a core `filtering::*` error string into the fluent-API `PyErr`. Shared
+/// by every selection-mutator routed through `derive_with`.
+fn fluent_arg_err(e: String) -> PyErr {
+    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+}
+
 #[pymethods]
 impl KnowledgeGraph {
     /// Configure temporal validity for a node type or connection type.
@@ -216,51 +222,40 @@ impl KnowledgeGraph {
     #[pyo3(signature = (conditions, sort=None, limit=None))]
     #[pyo3(name = "where")]
     fn where_method(
-        &mut self,
+        &self,
         conditions: &Bound<'_, PyDict>,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
     ) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-
-        // Estimate based on current selection
-        let estimated = new_kg
-            .cursor
-            .selection
-            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.node_count())
-            .unwrap_or(0);
-
         let filter_conditions = py_in::pydict_to_filter_conditions(conditions)?;
         let sort_fields = match sort {
             Some(spec) => Some(py_in::parse_sort_fields(spec, None)?),
             None => None,
         };
 
-        crate::graph::core::filtering::filter_nodes(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            filter_conditions,
-            sort_fields,
-            limit,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        // Record actual result
-        let actual = new_kg
-            .cursor
-            .selection
-            .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
-            .map(|l| l.node_count())
-            .unwrap_or(0);
-        new_kg
-            .cursor
-            .selection
-            .add_plan_step(PlanStep::new("WHERE", None, estimated).with_actual_rows(actual));
-
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            let level_count = |c: &crate::graph::CursorState| {
+                c.selection
+                    .get_level(c.selection.get_level_count().saturating_sub(1))
+                    .map(|l| l.node_count())
+                    .unwrap_or(0)
+            };
+            // Estimate based on the (just-cloned) current selection.
+            let estimated = level_count(cursor);
+            crate::graph::core::filtering::filter_nodes(
+                inner,
+                &mut cursor.selection,
+                filter_conditions,
+                sort_fields,
+                limit,
+            )
+            .map_err(fluent_arg_err)?;
+            let actual = level_count(cursor);
+            cursor
+                .selection
+                .add_plan_step(PlanStep::new("WHERE", None, estimated).with_actual_rows(actual));
+            Ok(())
+        })
     }
 
     /// Filter nodes matching ANY of the given condition sets (OR logic).
@@ -268,13 +263,11 @@ impl KnowledgeGraph {
     /// A node is kept if it matches at least one condition set.
     #[pyo3(signature = (conditions, sort=None, limit=None))]
     fn where_any(
-        &mut self,
+        &self,
         conditions: &Bound<'_, PyList>,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
     ) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-
         let condition_sets: Vec<HashMap<String, FilterCondition>> = conditions
             .iter()
             .map(|item| {
@@ -300,90 +293,72 @@ impl KnowledgeGraph {
             None => None,
         };
 
-        crate::graph::core::filtering::filter_nodes_any(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            &condition_sets,
-            sort_fields,
-            limit,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::filter_nodes_any(
+                inner,
+                &mut cursor.selection,
+                &condition_sets,
+                sort_fields,
+                limit,
+            )
+            .map_err(fluent_arg_err)
+        })
     }
 
     #[pyo3(signature = (include_orphans=None, sort=None, limit=None))]
     fn where_orphans(
-        &mut self,
+        &self,
         include_orphans: Option<bool>,
         sort: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
     ) -> PyResult<Self> {
-        let mut new_kg = self.clone();
         let include = include_orphans.unwrap_or(true);
-
         let sort_fields = if let Some(spec) = sort {
             Some(py_in::parse_sort_fields(spec, None)?)
         } else {
             None
         };
 
-        crate::graph::core::filtering::filter_orphan_nodes(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            include,
-            sort_fields.as_ref(),
-            limit,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::filter_orphan_nodes(
+                inner,
+                &mut cursor.selection,
+                include,
+                sort_fields.as_ref(),
+                limit,
+            )
+            .map_err(fluent_arg_err)
+        })
     }
 
     #[pyo3(signature = (sort, ascending=None))]
-    fn sort(&mut self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
-        let mut new_kg = self.clone();
+    fn sort(&self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
-
-        crate::graph::core::filtering::sort_nodes(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            sort_fields,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-        Ok(new_kg)
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::sort_nodes(inner, &mut cursor.selection, sort_fields)
+                .map_err(fluent_arg_err)
+        })
     }
 
-    fn limit(&mut self, max_per_group: usize) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::core::filtering::limit_nodes_per_group(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            max_per_group,
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-
-        Ok(new_kg)
+    fn limit(&self, max_per_group: usize) -> PyResult<Self> {
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::limit_nodes_per_group(
+                inner,
+                &mut cursor.selection,
+                max_per_group,
+            )
+            .map_err(fluent_arg_err)
+        })
     }
 
     /// Skip the first N nodes per group (for pagination).
     /// Use with sort() + limit() for paged results:
     ///   graph.sort('name').offset(20).limit(10)
-    fn offset(&mut self, n: usize) -> PyResult<Self> {
-        let mut new_kg = self.clone();
-        crate::graph::core::filtering::offset_nodes(&self.inner, &mut new_kg.cursor.selection, n)
-            .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
-        Ok(new_kg)
+    fn offset(&self, n: usize) -> PyResult<Self> {
+        self.derive_with(|inner, cursor| {
+            crate::graph::core::filtering::offset_nodes(inner, &mut cursor.selection, n)
+                .map_err(fluent_arg_err)
+        })
     }
 
     /// Filter current selection to nodes that have at least one connection

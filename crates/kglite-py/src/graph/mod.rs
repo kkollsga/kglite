@@ -264,6 +264,24 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Derive a new handle that shares this graph's storage, lifecycle, and
+    /// embedder, carrying a cursor produced by mutating a clone of the current
+    /// cursor. **The single choke point** for every fluent "narrow the
+    /// selection" operation: `f` reads the (shared, immutable) graph and
+    /// mutates the freshly-cloned cursor, then the derived handle is returned.
+    ///
+    /// This replaces the copy-pasted `let mut new_kg = self.clone(); …mutate
+    /// new_kg.cursor…; Ok(new_kg)` body in the fluent methods, and is the seam
+    /// the future public `Cursor` type is built on (see `roadmap.md`).
+    pub(crate) fn derive_with<F>(&self, f: F) -> PyResult<Self>
+    where
+        F: FnOnce(&Arc<DirGraph>, &mut CursorState) -> PyResult<()>,
+    {
+        let mut new_kg = self.clone();
+        f(&self.inner, &mut new_kg.cursor)?;
+        Ok(new_kg)
+    }
+
     /// Bind an embedder implementing the [`embedder::Embedder`] trait.
     /// The pure-Rust counterpart of the `set_embedder` pymethod —
     /// used by `kglite-mcp-server` and other Rust consumers that
