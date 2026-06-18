@@ -1,10 +1,12 @@
-"""Session — thread-safe, shareable concurrency handle (Phase 1: reads).
+"""Session — thread-safe, shareable concurrency handle.
 
 `graph.session()` returns a `Session` that wraps the engine's
 `Mutex<Arc<DirGraph>>`. Unlike a live `KnowledgeGraph` (single-owner,
-borrow-guarded), a `Session` exposes only `&self` methods, so many threads
-can read it at once lock-free. This module covers the read surface; writes
-are covered in the Phase 2 / Phase 4 sections of the suite.
+borrow-guarded), a `Session` exposes only `&self` methods: `cypher()` reads
+run lock-free against momentary snapshots, while `execute()` writes serialize
+behind an internal writer lock and compose (no lost updates). Covers reads,
+snapshot isolation, serialized writes, and mixed concurrent read/write — the
+shared-handle failure mode that panicked on a shared live `KnowledgeGraph`.
 """
 
 import threading
@@ -112,9 +114,7 @@ def test_concurrent_writes_compose_no_lost_updates():
     counter must compose — every increment lands, none is lost. This is the
     serialized-writer property that a naive shared mutable handle lacks."""
     g = kglite.KnowledgeGraph()
-    g.add_nodes(
-        pd.DataFrame({"id": [1], "title": ["ctr"], "n": [0]}), "Doc", "id", "title"
-    )
+    g.add_nodes(pd.DataFrame({"id": [1], "title": ["ctr"], "n": [0]}), "Doc", "id", "title")
     s = g.session()
 
     def worker():
@@ -129,6 +129,60 @@ def test_concurrent_writes_compose_no_lost_updates():
 
     final = s.cypher("MATCH (n:Doc {id: 1}) RETURN n.n AS n").to_list()[0]["n"]
     assert final == 800, f"lost updates: {final} != 800"
+
+
+def test_mixed_readers_and_writers_one_session():
+    """The shared-handle failure mode, fixed: many threads reading AND writing the
+    SAME shared Session at once — what tripped a process-killing borrow panic
+    on a live KnowledgeGraph. With a Session it must never raise, and the
+    writes must all land (readers see only consistent, never torn, state)."""
+    g = kglite.KnowledgeGraph()
+    g.add_nodes(
+        pd.DataFrame({"id": list(range(100)), "title": [f"d{i}" for i in range(100)]}),
+        "Doc",
+        "id",
+        "title",
+    )
+    s = g.session()
+
+    start = threading.Event()
+    errors: list[Exception] = []
+    torn: list[int] = []
+
+    def reader():
+        start.wait()
+        for _ in range(80):
+            try:
+                c = _count(s)
+                # count must always be one of the consistent values in [100, 200]
+                if not (100 <= c <= 200):
+                    torn.append(c)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    def writer(base: int):
+        start.wait()
+        for i in range(25):
+            try:
+                s.execute(
+                    "CREATE (n:Doc {id: $id, title: 'w'})",
+                    params={"id": 1000 + base * 25 + i},
+                )
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    threads += [threading.Thread(target=writer, args=(b,)) for b in range(4)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"mixed read/write on a Session must not error: {errors[:3]}"
+    assert torn == [], f"readers observed torn counts: {torn[:3]}"
+    # 4 writers x 25 creates = 100 new nodes on top of the initial 100.
+    assert _count(s) == 200
 
 
 def test_many_threads_read_one_session_concurrently():
