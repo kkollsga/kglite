@@ -320,13 +320,24 @@ pub fn add_edges_from_specs(
     }
 
     let mut report = EdgeSpecReport::default();
+    // The id→node lookup depends only on (source_type, target_type), not the
+    // edge type, and creating edges never invalidates it (no nodes added). So
+    // cache it per node-type pair instead of rebuilding the full type scan for
+    // every edge type over the same pair (e.g. Person KNOWS/FOLLOWS/BLOCKS
+    // Person was K identical materializations; now one).
+    let mut lookup_cache: HashMap<(String, String), CombinedTypeLookup> = HashMap::new();
     for ((source_type, target_type, edge_type), edges) in groups {
-        let lookup = CombinedTypeLookup::from_id_indices(
-            &graph.id_indices,
-            &graph.graph,
-            source_type.clone(),
-            target_type.clone(),
-        )?;
+        let pair = (source_type.clone(), target_type.clone());
+        if !lookup_cache.contains_key(&pair) {
+            let lookup = CombinedTypeLookup::from_id_indices(
+                &graph.id_indices,
+                &graph.graph,
+                source_type.clone(),
+                target_type.clone(),
+            )?;
+            lookup_cache.insert(pair.clone(), lookup);
+        }
+        let lookup = &lookup_cache[&pair];
         let mut batch = ConnectionBatchProcessor::new(edges.len());
         // Same initial-load fast path as add_connections: skip per-edge
         // existence checks when this connection type has no edges yet.
