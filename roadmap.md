@@ -166,13 +166,24 @@ orchestration per method tangled with PyO3 marshalling. This let Piece 3 split:
   rewrite; true high-level-op consolidation remains an optional future refinement
   (the small per-method branching in `select`/`traverse` could be hoisted later).
 
-  **Remaining 85 (long tail → Piece 3 cleanup / Piece 4):** already-in-api
-  symbols still reached via `crate::graph` paths (session, io, parts of
-  introspection/handle/explore/dir_graph/blueprint) + not-yet-lifted clusters:
-  schema config types (`SpatialConfig`/`NodeData`/`TemporalConfig` + the
-  `SchemaDefinition` family + `validate_graph`), spatial/temporal predicates,
-  storage-backend internals (`GraphBackend`/`DiskGraph`/`lookups`), the
-  `subgraph_streaming` disk-export cluster, and `wal`/recording.
+  **Long-tail cleanup DONE (85 → 27).** Batch 1 migrated the already-in-api
+  clusters (session / explore / dir_graph / handle / io::file / blueprint) onto
+  api paths. Batch 2 lifted the generic clusters: the schema data-type family
+  (`NodeData`/`NodeInfo`/`StringInterner`/`SchemaDefinition`*/configs/
+  `ValidationError` + parse helpers), `api::introspection` (compute primitives +
+  `bug_report`/`mcp_quickstart`/`debugging`), `api::io` (exporters + N-Triples
+  loader), `api::fluent` spatial/temporal predicates, and
+  `api::mutation::{validate_graph, add_properties, …}`. All pure aliasing,
+  golden digest unchanged.
+
+  **Remaining 27 = the storage-backend + durability + embedding cluster**
+  (`GraphBackend` / `DiskGraph` / `MappedGraph` / `EmbeddingStore` /
+  `recording` / `wal` / `wal_replay` / `subgraph_streaming` + the embedding-file
+  io). These are the storage/WAL *implementation* internals — exposing them raw
+  would bless the whole backend + durability mechanism as stable api (wrong per
+  the strict posture). They need a **high-level api design** — a
+  durable-transaction / storage-mode-open surface that hides them — which is the
+  real gateway to Piece 4. This is the one genuine design decision left.
 
 **Goal.** The big architectural piece. Move the fine-grained fluent-orchestration
 logic out of `pyapi/` (`core::{filtering,traversal,calculations,statistics,
@@ -219,7 +230,7 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 |---|---|---|---|---|
 | 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **done (0.11.4)** |
 | 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | **2a/2b/2c done (253→153); storage-backend internals deferred** |
-| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b/3c done (153→85); long-tail 85 remains** |
+| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b/3c + long-tail done (153→27); 27 storage/durability remain for Piece 4** |
 | 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
 
 ## Invariants for every piece
