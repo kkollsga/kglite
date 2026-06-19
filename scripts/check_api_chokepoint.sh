@@ -37,12 +37,15 @@ ENGINE='(core|algorithms|features|mutation|storage|schema|session|io|introspecti
 # crate alias is `kglite` (bolt/mcp/c) or `kglite_core` (the wheel). Comment
 # and doc-comment lines (`//` / `///`) are excluded — they reference paths in
 # prose, not code.
-# grep exits 1 on no match; with `pipefail` that would abort the script, so
-# tolerate it with `|| true` (a clean crate legitimately has zero matches).
+# Count code reaches. Strip `//` line comments AND `/* */` block comments
+# before matching, so a path mentioned in prose/doc-comments never counts
+# (a bare `grep -v '//'` missed block comments and trailing comments). grep
+# exits 1 on no match; `|| true` tolerates that (a clean crate has zero).
 count_reaches() {
 	local dir="$1"
-	{ grep -rnE "(crate|kglite|kglite_core)::graph::$ENGINE" "$dir" 2>/dev/null \
-		| grep -vE ':[[:space:]]*//' || true; } | wc -l | tr -d ' '
+	find "$dir" -name '*.rs' -exec cat {} + 2>/dev/null \
+		| perl -0pe 's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g' \
+		| { grep -cE "(crate|kglite|kglite_core)::graph::$ENGINE" || true; }
 }
 
 # The wheel's frozen baseline. Lower this as roadmap Pieces 2-4 migrate
@@ -81,9 +84,12 @@ if [ "$wheel" -gt "$WHEEL_BASELINE" ]; then
 	echo "      (see roadmap.md / CLAUDE.md boundary principle)."
 	fail=1
 elif [ "$wheel" -lt "$WHEEL_BASELINE" ]; then
-	echo "ok:   crates/kglite-py — $wheel below-api reaches (baseline $WHEEL_BASELINE)."
-	echo "      NOTICE: count dropped below baseline. Lower WHEEL_BASELINE to $wheel"
-	echo "      in scripts/check_api_chokepoint.sh to keep the ratchet tight."
+	echo "FAIL: crates/kglite-py below-api reaches dropped to $wheel (baseline $WHEEL_BASELINE)."
+	echo "      A lift reduced the count — lower WHEEL_BASELINE to $wheel in"
+	echo "      scripts/check_api_chokepoint.sh (in the same change) so the"
+	echo "      ratchet stays tight. The baseline must track the floor exactly,"
+	echo "      otherwise the freed slack lets new below-api reaches creep back."
+	fail=1
 else
 	echo "ok:   crates/kglite-py — $wheel below-api reaches (at baseline)."
 fi
