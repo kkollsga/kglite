@@ -26,7 +26,8 @@ pub use pyapi::transaction::Transaction;
 
 use crate::datatypes::py_out;
 use crate::datatypes::values::{FilterCondition, Value};
-use kglite_core::api::{DirGraph, GraphRead, OperationReport, OperationReports};
+use kglite_core::api::mutation::{OperationReport, OperationReports};
+use kglite_core::api::{DirGraph, GraphRead};
 // `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
 // `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
 use kglite_core::api::{CowSelection, PlanStep};
@@ -270,7 +271,7 @@ impl KnowledgeGraph {
     /// no timeout, no row cap). Used by the pyapi `load()` pyfunction,
     /// the `code_tree.build()` / `code_tree.repo_tree()` pyfunctions,
     /// and the sibling Rust crates (kglite-bolt-server,
-    /// kglite-mcp-server) that consume `kglite_core::api::load_file ->
+    /// kglite-mcp-server) that consume `kglite_core::api::io::load_file ->
     /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`
     /// alongside their own state. Phase G.3-pre decoupled the
     /// engine-side constructors from the binding-side wrapper.
@@ -421,7 +422,7 @@ impl KnowledgeGraph {
     /// Convert a ConnectionOperationReport to a Python dict and emit a warning
     /// if any rows were skipped.
     pub(crate) fn connection_report_to_py(
-        result: &kglite_core::api::ConnectionOperationReport,
+        result: &kglite_core::api::mutation::ConnectionOperationReport,
         connection_type: &str,
     ) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
@@ -532,7 +533,7 @@ impl KnowledgeGraph {
         Option<NodeIndex>,
         Vec<(NodeIndex, kglite_core::api::NodeInfo)>,
     ) {
-        kglite_core::api::resolve_code_entity(&self.inner, name, node_type)
+        kglite_core::api::code_tree::resolve_code_entity(&self.inner, name, node_type)
     }
 
     /// Build a source-location dict for a single name.
@@ -609,7 +610,7 @@ impl KnowledgeGraph {
     /// crate keeps this method for back-compat with Python callers
     /// via `#[pymethods]`; the engine logic lives in `kglite`.
     pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
-        kglite_core::api::source_location(&self.inner, name, node_type)
+        kglite_core::api::code_tree::source_location(&self.inner, name, node_type)
     }
 
     // `field_contains_ci` and `field_starts_with_ci` lifted to
@@ -682,7 +683,7 @@ pub(crate) fn parse_temporal_column_types(
 // `kglite_core::graph::features::timeseries` in 0.10.1. Re-exported
 // under the wheel's previous paths so the local `parse_inline_timeseries`
 // + downstream `pyapi/*.rs` callers compile unchanged.
-pub(crate) use kglite_core::api::{InlineTimeseriesConfig, TimeSpec};
+pub(crate) use kglite_core::api::timeseries::{InlineTimeseriesConfig, TimeSpec};
 
 /// Parse the `timeseries` PyDict parameter from `add_nodes`.
 ///

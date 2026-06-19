@@ -11,7 +11,7 @@ use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph, TemporalContext,
 };
-use kglite_core::api::OperationReports;
+use kglite_core::api::mutation::OperationReports;
 use kglite_core::api::{CowSelection, PlanStep};
 
 #[pymethods]

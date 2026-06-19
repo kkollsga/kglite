@@ -11,7 +11,8 @@
 //! cargo run -p kglite --example embedded_blueprint
 //! ```
 
-use kglite::api::{build_code_tree, session, Value};
+use kglite::api::code_tree::build_code_tree;
+use kglite::api::{session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

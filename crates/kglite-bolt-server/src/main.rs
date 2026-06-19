@@ -18,7 +18,7 @@ use boltr::server::BoltServer;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use kglite::api::load_file;
+use kglite::api::io::load_file;
 
 use crate::backend::KgliteBackend;
 

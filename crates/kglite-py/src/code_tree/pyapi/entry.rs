@@ -14,7 +14,7 @@ use crate::graph::KnowledgeGraph;
 /// `kglite::api::language_for_path` for the Python side.
 #[pyfunction]
 pub fn language_for_path(path: &str) -> Option<&'static str> {
-    kglite_core::api::language_for_path(Path::new(path))
+    kglite_core::api::code_tree::language_for_path(Path::new(path))
 }
 
 /// Parse a directory into a KnowledgeGraph.

@@ -17,7 +17,8 @@
 //! the engine's portable contract; it travels across any kglite
 //! binding.
 
-use kglite::api::{load_file, session, Value};
+use kglite::api::io::load_file;
+use kglite::api::{session, Value};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

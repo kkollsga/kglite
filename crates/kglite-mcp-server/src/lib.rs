@@ -130,7 +130,7 @@ fn pick_mode(cli: &Cli) -> Mode {
 /// handles, plus `.md` files when the docs pass is enabled (so editing a
 /// README re-links it to the code).
 fn is_graph_relevant(p: &std::path::Path, include_docs: bool) -> bool {
-    kglite::api::language_for_path(p).is_some()
+    kglite::api::code_tree::language_for_path(p).is_some()
         || (include_docs
             && p.extension()
                 .and_then(|e| e.to_str())
