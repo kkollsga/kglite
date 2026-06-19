@@ -102,7 +102,16 @@ near-zero risk to the deeply-coupled wheel.
 
 ---
 
-### Piece 2 — Lift the generic engine capabilities
+### Piece 2 — Lift the generic engine capabilities · **2a/2b/2c DONE**
+
+**Status (2026-06-19).** Phases 2a (graph algorithms), 2b (bulk mutation +
+operation-report types), 2c (timeseries helpers + `InternedKey` + GraphRead
+migration) shipped. Ratchet baseline **253 → 153**. Remaining Piece-2 candidate
+— the storage-backend internals (`storage::backend::GraphBackend`,
+`storage::disk::DiskGraph`, `storage::lookups::TypeLookup`) — is **deferred**:
+it's entangled with the recording/WAL path and storage-mode construction, so it
+needs a storage-mode api-shape decision, not a mechanical lift. Folded into the
+Piece 3 design work (or a dedicated storage sub-phase).
 
 **Goal.** Move the below-api reaches that *are* genuine engine capabilities (not
 fluent-impl glue) onto the curated surface, shrinking the frozen allowlist.
@@ -170,8 +179,8 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 
 | Order | Piece | Leverage | Risk | Status |
 |---|---|---|---|---|
-| 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **in progress** |
-| 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | queued |
+| 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **done (0.11.4)** |
+| 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | **2a/2b/2c done (253→153); storage-backend internals deferred** |
 | 3 | Consolidate fluent into core | High (correct end-state) | Med–high | queued |
 | 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
 
