@@ -9,6 +9,7 @@ use crate::graph::{GraphState, KgliteGraph};
 use crate::result::{result_to_json_object, KgliteCypherResult, ResultState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
+use kglite::api::mutation::{add_edges_from_specs, EdgeSpec};
 use kglite::api::param::json_value_to_kglite_value;
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
@@ -433,6 +434,95 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
     KgliteStatusCode::Ok
 }
 
+/// Bulk-create edges addressed by **stable node id + type**, bypassing
+/// Cypher — the fast ingest path for bindings loading many edges.
+///
+/// `edges_json` is a JSON array of objects:
+/// `{"src_id": <id>, "src_type": "Person", "dst_id": <id>,
+///   "dst_type": "Company", "type": "WORKS_AT", "props": {...}}`
+/// (`props` optional). `src_id`/`dst_id` are the nodes' stable ids (the
+/// same value `n.id` returns), not internal indices. Runs in one
+/// transaction: the whole batch commits together, or — on error — none
+/// of it lands. Endpoints must already exist; an edge whose source or
+/// target id isn't found for its declared type is skipped and counted.
+///
+/// On success `out_report_json` is set to an owned JSON object
+/// `{"connections_created": N, "skipped_missing_endpoint": M}`; free it
+/// with [`kglite_free_string`](crate::kglite_free_string).
+///
+/// This wraps the shared core primitive
+/// [`add_edges_from_specs`](kglite::api::mutation::add_edges_from_specs) —
+/// the same engine the Python `add_connections` DataFrame path uses.
+///
+/// # Safety
+///
+/// `session` must be valid; `edges_json` a null-terminated UTF-8 JSON
+/// array; `out_report_json` a valid writable `*const c_char` slot;
+/// `out_error_msg` null or a valid writable slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_create_edges_batch(
+    session: *mut KgliteSession,
+    edges_json: *const c_char,
+    out_report_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if session.is_null() || edges_json.is_null() || out_report_json.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let specs = match parse_edge_specs(edges_json) {
+        Ok(s) => s,
+        Err(rc) => return rc,
+    };
+    let session_state = unsafe { SessionState::from_handle(session) };
+    let mut tx = session_state.inner.begin();
+    let working = match tx.working_mut() {
+        Ok(w) => w,
+        Err(err) => {
+            let code = KgliteStatusCode::from_kg_error_code(err.code());
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&err.to_string());
+                }
+            }
+            unsafe {
+                *out_report_json = std::ptr::null();
+            }
+            return code;
+        }
+    };
+    match add_edges_from_specs(working, specs) {
+        Ok(report) => {
+            let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
+            let json = serde_json::json!({
+                "connections_created": report.connections_created,
+                "skipped_missing_endpoint": report.skipped_missing_endpoint,
+            })
+            .to_string();
+            unsafe {
+                *out_report_json = alloc_c_string(&json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(msg) => {
+            // tx drops uncommitted → none of the batch's edges land.
+            unsafe {
+                *out_report_json = std::ptr::null();
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&msg);
+                }
+            }
+            KgliteStatusCode::Internal
+        }
+    }
+}
+
 /// Free a session handle. Idempotent on null (no-op).
 ///
 /// # Safety
@@ -513,6 +603,60 @@ fn parse_batch_queries(
             Some(_) => return Err(KgliteStatusCode::InvalidArgument),
         };
         out.push((query, params));
+    }
+    Ok(out)
+}
+
+/// Parse an `edges_json` argument into `EdgeSpec`s. Expects a JSON array
+/// of objects with `src_id`, `src_type`, `dst_id`, `dst_type`, `type`
+/// (the edge type) and optional `props`. Any other shape →
+/// `InvalidArgument`. Assumes `edges_json` is non-null (callers check).
+fn parse_edge_specs(edges_json: *const c_char) -> Result<Vec<EdgeSpec>, KgliteStatusCode> {
+    let s = match unsafe { CStr::from_ptr(edges_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(KgliteStatusCode::InvalidUtf8),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return Err(KgliteStatusCode::InvalidArgument),
+    };
+    let arr = match parsed.as_array() {
+        Some(a) => a,
+        None => return Err(KgliteStatusCode::InvalidArgument),
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => return Err(KgliteStatusCode::InvalidArgument),
+        };
+        let req_str = |key: &str| -> Result<String, KgliteStatusCode> {
+            obj.get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or(KgliteStatusCode::InvalidArgument)
+        };
+        let req_id = |key: &str| -> Result<Value, KgliteStatusCode> {
+            obj.get(key)
+                .map(json_value_to_kglite_value)
+                .ok_or(KgliteStatusCode::InvalidArgument)
+        };
+        let properties = match obj.get("props") {
+            None | Some(serde_json::Value::Null) => HashMap::new(),
+            Some(serde_json::Value::Object(o)) => o
+                .iter()
+                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
+                .collect(),
+            Some(_) => return Err(KgliteStatusCode::InvalidArgument),
+        };
+        out.push(EdgeSpec {
+            source_type: req_str("src_type")?,
+            source_id: req_id("src_id")?,
+            target_type: req_str("dst_type")?,
+            target_id: req_id("dst_id")?,
+            edge_type: req_str("type")?,
+            properties,
+        });
     }
     Ok(out)
 }

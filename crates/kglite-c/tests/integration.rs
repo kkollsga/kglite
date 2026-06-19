@@ -11,7 +11,7 @@
 use kglite_c::{
     kglite_abi_version, kglite_cypher_result_columns_json, kglite_cypher_result_free,
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_string,
-    kglite_graph_new, kglite_load_file, kglite_session_execute_mut,
+    kglite_create_edges_batch, kglite_graph_new, kglite_load_file, kglite_session_execute_mut,
     kglite_session_execute_mut_batch, kglite_session_execute_read, kglite_session_execute_read_batch,
     kglite_session_free, kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession,
     KgliteStatusCode,
@@ -335,6 +335,78 @@ fn execute_mut_batch_is_atomic_on_failure() {
     let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
     let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
     assert_eq!(rows, r#"[{"c":0}]"#, "first create should have rolled back");
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn create_edges_batch_by_id() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph, &mut session as *mut _) };
+
+    // Seed nodes via Cypher.
+    let create =
+        CString::new("CREATE (:Person {id: 1}), (:Person {id: 2}), (:Company {id: 10})").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut(
+            session,
+            create.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    unsafe { kglite_cypher_result_free(result) };
+
+    // Bulk-add edges by stable id + type. The third edge's source (99)
+    // doesn't exist → it should be skipped, not error the batch.
+    let edges = CString::new(
+        r#"[
+          {"src_id":1,"src_type":"Person","dst_id":2,"dst_type":"Person","type":"KNOWS"},
+          {"src_id":1,"src_type":"Person","dst_id":10,"dst_type":"Company","type":"WORKS_AT","props":{"since":2020}},
+          {"src_id":99,"src_type":"Person","dst_id":2,"dst_type":"Person","type":"KNOWS"}
+        ]"#,
+    )
+    .unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_create_edges_batch(
+            session,
+            edges.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "create_edges_batch failed");
+    assert!(!out.is_null());
+    let report: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(out).to_str().unwrap() }).unwrap();
+    assert_eq!(report["connections_created"], serde_json::json!(2));
+    assert_eq!(report["skipped_missing_endpoint"], serde_json::json!(1));
+    unsafe { kglite_free_string(out) };
+
+    // Verify two edges actually landed.
+    let q = CString::new("MATCH ()-[r]->() RETURN count(r) AS c").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe {
+        kglite_session_execute_read(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
+    assert_eq!(rows, r#"[{"c":2}]"#);
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
