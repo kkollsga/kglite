@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::datatypes::py_out::value_to_py;
-use crate::graph::storage::GraphRead;
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::GraphRead;
 
 #[pymethods]
 impl KnowledgeGraph {

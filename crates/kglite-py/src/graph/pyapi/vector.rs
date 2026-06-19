@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::graph::io::file;
 use crate::graph::schema;
-use crate::graph::storage::GraphRead;
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::GraphRead;
 
 #[pymethods]
 impl KnowledgeGraph {

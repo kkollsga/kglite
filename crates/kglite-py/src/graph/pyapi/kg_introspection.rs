@@ -13,11 +13,11 @@ use crate::graph::introspection::{
     reporting::{OperationReport, OperationReports},
 };
 use crate::graph::schema::{CowSelection, PlanStep};
-use crate::graph::storage::GraphRead;
 use crate::graph::{
     compare_inner, extract_cypher_param, extract_detail_param, extract_fluent_param, get_graph_mut,
     parse_method_param, KnowledgeGraph, TemporalContext,
 };
+use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt};
@@ -674,7 +674,7 @@ impl KnowledgeGraph {
         let temporal_filter = if temporal == Some(false) {
             None
         } else if let Some(at_str) = at {
-            let (date, _) = crate::graph::features::timeseries::parse_date_query(at_str).map_err(
+            let (date, _) = kglite_core::api::timeseries::parse_date_query(at_str).map_err(
                 |e: String| -> PyErr {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },
@@ -686,11 +686,12 @@ impl KnowledgeGraph {
                     crate::graph::core::traversal::TemporalEdgeFilter::At(configs.clone(), date)
                 })
         } else if let Some((start_str, end_str)) = &during {
-            let (start, _) = crate::graph::features::timeseries::parse_date_query(start_str)
-                .map_err(|e: String| -> PyErr {
+            let (start, _) = kglite_core::api::timeseries::parse_date_query(start_str).map_err(
+                |e: String| -> PyErr {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                })?;
-            let (end, _) = crate::graph::features::timeseries::parse_date_query(end_str).map_err(
+                },
+            )?;
+            let (end, _) = kglite_core::api::timeseries::parse_date_query(end_str).map_err(
                 |e: String| -> PyErr {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 },

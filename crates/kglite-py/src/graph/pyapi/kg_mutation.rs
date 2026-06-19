@@ -9,12 +9,12 @@ use crate::datatypes::py_in;
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::languages::cypher;
 use crate::graph::schema::{self, CowSelection, DirGraph};
-use crate::graph::storage::GraphRead;
 use crate::graph::{
     get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
     parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
     KnowledgeGraph, TemporalContext, TimeSpec,
 };
+use kglite_core::api::GraphRead;
 use kglite_core::api::{NodeOperationReport, OperationReport, OperationReports};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -563,7 +563,7 @@ fn apply_batch_labels<'py>(
     labels: &[String],
 ) -> PyResult<()> {
     graph.build_id_index(node_type);
-    let label_keys: Vec<crate::graph::schema::InternedKey> = labels
+    let label_keys: Vec<kglite_core::api::InternedKey> = labels
         .iter()
         .map(|l| graph.interner.get_or_intern(l))
         .collect();
@@ -603,7 +603,7 @@ fn apply_timeseries<'py>(
                 .call_method0("tolist")?
                 .extract()?;
             raw.iter()
-                .map(|s| crate::graph::features::timeseries::parse_date_query(s).map(|(d, _)| d))
+                .map(|s| kglite_core::api::timeseries::parse_date_query(s).map(|(d, _)| d))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e: String| -> PyErr {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
@@ -628,7 +628,7 @@ fn apply_timeseries<'py>(
                     } else {
                         1
                     };
-                    crate::graph::features::timeseries::date_from_ymd(year, month, day)
+                    kglite_core::api::timeseries::date_from_ymd(year, month, day)
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e: String| -> PyErr {
@@ -638,11 +638,9 @@ fn apply_timeseries<'py>(
     };
 
     let resolved_resolution = if let Some(ref r) = ts_cfg.resolution {
-        crate::graph::features::timeseries::validate_resolution(r).map_err(
-            |e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            },
-        )?;
+        kglite_core::api::timeseries::validate_resolution(r).map_err(|e: String| -> PyErr {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+        })?;
         r.clone()
     } else {
         match &ts_cfg.time {
@@ -698,7 +696,7 @@ fn apply_timeseries<'py>(
 
         graph.timeseries_store.insert(
             node_idx.index(),
-            crate::graph::features::timeseries::NodeTimeseries { keys, channels },
+            kglite_core::api::timeseries::NodeTimeseries { keys, channels },
         );
         ts_nodes_loaded += 1;
     }
@@ -718,7 +716,7 @@ fn apply_timeseries<'py>(
 
     graph.timeseries_configs.insert(
         node_type.to_string(),
-        crate::graph::features::timeseries::TimeseriesConfig {
+        kglite_core::api::timeseries::TimeseriesConfig {
             resolution: resolved_resolution,
             channels: merged_channels,
             units: merged_units,

@@ -1250,13 +1250,13 @@ impl KnowledgeGraph {
 
         let edge_type_keys_u64: Vec<u64> = edge_types
             .iter()
-            .map(|s| crate::graph::storage::interner::InternedKey::from_str(s).as_u64())
+            .map(|s| kglite_core::api::InternedKey::from_str(s).as_u64())
             .collect();
         let spec = SubsetSpec {
             edge_types: Some(
                 edge_types
                     .iter()
-                    .map(|s| crate::graph::storage::interner::InternedKey::from_str(s))
+                    .map(|s| kglite_core::api::InternedKey::from_str(s))
                     .collect(),
             ),
         };
@@ -1364,7 +1364,7 @@ impl KnowledgeGraph {
             edge_types: Some(
                 edge_types
                     .iter()
-                    .map(|s| crate::graph::storage::interner::InternedKey::from_str(s))
+                    .map(|s| kglite_core::api::InternedKey::from_str(s))
                     .collect(),
             ),
         };
@@ -1519,7 +1519,7 @@ impl KnowledgeGraph {
         let edge_type_keys = edge_types.map(|names| {
             names
                 .into_iter()
-                .map(|s| crate::graph::storage::interner::InternedKey::from_str(&s))
+                .map(|s| kglite_core::api::InternedKey::from_str(&s))
                 .collect::<Vec<_>>()
         });
         let spec = SubsetSpec {

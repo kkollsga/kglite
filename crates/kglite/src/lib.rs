@@ -97,6 +97,11 @@ pub mod api {
         discover_property_keys_from_data, resolve_code_entity, source_location, KnowledgeGraph,
         CODE_TYPES,
     };
+    /// Interned property-/type-key handle (a transparent `u64` newtype).
+    /// Bindings doing low-level direct graph access bridge between string
+    /// keys and the engine's interned ids via `InternedKey::from_str(..)` /
+    /// `.as_u64()`. Lifted in roadmap Piece 2.
+    pub use crate::graph::storage::interner::InternedKey;
     /// The canonical graph read trait — node/edge/property accessors
     /// shared by every storage backend. Non-object-safe (GATs on the
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
@@ -173,6 +178,22 @@ pub mod api {
         };
         pub use crate::graph::algorithms::hnsw::HnswParams;
         pub use crate::graph::algorithms::vector::DistanceMetric;
+    }
+
+    /// Timeseries date/query helpers — the pure date-parsing and
+    /// range-finding utilities behind inline timeseries support.
+    /// `parse_date_query` ("2013" / "2010..2015" → `NaiveDate` +
+    /// `DatePrecision`), `expand_end`, `date_from_ymd`, `find_range`, and
+    /// the validators are plain functions every binding's date handling
+    /// reaches; `TimeseriesConfig` / `NodeTimeseries` are the config/data
+    /// types. Lifted in roadmap Piece 2. (The KG-construction-level
+    /// `InlineTimeseriesConfig` / `TimeSpec` live in the api root.)
+    pub mod timeseries {
+        pub use crate::graph::features::timeseries::{
+            date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
+            validate_keys_sorted, validate_resolution, DatePrecision, NodeTimeseries,
+            TimeseriesConfig,
+        };
     }
 
     /// Blueprint loader + builder — declarative graph construction
