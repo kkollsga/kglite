@@ -134,7 +134,7 @@ freeze keeps the rewrite honest).
 
 ---
 
-### Piece 3 — Consolidate fluent orchestration into core · **3a/3b DONE; 3c remains**
+### Piece 3 — Consolidate fluent orchestration into core · **3a/3b/3c DONE**
 
 **Status (2026-06-19).** The architecture map (Explore sweep) found
 `core::languages::fluent` is **empty** (doc-comment placeholders only) — the
@@ -151,17 +151,28 @@ orchestration per method tangled with PyO3 marshalling. This let Piece 3 split:
   `VectorSearchResult` (api::algorithms), `create_connections` (api::mutation),
   set-ops + subgraph extract/expand/stats (new `api::fluent`),
   `infer_selection_node_type`. Ratchet **153 → 137**.
-- **3c REMAINS — the real consolidation.** Move the ~31 fine-grained `core::*`
-  fluent-orchestration primitives (filtering / traversal / calculations /
-  statistics / data_retrieval) out of `pyapi/` into `core::languages::fluent`
-  as high-level chain ops, exposed in `api::fluent`; the primitives stay
-  `pub(crate)`. The wheel's `kg_fluent.rs` / `kg_introspection.rs` reduce to
-  PyO3 marshalling. This is the genuinely large, behaviour-sensitive refactor —
-  do it with characterization tests first, one method-family per sub-phase.
-  Also still deferred here: spatial/temporal predicates (need the schema config
-  types `SpatialConfig` / `NodeData` / `TemporalConfig` lifted), the
-  `subgraph_streaming` disk-export cluster, and the storage-backend internals
-  (`GraphBackend` / `DiskGraph` / `lookups`).
+- **3c DONE — reframed after the architecture map.** The map showed
+  `core::languages::fluent` was empty and the wheel's fluent methods are
+  `marshal → derive_with → call ONE core::* primitive`: there is **no
+  extractable orchestration layer to consolidate** — the `core::*` primitives
+  are already the correctly-grained shared operations (CLAUDE.md: "shared query
+  primitives … used by both Cypher and the fluent API"), not glue to hide. So
+  rather than a pass-through-wrapper rewrite, the shared selection-based
+  query-primitive layer (filtering / traversal / calculations / statistics /
+  data_retrieval / pattern_matching / value_operations) is **exposed via
+  `api::fluent`** — primitives stay *defined* in `core::graph::core`, re-exported
+  as their stable binding surface. Pure aliasing → behaviour byte-identical.
+  Ratchet **137 → 85**. *Trade-off:* a larger but honest api layer vs. a risky
+  rewrite; true high-level-op consolidation remains an optional future refinement
+  (the small per-method branching in `select`/`traverse` could be hoisted later).
+
+  **Remaining 85 (long tail → Piece 3 cleanup / Piece 4):** already-in-api
+  symbols still reached via `crate::graph` paths (session, io, parts of
+  introspection/handle/explore/dir_graph/blueprint) + not-yet-lifted clusters:
+  schema config types (`SpatialConfig`/`NodeData`/`TemporalConfig` + the
+  `SchemaDefinition` family + `validate_graph`), spatial/temporal predicates,
+  storage-backend internals (`GraphBackend`/`DiskGraph`/`lookups`), the
+  `subgraph_streaming` disk-export cluster, and `wal`/recording.
 
 **Goal.** The big architectural piece. Move the fine-grained fluent-orchestration
 logic out of `pyapi/` (`core::{filtering,traversal,calculations,statistics,
@@ -208,7 +219,7 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 |---|---|---|---|---|
 | 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **done (0.11.4)** |
 | 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | **2a/2b/2c done (253→153); storage-backend internals deferred** |
-| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b done (153→137); 3c (core consolidation) remains** |
+| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b/3c done (153→85); long-tail 85 remains** |
 | 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
 
 ## Invariants for every piece
