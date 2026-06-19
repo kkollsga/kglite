@@ -944,6 +944,30 @@ KgliteStatusCode kglite_session_execute_read(const struct KgliteSession *session
                                              const char **out_error_msg);
 
 /**
+ * Run a read-only Cypher query with execution options. Same as
+ * [`kglite_session_execute_read`], plus:
+ *
+ * - `timeout_ms`: past this wall-clock budget the query returns
+ *   `CypherTimeout`. `0` = no deadline.
+ * - `max_rows`: reject the query (error) if it would produce more than
+ *   this many rows — a safety guard against runaway results, not a
+ *   silent truncation; add a `LIMIT` clause to bound output. `0` = no
+ *   limit.
+ *
+ * # Safety
+ *
+ * Same as [`kglite_session_execute_read`].
+ */
+
+KgliteStatusCode kglite_session_execute_read_opts(const struct KgliteSession *session,
+                                                  const char *query,
+                                                  const char *params_json,
+                                                  uint64_t timeout_ms,
+                                                  uint64_t max_rows,
+                                                  struct KgliteCypherResult **out_result,
+                                                  const char **out_error_msg);
+
+/**
  * Run a mutating Cypher query. Same shape as
  * [`kglite_session_execute_read`] but accepts CREATE / SET /
  * DELETE / REMOVE / MERGE statements. The session's underlying

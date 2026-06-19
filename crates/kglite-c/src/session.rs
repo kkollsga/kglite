@@ -16,6 +16,7 @@ use kglite::api::{Embedder, Value};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Opaque handle for a session. See [`KgliteGraph`](crate::KgliteGraph)
 /// for the rationale on the empty `#[repr(C)]` facade pattern.
@@ -151,6 +152,79 @@ pub unsafe extern "C" fn kglite_session_execute_read(
     let snapshot = session_state.inner.snapshot();
     let mut opts = ExecuteOptions::eager(&params);
     opts.embedder = session_state.embedder.clone();
+
+    match execute_read(&snapshot, query_str, &opts) {
+        Ok(outcome) => {
+            unsafe {
+                *out_result = ResultState::into_handle(outcome.result);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(err) => {
+            unsafe {
+                *out_result = std::ptr::null_mut();
+            }
+            let code = KgliteStatusCode::from_kg_error_code(err.code());
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&err.to_string());
+                }
+            }
+            code
+        }
+    }
+}
+
+/// Run a read-only Cypher query with execution options. Same as
+/// [`kglite_session_execute_read`], plus:
+///
+/// - `timeout_ms`: past this wall-clock budget the query returns
+///   `CypherTimeout`. `0` = no deadline.
+/// - `max_rows`: reject the query (error) if it would produce more than
+///   this many rows — a safety guard against runaway results, not a
+///   silent truncation; add a `LIMIT` clause to bound output. `0` = no
+///   limit.
+///
+/// # Safety
+///
+/// Same as [`kglite_session_execute_read`].
+#[no_mangle]
+pub unsafe extern "C" fn kglite_session_execute_read_opts(
+    session: *const KgliteSession,
+    query: *const c_char,
+    params_json: *const c_char,
+    timeout_ms: u64,
+    max_rows: u64,
+    out_result: *mut *mut KgliteCypherResult,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if session.is_null() || query.is_null() || out_result.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let params = match parse_params_json(params_json) {
+        Ok(p) => p,
+        Err(rc) => return rc,
+    };
+
+    let session_state = unsafe { SessionState::from_handle(session) };
+    let snapshot = session_state.inner.snapshot();
+    let mut opts = ExecuteOptions::eager(&params);
+    opts.embedder = session_state.embedder.clone();
+    if timeout_ms > 0 {
+        opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
+    }
+    if max_rows > 0 {
+        opts.max_rows = Some(max_rows as usize);
+    }
 
     match execute_read(&snapshot, query_str, &opts) {
         Ok(outcome) => {
