@@ -134,7 +134,34 @@ freeze keeps the rewrite honest).
 
 ---
 
-### Piece 3 — Consolidate fluent orchestration into core
+### Piece 3 — Consolidate fluent orchestration into core · **3a/3b DONE; 3c remains**
+
+**Status (2026-06-19).** The architecture map (Explore sweep) found
+`core::languages::fluent` is **empty** (doc-comment placeholders only) — the
+fluent orchestration lives entirely in `pyapi/` as **31 distinct `core::*`
+primitive reaches** (kg_introspection.rs 23, kg_fluent.rs 11), 30–65 % genuine
+orchestration per method tangled with PyO3 marshalling. This let Piece 3 split:
+
+- **3a DONE** — the **Selection api-type decision**: `CowSelection` /
+  `CurrentSelection` / `PlanStep` / `SelectionLevel` / `SelectionOperation` are
+  clean generic core types (petgraph `NodeIndex` + maps, no binding coupling) →
+  lifted into `kglite::api` root.
+- **3b DONE** — with Selection in api, lifted the generic capabilities that
+  merely *take* a selection (not fluent-impl glue): `vector_search` +
+  `VectorSearchResult` (api::algorithms), `create_connections` (api::mutation),
+  set-ops + subgraph extract/expand/stats (new `api::fluent`),
+  `infer_selection_node_type`. Ratchet **153 → 137**.
+- **3c REMAINS — the real consolidation.** Move the ~31 fine-grained `core::*`
+  fluent-orchestration primitives (filtering / traversal / calculations /
+  statistics / data_retrieval) out of `pyapi/` into `core::languages::fluent`
+  as high-level chain ops, exposed in `api::fluent`; the primitives stay
+  `pub(crate)`. The wheel's `kg_fluent.rs` / `kg_introspection.rs` reduce to
+  PyO3 marshalling. This is the genuinely large, behaviour-sensitive refactor —
+  do it with characterization tests first, one method-family per sub-phase.
+  Also still deferred here: spatial/temporal predicates (need the schema config
+  types `SpatialConfig` / `NodeData` / `TemporalConfig` lifted), the
+  `subgraph_streaming` disk-export cluster, and the storage-backend internals
+  (`GraphBackend` / `DiskGraph` / `lookups`).
 
 **Goal.** The big architectural piece. Move the fine-grained fluent-orchestration
 logic out of `pyapi/` (`core::{filtering,traversal,calculations,statistics,
@@ -181,7 +208,7 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 |---|---|---|---|---|
 | 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **done (0.11.4)** |
 | 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | **2a/2b/2c done (253→153); storage-backend internals deferred** |
-| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | queued |
+| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b done (153→137); 3c (core consolidation) remains** |
 | 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
 
 ## Invariants for every piece
