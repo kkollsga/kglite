@@ -836,6 +836,68 @@ KgliteStatusCode kglite_blueprint_build(const char *blueprint_path,
                                         const char **out_error_msg);
 
 /**
+ * Save a graph to a `.kgl` file with an explicit durability choice. Same
+ * as [`kglite_save_graph`] but when `fsync` != 0 the file and its
+ * directory entry are flushed to stable storage before returning —
+ * durable across power loss, at the cost of fsync latency. `fsync` == 0
+ * matches [`kglite_save_graph`] (atomic rename, no fsync).
+ *
+ * # Safety
+ *
+ * `graph` must be a valid handle; `path` a null-terminated UTF-8 path;
+ * `out_error_msg` null or a valid slot.
+ */
+
+KgliteStatusCode kglite_save_graph_durable(struct KgliteGraph *graph,
+                                           const char *path,
+                                           uint8_t fsync,
+                                           const char **out_error_msg);
+
+/**
+ * Serialize a graph to an in-memory `.kgl` byte buffer (no file). On
+ * success `*out_buf` / `*out_len` describe an owned buffer the caller
+ * MUST free with [`kglite_free_bytes`]. Pair with
+ * [`kglite_graph_from_bytes`] to round-trip a graph through bytes (IPC,
+ * object storage, …).
+ *
+ * # Safety
+ *
+ * `graph` valid; `out_buf` a valid `*mut u8` slot; `out_len` a valid
+ * `usize` slot; `out_error_msg` null or valid.
+ */
+
+KgliteStatusCode kglite_graph_to_bytes(struct KgliteGraph *graph,
+                                       uint8_t **out_buf,
+                                       uintptr_t *out_len,
+                                       const char **out_error_msg);
+
+/**
+ * Free a byte buffer returned by [`kglite_graph_to_bytes`]. Pass the
+ * same `buf` / `len` pair. Null `buf` is a no-op.
+ *
+ * # Safety
+ *
+ * `buf` / `len` must be a pair previously returned by
+ * [`kglite_graph_to_bytes`] and not yet freed.
+ */
+ void kglite_free_bytes(uint8_t *buf, uintptr_t len);
+
+/**
+ * Load a graph from an in-memory `.kgl` byte buffer — the inverse of
+ * [`kglite_graph_to_bytes`].
+ *
+ * # Safety
+ *
+ * `data` / `len` must describe a readable buffer; `out_graph` a valid
+ * writable slot; `out_error_msg` null or a valid slot.
+ */
+
+KgliteStatusCode kglite_graph_from_bytes(const uint8_t *data,
+                                         uintptr_t len,
+                                         struct KgliteGraph **out_graph,
+                                         const char **out_error_msg);
+
+/**
  * Return the column names as a JSON array string:
  * `["col1", "col2", ...]`.
  *
