@@ -21,6 +21,7 @@
 //! - [`session`] — `KgliteSession` opaque handle + execute_read /
 //!   execute_mut.
 //! - [`result`] — `KgliteCypherResult` opaque handle + JSON accessors.
+//! - [`alloc`] — tracking global allocator + `kglite_memory_stats`.
 //!
 //! Each submodule's items are re-exported at the crate root so the
 //! generated `kglite.h` is a flat namespace.
@@ -35,6 +36,7 @@
 // ours to wrap up in `unsafe { ... }` for clippy's sake.
 
 pub mod abi;
+pub mod alloc;
 pub mod datasets;
 pub mod embedder;
 pub mod graph;
@@ -48,6 +50,7 @@ pub mod strings;
 // flat structure here keeps the generated header tidy and easier
 // for binding authors to navigate.
 pub use abi::*;
+pub use alloc::*;
 // Datasets — each loader sits behind its own feature; re-exported
 // at the crate root so cbindgen picks the C functions up at the
 // flat namespace level.

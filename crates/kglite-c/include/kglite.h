@@ -71,6 +71,24 @@ typedef struct KgliteAbiVersion {
   uint32_t patch;
 } KgliteAbiVersion;
 
+/**
+ * Rust-heap statistics from kglite's tracking allocator.
+ */
+typedef struct KgMemStats {
+  /**
+   * Current live Rust-heap bytes (allocated minus freed).
+   */
+  uint64_t current_bytes;
+  /**
+   * Peak live Rust-heap bytes since process start.
+   */
+  uint64_t peak_bytes;
+  /**
+   * Total number of allocations since process start (monotonic).
+   */
+  uint64_t total_allocs;
+} KgMemStats;
+
 #if defined(KGLITE_FEATURE_SEC)
 /**
  * Opaque handle for a SEC HTTP client (rate-limited, user-agent
@@ -149,6 +167,14 @@ typedef struct KgliteCypherResult {
  * ```
  */
  struct KgliteAbiVersion kglite_abi_version(void);
+
+/**
+ * Return current Rust-heap statistics from kglite's tracking allocator.
+ * Counts only allocations through the Rust global allocator — the host
+ * runtime's own heap is separate. Useful for a binding to surface
+ * kglite's memory footprint in its own metrics.
+ */
+ struct KgMemStats kglite_memory_stats(void);
 
 #if defined(KGLITE_FEATURE_SODIR)
 /**
