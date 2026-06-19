@@ -675,6 +675,27 @@ KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
 #endif
 
 /**
+ * Create a new, empty in-memory knowledge graph.
+ *
+ * The returned handle owns a fresh, empty `DirGraph` — the C-side
+ * analogue of constructing `KnowledgeGraph()` in Python. Build it up
+ * by opening a session ([`kglite_session_new`](crate::kglite_session_new))
+ * and running `CREATE` / `MERGE` Cypher through
+ * [`kglite_session_execute_mut`](crate::kglite_session_execute_mut), or
+ * by bulk-loading via the dataset / blueprint entry points. Before this
+ * existed, the only way to obtain a graph at the C boundary was to load
+ * a pre-built `.kgl` file — a binding could not start one from scratch.
+ *
+ * # Returns
+ *
+ * A non-null `KgliteGraph*` the caller must free with
+ * [`kglite_graph_free`], or hand to
+ * [`kglite_session_new`](crate::kglite_session_new) which takes
+ * ownership. Returns null only on allocation failure.
+ */
+ struct KgliteGraph *kglite_graph_new(void);
+
+/**
  * Load a knowledge graph from disk. Accepts `.kgl` files
  * (single-file mmap format) and directories (disk-backed CSR
  * layout) — the loader picks the right path based on what's at

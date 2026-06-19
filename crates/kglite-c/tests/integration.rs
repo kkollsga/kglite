@@ -11,8 +11,9 @@
 use kglite_c::{
     kglite_abi_version, kglite_cypher_result_columns_json, kglite_cypher_result_free,
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_string,
-    kglite_load_file, kglite_session_execute_read, kglite_session_free, kglite_session_new,
-    KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
+    kglite_graph_new, kglite_load_file, kglite_session_execute_mut, kglite_session_execute_read,
+    kglite_session_free, kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession,
+    KgliteStatusCode,
 };
 
 #[cfg(feature = "fastembed")]
@@ -175,6 +176,62 @@ fn params_json_round_trip() {
     let rows_str = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
     assert!(rows_str.contains("\"x\":") && rows_str.contains("42"));
     assert!(rows_str.contains("\"y\":") && rows_str.contains("hello"));
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn create_empty_graph_then_mutate_and_read() {
+    // The hole this closes: build a graph from scratch at the C boundary
+    // (no pre-built `.kgl` file), mutate it, and read it back — the path a
+    // fresh binding needs for "hello, query a graph".
+    let graph = kglite_graph_new();
+    assert!(!graph.is_null());
+
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    let rc = unsafe { kglite_session_new(graph, &mut session as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    // graph ownership moved into the session — don't free it.
+
+    // Mutate: create two nodes via execute_mut (auto-commits).
+    let create = CString::new("CREATE (:T {id: 1}), (:T {id: 2})").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut(
+            session,
+            create.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "execute_mut failed");
+    assert!(err.is_null());
+    unsafe { kglite_cypher_result_free(result) };
+
+    // Read it back — both created nodes must be present. Assert via the
+    // row-count accessor (encoding-independent) so this test stays green
+    // regardless of how scalar values are JSON-encoded in the rows blob.
+    let q = CString::new("MATCH (n:T) RETURN n.id AS id ORDER BY id").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let row_count = unsafe { kglite_cypher_result_row_count(result) };
+    assert_eq!(row_count, 2, "both created nodes should be returned");
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
+    assert!(rows.contains('1') && rows.contains('2'));
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
