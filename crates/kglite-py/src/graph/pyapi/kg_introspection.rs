@@ -13,9 +13,9 @@ use crate::graph::{
 };
 use kglite_core::api::fluent::StatResult;
 use kglite_core::api::introspection;
+use kglite_core::api::mutation::{OperationReport, OperationReports};
 use kglite_core::api::GraphRead;
 use kglite_core::api::{CowSelection, PlanStep};
-use kglite_core::api::{OperationReport, OperationReports};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt};

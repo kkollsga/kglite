@@ -55,13 +55,14 @@ pub mod param;
 /// items here, not on the underlying module structure (which may
 /// move between minor releases).
 pub mod api {
-    pub use crate::code_tree::builder::run_with_options as build_code_tree;
-    /// Map a file path to its `code_tree` language identifier, or
-    /// `None` if no parser handles the file. Bindings use this to
-    /// decide whether a filesystem event is graph-relevant — only
-    /// changes to files this returns `Some` for can change what
-    /// `build_code_tree` produces.
-    pub use crate::code_tree::parsers::language_for_path;
+    // ── Root prelude ──────────────────────────────────────────────────────
+    // The root holds only the cross-cutting *data model* (the types every
+    // binding speaks) + a couple of standalone top-level capabilities
+    // (`graphgen`, `explore_markdown`). Everything else is clustered into a
+    // submodule by concern: `param`, `mutation`, `fluent`, `algorithms`,
+    // `timeseries`, `introspection`, `io`, `code_tree`, `blueprint`,
+    // `cypher`, `session`, `datasets`. Per-cluster items live in exactly one
+    // place (no root↔submodule duplication).
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
     pub use crate::datatypes::Value;
     pub use crate::error::{KgError, KgErrorCode};
@@ -74,8 +75,6 @@ pub mod api {
     /// streams the benchmark/demo graph as CSVs + a manifest in bounded memory.
     /// Surfaced through the wheel as `kglite.graphgen(...)`.
     pub use crate::graphgen::{generate_to_dir as graphgen, GraphGenConfig, GraphGenStats};
-    // Inline timeseries config types (lifted from kglite-py in 0.10.1).
-    pub use crate::graph::features::timeseries::{InlineTimeseriesConfig, TimeSpec};
     // Thin pure-Rust graph handle for embedders + the free function
     // backing it. The wheel crate (`kglite-py`) defines its own,
     // Python-flavored `KnowledgeGraph` separately — same name,
@@ -85,14 +84,10 @@ pub mod api {
     // current level; it takes `&CowSelection`, so it landed here in
     // Piece 3b alongside the Selection api-type lift (Piece 3a).
     //
-    // `resolve_code_entity` + `CODE_TYPES` are the code-tree graph
-    // helpers (resolve a `Type::method` qualified name to a node;
-    // the canonical set of code-entity node-type labels) — generic
-    // for any binding that ships the code-tree parser. Lifted in the
-    // api-sealing soft-seal (roadmap Piece 1).
+    // (The code-tree handle helpers `resolve_code_entity` / `CODE_TYPES` /
+    // `source_location` live in `api::code_tree`.)
     pub use crate::graph::handle::{
-        discover_property_keys_from_data, infer_selection_node_type, resolve_code_entity,
-        source_location, KnowledgeGraph, CODE_TYPES,
+        discover_property_keys_from_data, infer_selection_node_type, KnowledgeGraph,
     };
     /// Core schema data types — the node record (`NodeData`), the projected
     /// `NodeInfo`, geo/temporal validity configs (`SpatialConfig` /
@@ -132,28 +127,10 @@ pub mod api {
     pub use crate::graph::storage::GraphRead;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
     pub use crate::graph::dir_graph::make_dir_graph_mut;
-    pub use crate::graph::introspection::describe::compute_description;
-    /// Structured mutation reports — what a write touched (nodes/edges
-    /// created/updated/deleted, per operation). Every binding surfaces
-    /// these after a mutating call; lifted for cross-binding result
-    /// reporting (roadmap Piece 1; the per-op `NodeOperationReport` /
-    /// `ConnectionOperationReport` return types added in Piece 2 alongside
-    /// the bulk-mutation functions that produce them).
-    pub use crate::graph::introspection::reporting::{
-        ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
-    };
-    pub use crate::graph::introspection::schema_overview::compute_schema;
-    /// Canonical `SchemaOverview` → JSON serializer — the single source of
-    /// truth for the agent-facing schema document, so the shape can't drift
-    /// across JSON bindings (the C ABI uses it directly). Lifted in the
-    /// api-sealing review follow-up.
-    pub use crate::graph::introspection::schema_overview_to_json;
-    pub use crate::graph::introspection::SchemaOverview;
-    pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
-    pub use crate::graph::io::file::{
-        load_file, load_kgl_bytes, save_graph, write_kgl, write_kgl_to, write_kgl_with,
-    };
-    pub use crate::graph::{SourceLocation, SourceLookup};
+    // (Mutation reports → `api::mutation`; schema introspection /
+    // `SchemaOverview` / detail enums → `api::introspection`; `.kgl`
+    // load/save → `api::io`; `SourceLocation`/`SourceLookup` →
+    // `api::code_tree`.)
 
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. Future
@@ -179,6 +156,12 @@ pub mod api {
     /// `create_connections` (edge-create between the two ends of a
     /// selection) lifted in Piece 3b once `CurrentSelection` reached api.
     pub mod mutation {
+        /// Structured mutation reports — what a write touched (nodes/edges
+        /// created/updated/deleted, per operation). Returned by the mutation
+        /// functions above; every binding surfaces them after a mutating call.
+        pub use crate::graph::introspection::reporting::{
+            ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
+        };
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
         pub use crate::graph::mutation::maintain::{
             add_connections, add_edges_from_specs, add_nodes, add_properties, create_connections,
@@ -297,8 +280,8 @@ pub mod api {
     pub mod timeseries {
         pub use crate::graph::features::timeseries::{
             date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
-            validate_keys_sorted, validate_resolution, DatePrecision, NodeTimeseries,
-            TimeseriesConfig,
+            validate_keys_sorted, validate_resolution, DatePrecision, InlineTimeseriesConfig,
+            NodeTimeseries, TimeSpec, TimeseriesConfig,
         };
     }
 
@@ -306,9 +289,7 @@ pub mod api {
     /// `describe()` / schema overview (connectivity, per-type stats,
     /// neighbor schema) + the detail-level enums + a bug-report writer.
     /// The typed schema-discovery surface every binding builds its
-    /// agent-facing schema from. Lifted in roadmap Piece 3 cleanup;
-    /// `compute_schema` / `compute_description` / `SchemaOverview` /
-    /// `schema_overview_to_json` are also in the api root.
+    /// agent-facing schema from. Lifted in roadmap Piece 3 cleanup.
     pub mod introspection {
         pub use crate::graph::introspection::bug_report::write_bug_report;
         /// Debug-string helpers (schema / selection dumps) for diagnostics.
@@ -330,9 +311,24 @@ pub mod api {
     /// Lifted in roadmap Piece 3 cleanup.
     pub mod io {
         pub use crate::graph::io::export::{to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml};
+        /// `.kgl` load / save (the canonical persistence format).
+        pub use crate::graph::io::file::{
+            load_file, load_kgl_bytes, save_graph, write_kgl, write_kgl_to, write_kgl_with,
+        };
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
+    }
+
+    /// Code-tree — build a queryable graph from source files, map a path to
+    /// its language, and resolve / locate code entities. The code-graph
+    /// surface (parser + the `Type::method` entity helpers + source-location
+    /// types). Consolidated in the api-organization pass.
+    pub mod code_tree {
+        pub use crate::code_tree::builder::run_with_options as build_code_tree;
+        pub use crate::code_tree::parsers::language_for_path;
+        pub use crate::graph::handle::{resolve_code_entity, source_location, CODE_TYPES};
+        pub use crate::graph::{SourceLocation, SourceLookup};
     }
 
     /// Blueprint loader + builder — declarative graph construction

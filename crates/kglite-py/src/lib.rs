@@ -54,7 +54,7 @@ use graph::pyapi::frozen::FrozenGraph;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::pyapi::session::Session;
 use graph::{KnowledgeGraph, Transaction};
-use kglite_core::api::load_file;
+use kglite_core::api::io::load_file;
 
 /// Curated Rust-side façade for downstream binaries (notably
 /// `kglite-mcp-server`). This module is the **only** stable Rust
@@ -84,13 +84,13 @@ pub mod api {
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
     pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
-    pub use kglite_core::api::compute_description;
-    pub use kglite_core::api::compute_schema;
+    pub use kglite_core::api::introspection::compute_description;
+    pub use kglite_core::api::introspection::compute_schema;
+    pub use kglite_core::api::introspection::SchemaOverview;
+    pub use kglite_core::api::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
+    pub use kglite_core::api::io::{load_file, save_graph};
     pub use kglite_core::api::DirGraph;
-    pub use kglite_core::api::SchemaOverview;
     pub use kglite_core::api::{explore_markdown, ExploreOptions};
-    pub use kglite_core::api::{load_file, save_graph};
-    pub use kglite_core::api::{ConnectionDetail, CypherDetail, FluentDetail};
 
     /// Cypher parser + planner + executor surface. Downstream Rust
     /// consumers (notably `kglite-mcp-server`) build their own
@@ -204,7 +204,7 @@ fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
 /// section), distinct from a successful empty graph.
 #[pyfunction]
 fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
-    py.detach(|| kglite_core::api::load_kgl_bytes(data))
+    py.detach(|| kglite_core::api::io::load_kgl_bytes(data))
         .map(KnowledgeGraph::from_arc)
         .map_err(|e| load_err_to_pyerr(e, None))
 }

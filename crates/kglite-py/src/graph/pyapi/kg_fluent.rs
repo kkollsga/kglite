@@ -8,8 +8,8 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
 use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
+use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::GraphRead;
-use kglite_core::api::OperationReport;
 use kglite_core::api::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
@@ -679,7 +679,7 @@ impl KnowledgeGraph {
         };
 
         // Create and add a report
-        let report = kglite_core::api::NodeOperationReport {
+        let report = kglite_core::api::mutation::NodeOperationReport {
             operation_type: "update".to_string(),
             timestamp: chrono::Utc::now(),
             nodes_created: 0,
@@ -1236,7 +1236,7 @@ impl KnowledgeGraph {
         let name_lower = name.to_lowercase();
         let types_to_search: Vec<&str> = match node_type {
             Some(nt) => vec![nt],
-            None => kglite_core::api::CODE_TYPES.to_vec(),
+            None => kglite_core::api::code_tree::CODE_TYPES.to_vec(),
         };
 
         let mut results: Vec<kglite_core::api::NodeInfo> = Vec::new();

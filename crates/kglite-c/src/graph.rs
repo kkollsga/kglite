@@ -9,10 +9,9 @@
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
-use kglite::api::{
-    compute_schema, graphgen, load_file, load_kgl_bytes, save_graph, schema_overview_to_json,
-    write_kgl_to, write_kgl_with, DirGraph, GraphGenConfig,
-};
+use kglite::api::introspection::{compute_schema, schema_overview_to_json};
+use kglite::api::io::{load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with};
+use kglite::api::{graphgen, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
 use std::sync::Arc;

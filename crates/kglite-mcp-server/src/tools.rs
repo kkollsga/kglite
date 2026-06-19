@@ -15,10 +15,11 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use kglite::api::cypher;
 use kglite::api::cypher::ValueCodec;
-use kglite::api::{
-    compute_description, compute_schema, load_file, ConnectionDetail, CypherDetail, Embedder,
-    FluentDetail, KnowledgeGraph, Value,
+use kglite::api::introspection::{
+    compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
+use kglite::api::io::load_file;
+use kglite::api::{Embedder, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
 use serde::{Deserialize, Serialize};
 
@@ -128,8 +129,15 @@ impl GraphState {
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
         // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
         // include_docs is mode-dependent (github-workspace on, local off).
-        let dir_arc = kglite::api::build_code_tree(dir, false, true, None, None, self.include_docs)
-            .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
+        let dir_arc = kglite::api::code_tree::build_code_tree(
+            dir,
+            false,
+            true,
+            None,
+            None,
+            self.include_docs,
+        )
+        .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
@@ -223,7 +231,7 @@ impl GraphState {
             return Err(NO_GRAPH.to_string());
         };
         match active.kg.source_location(qualified_name, node_type) {
-            kglite::api::SourceLookup::Found(loc) => {
+            kglite::api::code_tree::SourceLookup::Found(loc) => {
                 let file_path = loc.file_path.ok_or_else(|| {
                     format!("graph.source({qualified_name:?}) returned no file_path")
                 })?;
@@ -235,11 +243,11 @@ impl GraphState {
                     end_line,
                 })
             }
-            kglite::api::SourceLookup::Ambiguous(matches) => Err(format!(
+            kglite::api::code_tree::SourceLookup::Ambiguous(matches) => Err(format!(
                 "ambiguous qualified_name {qualified_name:?}; matches: {matches:?}. \
                  Pass `node_type` to narrow."
             )),
-            kglite::api::SourceLookup::NotFound => Err(format!(
+            kglite::api::code_tree::SourceLookup::NotFound => Err(format!(
                 "graph.source({qualified_name:?}) returned no match. \
                  Try passing `node_type` or using a different qualified name."
             )),
@@ -660,14 +668,14 @@ fn run_save(graph: &ActiveGraph) -> String {
         return "save_graph requires --graph mode (no source path bound).".to_string();
     };
     let path_str = path.to_string_lossy().into_owned();
-    // `kglite::api::save_graph` dispatches on storage mode (mirrors
+    // `kglite::api::io::save_graph` dispatches on storage mode (mirrors
     // `KnowledgeGraph::save` at `src/graph/pyapi/kg_core.rs`):
     //   - disk-backed → `save_disk(path)` (the folder IS the graph)
     //   - in-memory  → `prepare_save` → `enable_columnar` → `write_kgl`
     // The pre-0.9.45 inline `save_disk` call errored "save_disk requires
     // disk mode" for in-memory `.kgl` graphs — see CHANGELOG [0.9.45].
     let mut dir_arc = graph.kg.dir().clone();
-    match kglite::api::save_graph(&mut dir_arc, &path_str) {
+    match kglite::api::io::save_graph(&mut dir_arc, &path_str) {
         Ok(()) => {
             let dir = std::sync::Arc::make_mut(&mut dir_arc);
             let overview = compute_schema(dir);

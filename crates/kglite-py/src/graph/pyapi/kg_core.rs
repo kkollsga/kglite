@@ -13,8 +13,8 @@ use crate::graph::schema; // still needed for GraphBackend (deferred storage clu
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
 use kglite_core::api::introspection;
 use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
+use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::GraphRead;
-use kglite_core::api::OperationReport;
 use kglite_core::api::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
