@@ -8,6 +8,7 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
+use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::{graphgen, load_file, save_graph, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -323,6 +324,95 @@ pub unsafe extern "C" fn kglite_graphgen_to_dir(
     }
 }
 
+/// Build a graph declaratively from a blueprint file + a directory of
+/// CSVs — the C-side handle on the wheel's `from_blueprint`. Loads the
+/// JSON/YAML blueprint at `blueprint_path`, builds into a fresh graph
+/// reading CSVs relative to `csv_dir`, and returns the populated graph.
+///
+/// On success `out_graph` is set to a `KgliteGraph*` (free via
+/// [`kglite_graph_free`] or hand to [`kglite_session_new`](crate::kglite_session_new)),
+/// and `out_report_json` to an owned
+/// `{"nodes_by_type":{..},"edges_by_type":{..},"warnings":[..],"errors":[..],"provisional_purged":N}`
+/// string — free via [`kglite_free_string`](crate::kglite_free_string).
+///
+/// # Safety
+///
+/// `blueprint_path` / `csv_dir` must be null-terminated UTF-8 paths;
+/// `out_graph` / `out_report_json` valid writable slots; `out_error_msg`
+/// null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_blueprint_build(
+    blueprint_path: *const c_char,
+    csv_dir: *const c_char,
+    out_graph: *mut *mut KgliteGraph,
+    out_report_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if blueprint_path.is_null() || csv_dir.is_null() || out_graph.is_null() || out_report_json.is_null()
+    {
+        return KgliteStatusCode::NullPointer;
+    }
+    let bp_path = match unsafe { CStr::from_ptr(blueprint_path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let dir = match unsafe { CStr::from_ptr(csv_dir) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+
+    let set_err = |out_error_msg: *mut *const c_char, msg: &str| {
+        if !out_error_msg.is_null() {
+            unsafe {
+                *out_error_msg = alloc_c_string(msg);
+            }
+        }
+    };
+
+    let blueprint = match load_blueprint_file(Path::new(bp_path)) {
+        Ok(b) => b,
+        Err(e) => {
+            unsafe {
+                *out_graph = std::ptr::null_mut();
+            }
+            set_err(out_error_msg, &e);
+            return KgliteStatusCode::FileFormat;
+        }
+    };
+    let mut graph = DirGraph::new();
+    let report = match blueprint_build(&mut graph, blueprint, Path::new(dir)) {
+        Ok(r) => r,
+        Err(e) => {
+            unsafe {
+                *out_graph = std::ptr::null_mut();
+            }
+            set_err(out_error_msg, &e);
+            return KgliteStatusCode::InvalidArgument;
+        }
+    };
+
+    unsafe {
+        *out_graph = GraphState::into_handle(Arc::new(graph));
+    }
+    let report_json = serde_json::json!({
+        "nodes_by_type": report.nodes_by_type,
+        "edges_by_type": report.edges_by_type,
+        "warnings": report.warnings,
+        "errors": report.errors,
+        "provisional_purged": report.provisional_purged,
+    })
+    .to_string();
+    unsafe {
+        *out_report_json = alloc_c_string(&report_json);
+    }
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = std::ptr::null();
+        }
+    }
+    KgliteStatusCode::Ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +479,27 @@ mod tests {
         assert!(parsed["edges"].as_u64().unwrap() > 0);
         unsafe { crate::kglite_free_string(stats) };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blueprint_build_missing_file_returns_file_format() {
+        let bp = CString::new("/tmp/__kglite_c_no_blueprint__.json").unwrap();
+        let dir = CString::new("/tmp").unwrap();
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut report: *const c_char = std::ptr::null();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_blueprint_build(
+                bp.as_ptr(),
+                dir.as_ptr(),
+                &mut graph as *mut _,
+                &mut report as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::FileFormat);
+        assert!(graph.is_null());
+        assert!(!err.is_null());
+        unsafe { crate::kglite_free_string(err) };
     }
 }
