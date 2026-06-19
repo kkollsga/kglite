@@ -3,8 +3,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::graph::schema::SpatialConfig;
 use crate::graph::{get_graph_mut, KnowledgeGraph};
+use kglite_core::api::SpatialConfig;
 use kglite_core::api::{CowSelection, DirGraph, PlanStep, SelectionOperation};
 
 /// Extract a WKT string from a Python argument.
@@ -157,7 +157,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
-        let matching_nodes = crate::graph::features::spatial::within_bounds(
+        let matching_nodes = kglite_core::api::fluent::within_bounds(
             &self.inner,
             &self.cursor.selection,
             lat_field,
@@ -232,7 +232,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
-        let matching_nodes = crate::graph::features::spatial::near_point(
+        let matching_nodes = kglite_core::api::fluent::near_point(
             &self.inner,
             &self.cursor.selection,
             lat_field,
@@ -302,7 +302,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
-        let matching_nodes = crate::graph::features::spatial::near_point_m(
+        let matching_nodes = kglite_core::api::fluent::near_point_m(
             &self.inner,
             &self.cursor.selection,
             lat_field,
@@ -366,7 +366,7 @@ impl KnowledgeGraph {
         let geometry_field =
             resolve_geometry_field(&self.inner, &self.cursor.selection, geometry_field);
 
-        let matching_nodes = crate::graph::features::spatial::contains_point(
+        let matching_nodes = kglite_core::api::fluent::contains_point(
             &self.inner,
             &self.cursor.selection,
             geometry_field,
@@ -430,7 +430,7 @@ impl KnowledgeGraph {
         let geometry_field =
             resolve_geometry_field(&self.inner, &self.cursor.selection, geometry_field);
 
-        let matching_nodes = crate::graph::features::spatial::intersects_geometry(
+        let matching_nodes = kglite_core::api::fluent::intersects_geometry(
             &self.inner,
             &self.cursor.selection,
             geometry_field,
@@ -489,7 +489,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
-        match crate::graph::features::spatial::get_bounds(
+        match kglite_core::api::fluent::get_bounds(
             &self.inner,
             &self.cursor.selection,
             lat_field,
@@ -542,7 +542,7 @@ impl KnowledgeGraph {
             resolve_lat_lon_fields(&self.inner, &self.cursor.selection, lat_field, lon_field);
         let geom_fb = resolve_geom_fallback(&self.inner, &self.cursor.selection);
 
-        match crate::graph::features::spatial::calculate_centroid(
+        match kglite_core::api::fluent::calculate_centroid(
             &self.inner,
             &self.cursor.selection,
             lat_field,
@@ -591,7 +591,7 @@ impl KnowledgeGraph {
         as_shapely: bool,
     ) -> PyResult<Py<PyAny>> {
         let wkt_str = extract_wkt(wkt_string)?;
-        match crate::graph::features::spatial::wkt_centroid(&wkt_str) {
+        match kglite_core::api::fluent::wkt_centroid(&wkt_str) {
             Ok((lat, lon)) => {
                 if as_shapely {
                     make_shapely_point(py, lat, lon)

@@ -15,9 +15,9 @@ use crate::graph::languages::cypher::py_convert::{
 use crate::graph::languages::cypher::result::{
     ClauseStats, CypherResult, MutationStats, QueryDiagnostics, ResultRow,
 };
-use crate::graph::schema::{DirGraph, NodeData};
 use kglite_core::api::algorithms::CentralityResult;
 use kglite_core::api::GraphRead;
+use kglite_core::api::{DirGraph, NodeData};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;
@@ -204,7 +204,7 @@ impl ResultView {
     /// Discover property keys by scanning all nodes (fallback path).
     fn discover_property_keys(
         nodes: &[&NodeData],
-        interner: &crate::graph::schema::StringInterner,
+        interner: &kglite_core::api::StringInterner,
     ) -> Vec<String> {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut keys: Vec<String> = Vec::new();

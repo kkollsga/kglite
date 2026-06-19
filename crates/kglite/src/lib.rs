@@ -94,6 +94,16 @@ pub mod api {
         discover_property_keys_from_data, infer_selection_node_type, resolve_code_entity,
         source_location, KnowledgeGraph, CODE_TYPES,
     };
+    /// Core schema data types — the node record (`NodeData`), the projected
+    /// `NodeInfo`, geo/temporal validity configs (`SpatialConfig` /
+    /// `TemporalConfig`), and the declarative schema-definition +
+    /// validation types. Generic across bindings; lifted in roadmap
+    /// Piece 3 cleanup.
+    pub use crate::graph::schema::{
+        parse_spatial_column_types_from_pairs, parse_temporal_column_types_from_pairs,
+        ConnectionSchemaDefinition, NodeData, NodeInfo, NodeSchemaDefinition, SchemaDefinition,
+        SpatialConfig, TemporalConfig, ValidationError,
+    };
     /// The fluent **selection** data model — the cursor state threaded
     /// through the fluent query chain (and through Selection-scoped
     /// capabilities like `algorithms::vector_search`, `mutation`
@@ -109,11 +119,12 @@ pub mod api {
     pub use crate::graph::schema::{
         CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
-    /// Interned property-/type-key handle (a transparent `u64` newtype).
-    /// Bindings doing low-level direct graph access bridge between string
-    /// keys and the engine's interned ids via `InternedKey::from_str(..)` /
-    /// `.as_u64()`. Lifted in roadmap Piece 2.
-    pub use crate::graph::storage::interner::InternedKey;
+    /// Interned property-/type-key handle (`InternedKey`, a transparent
+    /// `u64` newtype) + the `StringInterner` that mints them. Bindings
+    /// doing low-level direct graph access bridge string keys ↔ interned
+    /// ids via `InternedKey::from_str(..)` / `.as_u64()`. Lifted in roadmap
+    /// Piece 2 / Piece 3 cleanup.
+    pub use crate::graph::storage::interner::{InternedKey, StringInterner};
     /// The canonical graph read trait — node/edge/property accessors
     /// shared by every storage backend. Non-object-safe (GATs on the
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
@@ -170,10 +181,12 @@ pub mod api {
     pub mod mutation {
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
         pub use crate::graph::mutation::maintain::{
-            add_connections, add_edges_from_specs, add_nodes, create_connections,
+            add_connections, add_edges_from_specs, add_nodes, add_properties, create_connections,
             purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
-            EdgeSpecReport,
+            EdgeSpecReport, PropertySpec,
         };
+        /// Validate a graph against a `SchemaDefinition` (Piece 3 cleanup).
+        pub use crate::graph::mutation::validation::validate_graph;
     }
 
     /// Selection-scoped operations — selection set algebra
@@ -235,6 +248,17 @@ pub mod api {
         };
         // Compact value formatting for fluent result shaping.
         pub use crate::graph::core::value_operations::format_value_compact;
+        // Spatial predicates over a selection (geo filters / centroids /
+        // bounds). Selection-scoped — lifted in Piece 3 cleanup now that
+        // CurrentSelection is an api type.
+        pub use crate::graph::features::spatial::{
+            calculate_centroid, contains_point, get_bounds, intersects_geometry, near_point,
+            near_point_m, within_bounds, wkt_centroid,
+        };
+        // Temporal validity predicates (per NodeData + TemporalConfig).
+        pub use crate::graph::features::temporal::{
+            node_is_temporally_valid, node_overlaps_range, node_passes_context,
+        };
     }
 
     /// Graph algorithms — pathfinding, components, centrality, community
@@ -275,6 +299,39 @@ pub mod api {
             date_from_ymd, expand_end, find_range, parse_date_query, validate_channel_length,
             validate_keys_sorted, validate_resolution, DatePrecision, NodeTimeseries,
             TimeseriesConfig,
+        };
+    }
+
+    /// Schema/graph introspection — the compute primitives behind
+    /// `describe()` / schema overview (connectivity, per-type stats,
+    /// neighbor schema) + the detail-level enums + a bug-report writer.
+    /// The typed schema-discovery surface every binding builds its
+    /// agent-facing schema from. Lifted in roadmap Piece 3 cleanup;
+    /// `compute_schema` / `compute_description` / `SchemaOverview` /
+    /// `schema_overview_to_json` are also in the api root.
+    pub mod introspection {
+        pub use crate::graph::introspection::bug_report::write_bug_report;
+        /// Debug-string helpers (schema / selection dumps) for diagnostics.
+        pub use crate::graph::introspection::debugging;
+        pub use crate::graph::introspection::describe::{compute_description, mcp_quickstart};
+        pub use crate::graph::introspection::schema_overview::{
+            compute_connection_type_stats, compute_neighbors_schema, compute_property_stats,
+            compute_schema,
+        };
+        pub use crate::graph::introspection::{
+            compute_type_connectivity, derive_edge_counts_from_triples, schema_overview_to_json,
+            ConnectionDetail, ConnectionTypeStats, CypherDetail, FluentDetail, SchemaOverview,
+        };
+    }
+
+    /// Graph I/O beyond `.kgl` load/save (those are in the api root):
+    /// format exporters (GraphML / GEXF / D3-JSON / CSV) and the
+    /// N-Triples (RDF) streaming loader + its progress-callback types.
+    /// Lifted in roadmap Piece 3 cleanup.
+    pub mod io {
+        pub use crate::graph::io::export::{to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml};
+        pub use crate::graph::io::ntriples::{
+            load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
     }
 

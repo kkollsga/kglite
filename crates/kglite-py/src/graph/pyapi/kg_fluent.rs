@@ -7,7 +7,6 @@
 
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
-use crate::graph::schema;
 use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
 use kglite_core::api::GraphRead;
 use kglite_core::api::OperationReport;
@@ -44,7 +43,7 @@ impl KnowledgeGraph {
         valid_from: String,
         valid_to: String,
     ) -> PyResult<()> {
-        use crate::graph::schema::TemporalConfig;
+        use kglite_core::api::TemporalConfig;
         let config = TemporalConfig {
             valid_from,
             valid_to,
@@ -190,7 +189,7 @@ impl KnowledgeGraph {
                     for nodes in level.selections.values_mut() {
                         nodes.retain(|&idx| {
                             if let Some(node) = self.inner.graph.node_weight(idx) {
-                                crate::graph::features::temporal::node_passes_context(
+                                kglite_core::api::fluent::node_passes_context(
                                     node,
                                     config,
                                     &self.cursor.temporal_context,
@@ -435,7 +434,7 @@ impl KnowledgeGraph {
         };
 
         // Use temporal helper for NULL-aware filtering (NULL date_to = still active)
-        let config = schema::TemporalConfig {
+        let config = kglite_core::api::TemporalConfig {
             valid_from: from_field,
             valid_to: to_field,
         };
@@ -456,9 +455,7 @@ impl KnowledgeGraph {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
-                        crate::graph::features::temporal::node_is_temporally_valid(
-                            node, &config, &ref_date,
-                        )
+                        kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
                     } else {
                         false
                     }
@@ -523,7 +520,7 @@ impl KnowledgeGraph {
         )?;
 
         // Use temporal helper for NULL-aware overlap check
-        let config = schema::TemporalConfig {
+        let config = kglite_core::api::TemporalConfig {
             valid_from: from_field,
             valid_to: to_field,
         };
@@ -544,7 +541,7 @@ impl KnowledgeGraph {
             for (_parent, children) in level.selections.iter_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
-                        crate::graph::features::temporal::node_overlaps_range(
+                        kglite_core::api::fluent::node_overlaps_range(
                             node,
                             &config,
                             &start_parsed,
@@ -756,7 +753,7 @@ impl KnowledgeGraph {
     #[pyo3(signature = (*, include_type=true, include_id=true))]
     fn to_df(&self, py: Python<'_>, include_type: bool, include_id: bool) -> PyResult<Py<PyAny>> {
         // Collect nodes from the current selection
-        let mut nodes_data: Vec<(&str, &schema::NodeData)> = Vec::new();
+        let mut nodes_data: Vec<(&str, &kglite_core::api::NodeData)> = Vec::new();
         for node_idx in self.cursor.selection.current_node_indices() {
             if let Some(node) = self.inner.get_node(node_idx) {
                 nodes_data.push((node.node_type_str(&self.inner.interner), node));
@@ -1242,7 +1239,7 @@ impl KnowledgeGraph {
             None => kglite_core::api::CODE_TYPES.to_vec(),
         };
 
-        let mut results: Vec<schema::NodeInfo> = Vec::new();
+        let mut results: Vec<kglite_core::api::NodeInfo> = Vec::new();
         for nt in &types_to_search {
             if let Some(indices) = self.inner.type_indices.get(nt) {
                 for idx in indices.iter() {

@@ -58,8 +58,14 @@ count_reaches() {
 # (filtering/traversal/calculations/statistics/data_retrieval/
 # pattern_matching/value_operations) exposed via api::fluent)
 # -> 66 (long-tail batch 1: migrate already-in-api clusters — session,
-# explore, dir_graph, handle, io::file, blueprint — onto api paths).
-WHEEL_BASELINE=66
+# explore, dir_graph, handle, io::file, blueprint — onto api paths)
+# -> 27 (long-tail batch 2: lift io export/ntriples, spatial/temporal,
+# introspection-compute, schema type family, validate_graph). The
+# remaining 27 are the storage-backend + durability + embedding cluster
+# (GraphBackend/DiskGraph/MappedGraph/EmbeddingStore/recording/wal/
+# subgraph_streaming) — they need a high-level api design (Piece 4), not
+# a raw lift of the storage/WAL internals.
+WHEEL_BASELINE=27
 
 fail=0
 

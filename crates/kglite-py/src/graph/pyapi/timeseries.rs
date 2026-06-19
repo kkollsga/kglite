@@ -480,7 +480,7 @@ fn ts_config_to_py(py: Python<'_>, config: &TimeseriesConfig) -> PyResult<Py<PyA
 }
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::DirGraph;
+use kglite_core::api::DirGraph;
 use petgraph::graph::NodeIndex;
 
 /// Parse time index keys from Python — accepts either list[str] or list[list[int]].

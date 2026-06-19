@@ -493,8 +493,8 @@ impl KnowledgeGraph {
     /// Thin delegate to `kglite_core::graph::handle::discover_property_keys_from_data`.
     /// Engine logic lifted to core in 0.10.1.
     pub(crate) fn discover_property_keys_from_data(
-        nodes: &[(&str, &schema::NodeData)],
-        interner: &schema::StringInterner,
+        nodes: &[(&str, &kglite_core::api::NodeData)],
+        interner: &kglite_core::api::StringInterner,
     ) -> Vec<String> {
         kglite_core::api::discover_property_keys_from_data(nodes, interner)
     }
@@ -528,7 +528,10 @@ impl KnowledgeGraph {
         &self,
         name: &str,
         node_type: Option<&str>,
-    ) -> (Option<NodeIndex>, Vec<(NodeIndex, schema::NodeInfo)>) {
+    ) -> (
+        Option<NodeIndex>,
+        Vec<(NodeIndex, kglite_core::api::NodeInfo)>,
+    ) {
         kglite_core::api::resolve_code_entity(&self.inner, name, node_type)
     }
 
@@ -625,7 +628,7 @@ impl KnowledgeGraph {
 pub(crate) fn parse_spatial_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
-) -> PyResult<(Option<schema::SpatialConfig>, Py<PyDict>)> {
+) -> PyResult<(Option<kglite_core::api::SpatialConfig>, Py<PyDict>)> {
     // PyO3-only boundary: extract dict → Vec<(String, String)>,
     // delegate to core, repack cleaned pairs into a fresh PyDict.
     // Engine logic in `kglite::api::parse_spatial_column_types_from_pairs`
@@ -636,7 +639,7 @@ pub(crate) fn parse_spatial_column_types(
         let type_str: String = value.extract()?;
         pairs.push((col_name, type_str));
     }
-    let (config, cleaned_pairs) = schema::parse_spatial_column_types_from_pairs(pairs)
+    let (config, cleaned_pairs) = kglite_core::api::parse_spatial_column_types_from_pairs(pairs)
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
     let cleaned = PyDict::new(py);
     for (col_name, type_str) in cleaned_pairs {
@@ -655,7 +658,7 @@ pub(crate) fn parse_spatial_column_types(
 pub(crate) fn parse_temporal_column_types(
     py: Python<'_>,
     column_types: &Bound<'_, PyDict>,
-) -> PyResult<(Option<schema::TemporalConfig>, Py<PyDict>)> {
+) -> PyResult<(Option<kglite_core::api::TemporalConfig>, Py<PyDict>)> {
     // PyO3-only boundary; engine logic in
     // `kglite::api::parse_temporal_column_types_from_pairs` (0.10.1).
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -664,7 +667,7 @@ pub(crate) fn parse_temporal_column_types(
         let type_str: String = value.extract()?;
         pairs.push((col_name, type_str));
     }
-    let (config, cleaned_pairs) = schema::parse_temporal_column_types_from_pairs(pairs)
+    let (config, cleaned_pairs) = kglite_core::api::parse_temporal_column_types_from_pairs(pairs)
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
     let cleaned = PyDict::new(py);
     for (col_name, type_str) in cleaned_pairs {

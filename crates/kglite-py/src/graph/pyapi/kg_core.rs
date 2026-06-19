@@ -6,16 +6,16 @@
 //! no runtime impact.
 
 use crate::datatypes::{py_in, py_out};
-use crate::graph::introspection::{self, reporting::OperationReport};
 use crate::graph::io;
-use crate::graph::io::ntriples::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::transaction::Transaction;
-use crate::graph::schema::{
-    self, ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition,
-};
+use crate::graph::schema; // still needed for GraphBackend (deferred storage cluster)
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
+use kglite_core::api::introspection;
+use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
 use kglite_core::api::GraphRead;
+use kglite_core::api::OperationReport;
+use kglite_core::api::{ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
@@ -481,7 +481,7 @@ impl KnowledgeGraph {
         let progress_sink: Option<Box<dyn ProgressSink>> =
             progress.map(|cb| Box::new(PyProgressSink { callback: cb }) as Box<dyn ProgressSink>);
 
-        let config = crate::graph::io::ntriples::NTriplesConfig {
+        let config = kglite_core::api::io::NTriplesConfig {
             predicates: predicates.map(|v| v.into_iter().collect::<HashSet<_>>()),
             languages: languages.map(|v| v.into_iter().collect::<HashSet<_>>()),
             node_types: node_types
@@ -517,7 +517,7 @@ impl KnowledgeGraph {
         // `<cancelled>` sentinel — translate that into the KeyboardInterrupt
         // the user actually expects, instead of a generic RuntimeError.
         let stats = py
-            .detach(|| crate::graph::io::ntriples::load_ntriples(graph, path, &config))
+            .detach(|| kglite_core::api::io::load_ntriples(graph, path, &config))
             .map_err(|e| {
                 if e == "<cancelled>" {
                     PyErr::new::<pyo3::exceptions::PyKeyboardInterrupt, _>(
@@ -1168,7 +1168,7 @@ impl KnowledgeGraph {
             )
         })?;
 
-        let errors = crate::graph::mutation::validation::validate_graph(
+        let errors = kglite_core::api::mutation::validate_graph(
             &self.inner,
             schema,
             strict.unwrap_or(false),
@@ -1180,7 +1180,7 @@ impl KnowledgeGraph {
             let error_dict = PyDict::new(py);
 
             match &error {
-                schema::ValidationError::MissingRequiredField {
+                kglite_core::api::ValidationError::MissingRequiredField {
                     node_type,
                     node_title,
                     field,
@@ -1190,7 +1190,7 @@ impl KnowledgeGraph {
                     error_dict.set_item("node_title", node_title)?;
                     error_dict.set_item("field", field)?;
                 }
-                schema::ValidationError::TypeMismatch {
+                kglite_core::api::ValidationError::TypeMismatch {
                     node_type,
                     node_title,
                     field,
@@ -1204,7 +1204,7 @@ impl KnowledgeGraph {
                     error_dict.set_item("expected_type", expected_type)?;
                     error_dict.set_item("actual_type", actual_type)?;
                 }
-                schema::ValidationError::InvalidConnectionEndpoint {
+                kglite_core::api::ValidationError::InvalidConnectionEndpoint {
                     connection_type,
                     expected_source,
                     expected_target,
@@ -1218,7 +1218,7 @@ impl KnowledgeGraph {
                     error_dict.set_item("actual_source", actual_source)?;
                     error_dict.set_item("actual_target", actual_target)?;
                 }
-                schema::ValidationError::MissingConnectionProperty {
+                kglite_core::api::ValidationError::MissingConnectionProperty {
                     connection_type,
                     source_title,
                     target_title,
@@ -1230,12 +1230,12 @@ impl KnowledgeGraph {
                     error_dict.set_item("target_title", target_title)?;
                     error_dict.set_item("property", property)?;
                 }
-                schema::ValidationError::UndefinedNodeType { node_type, count } => {
+                kglite_core::api::ValidationError::UndefinedNodeType { node_type, count } => {
                     error_dict.set_item("error_type", "undefined_node_type")?;
                     error_dict.set_item("node_type", node_type)?;
                     error_dict.set_item("count", count)?;
                 }
-                schema::ValidationError::UndefinedConnectionType {
+                kglite_core::api::ValidationError::UndefinedConnectionType {
                     connection_type,
                     count,
                 } => {
@@ -1888,6 +1888,6 @@ fn build_disabled_passes(
 /// a 100M+ node graph) error out instead of wedging the host process or an
 /// MCP server. Users override per-call with `timeout_ms=N` (or `0` to
 /// disable), or globally via `set_default_timeout(ms)`.
-pub(crate) fn backend_default_timeout_ms(_graph: &schema::DirGraph) -> Option<u64> {
+pub(crate) fn backend_default_timeout_ms(_graph: &kglite_core::api::DirGraph) -> Option<u64> {
     Some(180_000)
 }

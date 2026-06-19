@@ -1,9 +1,9 @@
 // src/datatypes/py_out.rs
 use super::values::Value;
-use crate::graph::schema::NodeInfo;
 use kglite_core::api::fluent::PropertyStats;
 use kglite_core::api::fluent::StatResult;
 use kglite_core::api::fluent::{LevelConnections, LevelNodes, LevelValues, UniqueValues};
+use kglite_core::api::NodeInfo;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
@@ -666,7 +666,7 @@ pub fn string_pairs_to_pydict(py: Python, pairs: &[(String, String)]) -> PyResul
 pub fn pattern_matches_to_pylist(
     py: Python,
     matches: &[kglite_core::api::fluent::PatternMatch],
-    interner: &crate::graph::schema::StringInterner,
+    interner: &kglite_core::api::StringInterner,
 ) -> PyResult<Py<PyAny>> {
     use kglite_core::api::fluent::MatchBinding;
 

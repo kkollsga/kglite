@@ -69,26 +69,26 @@ impl KnowledgeGraph {
 
         match fmt {
             "graphml" => {
-                let content = crate::graph::io::export::to_graphml(&self.inner, selection)
+                let content = kglite_core::api::io::to_graphml(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "gexf" => {
-                let content = crate::graph::io::export::to_gexf(&self.inner, selection)
+                let content = kglite_core::api::io::to_gexf(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "d3" | "json" => {
-                let content = crate::graph::io::export::to_d3_json(&self.inner, selection)
+                let content = kglite_core::api::io::to_d3_json(&self.inner, selection)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
                 std::fs::write(path, content)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
             }
             "csv" => {
                 let (nodes_csv, edges_csv) =
-                    crate::graph::io::export::to_csv(&self.inner, selection)
+                    kglite_core::api::io::to_csv(&self.inner, selection)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
                 // Write nodes file
@@ -179,7 +179,7 @@ impl KnowledgeGraph {
             None
         };
 
-        let summary = crate::graph::io::export::to_csv_dir(
+        let summary = kglite_core::api::io::to_csv_dir(
             &self.inner,
             path,
             selection,
@@ -261,11 +261,11 @@ impl KnowledgeGraph {
         };
 
         match format {
-            "graphml" => crate::graph::io::export::to_graphml(&self.inner, selection)
+            "graphml" => kglite_core::api::io::to_graphml(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
-            "gexf" => crate::graph::io::export::to_gexf(&self.inner, selection)
+            "gexf" => kglite_core::api::io::to_gexf(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
-            "d3" | "json" => crate::graph::io::export::to_d3_json(&self.inner, selection)
+            "d3" | "json" => kglite_core::api::io::to_d3_json(&self.inner, selection)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Unknown export format: '{}'. Supported: graphml, gexf, d3, json",
