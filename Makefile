@@ -124,8 +124,12 @@ clippy:
 lint-py:
 	$(ACTIVATE) && ruff format --check . && ruff check .
 
+## Enforce the kglite::api single-chokepoint boundary (roadmap.md)
+check-api-chokepoint:
+	./scripts/check_api_chokepoint.sh
+
 ## Run all lint checks (Rust + Python + stubs) — use before pushing
-lint:
+lint: check-api-chokepoint
 	cargo fmt -- --check
 	cargo clippy --all-targets -- -D warnings
 	$(ACTIVATE) && ruff format --check . && ruff check .
