@@ -26,10 +26,11 @@ pub use pyapi::transaction::Transaction;
 
 use crate::datatypes::py_out;
 use crate::datatypes::values::{FilterCondition, Value};
-use kglite_core::graph::introspection::reporting::{OperationReport, OperationReports};
+use kglite_core::api::{DirGraph, GraphRead, OperationReport, OperationReports};
+// `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
+// `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
 use kglite_core::graph::languages::cypher;
-use kglite_core::graph::schema::{CowSelection, DirGraph, PlanStep};
-use kglite_core::graph::storage::GraphRead;
+use kglite_core::graph::schema::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -131,7 +132,7 @@ pub(crate) fn extract_fluent_param(
 /// see that function for the lookup semantics. Kept as a crate-local
 /// re-export so existing wheel callers (`graph/pyapi/*.rs`) don't have
 /// to change their imports; the engine logic lives in core.
-pub(crate) use kglite_core::graph::session::resolve_noderefs;
+pub(crate) use kglite_core::api::session::resolve_noderefs;
 
 /// Per-caller query **cursor** state — the part of a `KnowledgeGraph` that is
 /// specific to one chain of fluent calls, separable from the shared graph
@@ -495,7 +496,7 @@ impl KnowledgeGraph {
         nodes: &[(&str, &schema::NodeData)],
         interner: &schema::StringInterner,
     ) -> Vec<String> {
-        kglite_core::graph::handle::discover_property_keys_from_data(nodes, interner)
+        kglite_core::api::discover_property_keys_from_data(nodes, interner)
     }
 
     /// Thin delegate to `kglite_core::graph::handle::infer_selection_node_type`.
@@ -528,7 +529,7 @@ impl KnowledgeGraph {
         name: &str,
         node_type: Option<&str>,
     ) -> (Option<NodeIndex>, Vec<(NodeIndex, schema::NodeInfo)>) {
-        kglite_core::graph::handle::resolve_code_entity(&self.inner, name, node_type)
+        kglite_core::api::resolve_code_entity(&self.inner, name, node_type)
     }
 
     /// Build a source-location dict for a single name.
@@ -605,7 +606,7 @@ impl KnowledgeGraph {
     /// crate keeps this method for back-compat with Python callers
     /// via `#[pymethods]`; the engine logic lives in `kglite`.
     pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
-        kglite_core::graph::handle::source_location(&self.inner, name, node_type)
+        kglite_core::api::source_location(&self.inner, name, node_type)
     }
 
     // `field_contains_ci` and `field_starts_with_ci` lifted to
@@ -678,7 +679,7 @@ pub(crate) fn parse_temporal_column_types(
 // `kglite_core::graph::features::timeseries` in 0.10.1. Re-exported
 // under the wheel's previous paths so the local `parse_inline_timeseries`
 // + downstream `pyapi/*.rs` callers compile unchanged.
-pub(crate) use kglite_core::graph::features::timeseries::{InlineTimeseriesConfig, TimeSpec};
+pub(crate) use kglite_core::api::{InlineTimeseriesConfig, TimeSpec};
 
 /// Parse the `timeseries` PyDict parameter from `add_nodes`.
 ///
@@ -755,7 +756,7 @@ pub(crate) fn parse_inline_timeseries(
 /// Thin delegate to `kglite_core::graph::dir_graph::make_dir_graph_mut` —
 /// renamed in the lift; this `use` alias keeps the wheel's existing
 /// `get_graph_mut` callers compiling unchanged.
-pub(crate) use kglite_core::graph::dir_graph::make_dir_graph_mut as get_graph_mut;
+pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
 
 /// Lightweight centrality result conversion: returns {title: score} dict.
 /// Creates ONE Python dict instead of N dicts — returns {title: score} format.

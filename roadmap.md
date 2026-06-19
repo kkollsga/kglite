@@ -1,171 +1,190 @@
-# KGLite Architecture Roadmap — `KnowledgeGraph` handle decomposition
+# KGLite Architecture Roadmap — sealing `kglite::api` as the single chokepoint
 
-> Created 2026-06-18. **Status: the decomposition is COMPLETE (shipped in
-> 0.11.3).** This file now reads as a record: the root-cause smell, the layering
-> that was implemented, the plan as executed, and the small set of genuinely
-> future items (trigger-gated). The headline `Status` section is the current
-> truth; the `Background` and `Executed plan` sections are archival rationale.
+> Created 2026-06-19, replacing the completed `KnowledgeGraph` handle-decomposition
+> record (shipped 0.11.3; see git history of this file for that archival content).
+> **Status: Piece 1 in progress.** This roadmap breaks the api-sealing effort into
+> independently-shippable pieces, ordered by leverage.
 
-> _(Filename note: requested as `roadmap.me`; created as `roadmap.md` so it
-> renders on GitHub / readthedocs. Rename on request.)_
+## The smell: the Python wheel reaches deep below `kglite::api`
 
-## The smell: `KnowledgeGraph` is a god-object
+The two-tier binding architecture (see `CLAUDE.md` → "Two-tier standardization
+architecture") says every downstream consumer reaches the engine through the
+curated, semver-stable `kglite::api::*` surface — never the raw module tree. The
+Rust-side servers honour this today: **`kglite-bolt-server`, `kglite-mcp-server`,
+and `kglite-c` all go through `kglite::api`** (verified 2026-06-19, zero
+`kglite_core::graph::` reaches).
 
-`crates/kglite-py/src/graph/mod.rs` — `KnowledgeGraph` conflates **three
-responsibilities with three different lifetimes and ownership models** in one
-`#[pyclass]`:
+**The Python wheel (`kglite-py`) does not.** Its `graph/mod.rs` opens with
 
-1. **Shared storage** — `inner: Arc<DirGraph>`. Genuinely shareable,
-   thread-safe (`DirGraph` is `Send + Sync`).
-2. **Session / lifecycle** — `durable: DurableState` (owns a WAL `File`
-   handle), `embedder`, `source_path`, version/commit coordination.
-   Per-process, long-lived.
-3. **Query cursor** — `selection: CowSelection`, `default_timeout_ms`,
-   `default_max_rows`, `temporal_context`, `last_mutation_stats`,
-   `reports`. Per-**caller**, disposable, thread-affine.
+```rust
+pub use kglite_core::graph::*;   // pulls the ENTIRE engine graph subtree in
+```
 
-Responsibility (3) is *why* the handle cannot be shared across threads even
-though (1) is begging to be. The fluent cursor (`selection`) and the shared
-graph live in the same struct, so `.select().where_(...).sort()` chains on a
-shared handle would corrupt each other's cursor — a **semantic** hazard no
-amount of locking fixes. This conflation is the root cause that the near-term
-`Session` pyclass works *around* rather than *through*.
+and `pyapi/` then leans on that glob via **~344 `crate::graph::…` references**
+reaching **~80 distinct engine items** — many of them deep internals, not curated
+api:
 
-## Target layering (greenfield ideal)
+| Cluster | Examples | Nature |
+|---|---|---|
+| `core::*` (~52) | `filtering::filter_nodes/sort_nodes`, `traversal::make_traversal/MethodConfig`, `calculations::process_equation`, `pattern_matching::MatchBinding`, `statistics::*`, `data_retrieval::*` | **fluent-API implementation primitives** |
+| `algorithms::*` (~36) | `graph_algorithms::shortest_path/CentralityResult`, `vector::DistanceMetric`, `hnsw::HnswParams` | engine algorithms |
+| `features::*` (~39) | `timeseries::parse_date_query`, `validate_resolution`, `date_from_ymd` | timeseries internals |
+| `mutation::*` / `storage::*` (~52) | `maintain::add_connections`, `set_ops::*`, `subgraph::*`, `storage::backend::GraphBackend`, `interner::InternedKey`, `disk::graph` | mutation + storage internals |
 
-Three types, each with one responsibility and one ownership model:
+This is not "a handful of public types not yet lifted." The wheel's **fluent API
+is implemented across the crate boundary**: `pyapi/` orchestrates fine-grained
+engine primitives directly. The root cause is historical — the wheel predates the
+api-curation effort (Phase G, 2026-05-24) and was never migrated onto the curated
+surface the way the later server crates were.
 
-| Layer | Type | Owns | Sharing model |
-|---|---|---|---|
-| Storage | `DirGraph` | nodes/edges/indices | already `Send + Sync`; shared via `Arc` |
-| Session | `Session` | shared graph + lifecycle (durability, embedder, path, version/commit) | **the unit of sharing**; thread-safe (`Mutex<Arc<DirGraph>>`) |
-| Cursor | `Cursor` / `View` | `selection`, per-call defaults, `temporal_context`, last-result state + an `Arc` snapshot | **never shared**; cheap, per-caller, disposable, thread-affine |
+## Why it matters
 
-Under this split the concurrency problem dissolves structurally: **share the
-`Session`, each thread spins up its own throwaway `Cursor`.** No shared mutable
-cursor, no locking gymnastics, no `selection`-corruption hazard. The fluent API
-operates on the `Cursor`; the `Session` is the long-lived shared anchor.
+- **Stability contract.** Today any refactor of `core::graph::*` internals can
+  break the wheel. A sealed api means core internals can move freely behind a
+  stable facade — the whole point of the two-tier design.
+- **Future bindings.** Every item the wheel reaches below api but *should* be
+  public is a capability a future Go/JS/JVM binding can't get without us lifting
+  it. Sealing forces those lifts, expanding the shared standard (goal 2:
+  "standardized"; goal 3: "centrally maintained").
+- **`feedback_kglite_py_python_only`.** The wheel is supposed to hold *only* PyO3
+  marshalling + Python type conversion. Engine logic living in `pyapi/` (the
+  fluent orchestration) is logic in the wrong crate.
 
-`DirGraph` already sits correctly at the bottom. The core `Session` type
-(`crates/kglite/src/graph/session/transaction.rs`) already exists and is the
-right shape — it just needs to grow into the full lifecycle home (see below).
-The missing piece is extracting the `Cursor` out of `KnowledgeGraph`.
+## The strict-posture constraint (why this isn't one big `pub use`)
 
-## Why this was deferred until 0.11.3 (historical rationale, now superseded by Status below)
+The naïve fix — lift all ~80 internals into `api` and rewrite all 344 call sites
+— is **wrong**. It would bless the engine's entire internal surface as
+semver-stable public api, directly violating the DOWNGRADE posture in `CLAUDE.md`
+("burden of proof is on *keeping* an item; the test is the *shape*"). The
+fine-grained fluent primitives (`filter_nodes`, `make_traversal`,
+`process_equation`, …) are not api material — they're the fluent *implementation*,
+which belongs consolidated in core, not exposed.
 
-- **Large breaking change.** Splitting the cursor out of `KnowledgeGraph`
-  touches every fluent method, the entire `kglite/__init__.pyi` stub surface,
-  `describe()` introspection, and every downstream consumer. It is a
-  major-version event.
-- **Payoff is architectural, not user-facing.** No user is asking for a
-  decomposed handle; they are asking for safe concurrency — which the
-  near-term `Session` pyclass delivers without the decomposition. By the
-  CLAUDE.md "test the use case" bar, doing the decomposition as a prerequisite
-  is over-engineering.
-- **The seam can be installed cheaply now.** The `Session` pyclass (near-term
-  work) introduces the shared unit that this decomposition would build on.
-  Once it exists, the eventual cursor-split is "move `selection` + defaults out
-  of `KnowledgeGraph` into a `Cursor` that borrows a `Session`" rather than a
-  ground-up redesign.
-
-## Status (2026-06-18)
-
-**Prerequisite shipped (0.11.3).** The `Session` pyclass + the Phase-E
-transaction consolidation are in: `Session` is the canonical shared,
-thread-safe anchor; there is a single transaction engine (no parallel
-`pyapi::Transaction` copy); `FrozenGraph` is the read snapshot a `Session`
-hands out.
-
-**Decomposition: Stage A + B SHIPPED (0.11.3, 2026-06-18).** `KnowledgeGraph`
-now decomposes into labeled concerns instead of 10 flat fields: `inner`
-(shared `DirGraph` storage) + `cursor: CursorState` (per-query selection /
-temporal / stats / reports) + `lifecycle: GraphLifecycle` (save target +
-durability `File`) + `embedder` + 2 query-default scalars. `derive_with`
-funnels fluent derivation through one choke point. The public capability ships
-as **`Session.cursor()`** — a per-thread, snapshot-bound `KnowledgeGraph` with
-the full fluent surface (see the design note below). All phases behaviour-
-identical: the 10 characterization tests + full suite stayed green byte-for-
-byte; perf showed no regression (most paths faster).
-
-Phase map as executed: P0 characterization tests · P1 `CursorState` ·
-P2 `derive_with` funnel · P3 `GraphLifecycle` · **P4+P5 folded** →
-`Session.cursor()`.
-
-**Design note on P4/P5 (the public Cursor).** The original framing was
-"promote `CursorState` to a distinct `Cursor` pyclass; KG delegates." Building
-that as a separate type with a *full fluent mirror* would mean ~50 hand-written
-delegating methods — re-duplicating the exact monolithic surface this
-decomposition removes, and forcing a Cursor twin for every future KG method. So
-the full mirror is delivered as a snapshot-bound `KnowledgeGraph` (the real
-fluent type) via `Session.cursor()`: per-thread, lock-free, zero surface
-duplication. A nominal distinct `Cursor` type remains an easy follow-up if a
-concrete need for the separate name appears.
+So the effort splits into: **lift what's genuinely generic, consolidate what's
+fluent-implementation, then seal.**
 
 ---
 
-## Executed plan (shipped 0.11.3, behaviour-identical throughout)
+## Pieces (ordered by leverage)
 
-Two design decisions shaped the implementation and are worth preserving:
+### Piece 1 — Soft-seal foundation: safe lifts + CI grep freeze · **IN PROGRESS**
 
-- **No Mutex on the single-owner path.** The live `KnowledgeGraph` keeps
-  `inner: Arc<DirGraph>` + `make_mut` CoW — it is **not** wrapped in the
-  `Session`'s `Mutex<Arc<DirGraph>>` (that would add lock overhead to the hot
-  path). The decomposition is **cursor extraction + lifecycle grouping**, not
-  re-homing storage. The shareable `Session` is the multi-thread variant.
-- **Golden-tests-first, mechanical-before-semantic, internal-before-public.**
-  Every phase stayed compiler-verified and byte-for-byte behaviour-identical
-  (10 characterization tests + full suite green; perf no-regression).
+**Goal.** Stop the erosion immediately and deliver the clearly-generic lifts, at
+near-zero risk to the deeply-coupled wheel.
 
-Phase map (one commit each — see git history for detail):
+**Scope.**
+- Lift the unambiguously-generic, future-binding-useful below-api items into
+  `kglite::api::*` (re-export, never re-wrap — provably zero-cost):
+  - `graph::storage::GraphRead` — the canonical read trait.
+  - `graph::introspection::reporting::{OperationReport, OperationReports}` —
+    mutation operation reports; every binding returns these.
+  - `graph::handle::{resolve_code_entity, CODE_TYPES}` — code-tree graph helpers
+    (`source_location` + `discover_property_keys_from_data` are already in api).
+  - `graph::languages::cypher::planner::all_pass_names` — *verify first*; api
+    already re-exports the `planner` module, so this may already be reachable as
+    `api::cypher::planner::all_pass_names` (switch the import, no lift needed).
+- Switch the wheel's already-in-api reaches (`io::file::load_file`,
+  `dir_graph::DirGraph`, `io::file::load_kgl_bytes`, `handle::source_location`,
+  `features::timeseries::*`, `make_dir_graph_mut`, …) onto the `api::` path.
+- Add `scripts/check_api_chokepoint.sh` (wired into `make lint` / CI):
+  freeze the current set of below-api reaches as an allowlist; **fail on any new
+  `kglite_core::graph::` reach** in any wrapper crate. This is the regression
+  ratchet — the set can only shrink from here.
 
-| Phase | What shipped |
-|---|---|
-| P0 | Characterization/golden tests pinning Clone-vs-copy, selection inheritance, temporal/reports/stats lifecycle, `update()` |
-| P1 | `CursorState` struct — grouped `selection`/`temporal_context`/`last_mutation_stats`/`reports` (~170 sites, compiler-verified) |
-| P2 | `derive_with` — single funnel for the fluent clone-and-mutate-cursor pattern |
-| P3 | `GraphLifecycle` struct — grouped `source_path` + `durable` (the un-shareable identity/WAL fields) |
-| P4+P5 | `Session.cursor()` — per-thread, snapshot-bound full-fluent handle (folded; see design note) |
-| P6 | Docs (`concurrency.md`) + this roadmap + perf gate |
+**Deliberately deferred to later pieces** (not safe lifts):
+- `Selection` / `CowSelection` / `PlanStep` — the fluent cursor types. Blessing
+  them as stable api is a design decision that belongs with Piece 3.
+- `wal` / `recording` / `GraphBackend` / `apply_frames` — durable-transaction
+  internals. A future lift should expose a *high-level* durable-transaction api
+  (cf. the C ABI's `kglite_save_graph_durable`), not raw WAL frames.
 
-Result: `KnowledgeGraph` decomposes into labeled concerns — `inner`
-(storage) + `cursor: CursorState` + `lifecycle: GraphLifecycle` + `embedder`
-+ 2 query-default scalars — instead of 10 flat fields.
+**Effort.** 1–2 phases. **Risk.** Low. **Depends on.** Nothing.
 
-## What remains (future, trigger-gated — none currently active)
+---
 
-The decomposition is done. The remaining items are deliberately *not* built;
-each is gated on a concrete trigger that has not fired.
+### Piece 2 — Lift the generic engine capabilities
 
-1. **Nominal distinct `Cursor` type — CLOSED (satisfied).** The original plan
-   imagined promoting `CursorState` to a public `Cursor` pyclass. That is
-   delivered functionally by **`Session.cursor()`** (a per-thread snapshot-bound
-   `KnowledgeGraph` with the full fluent surface). A *separate* type would be
-   either ~50 hand-written delegating methods (re-duplicating the monolithic
-   surface this effort removed) or fragile `__getattr__` delegation — net-negative
-   for a cosmetic rename. Reopen only if a concrete need for the distinct *name*
-   appears, and only with consolidation (e.g. unifying with `FrozenGraph`) so the
-   handle-type count doesn't balloon.
+**Goal.** Move the below-api reaches that *are* genuine engine capabilities (not
+fluent-impl glue) onto the curated surface, shrinking the frozen allowlist.
 
-2. **Enrich core `Session` as the cross-binding lifecycle home.** Lift the
-   binding-agnostic lifecycle coordination (embedder registration, version,
-   source-path) into core `Session` so future bindings share it. **Trigger: a
-   second non-Rust binding (Go/JVM) exists.** Premature before then — it can't
-   even apply to today's `KnowledgeGraph` without the rejected Mutex refactor,
-   and `DurableState` owns an OS `File` that stays per-binding regardless. By
-   CLAUDE.md's "test the use case" bar, building it now is speculative.
+**Scope (each judged against the use-case + shape test before lifting).**
+- `algorithms::graph_algorithms::{shortest_path, shortest_path_weighted,
+  shortest_path_cost_weighted, weakly_connected_components, CentralityResult,
+  get_node_info, get_path_connections}`, `algorithms::vector::{DistanceMetric,
+  vector_search}`, `algorithms::hnsw::HnswParams`.
+- High-level `mutation::maintain::{add_nodes, add_connections,
+  replace_connections, update_node_properties, …}`, `mutation::set_ops::*`,
+  `mutation::subgraph{,_streaming}::*`, `mutation::validation::validate_graph`.
+- `storage::interner::InternedKey`, public `storage` types as needed.
+- `features::timeseries::*` public config + the date helpers
+  (`parse_date_query`, `date_from_ymd`, `validate_resolution`, …).
 
-3. **Deprecate any conflated `KnowledgeGraph` surface.** A breaking,
-   **major-version** event (no back-compat shims, by project policy). **Trigger:
-   a major version is already being cut** for other reasons — amortize the churn
-   then, not as a standalone break.
+**Effort.** 2–4 phases, mostly mechanical `pub use` + import rewrites, each
+independently green. **Risk.** Low–medium. **Depends on.** Piece 1 (the grep
+freeze keeps the rewrite honest).
 
-### Trigger summary
+---
 
-- *Second non-Rust binding built* → do item 2.
-- *Next major version cut* → consider item 3.
-- *Concurrency demand outgrows `Session`* → **already satisfied** by
-  `Session.cursor()` (this was the original third trigger; per-thread fluent
-  chains against a shared store now work).
+### Piece 3 — Consolidate fluent orchestration into core
 
-Until a trigger fires, `Session` + `Session.cursor()` is the supported
-concurrency story and the above stays recorded-but-unscheduled.
+**Goal.** The big architectural piece. Move the fine-grained fluent-orchestration
+logic out of `pyapi/` (`core::{filtering,traversal,calculations,statistics,
+data_retrieval,pattern_matching}` callers) into core's
+`graph::languages::fluent`, exposing **one high-level fluent surface** in
+`kglite::api`. The wheel's `pyapi/kg_fluent.rs` is then reduced to thin PyO3
+marshalling over that surface.
+
+This is where the `Selection` / `CowSelection` / `PlanStep` stable-api-type
+decision is made (the fluent cursor is the thing being lifted). It matches both
+`feedback_kglite_py_python_only` (engine logic belongs in core) and the strategic
+ROADMAP's "de-emphasize the fluent API as a parallel surface" stance — by giving
+it a single owned home rather than a cross-crate split.
+
+**Effort.** Largest — multi-phase, per-method, behaviour-preserving. Golden /
+characterization tests first (same discipline as the 0.11.3 handle
+decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
+**Depends on.** Piece 2 (so only fluent-impl primitives remain below api).
+
+---
+
+### Piece 4 — Hard seal
+
+**Goal.** Make the chokepoint compiler-enforced.
+
+**Scope.**
+- Delete the `pub use kglite_core::graph::*` glob from the wheel.
+- Demote core `graph` (and any other still-leaking top-level module) from
+  `pub mod` to `pub(crate) mod` in `crates/kglite/src/lib.rs`. Because `kglite-py`
+  is a separate crate, it then *physically cannot* reach below `api` — the
+  `api::` `pub use` re-exports still resolve internally (re-exporting a `pub` item
+  out of a `pub(crate)` module is legal), so this is zero runtime cost.
+- Flip `check_api_chokepoint.sh` from "no new reaches" to "zero reaches."
+
+**Effort.** 1 phase (the lifts/consolidation in Pieces 1–3 did the real work).
+**Risk.** Low at this point (compiler catches everything). **Depends on.** Pieces
+1–3 complete.
+
+---
+
+## Sequencing
+
+| Order | Piece | Leverage | Risk | Status |
+|---|---|---|---|---|
+| 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **in progress** |
+| 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | queued |
+| 3 | Consolidate fluent into core | High (correct end-state) | Med–high | queued |
+| 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
+
+## Invariants for every piece
+
+- **Re-export, don't re-wrap.** Lift the *same concrete type/function* into
+  `api::` via `pub use`. Never introduce a wrapper struct that copies/converts;
+  never box a hot type (`DirGraph`, `Selection`, `Value`) behind `dyn` at the
+  boundary. `pub use` is a compile-time alias — provably zero perf cost.
+- **Judge before lifting.** Each candidate passes the use-case + shape test
+  (`CLAUDE.md` → boundary principle). Generic-and-useful → lift; tailored / fluent
+  -impl → consolidate (Piece 3), don't bless as api.
+- **One commit per phase, each green** (`cargo build --lib` + `make lint` + the
+  relevant test suite, incl. `-m parity` and `-m bolt` which `make test`
+  deselects). No `Cargo.toml` version bump until a release commit.
+- **In-memory perf is the gate** (`CLAUDE.md` → performance protocol).
