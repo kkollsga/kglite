@@ -101,12 +101,14 @@ pub mod api {
     pub use crate::graph::{SourceLocation, SourceLookup};
 
     /// Parameter-shape helpers for bindings — wire-shaped values
-    /// (JSON / protobuf-map / etc.) → `kglite::api::Value`. Future
-    /// REST / gRPC bindings shouldn't re-implement the JSON
-    /// dispatch each time; this re-export hands them the canonical
-    /// converter.
+    /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. Future
+    /// REST / gRPC bindings shouldn't re-implement the JSON dispatch
+    /// each time; these re-exports hand them the canonical converters
+    /// for both directions: `json_value_to_kglite_value` (inbound
+    /// params) and `kglite_value_to_json` (outbound result cells, in
+    /// natural untagged JSON).
     pub mod param {
-        pub use crate::param::json_value_to_kglite_value;
+        pub use crate::param::{json_value_to_kglite_value, kglite_value_to_json};
     }
 
     /// Blueprint loader + builder — declarative graph construction

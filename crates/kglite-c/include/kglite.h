@@ -798,6 +798,11 @@ KgliteStatusCode kglite_save_graph(struct KgliteGraph *graph,
  * Return all rows as a JSON array of objects keyed by column
  * name: `[{"col1": v1, "col2": v2}, ...]`.
  *
+ * Cell values are **natural** JSON (`2`, `"x"`, `[..]`, `{..}`) via
+ * [`kglite_value_to_json`](kglite::api::param::kglite_value_to_json) —
+ * not serde's externally-tagged enum encoding — so a binding parses
+ * `{"n": 2}`, not `{"n": {"Int64": 2}}`.
+ *
  * For large result sets this materializes the entire JSON blob
  * in memory. Future v2 will add pull-row-by-row accessors; for
  * now this is fine for the common-case query sizes.

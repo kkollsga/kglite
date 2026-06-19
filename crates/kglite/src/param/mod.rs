@@ -64,6 +64,43 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
     }
 }
 
+/// Convert a Cypher `Value` into a **natural** JSON value — the outbound
+/// inverse of [`json_value_to_kglite_value`], and the canonical converter
+/// every JSON binding (C ABI, REST, gRPC, MCP) should use to render result
+/// cells.
+///
+/// "Natural" means scalars become bare JSON scalars and containers recurse:
+/// `Value::Int64(2)` → `2`, not serde's externally-tagged `{"Int64": 2}`.
+/// JSON can't distinguish `Int64` from `Float64` (both are numbers) — the
+/// accepted ergonomics tradeoff, matching the Bolt / Neo4j result shape.
+///
+/// Conventions:
+/// - `Null` → `null`; `Boolean` → bool; `Int64`/`Float64` → number
+///   (`null` for a non-finite float); `String` → string
+/// - `List` → array (recursing); `Map` → object (recursing)
+/// - graph/temporal/spatial variants (`Node`, `Relationship`, `Path`,
+///   `Duration`, `Point`) → their `Debug` string; a richer natural
+///   projection of those is a future refinement
+pub fn kglite_value_to_json(v: &Value) -> serde_json::Value {
+    use serde_json::Value as J;
+    match v {
+        Value::Null => J::Null,
+        Value::Boolean(b) => J::Bool(*b),
+        Value::Int64(i) => J::Number((*i).into()),
+        Value::Float64(f) => serde_json::Number::from_f64(*f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
+        Value::String(s) => J::String(s.clone()),
+        Value::List(items) => J::Array(items.iter().map(kglite_value_to_json).collect()),
+        Value::Map(m) => J::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), kglite_value_to_json(v)))
+                .collect(),
+        ),
+        other => J::String(format!("{other:?}")),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::approx_constant)]
 mod tests {
@@ -156,5 +193,36 @@ mod tests {
             }
             other => panic!("expected List, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn value_to_json_natural_scalars() {
+        assert_eq!(kglite_value_to_json(&Value::Int64(2)), serde_json::json!(2));
+        assert_eq!(
+            kglite_value_to_json(&Value::String("x".into())),
+            serde_json::json!("x")
+        );
+        assert_eq!(
+            kglite_value_to_json(&Value::Boolean(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(kglite_value_to_json(&Value::Null), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn value_to_json_natural_nested_is_untagged() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("id".to_string(), Value::Int64(7));
+        let v = Value::List(vec![Value::Int64(1), Value::Map(m)]);
+        // Untagged: `1` and `{"id":7}`, NOT `{"Int64":1}` / `{"Map":...}`.
+        assert_eq!(kglite_value_to_json(&v), serde_json::json!([1, {"id": 7}]));
+    }
+
+    #[test]
+    fn value_to_json_is_inverse_of_inbound() {
+        // JSON → Value → JSON is identity for the natural-shaped subset.
+        let j = serde_json::json!({"rows": [{"id": 1}, {"id": 2}]});
+        let back = kglite_value_to_json(&json_value_to_kglite_value(&j));
+        assert_eq!(back, j);
     }
 }

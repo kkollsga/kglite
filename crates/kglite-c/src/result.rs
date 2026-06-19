@@ -8,6 +8,7 @@
 
 use crate::strings::alloc_c_string;
 use kglite::api::cypher::CypherResult;
+use kglite::api::param::kglite_value_to_json;
 use kglite::api::Value;
 use std::ffi::c_char;
 
@@ -68,6 +69,11 @@ pub unsafe extern "C" fn kglite_cypher_result_columns_json(
 /// Return all rows as a JSON array of objects keyed by column
 /// name: `[{"col1": v1, "col2": v2}, ...]`.
 ///
+/// Cell values are **natural** JSON (`2`, `"x"`, `[..]`, `{..}`) via
+/// [`kglite_value_to_json`](kglite::api::param::kglite_value_to_json) —
+/// not serde's externally-tagged enum encoding — so a binding parses
+/// `{"n": 2}`, not `{"n": {"Int64": 2}}`.
+///
 /// For large result sets this materializes the entire JSON blob
 /// in memory. Future v2 will add pull-row-by-row accessors; for
 /// now this is fine for the common-case query sizes.
@@ -92,11 +98,7 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
         let mut obj = serde_json::Map::with_capacity(cypher_result.columns.len());
         for (idx, col) in cypher_result.columns.iter().enumerate() {
             let cell = row.get(idx).unwrap_or(&Value::Null);
-            let json_val = match serde_json::to_value(cell) {
-                Ok(v) => v,
-                Err(_) => serde_json::Value::Null,
-            };
-            obj.insert(col.clone(), json_val);
+            obj.insert(col.clone(), kglite_value_to_json(cell));
         }
         rows.push(serde_json::Value::Object(obj));
     }
@@ -169,11 +171,11 @@ mod tests {
         let json_ptr = unsafe { kglite_cypher_result_rows_json(r) };
         assert!(!json_ptr.is_null());
         let s = unsafe { std::ffi::CStr::from_ptr(json_ptr).to_str().unwrap() };
-        // Value serializes via serde — Int64 and String variants
-        // are well-defined. We accept the verbose serde repr since
-        // it round-trips back into Value.
-        assert!(s.contains("alice"));
-        assert!(s.contains("bob"));
+        // Natural (untagged) JSON: Int64 → bare number, String → bare
+        // string. NOT serde's externally-tagged `{"Int64":30}`. Object
+        // keys are alphabetised by serde_json (objects are unordered;
+        // canonical column order lives in `columns_json`).
+        assert_eq!(s, r#"[{"age":30,"name":"alice"},{"age":25,"name":"bob"}]"#);
         unsafe { crate::kglite_free_string(json_ptr) };
         unsafe { kglite_cypher_result_free(r) };
     }
