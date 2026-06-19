@@ -2,8 +2,9 @@
 //! startup and fail loudly if the runtime ABI's major version
 //! doesn't match what they were compiled against.
 
-/// The ABI version that this build of `kglite-c` exposes. Tracks
-/// the engine crate's package version (semver minor-aligned).
+/// The ABI version that this build of `kglite-c` exposes. Derived at
+/// compile time from the crate's package version (`CARGO_PKG_VERSION_*`),
+/// so it tracks the engine version automatically.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KgliteAbiVersion {
@@ -12,9 +13,24 @@ pub struct KgliteAbiVersion {
     pub patch: u32,
 }
 
-const ABI_MAJOR: u32 = 0;
-const ABI_MINOR: u32 = 10;
-const ABI_PATCH: u32 = 5;
+/// Parse a `CARGO_PKG_VERSION_*` env string (pure ASCII digits) into a
+/// `u32` at compile time, so the reported ABI version is *derived* from
+/// the crate version and can never drift the way the old hard-coded
+/// constants did (they were left at 0.10.5 while the crate shipped 0.11.3).
+const fn parse_u32(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut n: u32 = 0;
+    while i < bytes.len() {
+        n = n * 10 + (bytes[i] - b'0') as u32;
+        i += 1;
+    }
+    n
+}
+
+const ABI_MAJOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MAJOR"));
+const ABI_MINOR: u32 = parse_u32(env!("CARGO_PKG_VERSION_MINOR"));
+const ABI_PATCH: u32 = parse_u32(env!("CARGO_PKG_VERSION_PATCH"));
 
 /// Return the C ABI version this library was built against.
 /// Bindings should call this on startup and refuse to proceed if
@@ -50,10 +66,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abi_version_round_trips() {
+    fn abi_version_tracks_crate_version() {
         let v = kglite_abi_version();
-        assert_eq!(v.major, ABI_MAJOR);
-        assert_eq!(v.minor, ABI_MINOR);
-        assert_eq!(v.patch, ABI_PATCH);
+        // Must equal the crate's Cargo.toml version components — guards
+        // against the hard-coded-constant drift this fix removed (the
+        // probe reported 0.10.5 while the crate shipped 0.11.3).
+        assert_eq!(
+            format!("{}.{}.{}", v.major, v.minor, v.patch),
+            format!(
+                "{}.{}.{}",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                env!("CARGO_PKG_VERSION_MINOR"),
+                env!("CARGO_PKG_VERSION_PATCH"),
+            )
+        );
     }
 }

@@ -61,8 +61,9 @@ enum KgliteStatusCode {
 typedef uint32_t KgliteStatusCode;
 
 /**
- * The ABI version that this build of `kglite-c` exposes. Tracks
- * the engine crate's package version (semver minor-aligned).
+ * The ABI version that this build of `kglite-c` exposes. Derived at
+ * compile time from the crate's package version (`CARGO_PKG_VERSION_*`),
+ * so it tracks the engine version automatically.
  */
 typedef struct KgliteAbiVersion {
   uint32_t major;
