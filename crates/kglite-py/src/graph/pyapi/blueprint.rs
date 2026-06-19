@@ -5,9 +5,9 @@
 //! invoked from the Python shim using the existing `KnowledgeGraph`
 //! methods — avoids duplicating the v3 save pipeline here.
 
-use crate::graph::blueprint;
 use crate::graph::schema;
 use crate::graph::{KnowledgeGraph, TemporalContext};
+use kglite_core::api::blueprint;
 use kglite_core::api::OperationReports;
 use kglite_core::api::{CowSelection, DirGraph};
 use pyo3::prelude::*;

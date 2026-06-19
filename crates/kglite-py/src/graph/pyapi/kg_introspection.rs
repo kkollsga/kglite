@@ -1593,13 +1593,13 @@ impl KnowledgeGraph {
             .into_iter()
             .map(std::path::PathBuf::from)
             .collect();
-        let opts = crate::graph::explore::ExploreOptions {
+        let opts = kglite_core::api::ExploreOptions {
             max_entities,
             max_depth,
             include_source,
             ..Default::default()
         };
-        Ok(crate::graph::explore::explore_markdown(
+        Ok(kglite_core::api::explore_markdown(
             &self.inner,
             query,
             &opts,

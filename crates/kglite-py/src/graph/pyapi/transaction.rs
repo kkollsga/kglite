@@ -5,8 +5,8 @@
 use crate::datatypes::py_in;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher;
-use crate::graph::session::{Session as CoreSession, Transaction as CoreTransaction};
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::session::{Session as CoreSession, Transaction as CoreTransaction};
 use kglite_core::api::CowSelection;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -188,7 +188,7 @@ impl Transaction {
         }
 
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
-        let opts = crate::graph::session::ExecuteOptions {
+        let opts = kglite_core::api::session::ExecuteOptions {
             params: &param_map,
             deadline,
             max_rows: None,
@@ -206,7 +206,7 @@ impl Transaction {
             // (in place via Arc::try_unwrap when uniquely held, else a deep
             // clone) and rejects writes on a read-only tx — both in core.
             let working = tx.working_mut().map_err(crate::error_py::kg_to_pyerr)?;
-            crate::graph::session::execute_mut(working, query, &opts)
+            kglite_core::api::session::execute_mut(working, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?
                 .result
         } else {
@@ -217,7 +217,7 @@ impl Transaction {
                     "Transaction already committed or rolled back".to_string(),
                 ))
             })?;
-            crate::graph::session::execute_read(graph, query, &opts)
+            kglite_core::api::session::execute_read(graph, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?
                 .result
         };

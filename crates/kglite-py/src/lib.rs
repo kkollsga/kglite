@@ -80,17 +80,17 @@ pub mod api {
     // Python boundary; Phase C.6 (bolt-server) consumes them to map onto
     // Neo4j `Neo.ClientError.*` wire codes via `BoltError::Query`.
     pub use crate::error::{KgError, KgErrorCode};
-    pub use crate::graph::dir_graph::DirGraph;
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
-    pub use crate::graph::explore::{explore_markdown, ExploreOptions};
     pub use crate::graph::introspection::describe::compute_description;
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
-    pub use crate::graph::io::file::{load_file, save_graph};
     pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
+    pub use kglite_core::api::DirGraph;
+    pub use kglite_core::api::{explore_markdown, ExploreOptions};
+    pub use kglite_core::api::{load_file, save_graph};
 
     /// Cypher parser + planner + executor surface. Downstream Rust
     /// consumers (notably `kglite-mcp-server`) build their own
@@ -128,7 +128,7 @@ pub mod api {
     /// See `docs/explanation/session.md` for the operator-facing
     /// guide and `bolt_implementation.md` Phase E for the rationale.
     pub mod session {
-        pub use crate::graph::session::{
+        pub use kglite_core::api::session::{
             execute_mut, execute_read, CommitOutcome, ExecuteOptions, ExecuteOutcome, Session,
             Transaction,
         };

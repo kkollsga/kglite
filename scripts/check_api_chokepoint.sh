@@ -56,8 +56,10 @@ count_reaches() {
 # create_connections, set_ops, subgraph, infer_selection_node_type)
 # -> 85 (Piece 3c: the shared selection-based query-primitive layer
 # (filtering/traversal/calculations/statistics/data_retrieval/
-# pattern_matching/value_operations) exposed via api::fluent).
-WHEEL_BASELINE=85
+# pattern_matching/value_operations) exposed via api::fluent)
+# -> 66 (long-tail batch 1: migrate already-in-api clusters — session,
+# explore, dir_graph, handle, io::file, blueprint — onto api paths).
+WHEEL_BASELINE=66
 
 fail=0
 
