@@ -17,9 +17,7 @@
 use crate::datatypes::values::Value;
 
 /// Convert a JSON value to a Cypher `Value`. Scalars map directly;
-/// arrays and objects flow through as JSON-serialised strings (the
-/// Cypher engine doesn't have a first-class list/map at the
-/// parameter boundary).
+/// arrays and objects map recursively to `Value::List` / `Value::Map`.
 ///
 /// Conventions:
 /// - `null` → `Value::Null`
@@ -28,10 +26,10 @@ use crate::datatypes::values::Value;
 /// - non-integer JSON number → `Value::Float64`
 /// - JSON number that fits neither → `Value::Null`
 /// - JSON string → `Value::String`
-/// - JSON array / object → `Value::String` (serialised JSON)
+/// - JSON array → `Value::List` (recursing element-wise)
+/// - JSON object → `Value::Map` (recursing value-wise)
 ///
-/// Matches the behaviour `kglite-mcp-server` used before this lift
-/// — agents pass JSON-shaped tool args, the executor receives
+/// Agents/bindings pass JSON-shaped tool args; the executor receives
 /// `HashMap<String, Value>` parameters. Compose multiple calls via
 /// the caller's own loop to build the param map.
 pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
@@ -48,12 +46,21 @@ pub fn json_value_to_kglite_value(v: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
-        // Arrays and objects flow through as JSON-serialised strings.
-        // The Cypher engine's parameter boundary doesn't have a
-        // first-class list/map variant; bindings that need richer
-        // shapes should convert at their own layer (e.g. via
-        // `serde_json::from_value` on the way to the engine).
-        other => Value::String(other.to_string()),
+        // Arrays and objects map to first-class `Value::List` / `Value::Map`,
+        // recursing element-wise. This matches the PyO3 (`py_value_to_value`)
+        // and Bolt parameter paths so every binding agrees: `UNWIND $rows AS r
+        // CREATE (:T {id: r.id})` sees real list/map params, not a stringified
+        // blob. (The engine-side fix shipped in 0.11.2 for the Python wheel;
+        // this is the matching fix in the shared JSON converter that the C ABI,
+        // MCP server, and future REST/gRPC bindings all route through.)
+        serde_json::Value::Array(items) => {
+            Value::List(items.iter().map(json_value_to_kglite_value).collect())
+        }
+        serde_json::Value::Object(map) => Value::Map(
+            map.iter()
+                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -111,24 +118,43 @@ mod tests {
     }
 
     #[test]
-    fn array_serialises_to_string() {
+    fn array_maps_to_list() {
         let v = serde_json::json!([1, "two", null, true]);
-        let out = json_value_to_kglite_value(&v);
-        match out {
-            Value::String(s) => assert_eq!(s, r#"[1,"two",null,true]"#),
-            other => panic!("expected String, got {other:?}"),
-        }
+        assert_eq!(
+            json_value_to_kglite_value(&v),
+            Value::List(vec![
+                Value::Int64(1),
+                Value::String("two".to_string()),
+                Value::Null,
+                Value::Boolean(true),
+            ])
+        );
     }
 
     #[test]
-    fn object_serialises_to_string() {
+    fn object_maps_to_map() {
         let v = serde_json::json!({"a": 1, "b": "x"});
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("a".to_string(), Value::Int64(1));
+        expected.insert("b".to_string(), Value::String("x".to_string()));
+        assert_eq!(json_value_to_kglite_value(&v), Value::Map(expected));
+    }
+
+    #[test]
+    fn nested_array_of_objects() {
+        // The exact shape that regressed before the fix:
+        // `UNWIND $rows AS r CREATE (:T {id: r.id})`. Each row must be a
+        // `Value::Map` whose `id` is a real `Int64`, not a stringified blob.
+        let v = serde_json::json!([{"id": 1}, {"id": 2}]);
         match json_value_to_kglite_value(&v) {
-            Value::String(s) => {
-                // Object key order isn't strictly guaranteed; check both.
-                assert!(s == r#"{"a":1,"b":"x"}"# || s == r#"{"b":"x","a":1}"#);
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                match &items[0] {
+                    Value::Map(m) => assert_eq!(m.get("id"), Some(&Value::Int64(1))),
+                    other => panic!("expected Map, got {other:?}"),
+                }
             }
-            other => panic!("expected String, got {other:?}"),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 }
