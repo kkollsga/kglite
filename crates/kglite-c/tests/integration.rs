@@ -11,7 +11,8 @@
 use kglite_c::{
     kglite_abi_version, kglite_cypher_result_columns_json, kglite_cypher_result_free,
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_string,
-    kglite_graph_new, kglite_load_file, kglite_session_execute_mut, kglite_session_execute_read,
+    kglite_graph_new, kglite_load_file, kglite_session_execute_mut,
+    kglite_session_execute_mut_batch, kglite_session_execute_read, kglite_session_execute_read_batch,
     kglite_session_free, kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession,
     KgliteStatusCode,
 };
@@ -233,6 +234,107 @@ fn create_empty_graph_then_mutate_and_read() {
     let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
     // Natural untagged JSON — bare numbers, not `{"Int64":1}`.
     assert_eq!(rows, r#"[{"id":1},{"id":2}]"#);
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn execute_batch_read_and_mut() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    let rc = unsafe { kglite_session_new(graph, &mut session as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+
+    // Two creates in one atomic transaction.
+    let muts =
+        CString::new(r#"[{"query":"CREATE (:T {id: 1})"},{"query":"CREATE (:T {id: 2})"}]"#)
+            .unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut_batch(
+            session,
+            muts.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok, "mut batch failed");
+    assert!(!out.is_null());
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(out).to_str().unwrap() }).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 2, "one result per query");
+    unsafe { kglite_free_string(out) };
+
+    // Two reads against a single snapshot.
+    let reads = CString::new(
+        r#"[{"query":"MATCH (n:T) RETURN count(n) AS c"},{"query":"MATCH (n:T) RETURN n.id AS id ORDER BY id"}]"#,
+    )
+    .unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read_batch(
+            session,
+            reads.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(out).to_str().unwrap() }).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    // count = 2 as a natural number; second query returns two id rows.
+    assert_eq!(arr[0]["rows"][0]["c"], serde_json::json!(2));
+    assert_eq!(arr[1]["rows"].as_array().unwrap().len(), 2);
+    unsafe { kglite_free_string(out) };
+
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn execute_mut_batch_is_atomic_on_failure() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph, &mut session as *mut _) };
+
+    // First query valid, second a syntax error → the whole batch rolls back.
+    let muts =
+        CString::new(r#"[{"query":"CREATE (:Z {id: 1})"},{"query":"MATCH (n RETURN n"}]"#).unwrap();
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut_batch(
+            session,
+            muts.as_ptr(),
+            &mut out as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_ne!(rc, KgliteStatusCode::Ok);
+    assert!(out.is_null());
+    assert!(!err.is_null());
+    unsafe { kglite_free_string(err) };
+
+    // The valid first CREATE must NOT have landed.
+    let q = CString::new("MATCH (n:Z) RETURN count(n) AS c").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe {
+        kglite_session_execute_read(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
+    assert_eq!(rows, r#"[{"c":0}]"#, "first create should have rolled back");
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };

@@ -913,6 +913,61 @@ KgliteStatusCode kglite_session_execute_mut(struct KgliteSession *session,
                                             const char **out_error_msg);
 
 /**
+ * Run several read-only Cypher queries against a single consistent
+ * snapshot, in one lock acquisition.
+ *
+ * `queries_json` is a JSON array of objects, each `{"query": "...",
+ * "params": {...}}` (the `params` key is optional). Every query sees
+ * the same snapshot, taken once up front — cheaper and more consistent
+ * than N separate [`kglite_session_execute_read`] calls when a binding
+ * issues many small reads.
+ *
+ * On success `out_results_json` is set to an owned JSON string: an
+ * array of `{"columns": [...], "rows": [{...}]}` objects, one per input
+ * query in order, with the same natural-value encoding as
+ * [`kglite_cypher_result_rows_json`]. Free it with
+ * [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * The batch aborts on the first failing query: `out_results_json` is
+ * set to null and the status code / `out_error_msg` describe that
+ * query's failure.
+ *
+ * # Safety
+ *
+ * `session` must be valid; `queries_json` a null-terminated UTF-8 JSON
+ * array; `out_results_json` a valid writable `*const c_char` slot;
+ * `out_error_msg` null or a valid writable slot.
+ */
+
+KgliteStatusCode kglite_session_execute_read_batch(const struct KgliteSession *session,
+                                                   const char *queries_json,
+                                                   const char **out_results_json,
+                                                   const char **out_error_msg);
+
+/**
+ * Run several mutating Cypher queries in a single transaction — one
+ * `begin`, N executes (each sees the previous query's writes), a single
+ * `commit`. The batch is **atomic**: if any query fails, the
+ * transaction is dropped uncommitted and none of the batch's mutations
+ * reach the graph.
+ *
+ * `queries_json` / `out_results_json` have the same shape as
+ * [`kglite_session_execute_read_batch`]. On failure `out_results_json`
+ * is null and the status / `out_error_msg` describe the failing query.
+ *
+ * # Safety
+ *
+ * Same as [`kglite_session_execute_read_batch`] except `session` is
+ * `*mut` (the call mutates the session's interior graph via
+ * commit-swap).
+ */
+
+KgliteStatusCode kglite_session_execute_mut_batch(struct KgliteSession *session,
+                                                  const char *queries_json,
+                                                  const char **out_results_json,
+                                                  const char **out_error_msg);
+
+/**
  * Free a session handle. Idempotent on null (no-op).
  *
  * # Safety

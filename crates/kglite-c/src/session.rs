@@ -6,7 +6,7 @@
 //! afterwards.
 
 use crate::graph::{GraphState, KgliteGraph};
-use crate::result::{KgliteCypherResult, ResultState};
+use crate::result::{result_to_json_object, KgliteCypherResult, ResultState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::param::json_value_to_kglite_value;
@@ -277,6 +277,162 @@ pub unsafe extern "C" fn kglite_session_execute_mut(
     }
 }
 
+/// Run several read-only Cypher queries against a single consistent
+/// snapshot, in one lock acquisition.
+///
+/// `queries_json` is a JSON array of objects, each `{"query": "...",
+/// "params": {...}}` (the `params` key is optional). Every query sees
+/// the same snapshot, taken once up front — cheaper and more consistent
+/// than N separate [`kglite_session_execute_read`] calls when a binding
+/// issues many small reads.
+///
+/// On success `out_results_json` is set to an owned JSON string: an
+/// array of `{"columns": [...], "rows": [{...}]}` objects, one per input
+/// query in order, with the same natural-value encoding as
+/// [`kglite_cypher_result_rows_json`]. Free it with
+/// [`kglite_free_string`](crate::kglite_free_string).
+///
+/// The batch aborts on the first failing query: `out_results_json` is
+/// set to null and the status code / `out_error_msg` describe that
+/// query's failure.
+///
+/// # Safety
+///
+/// `session` must be valid; `queries_json` a null-terminated UTF-8 JSON
+/// array; `out_results_json` a valid writable `*const c_char` slot;
+/// `out_error_msg` null or a valid writable slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_session_execute_read_batch(
+    session: *const KgliteSession,
+    queries_json: *const c_char,
+    out_results_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let queries = match parse_batch_queries(queries_json) {
+        Ok(q) => q,
+        Err(rc) => return rc,
+    };
+    let session_state = unsafe { SessionState::from_handle(session) };
+    let snapshot = session_state.inner.snapshot();
+    let mut results = Vec::with_capacity(queries.len());
+    for (query, params) in &queries {
+        let mut opts = ExecuteOptions::eager(params);
+        opts.embedder = session_state.embedder.clone();
+        match execute_read(&snapshot, query, &opts) {
+            Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
+            Err(err) => {
+                unsafe {
+                    *out_results_json = std::ptr::null();
+                }
+                let code = KgliteStatusCode::from_kg_error_code(err.code());
+                if !out_error_msg.is_null() {
+                    unsafe {
+                        *out_error_msg = alloc_c_string(&err.to_string());
+                    }
+                }
+                return code;
+            }
+        }
+    }
+    let json = serde_json::Value::Array(results).to_string();
+    unsafe {
+        *out_results_json = alloc_c_string(&json);
+    }
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = std::ptr::null();
+        }
+    }
+    KgliteStatusCode::Ok
+}
+
+/// Run several mutating Cypher queries in a single transaction — one
+/// `begin`, N executes (each sees the previous query's writes), a single
+/// `commit`. The batch is **atomic**: if any query fails, the
+/// transaction is dropped uncommitted and none of the batch's mutations
+/// reach the graph.
+///
+/// `queries_json` / `out_results_json` have the same shape as
+/// [`kglite_session_execute_read_batch`]. On failure `out_results_json`
+/// is null and the status / `out_error_msg` describe the failing query.
+///
+/// # Safety
+///
+/// Same as [`kglite_session_execute_read_batch`] except `session` is
+/// `*mut` (the call mutates the session's interior graph via
+/// commit-swap).
+#[no_mangle]
+pub unsafe extern "C" fn kglite_session_execute_mut_batch(
+    session: *mut KgliteSession,
+    queries_json: *const c_char,
+    out_results_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let queries = match parse_batch_queries(queries_json) {
+        Ok(q) => q,
+        Err(rc) => return rc,
+    };
+    let session_state = unsafe { SessionState::from_handle(session) };
+    let mut tx = session_state.inner.begin();
+    let mut results = Vec::with_capacity(queries.len());
+    for (query, params) in &queries {
+        let mut opts = ExecuteOptions::eager(params);
+        opts.embedder = session_state.embedder.clone();
+        let exec = {
+            let working = match tx.working_mut() {
+                Ok(w) => w,
+                Err(err) => {
+                    // tx drops uncommitted → atomic rollback.
+                    unsafe {
+                        *out_results_json = std::ptr::null();
+                    }
+                    let code = KgliteStatusCode::from_kg_error_code(err.code());
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    return code;
+                }
+            };
+            execute_mut(working, query, &opts)
+        };
+        match exec {
+            Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
+            Err(err) => {
+                // tx drops uncommitted → none of the batch's writes land.
+                unsafe {
+                    *out_results_json = std::ptr::null();
+                }
+                let code = KgliteStatusCode::from_kg_error_code(err.code());
+                if !out_error_msg.is_null() {
+                    unsafe {
+                        *out_error_msg = alloc_c_string(&err.to_string());
+                    }
+                }
+                return code;
+            }
+        }
+    }
+    let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
+    let json = serde_json::Value::Array(results).to_string();
+    unsafe {
+        *out_results_json = alloc_c_string(&json);
+    }
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = std::ptr::null();
+        }
+    }
+    KgliteStatusCode::Ok
+}
+
 /// Free a session handle. Idempotent on null (no-op).
 ///
 /// # Safety
@@ -317,6 +473,48 @@ fn parse_params_json(
         serde_json::Value::Null => Ok(HashMap::new()),
         _ => Err(KgliteStatusCode::InvalidArgument),
     }
+}
+
+/// Parse a batch `queries_json` argument into `(query, params)` pairs.
+/// Expects a JSON array of objects, each `{"query": "...", "params":
+/// {...}}` (the `params` key is optional). Any other shape →
+/// `InvalidArgument`. Assumes `queries_json` is non-null (callers check).
+fn parse_batch_queries(
+    queries_json: *const c_char,
+) -> Result<Vec<(String, HashMap<String, Value>)>, KgliteStatusCode> {
+    let s = match unsafe { CStr::from_ptr(queries_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(KgliteStatusCode::InvalidUtf8),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return Err(KgliteStatusCode::InvalidArgument),
+    };
+    let arr = match parsed.as_array() {
+        Some(a) => a,
+        None => return Err(KgliteStatusCode::InvalidArgument),
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let obj = match item.as_object() {
+            Some(o) => o,
+            None => return Err(KgliteStatusCode::InvalidArgument),
+        };
+        let query = match obj.get("query").and_then(|v| v.as_str()) {
+            Some(q) => q.to_string(),
+            None => return Err(KgliteStatusCode::InvalidArgument),
+        };
+        let params = match obj.get("params") {
+            None | Some(serde_json::Value::Null) => HashMap::new(),
+            Some(serde_json::Value::Object(o)) => o
+                .iter()
+                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
+                .collect(),
+            Some(_) => return Err(KgliteStatusCode::InvalidArgument),
+        };
+        out.push((query, params));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
