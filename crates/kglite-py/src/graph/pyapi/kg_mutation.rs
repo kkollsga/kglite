@@ -7,9 +7,6 @@
 
 use crate::datatypes::py_in;
 use crate::datatypes::values::{DataFrame, Value};
-use crate::graph::introspection::reporting::{
-    NodeOperationReport, OperationReport, OperationReports,
-};
 use crate::graph::languages::cypher;
 use crate::graph::schema::{self, CowSelection, DirGraph};
 use crate::graph::storage::GraphRead;
@@ -18,6 +15,7 @@ use crate::graph::{
     parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
     KnowledgeGraph, TemporalContext, TimeSpec,
 };
+use kglite_core::api::{NodeOperationReport, OperationReport, OperationReports};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
@@ -239,7 +237,7 @@ fn write_connections(
         let graph = get_graph_mut(&mut kg.inner);
 
         let result = if replace {
-            crate::graph::mutation::maintain::replace_connections(
+            kglite_core::api::mutation::replace_connections(
                 graph,
                 df_result,
                 connection_type.clone(),
@@ -252,7 +250,7 @@ fn write_connections(
                 conflict_handling,
             )
         } else {
-            crate::graph::mutation::maintain::add_connections(
+            kglite_core::api::mutation::add_connections(
                 graph,
                 df_result,
                 connection_type.clone(),
@@ -292,7 +290,7 @@ fn write_connections(
     let graph = get_graph_mut(&mut kg.inner);
 
     let result = if replace {
-        crate::graph::mutation::maintain::replace_connections(
+        kglite_core::api::mutation::replace_connections(
             graph,
             df_result,
             connection_type.clone(),
@@ -305,7 +303,7 @@ fn write_connections(
             conflict_handling,
         )
     } else {
-        crate::graph::mutation::maintain::add_connections(
+        kglite_core::api::mutation::add_connections(
             graph,
             df_result,
             connection_type.clone(),
@@ -486,7 +484,7 @@ fn apply_node_batch(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> PyResult<NodeOperationReport> {
-    crate::graph::mutation::maintain::add_nodes(
+    kglite_core::api::mutation::add_nodes(
         graph,
         df,
         node_type.to_string(),
@@ -799,7 +797,7 @@ fn build_node_report_dict<'py>(
 /// + optional `errors`) so users see a familiar shape.
 fn build_extend_report_dict<'py>(
     py: Python<'py>,
-    result: &crate::graph::mutation::extend::ExtendReport,
+    result: &kglite_core::api::mutation::ExtendReport,
 ) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item("operation", "extend")?;
@@ -1084,7 +1082,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
         let result =
-            crate::graph::mutation::extend::extend_graph(graph, &source_arc, conflict_handling)
+            kglite_core::api::mutation::extend_graph(graph, &source_arc, conflict_handling)
                 .map_err(|e: String| -> PyErr {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
@@ -1460,7 +1458,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = crate::graph::mutation::maintain::add_nodes(
+            let report = kglite_core::api::mutation::add_nodes(
                 graph,
                 df_result,
                 node_type.clone(),
@@ -1640,7 +1638,7 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = crate::graph::mutation::maintain::add_connections(
+            let report = kglite_core::api::mutation::add_connections(
                 graph,
                 df_result,
                 connection_name.clone(),

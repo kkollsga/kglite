@@ -6,9 +6,9 @@
 //! methods — avoids duplicating the v3 save pipeline here.
 
 use crate::graph::blueprint;
-use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{self, CowSelection, DirGraph};
 use crate::graph::{KnowledgeGraph, TemporalContext};
+use kglite_core::api::OperationReports;
 use pyo3::prelude::*;
 use std::path::Path;
 use std::sync::Arc;

@@ -205,7 +205,7 @@ impl KnowledgeGraph {
     fn purge_provisional(&mut self) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
         let (nodes_purged, edges_removed) =
-            crate::graph::mutation::maintain::purge_provisional_nodes(graph);
+            kglite_core::api::mutation::purge_provisional_nodes(graph);
         if nodes_purged > 0 {
             self.cursor.selection = CowSelection::new();
         }
@@ -525,14 +525,10 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            crate::graph::mutation::maintain::update_node_properties(
-                graph,
-                &nodes,
-                target_property,
-            )
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+            kglite_core::api::mutation::update_node_properties(graph, &nodes, target_property)
+                .map_err(|e: String| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
             if !keep_selection.unwrap_or(false) {
                 self.cursor.selection.clear();
@@ -1141,14 +1137,11 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = crate::graph::mutation::maintain::update_node_properties(
-            graph,
-            &nodes,
-            store_as.unwrap(),
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
+        let result =
+            kglite_core::api::mutation::update_node_properties(graph, &nodes, store_as.unwrap())
+                .map_err(|e: String| -> PyErr {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
         let mut new_kg = KnowledgeGraph {
             inner: self.inner.clone(),
