@@ -7,7 +7,6 @@
 // logic stays in `languages/cypher/py_convert.rs`; we import it here.
 
 use crate::datatypes::values::Value;
-use crate::graph::algorithms::graph_algorithms::CentralityResult;
 use crate::graph::languages::cypher::ast::{Expression, ReturnItem};
 use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
@@ -18,6 +17,7 @@ use crate::graph::languages::cypher::result::{
 };
 use crate::graph::schema::{DirGraph, NodeData};
 use crate::graph::storage::GraphRead;
+use kglite_core::api::algorithms::CentralityResult;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;

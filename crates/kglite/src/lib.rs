@@ -139,6 +139,29 @@ pub mod api {
         };
     }
 
+    /// Graph algorithms — pathfinding, components, centrality, community
+    /// detection (the typed, direct-call surface). Every binding that
+    /// exposes a typed `shortest_path()` / `pagerank()` / `louvain()`
+    /// method reaches these; they all take `&DirGraph` + plain params and
+    /// return the result structs below. (Per-query algorithm access is
+    /// also available through Cypher procedures; this is the typed-result
+    /// path for bindings that want structs, not result rows.) Lifted in
+    /// api-sealing roadmap Piece 2. `vector_search` is NOT here — it takes
+    /// the fluent `CurrentSelection` and lands with the Selection api-type
+    /// decision in Piece 3.
+    pub mod algorithms {
+        pub use crate::graph::algorithms::graph_algorithms::{
+            all_paths, are_connected, betweenness_centrality, closeness_centrality,
+            connected_components, degree_centrality, get_node_info, get_path_connections,
+            label_propagation, louvain_communities, node_degree, pagerank, shortest_path,
+            shortest_path_cost, shortest_path_cost_batch, shortest_path_cost_weighted,
+            shortest_path_weighted, weakly_connected_components, CentralityResult, CommunityResult,
+            PathNodeInfo, PathResult,
+        };
+        pub use crate::graph::algorithms::hnsw::HnswParams;
+        pub use crate::graph::algorithms::vector::DistanceMetric;
+    }
+
     /// Blueprint loader + builder — declarative graph construction
     /// from a YAML/JSON spec + a directory of CSVs. The wheel's
     /// `from_blueprint` is a thin ergonomics wrapper around
