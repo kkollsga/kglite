@@ -1518,7 +1518,7 @@ impl KnowledgeGraph {
             let embedder_for_opts: Option<std::sync::Arc<dyn crate::graph::embedder::Embedder>> =
                 None; // mutations don't typically use text_score; skip the embedder snapshot
 
-            let opts = crate::graph::session::ExecuteOptions {
+            let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
                 deadline,
                 max_rows: effective_max_rows,
@@ -1530,7 +1530,7 @@ impl KnowledgeGraph {
                 value_codecs: None,
             };
 
-            let outcome = crate::graph::session::execute_mut(graph, query, &opts)
+            let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?;
             let mut result = outcome.result;
             let output_csv = outcome.output_format == cypher::OutputFormat::Csv;
@@ -1588,7 +1588,7 @@ impl KnowledgeGraph {
             this.embedder.clone()
         };
         let result = {
-            let opts = crate::graph::session::ExecuteOptions {
+            let opts = kglite_core::api::session::ExecuteOptions {
                 params: &param_map,
                 deadline,
                 max_rows: effective_max_rows,
@@ -1601,7 +1601,7 @@ impl KnowledgeGraph {
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
             py.detach(move || -> Result<crate::graph::languages::cypher::result::CypherResult, crate::error::KgError> {
-                let outcome = crate::graph::session::execute_read(&inner_for_detach, query, &opts)?;
+                let outcome = kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
                 let mut result = outcome.result;
                 resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
                 Ok(result)
@@ -1809,7 +1809,7 @@ impl KnowledgeGraph {
             // Seed a core Transaction from the KG's current Arc. The throwaway
             // Session is dropped immediately; the Transaction owns its snapshot
             // Arc + base version. The CoW/OCC state machine now lives in core.
-            crate::graph::session::Session::from_arc(Arc::clone(&kg.inner)).begin()
+            kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin()
         });
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
@@ -1840,7 +1840,7 @@ impl KnowledgeGraph {
     fn begin_read(slf: Py<Self>, timeout_ms: Option<u64>) -> PyResult<Transaction> {
         let core_tx = Python::attach(|py| {
             let kg = slf.borrow(py);
-            crate::graph::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read()
+            kglite_core::api::session::Session::from_arc(Arc::clone(&kg.inner)).begin_read()
         });
         let deadline =
             timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
