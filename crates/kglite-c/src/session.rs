@@ -639,13 +639,14 @@ fn parse_params_json(
     }
 }
 
+/// One parsed batch entry: a query string and its parameter map.
+type BatchQuery = (String, HashMap<String, Value>);
+
 /// Parse a batch `queries_json` argument into `(query, params)` pairs.
 /// Expects a JSON array of objects, each `{"query": "...", "params":
 /// {...}}` (the `params` key is optional). Any other shape →
 /// `InvalidArgument`. Assumes `queries_json` is non-null (callers check).
-fn parse_batch_queries(
-    queries_json: *const c_char,
-) -> Result<Vec<(String, HashMap<String, Value>)>, KgliteStatusCode> {
+fn parse_batch_queries(queries_json: *const c_char) -> Result<Vec<BatchQuery>, KgliteStatusCode> {
     let s = match unsafe { CStr::from_ptr(queries_json) }.to_str() {
         Ok(s) => s,
         Err(_) => return Err(KgliteStatusCode::InvalidUtf8),

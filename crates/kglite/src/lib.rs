@@ -116,7 +116,9 @@ pub mod api {
     /// C ABI's `create_edges_batch` wraps it); it drives the same engine
     /// as the Python `add_connections` DataFrame path.
     pub mod mutation {
-        pub use crate::graph::mutation::maintain::{add_edges_from_specs, EdgeSpec, EdgeSpecReport};
+        pub use crate::graph::mutation::maintain::{
+            add_edges_from_specs, EdgeSpec, EdgeSpecReport,
+        };
     }
 
     /// Blueprint loader + builder — declarative graph construction
