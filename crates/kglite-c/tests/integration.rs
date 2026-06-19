@@ -37,9 +37,17 @@ fn fixture_path() -> CString {
 #[test]
 fn abi_version_is_aligned_with_crate() {
     let v = kglite_abi_version();
-    assert_eq!(v.major, 0);
-    assert_eq!(v.minor, 10);
-    assert!(v.patch >= 2);
+    // Derived from the crate version at compile time — assert it matches
+    // rather than hard-coding numbers that silently go stale.
+    assert_eq!(
+        format!("{}.{}.{}", v.major, v.minor, v.patch),
+        format!(
+            "{}.{}.{}",
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            env!("CARGO_PKG_VERSION_MINOR"),
+            env!("CARGO_PKG_VERSION_PATCH"),
+        )
+    );
 }
 
 #[test]
