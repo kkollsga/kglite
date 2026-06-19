@@ -45,6 +45,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      - name: API chokepoint gate
+        # Enforce the kglite::api single-chokepoint boundary: server crates
+        # stay at zero below-api reaches; the wheel's reach count can only
+        # shrink from its frozen baseline (roadmap.md).
+        run: ./scripts/check_api_chokepoint.sh
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
