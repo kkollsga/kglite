@@ -898,6 +898,27 @@ KgliteStatusCode kglite_graph_from_bytes(const uint8_t *data,
                                          const char **out_error_msg);
 
 /**
+ * Compute a JSON schema overview of a graph: node types (count +
+ * property types), connection types (endpoints + property names),
+ * indexes, and total node/edge counts. The C-side handle on the
+ * agent-facing schema — call it right after load / build / from_bytes
+ * to learn a graph's shape before querying.
+ *
+ * On success `out_json` is set to an owned JSON object — free via
+ * [`kglite_free_string`](crate::kglite_free_string). Operates on a graph
+ * handle (before it is moved into a session).
+ *
+ * # Safety
+ *
+ * `graph` must be a valid handle; `out_json` a valid writable slot;
+ * `out_error_msg` null or a valid slot.
+ */
+
+KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
+                                            const char **out_json,
+                                            const char **out_error_msg);
+
+/**
  * Return the column names as a JSON array string:
  * `["col1", "col2", ...]`.
  *

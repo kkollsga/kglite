@@ -11,8 +11,9 @@
 use kglite_c::{
     kglite_abi_version, kglite_create_edges_batch, kglite_cypher_result_columns_json,
     kglite_cypher_result_free, kglite_cypher_result_row_count, kglite_cypher_result_rows_json,
-    kglite_free_bytes, kglite_free_string, kglite_graph_from_bytes, kglite_graph_free,
-    kglite_graph_new, kglite_graph_to_bytes, kglite_load_file, kglite_save_graph_durable,
+    kglite_compute_schema_json, kglite_free_bytes, kglite_free_string, kglite_graph_from_bytes,
+    kglite_graph_free, kglite_graph_new, kglite_graph_to_bytes, kglite_load_file,
+    kglite_save_graph_durable,
     kglite_session_execute_mut, kglite_session_execute_mut_batch, kglite_session_execute_read,
     kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
     kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
@@ -549,6 +550,27 @@ fn save_graph_durable_round_trips() {
     assert!(!graph2.is_null());
     unsafe { kglite_graph_free(graph2) };
     let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn compute_schema_json_describes_graph() {
+    let path = fixture_path();
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe { kglite_load_file(path.as_ptr(), &mut graph as *mut _, &mut err as *mut _) };
+
+    let mut out: *const c_char = std::ptr::null();
+    let mut err: *const c_char = std::ptr::null();
+    let rc =
+        unsafe { kglite_compute_schema_json(graph, &mut out as *mut _, &mut err as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!out.is_null());
+    let parsed: serde_json::Value =
+        serde_json::from_str(unsafe { CStr::from_ptr(out).to_str().unwrap() }).unwrap();
+    assert!(parsed["node_count"].as_u64().unwrap() > 0);
+    assert!(!parsed["node_types"].as_array().unwrap().is_empty());
+    unsafe { kglite_free_string(out) };
+    unsafe { kglite_graph_free(graph) };
 }
 
 // ───────────────────────── embedder ─────────────────────────────────
