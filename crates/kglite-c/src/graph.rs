@@ -10,8 +10,8 @@ use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::{
-    graphgen, load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with, DirGraph,
-    GraphGenConfig,
+    compute_schema, graphgen, load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with,
+    DirGraph, GraphGenConfig,
 };
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -571,6 +571,74 @@ pub unsafe extern "C" fn kglite_graph_from_bytes(
             KgliteStatusCode::FileFormat
         }
     }
+}
+
+/// Compute a JSON schema overview of a graph: node types (count +
+/// property types), connection types (endpoints + property names),
+/// indexes, and total node/edge counts. The C-side handle on the
+/// agent-facing schema — call it right after load / build / from_bytes
+/// to learn a graph's shape before querying.
+///
+/// On success `out_json` is set to an owned JSON object — free via
+/// [`kglite_free_string`](crate::kglite_free_string). Operates on a graph
+/// handle (before it is moved into a session).
+///
+/// # Safety
+///
+/// `graph` must be a valid handle; `out_json` a valid writable slot;
+/// `out_error_msg` null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_compute_schema_json(
+    graph: *mut KgliteGraph,
+    out_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if graph.is_null() || out_json.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let state = unsafe { GraphState::from_handle_mut(graph) };
+    let schema = compute_schema(state.inner.as_ref());
+    let node_types: Vec<serde_json::Value> = schema
+        .node_types
+        .iter()
+        .map(|(name, ov)| {
+            serde_json::json!({
+                "type": name,
+                "count": ov.count,
+                "properties": ov.properties,
+            })
+        })
+        .collect();
+    let connection_types: Vec<serde_json::Value> = schema
+        .connection_types
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "type": c.connection_type,
+                "count": c.count,
+                "source_types": c.source_types,
+                "target_types": c.target_types,
+                "property_names": c.property_names,
+            })
+        })
+        .collect();
+    let json = serde_json::json!({
+        "node_types": node_types,
+        "connection_types": connection_types,
+        "indexes": schema.indexes,
+        "node_count": schema.node_count,
+        "edge_count": schema.edge_count,
+    })
+    .to_string();
+    unsafe {
+        *out_json = alloc_c_string(&json);
+    }
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = std::ptr::null();
+        }
+    }
+    KgliteStatusCode::Ok
 }
 
 #[cfg(test)]
