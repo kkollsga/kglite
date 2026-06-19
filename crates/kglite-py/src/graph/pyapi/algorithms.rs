@@ -6,13 +6,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use crate::graph::schema::{CowSelection, PlanStep};
 use crate::graph::storage::lookups;
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph, TemporalContext,
 };
 use kglite_core::api::OperationReports;
+use kglite_core::api::{CowSelection, PlanStep};
 
 #[pymethods]
 impl KnowledgeGraph {
@@ -1126,13 +1126,13 @@ impl KnowledgeGraph {
         let hops = hops.unwrap_or(1);
         self.derive_with(|inner, cursor| {
             // node_count of the last selection level (avoids allocation).
-            let last_count = |sel: &crate::graph::schema::CowSelection| {
+            let last_count = |sel: &kglite_core::api::CowSelection| {
                 sel.get_level(sel.get_level_count().saturating_sub(1))
                     .map(|l| l.node_count())
                     .unwrap_or(0)
             };
             let estimated = last_count(&cursor.selection);
-            crate::graph::mutation::subgraph::expand_selection(inner, &mut cursor.selection, hops)
+            kglite_core::api::fluent::expand_selection(inner, &mut cursor.selection, hops)
                 .map_err(|e: String| {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
@@ -1168,7 +1168,7 @@ impl KnowledgeGraph {
     ///     ```
     fn to_subgraph(&self) -> PyResult<Self> {
         let extracted =
-            crate::graph::mutation::subgraph::extract_subgraph(&self.inner, &self.cursor.selection)
+            kglite_core::api::fluent::extract_subgraph(&self.inner, &self.cursor.selection)
                 .map_err(|e: String| {
                     crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                 })?;
@@ -1450,11 +1450,11 @@ impl KnowledgeGraph {
     ///         - 'node_types': Dict of node type -> count
     ///         - 'connection_types': Dict of connection type -> count
     fn subgraph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let stats = crate::graph::mutation::subgraph::get_subgraph_stats(
-            &self.inner,
-            &self.cursor.selection,
-        )
-        .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?;
+        let stats =
+            kglite_core::api::fluent::get_subgraph_stats(&self.inner, &self.cursor.selection)
+                .map_err(|e: String| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("node_count", stats.node_count)?;

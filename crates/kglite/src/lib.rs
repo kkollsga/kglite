@@ -81,12 +81,9 @@ pub mod api {
     // Python-flavored `KnowledgeGraph` separately — same name,
     // different audience (`pip install kglite` users), polars-style.
     //
-    // `infer_selection_node_type` is NOT re-exported here: it depends
-    // on `CowSelection`, a wheel-only-external-consumer type. When
-    // the Selection concept gets lifted to a stable api type, both
-    // should land in api together (roadmap Piece 3). The wheel reaches
-    // the function directly via
-    // `kglite_core::graph::handle::infer_selection_node_type`.
+    // `infer_selection_node_type` infers the node type of a selection's
+    // current level; it takes `&CowSelection`, so it landed here in
+    // Piece 3b alongside the Selection api-type lift (Piece 3a).
     //
     // `resolve_code_entity` + `CODE_TYPES` are the code-tree graph
     // helpers (resolve a `Type::method` qualified name to a node;
@@ -94,8 +91,23 @@ pub mod api {
     // for any binding that ships the code-tree parser. Lifted in the
     // api-sealing soft-seal (roadmap Piece 1).
     pub use crate::graph::handle::{
-        discover_property_keys_from_data, resolve_code_entity, source_location, KnowledgeGraph,
-        CODE_TYPES,
+        discover_property_keys_from_data, infer_selection_node_type, resolve_code_entity,
+        source_location, KnowledgeGraph, CODE_TYPES,
+    };
+    /// The fluent **selection** data model — the cursor state threaded
+    /// through the fluent query chain (and through Selection-scoped
+    /// capabilities like `algorithms::vector_search`, `mutation`
+    /// set-ops/subgraph, and the spatial predicates). `CowSelection` is
+    /// the Arc copy-on-write wrapper a binding holds as its cursor;
+    /// `CurrentSelection` is the underlying level/plan state; `PlanStep`
+    /// is an `explain()` plan entry. Pure core types (petgraph node
+    /// indices and hash maps), no binding coupling. Lifted in roadmap
+    /// Piece 3a as the foundation for the fluent api surface. The
+    /// high-level fluent chain operations are consolidated into core and
+    /// exposed in Piece 3c; the fine-grained `core::*` primitives stay
+    /// internal.
+    pub use crate::graph::schema::{
+        CowSelection, CurrentSelection, PlanStep, SelectionLevel, SelectionOperation,
     };
     /// Interned property-/type-key handle (a transparent `u64` newtype).
     /// Bindings doing low-level direct graph access bridge between string
@@ -146,14 +158,32 @@ pub mod api {
     /// out). `update_node_properties`, `purge_provisional_nodes`, and
     /// `extend_graph` (merge one graph into another) round out the
     /// generic, non-Selection mutation surface. Lifted in roadmap Piece 2.
-    /// Selection-scoped mutations (`create_connections`, `set_ops`,
-    /// subgraph extract/expand) stay below api until the Selection
-    /// api-type decision in Piece 3.
+    /// `create_connections` (edge-create between the two ends of a
+    /// selection) lifted in Piece 3b once `CurrentSelection` reached api.
     pub mod mutation {
         pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
         pub use crate::graph::mutation::maintain::{
-            add_connections, add_edges_from_specs, add_nodes, purge_provisional_nodes,
-            replace_connections, update_node_properties, EdgeSpec, EdgeSpecReport,
+            add_connections, add_edges_from_specs, add_nodes, create_connections,
+            purge_provisional_nodes, replace_connections, update_node_properties, EdgeSpec,
+            EdgeSpecReport,
+        };
+    }
+
+    /// Selection-scoped operations — selection set algebra
+    /// (`union`/`intersection`/`difference`/`symmetric_difference`) and
+    /// subgraph extract / expand / stats. These take `&CurrentSelection`
+    /// (now an api type, roadmap Piece 3a) and are the building blocks the
+    /// fluent chain composes. Lifted in Piece 3b; the high-level chain
+    /// operations (`select`/`where`/`sort`/`traverse`) are consolidated
+    /// here in Piece 3c (the fine-grained `core::*` primitives behind them
+    /// stay internal).
+    pub mod fluent {
+        pub use crate::graph::mutation::set_ops::{
+            difference_selections, intersection_selections, symmetric_difference_selections,
+            union_selections,
+        };
+        pub use crate::graph::mutation::subgraph::{
+            expand_selection, extract_subgraph, get_subgraph_stats, SubgraphStats,
         };
     }
 
@@ -164,9 +194,9 @@ pub mod api {
     /// return the result structs below. (Per-query algorithm access is
     /// also available through Cypher procedures; this is the typed-result
     /// path for bindings that want structs, not result rows.) Lifted in
-    /// api-sealing roadmap Piece 2. `vector_search` is NOT here — it takes
-    /// the fluent `CurrentSelection` and lands with the Selection api-type
-    /// decision in Piece 3.
+    /// api-sealing roadmap Piece 2 (`vector_search` + `VectorSearchResult`
+    /// added in Piece 3b once `CurrentSelection` was lifted to api — vector
+    /// search is scoped to a selection).
     pub mod algorithms {
         pub use crate::graph::algorithms::graph_algorithms::{
             all_paths, are_connected, betweenness_centrality, closeness_centrality,
@@ -177,7 +207,9 @@ pub mod api {
             PathNodeInfo, PathResult,
         };
         pub use crate::graph::algorithms::hnsw::HnswParams;
-        pub use crate::graph::algorithms::vector::DistanceMetric;
+        pub use crate::graph::algorithms::vector::{
+            vector_search, DistanceMetric, VectorSearchResult,
+        };
     }
 
     /// Timeseries date/query helpers — the pure date-parsing and

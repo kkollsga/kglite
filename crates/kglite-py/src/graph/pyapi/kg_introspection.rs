@@ -12,12 +12,12 @@ use crate::graph::introspection::{
     self,
     reporting::{OperationReport, OperationReports},
 };
-use crate::graph::schema::{CowSelection, PlanStep};
 use crate::graph::{
     compare_inner, extract_cypher_param, extract_detail_param, extract_fluent_param, get_graph_mut,
     parse_method_param, KnowledgeGraph, TemporalContext,
 };
 use kglite_core::api::GraphRead;
+use kglite_core::api::{CowSelection, PlanStep};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt};
@@ -929,7 +929,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
 
-        let result = crate::graph::mutation::maintain::create_connections(
+        let result = kglite_core::api::mutation::create_connections(
             graph,
             &self.cursor.selection,
             connection_type,

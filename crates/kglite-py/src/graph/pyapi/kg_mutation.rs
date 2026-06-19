@@ -8,13 +8,14 @@
 use crate::datatypes::py_in;
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::languages::cypher;
-use crate::graph::schema::{self, CowSelection, DirGraph};
+use crate::graph::schema;
 use crate::graph::{
     get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
     parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
     KnowledgeGraph, TemporalContext, TimeSpec,
 };
 use kglite_core::api::GraphRead;
+use kglite_core::api::{CowSelection, DirGraph};
 use kglite_core::api::{NodeOperationReport, OperationReport, OperationReports};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
