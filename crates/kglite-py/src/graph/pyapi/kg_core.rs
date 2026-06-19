@@ -952,7 +952,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with the union of both selections
     fn union(&self, other: &Self) -> PyResult<Self> {
         self.derive_with(|_inner, cursor| {
-            crate::graph::mutation::set_ops::union_selections(
+            kglite_core::api::fluent::union_selections(
                 &mut cursor.selection,
                 &other.cursor.selection,
             )
@@ -964,7 +964,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with only nodes that exist in both selections
     fn intersection(&self, other: &Self) -> PyResult<Self> {
         self.derive_with(|_inner, cursor| {
-            crate::graph::mutation::set_ops::intersection_selections(
+            kglite_core::api::fluent::intersection_selections(
                 &mut cursor.selection,
                 &other.cursor.selection,
             )
@@ -976,7 +976,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes from self that are not in other
     fn difference(&self, other: &Self) -> PyResult<Self> {
         self.derive_with(|_inner, cursor| {
-            crate::graph::mutation::set_ops::difference_selections(
+            kglite_core::api::fluent::difference_selections(
                 &mut cursor.selection,
                 &other.cursor.selection,
             )
@@ -988,7 +988,7 @@ impl KnowledgeGraph {
     /// Returns a new KnowledgeGraph with nodes that are in exactly one of the selections
     fn symmetric_difference(&self, other: &Self) -> PyResult<Self> {
         self.derive_with(|_inner, cursor| {
-            crate::graph::mutation::set_ops::symmetric_difference_selections(
+            kglite_core::api::fluent::symmetric_difference_selections(
                 &mut cursor.selection,
                 &other.cursor.selection,
             )
@@ -1547,7 +1547,7 @@ impl KnowledgeGraph {
                 if (stats.nodes_deleted > 0 || stats.relationships_deleted > 0)
                     && graph.check_auto_vacuum()
                 {
-                    this.cursor.selection = schema::CowSelection::new();
+                    this.cursor.selection = kglite_core::api::CowSelection::new();
                 }
                 this.cursor.last_mutation_stats = Some(stats.clone());
             }

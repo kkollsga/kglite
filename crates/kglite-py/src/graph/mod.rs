@@ -29,8 +29,8 @@ use crate::datatypes::values::{FilterCondition, Value};
 use kglite_core::api::{DirGraph, GraphRead, OperationReport, OperationReports};
 // `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
 // `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
+use kglite_core::api::{CowSelection, PlanStep};
 use kglite_core::graph::languages::cypher;
-use kglite_core::graph::schema::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -499,10 +499,10 @@ impl KnowledgeGraph {
         kglite_core::api::discover_property_keys_from_data(nodes, interner)
     }
 
-    /// Thin delegate to `kglite_core::graph::handle::infer_selection_node_type`.
+    /// Thin delegate to `kglite_core::api::infer_selection_node_type`.
     /// Engine logic lifted to core in 0.10.1.
     pub(crate) fn infer_selection_node_type(&self) -> Option<String> {
-        kglite_core::graph::handle::infer_selection_node_type(&self.cursor.selection, &self.inner)
+        kglite_core::api::infer_selection_node_type(&self.cursor.selection, &self.inner)
     }
 
     /// Get the registered embedder or return a helpful error with a skeleton.

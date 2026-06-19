@@ -336,7 +336,7 @@ impl KnowledgeGraph {
         let selection = self.cursor.selection.clone();
         let results = py
             .detach(|| {
-                crate::graph::algorithms::vector::vector_search(
+                kglite_core::api::algorithms::vector_search(
                     &inner,
                     &selection,
                     &embedding_property,

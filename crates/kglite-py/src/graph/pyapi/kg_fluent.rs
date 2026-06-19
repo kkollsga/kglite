@@ -7,10 +7,11 @@
 
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
-use crate::graph::schema::{self, CowSelection, PlanStep};
+use crate::graph::schema;
 use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
 use kglite_core::api::GraphRead;
 use kglite_core::api::OperationReport;
+use kglite_core::api::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};

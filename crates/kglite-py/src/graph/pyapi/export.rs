@@ -2,8 +2,8 @@
 
 use pyo3::prelude::*;
 
-use crate::graph::schema::CurrentSelection;
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::CurrentSelection;
 
 #[pymethods]
 impl KnowledgeGraph {
