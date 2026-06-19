@@ -111,6 +111,14 @@ pub mod api {
         pub use crate::param::{json_value_to_kglite_value, kglite_value_to_json};
     }
 
+    /// Bulk graph construction. `add_edges_from_specs` is the
+    /// DataFrame-free edge-ingest path that non-Python bindings use (the
+    /// C ABI's `create_edges_batch` wraps it); it drives the same engine
+    /// as the Python `add_connections` DataFrame path.
+    pub mod mutation {
+        pub use crate::graph::mutation::maintain::{add_edges_from_specs, EdgeSpec, EdgeSpecReport};
+    }
+
     /// Blueprint loader + builder — declarative graph construction
     /// from a YAML/JSON spec + a directory of CSVs. The wheel's
     /// `from_blueprint` is a thin ergonomics wrapper around

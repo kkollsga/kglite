@@ -267,6 +267,99 @@ pub fn add_nodes(
     Ok(report)
 }
 
+/// A single edge to bulk-create, addressed by stable node id + type —
+/// the binding-friendly, DataFrame-free counterpart of an
+/// [`add_connections`] row.
+#[derive(Debug, Clone)]
+pub struct EdgeSpec {
+    pub source_type: String,
+    pub source_id: Value,
+    pub target_type: String,
+    pub target_id: Value,
+    pub edge_type: String,
+    pub properties: HashMap<String, Value>,
+}
+
+/// Outcome of [`add_edges_from_specs`].
+#[derive(Debug, Default, Clone)]
+pub struct EdgeSpecReport {
+    /// Edges the batch engine actually created.
+    pub connections_created: usize,
+    /// Edges skipped because a source or target id had no node of its
+    /// declared type. Unlike [`add_connections`], this primitive does NOT
+    /// vivify stub endpoints — endpoints must already exist.
+    pub skipped_missing_endpoint: usize,
+}
+
+/// Bulk-create edges from explicit specs, addressed by stable node id +
+/// type. The DataFrame-free sibling of [`add_connections`]: it drives the
+/// *same* engine (`CombinedTypeLookup` + `ConnectionBatchProcessor`) but
+/// takes a spec list instead of a polars `DataFrame` — the path the C ABI
+/// (and future Go / JS / JVM bindings, which can't cheaply build a
+/// DataFrame) use, plus any caller that already has edges as records.
+///
+/// Specs are grouped by `(source_type, target_type, edge_type)`; each
+/// group gets one type lookup and one batch, mirroring `add_connections`.
+/// Endpoints must already exist — an edge whose source or target id isn't
+/// found for its declared type is counted in `skipped_missing_endpoint`
+/// and skipped (no stub vivification).
+pub fn add_edges_from_specs(
+    graph: &mut DirGraph,
+    specs: Vec<EdgeSpec>,
+) -> Result<EdgeSpecReport, String> {
+    use std::collections::BTreeMap;
+    // Group by (source_type, target_type, edge_type) for deterministic,
+    // one-lookup-one-batch-per-group processing.
+    type EdgeRows = Vec<(Value, Value, HashMap<String, Value>)>;
+    let mut groups: BTreeMap<(String, String, String), EdgeRows> = BTreeMap::new();
+    for spec in specs {
+        groups
+            .entry((spec.source_type, spec.target_type, spec.edge_type))
+            .or_default()
+            .push((spec.source_id, spec.target_id, spec.properties));
+    }
+
+    let mut report = EdgeSpecReport::default();
+    for ((source_type, target_type, edge_type), edges) in groups {
+        let lookup = CombinedTypeLookup::from_id_indices(
+            &graph.id_indices,
+            &graph.graph,
+            source_type.clone(),
+            target_type.clone(),
+        )?;
+        let mut batch = ConnectionBatchProcessor::new(edges.len());
+        // Same initial-load fast path as add_connections: skip per-edge
+        // existence checks when this connection type has no edges yet.
+        let is_initial_load = !graph.connection_type_metadata.contains_key(&edge_type);
+        batch.set_skip_existence_check(is_initial_load);
+
+        for (source_id, target_id, props) in edges {
+            match (
+                lookup.check_source(&source_id),
+                lookup.check_target(&target_id),
+            ) {
+                (Some(src_idx), Some(tgt_idx)) => {
+                    batch.add_connection(src_idx, tgt_idx, props, graph, &edge_type)?;
+                }
+                _ => report.skipped_missing_endpoint += 1,
+            }
+        }
+
+        // Register the connection in the schema before consuming the batch.
+        update_schema_node(
+            graph,
+            &edge_type,
+            &source_type,
+            &target_type,
+            batch.get_schema_properties(),
+        )?;
+
+        let (stats, _metrics) = batch.execute(graph, edge_type)?;
+        report.connections_created += stats.connections_created;
+    }
+    Ok(report)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn add_connections(
     graph: &mut DirGraph,
