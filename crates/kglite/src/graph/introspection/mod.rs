@@ -25,10 +25,6 @@ use crate::graph::schema::DirGraph;
 use std::collections::HashMap;
 
 pub use connectivity::{compute_type_connectivity, derive_edge_counts_from_triples};
-pub use describe::{compute_description, mcp_quickstart};
-pub use schema_overview::{
-    compute_connection_type_stats, compute_neighbors_schema, compute_property_stats, compute_schema,
-};
 
 // ── Return types ────────────────────────────────────────────────────────────
 

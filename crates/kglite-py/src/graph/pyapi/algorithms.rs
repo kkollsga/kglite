@@ -6,7 +6,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use crate::graph::storage::lookups;
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph, TemporalContext,
@@ -49,10 +48,11 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         // Look up source node
-        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e: String| {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+        let source_lookup =
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
+                .map_err(|e: String| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup
@@ -68,7 +68,7 @@ impl KnowledgeGraph {
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
-            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
                 |e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)),
             )?
         };
@@ -496,10 +496,11 @@ impl KnowledgeGraph {
         let max_hops = max_hops.unwrap_or(5);
 
         // Look up source node
-        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e: String| {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+        let source_lookup =
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
+                .map_err(|e: String| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup
@@ -515,7 +516,7 @@ impl KnowledgeGraph {
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
-            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
                 |e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)),
             )?
         };
@@ -674,10 +675,11 @@ impl KnowledgeGraph {
         target_id: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
         // Look up source node
-        let source_lookup = lookups::TypeLookup::new(&self.inner.graph, source_type.to_string())
-            .map_err(|e: String| {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+        let source_lookup =
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, source_type.to_string())
+                .map_err(|e: String| {
+                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                })?;
 
         let source_value = py_in::py_value_to_value(source_id)?;
         let source_idx = source_lookup
@@ -693,7 +695,7 @@ impl KnowledgeGraph {
         let target_lookup = if target_type == source_type {
             source_lookup
         } else {
-            lookups::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
+            kglite_core::api::storage::TypeLookup::new(&self.inner.graph, target_type.to_string()).map_err(
                 |e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)),
             )?
         };
@@ -1209,7 +1211,7 @@ impl KnowledgeGraph {
         let selection = self.cursor.selection.clone();
         let path_owned = path.to_string();
         py.detach(move || {
-            crate::graph::mutation::subgraph_streaming::save_subset(
+            kglite_core::api::io::save_subset(
                 &inner,
                 &selection,
                 std::path::Path::new(&path_owned),
@@ -1242,10 +1244,8 @@ impl KnowledgeGraph {
         path: &str,
         edge_types: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::mutation::subgraph_streaming::{
-            pass_a_scan, save_subset_streaming_disk, SubsetSpec,
-        };
-        use crate::graph::storage::backend::GraphBackend;
+        use kglite_core::api::io::{pass_a_scan, save_subset_streaming_disk, SubsetSpec};
+        use kglite_core::api::storage::GraphBackend;
         use std::collections::HashMap;
 
         let edge_type_keys_u64: Vec<u64> = edge_types
@@ -1354,10 +1354,8 @@ impl KnowledgeGraph {
         path: &str,
         edge_types: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::mutation::subgraph_streaming::{
-            pass_a_scan, save_subset_streaming_disk, SubsetSpec,
-        };
-        use crate::graph::storage::backend::GraphBackend;
+        use kglite_core::api::io::{pass_a_scan, save_subset_streaming_disk, SubsetSpec};
+        use kglite_core::api::storage::GraphBackend;
         use std::collections::HashMap;
 
         let spec = SubsetSpec {
@@ -1502,10 +1500,8 @@ impl KnowledgeGraph {
         edge_types: Option<Vec<String>>,
         kept_edges_out: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::mutation::subgraph_streaming::{
-            pass_a_scan, pass_a_scan_to_file, RankIndex, SubsetSpec,
-        };
-        use crate::graph::storage::backend::GraphBackend;
+        use kglite_core::api::io::{pass_a_scan, pass_a_scan_to_file, RankIndex, SubsetSpec};
+        use kglite_core::api::storage::GraphBackend;
 
         let disk = match &self.inner.graph {
             GraphBackend::Disk(dg) => dg.as_ref(),

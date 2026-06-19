@@ -29,16 +29,12 @@ mod window;
 // through the cache. The raw uncached parser lives at
 // `parser::parse_cypher`; only the cache implementation itself and a
 // handful of planner-internal unit tests bypass the cache.
-pub use ast::OutputFormat;
 pub use executor::{execute_mutable, is_mutation_query, CypherExecutor};
 pub use parse_cache::parse_cypher_cached as parse_cypher;
 pub use planner::mark_lazy_eligibility;
 pub use planner::optimize;
-pub use planner::schema_check::{
-    collect_unknown_pattern_warnings, validate_schema, warn_unknown_pattern_refs,
-};
+pub use planner::schema_check::{validate_schema, warn_unknown_pattern_refs};
 pub use planner::simplification::rewrite_text_score;
-pub use result::CypherResult;
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::DirGraph;

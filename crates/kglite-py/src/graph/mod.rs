@@ -8,16 +8,11 @@
 // wrapper concerns (KnowledgeGraph #[pyclass], pyapi/ submodule,
 // pyo3 param-extract helpers) that only the wrapper crate needs.
 //
-// Every engine subtree (algorithms, blueprint, core, dir_graph,
-// explore, features, introspection, io, mutation, schema,
-// session, storage) lives in `kglite_core::graph` — the glob
-// re-export below keeps every `crate::graph::X::Y` path in
-// pyapi/ resolving unchanged.
-pub use kglite_core::graph::*;
-
-// Mixed subtrees (have both engine and pyo3 parts) — local
-// module declarations shadow the re-exported ones from the
-// kglite engine crate.
+// The engine subtree is NO LONGER glob-re-exported here: the wheel
+// reaches the engine exclusively through `kglite_core::api::*` (roadmap
+// Piece 4 hard seal). `kglite_core::graph` is `pub(crate)` in the engine
+// and unreachable from this crate. The wheel's own graph-namespaced
+// modules (embedder / languages / pyapi) remain below.
 pub mod embedder;
 pub mod languages;
 pub mod pyapi;
@@ -30,8 +25,11 @@ use kglite_core::api::mutation::{OperationReport, OperationReports};
 use kglite_core::api::{DirGraph, GraphRead};
 // `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
 // `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
+use kglite_core::api::code_tree::SourceLookup;
+use kglite_core::api::cypher;
+use kglite_core::api::introspection;
+use kglite_core::api::TemporalContext;
 use kglite_core::api::{CowSelection, PlanStep};
-use kglite_core::graph::languages::cypher;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -239,7 +237,7 @@ impl GraphLifecycle {
 /// Lives on the binding (not the CoW-cloned `DirGraph`) because it owns a
 /// `File` handle. See `flush_wal`.
 pub(crate) struct DurableState {
-    pub(crate) wal: kglite_core::graph::wal::Wal,
+    pub(crate) wal: kglite_core::api::durable::Wal,
     /// Monotonic log-sequence number stamped on the next WAL frame.
     pub(crate) next_lsn: u64,
 }
@@ -324,8 +322,8 @@ impl KnowledgeGraph {
     /// so mutations are buffered for the WAL. Idempotent. Used by
     /// `kglite.open(..., durable=True)` after load / create.
     pub(crate) fn wrap_backend_for_durability(dir: &mut DirGraph) {
-        use kglite_core::graph::schema::GraphBackend;
-        use kglite_core::graph::storage::recording::RecordingGraph;
+        use kglite_core::api::durable::RecordingGraph;
+        use kglite_core::api::storage::GraphBackend;
         if matches!(dir.graph, GraphBackend::Recording(_)) {
             return;
         }
@@ -347,7 +345,7 @@ impl KnowledgeGraph {
         let ops = {
             let dir = get_graph_mut(&mut self.inner);
             let raw = match &mut dir.graph {
-                kglite_core::graph::schema::GraphBackend::Recording(rg) => rg.take_ops(),
+                kglite_core::api::storage::GraphBackend::Recording(rg) => rg.take_ops(),
                 // Not wrapped — durable state without a recording backend
                 // shouldn't happen, but treat it as nothing to flush.
                 _ => return Ok(()),
@@ -355,7 +353,7 @@ impl KnowledgeGraph {
             if raw.is_empty() {
                 return Ok(());
             }
-            kglite_core::graph::storage::recording::resolve_ops(&raw, &dir.graph, &dir.interner)
+            kglite_core::api::durable::resolve_ops(&raw, &dir.graph, &dir.interner)
         };
         let ds = self
             .lifecycle
@@ -365,7 +363,7 @@ impl KnowledgeGraph {
         let lsn = ds.next_lsn;
         ds.next_lsn += 1;
         ds.wal
-            .append(&kglite_core::graph::wal::WalFrame { lsn, ops })
+            .append(&kglite_core::api::durable::WalFrame { lsn, ops })
     }
 }
 

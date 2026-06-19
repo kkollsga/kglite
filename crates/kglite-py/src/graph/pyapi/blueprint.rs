@@ -5,10 +5,10 @@
 //! invoked from the Python shim using the existing `KnowledgeGraph`
 //! methods — avoids duplicating the v3 save pipeline here.
 
-use crate::graph::schema;
-use crate::graph::{KnowledgeGraph, TemporalContext};
+use crate::graph::KnowledgeGraph;
 use kglite_core::api::blueprint;
 use kglite_core::api::mutation::OperationReports;
+use kglite_core::api::TemporalContext;
 use kglite_core::api::{CowSelection, DirGraph};
 use pyo3::prelude::*;
 use std::path::Path;
@@ -44,18 +44,20 @@ pub fn from_blueprint_rust(
                 match storage {
                     None | Some("default") | Some("") => {}
                     Some("mapped") => {
-                        graph.graph = schema::GraphBackend::Mapped(schema::MappedGraph::new());
+                        graph.graph = kglite_core::api::storage::GraphBackend::Mapped(
+                            kglite_core::api::storage::MappedGraph::new(),
+                        );
                         graph.memory_limit = Some(0);
                     }
                     Some("disk") => {
                         let dir = path.ok_or_else(|| {
                             "storage='disk' requires a path parameter".to_string()
                         })?;
-                        let dg = crate::graph::storage::disk::graph::DiskGraph::new_at_path(
-                            Path::new(dir),
-                        )
-                        .map_err(|e| format!("Failed to create disk graph at '{}': {}", dir, e))?;
-                        graph.graph = schema::GraphBackend::Disk(Box::new(dg));
+                        let dg = kglite_core::api::storage::DiskGraph::new_at_path(Path::new(dir))
+                            .map_err(|e| {
+                                format!("Failed to create disk graph at '{}': {}", dir, e)
+                            })?;
+                        graph.graph = kglite_core::api::storage::GraphBackend::Disk(Box::new(dg));
                     }
                     Some(other) => {
                         return Err(format!(

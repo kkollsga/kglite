@@ -6,12 +6,11 @@
 //! no runtime impact.
 
 use crate::datatypes::{py_in, py_out};
-use crate::graph::io;
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::transaction::Transaction;
-use crate::graph::schema; // still needed for GraphBackend (deferred storage cluster)
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
 use kglite_core::api::introspection;
+use kglite_core::api::io;
 use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
 use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::GraphRead;
@@ -173,7 +172,7 @@ impl KnowledgeGraph {
         // won't have the histogram files — this call creates them.
         {
             let graph = get_graph_mut(&mut self.inner);
-            if let schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+            if let kglite_core::api::storage::GraphBackend::Disk(ref mut dg) = graph.graph {
                 dg.rebuild_peer_count_histogram();
             }
         }
@@ -574,7 +573,7 @@ impl KnowledgeGraph {
         }
 
         // Prep phase (quick): stamp metadata, snapshot index keys
-        io::file::prepare_save(&mut self.inner);
+        io::prepare_save(&mut self.inner);
 
         // Consolidate ALL node properties into column stores (v3 requires columnar).
         // Always rebuild: after load+add, some nodes may have Compact storage;
@@ -590,7 +589,7 @@ impl KnowledgeGraph {
         // durable (file + directory fsync) — a crash mid-save can't tear the .kgl.
         let inner = self.inner.clone();
         let path_owned = path.to_string();
-        py.detach(move || io::file::write_kgl_with(&inner, &path_owned, fsync))
+        py.detach(move || io::write_kgl_with(&inner, &path_owned, fsync))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
         // Durable checkpoint: the .kgl now holds the full current state, so
@@ -599,7 +598,7 @@ impl KnowledgeGraph {
         // truncate, and replay is idempotent, so a crash between the two
         // only costs a harmless re-apply on the next open.
         if self.lifecycle.durable.is_some() {
-            if let kglite_core::graph::schema::GraphBackend::Recording(rg) =
+            if let kglite_core::api::storage::GraphBackend::Recording(rg) =
                 &mut Arc::make_mut(&mut self.inner).graph
             {
                 let _ = rg.take_ops();
@@ -637,7 +636,7 @@ impl KnowledgeGraph {
             ));
         }
         // Same prep as save(): stamp metadata + consolidate to columnar.
-        io::file::prepare_save(&mut self.inner);
+        io::prepare_save(&mut self.inner);
         {
             let graph = Arc::make_mut(&mut self.inner);
             graph.enable_columnar();
@@ -647,7 +646,7 @@ impl KnowledgeGraph {
         let bytes = py
             .detach(move || -> std::io::Result<Vec<u8>> {
                 let mut buf: Vec<u8> = Vec::new();
-                io::file::write_kgl_to(&inner, &mut buf)?;
+                io::write_kgl_to(&inner, &mut buf)?;
                 Ok(buf)
             })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;

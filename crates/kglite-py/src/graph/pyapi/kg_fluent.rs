@@ -7,9 +7,10 @@
 
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
-use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 use kglite_core::api::mutation::OperationReport;
 use kglite_core::api::GraphRead;
+use kglite_core::api::TemporalContext;
 use kglite_core::api::{CowSelection, PlanStep};
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;

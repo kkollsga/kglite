@@ -7,10 +7,6 @@
 // attributes. This module declares the engine submodules + a few
 // shared types those wrappers reference.
 
-use crate::datatypes::values::Value;
-use crate::graph::schema::GraphBackend;
-use crate::graph::storage::GraphRead;
-
 pub mod algorithms;
 pub mod blueprint;
 pub mod core;
@@ -34,12 +30,6 @@ pub mod wal;
 // (`crate::graph::DirGraph`). Actual definition lives in
 // `dir_graph` and is re-exported by `schema` too.
 pub use dir_graph::DirGraph;
-
-/// Embedding column data extracted from a DataFrame:
-/// `[(column_name, [(node_id, embedding)])]`. Public because the
-/// kglite-py wrapper consumes this from its DataFrame ingestion
-/// path.
-pub type EmbeddingColumnData = Vec<(String, Vec<(Value, Vec<f32>)>)>;
 
 /// Temporal context for automatic date filtering on select /
 /// traverse / collect. Set via `KnowledgeGraph::date()` (Python:
@@ -90,21 +80,6 @@ pub enum SourceLookup {
     NotFound,
 }
 
-/// Resolve any `Value::NodeRef` in Cypher result rows to node
-/// titles. Called just before Python conversion so that NodeRef
-/// (an internal representation used to preserve node identity
-/// through collect/WITH) is never exposed to Python.
-pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
-    for row in rows.iter_mut() {
-        for val in row.iter_mut() {
-            if let Value::NodeRef(idx) = val {
-                let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
-                if let Some(node) = graph.node_weight(node_idx) {
-                    *val = node.title().into_owned();
-                } else {
-                    *val = Value::Null;
-                }
-            }
-        }
-    }
-}
+// (The canonical `resolve_noderefs` lives in `graph::session`; it is the
+// one re-exported as `kglite::api::session::resolve_noderefs`. A dead
+// duplicate here was removed when the hard seal surfaced it.)

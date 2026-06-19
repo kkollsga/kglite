@@ -45,7 +45,12 @@ pub mod code_tree;
 pub mod datasets;
 pub mod datatypes;
 pub mod error;
-pub mod graph;
+// Engine internals — sealed behind the curated `api` facade (roadmap Piece 4).
+// `pub(crate)` so no downstream crate can reach `kglite::graph::*` directly;
+// the `api` re-exports below still resolve (re-exporting a `pub` item out of a
+// `pub(crate)` module is legal). A CI grep (`scripts/check_api_chokepoint.sh`)
+// keeps the wrapper crates honest.
+pub(crate) mod graph;
 pub mod graphgen;
 #[cfg(feature = "okf")]
 pub mod okf;
@@ -125,6 +130,10 @@ pub mod api {
     /// iterator-returning methods), so consumers take `&impl GraphRead`,
     /// never `&dyn`. Lifted for cross-binding read access (roadmap Piece 1).
     pub use crate::graph::storage::GraphRead;
+    /// The temporal query context (`At` / `During` / `Today` / `All`) — the
+    /// as-of filter a binding's cursor carries for temporal-validity
+    /// auto-filtering. Lifted in roadmap Piece 4.
+    pub use crate::graph::TemporalContext;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
     pub use crate::graph::dir_graph::make_dir_graph_mut;
     // (Mutation reports → `api::mutation`; schema introspection /
@@ -305,19 +314,54 @@ pub mod api {
         };
     }
 
-    /// Graph I/O beyond `.kgl` load/save (those are in the api root):
-    /// format exporters (GraphML / GEXF / D3-JSON / CSV) and the
-    /// N-Triples (RDF) streaming loader + its progress-callback types.
-    /// Lifted in roadmap Piece 3 cleanup.
+    /// Graph I/O: `.kgl` load/save, format exporters (GraphML / GEXF /
+    /// D3-JSON / CSV), the N-Triples (RDF) streaming loader + progress
+    /// callbacks, embedding-vector file export/import, and streaming
+    /// disk subset export.
     pub mod io {
         pub use crate::graph::io::export::{to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml};
+        /// Embedding-vector file export / import.
+        pub use crate::graph::io::file::{
+            export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,
+            ImportStats,
+        };
         /// `.kgl` load / save (the canonical persistence format).
         pub use crate::graph::io::file::{
-            load_file, load_kgl_bytes, save_graph, write_kgl, write_kgl_to, write_kgl_with,
+            load_file, load_kgl_bytes, prepare_save, save_graph, write_kgl, write_kgl_to,
+            write_kgl_with,
         };
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
+        /// Streaming disk subset export (bounded-memory subgraph save).
+        pub use crate::graph::mutation::subgraph_streaming::{
+            pass_a_scan, pass_a_scan_to_file, save_subset, save_subset_streaming_disk, RankIndex,
+            SubsetSpec,
+        };
+    }
+
+    /// Storage backend configuration — the in-memory / mmap / disk backends
+    /// (`GraphBackend` + `DiskGraph` / `MappedGraph` constructors), the
+    /// per-type lookup, and the embedding store. CLAUDE.md designates
+    /// storage-backend configuration a direct-api concern; these let a
+    /// binding open / inspect a graph in a specific storage mode and manage
+    /// embeddings. Lifted in roadmap Piece 4 (the hard-seal gateway).
+    pub mod storage {
+        pub use crate::graph::schema::EmbeddingStore;
+        pub use crate::graph::storage::backend::GraphBackend;
+        pub use crate::graph::storage::disk::graph::DiskGraph;
+        pub use crate::graph::storage::lookups::TypeLookup;
+        pub use crate::graph::storage::MappedGraph;
+    }
+
+    /// Durable transactions — the write-ahead log (append / recover / replay)
+    /// and the write-capture recording layer behind a binding's `durable()`
+    /// feature. The in-process WAL mechanism (distinct from the checkpoint
+    /// save in `io`). Lifted in roadmap Piece 4.
+    pub mod durable {
+        pub use crate::graph::mutation::wal_replay::apply_frames;
+        pub use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
+        pub use crate::graph::wal::{recover, wal_path, Wal, WalFrame};
     }
 
     /// Code-tree — build a queryable graph from source files, map a path to
@@ -367,6 +411,15 @@ pub mod api {
         /// `session::ExecuteOptions::value_codecs`. See `value_codec` module
         /// docs for the safety model.
         pub use crate::graph::languages::cypher::value_codec::{CodecKind, StoredType, ValueCodec};
+        // The Cypher pipeline submodules — a binding implementing a native
+        // `cypher()` method (the wheel) reaches the ast / executor / parser /
+        // result internals to drive + post-process the pipeline. Exposed as
+        // the shared Cypher-pipeline surface (the same "expose the shared
+        // layer" posture as the query primitives in `api::fluent`). Lifted in
+        // roadmap Piece 4 (the hard seal).
+        pub use crate::graph::languages::cypher::optimize;
+        pub use crate::graph::languages::cypher::planner::schema_check::collect_unknown_pattern_warnings;
+        pub use crate::graph::languages::cypher::{ast, executor, parser, result};
     }
 
     /// Canonical query + transaction surface — single source of
