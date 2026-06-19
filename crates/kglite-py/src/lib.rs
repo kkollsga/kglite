@@ -83,7 +83,8 @@ pub mod api {
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
-    pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
+    pub use crate::graph::KnowledgeGraph;
+    pub use kglite_core::api::code_tree::{SourceLocation, SourceLookup};
     pub use kglite_core::api::introspection::compute_description;
     pub use kglite_core::api::introspection::compute_schema;
     pub use kglite_core::api::introspection::SchemaOverview;
@@ -252,7 +253,7 @@ fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
     use kglite_core::api::GraphRead;
     // `wal` stays a below-api reach (durable-transaction internals) —
     // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
-    use kglite_core::graph::wal;
+    use kglite_core::api::durable as wal;
 
     if kg.inner.graph.is_mapped() || kg.inner.graph.is_disk() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -271,7 +272,7 @@ fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
     // mutations are captured. Replaying before wrapping keeps the replay's
     // own GraphWrite calls out of the capture buffer.
     let dir = crate::graph::get_graph_mut(&mut kg.inner);
-    let max_lsn = kglite_core::graph::mutation::wal_replay::apply_frames(dir, &frames, 0)
+    let max_lsn = kglite_core::api::durable::apply_frames(dir, &frames, 0)
         .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
     KnowledgeGraph::wrap_backend_for_durability(dir);
 

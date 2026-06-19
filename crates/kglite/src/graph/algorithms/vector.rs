@@ -310,6 +310,11 @@ impl Scorer {
 /// Uses 4 independent accumulators per metric for instruction-level parallelism,
 /// with chunks_exact(8) for LLVM auto-vectorization (SSE2/AVX2/NEON).
 /// Returns similarity in [-1.0, 1.0].
+///
+/// Standalone SIMD util exercised by this module's tests; the live vector
+/// scoring path inlines its own distance math (`vector_score`), so this is
+/// not currently wired into production — kept (and tested) for reuse.
+#[allow(dead_code)]
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     // 4 independent accumulators break the loop-carried dependency chain,

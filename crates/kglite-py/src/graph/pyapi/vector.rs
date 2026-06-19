@@ -8,9 +8,8 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::io::file;
-use crate::graph::schema;
 use crate::graph::KnowledgeGraph;
+use kglite_core::api::io as file;
 use kglite_core::api::GraphRead;
 
 #[pymethods]
@@ -133,8 +132,8 @@ impl KnowledgeGraph {
 
         // Create or replace the EmbeddingStore
         let mut store = match metric {
-            Some(m) => schema::EmbeddingStore::with_metric(dim, m),
-            None => schema::EmbeddingStore::new(dim),
+            Some(m) => kglite_core::api::storage::EmbeddingStore::with_metric(dim, m),
+            None => kglite_core::api::storage::EmbeddingStore::new(dim),
         };
         store.data.reserve(entries.len() * dim);
         for (node_idx, vec) in &entries {
@@ -244,8 +243,8 @@ impl KnowledgeGraph {
             .embeddings
             .entry(store_key.clone())
             .or_insert_with(|| match metric {
-                Some(m) => schema::EmbeddingStore::with_metric(dim, m),
-                None => schema::EmbeddingStore::new(dim),
+                Some(m) => kglite_core::api::storage::EmbeddingStore::with_metric(dim, m),
+                None => kglite_core::api::storage::EmbeddingStore::new(dim),
             });
         for (node_idx, vec) in &entries {
             store.set_embedding(node_idx.index(), vec);
@@ -577,7 +576,7 @@ impl KnowledgeGraph {
             total_length: usize,
             max_length: usize,
             distinct: HashSet<String>,
-            store: Option<&'a schema::EmbeddingStore>,
+            store: Option<&'a kglite_core::api::storage::EmbeddingStore>,
         }
         let mut by_key: std::collections::BTreeMap<(String, String), Stats<'_>> =
             std::collections::BTreeMap::new();
@@ -1117,7 +1116,7 @@ impl KnowledgeGraph {
             if let Some(node) = self.inner.graph.node_weight(node_idx) {
                 match node.get_property(text_column).as_deref() {
                     Some(crate::datatypes::values::Value::String(s)) if !s.is_empty() => {
-                        let hash = schema::EmbeddingStore::text_hash(s);
+                        let hash = kglite_core::api::storage::EmbeddingStore::text_hash(s);
                         let has_emb = existing_store
                             .map(|st| st.get_embedding(node_idx.index()).is_some())
                             .unwrap_or(false);
@@ -1162,7 +1161,7 @@ impl KnowledgeGraph {
         // Clone existing store or create new — we'll merge new embeddings into it
         let mut store = match existing_store {
             Some(s) => s.clone(),
-            None => schema::EmbeddingStore::new(dimension),
+            None => kglite_core::api::storage::EmbeddingStore::new(dimension),
         };
         store.data.reserve(node_texts.len() * dimension);
 

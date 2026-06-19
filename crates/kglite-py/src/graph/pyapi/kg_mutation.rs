@@ -8,7 +8,6 @@
 use crate::datatypes::py_in;
 use crate::datatypes::values::{DataFrame, Value};
 use crate::graph::languages::cypher;
-use crate::graph::schema;
 use crate::graph::{
     get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
     parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
@@ -533,7 +532,7 @@ fn store_extracted_embeddings(
         } else {
             format!("{}_emb", emb_col)
         };
-        let mut store = schema::EmbeddingStore::new(dimension);
+        let mut store = kglite_core::api::storage::EmbeddingStore::new(dimension);
         store.data.reserve(pairs.len() * dimension);
         for (id_val, vec) in pairs {
             if vec.len() != dimension {
@@ -840,7 +839,9 @@ impl KnowledgeGraph {
                 "mapped" => {
                     // Mapped mode: switch the backend variant and force
                     // columnar property storage to spill to mmap on build.
-                    graph.graph = schema::GraphBackend::Mapped(schema::MappedGraph::new());
+                    graph.graph = kglite_core::api::storage::GraphBackend::Mapped(
+                        kglite_core::api::storage::MappedGraph::new(),
+                    );
                     graph.memory_limit = Some(0);
                 }
                 "disk" => {
@@ -851,14 +852,15 @@ impl KnowledgeGraph {
                         )
                     })?;
                     let data_dir = std::path::Path::new(dir);
-                    let dg = crate::graph::storage::disk::graph::DiskGraph::new_at_path(data_dir)
-                        .map_err(|e| {
-                        crate::error_py::kg_to_pyerr(crate::error::KgError::FileFormat {
-                            path: std::path::PathBuf::new(),
-                            message: format!("Failed to create disk graph at '{}': {}", dir, e),
-                        })
-                    })?;
-                    graph.graph = schema::GraphBackend::Disk(Box::new(dg));
+                    let dg = kglite_core::api::storage::DiskGraph::new_at_path(data_dir).map_err(
+                        |e| {
+                            crate::error_py::kg_to_pyerr(crate::error::KgError::FileFormat {
+                                path: std::path::PathBuf::new(),
+                                message: format!("Failed to create disk graph at '{}': {}", dir, e),
+                            })
+                        },
+                    )?;
+                    graph.graph = kglite_core::api::storage::GraphBackend::Disk(Box::new(dg));
                 }
                 other => {
                     return Err(crate::error_py::kg_to_pyerr(

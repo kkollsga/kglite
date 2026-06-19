@@ -58,7 +58,7 @@ impl KnowledgeGraph {
         // route there to the persistent mmap-backed PropertyIndex instead.
         let mut persistent_disk = false;
         let mut disk_count = 0usize;
-        if let crate::graph::storage::backend::GraphBackend::Disk(dg) = &graph.graph {
+        if let kglite_core::api::storage::GraphBackend::Disk(dg) = &graph.graph {
             match dg.build_property_index(node_type, property) {
                 Ok(n) => {
                     persistent_disk = true;
@@ -128,7 +128,7 @@ impl KnowledgeGraph {
     fn create_global_index(&mut self, py: Python<'_>, property: &str) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
         let count = match &graph.graph {
-            crate::graph::storage::backend::GraphBackend::Disk(dg) => {
+            kglite_core::api::storage::GraphBackend::Disk(dg) => {
                 dg.build_global_property_index(property).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
                         "Failed to build global property index for '{}': {}",

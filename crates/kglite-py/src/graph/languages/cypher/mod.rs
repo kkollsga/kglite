@@ -4,6 +4,6 @@
 //! `generate_explain_result` helper) and adds the PyO3-side
 //! `py_convert` helpers used by pyapi to convert Cypher results
 //! into Python objects.
-pub use kglite_core::graph::languages::cypher::*;
+pub use kglite_core::api::cypher::*;
 
 pub mod py_convert;
