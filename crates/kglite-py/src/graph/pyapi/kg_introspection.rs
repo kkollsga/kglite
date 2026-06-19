@@ -7,17 +7,15 @@
 
 use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
-use crate::graph::introspection::{
-    self,
-    reporting::{OperationReport, OperationReports},
-};
 use crate::graph::{
     compare_inner, extract_cypher_param, extract_detail_param, extract_fluent_param, get_graph_mut,
     parse_method_param, KnowledgeGraph, TemporalContext,
 };
 use kglite_core::api::fluent::StatResult;
+use kglite_core::api::introspection;
 use kglite_core::api::GraphRead;
 use kglite_core::api::{CowSelection, PlanStep};
+use kglite_core::api::{OperationReport, OperationReports};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{Bound, IntoPyObjectExt};
@@ -978,9 +976,7 @@ impl KnowledgeGraph {
         properties: &Bound<'_, PyDict>,
         keep_selection: Option<bool>,
     ) -> PyResult<Self> {
-        use crate::graph::mutation::maintain::{
-            add_properties as core_add_properties, PropertySpec,
-        };
+        use kglite_core::api::mutation::{add_properties as core_add_properties, PropertySpec};
 
         // Convert PyDict → HashMap<String, PropertySpec>
         let mut spec_map: HashMap<String, PropertySpec> = HashMap::new();
@@ -1644,7 +1640,7 @@ impl KnowledgeGraph {
         description: &str,
         path: Option<&str>,
     ) -> PyResult<String> {
-        crate::graph::introspection::bug_report::write_bug_report(
+        kglite_core::api::introspection::write_bug_report(
             query,
             result,
             expected,

@@ -83,14 +83,14 @@ pub mod api {
     #[cfg(feature = "fastembed")]
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
-    pub use crate::graph::introspection::describe::compute_description;
-    pub use crate::graph::introspection::schema_overview::compute_schema;
-    pub use crate::graph::introspection::SchemaOverview;
-    pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
     pub use crate::graph::{KnowledgeGraph, SourceLocation, SourceLookup};
+    pub use kglite_core::api::compute_description;
+    pub use kglite_core::api::compute_schema;
     pub use kglite_core::api::DirGraph;
+    pub use kglite_core::api::SchemaOverview;
     pub use kglite_core::api::{explore_markdown, ExploreOptions};
     pub use kglite_core::api::{load_file, save_graph};
+    pub use kglite_core::api::{ConnectionDetail, CypherDetail, FluentDetail};
 
     /// Cypher parser + planner + executor surface. Downstream Rust
     /// consumers (notably `kglite-mcp-server`) build their own

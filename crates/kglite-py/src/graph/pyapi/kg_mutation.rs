@@ -52,7 +52,7 @@ fn build_connection_df_from_pandas(
     columns: Option<&Bound<'_, PyList>>,
     skip_columns: Option<&Bound<'_, PyList>>,
     column_types: Option<&Bound<'_, PyDict>>,
-) -> PyResult<(DataFrame, Option<schema::TemporalConfig>)> {
+) -> PyResult<(DataFrame, Option<kglite_core::api::TemporalConfig>)> {
     let df_cols = data.getattr("columns")?;
     let all_columns: Vec<String> = df_cols.extract()?;
 
@@ -420,8 +420,8 @@ fn extract_embedding_pairs<'py>(
 
 struct ConvertedFrame {
     df: DataFrame,
-    spatial_cfg: Option<schema::SpatialConfig>,
-    temporal_cfg: Option<schema::TemporalConfig>,
+    spatial_cfg: Option<kglite_core::api::SpatialConfig>,
+    temporal_cfg: Option<kglite_core::api::TemporalConfig>,
 }
 
 fn convert_dataframe<'py>(
@@ -501,8 +501,8 @@ fn apply_node_batch(
 fn register_feature_configs(
     graph: &mut DirGraph,
     node_type: &str,
-    spatial_cfg: Option<schema::SpatialConfig>,
-    temporal_cfg: Option<schema::TemporalConfig>,
+    spatial_cfg: Option<kglite_core::api::SpatialConfig>,
+    temporal_cfg: Option<kglite_core::api::TemporalConfig>,
 ) {
     if let Some(cfg) = spatial_cfg {
         graph.spatial_configs.insert(node_type.to_string(), cfg);
