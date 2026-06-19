@@ -45,6 +45,32 @@ impl ResultState {
     }
 }
 
+/// Build the natural-JSON row-objects array for a result: one object
+/// per row keyed by column name, each cell via [`kglite_value_to_json`].
+/// Shared by [`kglite_cypher_result_rows_json`] and the batch-execute
+/// path in `session.rs`.
+pub(crate) fn rows_to_json_array(result: &CypherResult) -> Vec<serde_json::Value> {
+    let mut rows = Vec::with_capacity(result.rows.len());
+    for row in &result.rows {
+        let mut obj = serde_json::Map::with_capacity(result.columns.len());
+        for (idx, col) in result.columns.iter().enumerate() {
+            let cell = row.get(idx).unwrap_or(&Value::Null);
+            obj.insert(col.clone(), kglite_value_to_json(cell));
+        }
+        rows.push(serde_json::Value::Object(obj));
+    }
+    rows
+}
+
+/// Build a full `{"columns": [...], "rows": [{...}]}` JSON object for a
+/// result — the per-query element of a batch-execute result array.
+pub(crate) fn result_to_json_object(result: &CypherResult) -> serde_json::Value {
+    serde_json::json!({
+        "columns": result.columns,
+        "rows": rows_to_json_array(result),
+    })
+}
+
 /// Return the column names as a JSON array string:
 /// `["col1", "col2", ...]`.
 ///
@@ -89,19 +115,7 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
         return std::ptr::null();
     }
     let state = unsafe { ResultState::from_handle(result) };
-    let cypher_result = &state.inner;
-
-    // Build the row-objects array. Each row becomes a JSON object
-    // keyed by column name; cells go through serde_json on Value.
-    let mut rows = Vec::with_capacity(cypher_result.rows.len());
-    for row in &cypher_result.rows {
-        let mut obj = serde_json::Map::with_capacity(cypher_result.columns.len());
-        for (idx, col) in cypher_result.columns.iter().enumerate() {
-            let cell = row.get(idx).unwrap_or(&Value::Null);
-            obj.insert(col.clone(), kglite_value_to_json(cell));
-        }
-        rows.push(serde_json::Value::Object(obj));
-    }
+    let rows = rows_to_json_array(&state.inner);
     match serde_json::to_string(&rows) {
         Ok(s) => alloc_c_string(&s),
         Err(_) => std::ptr::null(),
