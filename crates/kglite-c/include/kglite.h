@@ -811,6 +811,31 @@ KgliteStatusCode kglite_graphgen_to_dir(uint64_t persons,
                                         const char **out_error_msg);
 
 /**
+ * Build a graph declaratively from a blueprint file + a directory of
+ * CSVs — the C-side handle on the wheel's `from_blueprint`. Loads the
+ * JSON/YAML blueprint at `blueprint_path`, builds into a fresh graph
+ * reading CSVs relative to `csv_dir`, and returns the populated graph.
+ *
+ * On success `out_graph` is set to a `KgliteGraph*` (free via
+ * [`kglite_graph_free`] or hand to [`kglite_session_new`](crate::kglite_session_new)),
+ * and `out_report_json` to an owned
+ * `{"nodes_by_type":{..},"edges_by_type":{..},"warnings":[..],"errors":[..],"provisional_purged":N}`
+ * string — free via [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Safety
+ *
+ * `blueprint_path` / `csv_dir` must be null-terminated UTF-8 paths;
+ * `out_graph` / `out_report_json` valid writable slots; `out_error_msg`
+ * null or a valid slot.
+ */
+
+KgliteStatusCode kglite_blueprint_build(const char *blueprint_path,
+                                        const char *csv_dir,
+                                        struct KgliteGraph **out_graph,
+                                        const char **out_report_json,
+                                        const char **out_error_msg);
+
+/**
  * Return the column names as a JSON array string:
  * `["col1", "col2", ...]`.
  *
