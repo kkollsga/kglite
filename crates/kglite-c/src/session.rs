@@ -10,7 +10,7 @@ use crate::result::{result_to_json_object, KgliteCypherResult, ResultState};
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::mutation::{add_edges_from_specs, EdgeSpec};
-use kglite::api::param::json_value_to_kglite_value;
+use kglite::api::param::{json_object_to_value_map, json_value_to_kglite_value};
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
 use std::collections::HashMap;
@@ -150,8 +150,7 @@ pub unsafe extern "C" fn kglite_session_execute_read(
 
     let session_state = unsafe { SessionState::from_handle(session) };
     let snapshot = session_state.inner.snapshot();
-    let mut opts = ExecuteOptions::eager(&params);
-    opts.embedder = session_state.embedder.clone();
+    let opts = session_state.make_opts(&params);
 
     match execute_read(&snapshot, query_str, &opts) {
         Ok(outcome) => {
@@ -217,8 +216,7 @@ pub unsafe extern "C" fn kglite_session_execute_read_opts(
 
     let session_state = unsafe { SessionState::from_handle(session) };
     let snapshot = session_state.inner.snapshot();
-    let mut opts = ExecuteOptions::eager(&params);
-    opts.embedder = session_state.embedder.clone();
+    let mut opts = session_state.make_opts(&params);
     if timeout_ms > 0 {
         opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
     }
@@ -290,8 +288,7 @@ pub unsafe extern "C" fn kglite_session_execute_mut(
     // borrow `&SessionState` here and rely on Session's internal
     // Mutex for the commit-swap.
     let session_state = unsafe { SessionState::from_handle(session) };
-    let mut opts = ExecuteOptions::eager(&params);
-    opts.embedder = session_state.embedder.clone();
+    let opts = session_state.make_opts(&params);
 
     // Mirror the bolt-server execute_in_tx pattern: begin →
     // working_mut → execute_mut → commit. The Transaction's
@@ -394,8 +391,7 @@ pub unsafe extern "C" fn kglite_session_execute_read_batch(
     let snapshot = session_state.inner.snapshot();
     let mut results = Vec::with_capacity(queries.len());
     for (query, params) in &queries {
-        let mut opts = ExecuteOptions::eager(params);
-        opts.embedder = session_state.embedder.clone();
+        let opts = session_state.make_opts(params);
         match execute_read(&snapshot, query, &opts) {
             Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
             Err(err) => {
@@ -457,8 +453,7 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
     let mut tx = session_state.inner.begin();
     let mut results = Vec::with_capacity(queries.len());
     for (query, params) in &queries {
-        let mut opts = ExecuteOptions::eager(params);
-        opts.embedder = session_state.embedder.clone();
+        let opts = session_state.make_opts(params);
         let exec = {
             let working = match tx.working_mut() {
                 Ok(w) => w,
@@ -608,6 +603,17 @@ pub unsafe extern "C" fn kglite_session_free(session: *mut KgliteSession) {
     unsafe { SessionState::free_handle(session) };
 }
 
+impl SessionState {
+    /// Build the per-call [`ExecuteOptions`] for this session — eager
+    /// defaults plus the session's embedder. Centralized so the read / mut /
+    /// batch paths can't drift on per-call option defaults.
+    fn make_opts<'a>(&self, params: &'a HashMap<String, Value>) -> ExecuteOptions<'a> {
+        let mut opts = ExecuteOptions::eager(params);
+        opts.embedder = self.embedder.clone();
+        opts
+    }
+}
+
 /// Parse a JSON-string params argument into a HashMap. Null /
 /// empty / "{}" → empty map. Any other shape (array, scalar,
 /// nested object value) maps via
@@ -630,12 +636,24 @@ fn parse_params_json(
         Err(_) => return Err(KgliteStatusCode::InvalidArgument),
     };
     match parsed {
-        serde_json::Value::Object(obj) => Ok(obj
-            .into_iter()
-            .map(|(k, v)| (k, json_value_to_kglite_value(&v)))
-            .collect()),
+        serde_json::Value::Object(obj) => Ok(json_object_to_value_map(&obj)),
         serde_json::Value::Null => Ok(HashMap::new()),
         _ => Err(KgliteStatusCode::InvalidArgument),
+    }
+}
+
+/// Read an optional JSON-object field (`params` / `props`) off a batch
+/// entry and build its `Value` map: absent / null → empty map; an object →
+/// the converted map; any other shape → `InvalidArgument`. Shared by the
+/// batch-query and edge-spec parsers so the two stay byte-identical.
+fn optional_object_map(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<HashMap<String, Value>, KgliteStatusCode> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
+        Some(serde_json::Value::Object(o)) => Ok(json_object_to_value_map(o)),
+        Some(_) => Err(KgliteStatusCode::InvalidArgument),
     }
 }
 
@@ -669,14 +687,7 @@ fn parse_batch_queries(queries_json: *const c_char) -> Result<Vec<BatchQuery>, K
             Some(q) => q.to_string(),
             None => return Err(KgliteStatusCode::InvalidArgument),
         };
-        let params = match obj.get("params") {
-            None | Some(serde_json::Value::Null) => HashMap::new(),
-            Some(serde_json::Value::Object(o)) => o
-                .iter()
-                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
-                .collect(),
-            Some(_) => return Err(KgliteStatusCode::InvalidArgument),
-        };
+        let params = optional_object_map(obj, "params")?;
         out.push((query, params));
     }
     Ok(out)
@@ -716,14 +727,7 @@ fn parse_edge_specs(edges_json: *const c_char) -> Result<Vec<EdgeSpec>, KgliteSt
                 .map(json_value_to_kglite_value)
                 .ok_or(KgliteStatusCode::InvalidArgument)
         };
-        let properties = match obj.get("props") {
-            None | Some(serde_json::Value::Null) => HashMap::new(),
-            Some(serde_json::Value::Object(o)) => o
-                .iter()
-                .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
-                .collect(),
-            Some(_) => return Err(KgliteStatusCode::InvalidArgument),
-        };
+        let properties = optional_object_map(obj, "props")?;
         out.push(EdgeSpec {
             source_type: req_str("src_type")?,
             source_id: req_id("src_id")?,

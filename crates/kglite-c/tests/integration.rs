@@ -9,14 +9,14 @@
 //! semantics, ownership transfer, JSON shape, etc.).
 
 use kglite_c::{
-    kglite_abi_version, kglite_compute_schema_json, kglite_create_edges_batch,
-    kglite_cypher_result_columns_json, kglite_cypher_result_free, kglite_cypher_result_row_count,
-    kglite_cypher_result_rows_json, kglite_free_bytes, kglite_free_string, kglite_graph_free,
-    kglite_graph_from_bytes, kglite_graph_new, kglite_graph_to_bytes, kglite_load_file,
-    kglite_save_graph_durable, kglite_session_execute_mut, kglite_session_execute_mut_batch,
-    kglite_session_execute_read, kglite_session_execute_read_batch,
-    kglite_session_execute_read_opts, kglite_session_free, kglite_session_new, KgliteCypherResult,
-    KgliteGraph, KgliteSession, KgliteStatusCode,
+    kglite_abi_version, kglite_blueprint_build, kglite_compute_schema_json,
+    kglite_create_edges_batch, kglite_cypher_result_columns_json, kglite_cypher_result_free,
+    kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_bytes,
+    kglite_free_string, kglite_graph_free, kglite_graph_from_bytes, kglite_graph_new,
+    kglite_graph_to_bytes, kglite_load_file, kglite_save_graph_durable, kglite_session_execute_mut,
+    kglite_session_execute_mut_batch, kglite_session_execute_read,
+    kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
+    kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
 };
 
 #[cfg(feature = "fastembed")]
@@ -666,4 +666,35 @@ fn sodir_fetch_empty_datasets_succeeds_with_empty_report() {
     assert!(parsed["preprocess"].is_object());
     unsafe { kglite_free_string(out_report) };
     let _ = fs::remove_dir_all(&workdir_path);
+}
+
+/// Regression: a failing `kglite_blueprint_build` must null BOTH out-params
+/// (graph + report), so a caller that frees the report on error doesn't free
+/// an uninitialized/wild pointer (segfault / heap corruption).
+#[test]
+fn blueprint_build_error_clears_out_report_json() {
+    let bad_path = CString::new("/nonexistent/does-not-exist.yaml").unwrap();
+    let dir = CString::new("/tmp").unwrap();
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    // Sentinel non-null: proves the callee actively clears the slot.
+    let mut report: *const c_char = std::ptr::NonNull::<c_char>::dangling().as_ptr();
+    let mut err_msg: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_blueprint_build(
+            bad_path.as_ptr(),
+            dir.as_ptr(),
+            &mut graph as *mut _,
+            &mut report as *mut _,
+            &mut err_msg as *mut _,
+        )
+    };
+    assert_ne!(rc, KgliteStatusCode::Ok, "bad blueprint path must fail");
+    assert!(graph.is_null(), "out_graph must be null on error");
+    assert!(
+        report.is_null(),
+        "out_report_json must be nulled on error (else freeing it is UB)"
+    );
+    if !err_msg.is_null() {
+        unsafe { kglite_free_string(err_msg) };
+    }
 }
