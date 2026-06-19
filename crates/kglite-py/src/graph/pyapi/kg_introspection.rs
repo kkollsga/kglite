@@ -7,7 +7,6 @@
 
 use crate::datatypes::values::Value;
 use crate::datatypes::{py_in, py_out};
-use crate::graph::core::calculations::StatResult;
 use crate::graph::introspection::{
     self,
     reporting::{OperationReport, OperationReports},
@@ -16,6 +15,7 @@ use crate::graph::{
     compare_inner, extract_cypher_param, extract_detail_param, extract_fluent_param, get_graph_mut,
     parse_method_param, KnowledgeGraph, TemporalContext,
 };
+use kglite_core::api::fluent::StatResult;
 use kglite_core::api::GraphRead;
 use kglite_core::api::{CowSelection, PlanStep};
 use pyo3::prelude::*;
@@ -414,7 +414,7 @@ impl KnowledgeGraph {
         include_node_properties: Option<bool>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let connections = crate::graph::core::data_retrieval::get_connections(
+        let connections = kglite_core::api::fluent::get_connections(
             &self.inner,
             &self.cursor.selection,
             None,
@@ -438,7 +438,7 @@ impl KnowledgeGraph {
         indices: Option<Vec<usize>>,
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let values = crate::graph::core::data_retrieval::get_property_values(
+        let values = kglite_core::api::fluent::get_property_values(
             &self.inner,
             &self.cursor.selection,
             None,
@@ -486,7 +486,7 @@ impl KnowledgeGraph {
         flatten_single_parent: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let property_refs: Vec<&str> = properties.iter().map(|s| s.as_str()).collect();
-        let values = crate::graph::core::data_retrieval::get_property_values(
+        let values = kglite_core::api::fluent::get_property_values(
             &self.inner,
             &self.cursor.selection,
             None,
@@ -509,7 +509,7 @@ impl KnowledgeGraph {
         max_length: Option<usize>,
         keep_selection: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let values = crate::graph::core::data_retrieval::get_unique_values(
+        let values = kglite_core::api::fluent::get_unique_values(
             &self.inner,
             &self.cursor.selection,
             &property,
@@ -519,9 +519,8 @@ impl KnowledgeGraph {
         );
 
         if let Some(target_property) = store_as {
-            let nodes = crate::graph::core::data_retrieval::format_unique_values_for_storage(
-                &values, max_length,
-            );
+            let nodes =
+                kglite_core::api::fluent::format_unique_values_for_storage(&values, max_length);
 
             let graph = get_graph_mut(&mut self.inner);
 
@@ -683,7 +682,7 @@ impl KnowledgeGraph {
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| {
-                    crate::graph::core::traversal::TemporalEdgeFilter::At(configs.clone(), date)
+                    kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), date)
                 })
         } else if let Some((start_str, end_str)) = &during {
             let (start, _) = kglite_core::api::timeseries::parse_date_query(start_str).map_err(
@@ -700,7 +699,7 @@ impl KnowledgeGraph {
                 .temporal_edge_configs
                 .get(&connection_type)
                 .map(|configs| {
-                    crate::graph::core::traversal::TemporalEdgeFilter::During(
+                    kglite_core::api::fluent::TemporalEdgeFilter::During(
                         configs.clone(),
                         start,
                         end,
@@ -716,24 +715,21 @@ impl KnowledgeGraph {
                     .get(&connection_type)
                     .map(|configs| {
                         let today = chrono::Local::now().date_naive();
-                        crate::graph::core::traversal::TemporalEdgeFilter::At(
-                            configs.clone(),
-                            today,
-                        )
+                        kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), today)
                     }),
                 TemporalContext::At(d) => self
                     .inner
                     .temporal_edge_configs
                     .get(&connection_type)
                     .map(|configs| {
-                        crate::graph::core::traversal::TemporalEdgeFilter::At(configs.clone(), *d)
+                        kglite_core::api::fluent::TemporalEdgeFilter::At(configs.clone(), *d)
                     }),
                 TemporalContext::During(start, end) => self
                     .inner
                     .temporal_edge_configs
                     .get(&connection_type)
                     .map(|configs| {
-                        crate::graph::core::traversal::TemporalEdgeFilter::During(
+                        kglite_core::api::fluent::TemporalEdgeFilter::During(
                             configs.clone(),
                             *start,
                             *end,
@@ -742,7 +738,7 @@ impl KnowledgeGraph {
             }
         };
 
-        crate::graph::core::traversal::make_traversal(
+        kglite_core::api::fluent::make_traversal(
             &self.inner,
             &mut new_kg.cursor.selection,
             connection_type.clone(),
@@ -1074,7 +1070,7 @@ impl KnowledgeGraph {
                 None => None,
             };
 
-            crate::graph::core::filtering::filter_nodes(
+            kglite_core::api::fluent::filter_nodes(
                 &self.inner,
                 &mut filtered_kg.cursor.selection,
                 conditions,
@@ -1087,7 +1083,7 @@ impl KnowledgeGraph {
         } else if let Some(spec) = sort {
             let sort_fields = py_in::parse_sort_fields(spec, None)?;
 
-            crate::graph::core::filtering::sort_nodes(
+            kglite_core::api::fluent::sort_nodes(
                 &self.inner,
                 &mut filtered_kg.cursor.selection,
                 sort_fields,
@@ -1097,7 +1093,7 @@ impl KnowledgeGraph {
             })?;
 
             if let Some(max) = limit {
-                crate::graph::core::filtering::limit_nodes_per_group(
+                kglite_core::api::fluent::limit_nodes_per_group(
                     &self.inner,
                     &mut filtered_kg.cursor.selection,
                     max,
@@ -1107,7 +1103,7 @@ impl KnowledgeGraph {
                 })?;
             }
         } else if let Some(max) = limit {
-            crate::graph::core::filtering::limit_nodes_per_group(
+            kglite_core::api::fluent::limit_nodes_per_group(
                 &self.inner,
                 &mut filtered_kg.cursor.selection,
                 max,
@@ -1118,7 +1114,7 @@ impl KnowledgeGraph {
         }
 
         // Generate the property lists with titles already included
-        let property_groups = crate::graph::core::traversal::get_children_properties(
+        let property_groups = kglite_core::api::fluent::get_children_properties(
             &filtered_kg.inner,
             &filtered_kg.cursor.selection,
             property_name,
@@ -1128,13 +1124,13 @@ impl KnowledgeGraph {
         if store_as.is_none() {
             // Format for dictionary display
             let dict_pairs =
-                crate::graph::core::traversal::format_for_dictionary(&property_groups, max_length);
+                kglite_core::api::fluent::format_for_dictionary(&property_groups, max_length);
 
             return Python::attach(|py| py_out::string_pairs_to_pydict(py, &dict_pairs));
         }
 
         // Format for storage
-        let nodes = crate::graph::core::traversal::format_for_storage(&property_groups, max_length);
+        let nodes = kglite_core::api::fluent::format_for_storage(&property_groups, max_length);
 
         let graph = get_graph_mut(&mut self.inner);
 
@@ -1178,7 +1174,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
-            let nodes = crate::graph::core::statistics::collect_selected_nodes(
+            let nodes = kglite_core::api::fluent::collect_selected_nodes(
                 &self.cursor.selection,
                 level_index,
             );
@@ -1238,12 +1234,10 @@ impl KnowledgeGraph {
             });
         }
 
-        let pairs = crate::graph::core::statistics::get_parent_child_pairs(
-            &self.cursor.selection,
-            level_index,
-        );
+        let pairs =
+            kglite_core::api::fluent::get_parent_child_pairs(&self.cursor.selection, level_index);
         let stats =
-            crate::graph::core::statistics::calculate_property_stats(&self.inner, &pairs, property);
+            kglite_core::api::fluent::calculate_property_stats(&self.inner, &pairs, property);
         py_out::convert_stats_for_python(stats)
     }
 
@@ -1260,7 +1254,7 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
-            let process_result = crate::graph::core::calculations::process_equation(
+            let process_result = kglite_core::api::fluent::process_equation(
                 graph,
                 &self.cursor.selection,
                 expression,
@@ -1270,7 +1264,7 @@ impl KnowledgeGraph {
             );
 
             match process_result {
-                Ok(crate::graph::core::calculations::EvaluationResult::Stored(report)) => {
+                Ok(kglite_core::api::fluent::EvaluationResult::Stored(report)) => {
                     let mut new_kg = KnowledgeGraph {
                         inner: self.inner.clone(),
                         cursor: crate::graph::CursorState {
@@ -1308,7 +1302,7 @@ impl KnowledgeGraph {
             }
         } else {
             // Just computing without storing - no need to modify graph
-            let process_result = crate::graph::core::calculations::process_equation(
+            let process_result = kglite_core::api::fluent::process_equation(
                 &mut (*self.inner).clone(), // Create a temporary clone just for calculation
                 &self.cursor.selection,
                 expression,
@@ -1319,7 +1313,7 @@ impl KnowledgeGraph {
 
             // Handle regular errors with descriptive messages
             match process_result {
-                Ok(crate::graph::core::calculations::EvaluationResult::Computed(results)) => {
+                Ok(kglite_core::api::fluent::EvaluationResult::Computed(results)) => {
                     // Check for errors
                     let error_count = results.iter().filter(|r| r.error_msg.is_some()).count();
                     if error_count == results.len() && !results.is_empty() {
@@ -1378,7 +1372,7 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by property: count nodes grouped by a property value
         if let Some(property) = group_by {
-            let nodes = crate::graph::core::statistics::collect_selected_nodes(
+            let nodes = kglite_core::api::fluent::collect_selected_nodes(
                 &self.cursor.selection,
                 level_index,
             );
@@ -1428,7 +1422,7 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
-            let result = match crate::graph::core::calculations::store_count_results(
+            let result = match kglite_core::api::fluent::store_count_results(
                 graph,
                 &self.cursor.selection,
                 level_index,
@@ -1463,7 +1457,7 @@ impl KnowledgeGraph {
             Python::attach(|py| Ok(Py::new(py, new_kg)?.into_any()))
         } else if use_grouping {
             // Return counts grouped by parent
-            let counts = crate::graph::core::calculations::count_nodes_by_parent(
+            let counts = kglite_core::api::fluent::count_nodes_by_parent(
                 &self.inner,
                 &self.cursor.selection,
                 level_index,
@@ -1471,10 +1465,8 @@ impl KnowledgeGraph {
             py_out::convert_computation_results_for_python(counts)
         } else {
             // Simple flat count
-            let count = crate::graph::core::calculations::count_nodes_in_level(
-                &self.cursor.selection,
-                level_index,
-            );
+            let count =
+                kglite_core::api::fluent::count_nodes_in_level(&self.cursor.selection, level_index);
             Python::attach(|py| count.into_py_any(py))
         }
     }

@@ -50,8 +50,11 @@ count_reaches() {
 # History: 253 (Piece 1) -> 153 (Piece 2: algorithms, bulk mutation +
 # reports, timeseries, GraphRead, InternedKey lifted) -> 137 (Piece 3a/3b:
 # Selection data model + Selection-coupled capabilities — vector_search,
-# create_connections, set_ops, subgraph, infer_selection_node_type).
-WHEEL_BASELINE=137
+# create_connections, set_ops, subgraph, infer_selection_node_type)
+# -> 85 (Piece 3c: the shared selection-based query-primitive layer
+# (filtering/traversal/calculations/statistics/data_retrieval/
+# pattern_matching/value_operations) exposed via api::fluent).
+WHEEL_BASELINE=85
 
 fail=0
 

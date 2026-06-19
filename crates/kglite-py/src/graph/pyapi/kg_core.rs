@@ -1374,13 +1374,12 @@ impl KnowledgeGraph {
         max_matches: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         // Parse the pattern
-        let parsed = crate::graph::core::pattern_matching::parse_pattern(pattern).map_err(|e| {
+        let parsed = kglite_core::api::fluent::parse_pattern(pattern).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Pattern syntax error: {}", e))
         })?;
 
         // Execute the pattern
-        let executor =
-            crate::graph::core::pattern_matching::PatternExecutor::new(&self.inner, max_matches);
+        let executor = kglite_core::api::fluent::PatternExecutor::new(&self.inner, max_matches);
         let matches = executor.execute(&parsed).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Pattern execution error: {}",
