@@ -301,8 +301,7 @@ pub unsafe extern "C" fn kglite_graphgen_to_dir(
     };
     match graphgen(&cfg, Path::new(dir)) {
         Ok(stats) => {
-            let json =
-                serde_json::json!({"nodes": stats.nodes, "edges": stats.edges}).to_string();
+            let json = serde_json::json!({"nodes": stats.nodes, "edges": stats.edges}).to_string();
             unsafe {
                 *out_stats_json = alloc_c_string(&json);
             }
@@ -351,7 +350,10 @@ pub unsafe extern "C" fn kglite_blueprint_build(
     out_report_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if blueprint_path.is_null() || csv_dir.is_null() || out_graph.is_null() || out_report_json.is_null()
+    if blueprint_path.is_null()
+        || csv_dir.is_null()
+        || out_graph.is_null()
+        || out_report_json.is_null()
     {
         return KgliteStatusCode::NullPointer;
     }
@@ -526,7 +528,7 @@ pub unsafe extern "C" fn kglite_free_bytes(buf: *mut u8, len: usize) {
     if buf.is_null() {
         return;
     }
-    let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(buf, len)) };
+    let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(buf, len)) };
 }
 
 /// Load a graph from an in-memory `.kgl` byte buffer — the inverse of

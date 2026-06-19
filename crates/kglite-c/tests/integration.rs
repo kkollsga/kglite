@@ -9,14 +9,14 @@
 //! semantics, ownership transfer, JSON shape, etc.).
 
 use kglite_c::{
-    kglite_abi_version, kglite_create_edges_batch, kglite_cypher_result_columns_json,
-    kglite_cypher_result_free, kglite_cypher_result_row_count, kglite_cypher_result_rows_json,
-    kglite_compute_schema_json, kglite_free_bytes, kglite_free_string, kglite_graph_from_bytes,
-    kglite_graph_free, kglite_graph_new, kglite_graph_to_bytes, kglite_load_file,
-    kglite_save_graph_durable,
-    kglite_session_execute_mut, kglite_session_execute_mut_batch, kglite_session_execute_read,
-    kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
-    kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
+    kglite_abi_version, kglite_compute_schema_json, kglite_create_edges_batch,
+    kglite_cypher_result_columns_json, kglite_cypher_result_free, kglite_cypher_result_row_count,
+    kglite_cypher_result_rows_json, kglite_free_bytes, kglite_free_string, kglite_graph_free,
+    kglite_graph_from_bytes, kglite_graph_new, kglite_graph_to_bytes, kglite_load_file,
+    kglite_save_graph_durable, kglite_session_execute_mut, kglite_session_execute_mut_batch,
+    kglite_session_execute_read, kglite_session_execute_read_batch,
+    kglite_session_execute_read_opts, kglite_session_free, kglite_session_new, KgliteCypherResult,
+    KgliteGraph, KgliteSession, KgliteStatusCode,
 };
 
 #[cfg(feature = "fastembed")]
@@ -249,9 +249,8 @@ fn execute_batch_read_and_mut() {
     assert_eq!(rc, KgliteStatusCode::Ok);
 
     // Two creates in one atomic transaction.
-    let muts =
-        CString::new(r#"[{"query":"CREATE (:T {id: 1})"},{"query":"CREATE (:T {id: 2})"}]"#)
-            .unwrap();
+    let muts = CString::new(r#"[{"query":"CREATE (:T {id: 1})"},{"query":"CREATE (:T {id: 2})"}]"#)
+        .unwrap();
     let mut out: *const c_char = std::ptr::null();
     let mut err: *const c_char = std::ptr::null();
     let rc = unsafe {
@@ -488,7 +487,12 @@ fn graph_bytes_round_trip() {
     let mut len: usize = 0;
     let mut err: *const c_char = std::ptr::null();
     let rc = unsafe {
-        kglite_graph_to_bytes(graph, &mut buf as *mut _, &mut len as *mut _, &mut err as *mut _)
+        kglite_graph_to_bytes(
+            graph,
+            &mut buf as *mut _,
+            &mut len as *mut _,
+            &mut err as *mut _,
+        )
     };
     assert_eq!(rc, KgliteStatusCode::Ok);
     assert!(!buf.is_null() && len > 0);
@@ -519,7 +523,10 @@ fn graph_bytes_round_trip() {
     let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
     let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
     let parsed: serde_json::Value = serde_json::from_str(rows).unwrap();
-    assert!(parsed[0]["n"].as_u64().unwrap() > 0, "round-tripped graph has nodes");
+    assert!(
+        parsed[0]["n"].as_u64().unwrap() > 0,
+        "round-tripped graph has nodes"
+    );
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
@@ -544,8 +551,7 @@ fn save_graph_durable_round_trips() {
     // Reloads cleanly.
     let mut graph2: *mut KgliteGraph = std::ptr::null_mut();
     let mut err: *const c_char = std::ptr::null();
-    let rc =
-        unsafe { kglite_load_file(tmp_c.as_ptr(), &mut graph2 as *mut _, &mut err as *mut _) };
+    let rc = unsafe { kglite_load_file(tmp_c.as_ptr(), &mut graph2 as *mut _, &mut err as *mut _) };
     assert_eq!(rc, KgliteStatusCode::Ok);
     assert!(!graph2.is_null());
     unsafe { kglite_graph_free(graph2) };
@@ -561,8 +567,7 @@ fn compute_schema_json_describes_graph() {
 
     let mut out: *const c_char = std::ptr::null();
     let mut err: *const c_char = std::ptr::null();
-    let rc =
-        unsafe { kglite_compute_schema_json(graph, &mut out as *mut _, &mut err as *mut _) };
+    let rc = unsafe { kglite_compute_schema_json(graph, &mut out as *mut _, &mut err as *mut _) };
     assert_eq!(rc, KgliteStatusCode::Ok);
     assert!(!out.is_null());
     let parsed: serde_json::Value =
