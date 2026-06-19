@@ -784,6 +784,33 @@ KgliteStatusCode kglite_save_graph(struct KgliteGraph *graph,
  void kglite_graph_free(struct KgliteGraph *graph);
 
 /**
+ * Generate a synthetic benchmark/demo graph as CSVs + a manifest under
+ * `out_dir`, in bounded memory. Load the result with [`kglite_load_file`]
+ * pointed at `out_dir` — the C-side handle on `kglite.graphgen(...)`, the
+ * "hello, query a graph" data source for a fresh binding.
+ *
+ * `zipf` != 0 uses a Zipf degree distribution (high-degree hubs) with
+ * exponent `zipf_exp`; `zipf` == 0 uses uniform degree.
+ *
+ * On success `out_stats_json` is set to an owned `{"nodes": N, "edges": M}`
+ * string — free via [`kglite_free_string`](crate::kglite_free_string).
+ *
+ * # Safety
+ *
+ * `out_dir` must be a null-terminated UTF-8 path; `out_stats_json` a valid
+ * writable `*const c_char` slot; `out_error_msg` null or a valid slot.
+ */
+
+KgliteStatusCode kglite_graphgen_to_dir(uint64_t persons,
+                                        uint64_t knows_per,
+                                        uint64_t seed,
+                                        uint8_t zipf,
+                                        double zipf_exp,
+                                        const char *out_dir,
+                                        const char **out_stats_json,
+                                        const char **out_error_msg);
+
+/**
  * Return the column names as a JSON array string:
  * `["col1", "col2", ...]`.
  *

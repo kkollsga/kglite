@@ -8,8 +8,9 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
-use kglite::api::{load_file, save_graph, DirGraph};
+use kglite::api::{graphgen, load_file, save_graph, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Opaque handle for a knowledge graph. The C-side caller only
@@ -254,6 +255,74 @@ pub unsafe extern "C" fn kglite_graph_free(graph: *mut KgliteGraph) {
     unsafe { GraphState::free_handle(graph) };
 }
 
+/// Generate a synthetic benchmark/demo graph as CSVs + a manifest under
+/// `out_dir`, in bounded memory. Load the result with [`kglite_load_file`]
+/// pointed at `out_dir` — the C-side handle on `kglite.graphgen(...)`, the
+/// "hello, query a graph" data source for a fresh binding.
+///
+/// `zipf` != 0 uses a Zipf degree distribution (high-degree hubs) with
+/// exponent `zipf_exp`; `zipf` == 0 uses uniform degree.
+///
+/// On success `out_stats_json` is set to an owned `{"nodes": N, "edges": M}`
+/// string — free via [`kglite_free_string`](crate::kglite_free_string).
+///
+/// # Safety
+///
+/// `out_dir` must be a null-terminated UTF-8 path; `out_stats_json` a valid
+/// writable `*const c_char` slot; `out_error_msg` null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_graphgen_to_dir(
+    persons: u64,
+    knows_per: u64,
+    seed: u64,
+    zipf: u8,
+    zipf_exp: f64,
+    out_dir: *const c_char,
+    out_stats_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if out_dir.is_null() || out_stats_json.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let dir = match unsafe { CStr::from_ptr(out_dir) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let cfg = GraphGenConfig {
+        persons,
+        knows_per,
+        seed,
+        zipf: zipf != 0,
+        zipf_exp,
+    };
+    match graphgen(&cfg, Path::new(dir)) {
+        Ok(stats) => {
+            let json =
+                serde_json::json!({"nodes": stats.nodes, "edges": stats.edges}).to_string();
+            unsafe {
+                *out_stats_json = alloc_c_string(&json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(e) => {
+            unsafe {
+                *out_stats_json = std::ptr::null();
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&e.to_string());
+                }
+            }
+            KgliteStatusCode::FileIo
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +360,34 @@ mod tests {
         let g = kglite_graph_new();
         assert!(!g.is_null());
         unsafe { kglite_graph_free(g) };
+    }
+
+    #[test]
+    fn graphgen_writes_stats() {
+        let dir = std::env::temp_dir().join("kglite_c_graphgen_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_c = CString::new(dir.to_str().unwrap()).unwrap();
+        let mut stats: *const c_char = std::ptr::null();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_graphgen_to_dir(
+                50,
+                3,
+                42,
+                0,
+                1.2,
+                dir_c.as_ptr(),
+                &mut stats as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::Ok);
+        assert!(!stats.is_null());
+        let s = unsafe { CStr::from_ptr(stats).to_str().unwrap() };
+        let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
+        assert!(parsed["nodes"].as_u64().unwrap() > 0);
+        assert!(parsed["edges"].as_u64().unwrap() > 0);
+        unsafe { crate::kglite_free_string(stats) };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
