@@ -10,8 +10,8 @@ use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::{
-    compute_schema, graphgen, load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with,
-    DirGraph, GraphGenConfig,
+    compute_schema, graphgen, load_file, load_kgl_bytes, save_graph, schema_overview_to_json,
+    write_kgl_to, write_kgl_with, DirGraph, GraphGenConfig,
 };
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -379,6 +379,9 @@ pub unsafe extern "C" fn kglite_blueprint_build(
         Err(e) => {
             unsafe {
                 *out_graph = std::ptr::null_mut();
+                // Clear the out-report too, so a caller that frees both
+                // out-params on failure doesn't free an uninitialized pointer.
+                *out_report_json = std::ptr::null();
             }
             set_err(out_error_msg, &e);
             return KgliteStatusCode::FileFormat;
@@ -390,6 +393,9 @@ pub unsafe extern "C" fn kglite_blueprint_build(
         Err(e) => {
             unsafe {
                 *out_graph = std::ptr::null_mut();
+                // Clear the out-report too, so a caller that frees both
+                // out-params on failure doesn't free an uninitialized pointer.
+                *out_report_json = std::ptr::null();
             }
             set_err(out_error_msg, &e);
             return KgliteStatusCode::InvalidArgument;
@@ -600,38 +606,9 @@ pub unsafe extern "C" fn kglite_compute_schema_json(
     }
     let state = unsafe { GraphState::from_handle_mut(graph) };
     let schema = compute_schema(state.inner.as_ref());
-    let node_types: Vec<serde_json::Value> = schema
-        .node_types
-        .iter()
-        .map(|(name, ov)| {
-            serde_json::json!({
-                "type": name,
-                "count": ov.count,
-                "properties": ov.properties,
-            })
-        })
-        .collect();
-    let connection_types: Vec<serde_json::Value> = schema
-        .connection_types
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "type": c.connection_type,
-                "count": c.count,
-                "source_types": c.source_types,
-                "target_types": c.target_types,
-                "property_names": c.property_names,
-            })
-        })
-        .collect();
-    let json = serde_json::json!({
-        "node_types": node_types,
-        "connection_types": connection_types,
-        "indexes": schema.indexes,
-        "node_count": schema.node_count,
-        "edge_count": schema.edge_count,
-    })
-    .to_string();
+    // Single source of truth for the schema JSON shape (kglite::api) — no
+    // per-binding hand-walk, so the document can't drift between bindings.
+    let json = schema_overview_to_json(&schema).to_string();
     unsafe {
         *out_json = alloc_c_string(&json);
     }
