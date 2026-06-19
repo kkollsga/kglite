@@ -132,6 +132,11 @@ pub mod api {
         ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
     };
     pub use crate::graph::introspection::schema_overview::compute_schema;
+    /// Canonical `SchemaOverview` → JSON serializer — the single source of
+    /// truth for the agent-facing schema document, so the shape can't drift
+    /// across JSON bindings (the C ABI uses it directly). Lifted in the
+    /// api-sealing review follow-up.
+    pub use crate::graph::introspection::schema_overview_to_json;
     pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
     pub use crate::graph::io::file::{
@@ -147,7 +152,9 @@ pub mod api {
     /// params) and `kglite_value_to_json` (outbound result cells, in
     /// natural untagged JSON).
     pub mod param {
-        pub use crate::param::{json_value_to_kglite_value, kglite_value_to_json};
+        pub use crate::param::{
+            json_object_to_value_map, json_value_to_kglite_value, kglite_value_to_json,
+        };
     }
 
     /// Bulk graph construction + maintenance. `add_edges_from_specs` is

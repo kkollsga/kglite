@@ -56,6 +56,45 @@ pub struct SchemaOverview {
     pub edge_count: usize,
 }
 
+/// Serialize a [`SchemaOverview`] to its canonical JSON shape — the single
+/// source of truth for the agent-facing schema document. Every JSON binding
+/// (the C ABI's `kglite_compute_schema_json`, future REST/gRPC) renders the
+/// schema through this one function so the field names + shape can't drift
+/// between bindings. Re-exported as `kglite::api::schema_overview_to_json`.
+pub fn schema_overview_to_json(schema: &SchemaOverview) -> serde_json::Value {
+    let node_types: Vec<serde_json::Value> = schema
+        .node_types
+        .iter()
+        .map(|(name, ov)| {
+            serde_json::json!({
+                "type": name,
+                "count": ov.count,
+                "properties": ov.properties,
+            })
+        })
+        .collect();
+    let connection_types: Vec<serde_json::Value> = schema
+        .connection_types
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "type": c.connection_type,
+                "count": c.count,
+                "source_types": c.source_types,
+                "target_types": c.target_types,
+                "property_names": c.property_names,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "node_types": node_types,
+        "connection_types": connection_types,
+        "indexes": schema.indexes,
+        "node_count": schema.node_count,
+        "edge_count": schema.edge_count,
+    })
+}
+
 /// Per-property statistics: data type, non-null count, unique count, and optional value list.
 pub struct PropertyStatInfo {
     pub property_name: String,

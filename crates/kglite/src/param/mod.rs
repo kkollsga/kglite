@@ -15,6 +15,19 @@
 //! dispatch each time.
 
 use crate::datatypes::values::Value;
+use std::collections::HashMap;
+
+/// Convert a JSON object into a `HashMap<String, Value>` (each value via
+/// [`json_value_to_kglite_value`]). The canonical builder for a Cypher
+/// **parameter map** from a JSON object — bindings parsing a params /
+/// props object share this instead of re-implementing the per-entry map.
+pub fn json_object_to_value_map(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, Value> {
+    map.iter()
+        .map(|(k, v)| (k.clone(), json_value_to_kglite_value(v)))
+        .collect()
+}
 
 /// Convert a JSON value to a Cypher `Value`. Scalars map directly;
 /// arrays and objects map recursively to `Value::List` / `Value::Map`.
@@ -22,12 +35,19 @@ use crate::datatypes::values::Value;
 /// Conventions:
 /// - `null` → `Value::Null`
 /// - `true` / `false` → `Value::Boolean`
-/// - integer JSON number → `Value::Int64`
+/// - integer JSON number in `i64` range → `Value::Int64`
 /// - non-integer JSON number → `Value::Float64`
-/// - JSON number that fits neither → `Value::Null`
 /// - JSON string → `Value::String`
 /// - JSON array → `Value::List` (recursing element-wise)
 /// - JSON object → `Value::Map` (recursing value-wise)
+///
+/// **Integer range limitation:** `Value` has no unsigned 64-bit variant
+/// (only `Int64` / `Float64`), so an integer in `(i64::MAX, u64::MAX]` has
+/// no exact representation and falls through to a lossy `Value::Float64`.
+/// This is consistent across the codebase (every numeric path shares the
+/// same `Value` enum), so equal inputs still compare equal; an exact fix
+/// would require a `Value::UInt64` variant (a `.kgl`-format change). In
+/// practice 63-bit ids (e.g. Snowflake) fit `i64` and are unaffected.
 ///
 /// Agents/bindings pass JSON-shaped tool args; the executor receives
 /// `HashMap<String, Value>` parameters. Compose multiple calls via
