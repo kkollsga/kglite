@@ -320,10 +320,10 @@ impl KnowledgeGraph {
             }
         };
         let metric = match effective_metric.as_str() {
-            "cosine" => crate::graph::algorithms::vector::DistanceMetric::Cosine,
-            "dot_product" => crate::graph::algorithms::vector::DistanceMetric::DotProduct,
-            "euclidean" => crate::graph::algorithms::vector::DistanceMetric::Euclidean,
-            "poincare" => crate::graph::algorithms::vector::DistanceMetric::Poincare,
+            "cosine" => kglite_core::api::algorithms::DistanceMetric::Cosine,
+            "dot_product" => kglite_core::api::algorithms::DistanceMetric::DotProduct,
+            "euclidean" => kglite_core::api::algorithms::DistanceMetric::Euclidean,
+            "poincare" => kglite_core::api::algorithms::DistanceMetric::Poincare,
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unknown metric '{}'. Use 'cosine', 'dot_product', 'euclidean', or 'poincare'.",
@@ -1366,8 +1366,8 @@ impl KnowledgeGraph {
         ef_search: Option<usize>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::algorithms::hnsw::HnswParams;
-        use crate::graph::algorithms::vector::DistanceMetric;
+        use kglite_core::api::algorithms::DistanceMetric;
+        use kglite_core::api::algorithms::HnswParams;
 
         let embedding_property = format!("{}_emb", text_column);
         let key = (node_type.to_string(), embedding_property);

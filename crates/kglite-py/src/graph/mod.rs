@@ -764,7 +764,7 @@ pub(crate) use kglite_core::api::make_dir_graph_mut as get_graph_mut;
 pub(crate) fn centrality_results_to_py_dict(
     py: Python<'_>,
     graph: &DirGraph,
-    results: Vec<crate::graph::algorithms::graph_algorithms::CentralityResult>,
+    results: Vec<kglite_core::api::algorithms::CentralityResult>,
     top_k: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let limit = top_k.unwrap_or(results.len());
@@ -785,7 +785,7 @@ pub(crate) fn centrality_results_to_py_dict(
 pub(crate) fn centrality_results_to_dataframe(
     py: Python<'_>,
     graph: &DirGraph,
-    results: Vec<crate::graph::algorithms::graph_algorithms::CentralityResult>,
+    results: Vec<kglite_core::api::algorithms::CentralityResult>,
     top_k: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
     let limit = top_k.unwrap_or(results.len());
@@ -825,7 +825,7 @@ pub(crate) fn centrality_results_to_dataframe(
 pub(crate) fn community_results_to_py(
     py: Python<'_>,
     graph: &DirGraph,
-    result: crate::graph::algorithms::graph_algorithms::CommunityResult,
+    result: kglite_core::api::algorithms::CommunityResult,
 ) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
 
