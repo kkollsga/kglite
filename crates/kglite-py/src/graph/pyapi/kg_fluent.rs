@@ -1239,7 +1239,7 @@ impl KnowledgeGraph {
         let name_lower = name.to_lowercase();
         let types_to_search: Vec<&str> = match node_type {
             Some(nt) => vec![nt],
-            None => kglite_core::graph::handle::CODE_TYPES.to_vec(),
+            None => kglite_core::api::CODE_TYPES.to_vec(),
         };
 
         let mut results: Vec<schema::NodeInfo> = Vec::new();

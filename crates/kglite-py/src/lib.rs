@@ -54,7 +54,7 @@ use graph::pyapi::frozen::FrozenGraph;
 use graph::pyapi::result_view::{ResultIter, ResultView};
 use graph::pyapi::session::Session;
 use graph::{KnowledgeGraph, Transaction};
-use kglite_core::graph::io::file::load_file;
+use kglite_core::api::load_file;
 
 /// Curated Rust-side façade for downstream binaries (notably
 /// `kglite-mcp-server`). This module is the **only** stable Rust
@@ -140,7 +140,7 @@ pub mod api {
 /// gives downstream Rust binaries a stable handle to plug into the
 /// planner / executor surface in [`api::cypher`].
 impl crate::graph::KnowledgeGraph {
-    pub fn dir(&self) -> &std::sync::Arc<kglite_core::graph::dir_graph::DirGraph> {
+    pub fn dir(&self) -> &std::sync::Arc<kglite_core::api::DirGraph> {
         &self.inner
     }
 }
@@ -204,7 +204,7 @@ fn open_session(py: Python<'_>, path: String) -> PyResult<Session> {
 /// section), distinct from a successful empty graph.
 #[pyfunction]
 fn from_bytes(py: Python<'_>, data: &[u8]) -> PyResult<KnowledgeGraph> {
-    py.detach(|| kglite_core::graph::io::file::load_kgl_bytes(data))
+    py.detach(|| kglite_core::api::load_kgl_bytes(data))
         .map(KnowledgeGraph::from_arc)
         .map_err(|e| load_err_to_pyerr(e, None))
 }
@@ -249,7 +249,9 @@ fn open(
 /// the last checkpoint onto the loaded graph, wrap its backend in the
 /// write-capture layer, and open the WAL for append. In-memory only.
 fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
-    use kglite_core::graph::storage::GraphRead;
+    use kglite_core::api::GraphRead;
+    // `wal` stays a below-api reach (durable-transaction internals) —
+    // deferred to a high-level durable-transaction api lift (roadmap Piece 2).
     use kglite_core::graph::wal;
 
     if kg.inner.graph.is_mapped() || kg.inner.graph.is_disk() {
@@ -288,7 +290,7 @@ fn setup_durable(kg: &mut KnowledgeGraph, path: &str) -> PyResult<()> {
 /// aren't here will be rejected by `cypher(..., disabled_passes=[...])`.
 #[pyfunction]
 fn cypher_pass_names() -> Vec<String> {
-    kglite_core::graph::languages::cypher::planner::all_pass_names()
+    kglite_core::api::cypher::planner::all_pass_names()
 }
 
 /// Run the bundled MCP server in-process and block until it exits.

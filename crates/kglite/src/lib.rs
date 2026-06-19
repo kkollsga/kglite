@@ -84,14 +84,32 @@ pub mod api {
     // `infer_selection_node_type` is NOT re-exported here: it depends
     // on `CowSelection`, a wheel-only-external-consumer type. When
     // the Selection concept gets lifted to a stable api type, both
-    // should land in api together. The wheel reaches the function
-    // directly via `kglite_core::graph::handle::infer_selection_node_type`.
+    // should land in api together (roadmap Piece 3). The wheel reaches
+    // the function directly via
+    // `kglite_core::graph::handle::infer_selection_node_type`.
+    //
+    // `resolve_code_entity` + `CODE_TYPES` are the code-tree graph
+    // helpers (resolve a `Type::method` qualified name to a node;
+    // the canonical set of code-entity node-type labels) — generic
+    // for any binding that ships the code-tree parser. Lifted in the
+    // api-sealing soft-seal (roadmap Piece 1).
     pub use crate::graph::handle::{
-        discover_property_keys_from_data, source_location, KnowledgeGraph,
+        discover_property_keys_from_data, resolve_code_entity, source_location, KnowledgeGraph,
+        CODE_TYPES,
     };
+    /// The canonical graph read trait — node/edge/property accessors
+    /// shared by every storage backend. Non-object-safe (GATs on the
+    /// iterator-returning methods), so consumers take `&impl GraphRead`,
+    /// never `&dyn`. Lifted for cross-binding read access (roadmap Piece 1).
+    pub use crate::graph::storage::GraphRead;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
     pub use crate::graph::dir_graph::make_dir_graph_mut;
     pub use crate::graph::introspection::describe::compute_description;
+    /// Structured mutation reports — what a write touched (nodes/edges
+    /// created/updated/deleted, per operation). Every binding surfaces
+    /// these after a mutating call; lifted for cross-binding result
+    /// reporting (roadmap Piece 1).
+    pub use crate::graph::introspection::reporting::{OperationReport, OperationReports};
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
