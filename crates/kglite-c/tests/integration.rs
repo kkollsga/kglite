@@ -174,8 +174,8 @@ fn params_json_round_trip() {
 
     let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
     let rows_str = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
-    assert!(rows_str.contains("\"x\":") && rows_str.contains("42"));
-    assert!(rows_str.contains("\"y\":") && rows_str.contains("hello"));
+    // Natural untagged JSON for scalar params.
+    assert_eq!(rows_str, r#"[{"x":42,"y":"hello"}]"#);
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
@@ -231,7 +231,8 @@ fn create_empty_graph_then_mutate_and_read() {
     assert_eq!(row_count, 2, "both created nodes should be returned");
     let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
     let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
-    assert!(rows.contains('1') && rows.contains('2'));
+    // Natural untagged JSON — bare numbers, not `{"Int64":1}`.
+    assert_eq!(rows, r#"[{"id":1},{"id":2}]"#);
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };

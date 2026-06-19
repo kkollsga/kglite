@@ -308,32 +308,10 @@ fn build_nodes(
 /// `code_tree`'s docs pass reuses the same frontmatter→column convention.
 pub(crate) fn column_value(v: &Value) -> Value {
     match v {
-        Value::List(_) | Value::Map(_) => {
-            Value::String(serde_json::to_string(&value_to_json(v)).unwrap_or_default())
-        }
-        other => other.clone(),
-    }
-}
-
-/// Clean JSON projection of a [`Value`] (strings as strings, not serde's
-/// externally-tagged enum encoding).
-fn value_to_json(v: &Value) -> serde_json::Value {
-    use serde_json::Value as J;
-    match v {
-        Value::String(s) => J::String(s.clone()),
-        Value::Int64(i) => J::Number((*i).into()),
-        Value::Float64(f) => serde_json::Number::from_f64(*f)
-            .map(J::Number)
-            .unwrap_or(J::Null),
-        Value::Boolean(b) => J::Bool(*b),
-        Value::Null => J::Null,
-        Value::List(items) => J::Array(items.iter().map(value_to_json).collect()),
-        Value::Map(m) => J::Object(
-            m.iter()
-                .map(|(k, v)| (k.clone(), value_to_json(v)))
-                .collect(),
+        Value::List(_) | Value::Map(_) => Value::String(
+            serde_json::to_string(&crate::param::kglite_value_to_json(v)).unwrap_or_default(),
         ),
-        other => J::String(format!("{other:?}")),
+        other => other.clone(),
     }
 }
 
