@@ -13,8 +13,8 @@ use kglite_c::{
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_string,
     kglite_create_edges_batch, kglite_graph_new, kglite_load_file, kglite_session_execute_mut,
     kglite_session_execute_mut_batch, kglite_session_execute_read, kglite_session_execute_read_batch,
-    kglite_session_free, kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession,
-    KgliteStatusCode,
+    kglite_session_execute_read_opts, kglite_session_free, kglite_session_new, KgliteCypherResult,
+    KgliteGraph, KgliteSession, KgliteStatusCode,
 };
 
 #[cfg(feature = "fastembed")]
@@ -408,6 +408,67 @@ fn create_edges_batch_by_id() {
     let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
     assert_eq!(rows, r#"[{"c":2}]"#);
     unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn execute_read_opts_caps_rows() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph, &mut session as *mut _) };
+
+    let create = CString::new("CREATE (:T {id: 1}), (:T {id: 2}), (:T {id: 3})").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe {
+        kglite_session_execute_mut(
+            session,
+            create.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    unsafe { kglite_cypher_result_free(result) };
+
+    // max_rows is a safety guard: a 3-row query with max_rows=2 ERRORS
+    // (it does not truncate).
+    let q = CString::new("MATCH (n:T) RETURN n.id AS id").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read_opts(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            0,
+            2,
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_ne!(rc, KgliteStatusCode::Ok, "exceeding max_rows must error");
+    assert!(result.is_null());
+    assert!(!err.is_null());
+    unsafe { kglite_free_string(err) };
+
+    // A limit at/above the row count succeeds and returns all rows.
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_read_opts(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            0,
+            5,
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert_eq!(unsafe { kglite_cypher_result_row_count(result) }, 3);
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
 }
