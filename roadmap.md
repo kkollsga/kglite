@@ -2,8 +2,12 @@
 
 > Created 2026-06-19, replacing the completed `KnowledgeGraph` handle-decomposition
 > record (shipped 0.11.3; see git history of this file for that archival content).
-> **Status: Piece 1 in progress.** This roadmap breaks the api-sealing effort into
-> independently-shippable pieces, ordered by leverage.
+> **Status: COMPLETE (2026-06-20).** All four pieces + an api-organization pass
+> shipped. `kglite::graph` is now `pub(crate)` and every wrapper crate (the
+> Python wheel + the bolt / mcp / c servers) reaches the engine EXCLUSIVELY
+> through `kglite::api` — compiler-enforced, with a CI grep ratchet as
+> belt-and-suspenders. Below-api reaches went 253 → 0. The sections below are
+> the record of how it was done.
 
 ## The smell: the Python wheel reaches deep below `kglite::api`
 
@@ -67,7 +71,7 @@ fluent-implementation, then seal.**
 
 ## Pieces (ordered by leverage)
 
-### Piece 1 — Soft-seal foundation: safe lifts + CI grep freeze · **IN PROGRESS**
+### Piece 1 — Soft-seal foundation: safe lifts + CI grep freeze · **DONE**
 
 **Goal.** Stop the erosion immediately and deliver the clearly-generic lifts, at
 near-zero risk to the deeply-coupled wheel.
@@ -205,7 +209,7 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 
 ---
 
-### Piece 4 — Hard seal
+### Piece 4 — Hard seal · **DONE (2026-06-20)**
 
 **Goal.** Make the chokepoint compiler-enforced.
 
@@ -231,7 +235,7 @@ decomposition). **Risk.** Medium–high (touches the biggest pyapi files).
 | 1 | Soft-seal foundation (safe lifts + grep freeze) | High (stops erosion, future-binding value now) | Low | **done (0.11.4)** |
 | 2 | Lift generic engine capabilities | Medium (shrinks frozen set) | Low–med | **2a/2b/2c done (253→153); storage-backend internals deferred** |
 | 3 | Consolidate fluent into core | High (correct end-state) | Med–high | **3a/3b/3c + long-tail done (153→27); 27 storage/durability remain for Piece 4** |
-| 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | queued |
+| 4 | Hard seal (pub(crate) + delete glob) | High (compiler-enforced) | Low | **DONE — graph is pub(crate); 0 below-api reaches** |
 
 ## Invariants for every piece
 
