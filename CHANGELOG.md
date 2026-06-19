@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] — 2026-06-19 — C ABI completeness + `kglite::api` soft-seal foundation
+
+### Added
+
+- **C ABI surface completed (`kglite-c`): 32 → 45 `extern "C"` functions.** The
+  C ABI (the entry point for every non-Rust binding — Go/cgo, JS/napi, JVM/JNI,
+  …) now covers the full lifecycle, not just query. New entry points:
+  - `kglite_graph_new` — create an empty in-memory graph (previously the C ABI
+    could only load a graph from a file).
+  - `kglite_session_execute_read_batch` / `kglite_session_execute_mut_batch` —
+    run a batch of queries against one snapshot / inside one transaction (the
+    mut batch is atomic).
+  - `kglite_session_execute_read_opts` — read with a timeout + max-rows guard
+    (max-rows *errors* when exceeded, it does not truncate).
+  - `kglite_create_edges_batch` — DataFrame-free bulk edge ingest by stable
+    id + type (wraps the new core `add_edges_from_specs`).
+  - `kglite_graphgen_to_dir` — synthetic-graph generator.
+  - `kglite_blueprint_build` — declarative graph construction from a blueprint.
+  - `kglite_save_graph_durable` (fsync) + `kglite_graph_to_bytes` /
+    `kglite_graph_from_bytes` / `kglite_free_bytes` — durable save +
+    in-memory bytes round-trip.
+  - `kglite_compute_schema_json` — schema introspection at the ABI boundary.
+  - `kglite_memory_stats` — backed by a tracking global allocator.
+- **Core: `add_edges_from_specs` — DataFrame-free bulk edge ingest** (exposed
+  via `kglite::api::mutation`, reusing the same engine as the Python
+  `add_connections` DataFrame path). The one genuine library gap that the C ABI
+  needed; available to every Rust-side binding too.
+- **`kglite::api` surface expanded** (api-sealing roadmap Piece 1): `GraphRead`
+  (the canonical read trait), `OperationReport` / `OperationReports` (structured
+  mutation reports), `resolve_code_entity` + `CODE_TYPES` (code-tree graph
+  helpers) are now reachable through the curated `kglite::api` namespace for
+  downstream and future bindings. Zero-cost `pub use` re-exports — no behaviour
+  or perf change.
+
+### Changed
+
+- **C ABI result rows are now natural untagged JSON.** A scalar comes back as
+  `{"n": 2}` instead of the enum-tagged `{"n": {"Int64": 2}}`. The shared
+  `kglite_value_to_json` converter was lifted into `kglite::api::param` so every
+  binding (and the MCP server) emits the same shape.
+- **`kglite_abi_version` now derives from the crate version** (was hard-coded
+  and stale at `0.10.5`).
+
+### Fixed
+
+- **JSON array / object query parameters were stringified instead of converted
+  to `Value::List` / `Value::Map`.** A live data-corruption bug:
+  `UNWIND $rows AS r CREATE {id: r.id}` wrote null ids (an unmatchable graph),
+  so subsequent `SET` / `DELETE` silently no-oped. Same class as the 0.11.2 PyO3
+  fix, but in the *shared* `kglite::param` converter
+  (`json_value_to_kglite_value`) used by the C ABI, the MCP server, and every
+  future binding — the PyO3 path was already fixed in 0.11.2; this fixes
+  everyone else.
+
+### Packaging
+
+- **aarch64 Linux (gnu) wheel now builds on `manylinux_2_28`** instead of the
+  ancient `manylinux2014` cross image. The 2014 cross gcc (4.8.5) could not
+  cross-build the wheel's C deps for aarch64 — it failed on `ring`'s `.S` asm
+  (fixed in 0.11.1) and then on `libmimalloc-sys`'s `-Wno-error=date-time`
+  (gcc <4.9 has no `-Wdate-time`). Building on gcc 12 clears the whole class.
+  Trade-off: the gnu-aarch64 wheel's glibc floor rises 2.17 → 2.28
+  (RHEL 8 / Ubuntu 18.10+); the musllinux aarch64 and x86_64 wheels are
+  unchanged.
+
 ## [0.11.3] — 2026-06-18 — thread-safe `Session` handle (shared reads + serialized writes)
 
 ### Added
