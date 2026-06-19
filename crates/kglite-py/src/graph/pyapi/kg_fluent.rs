@@ -158,7 +158,7 @@ impl KnowledgeGraph {
             // Seed from nodes carrying `node_type` as primary OR secondary
             // label. On a single-label graph this is identical to the
             // primary `type == node_type` filter below.
-            crate::graph::core::filtering::filter_nodes_by_label(
+            kglite_core::api::fluent::filter_nodes_by_label(
                 &self.inner,
                 &mut new_kg.cursor.selection,
                 &node_type,
@@ -172,7 +172,7 @@ impl KnowledgeGraph {
                 "type".to_string(),
                 FilterCondition::Equals(Value::String(node_type.clone())),
             );
-            crate::graph::core::filtering::filter_nodes(
+            kglite_core::api::fluent::filter_nodes(
                 &self.inner,
                 &mut new_kg.cursor.selection,
                 conditions,
@@ -241,7 +241,7 @@ impl KnowledgeGraph {
             };
             // Estimate based on the (just-cloned) current selection.
             let estimated = level_count(cursor);
-            crate::graph::core::filtering::filter_nodes(
+            kglite_core::api::fluent::filter_nodes(
                 inner,
                 &mut cursor.selection,
                 filter_conditions,
@@ -293,7 +293,7 @@ impl KnowledgeGraph {
         };
 
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::filter_nodes_any(
+            kglite_core::api::fluent::filter_nodes_any(
                 inner,
                 &mut cursor.selection,
                 &condition_sets,
@@ -319,7 +319,7 @@ impl KnowledgeGraph {
         };
 
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::filter_orphan_nodes(
+            kglite_core::api::fluent::filter_orphan_nodes(
                 inner,
                 &mut cursor.selection,
                 include,
@@ -334,14 +334,14 @@ impl KnowledgeGraph {
     fn sort(&self, sort: &Bound<'_, PyAny>, ascending: Option<bool>) -> PyResult<Self> {
         let sort_fields = py_in::parse_sort_fields(sort, ascending)?;
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::sort_nodes(inner, &mut cursor.selection, sort_fields)
+            kglite_core::api::fluent::sort_nodes(inner, &mut cursor.selection, sort_fields)
                 .map_err(fluent_arg_err)
         })
     }
 
     fn limit(&self, max_per_group: usize) -> PyResult<Self> {
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::limit_nodes_per_group(
+            kglite_core::api::fluent::limit_nodes_per_group(
                 inner,
                 &mut cursor.selection,
                 max_per_group,
@@ -355,7 +355,7 @@ impl KnowledgeGraph {
     ///   graph.sort('name').offset(20).limit(10)
     fn offset(&self, n: usize) -> PyResult<Self> {
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::offset_nodes(inner, &mut cursor.selection, n)
+            kglite_core::api::fluent::offset_nodes(inner, &mut cursor.selection, n)
                 .map_err(fluent_arg_err)
         })
     }
@@ -379,7 +379,7 @@ impl KnowledgeGraph {
         };
 
         self.derive_with(|inner, cursor| {
-            crate::graph::core::filtering::filter_by_connection(
+            kglite_core::api::fluent::filter_by_connection(
                 inner,
                 &mut cursor.selection,
                 connection_type,
@@ -731,7 +731,7 @@ impl KnowledgeGraph {
         flatten_single_parent: Option<bool>,
         limit: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let nodes = crate::graph::core::data_retrieval::get_nodes(
+        let nodes = kglite_core::api::fluent::get_nodes(
             &self.inner,
             &self.cursor.selection,
             None,
@@ -932,7 +932,7 @@ impl KnowledgeGraph {
     /// ```
     #[pyo3(signature = (columns=None, limit=200))]
     fn show(&self, columns: Option<Vec<String>>, limit: usize) -> PyResult<String> {
-        use crate::graph::core::value_operations::format_value_compact;
+        use kglite_core::api::fluent::format_value_compact;
 
         let columns = columns.unwrap_or_else(|| vec!["id".to_string(), "title".to_string()]);
         let level_count = self.cursor.selection.get_level_count();

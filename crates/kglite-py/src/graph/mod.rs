@@ -873,8 +873,8 @@ pub(crate) fn community_results_to_py(
 /// Dict form: `method={'type': 'distance', 'max_m': 5000, 'resolve': 'centroid'}`
 pub(crate) fn parse_method_param(
     val: &Bound<'_, PyAny>,
-) -> PyResult<crate::graph::core::traversal::MethodConfig> {
-    use crate::graph::core::traversal::MethodConfig;
+) -> PyResult<kglite_core::api::fluent::MethodConfig> {
+    use kglite_core::api::fluent::MethodConfig;
 
     // Try string first
     if let Ok(s) = val.extract::<String>() {
@@ -952,13 +952,13 @@ pub(crate) fn compare_inner(
     inner: &Arc<DirGraph>,
     selection: &mut CowSelection,
     target_type: Option<&str>,
-    config: &crate::graph::core::traversal::MethodConfig,
+    config: &kglite_core::api::fluent::MethodConfig,
     conditions: Option<&HashMap<String, FilterCondition>>,
     sort_fields: Option<&Vec<(String, bool)>>,
     limit: Option<usize>,
     estimated: usize,
 ) -> PyResult<usize> {
-    crate::graph::core::traversal::make_comparison_traversal(
+    kglite_core::api::fluent::make_comparison_traversal(
         inner,
         selection,
         target_type,

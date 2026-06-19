@@ -173,11 +173,24 @@ pub mod api {
     /// (`union`/`intersection`/`difference`/`symmetric_difference`) and
     /// subgraph extract / expand / stats. These take `&CurrentSelection`
     /// (now an api type, roadmap Piece 3a) and are the building blocks the
-    /// fluent chain composes. Lifted in Piece 3b; the high-level chain
-    /// operations (`select`/`where`/`sort`/`traverse`) are consolidated
-    /// here in Piece 3c (the fine-grained `core::*` primitives behind them
-    /// stay internal).
+    /// fluent chain composes.
+    ///
+    /// The bulk of this module (Piece 3c) is the **shared selection-based
+    /// query-primitive layer** — `core::graph::core::*`, which CLAUDE.md
+    /// describes as "pattern matching, filtering, traversal … used by both
+    /// Cypher and the fluent API." Each op takes `(&DirGraph, &mut
+    /// CurrentSelection, …already-marshalled params)` and mutates the
+    /// selection in place; a binding building a fluent surface composes
+    /// these directly (the wheel's `kg_fluent` / `kg_introspection` PyO3
+    /// methods marshal Python args, then call straight into here). The
+    /// primitives stay *defined* in `core::graph::core`; this is their
+    /// curated, stable re-export surface. (A future refinement could hoist
+    /// the small amount of per-method branching — `select`'s
+    /// include-secondary / temporal logic, `traverse`'s temporal precedence
+    /// — into higher-level ops, but the primitives below are already the
+    /// correctly-grained shared operations, not glue to hide.)
     pub mod fluent {
+        // Selection set algebra + subgraph (Piece 3b).
         pub use crate::graph::mutation::set_ops::{
             difference_selections, intersection_selections, symmetric_difference_selections,
             union_selections,
@@ -185,6 +198,36 @@ pub mod api {
         pub use crate::graph::mutation::subgraph::{
             expand_selection, extract_subgraph, get_subgraph_stats, SubgraphStats,
         };
+        // Filtering / sorting / pagination over a selection.
+        pub use crate::graph::core::filtering::{
+            filter_by_connection, filter_nodes, filter_nodes_any, filter_nodes_by_label,
+            filter_orphan_nodes, limit_nodes_per_group, offset_nodes, sort_nodes,
+        };
+        // Traversal (parent→child level expansion) + its config/filter types.
+        pub use crate::graph::core::traversal::{
+            format_for_dictionary, format_for_storage, get_children_properties,
+            make_comparison_traversal, make_traversal, MethodConfig, TemporalEdgeFilter,
+        };
+        // Per-level calculations / equation evaluation / counts.
+        pub use crate::graph::core::calculations::{
+            count_nodes_by_parent, count_nodes_in_level, process_equation, store_count_results,
+            EvaluationResult, StatResult,
+        };
+        // Node/connection/property retrieval from a selection + result types.
+        pub use crate::graph::core::data_retrieval::{
+            format_unique_values_for_storage, get_connections, get_nodes, get_property_values,
+            get_unique_values, LevelConnections, LevelNodes, LevelValues, UniqueValues,
+        };
+        // Aggregate statistics over selected nodes.
+        pub use crate::graph::core::statistics::{
+            calculate_property_stats, collect_selected_nodes, get_parent_child_pairs, PropertyStats,
+        };
+        // Pattern-match execution (shared with Cypher MATCH).
+        pub use crate::graph::core::pattern_matching::{
+            parse_pattern, MatchBinding, PatternExecutor, PatternMatch,
+        };
+        // Compact value formatting for fluent result shaping.
+        pub use crate::graph::core::value_operations::format_value_compact;
     }
 
     /// Graph algorithms — pathfinding, components, centrality, community
