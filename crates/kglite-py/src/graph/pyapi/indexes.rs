@@ -176,7 +176,7 @@ impl KnowledgeGraph {
         property: &str,
         limit: usize,
     ) -> PyResult<Py<PyAny>> {
-        use crate::graph::storage::GraphRead;
+        use kglite_core::api::GraphRead;
         let backend = &self.inner.graph;
 
         // Alias-aware lookup. Mirrors the matcher's cross-type fast

@@ -16,8 +16,8 @@ use crate::graph::languages::cypher::result::{
     ClauseStats, CypherResult, MutationStats, QueryDiagnostics, ResultRow,
 };
 use crate::graph::schema::{DirGraph, NodeData};
-use crate::graph::storage::GraphRead;
 use kglite_core::api::algorithms::CentralityResult;
+use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
 use pyo3::IntoPyObjectExt;

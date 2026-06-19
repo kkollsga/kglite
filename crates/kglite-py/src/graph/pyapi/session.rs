@@ -50,8 +50,8 @@ use crate::graph::languages::cypher;
 use crate::graph::pyapi::frozen::FrozenGraph;
 use crate::graph::pyapi::result_view::ResultView;
 use crate::graph::session::{execute_mut, execute_read, ExecuteOptions, Session as CoreSession};
-use crate::graph::storage::GraphRead;
 use crate::graph::{resolve_noderefs, DirGraph};
+use kglite_core::api::GraphRead;
 
 /// Thread-safe, shareable handle over a graph. See module docs.
 ///

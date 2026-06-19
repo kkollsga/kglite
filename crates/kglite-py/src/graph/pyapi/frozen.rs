@@ -23,8 +23,8 @@ use crate::datatypes::py_in;
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::result_view::ResultView;
 use crate::graph::session::{execute_read, ExecuteOptions};
-use crate::graph::storage::GraphRead;
 use crate::graph::{resolve_noderefs, DirGraph};
+use kglite_core::api::GraphRead;
 
 /// Immutable, `Send`-able read snapshot of a graph. See module docs.
 #[pyclass]

@@ -14,8 +14,8 @@ use crate::graph::pyapi::transaction::Transaction;
 use crate::graph::schema::{
     self, ConnectionSchemaDefinition, NodeSchemaDefinition, SchemaDefinition,
 };
-use crate::graph::storage::GraphRead;
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
+use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::{Bound, IntoPyObjectExt};
@@ -207,7 +207,7 @@ impl KnowledgeGraph {
     /// per-type structure use ``schema()`` or ``describe()``.
     #[getter]
     fn shape(&self) -> (usize, usize) {
-        use crate::graph::storage::GraphRead;
+        use kglite_core::api::GraphRead;
         (self.inner.graph.node_count(), self.inner.graph.edge_count())
     }
 
@@ -215,7 +215,7 @@ impl KnowledgeGraph {
     /// Format: ``KnowledgeGraph(N nodes, M edges)`` with thousands
     /// separators for legibility on large graphs.
     fn __repr__(&self) -> String {
-        use crate::graph::storage::GraphRead;
+        use kglite_core::api::GraphRead;
         format!(
             "KnowledgeGraph({} nodes, {} edges)",
             fmt_with_commas(self.inner.graph.node_count()),

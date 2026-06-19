@@ -8,8 +8,8 @@
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
 use crate::graph::schema::{self, CowSelection, PlanStep};
-use crate::graph::storage::GraphRead;
 use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
+use kglite_core::api::GraphRead;
 use kglite_core::api::OperationReport;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
@@ -84,22 +84,20 @@ impl KnowledgeGraph {
         new_kg.cursor.temporal_context = match (date_str, end_str) {
             (Some("all"), _) => TemporalContext::All,
             (Some(start), Some(end)) => {
-                let (start_date, _) = crate::graph::features::timeseries::parse_date_query(start)
+                let (start_date, _) = kglite_core::api::timeseries::parse_date_query(start)
                     .map_err(|e: String| -> PyErr {
-                    crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                })?;
-                let (end_date, end_precision) =
-                    crate::graph::features::timeseries::parse_date_query(end).map_err(
-                        |e: String| -> PyErr {
-                            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-                        },
-                    )?;
+                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                    })?;
+                let (end_date, end_precision) = kglite_core::api::timeseries::parse_date_query(end)
+                    .map_err(|e: String| -> PyErr {
+                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+                    })?;
                 let expanded_end =
-                    crate::graph::features::timeseries::expand_end(end_date, end_precision);
+                    kglite_core::api::timeseries::expand_end(end_date, end_precision);
                 TemporalContext::During(start_date, expanded_end)
             }
             (Some(s), None) => {
-                let (date, _) = crate::graph::features::timeseries::parse_date_query(s).map_err(
+                let (date, _) = kglite_core::api::timeseries::parse_date_query(s).map_err(
                     |e: String| -> PyErr {
                         crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                     },
@@ -422,7 +420,7 @@ impl KnowledgeGraph {
         // Resolve the reference date
         let ref_date = match date {
             Some(d) => {
-                let (parsed, _) = crate::graph::features::timeseries::parse_date_query(d).map_err(
+                let (parsed, _) = kglite_core::api::timeseries::parse_date_query(d).map_err(
                     |e: String| -> PyErr {
                         crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                     },
@@ -513,14 +511,15 @@ impl KnowledgeGraph {
             .unwrap_or_else(|| "date_to".to_string());
 
         // Parse dates
-        let (start_parsed, _) = crate::graph::features::timeseries::parse_date_query(start_date)
+        let (start_parsed, _) = kglite_core::api::timeseries::parse_date_query(start_date)
             .map_err(|e: String| -> PyErr {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
             })?;
-        let (end_parsed, _) = crate::graph::features::timeseries::parse_date_query(end_date)
-            .map_err(|e: String| -> PyErr {
+        let (end_parsed, _) = kglite_core::api::timeseries::parse_date_query(end_date).map_err(
+            |e: String| -> PyErr {
                 crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-            })?;
+            },
+        )?;
 
         // Use temporal helper for NULL-aware overlap check
         let config = schema::TemporalConfig {
@@ -1604,7 +1603,7 @@ impl KnowledgeGraph {
             .graph
             .edges_directed(file_idx, petgraph::Direction::Outgoing)
         {
-            if edge.weight().connection_type != schema::InternedKey::from_str("DEFINES") {
+            if edge.weight().connection_type != kglite_core::api::InternedKey::from_str("DEFINES") {
                 continue;
             }
             if let Some(node) = self.inner.get_node(edge.target()) {

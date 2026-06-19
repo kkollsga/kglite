@@ -47,7 +47,9 @@ count_reaches() {
 
 # The wheel's frozen baseline. Lower this as roadmap Pieces 2-4 migrate
 # reaches onto kglite::api. NEVER raise it.
-WHEEL_BASELINE=253
+# History: 253 (Piece 1) -> 153 (Piece 2: algorithms, bulk mutation +
+# reports, timeseries, GraphRead, InternedKey lifted to kglite::api).
+WHEEL_BASELINE=153
 
 fail=0
 

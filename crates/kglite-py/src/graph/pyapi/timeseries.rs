@@ -3,10 +3,10 @@
 // PyO3 methods for timeseries operations on KnowledgeGraph.
 
 use crate::datatypes::py_in;
-use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
-use crate::graph::storage::GraphRead;
 use crate::graph::{get_graph_mut, KnowledgeGraph};
 use chrono::NaiveDate;
+use kglite_core::api::timeseries::{NodeTimeseries, TimeseriesConfig};
+use kglite_core::api::GraphRead;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ impl KnowledgeGraph {
         units: Option<HashMap<String, String>>,
         bin_type: Option<String>,
     ) -> PyResult<()> {
-        crate::graph::features::timeseries::validate_resolution(&resolution)
+        kglite_core::api::timeseries::validate_resolution(&resolution)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let graph = get_graph_mut(&mut self.inner);
@@ -85,7 +85,7 @@ impl KnowledgeGraph {
     ) -> PyResult<()> {
         let date_keys = parse_keys_from_python(keys)?;
 
-        crate::graph::features::timeseries::validate_keys_sorted(&date_keys)
+        kglite_core::api::timeseries::validate_keys_sorted(&date_keys)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
         let graph = get_graph_mut(&mut self.inner);
@@ -127,7 +127,7 @@ impl KnowledgeGraph {
                 )
             })?;
 
-        crate::graph::features::timeseries::validate_channel_length(
+        kglite_core::api::timeseries::validate_channel_length(
             ts.keys.len(),
             values.len(),
             &channel_name,
@@ -178,7 +178,7 @@ impl KnowledgeGraph {
         // Resolve resolution: parameter > existing config > auto-detect
         let graph_ref = &self.inner;
         let resolved_resolution = if let Some(r) = resolution {
-            crate::graph::features::timeseries::validate_resolution(&r)
+            kglite_core::api::timeseries::validate_resolution(&r)
                 .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
             r
         } else if let Some(config) = graph_ref.timeseries_configs.get(&node_type) {
@@ -232,7 +232,7 @@ impl KnowledgeGraph {
                 .extract()?;
             raw.iter()
                 .map(|s| {
-                    crate::graph::features::timeseries::parse_date_query(s)
+                    kglite_core::api::timeseries::parse_date_query(s)
                         .map(|(d, _)| d)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
                 })
@@ -257,7 +257,7 @@ impl KnowledgeGraph {
                     } else {
                         1
                     };
-                    crate::graph::features::timeseries::date_from_ymd(year, month, day)
+                    kglite_core::api::timeseries::date_from_ymd(year, month, day)
                         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
                 })
                 .collect::<PyResult<Vec<_>>>()?
@@ -391,20 +391,19 @@ impl KnowledgeGraph {
         // Parse date strings and compute range
         let start_date = start
             .as_ref()
-            .map(|s| crate::graph::features::timeseries::parse_date_query(s).map(|(d, _)| d))
+            .map(|s| kglite_core::api::timeseries::parse_date_query(s).map(|(d, _)| d))
             .transpose()
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let end_date = end
             .as_ref()
             .map(|s| {
-                crate::graph::features::timeseries::parse_date_query(s)
-                    .map(|(d, prec)| crate::graph::features::timeseries::expand_end(d, prec))
+                kglite_core::api::timeseries::parse_date_query(s)
+                    .map(|(d, prec)| kglite_core::api::timeseries::expand_end(d, prec))
             })
             .transpose()
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
 
-        let (lo, hi) =
-            crate::graph::features::timeseries::find_range(&ts.keys, start_date, end_date);
+        let (lo, hi) = kglite_core::api::timeseries::find_range(&ts.keys, start_date, end_date);
         let keys_slice = &ts.keys[lo..hi];
 
         let result = PyDict::new(py);
@@ -491,7 +490,7 @@ fn parse_keys_from_python(keys: &Bound<'_, PyAny>) -> PyResult<Vec<NaiveDate>> {
         return strings
             .iter()
             .map(|s| {
-                crate::graph::features::timeseries::parse_date_query(s)
+                kglite_core::api::timeseries::parse_date_query(s)
                     .map(|(d, _)| d)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
             })
@@ -506,7 +505,7 @@ fn parse_keys_from_python(keys: &Bound<'_, PyAny>) -> PyResult<Vec<NaiveDate>> {
                 let year = parts.first().copied().unwrap_or(2000) as i32;
                 let month = parts.get(1).copied().unwrap_or(1) as u32;
                 let day = parts.get(2).copied().unwrap_or(1) as u32;
-                crate::graph::features::timeseries::date_from_ymd(year, month, day)
+                kglite_core::api::timeseries::date_from_ymd(year, month, day)
                     .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
             })
             .collect();
