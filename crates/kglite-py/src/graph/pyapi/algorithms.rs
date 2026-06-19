@@ -6,13 +6,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 
-use crate::graph::introspection::reporting::OperationReports;
 use crate::graph::schema::{CowSelection, PlanStep};
 use crate::graph::storage::lookups;
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
     KnowledgeGraph, TemporalContext,
 };
+use kglite_core::api::OperationReports;
 
 #[pymethods]
 impl KnowledgeGraph {

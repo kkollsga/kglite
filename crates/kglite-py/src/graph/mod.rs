@@ -421,7 +421,7 @@ impl KnowledgeGraph {
     /// Convert a ConnectionOperationReport to a Python dict and emit a warning
     /// if any rows were skipped.
     pub(crate) fn connection_report_to_py(
-        result: &crate::graph::introspection::reporting::ConnectionOperationReport,
+        result: &kglite_core::api::ConnectionOperationReport,
         connection_type: &str,
     ) -> PyResult<Py<PyAny>> {
         Python::attach(|py| {

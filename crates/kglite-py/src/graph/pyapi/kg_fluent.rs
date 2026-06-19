@@ -7,10 +7,10 @@
 
 use crate::datatypes::values::{FilterCondition, Value};
 use crate::datatypes::{py_in, py_out};
-use crate::graph::introspection::reporting::OperationReport;
 use crate::graph::schema::{self, CowSelection, PlanStep};
 use crate::graph::storage::GraphRead;
 use crate::graph::{get_graph_mut, KnowledgeGraph, TemporalContext};
+use kglite_core::api::OperationReport;
 use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -644,7 +644,7 @@ impl KnowledgeGraph {
                 .map(|&idx| (Some(idx), property_value.clone()))
                 .collect();
 
-            match crate::graph::mutation::maintain::update_node_properties(
+            match kglite_core::api::mutation::update_node_properties(
                 graph,
                 &node_values,
                 property_name,
@@ -682,7 +682,7 @@ impl KnowledgeGraph {
         };
 
         // Create and add a report
-        let report = crate::graph::introspection::reporting::NodeOperationReport {
+        let report = kglite_core::api::NodeOperationReport {
             operation_type: "update".to_string(),
             timestamp: chrono::Utc::now(),
             nodes_created: 0,

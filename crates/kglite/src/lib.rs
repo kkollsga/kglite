@@ -108,8 +108,12 @@ pub mod api {
     /// Structured mutation reports — what a write touched (nodes/edges
     /// created/updated/deleted, per operation). Every binding surfaces
     /// these after a mutating call; lifted for cross-binding result
-    /// reporting (roadmap Piece 1).
-    pub use crate::graph::introspection::reporting::{OperationReport, OperationReports};
+    /// reporting (roadmap Piece 1; the per-op `NodeOperationReport` /
+    /// `ConnectionOperationReport` return types added in Piece 2 alongside
+    /// the bulk-mutation functions that produce them).
+    pub use crate::graph::introspection::reporting::{
+        ConnectionOperationReport, NodeOperationReport, OperationReport, OperationReports,
+    };
     pub use crate::graph::introspection::schema_overview::compute_schema;
     pub use crate::graph::introspection::SchemaOverview;
     pub use crate::graph::introspection::{ConnectionDetail, CypherDetail, FluentDetail};
@@ -129,13 +133,22 @@ pub mod api {
         pub use crate::param::{json_value_to_kglite_value, kglite_value_to_json};
     }
 
-    /// Bulk graph construction. `add_edges_from_specs` is the
-    /// DataFrame-free edge-ingest path that non-Python bindings use (the
-    /// C ABI's `create_edges_batch` wraps it); it drives the same engine
-    /// as the Python `add_connections` DataFrame path.
+    /// Bulk graph construction + maintenance. `add_edges_from_specs` is
+    /// the DataFrame-free edge-ingest path that non-Python bindings use
+    /// (the C ABI's `create_edges_batch` wraps it); the DataFrame-based
+    /// `add_nodes` / `add_connections` / `replace_connections` are the
+    /// Rust-side bulk-ingest path (polars `DataFrame` in, operation report
+    /// out). `update_node_properties`, `purge_provisional_nodes`, and
+    /// `extend_graph` (merge one graph into another) round out the
+    /// generic, non-Selection mutation surface. Lifted in roadmap Piece 2.
+    /// Selection-scoped mutations (`create_connections`, `set_ops`,
+    /// subgraph extract/expand) stay below api until the Selection
+    /// api-type decision in Piece 3.
     pub mod mutation {
+        pub use crate::graph::mutation::extend::{extend_graph, ExtendReport};
         pub use crate::graph::mutation::maintain::{
-            add_edges_from_specs, EdgeSpec, EdgeSpecReport,
+            add_connections, add_edges_from_specs, add_nodes, purge_provisional_nodes,
+            replace_connections, update_node_properties, EdgeSpec, EdgeSpecReport,
         };
     }
 
