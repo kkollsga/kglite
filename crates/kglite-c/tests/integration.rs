@@ -9,12 +9,13 @@
 //! semantics, ownership transfer, JSON shape, etc.).
 
 use kglite_c::{
-    kglite_abi_version, kglite_cypher_result_columns_json, kglite_cypher_result_free,
-    kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_string,
-    kglite_create_edges_batch, kglite_graph_new, kglite_load_file, kglite_session_execute_mut,
-    kglite_session_execute_mut_batch, kglite_session_execute_read, kglite_session_execute_read_batch,
-    kglite_session_execute_read_opts, kglite_session_free, kglite_session_new, KgliteCypherResult,
-    KgliteGraph, KgliteSession, KgliteStatusCode,
+    kglite_abi_version, kglite_create_edges_batch, kglite_cypher_result_columns_json,
+    kglite_cypher_result_free, kglite_cypher_result_row_count, kglite_cypher_result_rows_json,
+    kglite_free_bytes, kglite_free_string, kglite_graph_from_bytes, kglite_graph_free,
+    kglite_graph_new, kglite_graph_to_bytes, kglite_load_file, kglite_save_graph_durable,
+    kglite_session_execute_mut, kglite_session_execute_mut_batch, kglite_session_execute_read,
+    kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
+    kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
 };
 
 #[cfg(feature = "fastembed")]
@@ -471,6 +472,83 @@ fn execute_read_opts_caps_rows() {
     assert_eq!(unsafe { kglite_cypher_result_row_count(result) }, 3);
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn graph_bytes_round_trip() {
+    // Load fixture → serialize to bytes → free original → load from bytes
+    // → query: the round-tripped graph must hold the same nodes.
+    let path = fixture_path();
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe { kglite_load_file(path.as_ptr(), &mut graph as *mut _, &mut err as *mut _) };
+
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_graph_to_bytes(graph, &mut buf as *mut _, &mut len as *mut _, &mut err as *mut _)
+    };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!buf.is_null() && len > 0);
+    unsafe { kglite_graph_free(graph) }; // original no longer needed
+
+    let mut graph2: *mut KgliteGraph = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc =
+        unsafe { kglite_graph_from_bytes(buf, len, &mut graph2 as *mut _, &mut err as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!graph2.is_null());
+    unsafe { kglite_free_bytes(buf, len) };
+
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph2, &mut session as *mut _) };
+    let q = CString::new("MATCH (n) RETURN count(n) AS n").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe {
+        kglite_session_execute_read(
+            session,
+            q.as_ptr(),
+            std::ptr::null(),
+            &mut result as *mut _,
+            &mut err as *mut _,
+        )
+    };
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    let rows = unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() };
+    let parsed: serde_json::Value = serde_json::from_str(rows).unwrap();
+    assert!(parsed[0]["n"].as_u64().unwrap() > 0, "round-tripped graph has nodes");
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn save_graph_durable_round_trips() {
+    let path = fixture_path();
+    let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    unsafe { kglite_load_file(path.as_ptr(), &mut graph as *mut _, &mut err as *mut _) };
+
+    let tmp = std::env::temp_dir().join("kglite_c_durable.kgl");
+    let _ = std::fs::remove_file(&tmp);
+    let tmp_c = CString::new(tmp.to_str().unwrap()).unwrap();
+    let mut err: *const c_char = std::ptr::null();
+    // fsync = 1 → durable.
+    let rc = unsafe { kglite_save_graph_durable(graph, tmp_c.as_ptr(), 1, &mut err as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    unsafe { kglite_graph_free(graph) };
+
+    // Reloads cleanly.
+    let mut graph2: *mut KgliteGraph = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    let rc =
+        unsafe { kglite_load_file(tmp_c.as_ptr(), &mut graph2 as *mut _, &mut err as *mut _) };
+    assert_eq!(rc, KgliteStatusCode::Ok);
+    assert!(!graph2.is_null());
+    unsafe { kglite_graph_free(graph2) };
+    let _ = std::fs::remove_file(&tmp);
 }
 
 // ───────────────────────── embedder ─────────────────────────────────

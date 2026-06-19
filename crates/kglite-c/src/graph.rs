@@ -9,7 +9,10 @@
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
-use kglite::api::{graphgen, load_file, save_graph, DirGraph, GraphGenConfig};
+use kglite::api::{
+    graphgen, load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with, DirGraph,
+    GraphGenConfig,
+};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
 use std::sync::Arc;
@@ -411,6 +414,163 @@ pub unsafe extern "C" fn kglite_blueprint_build(
         }
     }
     KgliteStatusCode::Ok
+}
+
+/// Save a graph to a `.kgl` file with an explicit durability choice. Same
+/// as [`kglite_save_graph`] but when `fsync` != 0 the file and its
+/// directory entry are flushed to stable storage before returning —
+/// durable across power loss, at the cost of fsync latency. `fsync` == 0
+/// matches [`kglite_save_graph`] (atomic rename, no fsync).
+///
+/// # Safety
+///
+/// `graph` must be a valid handle; `path` a null-terminated UTF-8 path;
+/// `out_error_msg` null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_save_graph_durable(
+    graph: *mut KgliteGraph,
+    path: *const c_char,
+    fsync: u8,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if graph.is_null() || path.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let state = unsafe { GraphState::from_handle_mut(graph) };
+    match write_kgl_with(state.inner.as_ref(), path_str, fsync != 0) {
+        Ok(()) => {
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(e) => {
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&e.to_string());
+                }
+            }
+            KgliteStatusCode::FileIo
+        }
+    }
+}
+
+/// Serialize a graph to an in-memory `.kgl` byte buffer (no file). On
+/// success `*out_buf` / `*out_len` describe an owned buffer the caller
+/// MUST free with [`kglite_free_bytes`]. Pair with
+/// [`kglite_graph_from_bytes`] to round-trip a graph through bytes (IPC,
+/// object storage, …).
+///
+/// # Safety
+///
+/// `graph` valid; `out_buf` a valid `*mut u8` slot; `out_len` a valid
+/// `usize` slot; `out_error_msg` null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_graph_to_bytes(
+    graph: *mut KgliteGraph,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if graph.is_null() || out_buf.is_null() || out_len.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let state = unsafe { GraphState::from_handle_mut(graph) };
+    let mut buf: Vec<u8> = Vec::new();
+    match write_kgl_to(state.inner.as_ref(), &mut buf) {
+        Ok(()) => {
+            let boxed: Box<[u8]> = buf.into_boxed_slice();
+            let len = boxed.len();
+            let ptr = Box::into_raw(boxed) as *mut u8;
+            unsafe {
+                *out_buf = ptr;
+                *out_len = len;
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(e) => {
+            unsafe {
+                *out_buf = std::ptr::null_mut();
+                *out_len = 0;
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&e.to_string());
+                }
+            }
+            KgliteStatusCode::FileIo
+        }
+    }
+}
+
+/// Free a byte buffer returned by [`kglite_graph_to_bytes`]. Pass the
+/// same `buf` / `len` pair. Null `buf` is a no-op.
+///
+/// # Safety
+///
+/// `buf` / `len` must be a pair previously returned by
+/// [`kglite_graph_to_bytes`] and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_free_bytes(buf: *mut u8, len: usize) {
+    if buf.is_null() {
+        return;
+    }
+    let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(buf, len)) };
+}
+
+/// Load a graph from an in-memory `.kgl` byte buffer — the inverse of
+/// [`kglite_graph_to_bytes`].
+///
+/// # Safety
+///
+/// `data` / `len` must describe a readable buffer; `out_graph` a valid
+/// writable slot; `out_error_msg` null or a valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_graph_from_bytes(
+    data: *const u8,
+    len: usize,
+    out_graph: *mut *mut KgliteGraph,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if data.is_null() || out_graph.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    match load_kgl_bytes(slice) {
+        Ok(arc) => {
+            unsafe {
+                *out_graph = GraphState::into_handle(arc);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(e) => {
+            unsafe {
+                *out_graph = std::ptr::null_mut();
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = alloc_c_string(&e.to_string());
+                }
+            }
+            KgliteStatusCode::FileFormat
+        }
+    }
 }
 
 #[cfg(test)]
