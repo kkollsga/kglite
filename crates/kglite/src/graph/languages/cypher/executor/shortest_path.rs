@@ -131,7 +131,7 @@ impl<'a> CypherExecutor<'a> {
                             target_idx,
                             connection_types,
                             None,
-                            self.deadline,
+                            self.interrupt(),
                         )
                     }
                     EdgeDirection::Outgoing => {
@@ -142,7 +142,7 @@ impl<'a> CypherExecutor<'a> {
                             target_idx,
                             connection_types,
                             None,
-                            self.deadline,
+                            self.interrupt(),
                         )
                     }
                     EdgeDirection::Incoming => {
@@ -153,7 +153,7 @@ impl<'a> CypherExecutor<'a> {
                             source_idx,
                             connection_types,
                             None,
-                            self.deadline,
+                            self.interrupt(),
                         )
                         .map(|mut pr| {
                             pr.path.reverse();

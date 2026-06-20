@@ -1,13 +1,13 @@
 // src/graph/graph_algorithms.rs
 //! Graph algorithms module providing path finding and connectivity analysis.
 
+use super::Interrupt;
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 // Centrality algorithms moved to the sibling `centrality` module to keep this
 // file under the god-file ceiling. Re-exported so existing
@@ -179,7 +179,7 @@ pub fn shortest_path(
     target: NodeIndex,
     connection_types: Option<&[String]>,
     via_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Option<PathResult> {
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
@@ -366,7 +366,7 @@ fn reconstruct_path_bfs(
     target: NodeIndex,
     connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Option<Vec<NodeIndex>> {
     use std::collections::{HashMap, VecDeque};
 
@@ -388,11 +388,9 @@ fn reconstruct_path_bfs(
     while let Some(current_idx) = queue.pop_front() {
         // Periodic timeout check (every 1000 nodes)
         visit_count += 1;
-        if visit_count.is_multiple_of(1000) {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return None;
-                }
+        if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+            {
+                return None;
             }
         }
 
@@ -444,7 +442,7 @@ pub fn shortest_path_directed(
     target: NodeIndex,
     connection_types: Option<&[String]>,
     via_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Option<PathResult> {
     use std::collections::VecDeque;
 
@@ -475,11 +473,9 @@ pub fn shortest_path_directed(
     while let Some(current_idx) = queue.pop_front() {
         // Periodic timeout check
         visit_count += 1;
-        if visit_count.is_multiple_of(1000) {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return None;
-                }
+        if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+            {
+                return None;
             }
         }
 
@@ -538,7 +534,7 @@ pub fn all_paths(
     max_results: Option<usize>,
     connection_types: Option<&[String]>,
     via_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Vec<Vec<NodeIndex>> {
     let via_set: Option<HashSet<&str>> =
         via_types.map(|vt| vt.iter().map(|s| s.as_str()).collect());
@@ -577,7 +573,7 @@ fn find_all_paths_recursive(
     max_results: Option<usize>,
     connection_types: Option<&[InternedKey]>,
     via_types: &Option<HashSet<&str>>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) {
     // Early termination when result limit is hit
     if let Some(max) = max_results {
@@ -587,8 +583,8 @@ fn find_all_paths_recursive(
     }
 
     // Timeout check at each recursive entry
-    if let Some(dl) = deadline {
-        if Instant::now() > dl {
+    if deadline.exceeded() {
+        {
             return;
         }
     }
@@ -647,7 +643,7 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // For disk mode, fall back to weakly_connected_components since
     // kosaraju_scc requires petgraph trait bounds.
     if GraphRead::is_disk(&graph.graph) {
-        return weakly_connected_components(graph, None)
+        return weakly_connected_components(graph, Interrupt::default())
             .expect("weakly_connected_components with deadline=None cannot time out");
     }
     kosaraju_scc(graph.graph.as_stable_digraph())
@@ -661,7 +657,7 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
 /// @procedure: weakly_connected_components
 pub fn weakly_connected_components(
     graph: &DirGraph,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
     weakly_connected_components_scoped(graph, None, None, deadline)
 }
@@ -686,7 +682,7 @@ pub fn weakly_connected_components_scoped(
     graph: &DirGraph,
     node_types: Option<&[String]>,
     rel_types: Option<&[InternedKey]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<Vec<NodeIndex>>, String> {
     let edge_matches = |key: InternedKey| -> bool {
         match rel_types {
@@ -777,11 +773,9 @@ pub fn weakly_connected_components_scoped(
         g.edge_references()
     } {
         edge_counter += 1;
-        if edge_counter & 0xFFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if edge_counter & 0xFFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         if !edge_matches(edge.connection_type()) {
@@ -823,7 +817,7 @@ fn build_scoped_undirected_adjacency(
     graph: &DirGraph,
     node_types: Option<&[String]>,
     rel_types: Option<&[InternedKey]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<(Vec<NodeIndex>, Vec<Vec<u32>>), String> {
     let edge_matches = |key: InternedKey| -> bool {
         match rel_types {
@@ -848,11 +842,9 @@ fn build_scoped_undirected_adjacency(
         g.edge_references()
     } {
         counter += 1;
-        if counter & 0xFFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if counter & 0xFFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         if !edge_matches(edge.connection_type()) {
@@ -882,7 +874,7 @@ pub fn coreness_scoped(
     graph: &DirGraph,
     node_types: Option<&[String]>,
     rel_types: Option<&[InternedKey]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
     // Disk/mapped: stream the scoped neighbours (bounded memory) instead of
     // materialising the whole adjacency. In-memory keeps the materialised path.
@@ -964,7 +956,7 @@ fn coreness_scoped_streaming(
     graph: &DirGraph,
     node_types: Option<&[String]>,
     rel_types: Option<&[InternedKey]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, i64)>, String> {
     let nodes = scoped_universe(graph, node_types, rel_types);
     let src = DedupNeighborSource::new(graph, nodes, rel_types.map(|k| k.to_vec()));
@@ -978,11 +970,9 @@ fn coreness_scoped_streaming(
     // Pass 1: distinct-neighbour degree per node.
     let mut deg: Vec<u32> = vec![0; n];
     for (v, d) in deg.iter_mut().enumerate() {
-        if v & 0xFFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if v & 0xFFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         src.neighbors_deduped(v, &mut buf);
@@ -1019,11 +1009,9 @@ fn coreness_scoped_streaming(
     // Pass 2: peel in degree order, re-streaming each vertex's neighbours once.
     let mut core = vec![0i64; n];
     for i in 0..n {
-        if i & 0xFFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if i & 0xFFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         let v = vert[i];
@@ -1059,18 +1047,16 @@ pub fn clustering_coefficient_scoped(
     graph: &DirGraph,
     node_types: Option<&[String]>,
     rel_types: Option<&[InternedKey]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<(NodeIndex, f64)>, String> {
     let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
     let n = nodes.len();
     let mut out = Vec::with_capacity(n);
 
     for v in 0..n {
-        if v & 0xFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if v & 0xFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         let nbrs = &adj[v];
@@ -1159,7 +1145,7 @@ pub fn get_path_connections(graph: &DirGraph, path: &[NodeIndex]) -> Vec<Option<
 
 /// Check if two nodes are connected (directly or indirectly)
 pub fn are_connected(graph: &DirGraph, source: NodeIndex, target: NodeIndex) -> bool {
-    shortest_path(graph, source, target, None, None, None).is_some()
+    shortest_path(graph, source, target, None, None, Interrupt::default()).is_some()
 }
 
 /// Calculate the degree (number of connections) for a node
@@ -1543,7 +1529,7 @@ fn local_move<S: NeighborSource>(
     src: &S,
     init: Option<&[usize]>,
     resolution: f64,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<usize>, String> {
     let n = src.len();
     let total_weight = src.total_weight();
@@ -1577,8 +1563,8 @@ fn local_move<S: NeighborSource>(
 
     let max_iterations = 100;
     for _ in 0..max_iterations {
-        if let Some(dl) = deadline {
-            if Instant::now() > dl {
+        if deadline.exceeded() {
+            {
                 return Err(algorithm_timeout_err());
             }
         }
@@ -1685,7 +1671,7 @@ fn aggregate_graph<S: NeighborSource>(src: &S, community: &[usize], k: usize) ->
 fn louvain_levels<S: NeighborSource>(
     level0: &S,
     resolution: f64,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<Vec<usize>>, String> {
     let n0 = level0.len();
     let m = level0.total_weight();
@@ -1802,7 +1788,7 @@ pub fn louvain_communities(
     resolution: f64,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<CommunityResult, String> {
     // Unscoped disk/mapped: stream level 0 from the CSR (O(nodes) heap) — the
     // bounded-memory path for whole-graph runs. In-memory, or any *scoped* run:
@@ -1888,7 +1874,7 @@ fn refine_connected<S: NeighborSource>(src: &S, partition: &[usize]) -> (Vec<usi
 fn leiden_levels<S: NeighborSource>(
     level0: &S,
     resolution: f64,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<Vec<usize>>, String> {
     let n0 = level0.len();
     let m = level0.total_weight();
@@ -1906,7 +1892,7 @@ fn leiden_levels<S: NeighborSource>(
         init: Option<&[usize]>,
         levels: &mut Vec<Vec<usize>>,
         resolution: f64,
-        deadline: Option<Instant>,
+        deadline: Interrupt,
     ) -> Result<RefineStep, String> {
         let moved = local_move(src, init, resolution, deadline)?;
         let (p, _kp) = renumber_communities(&moved);
@@ -1989,7 +1975,7 @@ pub fn leiden_communities(
     resolution: f64,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<CommunityResult, String> {
     let (nodes, levels, m) =
         if (graph.graph.is_disk() || graph.graph.is_mapped()) && scope.is_none() {
@@ -2032,7 +2018,7 @@ pub fn label_propagation(
     max_iterations: usize,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<CommunityResult, String> {
     // Unscoped disk/mapped: stream the deduped neighbours (bounded memory). A
     // *scoped* run falls through to the materialised path below — the scoped
@@ -2093,8 +2079,8 @@ pub fn label_propagation(
 
     for _ in 0..max_iterations {
         // Timeout check each iteration — error rather than return partial.
-        if let Some(dl) = deadline {
-            if Instant::now() > dl {
+        if deadline.exceeded() {
+            {
                 return Err(algorithm_timeout_err());
             }
         }
@@ -2198,7 +2184,7 @@ fn label_propagation_streaming(
     graph: &DirGraph,
     max_iterations: usize,
     connection_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<CommunityResult, String> {
     let nodes: Vec<NodeIndex> = graph.graph.node_indices().collect();
     if nodes.is_empty() {
@@ -2215,8 +2201,8 @@ fn label_propagation_streaming(
     let mut buf: Vec<u32> = Vec::new();
 
     for _ in 0..max_iterations {
-        if let Some(dl) = deadline {
-            if Instant::now() > dl {
+        if deadline.exceeded() {
+            {
                 return Err(algorithm_timeout_err());
             }
         }
@@ -2306,7 +2292,7 @@ pub fn shortest_path_weighted(
     weight_property: &str,
     connection_types: Option<&[String]>,
     via_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Option<WeightedPathResult> {
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
@@ -2371,11 +2357,9 @@ pub fn shortest_path_weighted(
         }
 
         visit_count += 1;
-        if visit_count.is_multiple_of(1000) {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return None;
-                }
+        if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+            {
+                return None;
             }
         }
 
@@ -2428,7 +2412,7 @@ pub fn shortest_path_cost_weighted(
     weight_property: &str,
     connection_types: Option<&[String]>,
     via_types: Option<&[String]>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Option<f64> {
     shortest_path_weighted(
         graph,

@@ -83,8 +83,9 @@ impl KnowledgeGraph {
 
         // Find shortest path — Dijkstra when weight_property is set,
         // BFS otherwise.
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         if let Some(prop) = weight_property {
             let result = kglite_core::api::algorithms::shortest_path_weighted(
@@ -235,7 +236,7 @@ impl KnowledgeGraph {
                     &prop,
                     None,
                     None,
-                    None,
+                    kglite_core::api::algorithms::Interrupt::default(),
                 ) {
                     Some(w) => w.into_pyobject(py)?.unbind().into_any(),
                     None => py.None(),
@@ -367,8 +368,9 @@ impl KnowledgeGraph {
             })?;
 
         // Find shortest path
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
         match kglite_core::api::algorithms::shortest_path(
             &self.inner,
             source_idx,
@@ -445,8 +447,9 @@ impl KnowledgeGraph {
                 )))
             })?;
 
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         // Find shortest path and return raw indices
         match kglite_core::api::algorithms::shortest_path(
@@ -529,8 +532,9 @@ impl KnowledgeGraph {
             )))
         })?;
 
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         // Find all paths
         let paths = kglite_core::api::algorithms::all_paths(
@@ -602,9 +606,11 @@ impl KnowledgeGraph {
         let weak = weak.unwrap_or(true);
 
         let components = if weak {
-            kglite_core::api::algorithms::weakly_connected_components(&self.inner, None).map_err(
-                |e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)),
-            )?
+            kglite_core::api::algorithms::weakly_connected_components(
+                &self.inner,
+                kglite_core::api::algorithms::Interrupt::default(),
+            )
+            .map_err(|e: String| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?
         } else {
             kglite_core::api::algorithms::connected_components(&self.inner)
         };
@@ -786,8 +792,9 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         let inner = Arc::clone(&self.inner);
         let results = py
@@ -860,8 +867,9 @@ impl KnowledgeGraph {
         let damping = damping_factor.unwrap_or(0.85);
         let max_iter = max_iterations.unwrap_or(100);
         let tol = tolerance.unwrap_or(1e-6);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         let inner = Arc::clone(&self.inner);
         let results = py
@@ -927,8 +935,9 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         let inner = Arc::clone(&self.inner);
         let results = py
@@ -998,8 +1007,9 @@ impl KnowledgeGraph {
         to_df: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let normalized = normalized.unwrap_or(true);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
 
         let inner = Arc::clone(&self.inner);
         let results = py
@@ -1056,8 +1066,9 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let res = resolution.unwrap_or(1.0);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
         let result = kglite_core::api::algorithms::louvain_communities(
             &self.inner,
             weight_property.as_deref(),
@@ -1089,8 +1100,9 @@ impl KnowledgeGraph {
         timeout_ms: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         let max_iter = max_iterations.unwrap_or(100);
-        let deadline =
-            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+        let deadline = kglite_core::api::algorithms::Interrupt::from_deadline(
+            timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        );
         let result = kglite_core::api::algorithms::label_propagation(
             &self.inner,
             max_iter,

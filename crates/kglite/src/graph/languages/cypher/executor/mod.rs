@@ -259,7 +259,7 @@ pub struct CypherExecutor<'a> {
     /// Optional cooperative-cancellation flag, polled alongside
     /// `deadline` (and propagated to the pattern matcher). Set by a
     /// binding's signal model so a long query can be interrupted.
-    pub(super) cancel: Option<&'a AtomicBool>,
+    pub(super) cancel: Option<&'static AtomicBool>,
     /// Optional cap on intermediate result rows. Queries exceeding this return an error.
     max_rows: Option<usize>,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
@@ -350,10 +350,22 @@ impl<'a> CypherExecutor<'a> {
         self
     }
 
+    /// Bundle this executor's deadline + cancel flag into an [`Interrupt`]
+    /// for the graph-algorithm functions (which poll it at their iteration
+    /// checkpoints, so a long `CALL` algorithm is deadline- *and*
+    /// Ctrl-C-interruptible).
+    #[inline]
+    pub(super) fn interrupt(&self) -> crate::graph::algorithms::Interrupt {
+        crate::graph::algorithms::Interrupt {
+            deadline: self.deadline,
+            cancel: self.cancel,
+        }
+    }
+
     /// Set the cooperative-cancellation flag. Propagated to every
     /// pattern matcher this executor spawns so a long scan/expansion
     /// can be interrupted. Default `None`.
-    pub fn with_cancel(mut self, cancel: Option<&'a AtomicBool>) -> Self {
+    pub fn with_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
         self
     }

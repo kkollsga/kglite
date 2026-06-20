@@ -7,10 +7,10 @@
 use super::graph_algorithms::{
     algorithm_timeout_err, edge_in_scope, intern_connection_types, scoped_node_set, NodeScope,
 };
+use super::Interrupt;
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
-use std::time::Instant;
 
 /// Result of centrality calculation
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ pub fn betweenness_centrality(
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,8 +145,8 @@ pub fn betweenness_centrality(
                         if timed_out_ref.load(Ordering::Relaxed) {
                             break;
                         }
-                        if let Some(dl) = deadline_ref {
-                            if Instant::now() > *dl {
+                        if deadline_ref.exceeded() {
+                            {
                                 timed_out_ref.store(true, Ordering::Relaxed);
                                 break;
                             }
@@ -220,11 +220,9 @@ pub fn betweenness_centrality(
 
         for (source_counter, &s_idx) in source_indices.iter().enumerate() {
             // Periodic timeout check (every 10 source nodes)
-            if source_counter.is_multiple_of(10) {
-                if let Some(dl) = deadline {
-                    if Instant::now() > dl {
-                        return Err(algorithm_timeout_err());
-                    }
+            if source_counter.is_multiple_of(10) && deadline.exceeded() {
+                {
+                    return Err(algorithm_timeout_err());
                 }
             }
 
@@ -339,7 +337,7 @@ pub fn pagerank(
     tolerance: f64,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
@@ -407,8 +405,8 @@ pub fn pagerank(
         // Timeout check each iteration — error rather than return partial.
         // Half-converged PageRank scores are misleading; an explicit error
         // tells the caller to extend timeout_ms or scope the graph.
-        if let Some(dl) = deadline {
-            if Instant::now() > dl {
+        if deadline.exceeded() {
+            {
                 return Err(algorithm_timeout_err());
             }
         }
@@ -499,7 +497,7 @@ pub fn degree_centrality(
     normalized: bool,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
@@ -526,11 +524,9 @@ pub fn degree_centrality(
         g.edge_references()
     } {
         edge_counter += 1;
-        if edge_counter & 0xFFFFF == 0 {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if edge_counter & 0xFFFFF == 0 && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
         if let Some(ref types) = interned_ct {
@@ -581,7 +577,7 @@ pub fn closeness_centrality(
     sample_size: Option<usize>,
     connection_types: Option<&[String]>,
     scope: Option<&NodeScope>,
-    deadline: Option<Instant>,
+    deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -669,8 +665,8 @@ pub fn closeness_centrality(
                             score: 0.0,
                         };
                     }
-                    if let Some(dl) = deadline_ref {
-                        if Instant::now() > *dl {
+                    if deadline_ref.exceeded() {
+                        {
                             timed_out_ref.store(true, Ordering::Relaxed);
                             return CentralityResult {
                                 node_idx: source,
@@ -758,11 +754,9 @@ pub fn closeness_centrality(
         let source = nodes[s_idx];
 
         // Periodic timeout check (every 10 source nodes)
-        if i.is_multiple_of(10) {
-            if let Some(dl) = deadline {
-                if Instant::now() > dl {
-                    return Err(algorithm_timeout_err());
-                }
+        if i.is_multiple_of(10) && deadline.exceeded() {
+            {
+                return Err(algorithm_timeout_err());
             }
         }
 
