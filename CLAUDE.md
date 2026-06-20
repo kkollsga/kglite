@@ -372,19 +372,18 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 
 ## Inbox hygiene
 
-`dev_workfolder/inbox/unread/` holds incoming feedback/bug/coordination notes
-(named `YYYY-MM-DD-from-<sender>-<topic>.md`); `dev_workfolder/inbox/read/` is
-the archive. The inbox is gitignored — it's local working state, not committed.
-(It lives under the gitignored `dev_workfolder/` alongside `dev-documentation/`,
-local `projects/`, and `bench/`.)
+`inbox/unread/` (at the repo root) holds incoming feedback/bug/coordination
+notes (named `YYYY-MM-DD-from-<sender>-<topic>.md`); `inbox/read/` is the
+archive. The inbox is gitignored (`/inbox/`) — it's local working state, not
+committed.
 
-**When a message has been actioned, move it from `dev_workfolder/inbox/unread/`
-to `dev_workfolder/inbox/read/`.** "Actioned" means the work shipped, the bug was verified
+**When a message has been actioned, move it from `inbox/unread/`
+to `inbox/read/`.** "Actioned" means the work shipped, the bug was verified
 fixed, or it's a no-action acknowledgement — not merely read. `unread/`
 must reflect only what still needs doing, so a stale "you still have unread
 mail" never hides a genuinely open item among resolved ones. Append a
 one-line `## Status (kglite, <date>): …` footer to substantive work-items
-before moving, so `dev_workfolder/inbox/read/` carries the resolution record.
+before moving, so `inbox/read/` carries the resolution record.
 
 **Route to the party who can act.** A note only belongs in another project's
 inbox (e.g. `../mcp-servers/inbox/`, `../mcp-methods/inbox/`) if it carries an

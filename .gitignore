@@ -8,9 +8,13 @@
 /data/
 # Local development working folder — consolidated out of the repo root.
 # Holds gitignored dev material: `dev-documentation/` (design docs / audits),
-# `inbox/` (feedback/coordination notes), local `projects/`, and `bench/`
-# (one-off bench scripts/data). All local working state, never committed.
+# local `projects/`, and `bench/` (one-off bench scripts/data). All local
+# working state, never committed.
 /dev_workfolder/
+# Inbox of feedback/coordination notes (`unread/` = needs action, `read/` =
+# archive). Kept at the repo root by preference; local working state, never
+# committed — see the "Inbox hygiene" section in CLAUDE.md.
+/inbox/
 # Competitive-library benchmarks. The public, OSS-only `graphsuite` (it powers
 # the linkable BENCHMARKS.md table) IS tracked; the rest stays local —
 # `largescale`, `embedded_app` carry private / heavy data. (`/dir/*` +
