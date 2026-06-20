@@ -53,6 +53,7 @@ mod explore;
 mod tools;
 mod value_codecs;
 use crate::tools::GraphState;
+use kglite::api::storage::StorageMode;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,9 +61,18 @@ use crate::tools::GraphState;
     about = "MCP server for KGLite knowledge graphs (Rust-native)"
 )]
 struct Cli {
-    /// Path to a .kgl knowledge graph file. Loaded at boot.
+    /// Path to a knowledge graph. An existing `.kgl` file or disk-graph
+    /// directory is loaded at boot (mode auto-detected); a path that does
+    /// not exist is created as a fresh, empty graph in `--storage` mode
+    /// (build-and-serve via the mutation tools, then `save_graph`).
     #[arg(long, conflicts_with_all = ["workspace", "watch", "source_root"])]
     graph: Option<PathBuf>,
+
+    /// Storage mode for a freshly-created `--graph` when its path does not
+    /// exist: `memory` (default), `mapped`, or `disk`. Ignored when the
+    /// graph already exists (its saved mode is auto-detected).
+    #[arg(long, default_value = "memory")]
+    storage: String,
 
     /// Source-root mode (no graph).
     #[arg(long = "source-root", conflicts_with_all = ["graph", "workspace", "watch"])]
@@ -235,8 +245,15 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     let mut mode = pick_mode(&cli);
 
     if let Mode::Graph { path } = &mode {
-        if !path.is_file() {
-            anyhow::bail!("--graph path does not exist: {}", path.display());
+        // Validate --storage up front (only used when creating a new graph).
+        StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+        // An existing path must be a loadable .kgl file or disk-graph
+        // directory; a non-existent path is created fresh in --storage mode.
+        if path.exists() && !path.is_file() && !path.is_dir() {
+            anyhow::bail!(
+                "--graph path is neither a file nor a directory: {}",
+                path.display()
+            );
         }
     }
     if let Mode::SourceRoot { dir } | Mode::Watch { dir } = &mode {
@@ -332,8 +349,24 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     // Mode-specific bindings: source roots, workspace handle, initial graph build.
     match &mode {
         Mode::Graph { path } => {
-            let canon = path.canonicalize()?;
-            graph_state.load_kgl(&canon).context("kglite.load failed")?;
+            // Exists → load (auto-detect saved mode); absent → create fresh
+            // in --storage mode. Mirrors kglite.open(path, storage=...).
+            let base: PathBuf = if path.exists() {
+                let canon = path.canonicalize()?;
+                graph_state.load_kgl(&canon).context("kglite.load failed")?;
+                canon
+            } else {
+                let smode = StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+                tracing::info!(
+                    path = %path.display(),
+                    storage = smode.as_str(),
+                    "--graph path does not exist; creating new empty graph"
+                );
+                graph_state
+                    .create_in_mode(path, smode)
+                    .context("kglite create-in-mode failed")?;
+                path.clone()
+            };
             // P1 (operator feedback): honor the manifest's explicit
             // `source_root:` / `source_roots:` declaration in `--graph`
             // mode. The historical behaviour auto-bound the parent of
@@ -350,7 +383,7 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
                 .context("manifest source_root resolution failed")?;
             let roots = if let Some(rs) = manifest_roots {
                 rs
-            } else if let Some(parent) = canon.parent() {
+            } else if let Some(parent) = base.parent() {
                 vec![parent.to_string_lossy().into_owned()]
             } else {
                 Vec::new()

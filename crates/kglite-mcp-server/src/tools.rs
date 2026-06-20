@@ -19,6 +19,7 @@ use kglite::api::introspection::{
     compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
 use kglite::api::io::load_file;
+use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{Embedder, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,22 @@ impl GraphState {
         let dir = load_file(&path.to_string_lossy())
             .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir);
+        *self.inner.write().unwrap() = Some(ActiveGraph {
+            kg,
+            source_path: Some(path.to_path_buf()),
+        });
+        Ok(())
+    }
+
+    /// Create a fresh, empty graph in `mode` bound to `path` (so `save_graph`
+    /// later writes back here). The create/ingest counterpart of
+    /// [`Self::load_kgl`]: route through the shared core builder
+    /// (`new_dir_graph_in_mode`) so the server speaks the same
+    /// memory/mapped/disk vocabulary as the wheel and C ABI.
+    pub fn create_in_mode(&self, path: &Path, mode: StorageMode) -> Result<()> {
+        let dir = new_dir_graph_in_mode(mode, Some(path))
+            .map_err(|e| anyhow::anyhow!("kglite create-in-mode failed: {}", e))?;
+        let kg = KnowledgeGraph::from_arc(Arc::new(dir));
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
