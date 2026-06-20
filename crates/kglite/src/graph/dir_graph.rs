@@ -2796,26 +2796,9 @@ pub struct GraphInfo {
     pub columnar_live_rows: usize,
 }
 
-/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
-/// counter. Wraps [`Arc::make_mut`] (which clones the inner `DirGraph`
-/// if other strong refs exist) plus the canonical post-mutation
-/// `version += 1` increment that downstream OCC commit-checks rely on.
-///
-/// Lifted from the wheel crate in 0.10.1 so bindings + embedders that
-/// hold an `Arc<DirGraph>` and want to mutate it have a single,
-/// consistent entry point.
-///
-/// **Warning:** If other `Arc<DirGraph>` references exist (e.g. a
-/// snapshot held by an open transaction, or a clone held by a still-
-/// alive `ResultView`), this deep-clones the entire graph — every
-/// node, edge, and index. Mutation in a read-heavy workload is fine,
-/// but a lingering reference can cause an unexpected memory spike on
-/// the first write.
-pub fn make_dir_graph_mut(arc: &mut std::sync::Arc<DirGraph>) -> &mut DirGraph {
-    let graph = std::sync::Arc::make_mut(arc);
-    graph.bump_version();
-    graph
-}
+// `make_dir_graph_mut` (the `Arc<DirGraph>` → `&mut DirGraph` + version-bump
+// handle) lives in `crate::graph::handle` to keep this file under the
+// god-file ceiling; it is re-exported through `kglite::api::make_dir_graph_mut`.
 
 #[cfg(test)]
 mod multi_label_tests {

@@ -140,7 +140,7 @@ pub mod api {
     /// auto-filtering. Lifted in roadmap Piece 4.
     pub use crate::graph::TemporalContext;
     // `Arc<DirGraph>` → `&mut DirGraph` + version bump (lifted in 0.10.1).
-    pub use crate::graph::dir_graph::make_dir_graph_mut;
+    pub use crate::graph::handle::make_dir_graph_mut;
     // (Mutation reports → `api::mutation`; schema introspection /
     // `SchemaOverview` / detail enums → `api::introspection`; `.kgl`
     // load/save → `api::io`; `SourceLocation`/`SourceLookup` →
