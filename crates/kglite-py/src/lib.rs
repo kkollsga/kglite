@@ -41,6 +41,7 @@ mod graphgen;
 mod okf;
 mod sec;
 mod sodir;
+mod util;
 mod wikidata;
 
 // The pyo3 wrapper depends on the kglite engine for everything

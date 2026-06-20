@@ -9,6 +9,7 @@ use crate::datatypes::{py_in, py_out};
 use crate::graph::languages::cypher;
 use crate::graph::pyapi::transaction::Transaction;
 use crate::graph::{get_graph_mut, resolve_noderefs, KnowledgeGraph};
+use crate::util::EnterKg;
 use kglite_core::api::introspection;
 use kglite_core::api::io;
 use kglite_core::api::io::{Cancelled, ProgressEvent, ProgressSink, ProgressValue};
@@ -1581,12 +1582,12 @@ impl KnowledgeGraph {
                 value_codecs: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
-            py.detach(move || -> Result<crate::graph::languages::cypher::CypherResult, crate::error::KgError> {
+            py.enter_kg(move || -> Result<crate::graph::languages::cypher::CypherResult, crate::error::KgError> {
                 let outcome = kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
                 let mut result = outcome.result;
                 resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
                 Ok(result)
-            }).map_err(crate::error_py::kg_to_pyerr)?
+            })?
         };
         let elapsed_ms = query_started.elapsed().as_millis() as u64;
         // EXPLAIN: session::execute_read renders the plan into
