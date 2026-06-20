@@ -11,6 +11,7 @@ use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::introspection::{compute_schema, schema_overview_to_json};
 use kglite::api::io::{load_file, load_kgl_bytes, save_graph, save_graph_with, write_kgl_to};
+use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{graphgen, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -90,6 +91,114 @@ impl GraphState {
 #[no_mangle]
 pub extern "C" fn kglite_graph_new() -> *mut KgliteGraph {
     GraphState::into_handle(Arc::new(DirGraph::new()))
+}
+
+/// Create a fresh, empty knowledge graph in an explicit storage mode.
+///
+/// `mode` is `"memory"` (alias `"default"`), `"mapped"`, or `"disk"` — the
+/// same mode vocabulary as Python's `storage=` argument:
+///
+/// - `"memory"` — heap-resident (the default; same as [`kglite_graph_new`]).
+/// - `"mapped"` — property columns spill to mmap during build, so a graph
+///   larger than RAM can be constructed; saves to a `.kgl` file.
+/// - `"disk"` — CSR + mmap on-disk directory format for very large graphs;
+///   **requires** `path` (the directory that becomes the graph).
+///
+/// This is the create/ingest entry point. Opening an existing graph
+/// ([`kglite_load_file`]) auto-detects its mode, so no mode argument is
+/// needed there.
+///
+/// # Arguments
+///
+/// - `mode` (in, borrowed): UTF-8 mode string, null-terminated.
+/// - `path` (in, borrowed): UTF-8 directory path for `"disk"`, else null.
+/// - `out_graph` (out, owned): set to the new graph handle on success
+///   (free via [`kglite_graph_free`], or hand to
+///   [`kglite_session_new`](crate::kglite_session_new)); null on failure.
+/// - `out_error_msg` (out, owned): owned error message on failure (free via
+///   [`kglite_free_string`](crate::kglite_free_string)); null on success.
+///
+/// # Errors
+///
+/// - `KGLITE_ERR_NULL_POINTER` — `mode` or `out_graph` is null
+/// - `KGLITE_ERR_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
+/// - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
+/// - `KGLITE_ERR_FILE_IO` — failed to create the disk-graph directory
+///
+/// # Safety
+///
+/// `mode` must be a null-terminated UTF-8 string; `path` null or the same;
+/// `out_graph` a valid `*mut KgliteGraph` slot; `out_error_msg` null or a
+/// valid slot.
+#[no_mangle]
+pub unsafe extern "C" fn kglite_graph_new_in_mode(
+    mode: *const c_char,
+    path: *const c_char,
+    out_graph: *mut *mut KgliteGraph,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if mode.is_null() || out_graph.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    unsafe {
+        *out_graph = std::ptr::null_mut();
+    }
+    let mode_str = match unsafe { CStr::from_ptr(mode) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let path_opt: Option<&str> = if path.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(path) }.to_str() {
+            Ok(s) => Some(s),
+            Err(_) => return KgliteStatusCode::InvalidUtf8,
+        }
+    };
+
+    // Parse the mode separately so an unknown mode / missing disk path maps
+    // to InvalidArgument, while a genuine disk-create failure below is FileIo.
+    let sm = match StorageMode::parse(mode_str) {
+        Ok(m) => m,
+        Err(msg) => {
+            return fail_new_in_mode(KgliteStatusCode::InvalidArgument, &msg, out_error_msg)
+        }
+    };
+    if matches!(sm, StorageMode::Disk) && path_opt.is_none() {
+        return fail_new_in_mode(
+            KgliteStatusCode::InvalidArgument,
+            "storage mode 'disk' requires a directory path",
+            out_error_msg,
+        );
+    }
+
+    match new_dir_graph_in_mode(sm, path_opt.map(Path::new)) {
+        Ok(graph) => {
+            unsafe {
+                *out_graph = GraphState::into_handle(Arc::new(graph));
+                if !out_error_msg.is_null() {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(msg) => fail_new_in_mode(KgliteStatusCode::FileIo, &msg, out_error_msg),
+    }
+}
+
+/// Set the out-error string (when the slot is non-null) and return `code`.
+/// Small helper so `kglite_graph_new_in_mode`'s error arms stay one-liners.
+fn fail_new_in_mode(
+    code: KgliteStatusCode,
+    msg: &str,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    if !out_error_msg.is_null() {
+        unsafe {
+            *out_error_msg = alloc_c_string(msg);
+        }
+    }
+    code
 }
 
 /// Load a knowledge graph from disk. Accepts `.kgl` files
@@ -670,6 +779,81 @@ mod tests {
         let g = kglite_graph_new();
         assert!(!g.is_null());
         unsafe { kglite_graph_free(g) };
+    }
+
+    fn new_in_mode(mode: &str, path: Option<&str>) -> (KgliteStatusCode, *mut KgliteGraph, String) {
+        let mode_c = CString::new(mode).unwrap();
+        let path_c = path.map(|p| CString::new(p).unwrap());
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_graph_new_in_mode(
+                mode_c.as_ptr(),
+                path_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                &mut graph as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        let msg = if err.is_null() {
+            String::new()
+        } else {
+            let s = unsafe { CStr::from_ptr(err).to_str().unwrap().to_string() };
+            unsafe { crate::kglite_free_string(err) };
+            s
+        };
+        (rc, graph, msg)
+    }
+
+    #[test]
+    fn graph_new_in_mode_memory_and_mapped() {
+        for mode in ["memory", "default", "mapped"] {
+            let (rc, g, _) = new_in_mode(mode, None);
+            assert_eq!(rc, KgliteStatusCode::Ok, "mode {mode}");
+            assert!(!g.is_null(), "mode {mode}");
+            unsafe { kglite_graph_free(g) };
+        }
+    }
+
+    #[test]
+    fn graph_new_in_mode_disk_creates_at_path() {
+        let dir = std::env::temp_dir().join(format!("kglite_c_newmode_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (rc, g, msg) = new_in_mode("disk", Some(dir.to_str().unwrap()));
+        assert_eq!(rc, KgliteStatusCode::Ok, "{msg}");
+        assert!(!g.is_null());
+        unsafe { kglite_graph_free(g) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn graph_new_in_mode_unknown_is_invalid_argument() {
+        let (rc, g, msg) = new_in_mode("nope", None);
+        assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+        assert!(g.is_null());
+        assert!(msg.contains("Unknown storage mode"));
+    }
+
+    #[test]
+    fn graph_new_in_mode_disk_without_path_is_invalid_argument() {
+        let (rc, g, msg) = new_in_mode("disk", None);
+        assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+        assert!(g.is_null());
+        assert!(msg.contains("requires a directory path"));
+    }
+
+    #[test]
+    fn graph_new_in_mode_null_returns_null_pointer() {
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_graph_new_in_mode(
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut graph as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
     }
 
     #[test]
