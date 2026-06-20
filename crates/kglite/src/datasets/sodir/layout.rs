@@ -11,43 +11,7 @@
 //! Sodir has only two storage modes — `memory` (rebuilt each open,
 //! discarded) and `disk` (persisted under `graph/`).
 
-use std::fmt;
 use std::path::{Path, PathBuf};
-
-/// Storage mode for the built graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StorageMode {
-    Memory,
-    Disk,
-}
-
-impl StorageMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StorageMode::Memory => "memory",
-            StorageMode::Disk => "disk",
-        }
-    }
-}
-
-impl fmt::Display for StorageMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for StorageMode {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "memory" => Ok(StorageMode::Memory),
-            "disk" => Ok(StorageMode::Disk),
-            other => Err(format!(
-                "unknown storage mode '{other}'; expected memory|disk"
-            )),
-        }
-    }
-}
 
 /// Resolved paths for one Sodir workdir. Cheap to clone — wraps a
 /// single `PathBuf`.
@@ -145,14 +109,6 @@ mod tests {
             w.disk_graph_meta(),
             Path::new("/tmp/sodir/graph/disk_graph_meta.json")
         );
-    }
-
-    #[test]
-    fn storage_mode_roundtrip() {
-        for m in [StorageMode::Memory, StorageMode::Disk] {
-            assert_eq!(m.as_str().parse::<StorageMode>().unwrap(), m);
-        }
-        assert!("mapped".parse::<StorageMode>().is_err());
     }
 
     #[test]

@@ -24,9 +24,6 @@ pub mod freshness;
 pub mod layout;
 
 pub use cache::{ensure_dump, remote_last_modified};
-pub use error::{Result, WikidataError};
-pub use freshness::{
-    age_days, decide, file_mtime_utc, read_remote_mtime_from_source_meta, CacheDecision,
-    FreshnessInputs,
-};
-pub use layout::{Workdir, DUMP_FILE, DUMP_URL};
+pub use error::WikidataError;
+pub use freshness::{decide, CacheDecision, FreshnessInputs};
+pub use layout::Workdir;
