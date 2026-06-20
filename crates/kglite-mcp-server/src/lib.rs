@@ -240,11 +240,9 @@ where
     runtime.block_on(run_async(cli, factory))
 }
 
-async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> Result<()> {
-    init_tracing();
-    let mut mode = pick_mode(&cli);
-
-    if let Mode::Graph { path } = &mode {
+/// Fail fast on bad mode-specific path arguments before any expensive setup.
+fn validate_mode_paths(mode: &Mode, cli: &Cli) -> Result<()> {
+    if let Mode::Graph { path } = mode {
         // Validate --storage up front (only used when creating a new graph).
         StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
         // An existing path must be a loadable .kgl file or disk-graph
@@ -256,7 +254,7 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             );
         }
     }
-    if let Mode::SourceRoot { dir } | Mode::Watch { dir } = &mode {
+    if let Mode::SourceRoot { dir } | Mode::Watch { dir } = mode {
         if !dir.is_dir() {
             anyhow::bail!(
                 "path does not exist or is not a directory: {}",
@@ -264,42 +262,42 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             );
         }
     }
+    Ok(())
+}
 
-    let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
-
-    // Manifest `workspace.kind: local` wins over CLI flags — promote
-    // before mode-specific binding runs so the rest of the boot path
-    // sees `Mode::LocalWorkspace`. Mirrors the framework's own
-    // `mcp-server` binary (`crates/mcp-server/src/main.rs` in 0.3.23+).
-    if let Some(m) = manifest.as_ref() {
-        if let Some(wcfg) = m.workspace.as_ref() {
-            if wcfg.kind == WorkspaceKind::Local {
-                let raw_root = wcfg.root.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("manifest.workspace.kind=local is missing required `root`")
-                })?;
-                let base = m
-                    .yaml_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                let resolved = base.join(raw_root).canonicalize().with_context(|| {
-                    format!("workspace.root {raw_root:?} resolves to a path that does not exist")
-                })?;
-                mode = Mode::LocalWorkspace {
-                    root: resolved,
-                    watch: wcfg.watch,
-                };
-            }
-        }
+/// Manifest `workspace.kind: local` wins over CLI flags — promote `mode` to
+/// `LocalWorkspace` so the rest of boot sees it. Mirrors the framework's own
+/// `mcp-server` binary (`crates/mcp-server/src/main.rs` in 0.3.23+). Returns
+/// `mode` unchanged when no local-workspace manifest is in play.
+fn promote_local_workspace(mode: Mode, manifest: Option<&Manifest>) -> Result<Mode> {
+    let Some(wcfg) = manifest.and_then(|m| m.workspace.as_ref()) else {
+        return Ok(mode);
+    };
+    if wcfg.kind != WorkspaceKind::Local {
+        return Ok(mode);
     }
+    let m = manifest.expect("manifest present when wcfg is");
+    let raw_root = wcfg.root.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("manifest.workspace.kind=local is missing required `root`")
+    })?;
+    let base = m
+        .yaml_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let resolved = base.join(raw_root).canonicalize().with_context(|| {
+        format!("workspace.root {raw_root:?} resolves to a path that does not exist")
+    })?;
+    Ok(Mode::LocalWorkspace {
+        root: resolved,
+        watch: wcfg.watch,
+    })
+}
 
-    // Load `.env` before anything reads env vars (notably the GitHub
-    // tools' `GITHUB_TOKEN` auth check). Walk-up start point matches
-    // the framework binary's choice in `mcp-server`'s own main: the
-    // mode's directory for source-aware modes, cwd for bare. Explicit
-    // `env_file:` in the manifest overrides walk-up. Returns the path
-    // actually loaded so the boot summary can name it.
-    let env_start_dir: PathBuf = match &mode {
+/// The directory to start the `.env` walk-up from, per mode (the mode's own
+/// directory for source-aware modes, cwd for bare).
+fn resolve_env_start_dir(mode: &Mode) -> PathBuf {
+    match mode {
         Mode::Graph { path } => path
             .canonicalize()
             .ok()
@@ -308,46 +306,20 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
         Mode::SourceRoot { dir } | Mode::Workspace { dir } | Mode::Watch { dir } => dir.clone(),
         Mode::LocalWorkspace { root, .. } => root.clone(),
         Mode::Bare => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    };
-    let env_file_loaded = load_env_for_mode(manifest.as_ref(), &env_start_dir)
-        .context("manifest env_file load failed")?;
-
-    let mut options = ServerOptions::from_manifest(manifest.as_ref(), fallback_name(&mode));
-    if cli.name.is_some() {
-        options.name = cli.name.clone();
     }
+}
 
-    // The github-workspace (open-source) mode ingests each cloned repo's
-    // markdown as `:Doc` nodes and links them to code (MENTIONS/DOCUMENTS) —
-    // a repo's prose is part of its intelligence. Local / file / graph modes
-    // keep the lean code-only graph.
-    let include_docs = matches!(mode, Mode::Workspace { .. });
-    // extensions.value_codecs: build the manifest-declared, position-scoped
-    // literal codecs (prefix / map / regex). Passed to the engine via
-    // ExecuteOptions per query — decode on the way in, encode on the way out.
-    // Empty when absent; a malformed block errors at boot, not per-query.
-    let value_codecs = match manifest.as_ref() {
-        Some(m) => value_codecs::from_manifest(m.extensions.get("value_codecs"))
-            .context("extensions.value_codecs parse failed")?,
-        None => Vec::new(),
-    };
-    let value_codecs = if value_codecs.is_empty() {
-        None
-    } else {
-        Some(Arc::new(value_codecs))
-    };
-    let graph_state = GraphState::new(include_docs).with_value_codecs(value_codecs);
-
-    // Shared "active root" slot for local-workspace mode. Populated
-    // by the post-activate hook on each `set_root_dir`; read by the
-    // watch callback to scope rebuilds. Stays `None` until the first
-    // `set_root_dir` (the boot-time activate is intentionally
-    // deferred — see `Mode::LocalWorkspace` arm below for why).
-    // Other modes never write to it.
-    let local_active_root: Arc<RwLock<Option<PathBuf>>> = Arc::new(RwLock::new(None));
-
-    // Mode-specific bindings: source roots, workspace handle, initial graph build.
-    match &mode {
+/// Apply mode-specific bindings — source roots, workspace handle, initial
+/// graph load/build — onto `options`, returning the transformed value.
+fn bind_mode(
+    mode: &Mode,
+    cli: &Cli,
+    manifest: Option<&Manifest>,
+    graph_state: &GraphState,
+    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
+    mut options: ServerOptions,
+) -> Result<ServerOptions> {
+    match mode {
         Mode::Graph { path } => {
             // Exists → load (auto-detect saved mode); absent → create fresh
             // in --storage mode. Mirrors kglite.open(path, storage=...).
@@ -376,7 +348,6 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             // source files are elsewhere). Now: explicit YAML wins,
             // auto-bind only when the manifest doesn't declare one.
             let manifest_roots = manifest
-                .as_ref()
                 .filter(|m| !m.source_roots.is_empty())
                 .map(resolve_source_roots)
                 .transpose()
@@ -456,7 +427,7 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             options = options.with_workspace(ws);
         }
         Mode::Bare => {
-            if let Some(m) = manifest.as_ref() {
+            if let Some(m) = manifest {
                 if !m.source_roots.is_empty() {
                     let resolved =
                         resolve_source_roots(m).context("source root resolution failed")?;
@@ -465,6 +436,75 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             }
         }
     }
+    Ok(options)
+}
+
+async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> Result<()> {
+    init_tracing();
+    let mode = pick_mode(&cli);
+    validate_mode_paths(&mode, &cli)?;
+
+    let manifest = load_manifest(&cli, &mode).context("manifest load failed")?;
+
+    // Manifest `workspace.kind: local` wins over CLI flags — promote before
+    // mode-specific binding so the rest of boot sees `Mode::LocalWorkspace`.
+    let mode = promote_local_workspace(mode, manifest.as_ref())?;
+
+    // Load `.env` before anything reads env vars (notably the GitHub
+    // tools' `GITHUB_TOKEN` auth check). Walk-up start point matches
+    // the framework binary's choice in `mcp-server`'s own main: the
+    // mode's directory for source-aware modes, cwd for bare. Explicit
+    // `env_file:` in the manifest overrides walk-up. Returns the path
+    // actually loaded so the boot summary can name it.
+    let env_start_dir = resolve_env_start_dir(&mode);
+    let env_file_loaded = load_env_for_mode(manifest.as_ref(), &env_start_dir)
+        .context("manifest env_file load failed")?;
+
+    let mut options = ServerOptions::from_manifest(manifest.as_ref(), fallback_name(&mode));
+    if cli.name.is_some() {
+        options.name = cli.name.clone();
+    }
+
+    // The github-workspace (open-source) mode ingests each cloned repo's
+    // markdown as `:Doc` nodes and links them to code (MENTIONS/DOCUMENTS) —
+    // a repo's prose is part of its intelligence. Local / file / graph modes
+    // keep the lean code-only graph.
+    let include_docs = matches!(mode, Mode::Workspace { .. });
+    // extensions.value_codecs: build the manifest-declared, position-scoped
+    // literal codecs (prefix / map / regex). Passed to the engine via
+    // ExecuteOptions per query — decode on the way in, encode on the way out.
+    // Empty when absent; a malformed block errors at boot, not per-query.
+    let value_codecs = match manifest.as_ref() {
+        Some(m) => value_codecs::from_manifest(m.extensions.get("value_codecs"))
+            .context("extensions.value_codecs parse failed")?,
+        None => Vec::new(),
+    };
+    let value_codecs = if value_codecs.is_empty() {
+        None
+    } else {
+        Some(Arc::new(value_codecs))
+    };
+    let graph_state = GraphState::new(include_docs).with_value_codecs(value_codecs);
+
+    // Shared "active root" slot for local-workspace mode. Populated
+    // by the post-activate hook on each `set_root_dir`; read by the
+    // watch callback to scope rebuilds. Stays `None` until the first
+    // `set_root_dir` (the boot-time activate is intentionally
+    // deferred — see `Mode::LocalWorkspace` arm below for why).
+    // Other modes never write to it.
+    let local_active_root: Arc<RwLock<Option<PathBuf>>> = Arc::new(RwLock::new(None));
+
+    // Mode-specific bindings: source roots, workspace handle, initial graph
+    // build. Extracted to `bind_mode` so this boot fn reads as a sequence of
+    // named phases.
+    let options = bind_mode(
+        &mode,
+        &cli,
+        manifest.as_ref(),
+        &graph_state,
+        &local_active_root,
+        options,
+    )?;
 
     // Snapshot the dynamic source-roots provider before we move
     // `options` into the McpServer. The `read_code_source` tool
