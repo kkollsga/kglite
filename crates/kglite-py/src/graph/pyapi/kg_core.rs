@@ -1599,7 +1599,7 @@ impl KnowledgeGraph {
                 value_codecs: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
-            py.detach(move || -> Result<crate::graph::languages::cypher::result::CypherResult, crate::error::KgError> {
+            py.detach(move || -> Result<crate::graph::languages::cypher::CypherResult, crate::error::KgError> {
                 let outcome = kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
                 let mut result = outcome.result;
                 resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
@@ -1628,7 +1628,7 @@ impl KnowledgeGraph {
             Some(0) | None => None,
             other => other,
         };
-        let diagnostics = cypher::result::QueryDiagnostics {
+        let diagnostics = cypher::QueryDiagnostics {
             elapsed_ms,
             timed_out: false,
             timeout_ms: reported_timeout_ms,

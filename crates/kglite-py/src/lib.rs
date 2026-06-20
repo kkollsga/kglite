@@ -106,18 +106,18 @@ pub mod api {
     /// reach into specific passes (planner introspection,
     /// custom-disabled-pass sets, etc.).
     pub mod cypher {
-        pub use crate::graph::languages::cypher::ast::CypherQuery;
-        pub use crate::graph::languages::cypher::ast::OutputFormat;
-        pub use crate::graph::languages::cypher::executor::write::execute_mutable;
-        pub use crate::graph::languages::cypher::executor::CypherExecutor;
+        pub use crate::graph::languages::cypher::execute_mutable;
         pub use crate::graph::languages::cypher::generate_explain_result;
         pub use crate::graph::languages::cypher::is_mutation_query;
-        pub use crate::graph::languages::cypher::parser::parse_cypher;
+        pub use crate::graph::languages::cypher::parse_cypher;
         pub use crate::graph::languages::cypher::planner;
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
-        pub use crate::graph::languages::cypher::result::CypherResult;
+        pub use crate::graph::languages::cypher::CypherExecutor;
+        pub use crate::graph::languages::cypher::CypherQuery;
+        pub use crate::graph::languages::cypher::CypherResult;
+        pub use crate::graph::languages::cypher::OutputFormat;
     }
 
     /// Canonical query + transaction surface. Single source of truth

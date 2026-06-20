@@ -7,14 +7,14 @@
 // logic stays in `languages/cypher/py_convert.rs`; we import it here.
 
 use crate::datatypes::values::Value;
-use crate::graph::languages::cypher::ast::{Expression, ReturnItem};
 use crate::graph::languages::cypher::py_convert::{
     preprocess_values_owned, preprocessed_result_to_dataframe, preprocessed_value_to_py,
     stats_to_py, PreProcessedValue,
 };
-use crate::graph::languages::cypher::result::{
+use crate::graph::languages::cypher::{
     ClauseStats, CypherResult, MutationStats, QueryDiagnostics, ResultRow,
 };
+use crate::graph::languages::cypher::{Expression, ReturnItem};
 use kglite_core::api::algorithms::CentralityResult;
 use kglite_core::api::GraphRead;
 use kglite_core::api::{DirGraph, NodeData};
@@ -401,7 +401,7 @@ fn resolve_node_property_lazy(
     idx: petgraph::graph::NodeIndex,
     prop: &str,
 ) -> Value {
-    use crate::graph::languages::cypher::executor::helpers::resolve_node_property;
+    use crate::graph::languages::cypher::resolve_node_property;
     if let Some(node) = graph.graph.node_weight(idx) {
         return resolve_node_property(node, prop, graph);
     }
@@ -410,10 +410,10 @@ fn resolve_node_property_lazy(
 
 fn resolve_edge_property_lazy(
     graph: &DirGraph,
-    eb: &crate::graph::languages::cypher::result::EdgeBinding,
+    eb: &crate::graph::languages::cypher::EdgeBinding,
     prop: &str,
 ) -> Value {
-    use crate::graph::languages::cypher::executor::helpers::resolve_edge_property;
+    use crate::graph::languages::cypher::resolve_edge_property;
     resolve_edge_property(graph, eb, prop)
 }
 

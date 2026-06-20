@@ -149,7 +149,7 @@ pub(crate) struct CursorState {
     /// Cow wrapper for copy-on-write selection semantics.
     pub(crate) selection: CowSelection,
     pub(crate) reports: OperationReports,
-    pub(crate) last_mutation_stats: Option<cypher::result::MutationStats>,
+    pub(crate) last_mutation_stats: Option<cypher::MutationStats>,
     /// Temporal context for auto-filtering temporal nodes/connections.
     /// Set via `date()`. Default = Today (resolve at query time).
     pub(crate) temporal_context: TemporalContext,

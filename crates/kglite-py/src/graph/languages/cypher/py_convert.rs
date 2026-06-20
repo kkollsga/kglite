@@ -73,7 +73,7 @@ pub fn preprocess_values_owned(rows: Vec<Vec<Value>>) -> Vec<Vec<PreProcessedVal
 /// Convert MutationStats to a Python dict.
 pub fn stats_to_py<'py>(
     py: Python<'py>,
-    stats: &super::result::MutationStats,
+    stats: &super::MutationStats,
 ) -> PyResult<Bound<'py, PyDict>> {
     let stats_dict = PyDict::new(py);
     stats_dict.set_item("nodes_created", stats.nodes_created)?;

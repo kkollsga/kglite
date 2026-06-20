@@ -146,7 +146,7 @@ impl Session {
         let deadline = qopts.deadline;
         let max_rows = qopts.max_rows;
         let result = py
-            .detach(move || -> Result<cypher::result::CypherResult, KgError> {
+            .detach(move || -> Result<cypher::CypherResult, KgError> {
                 let opts = ExecuteOptions {
                     params: &param_map,
                     deadline,
@@ -185,7 +185,7 @@ impl Session {
         // KnowledgeGraph mutation path — text_score in a write is atypical and
         // would force a GIL re-acquire inside the detached block).
         let result = py
-            .detach(move || -> Result<cypher::result::CypherResult, KgError> {
+            .detach(move || -> Result<cypher::CypherResult, KgError> {
                 // Acquire the writer lock *with the GIL released* (we are
                 // already inside py.detach). Locking before the detach
                 // would deadlock: a waiting writer would hold the GIL while
@@ -223,7 +223,7 @@ impl Session {
 /// DataFrame / `ResultView`).
 fn marshal_result(
     py: Python<'_>,
-    result: cypher::result::CypherResult,
+    result: cypher::CypherResult,
     to_df: bool,
     output_csv: bool,
 ) -> PyResult<Py<PyAny>> {
