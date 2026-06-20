@@ -227,3 +227,59 @@ class TestTransactionWithParams:
         result = graph.cypher("MATCH (n:Person) WHERE n.title = 'Dave' RETURN n.age")
         assert len(result) == 1
         assert result[0]["n.age"] == 40
+
+
+def _count(handle, label="N"):
+    return handle.cypher(f"MATCH (n:{label}) RETURN count(n) AS c").to_list()[0]["c"]
+
+
+class TestTransactionRollbackHardening:
+    """Rollback correctness beyond the small-graph cases above — exercises the
+    `working_mut` deep-clone path (Arc::try_unwrap fallback) at scale and with
+    extra outstanding references, which the cancellation work leans on."""
+
+    def test_large_multi_statement_rollback_discards_everything(self):
+        """A big tx (bulk CREATE + SET + DELETE across many rows) must leave the
+        original graph unchanged after rollback."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("UNWIND range(1, 100000) AS i CREATE (:N {id: i})")
+        base = _count(g)
+
+        tx = g.begin()
+        tx.cypher("UNWIND range(1, 500000) AS i CREATE (:N {id: 1000000 + i})")
+        tx.cypher("MATCH (n:N) WHERE n.id <= 50000 SET n.touched = 1")
+        tx.cypher("MATCH (n:N) WHERE n.id <= 20000 DELETE n")
+        # Changes are visible inside the tx...
+        assert _count(tx) == base + 500000 - 20000
+        tx.rollback()
+
+        # ...but fully discarded after rollback.
+        assert _count(g) == base
+        leaked = g.cypher("MATCH (n:N) WHERE n.touched = 1 RETURN count(n) AS c").to_list()
+        assert leaked[0]["c"] == 0
+
+    def test_rollback_with_outstanding_session_and_frozen_refs(self):
+        """Rollback must work even when a Session and a FrozenGraph hold their
+        own Arc references to the same graph (refcount > 2 → working_mut takes
+        the deep-clone branch). The other views must be unaffected."""
+        g = kglite.KnowledgeGraph()
+        g.cypher("UNWIND range(1, 10) AS i CREATE (:N {id: i})")
+        session = g.session()  # extra Arc ref
+        frozen = g.freeze()  # extra Arc ref
+
+        tx = g.begin()
+        tx.cypher("CREATE (:N {id: 999})")
+        tx.rollback()
+
+        assert _count(g) == 10
+        assert _count(session) == 10
+        assert _count(frozen) == 10
+
+    def test_large_commit_persists(self):
+        """The inverse of rollback — a large committed tx must fully apply (so a
+        passing rollback test can't be a no-op that drops everything)."""
+        g = kglite.KnowledgeGraph()
+        tx = g.begin()
+        tx.cypher("UNWIND range(1, 200000) AS i CREATE (:N {id: i})")
+        tx.commit()
+        assert _count(g) == 200000
