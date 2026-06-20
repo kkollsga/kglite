@@ -7,18 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Performance
+## [0.11.5] — 2026-06-20 — `kglite::api` hard-seal + dataset surface curation + Cypher plan cache
 
-- **Cypher plan cache.** A param-less, codec-free query re-run against an
-  unchanged graph now reuses its fully-optimized plan, skipping parse +
-  schema-validate + optimize (the parse cache already covered parse; the
-  optimizer was the bigger uncached cost). Keyed on `(graph_id, version)` so
-  it is invalidated by any mutation and never leaks across graphs; parameter
-  binding still happens fresh at execute time. Biggest win for repeated
-  queries against a stable/served graph (bolt/mcp). To make the key sound,
-  `DirGraph` version now bumps on every mutation path (Cypher writes via
-  `execute_mut`, bulk ingest, and `make_dir_graph_mut`), not only on handle
-  acquisition.
+### Changed
+
+- **`kglite::graph` is now `pub(crate)` — the engine is reachable only through
+  the curated `kglite::api` facade** (roadmap Piece 4 completed the 253→0
+  below-api-reach sweep; the `api` surface was also reorganized into
+  one-home-per-concern clusters). The Python wheel, the bolt/mcp/C servers,
+  and the Cypher / `kglite::api` surfaces are unaffected. *Potentially
+  breaking only for external Rust consumers of the `kglite` engine crate that
+  reached `kglite::graph::*` directly — move those to `kglite::api::*`.* A CI
+  grep plus the `pub(crate)` compile boundary keep wrappers honest.
+- **`kglite::api::datasets` slimmed ~65 → 38 items.** The dataset module is
+  now sealed behind `api::datasets` (single, gate-enforced path, the same
+  treatment as `graph`); the per-function `*_blocking` twins collapsed to one
+  `kglite::api::datasets::block_on` bridge; the dataset surface was curated to
+  the items bindings actually consume; and ~530 lines of dead code the seal
+  unmasked were removed. The surface every binding actually uses is unchanged.
+- **Single mode-aware durable save dispatch** (`kglite::api::io::save_graph_with`)
+  now backs the wheel, the MCP server, and the C ABI, replacing three copies
+  of the disk-vs-in-memory / columnar / fsync logic. Fixes the C
+  `kglite_save_graph_durable`, which previously bypassed disk-mode dispatch
+  and columnar consolidation (and whose fsync docs were inverted). Saves are
+  byte-identical and remain durable (fsync) by default.
 
 ### Added
 
@@ -35,14 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is created fresh in `--storage` mode (build-and-serve). Mirrors the
     Python wheel's `kglite.open(path, storage=...)` semantics.
 
-### Changed
+### Performance
 
-- **Single mode-aware durable save dispatch** (`kglite::api::io::save_graph_with`)
-  now backs the wheel, the MCP server, and the C ABI, replacing three copies
-  of the disk-vs-in-memory / columnar / fsync logic. Fixes the C
-  `kglite_save_graph_durable`, which previously bypassed disk-mode dispatch
-  and columnar consolidation (and whose fsync docs were inverted). Saves are
-  byte-identical and remain durable (fsync) by default.
+- **Cypher plan cache.** A param-less, codec-free query re-run against an
+  unchanged graph now reuses its fully-optimized plan, skipping parse +
+  schema-validate + optimize (the parse cache already covered parse; the
+  optimizer was the bigger uncached cost). Keyed on `(graph_id, version)` so
+  it is invalidated by any mutation and never leaks across graphs; parameter
+  binding still happens fresh at execute time. Biggest win for repeated
+  queries against a stable/served graph (bolt/mcp). To make the key sound,
+  `DirGraph` version now bumps on every mutation path (Cypher writes via
+  `execute_mut`, bulk ingest, and `make_dir_graph_mut`), not only on handle
+  acquisition.
 
 ## [0.11.4] — 2026-06-19 — C ABI completeness + `kglite::api` soft-seal foundation
 
