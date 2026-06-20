@@ -61,6 +61,39 @@ def test_algorithm_deadline_still_raises():
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="POSIX SIGINT only")
+def test_session_mutation_cancel_is_atomic():
+    """A `Session.execute` mutation interrupted by Ctrl-C is atomic: the
+    transactional working copy is discarded on abort, so the graph is either
+    fully mutated (it finished) or unchanged (it was cancelled) — never partial.
+
+    (Live `KnowledgeGraph` / `Transaction` mutations are deliberately NOT
+    cancellable — they mutate in place / unreliably roll back — so this
+    invariant is only guaranteed for the `Session` path.)
+    """
+    g = _scan_graph(4_000_000)
+    s = g.session()
+    flag_all = "MATCH (a:N) SET a.flag = 1"  # matches every node — slow over 4M
+
+    def fire():
+        time.sleep(0.08)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=fire, daemon=True).start()
+    cancelled = False
+    try:
+        s.execute(flag_all, timeout_ms=0)
+    except KeyboardInterrupt:
+        cancelled = True
+
+    flagged = s.cypher("MATCH (a:N) WHERE a.flag = 1 RETURN count(a) AS c").to_list()[0]["c"]
+    total = s.cypher("MATCH (a:N) RETURN count(a) AS c").to_list()[0]["c"]
+    if cancelled:
+        assert flagged == 0, f"cancelled mutation left partial state: {flagged} flagged"
+    else:
+        assert flagged == total, f"completed mutation only flagged {flagged}/{total}"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="POSIX SIGINT only")
 def test_ctrl_c_interrupts_algorithm():
     """A SIGINT during a long CALL algorithm raises KeyboardInterrupt, and the
     previous (Python) SIGINT handler is restored afterwards."""

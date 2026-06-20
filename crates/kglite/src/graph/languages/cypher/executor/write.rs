@@ -5,6 +5,7 @@ use super::super::ast::*;
 use super::super::result::*;
 use super::{clause_display_name, CypherExecutor};
 use crate::datatypes::values::Value;
+use crate::graph::algorithms::Interrupt;
 use crate::graph::schema::{DirGraph, EdgeData, InternedKey};
 use crate::graph::storage::{GraphRead, GraphWrite};
 use petgraph::graph::NodeIndex;
@@ -53,7 +54,7 @@ pub fn execute_mutable(
     graph: &mut DirGraph,
     query: &CypherQuery,
     params: HashMap<String, Value>,
-    deadline: Option<Instant>,
+    interrupt: Interrupt,
 ) -> Result<CypherResult, String> {
     GraphRead::reset_arenas(&graph.graph);
 
@@ -63,10 +64,11 @@ pub fn execute_mutable(
     let mut profile_stats: Vec<ClauseStats> = Vec::new();
 
     for (i, clause) in query.clauses.iter().enumerate() {
-        if let Some(dl) = deadline {
-            if Instant::now() > dl {
-                return Err("Query timed out".to_string());
-            }
+        if interrupt.exceeded() {
+            // Deadline passed or the caller flipped the cancel flag (Ctrl-C).
+            // The mutation is atomic: aborting here discards the in-flight
+            // changes, leaving the graph unchanged.
+            return Err("Query interrupted".to_string());
         }
         // Seed first-clause WITH/UNWIND (same as read-only path)
         if i == 0
@@ -145,7 +147,8 @@ pub fn execute_mutable(
             // scope (variables bound by clauses 0..i), distinct from the
             // bindings present in any single row.
             Clause::CallSubquery { import, body } => {
-                let executor = CypherExecutor::with_params(graph, &params, deadline);
+                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                    .with_cancel(interrupt.cancel);
                 let declared =
                     crate::graph::languages::cypher::planner::simplification::declared_variables(
                         &query.clauses[..i],
@@ -154,7 +157,8 @@ pub fn execute_mutable(
             }
             // Read clauses: create temporary immutable executor
             _ => {
-                let executor = CypherExecutor::with_params(graph, &params, deadline);
+                let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+                    .with_cancel(interrupt.cancel);
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
@@ -187,7 +191,8 @@ pub fn execute_mutable(
     let profile = if profiling { Some(profile_stats) } else { None };
 
     if has_return || !result_set.columns.is_empty() {
-        let executor = CypherExecutor::with_params(graph, &params, deadline);
+        let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
+            .with_cancel(interrupt.cancel);
         let mut result = executor.finalize_result(result_set)?;
         result.stats = Some(stats);
         result.profile = profile;
