@@ -1510,9 +1510,13 @@ impl KnowledgeGraph {
                 // value_codecs are an MCP-manifest feature; the Python API
                 // doesn't configure them (the engine path uses native types).
                 value_codecs: None,
-                // Live-KG mutations run with the GIL held (exclusive borrow),
-                // not through enter_kg, so no cancel flag is wired here; the
-                // deadline still bounds them.
+                // Cancellation is deliberately NOT wired on the live-KG path:
+                // it mutates the single-owner graph *in place* (no working-copy
+                // rollback), so aborting mid-write would leave partial state.
+                // For interruptible + atomic mutations use a Session
+                // (`g.session().execute(...)`) or a Transaction — both run on a
+                // copy-on-write working graph that's discarded on abort. The
+                // deadline still bounds this path.
                 cancel: None,
             };
 

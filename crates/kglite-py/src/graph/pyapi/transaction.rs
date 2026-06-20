@@ -199,8 +199,11 @@ impl Transaction {
             disabled_passes: None,
             embedder: None,
             value_codecs: None,
-            // Transactions are explicit multi-step sessions; cancellation
-            // isn't wired through the tx path (deadline still applies).
+            // Cancellation is NOT wired on the transaction path: `working_mut`
+            // mutates in place when the graph is uniquely held, so an aborted
+            // mutation isn't reliably rolled back (a Ctrl-C could leave partial
+            // state). For interruptible + atomic mutations use `Session.execute`
+            // (separate working copy + atomic-swap commit). The deadline applies.
             cancel: None,
         };
 

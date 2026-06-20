@@ -560,7 +560,13 @@ fn test_create_single_node() {
     let mut graph = DirGraph::new();
     let query =
         super::super::parser::parse_cypher("CREATE (n:Person {name: 'Alice', age: 30})").unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert!(result.stats.is_some());
     let stats = result.stats.unwrap();
@@ -585,7 +591,13 @@ fn test_create_node_with_properties() {
     let query =
         super::super::parser::parse_cypher("CREATE (n:Product {name: 'Laptop', price: 999})")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     let node = graph
@@ -606,7 +618,13 @@ fn test_create_edge_between_matched() {
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:FRIENDS]->(b)",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let stats = result.stats.unwrap();
     assert_eq!(stats.nodes_created, 0);
@@ -623,7 +641,13 @@ fn test_create_path() {
         "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let stats = result.stats.unwrap();
     assert_eq!(stats.nodes_created, 2);
@@ -642,7 +666,13 @@ fn test_create_with_params() {
         ("name".to_string(), Value::String("Charlie".to_string())),
         ("age".to_string(), Value::Int64(35)),
     ]);
-    let result = execute_mutable(&mut graph, &query, params, None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        params,
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     let node = graph
@@ -662,7 +692,13 @@ fn test_create_return() {
         "CREATE (n:Person {name: 'Test'}) RETURN n.name AS name",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.columns, vec!["name"]);
     assert_eq!(result.rows.len(), 1);
@@ -675,7 +711,13 @@ fn test_set_property() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.age = 31")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let stats = result.stats.unwrap();
     assert_eq!(stats.properties_set, 1);
@@ -698,7 +740,13 @@ fn test_set_title() {
         "MATCH (n:Person {name: 'Alice'}) SET n.name = 'Alicia'",
     )
     .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // title is accessed via "name" or "title"
     let node = graph
@@ -717,7 +765,12 @@ fn test_set_id_error() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) SET n.id = 999")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    );
 
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("immutable"));
@@ -731,7 +784,13 @@ fn test_set_expression() {
         "MATCH (n:Person {name: 'Alice'}) SET n.age = n.age + 1",
     )
     .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let node = graph
         .graph
@@ -777,7 +836,13 @@ fn test_detach_delete_node() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let stats = result.stats.unwrap();
     assert_eq!(stats.nodes_deleted, 1);
@@ -791,7 +856,12 @@ fn test_delete_node_with_edges_error() {
     let mut graph = build_test_graph();
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DELETE n").unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    );
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("DETACH DELETE"));
 }
@@ -804,7 +874,13 @@ fn test_delete_relationship() {
     let query =
         super::super::parser::parse_cypher("MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let stats = result.stats.unwrap();
     assert_eq!(stats.relationships_deleted, 1);
@@ -830,7 +906,13 @@ fn test_delete_node_no_edges() {
 
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Solo'}) DELETE n").unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.unwrap().nodes_deleted, 1);
     assert_eq!(graph.graph.node_count(), 0);
@@ -842,7 +924,13 @@ fn test_detach_delete_updates_type_indices() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n")
             .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let person_indices = graph.type_indices.get("Person").unwrap();
     assert_eq!(person_indices.len(), 1);
@@ -857,7 +945,13 @@ fn test_remove_property() {
     let mut graph = build_test_graph();
     let query = super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n.age")
         .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().properties_removed, 1);
 
@@ -874,7 +968,13 @@ fn test_remove_nonexistent_property() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n.nonexistent")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
     assert_eq!(result.stats.as_ref().unwrap().properties_removed, 0);
 }
 
@@ -887,7 +987,12 @@ fn test_remove_primary_label_errors() {
     let query =
         super::super::parser::parse_cypher("MATCH (n:Person {name: 'Alice'}) REMOVE n:Person")
             .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None);
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    );
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -904,7 +1009,13 @@ fn test_remove_primary_label_errors() {
 fn test_merge_creates_when_not_found() {
     let mut graph = DirGraph::new();
     let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     // 1 Person node (no SchemaNodes — metadata stored in HashMap)
@@ -916,7 +1027,13 @@ fn test_merge_matches_when_found() {
     let mut graph = build_test_graph();
     let initial_count = graph.graph.node_count();
     let query = super::super::parser::parse_cypher("MERGE (n:Person {name: 'Alice'})").unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
     // No new nodes — MERGE matched existing; schema may or may not exist already
@@ -930,7 +1047,13 @@ fn test_merge_on_create_set() {
         "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.age = 30",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 1);
     assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
@@ -943,7 +1066,13 @@ fn test_merge_on_match_set() {
         "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visits = 1",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().nodes_created, 0);
     assert_eq!(result.stats.as_ref().unwrap().properties_set, 1);
@@ -965,7 +1094,13 @@ fn test_merge_relationship_matches() {
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:KNOWS]->(b)",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().relationships_created, 0);
     assert_eq!(graph.graph.edge_count(), 1);
@@ -978,7 +1113,13 @@ fn test_merge_creates_relationship() {
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:FRIENDS]->(b)",
     )
     .unwrap();
-    let result = execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     assert_eq!(result.stats.as_ref().unwrap().relationships_created, 1);
     assert_eq!(graph.graph.edge_count(), 2);
@@ -996,7 +1137,13 @@ fn test_create_updates_property_index() {
     // CREATE a new Person — should appear in the age index
     let query =
         super::super::parser::parse_cypher("CREATE (p:Person {name: 'Charlie', age: 40})").unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let found = graph.lookup_by_index("Person", "age", &Value::Int64(40));
     assert!(found.is_some());
@@ -1012,7 +1159,13 @@ fn test_set_updates_property_index() {
     let query =
         super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) SET p.age = 99")
             .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // Old value should be gone
     let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
@@ -1032,7 +1185,13 @@ fn test_remove_updates_property_index() {
     // REMOVE Alice.age — should disappear from index
     let query = super::super::parser::parse_cypher("MATCH (p:Person {name: 'Alice'}) REMOVE p.age")
         .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let found = graph.lookup_by_index("Person", "age", &Value::Int64(30));
     assert!(found.is_none() || found.unwrap().is_empty());
@@ -1044,7 +1203,13 @@ fn test_create_creates_type_metadata() {
     let query =
         super::super::parser::parse_cypher("CREATE (p:Animal {name: 'Rex', species: 'Dog'})")
             .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // Type metadata for "Animal" should exist
     let metadata = graph.get_node_type_metadata("Animal");
@@ -1070,7 +1235,13 @@ fn test_merge_updates_indices() {
         "MERGE (p:Person {name: 'Dave'}) ON CREATE SET p.age = 50",
     )
     .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let found = graph.lookup_by_index("Person", "age", &Value::Int64(50));
     assert!(found.is_some());
@@ -1081,7 +1252,13 @@ fn test_merge_updates_indices() {
         "MERGE (p:Person {name: 'Alice'}) ON MATCH SET p.age = 31",
     )
     .unwrap();
-    execute_mutable(&mut graph, &query2, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query2,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // Old Alice age gone
     let old = graph.lookup_by_index("Person", "age", &Value::Int64(30));
@@ -1143,7 +1320,13 @@ fn test_path_variable_count() {
          (a)-[:LINK]->(b), (b)-[:LINK]->(c)",
     )
     .unwrap();
-    execute_mutable(&mut graph, &query, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &query,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let read_query = super::super::parser::parse_cypher(
         "MATCH path = (a:Node)-[:LINK*1..2]->(b:Node) RETURN count(path) AS cnt",
@@ -1268,7 +1451,13 @@ fn eval_string_fn(query: &str) -> Value {
         "CREATE (n:Item {name: 'hello world', path: 'src/graph/mod.rs'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(query).unwrap();
     let no_params = HashMap::new();
@@ -1327,7 +1516,13 @@ fn test_right_function() {
 fn test_trim_function() {
     let mut graph = DirGraph::new();
     let setup = super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN trim(n.val)").unwrap();
     let no_params = HashMap::new();
@@ -1343,7 +1538,13 @@ fn test_trim_function() {
 fn test_ltrim_function() {
     let mut graph = DirGraph::new();
     let setup = super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN ltrim(n.val)").unwrap();
     let no_params = HashMap::new();
@@ -1359,7 +1560,13 @@ fn test_ltrim_function() {
 fn test_rtrim_function() {
     let mut graph = DirGraph::new();
     let setup = super::super::parser::parse_cypher("CREATE (n:Item {val: '  hello  '})").unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN rtrim(n.val)").unwrap();
     let no_params = HashMap::new();
@@ -1382,7 +1589,13 @@ fn test_string_functions_auto_coerce() {
     // String functions on non-string values should auto-coerce to string
     let mut graph = DirGraph::new();
     let setup = super::super::parser::parse_cypher("CREATE (n:Item {num: 42})").unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // split(42, '/') → ["42"] (coerced to "42", no '/' found)
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN split(n.num, '/')").unwrap();
@@ -1468,7 +1681,13 @@ fn test_pagerank_connection_types_list_syntax() {
          (a)-[:CALLS]->(b), (b)-[:CALLS]->(c), (a)-[:IMPORTS]->(c)",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // String syntax
     let q1 = super::super::parser::parse_cypher(
@@ -1605,7 +1824,13 @@ fn test_list_slice_with_collect() {
          (c:Item {name: 'C'}), (d:Item {name: 'D'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(
         "MATCH (n:Item) WITH collect(n.name) AS names RETURN names[..2]",
@@ -1662,7 +1887,13 @@ fn test_size_on_collect_result() {
         "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(
         "MATCH (n:Item) WITH collect(n.name) AS names RETURN size(names)",
@@ -1683,7 +1914,13 @@ fn test_aggregate_with_slice() {
          (c:Item {cat: 'X', name: 'C'}), (d:Item {cat: 'Y', name: 'D'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(
         "MATCH (n:Item) \
@@ -1719,7 +1956,13 @@ fn test_aggregate_arithmetic() {
         "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN count(n) + 1 AS cnt_plus")
         .unwrap();
@@ -1743,7 +1986,13 @@ fn test_size_of_collect_in_return() {
         "CREATE (a:Item {name: 'A'}), (b:Item {name: 'B'}), (c:Item {name: 'C'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // No grouping — all rows aggregated
     let q =
@@ -1764,7 +2013,13 @@ fn test_size_of_collect_grouped() {
          (c:Item {cat: 'X', name: 'C'}), (d:Item {cat: 'Y', name: 'D'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(
         "MATCH (n:Item) \
@@ -1914,7 +2169,13 @@ fn test_list_predicate_in_where_clause() {
          (c:Well {name: 'W3', depth: 300})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     let q = super::super::parser::parse_cypher(
         "MATCH (w:Well) \
@@ -1960,7 +2221,13 @@ fn test_list_predicate_collected_nodes_property_access() {
          (c:Well {name: 'W3', formation: 'Limestone'})",
     )
     .unwrap();
-    execute_mutable(&mut graph, &setup, HashMap::new(), None).unwrap();
+    execute_mutable(
+        &mut graph,
+        &setup,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
 
     // any() with collected node property access
     let q = super::super::parser::parse_cypher(

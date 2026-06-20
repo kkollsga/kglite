@@ -11,13 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Cypher queries are interruptible with Ctrl-C.** A long-running `cypher()`
   read — large scans / cross-products *and* `CALL` graph algorithms (pagerank,
-  betweenness, louvain, …) — can now be stopped with `Ctrl-C`, which raises
-  `KeyboardInterrupt` instead of blocking until the deadline. A scoped SIGINT
-  handler (installed only while a query runs, then restored) flips a
-  cooperative-cancel flag the engine polls at the same checkpoints as the query
-  deadline. POSIX only; on other platforms the deadline still bounds queries.
-  Targets the interactive single-query case (notebook / REPL); concurrent
-  multi-thread `Session` serving and in-place mutations remain deadline-bounded.
+  betweenness, louvain, …) — plus **`Session.execute` mutations** can now be
+  stopped with `Ctrl-C`, which raises `KeyboardInterrupt` instead of blocking
+  until the deadline. A scoped SIGINT handler (installed only while a query
+  runs, then restored) flips a cooperative-cancel flag the engine polls at the
+  same checkpoints as the query deadline. `Session.execute` mutations are
+  **atomic** when cancelled (they run on a copy-on-write working copy that's
+  discarded on abort — the graph is fully mutated or unchanged, never partial).
+  POSIX only; on other platforms the deadline still bounds queries. Targets the
+  interactive single-query case (notebook / REPL). Live `KnowledgeGraph`
+  in-place mutations and `Transaction` mutations remain deadline-bounded (not
+  Ctrl-C-cancellable) — they mutate in place / don't reliably roll back mid-run,
+  so interrupting them could leave partial state; use `Session.execute` for
+  cancellable + atomic mutations.
 
 ### Internal
 

@@ -253,7 +253,11 @@ pub fn execute_mut(
     }
 
     let mut result = if is_mutation {
-        let r = cypher::execute_mutable(graph, &parsed, params, opts.deadline)
+        let interrupt = crate::graph::algorithms::Interrupt {
+            deadline: opts.deadline,
+            cancel: opts.cancel,
+        };
+        let r = cypher::execute_mutable(graph, &parsed, params, interrupt)
             .map_err(|message| exec_err(opts, message))?;
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.
