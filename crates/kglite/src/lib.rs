@@ -42,7 +42,12 @@
 #![allow(clippy::result_unit_err)]
 
 pub mod code_tree;
-pub mod datasets;
+// Dataset loaders — sealed behind the curated `api::datasets` facade (the
+// same chokepoint treatment as `graph`). `pub(crate)` so no wrapper can reach
+// `kglite::datasets::*` directly; the `api::datasets` re-exports still resolve
+// (re-exporting a `pub` item out of a `pub(crate)` module is legal). The CI
+// grep (`scripts/check_api_chokepoint.sh`) keeps wrappers honest.
+pub(crate) mod datasets;
 pub mod datatypes;
 pub mod error;
 // Engine internals — sealed behind the curated `api` facade (roadmap Piece 4).

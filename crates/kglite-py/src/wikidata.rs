@@ -17,7 +17,7 @@ use pyo3::wrap_pyfunction;
 use chrono::DateTime;
 use std::path::Path;
 
-use kglite_core::datasets::wikidata::{
+use kglite_core::api::datasets::wikidata::{
     decide as decide_freshness, CacheDecision, FreshnessInputs, WikidataError, Workdir,
 };
 
@@ -47,7 +47,7 @@ fn ensure_dump(
     let wd = Workdir::new(workdir);
     let rt = runtime()?;
     let (path, mtime) = rt
-        .block_on(kglite_core::datasets::wikidata::ensure_dump(
+        .block_on(kglite_core::api::datasets::wikidata::ensure_dump(
             &wd,
             cooldown_days,
             verbose,
@@ -65,7 +65,7 @@ fn ensure_dump(
 fn remote_last_modified() -> PyResult<Option<String>> {
     let rt = runtime()?;
     Ok(rt
-        .block_on(kglite_core::datasets::wikidata::remote_last_modified())
+        .block_on(kglite_core::api::datasets::wikidata::remote_last_modified())
         .map(|m| m.to_rfc3339()))
 }
 

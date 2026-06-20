@@ -22,9 +22,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# A below-api reach is any CROSS-CRATE path into the engine's `graph` module
-# — `kglite::graph::*` (bolt/mcp/c, which import core as `kglite`) or
-# `kglite_core::graph::*` (the wheel, which aliases core as `kglite_core`).
+# A below-api reach is any CROSS-CRATE path into a sealed engine module —
+# `graph` or `datasets` (e.g. `kglite::graph::*` / `kglite::datasets::*`, or
+# `kglite_core::graph::*` / `kglite_core::datasets::*` from the wheel). The
+# curated `kglite_core::api::datasets::*` path does NOT match (the crate prefix
+# is followed by `api`, not `datasets`), so it is correctly allowed.
 # Since the hard seal (Piece 4), `kglite::graph` is `pub(crate)`, so any such
 # reach is ALSO a compile error — this grep is the fast, human-readable
 # secondary check. (`crate::graph::*` is NOT counted: that's a wrapper's own
@@ -35,7 +37,7 @@ count_reaches() {
 	local dir="$1"
 	find "$dir" -name '*.rs' -exec cat {} + 2>/dev/null \
 		| perl -0pe 's{/\*.*?\*/}{}gs; s{//[^\n]*}{}g' \
-		| { grep -cE "(kglite|kglite_core)::graph::" || true; }
+		| { grep -cE "(kglite|kglite_core)::(graph|datasets)::" || true; }
 }
 
 # The wheel's frozen baseline. Lower this as roadmap Pieces 2-4 migrate
@@ -70,7 +72,7 @@ for crate in kglite-bolt-server kglite-mcp-server kglite-c; do
 	if [ "$n" -ne 0 ]; then
 		echo "FAIL: crates/$crate reaches below kglite::api ($n times) — must be 0."
 		echo "      Offending lines:"
-		{ grep -rnE "(kglite|kglite_core)::graph::" "crates/$crate/src" \
+		{ grep -rnE "(kglite|kglite_core)::(graph|datasets)::" "crates/$crate/src" \
 			| grep -vE ':[[:space:]]*//' || true; } | sed 's/^/        /'
 		fail=1
 	else

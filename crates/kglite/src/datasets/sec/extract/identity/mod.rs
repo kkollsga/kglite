@@ -44,14 +44,6 @@ impl Identities {
         Self::default()
     }
 
-    /// Mark a CIK as already-emitted to `company.csv` (used by
-    /// `companies::emit_from_submissions` after it does the bulk
-    /// up-front load, so later `ensure_company` calls don't double-
-    /// write).
-    pub fn mark_company_seen(&mut self, cik: &str) {
-        self.seen_companies.insert(cik.to_string());
-    }
-
     /// Write a company row if `cik` hasn't been seen yet this run.
     /// Identity columns from `sinks::COMPANY_HEADER` order.
     /// `display_name` is the only required name; pass empty strings

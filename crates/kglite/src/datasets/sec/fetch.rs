@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use crate::datasets::sec::catalog::{self, RATE_LIMIT_PER_SEC};
+use crate::datasets::sec::catalog;
 use crate::datasets::sec::client::{FetchMode, SecClient};
 use crate::datasets::sec::error::{Result, SecError};
 use crate::datasets::sec::layout::Workdir;
@@ -134,12 +134,6 @@ pub async fn fetch_company_tickers(
     client
         .fetch_to_file(catalog::company_tickers_url(), &path, mode)
         .await
-}
-
-/// Estimate the rate-limit cost (in seconds-at-10/s) of fetching a
-/// year range of quarterly indices, for progress reporting.
-pub fn rate_limit_cost_seconds(range: YearRange) -> f64 {
-    range.quarters().count() as f64 / RATE_LIMIT_PER_SEC as f64
 }
 
 /// Fetch one company's XBRL company-facts JSON from
@@ -470,12 +464,6 @@ mod tests {
         let r = YearRange::new(2024, 2024);
         let qs: Vec<_> = r.quarters().collect();
         assert_eq!(qs, vec![(2024, 1), (2024, 2), (2024, 3), (2024, 4)]);
-    }
-
-    #[test]
-    fn rate_limit_cost_is_quarters_div_ten() {
-        let r = YearRange::new(2020, 2024); // 5 years × 4 = 20 quarters
-        assert!((rate_limit_cost_seconds(r) - 2.0).abs() < 1e-9);
     }
 
     #[test]
