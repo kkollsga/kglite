@@ -83,7 +83,7 @@ struct LazyRows {
     cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
 }
 
-#[pyclass(name = "ResultView")]
+#[pyclass(name = "ResultView", frozen)]
 pub struct ResultView {
     columns: Vec<String>,
     rows: Vec<Vec<PreProcessedValue>>,

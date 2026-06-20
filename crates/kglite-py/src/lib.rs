@@ -355,7 +355,12 @@ fn _run_mcp_server(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{e:#}")))
 }
 
-#[pymodule]
+// `gil_used = false` declares this module compatible with the free-threaded
+// (no-GIL, 3.13t) build — PyO3 0.28 makes this opt-in. The engine's shared
+// types are already `Send + Sync` (the concurrent `Session` / `FrozenGraph`
+// path is built on that), and the read/write entry points release the GIL via
+// `EnterKg`, so the module doesn't rely on the GIL as an implicit lock.
+#[pymodule(gil_used = false)]
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;

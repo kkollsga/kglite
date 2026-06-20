@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GIL-release + error-mapping + cancellation consolidated into one
   `EnterKg::enter_kg` helper in the Python wrapper (replaces scattered
   `py.detach(...).map_err(kg_to_pyerr)` call sites on the Cypher paths).
+- **Free-threading (no-GIL / 3.13t) readiness.** The `kglite` extension
+  module now declares `gil_used = false`, and the shareable read pyclasses
+  (`Session`, `FrozenGraph`, the Cypher `ResultView`) are `#[pyclass(frozen)]`
+  — immutable + `Sync`, removing the runtime borrow-flag and matching how the
+  concurrent `Session` path already shares state. No API change.
 
 ## [0.11.5] — 2026-06-20 — `kglite::api` hard-seal + dataset surface curation + Cypher plan cache
 

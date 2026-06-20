@@ -28,7 +28,7 @@ use kglite_core::api::session::{execute_read, ExecuteOptions};
 use kglite_core::api::GraphRead;
 
 /// Immutable, `Send`-able read snapshot of a graph. See module docs.
-#[pyclass]
+#[pyclass(frozen)]
 pub struct FrozenGraph {
     pub(crate) inner: Arc<DirGraph>,
     pub(crate) embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,
