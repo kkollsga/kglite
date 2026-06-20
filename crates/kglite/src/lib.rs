@@ -392,8 +392,9 @@ pub mod api {
     /// consumers can build their own custom Cypher pipelines using
     /// these items; for the canonical pipeline see [`session`].
     pub mod cypher {
-        pub use crate::graph::languages::cypher::ast::CypherQuery;
-        pub use crate::graph::languages::cypher::ast::OutputFormat;
+        pub use crate::graph::languages::cypher::ast::{
+            CypherQuery, Expression, OutputFormat, ReturnItem,
+        };
         pub use crate::graph::languages::cypher::executor::write::execute_mutable;
         pub use crate::graph::languages::cypher::executor::CypherExecutor;
         pub use crate::graph::languages::cypher::generate_explain_result;
@@ -411,15 +412,21 @@ pub mod api {
         /// `session::ExecuteOptions::value_codecs`. See `value_codec` module
         /// docs for the safety model.
         pub use crate::graph::languages::cypher::value_codec::{CodecKind, StoredType, ValueCodec};
-        // The Cypher pipeline submodules — a binding implementing a native
-        // `cypher()` method (the wheel) reaches the ast / executor / parser /
-        // result internals to drive + post-process the pipeline. Exposed as
-        // the shared Cypher-pipeline surface (the same "expose the shared
-        // layer" posture as the query primitives in `api::fluent`). Lifted in
-        // roadmap Piece 4 (the hard seal).
+        // Specific Cypher-pipeline items a binding implementing a native
+        // `cypher()` method (the wheel) reaches. Exposed INDIVIDUALLY — not as
+        // whole `ast`/`executor`/`parser`/`result` submodules — so the rest of
+        // the executor/parser internals stay un-exported and the optimizer can
+        // keep inlining the per-query hot path. (Re-exporting the whole
+        // executor module measurably regressed cypher micro-query latency by
+        // ~60% on tiny graphs — roadmap Piece 4 perf follow-up.)
+        pub use crate::graph::languages::cypher::executor::helpers::{
+            resolve_edge_property, resolve_node_property,
+        };
         pub use crate::graph::languages::cypher::optimize;
         pub use crate::graph::languages::cypher::planner::schema_check::collect_unknown_pattern_warnings;
-        pub use crate::graph::languages::cypher::{ast, executor, parser, result};
+        pub use crate::graph::languages::cypher::result::{
+            ClauseStats, EdgeBinding, MutationStats, QueryDiagnostics, ResultRow,
+        };
     }
 
     /// Canonical query + transaction surface — single source of

@@ -100,7 +100,7 @@ impl FrozenGraph {
         // many readers run in parallel against the shared, immutable graph.
         let result = py
             .detach(
-                move || -> Result<cypher::result::CypherResult, crate::error::KgError> {
+                move || -> Result<cypher::CypherResult, crate::error::KgError> {
                     let opts = ExecuteOptions {
                         params: &param_map,
                         deadline,
