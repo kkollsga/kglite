@@ -24,6 +24,7 @@ pub mod lookups;
 pub mod mapped;
 pub mod mapped_graph_impl;
 pub mod memory;
+pub mod mode;
 pub mod type_build_meta;
 
 use crate::datatypes::Value;
