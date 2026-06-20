@@ -264,6 +264,7 @@ pub fn add_nodes(
         report = report.with_errors(errors);
     }
 
+    graph.bump_version();
     Ok(report)
 }
 
@@ -368,6 +369,7 @@ pub fn add_edges_from_specs(
         let (stats, _metrics) = batch.execute(graph, edge_type)?;
         report.connections_created += stats.connections_created;
     }
+    graph.bump_version();
     Ok(report)
 }
 
@@ -660,6 +662,7 @@ pub fn add_connections(
         report = report.with_errors(errors);
     }
 
+    graph.bump_version();
     Ok(report)
 }
 
@@ -1226,6 +1229,7 @@ pub fn create_connections(
         report = report.with_errors(errors);
     }
 
+    graph.bump_version();
     Ok(report)
 }
 
@@ -1364,6 +1368,7 @@ pub fn update_node_properties(
         report = report.with_errors(errors);
     }
 
+    graph.bump_version();
     Ok(report)
 }
 
