@@ -271,7 +271,11 @@ pub fn execute_mut(
 /// Output of [`prepare`]: the parsed+optimized query, the (possibly
 /// embedding-augmented) param map, and the column-indexed value-codec encode
 /// plan (empty when no codecs apply).
-type PreparedQuery = (CypherQuery, HashMap<String, Value>, Vec<Option<ValueCodec>>);
+type PreparedQuery = (
+    Arc<CypherQuery>,
+    HashMap<String, Value>,
+    Vec<Option<ValueCodec>>,
+);
 
 fn prepare(
     graph: &DirGraph,
@@ -287,10 +291,11 @@ fn prepare(
         && opts.disabled_passes.is_none_or(|s| s.is_empty())
         && opts.value_codecs.is_none_or(|c| c.is_empty());
     if cacheable {
-        if let Some(mut plan) = cypher::plan_cache::get(graph.graph_id(), graph.version(), query) {
-            if opts.lazy_eligible {
-                cypher::mark_lazy_eligibility(&mut plan);
-            }
+        if let Some(plan) =
+            cypher::plan_cache::get(graph.graph_id(), graph.version(), opts.lazy_eligible, query)
+        {
+            // Stored post lazy-marking for this `lazy_eligible` — a hit is a
+            // pure Arc clone, no parse / validate / optimize / mutation.
             return Ok((plan, HashMap::new(), Vec::new()));
         }
     }
@@ -343,24 +348,31 @@ fn prepare(
     let disabled_ref = opts.disabled_passes.unwrap_or(disabled_default);
     cypher::planner::optimize_with_disabled(&mut parsed, graph, &params, disabled_ref);
 
-    // Cache the fully-optimized plan (before lazy-marking, which is per-call).
-    // Only when `params` stayed empty — a `text_score()` rewrite injects
-    // embedding params, which would make the plan call-specific, so those are
-    // never cached (and thus never hit above).
-    if cacheable && params.is_empty() {
-        cypher::plan_cache::insert(graph.graph_id(), graph.version(), query, &parsed);
-    }
-
-    // Lazy marking — only when the caller asked for it. Without
-    // this call, the executor materializes rows eagerly. With it,
-    // `result.lazy` may be Some and `result.rows` empty; the
-    // caller must handle materialization (Python's ResultView
+    // Lazy marking — only when the caller asked for it. Done BEFORE caching so
+    // the cached plan is ready-to-execute for this `lazy_eligible` (the cache
+    // key includes it), making hits a pure Arc clone. Without this the executor
+    // materializes rows eagerly; with it, `result.lazy` may be Some and
+    // `result.rows` empty and the caller must materialize (Python's ResultView
     // does; bolt-server doesn't, so it passes `lazy_eligible: false`).
     if opts.lazy_eligible {
         cypher::mark_lazy_eligibility(&mut parsed);
     }
 
-    Ok((parsed, params.into_owned(), encode_plan))
+    let plan = Arc::new(parsed);
+    // Cache the ready-to-execute plan. Only when `params` stayed empty — a
+    // `text_score()` rewrite injects embedding params, making the plan
+    // call-specific, so those are never cached (and thus never hit above).
+    if cacheable && params.is_empty() {
+        cypher::plan_cache::insert(
+            graph.graph_id(),
+            graph.version(),
+            opts.lazy_eligible,
+            query,
+            plan.clone(),
+        );
+    }
+
+    Ok((plan, params.into_owned(), encode_plan))
 }
 
 /// Run the embedder on collected texts; inject the JSON-encoded
