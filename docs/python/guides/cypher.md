@@ -117,6 +117,27 @@ In-memory graphs default to a generous deadline (shown in
 repeatedly nears its deadline, that's the signal to add an index or anchor the
 pattern, not just to raise the budget.
 
+### Interrupting a query (Ctrl-C)
+
+A long-running **read** can be interrupted with `Ctrl-C` — it raises
+`KeyboardInterrupt` and aborts promptly, rather than blocking until the
+deadline. This works from a REPL or notebook (the interactive, single-query
+case) on POSIX platforms, and applies to `KnowledgeGraph.cypher`,
+`Session.cypher`, and `FrozenGraph.cypher`. The graph is left unchanged.
+
+```python
+# In a notebook: a runaway scan is now Ctrl-C-able
+rows = graph.cypher("MATCH (a),(b),(c) RETURN count(*)", timeout_ms=0)
+# ^ press Ctrl-C -> KeyboardInterrupt, instead of waiting
+```
+
+Interruption shares the engine's deadline checkpoints, so the same advice
+applies: if you're routinely interrupting a query, anchor it or add an index.
+In-place mutations (`CREATE` / `SET` / `DELETE` on a live graph) and
+multi-statement transactions remain bounded by the deadline rather than
+Ctrl-C. On non-POSIX platforms the deadline still applies; Ctrl-C mid-query
+does not.
+
 ### EXPLAIN and PROFILE
 
 ```python

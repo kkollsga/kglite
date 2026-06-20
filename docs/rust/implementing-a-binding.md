@@ -323,7 +323,7 @@ or user-supplied embedder callbacks as bindings ask.
 ## Error mapping
 
 Every kglite API call returns `Result<T, KgError>`. `KgError` is a
-typed enum with 16 variants; each variant has a stable
+typed enum with 17 variants; each variant has a stable
 `KgErrorCode` discriminant. Your binding maps these to its target
 language's idiomatic error types. The file-I/O variants are worth
 surfacing distinctly: `FileNotFound`, `FileFormat` (corrupt /
@@ -339,6 +339,7 @@ retry? rewrite? give up?
 |---|---|---|---|
 | `CypherSyntax` | Tokenizer / parser rejected the query string | **No** — the query is malformed | Type/usage error (`TypeError`, `IllegalArgumentException`, `SyntaxError`) |
 | `CypherTimeout` | Query exceeded its `timeout_ms` budget | **Maybe** — retry with longer budget or rewrite | Timeout error (`TimeoutError`, `DeadlineExceeded`) |
+| `Cancelled` | Caller flipped `ExecuteOptions.cancel` mid-run (e.g. Ctrl-C, client disconnect) | **No** — the caller asked to stop | Interrupt / cancel idiom (`KeyboardInterrupt`, cancelled-context, abort status) |
 | `CypherExecution` | Mutation conflict, predicate panic, etc. | **Sometimes** — context-dependent | Runtime error |
 | `CypherTypeMismatch` | A param was the wrong type for an operator | **No** — fix the call site | Type error |
 | `Schema` | Query references unknown label/property/index | **No** — schema mismatch | Validation error |
@@ -731,6 +732,34 @@ a separate goroutine consuming them.
 
 This is genuinely binding-specific — no shared abstraction is
 likely to help. Pick the idiom your audience expects.
+
+### Cancellation / interruptible queries
+
+`ExecuteOptions.cancel: Option<&AtomicBool>` is the engine-agnostic
+cancellation primitive. The engine polls it at the same checkpoints it
+polls the query deadline (pattern-matcher scans + expansions); once the
+flag is set, the run aborts and the call returns `KgError::Cancelled`
+(`KgErrorCode::Cancelled` → HTTP 499, Neo
+`Neo.ClientError.Transaction.Terminated`). Leave it `None`
+(`ExecuteOptions::eager` does) and queries are deadline-bounded only.
+
+How you *flip* the flag is binding-specific — it's part of the
+async/threading/signal model each binding owns:
+
+- The **Python wheel** installs a scoped `SIGINT` (Ctrl-C) handler for
+  the duration of a query that flips a process-global `AtomicBool`, then
+  restores the previous handler; `KgError::Cancelled` is mapped to
+  Python's builtin `KeyboardInterrupt`. (Read paths only; mutations stay
+  deadline-bounded.)
+- A **server** binding typically wires the flag to a request-cancellation
+  token (client disconnect, gRPC `tokio::select!` on the cancel future, a
+  deadline-exceeded watcher) and maps `Cancelled` onto its protocol's
+  cancel/abort status.
+
+Because `cancel` is a `&AtomicBool`, the flag must outlive the
+`execute_*` call — a `'static` global (the wheel's choice) or a flag
+owned by the request scope both work. The previous SIGINT disposition,
+or whatever you replaced, is yours to restore.
 
 ## What you don't need to write
 
