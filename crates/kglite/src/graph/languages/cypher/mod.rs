@@ -16,6 +16,7 @@ pub mod ast;
 pub mod executor;
 pub mod parse_cache;
 pub mod parser;
+pub mod plan_cache;
 pub mod planner;
 pub mod result;
 pub mod tokenizer;
