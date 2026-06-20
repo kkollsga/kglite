@@ -266,6 +266,15 @@ impl DirGraph {
         self.version = v;
     }
 
+    /// Advance the version by one — the canonical "this graph just mutated"
+    /// signal. Every mutation path routes through this (Cypher writes via
+    /// `execute_mut`, bulk ingest, and the `make_dir_graph_mut` handle) so
+    /// version-keyed caches (the Cypher plan cache) and OCC observe every
+    /// change. Monotonic; wraps only after 2^64 mutations (never in practice).
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
+    }
+
     pub fn new() -> Self {
         DirGraph {
             graph: GraphBackend::new(),
@@ -2778,7 +2787,7 @@ pub struct GraphInfo {
 /// the first write.
 pub fn make_dir_graph_mut(arc: &mut std::sync::Arc<DirGraph>) -> &mut DirGraph {
     let graph = std::sync::Arc::make_mut(arc);
-    graph.version += 1;
+    graph.bump_version();
     graph
 }
 

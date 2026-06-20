@@ -216,12 +216,20 @@ pub fn execute_mut(
     }
 
     let mut result = if is_mutation {
-        cypher::execute_mutable(graph, &parsed, params, opts.deadline).map_err(|message| {
-            KgError::CypherExecution {
-                message,
-                position: None,
-            }
-        })?
+        let r =
+            cypher::execute_mutable(graph, &parsed, params, opts.deadline).map_err(|message| {
+                KgError::CypherExecution {
+                    message,
+                    position: None,
+                }
+            })?;
+        // A Cypher write occurred — advance the graph version so any
+        // version-keyed caches (the plan cache) and OCC see the change.
+        // Bumps the working copy directly so a read-after-write *within* the
+        // same transaction re-plans against the mutated state; the eventual
+        // commit recomputes the live version independently (see Session::commit).
+        graph.bump_version();
+        r
     } else {
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
             .with_max_rows(opts.max_rows)
@@ -385,4 +393,40 @@ fn embed_into_params(
         params.insert(param_name.clone(), Value::String(json));
     }
     Ok(params)
+}
+
+#[cfg(test)]
+mod version_soundness_tests {
+    use super::*;
+    use crate::graph::dir_graph::DirGraph;
+
+    /// A Cypher write through `execute_mut` must advance the graph version so
+    /// version-keyed caches (the plan cache) and a read-after-write within the
+    /// same transaction observe the change.
+    #[test]
+    fn execute_mut_write_bumps_version() {
+        let mut g = DirGraph::new();
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        let before = g.version();
+        execute_mut(&mut g, "CREATE (:Item {id: 1})", &opts).expect("create");
+        assert!(
+            g.version() > before,
+            "a Cypher write must bump version (was {before}, now {})",
+            g.version()
+        );
+    }
+
+    /// A read must NOT bump the version — otherwise repeated reads would
+    /// perpetually invalidate the plan cache.
+    #[test]
+    fn execute_read_does_not_bump_version() {
+        let mut g = DirGraph::new();
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        execute_mut(&mut g, "CREATE (:Item {id: 1})", &opts).expect("create");
+        let after_write = g.version();
+        let _ = execute_read(&g, "MATCH (n:Item) RETURN n.id", &opts).expect("read");
+        assert_eq!(g.version(), after_write, "a read must not bump version");
+    }
 }
