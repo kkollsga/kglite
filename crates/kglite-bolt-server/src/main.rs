@@ -50,16 +50,17 @@ enum AuthScheme {
 struct Cli {
     /// Path to the graph to serve. An existing `.kgl` file or disk-graph
     /// directory is loaded in whatever mode it was saved in (auto-detected).
-    /// A path that does NOT exist is created as a fresh, empty graph in
-    /// `--storage` mode (serve-and-build).
+    /// A path that does NOT exist is an error unless `--storage` is given, in
+    /// which case a fresh, empty graph is created in that mode (serve-and-build).
     #[arg(long, value_name = "PATH")]
     graph: PathBuf,
 
-    /// Storage mode for a freshly-created graph when `--graph` does not
-    /// exist: `memory` (default), `mapped`, or `disk`. Ignored when
+    /// Create a fresh, empty graph in this storage mode (`memory`, `mapped`,
+    /// or `disk`) when `--graph` does not exist — opt-in, so a typo'd path
+    /// fails fast instead of silently serving an empty graph. Ignored when
     /// `--graph` already exists (its saved mode is auto-detected).
-    #[arg(long, default_value = "memory")]
-    storage: String,
+    #[arg(long)]
+    storage: Option<String>,
 
     /// Interface to bind.
     #[arg(long, default_value = "127.0.0.1")]
@@ -157,8 +158,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Exists → load (auto-detect saved mode); absent → create fresh in
-    // --storage mode. Same open semantics as the Python wheel's
+    // Exists → load (auto-detect saved mode). Absent → error by default
+    // (a missing `.kgl` is almost always a typo), unless `--storage` opts in
+    // to creating a fresh graph (serve-and-build), mirroring the Python wheel's
     // `kglite.open(path, storage=...)` and the C ABI's create-in-mode.
     let dir_arc = if cli.graph.exists() {
         tracing::info!(path = %cli.graph.display(), "loading graph");
@@ -172,8 +174,8 @@ async fn main() -> Result<()> {
             "graph loaded; constructing Bolt server"
         );
         arc
-    } else {
-        let mode = StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+    } else if let Some(mode_str) = cli.storage.as_deref() {
+        let mode = StorageMode::parse(mode_str).map_err(|e| anyhow::anyhow!(e))?;
         let path = cli.graph.to_string_lossy().into_owned();
         let graph = new_dir_graph_in_mode(mode, Some(std::path::Path::new(&path)))
             .map_err(|e| anyhow::anyhow!(e))?;
@@ -183,6 +185,11 @@ async fn main() -> Result<()> {
             "created new empty graph; constructing Bolt server"
         );
         Arc::new(graph)
+    } else {
+        anyhow::bail!(
+            "--graph {} does not exist (pass --storage memory|mapped|disk to create a new graph)",
+            cli.graph.display()
+        );
     };
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
