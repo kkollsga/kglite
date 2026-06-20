@@ -58,7 +58,32 @@ Existing test coverage at `tests/test_concurrency.py`:
   queries = 64 reads, all return baseline. Pins Bolt-scale read
   parallelism.
 - `test_no_panic_under_high_contention` — 32 threads (16 readers +
-  16 mutators) for 500 ms. Asserts zero panics and zero errors.
+  16 mutators) for 500 ms over a shared `Session`. Asserts zero panics
+  and zero errors.
+
+## Free-threading (no-GIL / 3.13t) support
+
+The extension declares `gil_used = false` (PyO3 0.28), so it imports and
+runs under a free-threaded CPython build with the GIL genuinely disabled
+— validated in CI (the `free-threading` job builds against `3.13t` and
+asserts `sys._is_gil_enabled()` is `False` under a threaded query load).
+Because the read path already releases the GIL and runs against a
+shared-immutable `Arc<DirGraph>`, true parallelism is the same model
+described above — there's just no GIL serializing the Python-side glue.
+
+The shareable handles (`Session`, `FrozenGraph`, the Cypher `ResultView`)
+are `#[pyclass(frozen)]` — immutable and `Sync` — which is what lets the
+free-threaded build accept them. `tests/test_freethreading.py` exercises
+concurrent `Session` reads, composable `Session.execute` writes, and
+concurrent `FrozenGraph` readers; it runs on every build and adds the
+no-GIL assertion when the interpreter is free-threaded.
+
+One thing genuinely changes under no-GIL: sharing a **bare**
+`KnowledgeGraph` across threads where any thread mutates is no longer
+masked by GIL serialization, so the single-owner guard fires on every
+real overlap (a clear `RuntimeError`, never memory corruption). This was
+always unsupported — use `session()` / `freeze()` / `cursor()`. See
+*What's NOT supported* below.
 
 ## The single-owner contract & `freeze()` snapshots (0.11.0)
 

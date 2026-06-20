@@ -182,24 +182,35 @@ class TestBoltScaleConcurrency:
         assert all(r == baseline for r in results), "concurrent reads diverged"
 
     def test_no_panic_under_high_contention(self, large_graph):
-        """32 threads, half readers / half mutators, run for 500 ms. Pin that
-        no panic occurs (Bolt server must not crash under contention)."""
+        """32 threads, half readers / half mutators, run for 500 ms over a
+        shared ``Session`` — the supported concurrent handle (what the Bolt
+        server uses). Pin that there are no errors and no panic.
+
+        Note: this deliberately shares a ``Session``, not a bare
+        ``KnowledgeGraph``. Sharing a live ``KnowledgeGraph`` across mutating
+        threads is unsupported and is *correctly* rejected by the single-owner
+        guard — under a free-threaded (no-GIL) interpreter that guard fires on
+        every real overlap; under the GIL it was masked by serialization. The
+        Session path (lock-free reads + serialized composable writes) is the
+        contract we actually guarantee, so that's what we stress here.
+        """
         from concurrent.futures import ThreadPoolExecutor
 
+        session = large_graph.session()
         stop_event = threading.Event()
         errors: list[str] = []
 
         def reader():
             while not stop_event.is_set():
                 try:
-                    large_graph.cypher("MATCH (n:Person) RETURN count(n) AS cnt")
+                    session.cypher("MATCH (n:Person) RETURN count(n) AS cnt")
                 except Exception as e:
                     errors.append(f"reader: {e!r}")
 
         def mutator(idx):
             while not stop_event.is_set():
                 try:
-                    large_graph.cypher(f"CREATE (:Marker {{tid: {idx}}})")
+                    session.execute(f"CREATE (:Marker {{tid: {idx}}})")
                 except Exception as e:
                     errors.append(f"mutator-{idx}: {e!r}")
 
