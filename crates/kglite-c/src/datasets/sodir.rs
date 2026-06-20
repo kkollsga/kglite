@@ -23,7 +23,8 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
-use kglite::api::datasets::sodir::{fetch_all_blocking, FetchAllReport, Workdir};
+use kglite::api::datasets::block_on;
+use kglite::api::datasets::sodir::{fetch_all, FetchAllReport, Workdir};
 use std::ffi::{c_char, CStr};
 
 /// Fetch all Sodir (Norwegian Continental Shelf) datasets the
@@ -118,13 +119,13 @@ pub unsafe extern "C" fn kglite_datasets_sodir_fetch_all(
     };
 
     let workdir = Workdir::new(workdir_str);
-    match fetch_all_blocking(
+    match block_on(fetch_all(
         &workdir,
         &datasets,
         index_cooldown_days,
         dataset_cooldown_days,
         concurrency,
-    ) {
+    )) {
         Ok(report) => {
             let json = serialize_fetch_all_report(&report);
             unsafe {

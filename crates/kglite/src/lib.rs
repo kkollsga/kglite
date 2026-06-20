@@ -465,6 +465,15 @@ pub mod api {
     /// per call via `pyo3-async-runtimes`; a Rust binary can spin
     /// one up via `tokio::runtime::Builder`.
     pub mod datasets {
+        /// Single blocking bridge for the async dataset fetchers: drive any
+        /// `fetch_*` future to completion on a fresh single-thread tokio
+        /// runtime. Bindings without their own async runtime (the C ABI, …)
+        /// wrap the async entry points with this — `block_on(fetch_x(..))` —
+        /// instead of a per-function `*_blocking` twin. Async-aware bindings
+        /// (the wheel) drive the futures on their own runtime and ignore it.
+        #[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
+        pub use crate::datasets::blocking::run as block_on;
+
         /// SEC EDGAR — quarterly filings index, bulk submissions
         /// archive, per-form fetchers (Form 3/4/5, 13F, 8-K, SC 13D/G,
         /// DEF 14A, Form 144, Exhibit 21, XBRL company facts).
@@ -483,15 +492,6 @@ pub mod api {
                 fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
                 fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk, FetchMode,
                 SecClient,
-            };
-            // Sync wrappers (single-thread tokio runtime per call).
-            // For bindings that don't manage their own async runtime.
-            pub use crate::datasets::sec::{
-                fetch_13f_info_table_blocking, fetch_company_facts_blocking,
-                fetch_company_submission_blocking, fetch_company_tickers_blocking,
-                fetch_exhibit21_attachment_blocking, fetch_filing_primary_doc_blocking,
-                fetch_form4_filing_blocking, fetch_quarterly_master_idx_blocking,
-                fetch_submissions_bulk_blocking,
             };
             // Form-type → per-filing-fetcher bucket mapping. Lifts
             // the wheel's `_FORM_BUCKETS` + `_resolve_fetch_buckets`
@@ -529,7 +529,7 @@ pub mod api {
             // into csv/, applies preprocessing, returns the report.
             // The `*_blocking` variant for bindings without an async
             // runtime spins up a single-thread tokio runtime per call.
-            pub use crate::datasets::sodir::{fetch_all, fetch_all_blocking, FetchAllReport};
+            pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
             // Blueprint utilities the wheel composes with from_blueprint
             pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};
         }
@@ -542,10 +542,7 @@ pub mod api {
         #[cfg(feature = "wikidata")]
         pub mod wikidata {
             pub use crate::datasets::wikidata::Workdir;
-            pub use crate::datasets::wikidata::{
-                ensure_dump, ensure_dump_blocking, remote_last_modified,
-                remote_last_modified_blocking,
-            };
+            pub use crate::datasets::wikidata::{ensure_dump, remote_last_modified};
             pub use crate::datasets::wikidata::{Result, WikidataError};
             // Mirror config constants — bindings can read these to
             // tell users what file they'll end up with.

@@ -40,21 +40,3 @@ pub use index::{Action, DatasetEntry, SodirIndex};
 pub use layout::{StorageMode, Workdir};
 pub use orchestrator::{fetch_all, refresh_csvs, FetchAllReport, RefreshReport};
 pub use preprocess::{apply as apply_preprocess, PreprocessReport};
-
-/// Sync wrapper around [`fetch_all`] — see [`crate::datasets::blocking`]
-/// for the rationale. Pure convenience for synchronous bindings.
-pub fn fetch_all_blocking(
-    workdir: &Workdir,
-    needed: &[String],
-    index_cooldown_days: i64,
-    dataset_cooldown_days: i64,
-    concurrency: usize,
-) -> Result<FetchAllReport> {
-    crate::datasets::blocking::run(fetch_all(
-        workdir,
-        needed,
-        index_cooldown_days,
-        dataset_cooldown_days,
-        concurrency,
-    ))
-}
