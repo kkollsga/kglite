@@ -20,9 +20,9 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
+use kglite::api::datasets::block_on;
 use kglite::api::datasets::wikidata::{
-    decide, ensure_dump_blocking, remote_last_modified_blocking, CacheDecision, FreshnessInputs,
-    Workdir,
+    decide, ensure_dump, remote_last_modified, CacheDecision, FreshnessInputs, Workdir,
 };
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn kglite_datasets_wikidata_ensure_dump(
     };
     let workdir = Workdir::new(workdir_str);
 
-    match ensure_dump_blocking(&workdir, cooldown_days, verbose != 0) {
+    match block_on(ensure_dump(&workdir, cooldown_days, verbose != 0)) {
         Ok((dump_path, remote_mtime)) => {
             let path_str = dump_path.to_string_lossy().to_string();
             unsafe {
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn kglite_datasets_wikidata_remote_last_modified(
     if out_iso.is_null() {
         return KgliteStatusCode::NullPointer;
     }
-    match remote_last_modified_blocking() {
+    match block_on(remote_last_modified()) {
         Some(dt) => unsafe {
             *out_iso = alloc_c_string(&dt.to_rfc3339());
         },

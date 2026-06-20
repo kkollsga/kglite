@@ -21,11 +21,11 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
+use kglite::api::datasets::block_on;
 use kglite::api::datasets::sec::{
-    fetch_company_facts_blocking, fetch_company_tickers_blocking,
-    fetch_quarterly_master_idx_blocking, fetch_submissions_bulk_blocking, parse_tickers_json,
-    resolve_fetch_buckets, run_all, ExtractReport, SecClient, SecFormBucket, SliceSpec, Workdir,
-    YearRange,
+    fetch_company_facts, fetch_company_tickers, fetch_quarterly_master_idx, fetch_submissions_bulk,
+    parse_tickers_json, resolve_fetch_buckets, run_all, ExtractReport, SecClient, SecFormBucket,
+    SliceSpec, Workdir, YearRange,
 };
 use std::ffi::{c_char, CStr};
 
@@ -185,13 +185,13 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_quarterly_master_idx(
     let workdir = Workdir::new(workdir_str);
     let range = YearRange::new(year_start, year_end);
 
-    match fetch_quarterly_master_idx_blocking(
+    match block_on(fetch_quarterly_master_idx(
         &client_state.inner,
         &workdir,
         range,
         current_year,
         current_quarter,
-    ) {
+    )) {
         Ok((fetched, skipped)) => {
             let json = format!("[{},{}]", fetched, skipped);
             unsafe {
@@ -258,12 +258,12 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_submissions_bulk(
     let client_state = unsafe { SecClientState::from_handle(client) };
     let workdir = Workdir::new(workdir_str);
 
-    match fetch_submissions_bulk_blocking(
+    match block_on(fetch_submissions_bulk(
         &client_state.inner,
         &workdir,
         staleness_hours,
         force_refetch != 0,
-    ) {
+    )) {
         Ok(fetched) => {
             unsafe {
                 *out_fetched = u8::from(fetched);
@@ -314,7 +314,11 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_company_tickers(
     let client_state = unsafe { SecClientState::from_handle(client) };
     let workdir = Workdir::new(workdir_str);
 
-    match fetch_company_tickers_blocking(&client_state.inner, &workdir, force_refetch != 0) {
+    match block_on(fetch_company_tickers(
+        &client_state.inner,
+        &workdir,
+        force_refetch != 0,
+    )) {
         Ok(fetched) => {
             unsafe {
                 *out_fetched = u8::from(fetched);
@@ -373,7 +377,12 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_company_facts(
     let client_state = unsafe { SecClientState::from_handle(client) };
     let workdir = Workdir::new(workdir_str);
 
-    match fetch_company_facts_blocking(&client_state.inner, &workdir, cik, force_refetch != 0) {
+    match block_on(fetch_company_facts(
+        &client_state.inner,
+        &workdir,
+        cik,
+        force_refetch != 0,
+    )) {
         Ok(fetched) => {
             unsafe {
                 *out_fetched = u8::from(fetched);
