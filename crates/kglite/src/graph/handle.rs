@@ -309,3 +309,26 @@ impl KnowledgeGraph {
         source_location(&self.inner, name, node_type)
     }
 }
+
+/// Get a `&mut DirGraph` from an `Arc<DirGraph>` and bump the version
+/// counter. Wraps [`Arc::make_mut`] (which clones the inner `DirGraph`
+/// if other strong refs exist) plus the canonical post-mutation version
+/// increment that downstream OCC commit-checks + the plan cache rely on.
+///
+/// Lifted from the wheel crate in 0.10.1 so bindings + embedders that
+/// hold an `Arc<DirGraph>` and want to mutate it have a single,
+/// consistent entry point. Re-exported as `kglite::api::make_dir_graph_mut`.
+/// (Homed here rather than in `dir_graph.rs` to keep that file under the
+/// god-file ceiling.)
+///
+/// **Warning:** If other `Arc<DirGraph>` references exist (e.g. a
+/// snapshot held by an open transaction, or a clone held by a still-
+/// alive `ResultView`), this deep-clones the entire graph — every
+/// node, edge, and index. Mutation in a read-heavy workload is fine,
+/// but a lingering reference can cause an unexpected memory spike on
+/// the first write.
+pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+    let graph = Arc::make_mut(arc);
+    graph.bump_version();
+    graph
+}
