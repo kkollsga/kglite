@@ -1442,27 +1442,42 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 /// for parallelism with other Python threads — see `kg_core.rs::save`
 /// for the canonical split. Rust-only callers (no GIL) just call
 /// this directly.
-pub fn save_inmemory(graph: &mut Arc<DirGraph>, path: &str) -> io::Result<()> {
+/// In-memory `.kgl` save: stamp metadata, consolidate to columnar (v3
+/// requires it), then write. `fsync = true` flushes the file + parent
+/// directory before returning so the bytes survive an OS/power crash;
+/// `fsync = false` keeps the atomic temp+rename (never a torn file) but
+/// skips the durability barrier for speed (the bench-only fast path). See
+/// [`write_kgl_with`]. Callers normally use the mode-aware [`save_graph`] /
+/// [`save_graph_with`] rather than this directly.
+pub fn save_inmemory_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> io::Result<()> {
     prepare_save(graph);
     {
         let dir = Arc::make_mut(graph);
         dir.enable_columnar();
     }
-    write_kgl(graph, path)
+    write_kgl_with(graph, path, fsync)
 }
 
-/// Mode-aware save: dispatches to `DirGraph::save_disk` for
-/// disk-backed graphs, `save_inmemory` otherwise. Mirrors the
-/// dispatch in `KnowledgeGraph::save` at
-/// `src/graph/pyapi/kg_core.rs`; both consumers (the pyo3 wrapper
-/// and the `kglite-mcp-server` binary) call this so dispatch
-/// behaviour can't drift between paths.
+/// Mode-aware durable save: dispatches to `DirGraph::save_disk` for
+/// disk-backed graphs, `save_inmemory_with` otherwise. This is THE single
+/// save-dispatch — the wheel (`KnowledgeGraph::save`), the MCP server,
+/// and the C ABI (`kglite_save_graph`) all route through it so dispatch
+/// + durability behaviour can't drift between bindings.
 pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
+    save_graph_with(graph, path, true)
+}
+
+/// Durability-parameterized counterpart of [`save_graph`]. The `fsync`
+/// flag is threaded to the in-memory `.kgl` write ([`save_inmemory_with`]);
+/// disk-backed graphs persist through `DirGraph::save_disk`, which manages
+/// its own durability, so the flag does not apply to them. `fsync = false`
+/// is the fast, non-durable opt-out (atomic rename, no crash barrier).
+pub fn save_graph_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> Result<(), String> {
     if graph.graph.is_disk() {
         let dir = Arc::make_mut(graph);
         return dir.save_disk(path);
     }
-    save_inmemory(graph, path).map_err(|e| e.to_string())
+    save_inmemory_with(graph, path, fsync).map_err(|e| e.to_string())
 }
 
 // ─── Load ────────────────────────────────────────────────────────────────────

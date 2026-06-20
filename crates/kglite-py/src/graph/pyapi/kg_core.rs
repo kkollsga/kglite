@@ -564,33 +564,15 @@ impl KnowledgeGraph {
         self.lifecycle.source_path = Some(std::path::PathBuf::from(&effective));
         let path: &str = &effective;
 
-        // Disk mode: save as directory (the folder IS the graph)
-        if self.inner.graph.is_disk() {
-            let graph = Arc::make_mut(&mut self.inner);
-            return graph
-                .save_disk(path)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()));
-        }
-
-        // Prep phase (quick): stamp metadata, snapshot index keys
-        io::prepare_save(&mut self.inner);
-
-        // Consolidate ALL node properties into column stores (v3 requires columnar).
-        // Always rebuild: after load+add, some nodes may have Compact storage;
-        // after load+update, COW clones diverge from graph.column_stores.
-        // enable_columnar() handles all cases (fresh, mixed, and mapped mode).
-        {
-            let graph = Arc::make_mut(&mut self.inner);
-            graph.enable_columnar();
-        }
-
-        // Heavy phase: serialize, compress, write — release GIL for other Python threads.
-        // The write is atomic (temp + rename) and, with fsync=True (default),
-        // durable (file + directory fsync) — a crash mid-save can't tear the .kgl.
-        let inner = self.inner.clone();
-        let path_owned = path.to_string();
-        py.detach(move || io::write_kgl_with(&inner, &path_owned, fsync))
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
+        // Mode-aware durable save lives in core (`save_graph_with`): disk dir
+        // vs in-memory `.kgl`, columnar consolidation (v3 requires columnar;
+        // handles fresh / mixed / mapped), atomic temp+rename, and file +
+        // directory fsync (when `fsync`). Routing through the one shared
+        // dispatch keeps the wheel / MCP server / C ABI from drifting. Release
+        // the GIL for the heavy serialize+write.
+        let inner = &mut self.inner;
+        py.detach(move || io::save_graph_with(inner, path, fsync))
+            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
 
         // Durable checkpoint: the .kgl now holds the full current state, so
         // discard the capture buffer (those ops are folded in) and truncate

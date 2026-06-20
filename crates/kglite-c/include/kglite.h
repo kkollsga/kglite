@@ -766,6 +766,11 @@ KgliteStatusCode kglite_load_file(const char *path,
  * produce a `.kgl` single-file; disk-backed graphs produce / fill
  * a directory.
  *
+ * The write is atomic (temp + rename) and **durable** (file +
+ * parent-directory fsync) — a crash mid-save can't tear the file.
+ * Use [`kglite_save_graph_durable`] with `fsync == 0` for the fast,
+ * non-durable opt-out.
+ *
  * # Arguments
  *
  * - `graph` (in, borrowed): the graph to save.
@@ -862,11 +867,17 @@ KgliteStatusCode kglite_blueprint_build(const char *blueprint_path,
                                         const char **out_error_msg);
 
 /**
- * Save a graph to a `.kgl` file with an explicit durability choice. Same
- * as [`kglite_save_graph`] but when `fsync` != 0 the file and its
- * directory entry are flushed to stable storage before returning —
- * durable across power loss, at the cost of fsync latency. `fsync` == 0
- * matches [`kglite_save_graph`] (atomic rename, no fsync).
+ * Save a graph to a `.kgl` file with an explicit durability choice.
+ *
+ * `fsync` != 0 is exactly [`kglite_save_graph`]: mode-aware (disk dir vs
+ * in-memory `.kgl`), atomic temp+rename, and the file + parent directory
+ * are flushed to stable storage before returning — durable across power
+ * loss, at the cost of fsync latency.
+ *
+ * `fsync` == 0 is the fast, **non-durable** opt-out: same mode-aware
+ * atomic rename (never a torn file) but the fsync barrier is skipped, so
+ * the bytes may not survive an OS/power crash. Use it only for bulk or
+ * throwaway saves where you'll re-save or can rebuild.
  *
  * # Safety
  *

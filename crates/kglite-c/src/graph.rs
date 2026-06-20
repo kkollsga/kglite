@@ -10,7 +10,7 @@ use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::introspection::{compute_schema, schema_overview_to_json};
-use kglite::api::io::{load_file, load_kgl_bytes, save_graph, write_kgl_to, write_kgl_with};
+use kglite::api::io::{load_file, load_kgl_bytes, save_graph, save_graph_with, write_kgl_to};
 use kglite::api::{graphgen, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
 use std::path::Path;
@@ -181,6 +181,11 @@ fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, String) {
 /// the underlying storage mode — in-memory and mapped graphs
 /// produce a `.kgl` single-file; disk-backed graphs produce / fill
 /// a directory.
+///
+/// The write is atomic (temp + rename) and **durable** (file +
+/// parent-directory fsync) — a crash mid-save can't tear the file.
+/// Use [`kglite_save_graph_durable`] with `fsync == 0` for the fast,
+/// non-durable opt-out.
 ///
 /// # Arguments
 ///
@@ -423,11 +428,17 @@ pub unsafe extern "C" fn kglite_blueprint_build(
     KgliteStatusCode::Ok
 }
 
-/// Save a graph to a `.kgl` file with an explicit durability choice. Same
-/// as [`kglite_save_graph`] but when `fsync` != 0 the file and its
-/// directory entry are flushed to stable storage before returning —
-/// durable across power loss, at the cost of fsync latency. `fsync` == 0
-/// matches [`kglite_save_graph`] (atomic rename, no fsync).
+/// Save a graph to a `.kgl` file with an explicit durability choice.
+///
+/// `fsync` != 0 is exactly [`kglite_save_graph`]: mode-aware (disk dir vs
+/// in-memory `.kgl`), atomic temp+rename, and the file + parent directory
+/// are flushed to stable storage before returning — durable across power
+/// loss, at the cost of fsync latency.
+///
+/// `fsync` == 0 is the fast, **non-durable** opt-out: same mode-aware
+/// atomic rename (never a torn file) but the fsync barrier is skipped, so
+/// the bytes may not survive an OS/power crash. Use it only for bulk or
+/// throwaway saves where you'll re-save or can rebuild.
 ///
 /// # Safety
 ///
@@ -448,7 +459,10 @@ pub unsafe extern "C" fn kglite_save_graph_durable(
         Err(_) => return KgliteStatusCode::InvalidUtf8,
     };
     let state = unsafe { GraphState::from_handle_mut(graph) };
-    match write_kgl_with(state.inner.as_ref(), path_str, fsync != 0) {
+    // Route through the shared mode-aware dispatch so disk-backed graphs and
+    // columnar consolidation are handled identically to `kglite_save_graph`;
+    // only the fsync barrier differs.
+    match save_graph_with(&mut state.inner, path_str, fsync != 0) {
         Ok(()) => {
             if !out_error_msg.is_null() {
                 unsafe {
@@ -457,10 +471,10 @@ pub unsafe extern "C" fn kglite_save_graph_durable(
             }
             KgliteStatusCode::Ok
         }
-        Err(e) => {
+        Err(msg) => {
             if !out_error_msg.is_null() {
                 unsafe {
-                    *out_error_msg = alloc_c_string(&e.to_string());
+                    *out_error_msg = alloc_c_string(&msg);
                 }
             }
             KgliteStatusCode::FileIo
