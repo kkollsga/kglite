@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mapped / disk storage mode reaches every binding.** Creating a graph in
+  a specific backend (`memory` / `mapped` / `disk`) is now available across
+  all wrappers through one shared core builder
+  (`kglite::api::storage::StorageMode` + `new_dir_graph_in_mode`), so the
+  mode vocabulary can't drift:
+  - **C ABI:** new `kglite_graph_new_in_mode(mode, path, …)` — non-Rust
+    bindings can create mapped/disk graphs, not just in-memory ones.
+  - **bolt + mcp servers:** new `--storage memory|mapped|disk` flag. An
+    existing `--graph` (a `.kgl` file or disk-graph directory) is loaded in
+    its saved mode (auto-detected); a `--graph` path that does *not* exist
+    is created fresh in `--storage` mode (build-and-serve). Mirrors the
+    Python wheel's `kglite.open(path, storage=...)` semantics.
+
+### Changed
+
+- **Single mode-aware durable save dispatch** (`kglite::api::io::save_graph_with`)
+  now backs the wheel, the MCP server, and the C ABI, replacing three copies
+  of the disk-vs-in-memory / columnar / fsync logic. Fixes the C
+  `kglite_save_graph_durable`, which previously bypassed disk-mode dispatch
+  and columnar consolidation (and whose fsync docs were inverted). Saves are
+  byte-identical and remain durable (fsync) by default.
+
 ## [0.11.4] — 2026-06-19 — C ABI completeness + `kglite::api` soft-seal foundation
 
 ### Added

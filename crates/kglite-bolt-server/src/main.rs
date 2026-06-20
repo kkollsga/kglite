@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use kglite::api::io::load_file;
+use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 
 use crate::backend::KgliteBackend;
 
@@ -47,9 +48,18 @@ enum AuthScheme {
                   it were a Neo4j instance. See bolt_implementation.md for the phase plan."
 )]
 struct Cli {
-    /// Path to a `.kgl` graph file to serve.
+    /// Path to the graph to serve. An existing `.kgl` file or disk-graph
+    /// directory is loaded in whatever mode it was saved in (auto-detected).
+    /// A path that does NOT exist is created as a fresh, empty graph in
+    /// `--storage` mode (serve-and-build).
     #[arg(long, value_name = "PATH")]
     graph: PathBuf,
+
+    /// Storage mode for a freshly-created graph when `--graph` does not
+    /// exist: `memory` (default), `mapped`, or `disk`. Ignored when
+    /// `--graph` already exists (its saved mode is auto-detected).
+    #[arg(long, default_value = "memory")]
+    storage: String,
 
     /// Interface to bind.
     #[arg(long, default_value = "127.0.0.1")]
@@ -118,6 +128,18 @@ struct Cli {
     tls_key: Option<PathBuf>,
 }
 
+/// The effective storage mode of a loaded graph, for startup logging.
+fn storage_mode_str(g: &kglite::api::DirGraph) -> &'static str {
+    use kglite::api::GraphRead;
+    if g.graph.is_disk() {
+        "disk"
+    } else if g.graph.is_mapped() {
+        "mapped"
+    } else {
+        "memory"
+    }
+}
+
 fn init_tracing() {
     // Match kglite-mcp-server's filter: respect RUST_LOG, default to
     // info for our crate and warn for everything else.
@@ -135,17 +157,33 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    if !cli.graph.exists() {
-        anyhow::bail!("--graph {} does not exist", cli.graph.display());
-    }
-
-    tracing::info!(path = %cli.graph.display(), "loading graph");
-    // Phase G.3-pre: load_file returns Arc<DirGraph> directly — no
-    // KnowledgeGraph wrapper between us and the engine.
-    let dir_arc = load_file(&cli.graph.to_string_lossy())
-        .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))
-        .with_context(|| format!("loading {}", cli.graph.display()))?;
-    tracing::info!("graph loaded; constructing Bolt server");
+    // Exists → load (auto-detect saved mode); absent → create fresh in
+    // --storage mode. Same open semantics as the Python wheel's
+    // `kglite.open(path, storage=...)` and the C ABI's create-in-mode.
+    let dir_arc = if cli.graph.exists() {
+        tracing::info!(path = %cli.graph.display(), "loading graph");
+        // Phase G.3-pre: load_file returns Arc<DirGraph> directly — no
+        // KnowledgeGraph wrapper between us and the engine.
+        let arc = load_file(&cli.graph.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))
+            .with_context(|| format!("loading {}", cli.graph.display()))?;
+        tracing::info!(
+            storage = storage_mode_str(&arc),
+            "graph loaded; constructing Bolt server"
+        );
+        arc
+    } else {
+        let mode = StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+        let path = cli.graph.to_string_lossy().into_owned();
+        let graph = new_dir_graph_in_mode(mode, Some(std::path::Path::new(&path)))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        tracing::info!(
+            path = %cli.graph.display(),
+            storage = mode.as_str(),
+            "created new empty graph; constructing Bolt server"
+        );
+        Arc::new(graph)
+    };
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
     // the commit-swap pattern (Phase C.5). Unwrap the Arc — if no
