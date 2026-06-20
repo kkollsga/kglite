@@ -63,16 +63,18 @@ use kglite::api::storage::StorageMode;
 struct Cli {
     /// Path to a knowledge graph. An existing `.kgl` file or disk-graph
     /// directory is loaded at boot (mode auto-detected); a path that does
-    /// not exist is created as a fresh, empty graph in `--storage` mode
-    /// (build-and-serve via the mutation tools, then `save_graph`).
+    /// not exist is an error unless `--storage` is given, in which case a
+    /// fresh, empty graph is created (build-and-serve via the mutation tools,
+    /// then `save_graph`).
     #[arg(long, conflicts_with_all = ["workspace", "watch", "source_root"])]
     graph: Option<PathBuf>,
 
-    /// Storage mode for a freshly-created `--graph` when its path does not
-    /// exist: `memory` (default), `mapped`, or `disk`. Ignored when the
-    /// graph already exists (its saved mode is auto-detected).
-    #[arg(long, default_value = "memory")]
-    storage: String,
+    /// Create a fresh, empty `--graph` in this storage mode (`memory`,
+    /// `mapped`, or `disk`) when its path does not exist — opt-in, so a typo'd
+    /// path fails fast instead of silently serving an empty graph. Ignored
+    /// when the graph already exists (its saved mode is auto-detected).
+    #[arg(long)]
+    storage: Option<String>,
 
     /// Source-root mode (no graph).
     #[arg(long = "source-root", conflicts_with_all = ["graph", "workspace", "watch"])]
@@ -244,12 +246,21 @@ where
 fn validate_mode_paths(mode: &Mode, cli: &Cli) -> Result<()> {
     if let Mode::Graph { path } = mode {
         // Validate --storage up front (only used when creating a new graph).
-        StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(s) = &cli.storage {
+            StorageMode::parse(s).map_err(|e| anyhow::anyhow!(e))?;
+        }
         // An existing path must be a loadable .kgl file or disk-graph
-        // directory; a non-existent path is created fresh in --storage mode.
+        // directory; a non-existent path errors unless --storage opts in to
+        // creating one (handled in bind_mode).
         if path.exists() && !path.is_file() && !path.is_dir() {
             anyhow::bail!(
                 "--graph path is neither a file nor a directory: {}",
+                path.display()
+            );
+        }
+        if !path.exists() && cli.storage.is_none() {
+            anyhow::bail!(
+                "--graph path does not exist: {} (pass --storage memory|mapped|disk to create one)",
                 path.display()
             );
         }
@@ -328,7 +339,12 @@ fn bind_mode(
                 graph_state.load_kgl(&canon).context("kglite.load failed")?;
                 canon
             } else {
-                let smode = StorageMode::parse(&cli.storage).map_err(|e| anyhow::anyhow!(e))?;
+                // validate_mode_paths guarantees --storage is set when the
+                // path is missing (else it already bailed with a clean error).
+                let mode_str = cli.storage.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("--graph path does not exist: {}", path.display())
+                })?;
+                let smode = StorageMode::parse(mode_str).map_err(|e| anyhow::anyhow!(e))?;
                 tracing::info!(
                     path = %path.display(),
                     storage = smode.as_str(),

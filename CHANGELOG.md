@@ -44,8 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **bolt + mcp servers:** new `--storage memory|mapped|disk` flag. An
     existing `--graph` (a `.kgl` file or disk-graph directory) is loaded in
     its saved mode (auto-detected); a `--graph` path that does *not* exist
-    is created fresh in `--storage` mode (build-and-serve). Mirrors the
-    Python wheel's `kglite.open(path, storage=...)` semantics.
+    errors by default (typo guard) and is created fresh **only when
+    `--storage` is given** (opt-in build-and-serve).
 
 ### Performance
 
