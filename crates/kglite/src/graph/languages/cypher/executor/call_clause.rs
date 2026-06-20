@@ -450,7 +450,7 @@ impl<'a> CypherExecutor<'a> {
                     tolerance,
                     conn.as_deref(),
                     scope.as_ref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
             }
@@ -464,7 +464,7 @@ impl<'a> CypherExecutor<'a> {
                     sample_size,
                     conn.as_deref(),
                     scope.as_ref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
             }
@@ -476,7 +476,7 @@ impl<'a> CypherExecutor<'a> {
                     normalized,
                     conn.as_deref(),
                     scope.as_ref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
             }
@@ -490,7 +490,7 @@ impl<'a> CypherExecutor<'a> {
                     sample_size,
                     conn.as_deref(),
                     scope.as_ref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 self.centrality_to_rows(&results, &clause.yield_items)?
             }
@@ -505,9 +505,9 @@ impl<'a> CypherExecutor<'a> {
                     conn.as_deref(),
                     scope.as_ref(),
                     if streaming_community {
-                        None
+                        crate::graph::algorithms::Interrupt::default()
                     } else {
-                        self.deadline
+                        self.interrupt()
                     },
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?
@@ -523,9 +523,9 @@ impl<'a> CypherExecutor<'a> {
                     conn.as_deref(),
                     scope.as_ref(),
                     if streaming_community {
-                        None
+                        crate::graph::algorithms::Interrupt::default()
                     } else {
-                        self.deadline
+                        self.interrupt()
                     },
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?
@@ -538,7 +538,7 @@ impl<'a> CypherExecutor<'a> {
                     max_iter,
                     conn.as_deref(),
                     scope.as_ref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 self.community_result_to_rows(&result, &clause.yield_items)?
             }
@@ -552,7 +552,7 @@ impl<'a> CypherExecutor<'a> {
                         self.graph,
                         node_types.as_deref(),
                         rel_types.as_deref(),
-                        self.deadline,
+                        self.interrupt(),
                     )?;
                 // Periodic deadline check: 124M nodes can spend minutes here even
                 // after the algorithm itself completes within budget.
@@ -591,7 +591,7 @@ impl<'a> CypherExecutor<'a> {
                     self.graph,
                     node_types.as_deref(),
                     rel_types.as_deref(),
-                    self.deadline,
+                    self.interrupt(),
                 )?;
                 let mut rows = Vec::with_capacity(scores.len());
                 for (node_idx, core) in scores {
@@ -620,7 +620,7 @@ impl<'a> CypherExecutor<'a> {
                         self.graph,
                         node_types.as_deref(),
                         rel_types.as_deref(),
-                        self.deadline,
+                        self.interrupt(),
                     )?;
                 let mut rows = Vec::with_capacity(scores.len());
                 for (node_idx, coeff) in scores {

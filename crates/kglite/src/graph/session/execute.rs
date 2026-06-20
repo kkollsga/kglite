@@ -86,7 +86,7 @@ pub struct ExecuteOptions<'a> {
     /// Python wheel points this at a `static AtomicBool` its SIGINT
     /// handler flips. Bindings that need this provide a `'static` flag;
     /// the rest pass `None`.
-    pub cancel: Option<&'a AtomicBool>,
+    pub cancel: Option<&'static AtomicBool>,
 }
 
 impl<'a> ExecuteOptions<'a> {

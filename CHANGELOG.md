@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Cypher queries are interruptible with Ctrl-C.** A long-running `cypher()`
-  read (large scans / cross-products) can now be stopped with `Ctrl-C`, which
-  raises `KeyboardInterrupt` instead of blocking until the deadline. A scoped
-  SIGINT handler (installed only while a query runs, then restored) flips a
+  read — large scans / cross-products *and* `CALL` graph algorithms (pagerank,
+  betweenness, louvain, …) — can now be stopped with `Ctrl-C`, which raises
+  `KeyboardInterrupt` instead of blocking until the deadline. A scoped SIGINT
+  handler (installed only while a query runs, then restored) flips a
   cooperative-cancel flag the engine polls at the same checkpoints as the query
   deadline. POSIX only; on other platforms the deadline still bounds queries.
   Targets the interactive single-query case (notebook / REPL); concurrent
@@ -25,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signal model; threaded through the executor and pattern matcher. Servers
   pass `None` (unchanged behaviour). New `KgError::Cancelled` /
   `KgErrorCode::Cancelled` (HTTP 499, `Neo.ClientError.Transaction.Terminated`).
+  The graph algorithms now take an `algorithms::Interrupt` (deadline + cancel
+  bundle) in place of a bare `deadline: Option<Instant>`, polled at their
+  iteration/scan checkpoints so `CALL` procedures are interruptible too.
 - GIL-release + error-mapping + cancellation consolidated into one
   `EnterKg::enter_kg` helper in the Python wrapper (replaces scattered
   `py.detach(...).map_err(kg_to_pyerr)` call sites on the Cypher paths).

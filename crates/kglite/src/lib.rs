@@ -281,6 +281,7 @@ pub mod api {
         pub use crate::graph::algorithms::vector::{
             vector_search, DistanceMetric, VectorSearchResult,
         };
+        pub use crate::graph::algorithms::Interrupt;
     }
 
     /// Timeseries date/query helpers — the pure date-parsing and

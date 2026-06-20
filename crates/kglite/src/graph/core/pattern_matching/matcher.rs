@@ -94,7 +94,7 @@ pub struct PatternExecutor<'a> {
     /// checkpoints as `deadline` (one relaxed atomic load). Set by a
     /// binding's signal model (the Python wheel's SIGINT handler) so a
     /// long scan/expansion can be interrupted. `None` = never cancelled.
-    cancel: Option<&'a AtomicBool>,
+    cancel: Option<&'static AtomicBool>,
     /// When set, deduplicate results by NodeIndex of the named variable.
     /// At the last hop expansion, paths leading to already-seen target nodes
     /// are skipped, avoiding PatternMatch cloning and allocation overhead.
@@ -166,7 +166,7 @@ impl<'a> PatternExecutor<'a> {
     }
 
     /// Set the cooperative-cancellation flag. Returns self for chaining.
-    pub fn set_cancel(mut self, cancel: Option<&'a AtomicBool>) -> Self {
+    pub fn set_cancel(mut self, cancel: Option<&'static AtomicBool>) -> Self {
         self.cancel = cancel;
         self
     }
