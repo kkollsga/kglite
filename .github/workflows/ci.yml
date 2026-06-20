@@ -255,24 +255,32 @@ jobs:
           shared-key: free-threading
           workspaces: ". -> target"
 
-      - name: Build extension for free-threaded interpreter (abi3 off)
+      - name: Build extension into a free-threaded venv (abi3 off)
         # abi3 (the limited API) doesn't cover the free-threaded build, so the
-        # wheel is built per-version with `--no-default-features` (drops the
+        # extension is built per-version with `--no-default-features` (drops the
         # `abi3` default) + the `python-extension` feature. The build itself is
         # a real test: PyO3 0.28 enforces `Sync` on every `#[pyclass]` for a
         # free-threaded target, so a non-thread-safe class fails to compile here.
+        #
+        # Use `maturin develop` (not `build` + `pip install <wheel>`): it
+        # compiles the extension editable-into the local `kglite/` package dir,
+        # so `import kglite` from the repo root resolves to the freshly built
+        # `.so`. A plain `pip install <wheel>` leaves the source-tree `kglite/`
+        # (which has no compiled extension) shadowing the installed package →
+        # `ModuleNotFoundError: No module named 'kglite.kglite'`.
         run: |
-          pip install maturin pytest pandas
-          maturin build --release --no-default-features --features python-extension --out dist
-          pip install --no-index --find-links dist kglite
+          python -m venv .ftvenv
+          ./.ftvenv/bin/pip install -q maturin pytest pandas
+          VIRTUAL_ENV="$PWD/.ftvenv" ./.ftvenv/bin/maturin develop --release \
+            --no-default-features --features python-extension
 
       - name: Assert GIL is actually disabled + run concurrency suite
         # Backs the module's `gil_used = false` declaration with a real run:
         # imports under no-GIL, asserts the GIL stays off under a threaded
         # query load, and exercises the shared Session / FrozenGraph model.
         run: |
-          python -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'; print('no-GIL OK')"
-          pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
+          ./.ftvenv/bin/python -c "import sys, kglite; assert not sys._is_gil_enabled(), 'GIL unexpectedly enabled'; print('no-GIL OK')"
+          ./.ftvenv/bin/python -m pytest tests/test_freethreading.py tests/test_concurrency.py tests/test_session.py -v --tb=short
 
   perf-regression:
     name: Perf regression gate
