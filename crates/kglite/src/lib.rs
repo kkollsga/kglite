@@ -351,6 +351,11 @@ pub mod api {
         pub use crate::graph::storage::backend::GraphBackend;
         pub use crate::graph::storage::disk::graph::DiskGraph;
         pub use crate::graph::storage::lookups::TypeLookup;
+        /// The cross-binding create-in-mode builder: resolve a mode string to
+        /// a [`StorageMode`] and build a fresh graph in that backend. Shared by
+        /// the wheel (`storage='mapped'/'disk'`), the bolt/mcp servers
+        /// (`--storage`), and the C ABI (`kglite_graph_new_in_mode`).
+        pub use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
         pub use crate::graph::storage::MappedGraph;
     }
 

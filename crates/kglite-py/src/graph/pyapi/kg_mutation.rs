@@ -832,46 +832,24 @@ impl KnowledgeGraph {
     /// pyfunction. `source_path` is left `None` here — callers that want the
     /// graph to remember an origin file set it after construction.
     pub(crate) fn construct(storage: Option<&str>, path: Option<&str>) -> PyResult<Self> {
-        let mut graph = DirGraph::new();
-
-        if let Some(mode) = storage {
-            match mode {
-                "mapped" => {
-                    // Mapped mode: switch the backend variant and force
-                    // columnar property storage to spill to mmap on build.
-                    graph.graph = kglite_core::api::storage::GraphBackend::Mapped(
-                        kglite_core::api::storage::MappedGraph::new(),
-                    );
-                    graph.memory_limit = Some(0);
-                }
-                "disk" => {
-                    let dir = path.ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "storage='disk' requires a path parameter, e.g. \
-                             KnowledgeGraph(storage='disk', path='./my_graph')",
-                        )
+        // Mode selection + backend wiring lives in core
+        // (`kglite::api::storage::new_dir_graph_in_mode`) so the wheel, the
+        // bolt/mcp servers (`--storage`), and the C ABI
+        // (`kglite_graph_new_in_mode`) all share one mode vocabulary.
+        let graph = match storage {
+            Some(mode_str) => {
+                let mode =
+                    kglite_core::api::storage::StorageMode::parse(mode_str).map_err(|e| {
+                        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
                     })?;
-                    let data_dir = std::path::Path::new(dir);
-                    let dg = kglite_core::api::storage::DiskGraph::new_at_path(data_dir).map_err(
-                        |e| {
-                            crate::error_py::kg_to_pyerr(crate::error::KgError::FileFormat {
-                                path: std::path::PathBuf::new(),
-                                message: format!("Failed to create disk graph at '{}': {}", dir, e),
-                            })
-                        },
-                    )?;
-                    graph.graph = kglite_core::api::storage::GraphBackend::Disk(Box::new(dg));
-                }
-                other => {
-                    return Err(crate::error_py::kg_to_pyerr(
-                        crate::error::KgError::Argument(format!(
-                            "Unknown storage mode '{}'. Expected 'mapped', 'disk', or None.",
-                            other
-                        )),
-                    ));
-                }
+                kglite_core::api::storage::new_dir_graph_in_mode(
+                    mode,
+                    path.map(std::path::Path::new),
+                )
+                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))?
             }
-        }
+            None => DirGraph::new(),
+        };
 
         Ok(KnowledgeGraph {
             inner: Arc::new(graph),

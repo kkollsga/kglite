@@ -39,33 +39,15 @@ pub fn from_blueprint_rust(
     let (kg, output_path) = py
         .detach(
             || -> Result<(KnowledgeGraph, Option<std::path::PathBuf>), String> {
-                // Construct the backing DirGraph with the requested storage mode
-                let mut graph = DirGraph::new();
-                match storage {
-                    None | Some("default") | Some("") => {}
-                    Some("mapped") => {
-                        graph.graph = kglite_core::api::storage::GraphBackend::Mapped(
-                            kglite_core::api::storage::MappedGraph::new(),
-                        );
-                        graph.memory_limit = Some(0);
-                    }
-                    Some("disk") => {
-                        let dir = path.ok_or_else(|| {
-                            "storage='disk' requires a path parameter".to_string()
-                        })?;
-                        let dg = kglite_core::api::storage::DiskGraph::new_at_path(Path::new(dir))
-                            .map_err(|e| {
-                                format!("Failed to create disk graph at '{}': {}", dir, e)
-                            })?;
-                        graph.graph = kglite_core::api::storage::GraphBackend::Disk(Box::new(dg));
-                    }
-                    Some(other) => {
-                        return Err(format!(
-                            "Unknown storage mode '{}'. Expected 'default', 'mapped', or 'disk'.",
-                            other
-                        ));
-                    }
-                }
+                // Construct the backing DirGraph with the requested storage
+                // mode via the shared core builder (one mode vocabulary across
+                // wheel / servers / C ABI). Empty string is treated as default.
+                let mode = match storage {
+                    None | Some("") => kglite_core::api::storage::StorageMode::Memory,
+                    Some(s) => kglite_core::api::storage::StorageMode::parse(s)?,
+                };
+                let mut graph =
+                    kglite_core::api::storage::new_dir_graph_in_mode(mode, path.map(Path::new))?;
 
                 // Parse blueprint
                 let blueprint = blueprint::load_blueprint_file(&bp_path)?;
