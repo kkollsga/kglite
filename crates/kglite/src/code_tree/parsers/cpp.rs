@@ -1456,6 +1456,249 @@ impl CppParser {
     }
 }
 
+// ── Export-macro neutralization (pre-parse source fix) ──────────────────────
+//
+// tree-sitter-cpp has no preprocessor, so an export-visibility macro sitting in
+// the `class`/`struct` **keyword slot** — `class KUZU_API Foo { … }` — is read
+// as a `function_definition` (`class KUZU_API` → a `class_specifier` named after
+// the macro; `Foo` → a bare declarator). The real class is dropped and the
+// surrounding declarations frequently desync with it. This is ubiquitous in
+// C/C++ libraries that build shared objects (`KUZU_API`, `ARROW_EXPORT`,
+// `DUCKDB_API`, `LLVM_ABI`, `__declspec(dllexport)`, `__attribute__((visibility))`).
+//
+// We blank those keyword-slot macro tokens to equal-length spaces *before*
+// parsing, so tree-sitter sees `class           Foo { … }` and extracts the
+// class (and its members, and everything after it) correctly. Byte length is
+// preserved, so every node position / line number stays exact.
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Advance past whitespace and `//` / `/* */` comments. Returns the next
+/// significant index.
+fn skip_ws_and_comments(src: &[u8], mut i: usize) -> usize {
+    let n = src.len();
+    loop {
+        while i < n && src[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i + 1 < n && src[i] == b'/' && src[i + 1] == b'/' {
+            i += 2;
+            while i < n && src[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < n && src[i] == b'/' && src[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(src[i] == b'*' && src[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            continue;
+        }
+        return i;
+    }
+}
+
+/// Skip a string / char / raw-string literal starting at `i` (which is `"` or
+/// `'`, possibly with a raw-string `R"delim(…)delim"` form). Returns the index
+/// just past the closing quote.
+fn skip_quoted(src: &[u8], i: usize) -> usize {
+    let n = src.len();
+    let quote = src[i];
+    // Raw string: `R"delim( … )delim"` (the `R` is matched by the caller via the
+    // preceding byte). We only get here on the `"`; detect a raw string by a
+    // preceding `R`.
+    if quote == b'"' && i > 0 && src[i - 1] == b'R' {
+        // read delimiter up to '('
+        let mut j = i + 1;
+        let delim_start = j;
+        while j < n && src[j] != b'(' && src[j] != b'"' {
+            j += 1;
+        }
+        if j < n && src[j] == b'(' {
+            let delim = &src[delim_start..j];
+            j += 1; // past '('
+                    // find  )delim"
+            while j < n {
+                if src[j] == b')' && src[j + 1..].starts_with(delim) {
+                    let close = j + 1 + delim.len();
+                    if close < n && src[close] == b'"' {
+                        return close + 1;
+                    }
+                }
+                j += 1;
+            }
+            return n;
+        }
+        // not actually a raw string — fall through to normal string handling
+    }
+    let mut j = i + 1;
+    while j < n {
+        if src[j] == b'\\' {
+            j += 2;
+            continue;
+        }
+        if src[j] == quote {
+            return j + 1;
+        }
+        j += 1;
+    }
+    n
+}
+
+/// True when `text` looks like an export/visibility macro identifier
+/// (`KUZU_API`, `ARROW_EXPORT`, `_PUBLIC`, …): all-uppercase / digits / `_`.
+fn is_macro_ident(text: &[u8]) -> bool {
+    std::str::from_utf8(text)
+        .map(looks_like_macro_decorator)
+        .unwrap_or(false)
+}
+
+/// Skip a `__declspec(…)` / `__attribute__((…))` / `alignas(…)` specifier
+/// starting at `i` (the keyword start). Returns the index past the balanced
+/// parens. If no `(` follows, returns the index past the keyword.
+fn skip_attr_specifier(src: &[u8], i: usize) -> usize {
+    let n = src.len();
+    let mut j = i;
+    while j < n && is_ident_byte(src[j]) {
+        j += 1;
+    }
+    let after_kw = skip_ws_and_comments(src, j);
+    if after_kw >= n || src[after_kw] != b'(' {
+        return j;
+    }
+    let mut depth = 0usize;
+    let mut k = after_kw;
+    while k < n {
+        match src[k] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return k + 1;
+                }
+            }
+            b'"' | b'\'' => {
+                k = skip_quoted(src, k);
+                continue;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    n
+}
+
+/// Given `i` positioned just after a `class`/`struct` keyword, scan the keyword
+/// slot and return `(continue_index, ranges_to_blank)`. Ranges are the
+/// macro/attribute tokens strictly *between* the keyword and the type name.
+fn scan_keyword_slot(src: &[u8], start: usize) -> (usize, Vec<(usize, usize)>) {
+    let n = src.len();
+    let mut edits: Vec<(usize, usize)> = Vec::new();
+    let mut pending: Option<(usize, usize)> = None; // last macro-shaped ident seen
+    let mut i = start;
+    loop {
+        i = skip_ws_and_comments(src, i);
+        if i >= n {
+            break;
+        }
+        let c = src[i];
+        // `__declspec(...)` / `__attribute__((...))` / `alignas(...)`
+        if (src[i..].starts_with(b"__declspec")
+            || src[i..].starts_with(b"__attribute__")
+            || src[i..].starts_with(b"alignas"))
+            && (i == 0 || !is_ident_byte(src[i - 1]))
+        {
+            if let Some(r) = pending.take() {
+                edits.push(r); // a real token follows ⇒ the pending ident was a macro
+            }
+            let end = skip_attr_specifier(src, i);
+            edits.push((i, end));
+            i = end;
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let s = i;
+            while i < n && is_ident_byte(src[i]) {
+                i += 1;
+            }
+            let ident = &src[s..i];
+            // contextual keywords that follow the *name* — stop, keep pending name.
+            if ident == b"final" || ident == b"override" {
+                break;
+            }
+            // another token follows the previous ident ⇒ that one was a macro.
+            if let Some(r) = pending.take() {
+                edits.push(r);
+            }
+            if is_macro_ident(ident) {
+                pending = Some((s, i)); // could be a macro or the (ALLCAPS) name; decide later
+            } else {
+                break; // a normal identifier in the name slot ⇒ it's the type name
+            }
+        } else {
+            break; // `{`, `:`, `;`, `<`, `=`, `,` … ⇒ end of slot; pending = the name
+        }
+    }
+    // A still-pending ident at the stop is the type name itself — never blank it.
+    (i, edits)
+}
+
+/// See the module comment above. Returns `Cow::Borrowed` when nothing needed
+/// rewriting (the overwhelmingly common case — zero allocation).
+fn neutralize_export_macros(src: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let n = src.len();
+    let mut edits: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = src[i];
+        if c == b'/' && i + 1 < n && (src[i + 1] == b'/' || src[i + 1] == b'*') {
+            i = skip_ws_and_comments(src, i);
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            i = skip_quoted(src, i);
+            continue;
+        }
+        // `class` / `struct` at a word boundary, followed by a non-identifier.
+        let is_boundary = i == 0 || !is_ident_byte(src[i - 1]);
+        if is_boundary {
+            let kwlen = if src[i..].starts_with(b"class") {
+                5
+            } else if src[i..].starts_with(b"struct") {
+                6
+            } else {
+                0
+            };
+            if kwlen != 0 {
+                let after = i + kwlen;
+                if after < n && !is_ident_byte(src[after]) {
+                    let (next, slot_edits) = scan_keyword_slot(src, after);
+                    edits.extend(slot_edits);
+                    i = next;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    if edits.is_empty() {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = src.to_vec();
+    for (s, e) in edits {
+        for b in &mut out[s..e] {
+            if *b != b'\n' {
+                *b = b' '; // keep newlines so line numbers are unchanged
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 impl LanguageParser for CppParser {
     fn language_name(&self) -> &'static str {
         if self.is_cpp() {
@@ -1529,7 +1772,13 @@ impl LanguageParser for CppParser {
             return r;
         }
 
-        let Some(tree) = self.parse_tree(&source) else {
+        // Blank export-visibility macros in the `class`/`struct` keyword slot so
+        // tree-sitter-cpp parses `class KUZU_API Foo` as a class, not a function.
+        // Byte length is preserved, so node offsets index the *original* source
+        // identically — we parse the neutralized bytes but read text from the
+        // pristine original.
+        let neutralized = neutralize_export_macros(&source);
+        let Some(tree) = self.parse_tree(&neutralized) else {
             return ParseResult::new();
         };
         let root = tree.root_node();
@@ -1574,5 +1823,130 @@ impl LanguageParser for CppParser {
         file_info.annotations = extract_comment_annotations(root, &source, DEFAULT_COMMENT_TYPES);
         result.files.push(file_info);
         result
+    }
+}
+
+#[cfg(test)]
+mod export_macro_tests {
+    use super::{neutralize_export_macros, CppParser};
+    use crate::code_tree::models::ParseResult;
+    use crate::code_tree::parsers::LanguageParser;
+
+    fn neut(s: &str) -> String {
+        String::from_utf8(neutralize_export_macros(s.as_bytes()).into_owned()).unwrap()
+    }
+
+    fn is_unchanged(s: &str) -> bool {
+        matches!(
+            neutralize_export_macros(s.as_bytes()),
+            std::borrow::Cow::Borrowed(_)
+        )
+    }
+
+    #[test]
+    fn blanks_keyword_slot_macro_preserving_length() {
+        for (input, name, macro_tok) in [
+            ("class KUZU_API Foo {", "Foo", "KUZU_API"),
+            ("struct ARROW_EXPORT Bar {", "Bar", "ARROW_EXPORT"),
+        ] {
+            let out = neut(input);
+            assert_eq!(
+                out.len(),
+                input.len(),
+                "length must be preserved: {input:?}"
+            );
+            assert!(out.contains(name), "name dropped: {out:?}");
+            assert!(!out.contains(macro_tok), "macro not blanked: {out:?}");
+            // Only the macro span changed — modulo spaces, the rest is identical.
+            assert_eq!(
+                out.replace(' ', ""),
+                input.replace(macro_tok, "").replace(' ', "")
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_real_classes_untouched() {
+        // single identifier after the keyword = the name, even if ALLCAPS.
+        assert!(is_unchanged("class Foo {"));
+        assert!(is_unchanged("class FOO {")); // a real class literally named FOO
+        assert!(is_unchanged("struct Plain { int x; };"));
+        assert!(is_unchanged("class Foo : public Base {"));
+        assert!(is_unchanged("class Foo final {"));
+        assert!(is_unchanged("enum class Color { Red };"));
+    }
+
+    #[test]
+    fn handles_base_clause_and_final_and_allcaps_names() {
+        assert_eq!(
+            neut("class KUZU_API Foo : Base {"),
+            "class          Foo : Base {"
+        );
+        // ALLCAPS *name* after a macro: blank the macro, keep the name.
+        assert_eq!(
+            neut("class KUZU_API FOO_T final"),
+            "class          FOO_T final"
+        );
+        // multiple macros in the slot.
+        assert_eq!(neut("class M1 M2 Foo {"), "class       Foo {");
+    }
+
+    #[test]
+    fn ignores_macro_inside_strings_and_comments() {
+        assert!(is_unchanged("const char* s = \"class KUZU_API Foo {\";"));
+        assert!(is_unchanged("// class KUZU_API Foo {\nint x;"));
+        assert!(is_unchanged("/* class KUZU_API Foo */ int y;"));
+    }
+
+    #[test]
+    fn handles_declspec_attribute_specifiers() {
+        let out = neut("class __declspec(dllexport) Baz {");
+        assert!(out.contains("Baz {"), "{out}");
+        assert!(!out.contains("dllexport"), "{out}");
+        assert_eq!(out.len(), "class __declspec(dllexport) Baz {".len());
+    }
+
+    fn parse_cpp(src: &str) -> ParseResult {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hdr.hpp");
+        std::fs::write(&file, src).unwrap();
+        CppParser::cpp().parse_file(&file, dir.path())
+    }
+
+    #[test]
+    fn export_macro_class_is_extracted_end_to_end() {
+        // The minimal repro from the bug report: the macro-annotated class, the
+        // macro-position method, and a following macro-free struct must all land.
+        let src = "#define MYLIB_API\n\
+                   struct Plain { int x; };\n\
+                   class MYLIB_API Foo : public Base {\n\
+                   public:\n  MYLIB_API void bar();\n  int field;\n};\n\
+                   enum class Color { Red, Green };\n";
+        let r = parse_cpp(src);
+        let classes: Vec<&str> = r.classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(classes.contains(&"Foo"), "Foo class missing: {classes:?}");
+        assert!(
+            classes.contains(&"Plain"),
+            "Plain struct missing: {classes:?}"
+        );
+        let enums: Vec<&str> = r.enums.iter().map(|e| e.name.as_str()).collect();
+        assert!(enums.contains(&"Color"), "Color enum missing: {enums:?}");
+        // the macro-annotated class records its base + method, and yields no
+        // `unknown`-named functions.
+        let foo = r.classes.iter().find(|c| c.name == "Foo").unwrap();
+        assert!(
+            foo.bases.iter().any(|b| b == "Base"),
+            "base lost: {:?}",
+            foo.bases
+        );
+        assert!(
+            r.functions.iter().any(|f| f.name == "bar"),
+            "method bar missing: {:?}",
+            r.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !r.functions.iter().any(|f| f.name == "unknown"),
+            "degenerate unknown function present"
+        );
     }
 }
