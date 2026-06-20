@@ -15,6 +15,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use super::pattern::{
@@ -89,6 +90,11 @@ pub struct PatternExecutor<'a> {
     params: &'a HashMap<String, Value>,
     /// Optional deadline for aborting long-running pattern execution.
     deadline: Option<Instant>,
+    /// Optional cooperative-cancellation flag, polled at the same
+    /// checkpoints as `deadline` (one relaxed atomic load). Set by a
+    /// binding's signal model (the Python wheel's SIGINT handler) so a
+    /// long scan/expansion can be interrupted. `None` = never cancelled.
+    cancel: Option<&'a AtomicBool>,
     /// When set, deduplicate results by NodeIndex of the named variable.
     /// At the last hop expansion, paths leading to already-seen target nodes
     /// are skipped, avoiding PatternMatch cloning and allocation overhead.
@@ -112,6 +118,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: false,
             params: &EMPTY_PARAMS,
             deadline: None,
+            cancel: None,
             distinct_target_var: None,
         }
     }
@@ -129,6 +136,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params,
             deadline: None,
+            cancel: None,
             distinct_target_var: None,
         }
     }
@@ -146,6 +154,7 @@ impl<'a> PatternExecutor<'a> {
             lightweight: true,
             params,
             deadline: None,
+            cancel: None,
             distinct_target_var: None,
         }
     }
@@ -154,6 +163,32 @@ impl<'a> PatternExecutor<'a> {
     pub fn set_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.deadline = deadline;
         self
+    }
+
+    /// Set the cooperative-cancellation flag. Returns self for chaining.
+    pub fn set_cancel(mut self, cancel: Option<&'a AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// Combined deadline + cancellation poll. Returns `Some(message)`
+    /// when the run should abort (deadline exceeded or cancel flag set),
+    /// else `None`. The String is allocated only on the (rare) abort
+    /// path; the steady-state cost is the `Instant::now()` already done
+    /// for the deadline plus one relaxed atomic load when a flag is set.
+    #[inline]
+    fn interrupt_reason(&self) -> Option<String> {
+        if let Some(dl) = self.deadline {
+            if Instant::now() > dl {
+                return Some("Query timed out".to_string());
+            }
+        }
+        if let Some(c) = &self.cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                return Some("Query cancelled".to_string());
+            }
+        }
+        None
     }
 
     /// Set a distinct target variable for deduplication during pattern matching.
@@ -291,10 +326,8 @@ impl<'a> PatternExecutor<'a> {
             // max_matches is enforced DURING expansion (inner-loop checks below),
             // not between hops, to avoid breaking before edges are expanded.
             let is_last_hop = i + 2 >= pattern.elements.len();
-            if let Some(dl) = self.deadline {
-                if Instant::now() > dl {
-                    return Err("Query timed out".to_string());
-                }
+            if let Some(msg) = self.interrupt_reason() {
+                return Err(msg);
             }
 
             let edge_pattern = match &pattern.elements[i] {
@@ -331,14 +364,11 @@ impl<'a> PatternExecutor<'a> {
                         if had_error.load(std::sync::atomic::Ordering::Relaxed) {
                             return Vec::new();
                         }
-                        if let Some(dl) = self.deadline {
-                            if Instant::now() > dl {
-                                if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                    *first_error.lock().unwrap() =
-                                        Some("Query timed out".to_string());
-                                }
-                                return Vec::new();
+                        if let Some(msg) = self.interrupt_reason() {
+                            if !had_error.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                *first_error.lock().unwrap() = Some(msg);
                             }
+                            return Vec::new();
                         }
                         let expansions = match self.expand_from_node(
                             source_idx,
@@ -462,10 +492,8 @@ impl<'a> PatternExecutor<'a> {
                     for (target_idx, edge_binding) in expansions {
                         expand_count += 1;
                         if expand_count.is_multiple_of(1024) {
-                            if let Some(dl) = self.deadline {
-                                if Instant::now() > dl {
-                                    return Err("Query timed out".to_string());
-                                }
+                            if let Some(msg) = self.interrupt_reason() {
+                                return Err(msg);
                             }
                         }
                         if hop_limit.is_some_and(|max| new_matches_seq.len() >= max) {
@@ -530,11 +558,10 @@ impl<'a> PatternExecutor<'a> {
                 (new_matches_seq, new_indices_seq)
             };
 
-            // Check deadline after expansion (covers both parallel and sequential paths)
-            if let Some(dl) = self.deadline {
-                if Instant::now() > dl {
-                    return Err("Query timed out".to_string());
-                }
+            // Check deadline / cancellation after expansion (covers both
+            // parallel and sequential paths)
+            if let Some(msg) = self.interrupt_reason() {
+                return Err(msg);
             }
 
             // Apply hop limit truncation (for parallel path which can't early-exit)
@@ -823,6 +850,11 @@ impl<'a> PatternExecutor<'a> {
                      predicate property (create_index), anchor with \
                      MATCH (n {id: ...}), or raise timeout_ms."
                     .to_string());
+            }
+        }
+        if let Some(c) = &self.cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Query cancelled".to_string());
             }
         }
         Ok(())

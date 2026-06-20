@@ -130,7 +130,8 @@ impl<'a> CypherExecutor<'a> {
                 &row.node_bindings,
                 self.params,
             )
-            .set_deadline(self.deadline);
+            .set_deadline(self.deadline)
+            .set_cancel(self.cancel);
             let matches = pe.execute(pat)?;
             for m in &matches {
                 if !self.bindings_compatible(row, m) {
@@ -287,7 +288,8 @@ impl<'a> CypherExecutor<'a> {
                     &row.node_bindings,
                     self.params,
                 )
-                .set_deadline(self.deadline);
+                .set_deadline(self.deadline)
+                .set_cancel(self.cancel);
                 let matches = executor.execute(pat)?;
 
                 for m in &matches {
@@ -1141,7 +1143,8 @@ impl<'a> CypherExecutor<'a> {
                         &row.node_bindings,
                         self.params,
                     )
-                    .set_deadline(self.deadline);
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel);
                     let matches = executor.execute(pattern)?;
 
                     for m in &matches {
@@ -1844,7 +1847,8 @@ impl<'a> CypherExecutor<'a> {
                 };
                 let executor =
                     PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-                        .set_deadline(self.deadline);
+                        .set_deadline(self.deadline)
+                        .set_cancel(self.cancel);
                 let group_matches = executor.execute(&group_only_pattern)?;
                 let mut rows = Vec::with_capacity(group_matches.len());
                 for (scan_count, m) in group_matches.iter().enumerate() {
@@ -2586,7 +2590,8 @@ impl<'a> CypherExecutor<'a> {
         // count then runs against M2's pattern, which is anchored on the
         // shared variable per group key.
         let executor = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-            .set_deadline(self.deadline);
+            .set_deadline(self.deadline)
+            .set_cancel(self.cancel);
         let count_pattern: &crate::graph::core::pattern_matching::Pattern =
             if let Some(m2) = secondary_match {
                 &m2.patterns[0]

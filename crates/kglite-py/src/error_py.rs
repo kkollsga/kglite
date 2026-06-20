@@ -226,6 +226,12 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
         RustKgError::CypherTimeout { .. } => CypherTimeoutError::new_err(message),
         RustKgError::CypherExecution { .. } => CypherExecutionError::new_err(message),
         RustKgError::CypherTypeMismatch { .. } => CypherTypeMismatchError::new_err(message),
+        // Cooperative cancellation (the wheel's Ctrl-C handler flipped the
+        // cancel flag mid-query) surfaces as the builtin KeyboardInterrupt,
+        // not a kglite.* error class — it's an interrupt, not a query fault.
+        RustKgError::Cancelled => {
+            pyo3::exceptions::PyKeyboardInterrupt::new_err("Query interrupted")
+        }
         RustKgError::Schema { .. } => SchemaError::new_err(message),
         RustKgError::Validation(_) => ValidationError::new_err(message),
         RustKgError::Expr(_) => ExprError::new_err(message),

@@ -46,6 +46,13 @@ enum KgliteStatusCode {
   KGLITE_STATUS_CODE_MISSING_ARGUMENT = 15,
   KGLITE_STATUS_CODE_INTERNAL = 16,
   /**
+   * The query was cooperatively cancelled (a binding flipped the
+   * cancel flag). Appended here (not renumbered into core's
+   * declaration position) to keep the existing discriminants stable
+   * across this ABI major version.
+   */
+  KGLITE_STATUS_CODE_CANCELLED = 17,
+  /**
    * A string argument failed UTF-8 validation. The C-side
    * caller passed a `*const c_char` whose bytes didn't decode
    * as UTF-8 — typically a corrupted buffer or a non-UTF-8

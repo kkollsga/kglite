@@ -99,6 +99,11 @@ rayon = "1.10"
 mimalloc = { version = "0.1", default-features = false }
 # Async runtime needed by the SEC client wrapper at src/sec.rs.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Scoped SIGINT (Ctrl-C) handler so long Cypher queries are interruptible
+# from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
+# flips an AtomicBool the engine polls.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

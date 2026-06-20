@@ -11,6 +11,7 @@ use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
@@ -255,6 +256,10 @@ pub struct CypherExecutor<'a> {
     vs_cache: OnceLock<VectorScoreCache>,
     /// Optional deadline for aborting long-running queries.
     pub(super) deadline: Option<Instant>,
+    /// Optional cooperative-cancellation flag, polled alongside
+    /// `deadline` (and propagated to the pattern matcher). Set by a
+    /// binding's signal model so a long query can be interrupted.
+    pub(super) cancel: Option<&'a AtomicBool>,
     /// Optional cap on intermediate result rows. Queries exceeding this return an error.
     max_rows: Option<usize>,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
@@ -296,6 +301,7 @@ impl<'a> CypherExecutor<'a> {
             params,
             vs_cache: OnceLock::new(),
             deadline,
+            cancel: None,
             max_rows: None,
             spatial_node_cache: RwLock::new(HashMap::new()),
             regex_cache: RwLock::new(HashMap::new()),
@@ -344,6 +350,14 @@ impl<'a> CypherExecutor<'a> {
         self
     }
 
+    /// Set the cooperative-cancellation flag. Propagated to every
+    /// pattern matcher this executor spawns so a long scan/expansion
+    /// can be interrupted. Default `None`.
+    pub fn with_cancel(mut self, cancel: Option<&'a AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
     #[inline]
     pub(super) fn check_deadline(&self) -> Result<(), String> {
         if let Some(dl) = self.deadline {
@@ -356,6 +370,11 @@ impl<'a> CypherExecutor<'a> {
                      timeout_ms=0 disables the deadline."
                         .to_string(),
                 );
+            }
+        }
+        if let Some(c) = &self.cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Query cancelled".to_string());
             }
         }
         Ok(())
@@ -956,6 +975,7 @@ impl<'a> CypherExecutor<'a> {
                         self.params,
                     )
                     .set_deadline(self.deadline)
+                    .set_cancel(self.cancel)
                     .set_distinct_target(clause.distinct_node_hint.clone());
                     let matches = executor.execute(pattern)?;
 
@@ -1041,7 +1061,8 @@ impl<'a> CypherExecutor<'a> {
                             &existing_row.node_bindings,
                             self.params,
                         )
-                        .set_deadline(self.deadline);
+                        .set_deadline(self.deadline)
+                        .set_cancel(self.cancel);
                         let matches = executor.execute(pat)?;
                         // Collect compatible matches for move-on-last optimization
                         let compatible: Vec<_> = matches
@@ -1129,7 +1150,8 @@ impl<'a> CypherExecutor<'a> {
                         &row.node_bindings,
                         self.params,
                     )
-                    .set_deadline(self.deadline);
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel);
                     let matches = executor.execute(pat)?;
 
                     for m in &matches {

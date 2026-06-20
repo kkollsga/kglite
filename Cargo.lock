@@ -2003,6 +2003,7 @@ dependencies = [
  "chrono",
  "kglite",
  "kglite-mcp-server",
+ "libc",
  "mimalloc",
  "petgraph",
  "pyo3",

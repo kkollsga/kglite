@@ -38,6 +38,11 @@ pub enum KgliteStatusCode {
     InvalidArgument = 14,
     MissingArgument = 15,
     Internal = 16,
+    /// The query was cooperatively cancelled (a binding flipped the
+    /// cancel flag). Appended here (not renumbered into core's
+    /// declaration position) to keep the existing discriminants stable
+    /// across this ABI major version.
+    Cancelled = 17,
 
     // 100+: C-ABI-only errors.
     /// A string argument failed UTF-8 validation. The C-side
@@ -72,6 +77,7 @@ impl KgliteStatusCode {
             KgErrorCode::InvalidArgument => Self::InvalidArgument,
             KgErrorCode::MissingArgument => Self::MissingArgument,
             KgErrorCode::Internal => Self::Internal,
+            KgErrorCode::Cancelled => Self::Cancelled,
         }
     }
 
@@ -98,6 +104,7 @@ impl KgliteStatusCode {
             Self::InvalidArgument => KgErrorCode::InvalidArgument,
             Self::MissingArgument => KgErrorCode::MissingArgument,
             Self::Internal => KgErrorCode::Internal,
+            Self::Cancelled => KgErrorCode::Cancelled,
         })
     }
 }

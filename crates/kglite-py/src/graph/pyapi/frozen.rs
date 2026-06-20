@@ -99,21 +99,24 @@ impl FrozenGraph {
         let query_owned = query.to_string();
         // GIL-free execution — the whole point of a frozen snapshot is that
         // many readers run in parallel against the shared, immutable graph.
-        let result = py.enter_kg(move || -> Result<cypher::CypherResult, crate::error::KgError> {
-            let opts = ExecuteOptions {
-                params: &param_map,
-                deadline,
-                max_rows,
-                lazy_eligible: false,
-                disabled_passes: None,
-                embedder,
-                value_codecs: None,
-            };
-            let outcome = execute_read(&inner, &query_owned, &opts)?;
-            let mut result = outcome.result;
-            resolve_noderefs(&inner.graph, &mut result.rows);
-            Ok(result)
-        })?;
+        let result = py.enter_kg(
+            move |cancel| -> Result<cypher::CypherResult, crate::error::KgError> {
+                let opts = ExecuteOptions {
+                    params: &param_map,
+                    deadline,
+                    max_rows,
+                    lazy_eligible: false,
+                    disabled_passes: None,
+                    embedder,
+                    value_codecs: None,
+                    cancel,
+                };
+                let outcome = execute_read(&inner, &query_owned, &opts)?;
+                let mut result = outcome.result;
+                resolve_noderefs(&inner.graph, &mut result.rows);
+                Ok(result)
+            },
+        )?;
 
         if pre_parsed.output_format == cypher::OutputFormat::Csv {
             return result.to_csv().into_py_any(py);
