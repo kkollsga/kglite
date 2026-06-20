@@ -340,3 +340,37 @@ jobs:
           python scripts/compare_bench.py \
             tests/benchmarks/baselines/current.linux.json .bench-current.json \
             --metric min --threshold 20
+
+  ci-success:
+    name: CI success
+    # Single aggregate gate the publish workflows wait on. It fails if ANY CI
+    # job failed or was cancelled, so a new CI job is covered just by adding it
+    # to `needs` here — no more hand-maintained per-check allowlists in the two
+    # publish workflows (the gap that let 0.11.6 ship to PyPI/crates.io while
+    # the free-threading job was red: it simply wasn't in the allowlist).
+    #
+    # `if: always()` makes this run after every dependency regardless of their
+    # outcome, so it always produces a definitive pass/fail check to wait on.
+    needs:
+      - rust-checks
+      - kglite-c
+      - python-lint
+      - python-tests
+      - free-threading
+      - perf-regression
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all CI jobs passed
+        run: |
+          results="${{ join(needs.*.result, ',') }}"
+          echo "CI job results: $results"
+          case ",$results," in
+            *,failure,* | *,cancelled,*)
+              echo "::error::At least one CI job did not succeed — blocking release."
+              exit 1
+              ;;
+            *)
+              echo "All CI jobs succeeded."
+              ;;
+          esac

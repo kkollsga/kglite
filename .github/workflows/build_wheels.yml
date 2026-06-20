@@ -50,32 +50,15 @@ jobs:
     if: needs.version-check.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for CI workflow
+      # Wait on the single CI aggregate gate (ci.yml's `ci-success` job, which
+      # `needs` every CI job and fails if any failed). This replaces the old
+      # per-check allowlist — any new/failing CI job now blocks the release
+      # automatically, instead of slipping through because it wasn't listed.
+      - name: Wait for CI to pass
         uses: lewagon/wait-on-check-action@v1.7.0
         with:
           ref: ${{ github.sha }}
-          check-name: 'Rust checks'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
-      - name: Wait for Python tests (3.10)
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Python tests (py3.10)'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
-      - name: Wait for Python tests (3.12)
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Python tests (py3.12)'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
-      - name: Wait for Python lint
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Python lint'
+          check-name: 'CI success'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 15
 
