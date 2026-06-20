@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.6] — 2026-06-21 — interruptible Cypher (Ctrl-C) + free-threading readiness
+
 ### Added
 
 - **Cypher queries are interruptible with Ctrl-C.** A long-running `cypher()`

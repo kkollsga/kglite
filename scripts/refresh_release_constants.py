@@ -215,6 +215,11 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_json = Path(tmp) / "bench.json"
         cmd = [
+            # Use the active interpreter's pytest (not a bare `pytest` on PATH,
+            # which may resolve to an env without the pytest-benchmark plugin —
+            # then `--benchmark-*` args fail as "unrecognized arguments").
+            sys.executable,
+            "-m",
             "pytest",
             str(REPO_ROOT / "tests" / "benchmarks" / "test_bench_core.py"),
             "-m",
