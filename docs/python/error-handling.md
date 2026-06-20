@@ -37,6 +37,28 @@ Exception
     └── kglite.InternalError                  — invariant violation (bug)
 ```
 
+### The one exception that is *not* a `KgError`: Ctrl-C
+
+Interrupting a long-running read with `Ctrl-C` raises the **builtin
+`KeyboardInterrupt`**, not a `kglite.KgError` subclass — by design, an
+interrupt is a user action, not a query fault. (Internally the engine
+raises `KgError::Cancelled`; the Python boundary maps it to
+`KeyboardInterrupt`.) So `except kglite.KgError` will **not** swallow a
+Ctrl-C — catch it separately if you need to:
+
+```python
+try:
+    g.cypher(long_running_read, timeout_ms=0)
+except KeyboardInterrupt:
+    print("interrupted by user")   # graph is unchanged
+except kglite.CypherError as e:
+    print(f"query failed: {e}")
+```
+
+A deadline timeout is different — that *is* a query fault and surfaces as
+`kglite.CypherTimeoutError` (a `KgError`). See the Cypher guide's
+"Interrupting a query" section for the behaviour and platform notes.
+
 ## How to catch
 
 **Specific:** when you care which kind of error fired:

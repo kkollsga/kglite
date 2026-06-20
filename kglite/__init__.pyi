@@ -3892,7 +3892,10 @@ class KnowledgeGraph:
             timeout_ms: Deadline in milliseconds. If omitted, uses
                 ``set_default_timeout()`` when set, otherwise the
                 built-in default of 180_000 ms (3 min). Pass ``0`` to
-                disable the deadline for this call.
+                disable the deadline for this call. Independently of the
+                deadline, a long-running **read** can be interrupted with
+                ``Ctrl-C`` (raises ``KeyboardInterrupt``) on POSIX — the
+                query aborts promptly instead of waiting for the deadline.
             max_rows: Cap on intermediate rows; defaults to
                 ``set_default_max_rows()``.
             streaming: When ``True`` (default), the executor absorbs
@@ -3920,6 +3923,12 @@ class KnowledgeGraph:
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
             or CSV string when the query ends with ``FORMAT CSV``.
+
+        Raises:
+            KeyboardInterrupt: If a long-running read is interrupted with
+                ``Ctrl-C`` (POSIX only). The graph is left unchanged.
+            kglite.CypherSyntaxError / kglite.SchemaError / ...: Typed
+                ``kglite.KgError`` subclasses for query / schema faults.
 
         Example::
 
