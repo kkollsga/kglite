@@ -50,6 +50,7 @@ use crate::graph::languages::cypher;
 use crate::graph::pyapi::frozen::FrozenGraph;
 use crate::graph::pyapi::result_view::ResultView;
 use crate::graph::{resolve_noderefs, DirGraph};
+use crate::util::EnterKg;
 use kglite_core::api::session::{
     execute_mut, execute_read, ExecuteOptions, Session as CoreSession,
 };
@@ -145,23 +146,21 @@ impl Session {
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
         let max_rows = qopts.max_rows;
-        let result = py
-            .detach(move || -> Result<cypher::CypherResult, KgError> {
-                let opts = ExecuteOptions {
-                    params: &param_map,
-                    deadline,
-                    max_rows,
-                    lazy_eligible: false,
-                    disabled_passes: None,
-                    embedder,
-                    value_codecs: None,
-                };
-                let outcome = execute_read(&inner, &query_owned, &opts)?;
-                let mut result = outcome.result;
-                resolve_noderefs(&inner.graph, &mut result.rows);
-                Ok(result)
-            })
-            .map_err(crate::error_py::kg_to_pyerr)?;
+        let result = py.enter_kg(move || -> Result<cypher::CypherResult, KgError> {
+            let opts = ExecuteOptions {
+                params: &param_map,
+                deadline,
+                max_rows,
+                lazy_eligible: false,
+                disabled_passes: None,
+                embedder,
+                value_codecs: None,
+            };
+            let outcome = execute_read(&inner, &query_owned, &opts)?;
+            let mut result = outcome.result;
+            resolve_noderefs(&inner.graph, &mut result.rows);
+            Ok(result)
+        })?;
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
 
@@ -184,37 +183,35 @@ impl Session {
         // Mutations don't take an embedder snapshot (matches the live
         // KnowledgeGraph mutation path — text_score in a write is atypical and
         // would force a GIL re-acquire inside the detached block).
-        let result = py
-            .detach(move || -> Result<cypher::CypherResult, KgError> {
-                // Acquire the writer lock *with the GIL released* (we are
-                // already inside py.detach). Locking before the detach
-                // would deadlock: a waiting writer would hold the GIL while
-                // blocking on the lock, and the lock-holder needs the GIL
-                // back to return. Poison-recover — the graph swaps
-                // atomically, so a prior writer's panic doesn't cascade.
-                let _wguard = write_lock.lock().unwrap_or_else(|p| p.into_inner());
-                let mut tx = core.begin();
-                let graph = tx.working_mut()?; // materialise working copy (CoW)
-                let opts = ExecuteOptions {
-                    params: &param_map,
-                    deadline,
-                    max_rows,
-                    lazy_eligible: false,
-                    disabled_passes: None,
-                    embedder: None,
-                    value_codecs: None,
-                };
-                let outcome = execute_mut(graph, &query_owned, &opts)?;
-                let mut result = outcome.result;
-                // Resolve NodeRefs against the working graph before commit
-                // consumes the transaction.
-                resolve_noderefs(&graph.graph, &mut result.rows);
-                // Atomic Arc swap + version bump. check_occ=false: the
-                // writer lock guarantees no concurrent committer.
-                let _ = core.commit(tx, false);
-                Ok(result)
-            })
-            .map_err(crate::error_py::kg_to_pyerr)?;
+        let result = py.enter_kg(move || -> Result<cypher::CypherResult, KgError> {
+            // Acquire the writer lock *with the GIL released* (we are
+            // already inside py.detach). Locking before the detach
+            // would deadlock: a waiting writer would hold the GIL while
+            // blocking on the lock, and the lock-holder needs the GIL
+            // back to return. Poison-recover — the graph swaps
+            // atomically, so a prior writer's panic doesn't cascade.
+            let _wguard = write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut tx = core.begin();
+            let graph = tx.working_mut()?; // materialise working copy (CoW)
+            let opts = ExecuteOptions {
+                params: &param_map,
+                deadline,
+                max_rows,
+                lazy_eligible: false,
+                disabled_passes: None,
+                embedder: None,
+                value_codecs: None,
+            };
+            let outcome = execute_mut(graph, &query_owned, &opts)?;
+            let mut result = outcome.result;
+            // Resolve NodeRefs against the working graph before commit
+            // consumes the transaction.
+            resolve_noderefs(&graph.graph, &mut result.rows);
+            // Atomic Arc swap + version bump. check_occ=false: the
+            // writer lock guarantees no concurrent committer.
+            let _ = core.commit(tx, false);
+            Ok(result)
+        })?;
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
 }
