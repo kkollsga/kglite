@@ -27,6 +27,17 @@ use std::sync::{Arc, RwLock};
 /// Fields include `type_indices` for O(1) node-type lookup, `property_indices`
 /// for indexed equality filters, connection-type metadata, schema definitions,
 /// and optional embedding stores for vector similarity search.
+/// Source of process-unique graph ids. Starts at 1 (0 is never handed out, so
+/// it can serve as a sentinel); monotonic and never reused so a dropped graph's
+/// plan-cache entries can't be served to a later graph that reuses an address.
+static NEXT_GRAPH_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Mint a fresh, process-unique graph id (also the serde default for the
+/// skipped `graph_id` field, so a loaded graph gets a new identity).
+fn next_graph_id() -> u64 {
+    NEXT_GRAPH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub graph: GraphBackend,
@@ -172,6 +183,13 @@ pub struct DirGraph {
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
     pub version: u64,
+    /// Process-unique graph identity, assigned at construction and preserved
+    /// across clones (a CoW working copy shares its parent's id; `version`
+    /// distinguishes states). Never persisted — a loaded `.kgl` is a fresh
+    /// runtime instance and gets a new id. Used with `version` as the Cypher
+    /// plan-cache key so a cached plan can never leak across graphs.
+    #[serde(skip, default = "next_graph_id")]
+    pub graph_id: u64,
     /// Property key interner: maps InternedKey(u64) → original string.
     /// Populated during ingestion (add_nodes, CREATE, SET) and deserialization.
     /// Skipped during serde — rebuilt on load by the InternedKey Deserialize impl.
@@ -258,6 +276,12 @@ impl DirGraph {
         self.version
     }
 
+    /// Process-unique graph identity (see the `graph_id` field). Pairs with
+    /// [`Self::version`] to form the Cypher plan-cache key.
+    pub fn graph_id(&self) -> u64 {
+        self.graph_id
+    }
+
     /// Set the version directly. Used by [`crate::graph::session::Session::commit`]
     /// to bump the working DirGraph's version on commit-swap. Not
     /// for general use — mutation paths bump version through their
@@ -277,6 +301,7 @@ impl DirGraph {
 
     pub fn new() -> Self {
         DirGraph {
+            graph_id: next_graph_id(),
             graph: GraphBackend::new(),
             type_indices: TypeIndexStore::new(),
             schema_definition: None,
@@ -322,6 +347,7 @@ impl DirGraph {
     /// All metadata fields start empty and are populated by the caller.
     pub fn from_graph(graph: GraphBackend) -> Self {
         DirGraph {
+            graph_id: next_graph_id(),
             graph,
             type_indices: TypeIndexStore::new(),
             schema_definition: None,

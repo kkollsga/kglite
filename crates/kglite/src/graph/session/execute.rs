@@ -278,6 +278,23 @@ fn prepare(
     query: &str,
     opts: &ExecuteOptions<'_>,
 ) -> Result<PreparedQuery, KgError> {
+    // Plan cache: a param-less, codec-free, no-disabled-passes query against an
+    // unchanged graph reuses its fully-optimized plan, skipping parse + validate
+    // + optimize. Keyed on (graph_id, version) so any mutation invalidates it
+    // and it never leaks across graphs (see `cypher::plan_cache`). Lazy-marking
+    // is applied fresh per call since it depends on `opts.lazy_eligible`.
+    let cacheable = opts.params.is_empty()
+        && opts.disabled_passes.is_none_or(|s| s.is_empty())
+        && opts.value_codecs.is_none_or(|c| c.is_empty());
+    if cacheable {
+        if let Some(mut plan) = cypher::plan_cache::get(graph.graph_id(), graph.version(), query) {
+            if opts.lazy_eligible {
+                cypher::mark_lazy_eligibility(&mut plan);
+            }
+            return Ok((plan, HashMap::new(), Vec::new()));
+        }
+    }
+
     let mut parsed = cypher::parse_cypher(query)?;
 
     // value_codecs: decode operator-declared literals bound to a codec'd
@@ -325,6 +342,14 @@ fn prepare(
     let disabled_default = cypher::planner::empty_disabled_set();
     let disabled_ref = opts.disabled_passes.unwrap_or(disabled_default);
     cypher::planner::optimize_with_disabled(&mut parsed, graph, &params, disabled_ref);
+
+    // Cache the fully-optimized plan (before lazy-marking, which is per-call).
+    // Only when `params` stayed empty — a `text_score()` rewrite injects
+    // embedding params, which would make the plan call-specific, so those are
+    // never cached (and thus never hit above).
+    if cacheable && params.is_empty() {
+        cypher::plan_cache::insert(graph.graph_id(), graph.version(), query, &parsed);
+    }
 
     // Lazy marking — only when the caller asked for it. Without
     // this call, the executor materializes rows eagerly. With it,

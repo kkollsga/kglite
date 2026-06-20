@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Cypher plan cache.** A param-less, codec-free query re-run against an
+  unchanged graph now reuses its fully-optimized plan, skipping parse +
+  schema-validate + optimize (the parse cache already covered parse; the
+  optimizer was the bigger uncached cost). Keyed on `(graph_id, version)` so
+  it is invalidated by any mutation and never leaks across graphs; parameter
+  binding still happens fresh at execute time. Biggest win for repeated
+  queries against a stable/served graph (bolt/mcp). To make the key sound,
+  `DirGraph` version now bumps on every mutation path (Cypher writes via
+  `execute_mut`, bulk ingest, and `make_dir_graph_mut`), not only on handle
+  acquisition.
+
 ### Added
 
 - **Mapped / disk storage mode reaches every binding.** Creating a graph in
