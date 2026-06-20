@@ -327,8 +327,8 @@ pub mod api {
         };
         /// `.kgl` load / save (the canonical persistence format).
         pub use crate::graph::io::file::{
-            load_file, load_kgl_bytes, prepare_save, save_graph, write_kgl, write_kgl_to,
-            write_kgl_with,
+            load_file, load_kgl_bytes, prepare_save, save_graph, save_graph_with, write_kgl,
+            write_kgl_to, write_kgl_with,
         };
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
