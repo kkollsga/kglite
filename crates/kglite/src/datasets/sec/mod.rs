@@ -30,12 +30,10 @@ pub mod planning;
 pub mod slicing;
 pub mod tickers;
 
-pub use buckets::{
-    all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
-};
+pub use buckets::{all_buckets, resolve_fetch_buckets, SecFormBucket};
 pub use client::{FetchMode, SecClient};
-pub use dispatch::{prepare_dispatch_plan, DispatchPlan, DispatchScope, FilingTask};
-pub use error::{Result, SecError};
+pub use dispatch::{prepare_dispatch_plan, DispatchScope};
+pub use error::SecError;
 pub use extract::{run_all, ExtractReport};
 pub use fetch::{
     fetch_13f_info_table, fetch_company_facts, fetch_company_submission, fetch_company_tickers,

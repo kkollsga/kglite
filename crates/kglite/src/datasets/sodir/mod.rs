@@ -16,7 +16,7 @@
 //!   ├── fetch         paginate ArcGIS GeoJSON → CSV                     [A2]
 //!   ├── client        ArcGIS REST client (rate limit + retry)           [A2]
 //!   ├── geojson_wkt   GeoJSON → WKT, epoch-ms → ISO date                [A1]
-//!   ├── layout        Workdir tiers + StorageMode                       [A1]
+//!   ├── layout        Workdir tiers                                     [A1]
 //!   ├── catalog       ~150 dataset stem → (url, layer_id)               [A1]
 //!   └── error         SodirError                                        [A1]
 //! ```
@@ -33,7 +33,6 @@ pub mod orchestrator;
 pub mod preprocess;
 
 pub use blueprint::{datasets_used_by_blueprint, merge_blueprint_json};
-pub use client::ArcGISClient;
-pub use error::{Result, SodirError};
-pub use layout::{StorageMode, Workdir};
+pub use error::SodirError;
+pub use layout::Workdir;
 pub use orchestrator::{fetch_all, FetchAllReport};

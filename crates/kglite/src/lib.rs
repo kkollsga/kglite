@@ -484,42 +484,27 @@ pub mod api {
         /// DEF 14A, Form 144, Exhibit 21, XBRL company facts).
         #[cfg(feature = "sec")]
         pub mod sec {
-            // Workdir layout + storage mode picker
+            // Workdir layout, storage-mode sizing, slicing + the error type.
             pub use crate::datasets::sec::{
-                pick_storage_mode, predict_graph_size_gb, SliceSpec, StorageMode, Workdir,
-                YearRange,
+                pick_storage_mode, predict_graph_size_gb, SecError, SliceSpec, StorageMode,
+                Workdir, YearRange,
             };
-            // Error type + the crate's Result alias
-            pub use crate::datasets::sec::{Result, SecError};
-            // HTTP client + fetch entry points (all async)
+            // HTTP client + per-form fetch entry points (all async; drive via
+            // `block_on` or your own runtime).
             pub use crate::datasets::sec::{
                 fetch_13f_info_table, fetch_company_facts, fetch_company_submission,
                 fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
                 fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk, FetchMode,
                 SecClient,
             };
-            // Form-type → per-filing-fetcher bucket mapping. Lifts
-            // the wheel's `_FORM_BUCKETS` + `_resolve_fetch_buckets`
-            // into core so every binding gets the same form-string
-            // table without re-implementing it.
+            // Form-type → fetch-bucket resolution + per-filing dispatch
+            // planning (reads filing_index.csv, applies CIK/year/form filters).
             pub use crate::datasets::sec::{
-                all_buckets, resolve_fetch_buckets, SecFormBucket, ALL_BUCKETS, LEAN_FETCH_BUCKETS,
+                all_buckets, prepare_dispatch_plan, resolve_fetch_buckets, DispatchScope,
+                SecFormBucket,
             };
-            // Per-filing dispatch planning — reads filing_index.csv,
-            // applies company / year / form-type filters, groups by
-            // bucket. Every binding then drives its own execution
-            // loop over the plan. Lifted from the wheel's
-            // `_dispatch_per_filing_fetches` (CSV-reading + filtering
-            // + grouping half) in the 2026-05-25 binding prep.
-            pub use crate::datasets::sec::{
-                prepare_dispatch_plan, DispatchPlan, DispatchScope, FilingTask,
-            };
-            // SEC company_tickers.json parser — turns the published
-            // JSON into a `TICKER → CIK` HashMap for bindings that
-            // accept string tickers from their users.
-            pub use crate::datasets::sec::parse_tickers_json;
-            // Extract pipeline (parses raw/ → processed/ CSVs)
-            pub use crate::datasets::sec::{run_all, ExtractReport};
+            // company_tickers.json parser + the raw→processed extract pipeline.
+            pub use crate::datasets::sec::{parse_tickers_json, run_all, ExtractReport};
         }
 
         /// Sodir — Norwegian Continental Shelf petroleum data
@@ -527,15 +512,12 @@ pub mod api {
         /// ArcGIS FactMaps REST API.
         #[cfg(feature = "sodir")]
         pub mod sodir {
-            pub use crate::datasets::sodir::ArcGISClient;
-            pub use crate::datasets::sodir::{Result, SodirError};
-            pub use crate::datasets::sodir::{StorageMode, Workdir};
-            // Single async fetch entry — pulls all referenced datasets
-            // into csv/, applies preprocessing, returns the report.
-            // The `*_blocking` variant for bindings without an async
-            // runtime spins up a single-thread tokio runtime per call.
+            pub use crate::datasets::sodir::{SodirError, Workdir};
+            // Single async fetch entry — pulls all referenced datasets into
+            // csv/, applies preprocessing, returns the report. Drive via
+            // `block_on` or your own runtime.
             pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
-            // Blueprint utilities the wheel composes with from_blueprint
+            // Blueprint utilities the wheel composes with from_blueprint.
             pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};
         }
 
@@ -546,22 +528,14 @@ pub mod api {
         /// dump-management half only.
         #[cfg(feature = "wikidata")]
         pub mod wikidata {
-            pub use crate::datasets::wikidata::Workdir;
-            pub use crate::datasets::wikidata::{ensure_dump, remote_last_modified};
-            pub use crate::datasets::wikidata::{Result, WikidataError};
-            // Mirror config constants — bindings can read these to
-            // tell users what file they'll end up with.
-            pub use crate::datasets::wikidata::{DUMP_FILE, DUMP_URL};
-            // Cache-freshness decision tree — every binding's
-            // `open()` flow asks the same questions; the decision
-            // lives in core, but each binding handles the outcome
-            // (verbose prints, process-local cache hits, etc.) in
-            // its own idiom. Lifted from `kglite/datasets/wikidata.py`
-            // in the 2026-05-25 dataset-wrapper prep.
             pub use crate::datasets::wikidata::{
-                age_days, decide, file_mtime_utc, read_remote_mtime_from_source_meta,
-                CacheDecision, FreshnessInputs,
+                ensure_dump, remote_last_modified, WikidataError, Workdir,
             };
+            // Cache-freshness decision — every binding's `open()` flow asks
+            // the same question; the decision lives in core, each binding
+            // handles the outcome (verbose prints, process-local cache) in its
+            // own idiom. Lifted from `kglite/datasets/wikidata.py`.
+            pub use crate::datasets::wikidata::{decide, CacheDecision, FreshnessInputs};
         }
     }
 }
