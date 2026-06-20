@@ -598,7 +598,8 @@ impl<'a> CypherExecutor<'a> {
                         &row.node_bindings,
                         self.params,
                     )
-                    .set_deadline(self.deadline);
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel);
                     let matches = executor.execute(pat)?;
                     let count = if let Some(ref where_pred) = where_clause {
                         matches

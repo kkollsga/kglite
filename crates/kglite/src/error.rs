@@ -67,6 +67,10 @@ pub enum KgErrorCode {
     CypherExecution,
     CypherTypeMismatch,
 
+    // Cooperative cancellation (a binding flipped the cancel flag, e.g.
+    // the Python wheel's Ctrl-C / KeyboardInterrupt handler).
+    Cancelled,
+
     // Schema / validation
     Schema,
     Validation,
@@ -99,6 +103,7 @@ impl KgErrorCode {
             KgErrorCode::CypherTimeout => "CypherTimeout",
             KgErrorCode::CypherExecution => "CypherExecution",
             KgErrorCode::CypherTypeMismatch => "CypherTypeMismatch",
+            KgErrorCode::Cancelled => "Cancelled",
             KgErrorCode::Schema => "Schema",
             KgErrorCode::Validation => "Validation",
             KgErrorCode::Expr => "Expr",
@@ -148,6 +153,10 @@ impl KgErrorCode {
 
             KgErrorCode::CypherTimeout => 408,
 
+            // 499 Client Closed Request (nginx convention) — the caller
+            // interrupted the query before it finished.
+            KgErrorCode::Cancelled => 499,
+
             KgErrorCode::Schema | KgErrorCode::Validation | KgErrorCode::Expr => 422,
 
             // 5xx — server-side
@@ -173,6 +182,7 @@ impl KgErrorCode {
         match self {
             KgErrorCode::CypherSyntax => "Neo.ClientError.Statement.SyntaxError",
             KgErrorCode::CypherTimeout => "Neo.ClientError.Transaction.TransactionTimedOut",
+            KgErrorCode::Cancelled => "Neo.ClientError.Transaction.Terminated",
             KgErrorCode::CypherTypeMismatch => "Neo.ClientError.Statement.TypeError",
             KgErrorCode::CypherExecution => "Neo.DatabaseError.Statement.ExecutionFailed",
             KgErrorCode::Schema => "Neo.ClientError.Schema.ConstraintValidationFailed",
@@ -241,6 +251,14 @@ pub enum KgError {
         found: String,
         context: String,
     },
+
+    /// The query was cooperatively cancelled — a binding flipped the
+    /// [`ExecuteOptions::cancel`](crate::api::session::ExecuteOptions)
+    /// flag mid-run (the Python wheel does this from its Ctrl-C / SIGINT
+    /// handler). Bindings map this to their interrupt type
+    /// (`KeyboardInterrupt` in the wheel). Distinct from `CypherTimeout`
+    /// (a deadline) and `CypherExecution` (a genuine failure).
+    Cancelled,
 
     // ── Schema / validation ──────────────────────────────────────────
     /// Schema check failure (unknown property, type mismatch at
@@ -356,6 +374,7 @@ impl KgError {
             KgError::CypherTimeout { .. } => KgErrorCode::CypherTimeout,
             KgError::CypherExecution { .. } => KgErrorCode::CypherExecution,
             KgError::CypherTypeMismatch { .. } => KgErrorCode::CypherTypeMismatch,
+            KgError::Cancelled => KgErrorCode::Cancelled,
             KgError::Schema { .. } => KgErrorCode::Schema,
             KgError::Validation(_) => KgErrorCode::Validation,
             KgError::Expr(_) => KgErrorCode::Expr,
@@ -419,6 +438,7 @@ impl fmt::Display for KgError {
                 ),
                 None => write!(f, "Cypher execution error: {}", message),
             },
+            KgError::Cancelled => write!(f, "Query cancelled"),
             KgError::CypherTypeMismatch {
                 expected,
                 found,

@@ -1510,6 +1510,10 @@ impl KnowledgeGraph {
                 // value_codecs are an MCP-manifest feature; the Python API
                 // doesn't configure them (the engine path uses native types).
                 value_codecs: None,
+                // Live-KG mutations run with the GIL held (exclusive borrow),
+                // not through enter_kg, so no cancel flag is wired here; the
+                // deadline still bounds them.
+                cancel: None,
             };
 
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
@@ -1580,14 +1584,24 @@ impl KnowledgeGraph {
                 // value_codecs are an MCP-manifest feature; the Python API
                 // doesn't configure them (the engine path uses native types).
                 value_codecs: None,
+                // Overridden with the live cancel flag inside enter_kg below.
+                cancel: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
-            py.enter_kg(move || -> Result<crate::graph::languages::cypher::CypherResult, crate::error::KgError> {
-                let outcome = kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
-                let mut result = outcome.result;
-                resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
-                Ok(result)
-            })?
+            py.enter_kg(
+                move |cancel| -> Result<
+                    crate::graph::languages::cypher::CypherResult,
+                    crate::error::KgError,
+                > {
+                    let mut opts = opts;
+                    opts.cancel = cancel;
+                    let outcome =
+                        kglite_core::api::session::execute_read(&inner_for_detach, query, &opts)?;
+                    let mut result = outcome.result;
+                    resolve_noderefs(&inner_for_detach.graph, &mut result.rows);
+                    Ok(result)
+                },
+            )?
         };
         let elapsed_ms = query_started.elapsed().as_millis() as u64;
         // EXPLAIN: session::execute_read renders the plan into

@@ -199,6 +199,9 @@ impl Transaction {
             disabled_passes: None,
             embedder: None,
             value_codecs: None,
+            // Transactions are explicit multi-step sessions; cancellation
+            // isn't wired through the tx path (deadline still applies).
+            cancel: None,
         };
 
         let result = if is_mut {

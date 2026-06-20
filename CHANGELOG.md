@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cypher queries are interruptible with Ctrl-C.** A long-running `cypher()`
+  read (large scans / cross-products) can now be stopped with `Ctrl-C`, which
+  raises `KeyboardInterrupt` instead of blocking until the deadline. A scoped
+  SIGINT handler (installed only while a query runs, then restored) flips a
+  cooperative-cancel flag the engine polls at the same checkpoints as the query
+  deadline. POSIX only; on other platforms the deadline still bounds queries.
+  Targets the interactive single-query case (notebook / REPL); concurrent
+  multi-thread `Session` serving and in-place mutations remain deadline-bounded.
+
+### Internal
+
+- New `kglite::api::session::ExecuteOptions.cancel` (`Option<&AtomicBool>`) —
+  the engine-agnostic cancellation primitive bindings flip from their own
+  signal model; threaded through the executor and pattern matcher. Servers
+  pass `None` (unchanged behaviour). New `KgError::Cancelled` /
+  `KgErrorCode::Cancelled` (HTTP 499, `Neo.ClientError.Transaction.Terminated`).
+- GIL-release + error-mapping + cancellation consolidated into one
+  `EnterKg::enter_kg` helper in the Python wrapper (replaces scattered
+  `py.detach(...).map_err(kg_to_pyerr)` call sites on the Cypher paths).
+
 ## [0.11.5] — 2026-06-20 — `kglite::api` hard-seal + dataset surface curation + Cypher plan cache
 
 ### Changed

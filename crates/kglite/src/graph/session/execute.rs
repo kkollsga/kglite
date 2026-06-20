@@ -15,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -71,6 +72,21 @@ pub struct ExecuteOptions<'a> {
     /// back (`42` → `'Q42'`). `None`/empty = no transform (the common
     /// case; zero hot-path cost). See `cypher::value_codec`.
     pub value_codecs: Option<&'a [ValueCodec]>,
+    /// Optional cooperative-cancellation flag. The executor and pattern
+    /// matcher poll it at the same checkpoints they poll `deadline`
+    /// (one relaxed atomic load per ~4K comparisons); once set, the
+    /// run aborts with [`KgError::Cancelled`]. `None` = never cancelled
+    /// (zero hot-path cost). This is the engine-agnostic primitive each
+    /// binding flips from its own signal model — the Python wheel wires
+    /// it to a scoped SIGINT handler so Ctrl-C interrupts long queries;
+    /// servers leave it `None` and use their own deadline/teardown.
+    ///
+    /// A `&'static` flag (not an owned `Arc`) because the only setter is
+    /// a process-global signal handler, which can't capture state — the
+    /// Python wheel points this at a `static AtomicBool` its SIGINT
+    /// handler flips. Bindings that need this provide a `'static` flag;
+    /// the rest pass `None`.
+    pub cancel: Option<&'a AtomicBool>,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -108,6 +124,29 @@ impl<'a> ExecuteOptions<'a> {
             disabled_passes: None,
             embedder: None,
             value_codecs: None,
+            cancel: None,
+        }
+    }
+}
+
+/// Map an executor error string to a typed [`KgError`]. When the
+/// caller's cooperative-cancellation flag is set, an aborted run is
+/// reported as [`KgError::Cancelled`] (the binding maps that to its
+/// interrupt type — `KeyboardInterrupt` in the Python wheel) rather
+/// than a misleading `CypherExecution`. Otherwise it's a plain
+/// execution error. `cancel == None` (every server binding) always
+/// takes the `CypherExecution` branch, so behaviour is unchanged there.
+#[inline]
+fn exec_err(opts: &ExecuteOptions<'_>, message: String) -> KgError {
+    if opts
+        .cancel
+        .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        KgError::Cancelled
+    } else {
+        KgError::CypherExecution {
+            message,
+            position: None,
         }
     }
 }
@@ -170,11 +209,9 @@ pub fn execute_read(
     let mut result = cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
         .with_max_rows(opts.max_rows)
         .with_streaming(opts.lazy_eligible)
+        .with_cancel(opts.cancel)
         .execute(&parsed)
-        .map_err(|message| KgError::CypherExecution {
-            message,
-            position: None,
-        })?;
+        .map_err(|message| exec_err(opts, message))?;
     // value_codecs: encode codec'd-property result columns back to the typed
     // form (`42` → `'Q42'`). Applies to eager rows; lazy results (Python's
     // streaming path) materialize later and aren't covered — the configured
@@ -216,13 +253,8 @@ pub fn execute_mut(
     }
 
     let mut result = if is_mutation {
-        let r =
-            cypher::execute_mutable(graph, &parsed, params, opts.deadline).map_err(|message| {
-                KgError::CypherExecution {
-                    message,
-                    position: None,
-                }
-            })?;
+        let r = cypher::execute_mutable(graph, &parsed, params, opts.deadline)
+            .map_err(|message| exec_err(opts, message))?;
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.
         // Bumps the working copy directly so a read-after-write *within* the
@@ -234,11 +266,9 @@ pub fn execute_mut(
         cypher::CypherExecutor::with_params(graph, &params, opts.deadline)
             .with_max_rows(opts.max_rows)
             .with_streaming(opts.lazy_eligible)
+            .with_cancel(opts.cancel)
             .execute(&parsed)
-            .map_err(|message| KgError::CypherExecution {
-                message,
-                position: None,
-            })?
+            .map_err(|message| exec_err(opts, message))?
     };
     // Encode codec'd-property result columns (e.g. `CREATE (...) RETURN n.id`
     // reads back `'Q42'`). Eager path only; see execute_read.

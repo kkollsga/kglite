@@ -146,7 +146,7 @@ impl Session {
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
         let max_rows = qopts.max_rows;
-        let result = py.enter_kg(move || -> Result<cypher::CypherResult, KgError> {
+        let result = py.enter_kg(move |cancel| -> Result<cypher::CypherResult, KgError> {
             let opts = ExecuteOptions {
                 params: &param_map,
                 deadline,
@@ -155,6 +155,7 @@ impl Session {
                 disabled_passes: None,
                 embedder,
                 value_codecs: None,
+                cancel,
             };
             let outcome = execute_read(&inner, &query_owned, &opts)?;
             let mut result = outcome.result;
@@ -183,7 +184,7 @@ impl Session {
         // Mutations don't take an embedder snapshot (matches the live
         // KnowledgeGraph mutation path — text_score in a write is atypical and
         // would force a GIL re-acquire inside the detached block).
-        let result = py.enter_kg(move || -> Result<cypher::CypherResult, KgError> {
+        let result = py.enter_kg(move |cancel| -> Result<cypher::CypherResult, KgError> {
             // Acquire the writer lock *with the GIL released* (we are
             // already inside py.detach). Locking before the detach
             // would deadlock: a waiting writer would hold the GIL while
@@ -201,6 +202,7 @@ impl Session {
                 disabled_passes: None,
                 embedder: None,
                 value_codecs: None,
+                cancel,
             };
             let outcome = execute_mut(graph, &query_owned, &opts)?;
             let mut result = outcome.result;
