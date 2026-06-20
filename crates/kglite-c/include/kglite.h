@@ -722,6 +722,51 @@ KgliteStatusCode kglite_embedder_fastembed_new(const char *model_name,
  struct KgliteGraph *kglite_graph_new(void);
 
 /**
+ * Create a fresh, empty knowledge graph in an explicit storage mode.
+ *
+ * `mode` is `"memory"` (alias `"default"`), `"mapped"`, or `"disk"` — the
+ * same mode vocabulary as Python's `storage=` argument:
+ *
+ * - `"memory"` — heap-resident (the default; same as [`kglite_graph_new`]).
+ * - `"mapped"` — property columns spill to mmap during build, so a graph
+ *   larger than RAM can be constructed; saves to a `.kgl` file.
+ * - `"disk"` — CSR + mmap on-disk directory format for very large graphs;
+ *   **requires** `path` (the directory that becomes the graph).
+ *
+ * This is the create/ingest entry point. Opening an existing graph
+ * ([`kglite_load_file`]) auto-detects its mode, so no mode argument is
+ * needed there.
+ *
+ * # Arguments
+ *
+ * - `mode` (in, borrowed): UTF-8 mode string, null-terminated.
+ * - `path` (in, borrowed): UTF-8 directory path for `"disk"`, else null.
+ * - `out_graph` (out, owned): set to the new graph handle on success
+ *   (free via [`kglite_graph_free`], or hand to
+ *   [`kglite_session_new`](crate::kglite_session_new)); null on failure.
+ * - `out_error_msg` (out, owned): owned error message on failure (free via
+ *   [`kglite_free_string`](crate::kglite_free_string)); null on success.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `mode` or `out_graph` is null
+ * - `KGLITE_ERR_INVALID_UTF8` — `mode` / `path` isn't valid UTF-8
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — unknown mode, or `"disk"` with no path
+ * - `KGLITE_ERR_FILE_IO` — failed to create the disk-graph directory
+ *
+ * # Safety
+ *
+ * `mode` must be a null-terminated UTF-8 string; `path` null or the same;
+ * `out_graph` a valid `*mut KgliteGraph` slot; `out_error_msg` null or a
+ * valid slot.
+ */
+
+KgliteStatusCode kglite_graph_new_in_mode(const char *mode,
+                                          const char *path,
+                                          struct KgliteGraph **out_graph,
+                                          const char **out_error_msg);
+
+/**
  * Load a knowledge graph from disk. Accepts `.kgl` files
  * (single-file mmap format) and directories (disk-backed CSR
  * layout) — the loader picks the right path based on what's at
