@@ -21,7 +21,6 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Default)]
 pub struct RemoteMeta {
     pub last_modified: Option<DateTime<Utc>>,
-    pub content_length: Option<u64>,
 }
 
 /// HTTP client for the Wikimedia dump server.
@@ -41,7 +40,7 @@ impl WikidataClient {
         Ok(Self { http })
     }
 
-    /// `HEAD` probe for the dump's `Last-Modified` + `Content-Length`.
+    /// `HEAD` probe for the dump's `Last-Modified`.
     pub async fn head(&self, url: &str) -> Result<RemoteMeta> {
         let resp = self.http.head(url).send().await?;
         if !resp.status().is_success() {
@@ -50,19 +49,12 @@ impl WikidataClient {
                 url: url.to_string(),
             });
         }
-        let headers = resp.headers();
-        let last_modified = headers
+        let last_modified = resp
+            .headers()
             .get(reqwest::header::LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_http_date);
-        let content_length = headers
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
-        Ok(RemoteMeta {
-            last_modified,
-            content_length,
-        })
+        Ok(RemoteMeta { last_modified })
     }
 
     /// Download `url` to `dest`, resuming from `dest`'s current size

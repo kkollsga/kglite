@@ -22,15 +22,6 @@ pub fn quarterly_master_idx_url(year: u16, quarter: u8) -> String {
     format!("{EDGAR_BASE}Archives/edgar/full-index/{year}/QTR{quarter}/master.idx")
 }
 
-/// Daily company.YYYYMMDD.idx file — same schema as master.idx, one
-/// day's filings. Used only for incremental rebuilds.
-pub fn daily_company_idx_url(year: u16, quarter: u8, date_yyyymmdd: u32) -> String {
-    debug_assert!((1..=4).contains(&quarter));
-    format!(
-        "{EDGAR_BASE}Archives/edgar/daily-index/{year}/QTR{quarter}/company.{date_yyyymmdd}.idx"
-    )
-}
-
 /// Nightly bulk submissions ZIP. Contains one JSON per CIK in the form
 /// `CIK0000320193.json`.
 pub fn submissions_bulk_url() -> &'static str {
@@ -75,15 +66,6 @@ mod tests {
         assert_eq!(
             url,
             "https://www.sec.gov/Archives/edgar/full-index/2024/QTR4/master.idx"
-        );
-    }
-
-    #[test]
-    fn daily_idx_url_well_formed() {
-        let url = daily_company_idx_url(2024, 4, 20241115);
-        assert_eq!(
-            url,
-            "https://www.sec.gov/Archives/edgar/daily-index/2024/QTR4/company.20241115.idx"
         );
     }
 

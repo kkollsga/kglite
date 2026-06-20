@@ -12,7 +12,6 @@ pub mod form144;
 pub mod form4;
 pub mod formd;
 pub mod html_text;
-pub mod idx;
 pub mod offering;
 pub mod officer_change;
 pub mod ownership_table;

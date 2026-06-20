@@ -254,15 +254,6 @@ pub fn insert_accession_dashes(no_dashes: &str) -> String {
 
 // ─────────────────────────── value formatters ───────────────────────────
 
-/// Render a Rust bool as the canonical CSV cell "0" / "1".
-pub fn bool_str(b: bool) -> &'static str {
-    if b {
-        "1"
-    } else {
-        "0"
-    }
-}
-
 /// Render an f64 for CSV: empty for 0.0, integer form when whole,
 /// `{f}` otherwise. Matches the convention the existing extractor
 /// established so existing tests/parsers keep working.
@@ -273,15 +264,6 @@ pub fn format_float(f: f64) -> String {
         format!("{:.0}", f)
     } else {
         format!("{}", f)
-    }
-}
-
-/// Render an Option<u8> / Option<u16> / Option<i64> CSV cell —
-/// empty string for None, decimal for Some.
-pub fn opt_int<T: std::fmt::Display>(v: Option<T>) -> String {
-    match v {
-        Some(x) => x.to_string(),
-        None => String::new(),
     }
 }
 

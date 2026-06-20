@@ -13,10 +13,6 @@ pub const DATASERVICE_URL: &str =
 /// FactMaps FeatureServer — pre-filtered / styled display layers.
 pub const FACTMAPS_URL: &str =
     "https://factmaps.sodir.no/api/rest/services/Factmaps/FactMapsWGS84/FeatureServer";
-/// DataService Metadata FeatureServer (reserved; not yet fetched).
-pub const METADATA_URL: &str =
-    "https://factmaps.sodir.no/api/rest/services/DataService/Metadata/FeatureServer";
-
 /// Which FeatureServer + table family a dataset belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataKind {

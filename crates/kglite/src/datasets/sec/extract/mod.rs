@@ -47,5 +47,3 @@ pub mod sinks;
 pub mod util;
 
 pub use orchestrator::{run_all, ExtractReport};
-pub use provenance::Provenance;
-pub use sinks::Sinks;

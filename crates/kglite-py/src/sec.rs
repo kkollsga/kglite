@@ -9,7 +9,7 @@
 //!    these in the order dictated by form-type dependencies.
 //! 2. **Feature extraction** is exposed as ONE function:
 //!    `extract_all_py(workdir, *, force, cik_list, form_types, year_range)`.
-//!    It calls the Rust orchestrator `kglite_core::datasets::sec::run_all` which
+//!    It calls the Rust orchestrator `kglite_core::api::datasets::sec::run_all` which
 //!    dispatches every form-specific extractor and emits the
 //!    info-row CSVs in `processed/`.
 //!
@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
-use kglite_core::datasets::sec::{
+use kglite_core::api::datasets::sec::{
     all_buckets, fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
     fetch_quarterly_master_idx, fetch_submissions_bulk, parse_tickers_json, prepare_dispatch_plan,
     resolve_fetch_buckets, run_all, DispatchScope, SecClient, SecError, SliceSpec, Workdir,
@@ -226,7 +226,7 @@ fn fetch_form4_batch(
     batch: Vec<(u64, String, String)>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    use kglite_core::datasets::sec::fetch_form4_filing;
+    use kglite_core::api::datasets::sec::fetch_form4_filing;
     run_batch(
         py,
         user_agent,
@@ -257,7 +257,7 @@ fn fetch_13f_batch(
     batch: Vec<(u64, String)>,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    use kglite_core::datasets::sec::fetch_13f_info_table;
+    use kglite_core::api::datasets::sec::fetch_13f_info_table;
     run_batch(
         py,
         user_agent,
@@ -326,7 +326,7 @@ fn fetch_company_submissions_batch(
     force_refetch: bool,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    use kglite_core::datasets::sec::fetch_company_submission;
+    use kglite_core::api::datasets::sec::fetch_company_submission;
     run_batch(
         py,
         user_agent,
@@ -360,7 +360,7 @@ fn fetch_company_facts_batch(
     force_refetch: bool,
     progress: Option<Py<PyAny>>,
 ) -> PyResult<(usize, usize)> {
-    use kglite_core::datasets::sec::fetch_company_facts;
+    use kglite_core::api::datasets::sec::fetch_company_facts;
     run_batch(
         py,
         user_agent,
@@ -495,7 +495,7 @@ fn predict_graph_size_gb(
     include_xbrl_metrics: bool,
     include_8k_events: bool,
 ) -> f64 {
-    kglite_core::datasets::sec::predict_graph_size_gb(
+    kglite_core::api::datasets::sec::predict_graph_size_gb(
         years,
         detailed,
         cik_count,
@@ -508,7 +508,7 @@ fn predict_graph_size_gb(
 /// Pick a storage backend for an estimated graph size.
 #[pyfunction]
 fn pick_storage_mode(predicted_gb: f64) -> &'static str {
-    kglite_core::datasets::sec::pick_storage_mode(predicted_gb)
+    kglite_core::api::datasets::sec::pick_storage_mode(predicted_gb)
 }
 
 // ─────────────────────── graph location helpers ───────────────────────
@@ -518,7 +518,7 @@ fn pick_storage_mode(predicted_gb: f64) -> &'static str {
 /// `PathBuf` PyO3 args).
 #[pyfunction]
 fn graph_dir(workdir: String, mode: &str) -> PyResult<String> {
-    let m: kglite_core::datasets::sec::StorageMode =
+    let m: kglite_core::api::datasets::sec::StorageMode =
         mode.parse().map_err(|e: String| PyValueError::new_err(e))?;
     Ok(Workdir::new(workdir)
         .graph_dir(m)
@@ -529,7 +529,7 @@ fn graph_dir(workdir: String, mode: &str) -> PyResult<String> {
 /// True if a built graph for `mode` already exists in `workdir/graph/{mode}/`.
 #[pyfunction]
 fn graph_exists(workdir: String, mode: &str) -> PyResult<bool> {
-    let m: kglite_core::datasets::sec::StorageMode =
+    let m: kglite_core::api::datasets::sec::StorageMode =
         mode.parse().map_err(|e: String| PyValueError::new_err(e))?;
     Ok(Workdir::new(workdir).graph_exists(m))
 }
@@ -538,7 +538,7 @@ fn graph_exists(workdir: String, mode: &str) -> PyResult<bool> {
 
 /// Resolve a Python `form_types` list to per-filing fetch bucket names
 /// + the list of form strings with no matching bucket. Thin wrapper
-/// around `kglite_core::datasets::sec::resolve_fetch_buckets` so the
+/// around `kglite_core::api::datasets::sec::resolve_fetch_buckets` so the
 /// wheel's `_resolve_fetch_buckets` doesn't have to carry the
 /// `_FORM_BUCKETS` table — every binding now shares the core mapping.
 #[pyfunction]
@@ -558,7 +558,7 @@ fn resolve_fetch_buckets_py(form_types: Option<Vec<String>>) -> (Vec<String>, Ve
 }
 
 /// Parse SEC's `company_tickers.json` payload into a `TICKER → CIK`
-/// dict. Wrapper around `kglite_core::datasets::sec::parse_tickers_json`
+/// dict. Wrapper around `kglite_core::api::datasets::sec::parse_tickers_json`
 /// — the wheel's `_resolve_companies` calls this to avoid re-implementing
 /// the JSON-shape walk that every binding would otherwise duplicate.
 #[pyfunction]

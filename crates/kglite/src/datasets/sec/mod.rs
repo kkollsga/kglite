@@ -36,22 +36,13 @@ pub use buckets::{
 pub use client::{FetchMode, SecClient};
 pub use dispatch::{prepare_dispatch_plan, DispatchPlan, DispatchScope, FilingTask};
 pub use error::{Result, SecError};
-pub use extract::{run_all, ExtractReport, Provenance, Sinks};
+pub use extract::{run_all, ExtractReport};
 pub use fetch::{
     fetch_13f_info_table, fetch_company_facts, fetch_company_submission, fetch_company_tickers,
     fetch_exhibit21_attachment, fetch_filing_primary_doc, fetch_form4_filing,
     fetch_quarterly_master_idx, fetch_submissions_bulk, YearRange,
 };
 pub use layout::{StorageMode, Workdir};
-pub use parsers::eightk::{extract_8k_items, EightKItem};
-pub use parsers::exhibit21::{extract_subsidiaries as parse_exhibit21_subsidiaries, Subsidiary};
-pub use parsers::f13f::{parse_13f_info_table, Holding};
-pub use parsers::form4::{parse_form4, Form4, InsiderTransaction};
-pub use parsers::idx::{parse_master_idx, FilingEntry, ParseError};
-pub use parsers::sc13d::{parse_sc13d, Sc13dFiling};
-pub use parsers::submissions::{
-    iter_submissions_zip, parse_submission_json, CompanyRecord, RecentFilings, Submission,
-};
 pub use planning::{pick_storage_mode, predict_graph_size_gb};
 pub use slicing::SliceSpec;
 pub use tickers::parse_tickers_json;

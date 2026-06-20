@@ -16,7 +16,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 
-use kglite_core::datasets::sodir::{datasets_used_by_blueprint, fetch_all, SodirError, Workdir};
+use kglite_core::api::datasets::sodir::{
+    datasets_used_by_blueprint, fetch_all, SodirError, Workdir,
+};
 
 fn map_err(e: SodirError) -> PyErr {
     match &e {
@@ -94,10 +96,10 @@ fn merge_blueprint(
     complement_json: Option<String>,
     complement_overrides: bool,
 ) -> PyResult<String> {
-    // Engine logic lives in `kglite_core::datasets::sodir::merge_blueprint_json`
+    // Engine logic lives in `kglite_core::api::datasets::sodir::merge_blueprint_json`
     // (lifted from this file in 0.10.1). This wrapper only adapts the
     // String → PyErr boundary.
-    kglite_core::datasets::sodir::merge_blueprint_json(
+    kglite_core::api::datasets::sodir::merge_blueprint_json(
         &base_json,
         complement_json.as_deref(),
         complement_overrides,
