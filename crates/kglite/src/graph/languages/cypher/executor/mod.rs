@@ -1,5 +1,26 @@
-// src/graph/cypher/executor.rs
-// Pipeline executor for Cypher queries
+//! Cypher **read-engine** executor — runs read-only queries
+//! (MATCH / WHERE / WITH / RETURN / UNWIND / CALL …) plus the
+//! optimizer's fused physical nodes.
+//!
+//! # Two execution engines (read this before adding a clause)
+//!
+//! KGLite runs every Cypher query through one of two engines, chosen
+//! *upstream* in `graph::session::execute` by `is_mutation_query`
+//! (defined in `executor/write.rs`):
+//!
+//! - **read engine — THIS module.** `execute_clauses` / `execute_clause`
+//!   handle reads and the optimizer's fused nodes. The mutation arm here
+//!   (`Create | Set | Delete | Remove | Merge`) is an *unreachable
+//!   defensive guard*: a real mutation never lands here because the
+//!   router already sent the whole query to the mutable engine.
+//! - **mutable engine — `executor/write.rs`.** `execute_mutable` plus
+//!   `execute_create` / `_set` / `_delete` / `_remove` / `_merge` apply
+//!   the writes.
+//!
+//! A clause that mutates — or whose *body* can mutate, e.g. a future
+//! `FOREACH (x IN list | <updates>)` — must be (1) recognised by
+//! `clause_is_mutation` in `write.rs` so routing picks the mutable
+//! engine, and (2) executed there, not here.
 
 use super::ast::*;
 use super::result::*;
@@ -839,6 +860,14 @@ impl<'a> CypherExecutor<'a> {
                 let declared = declared_from_rows(&result_set);
                 self.execute_call_subquery(import, body, result_set, &declared)
             }
+            // Unreachable for real queries: `is_mutation_query` (write.rs)
+            // routes any query containing these to the mutable engine
+            // (`execute_mutable`) upstream in `session::execute`, so the
+            // read engine never sees a live mutation. This arm is a
+            // defensive guard for a mutation clause reaching the read path
+            // directly (e.g. a hand-built clause list in a test). A future
+            // `FOREACH` (mutation control-flow) is handled in the mutable
+            // engine — do NOT wire its execution in here.
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)

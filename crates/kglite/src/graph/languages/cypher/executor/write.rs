@@ -33,6 +33,13 @@ pub fn is_mutation_query(query: &CypherQuery) -> bool {
 
 /// True if `clause` is itself a write clause or contains a write
 /// clause in a nested sub-pipeline.
+///
+/// **Routing entry point.** This is the single classifier that decides
+/// read engine (`executor/mod.rs`) vs mutable engine (`execute_mutable`,
+/// below). A new clause that can mutate — or whose *body* can, e.g. a
+/// future `FOREACH (x IN list | <updates>)` — must add an arm here that
+/// recurses into its body. Miss it and the query is mis-routed to the
+/// read engine, where its writes are silently rejected.
 fn clause_is_mutation(clause: &Clause) -> bool {
     match clause {
         Clause::Create(_)
