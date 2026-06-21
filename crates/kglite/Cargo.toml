@@ -36,6 +36,13 @@ name = "bz2_bench"
 path = "src/bin/bz2_bench.rs"
 required-features = ["parallel-bz2"]
 
+# code_tree accuracy harness — reports CALLS-resolution stats + node/edge
+# counts for a repo as JSON, the baseline the re-resolution phases track.
+# Run with `cargo run -p kglite --bin code_tree_stats --release -- <path>`.
+[[bin]]
+name = "code_tree_stats"
+path = "src/bin/code_tree_stats.rs"
+
 [features]
 default = []
 # Rust-native embedder backend behind the `fastembed` Cargo feature.

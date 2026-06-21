@@ -1,0 +1,16 @@
+{
+  "_comment": "Phase 0 reference snapshot of code_tree CALLS-resolution on the KGLite repo itself (source roots only, --include-tests off). Regenerate with `cargo run -p kglite --bin code_tree_stats --release -- .`. The absolute counts drift as the repo grows; the metric to watch across the re-resolution phases is resolution_rate (resolved_call_sites / (total_calls - excluded_noise)) and, more robustly, resolver quality = resolved_call_sites / (resolved_call_sites + ambiguous_dropped) which is independent of how many calls are external.",
+  "captured_at_version": "0.11.7",
+  "path": ".",
+  "include_tests": false,
+  "nodes": 7342,
+  "edges": 32401,
+  "total_calls": 69938,
+  "excluded_noise": 32737,
+  "no_candidate": 19194,
+  "ambiguous_dropped": 905,
+  "resolved_call_sites": 17102,
+  "resolved_edges": 14658,
+  "resolution_rate": 0.4597,
+  "resolver_quality": 0.9497
+}
