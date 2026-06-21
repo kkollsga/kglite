@@ -181,43 +181,74 @@ impl CppParser {
     fn get_name<'a>(node: Node<'a>, source: &'a [u8], name_type: &str) -> Option<&'a str> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            // Destructor names: `~Widget` is a `destructor_name` node wrapping
-            // the type identifier. Use its full text (including the `~`) so
-            // graph queries can distinguish destructors from other members.
-            if child.kind() == "destructor_name" {
-                return Some(node_text(child, source));
-            }
-            // Out-of-class definitions like `bool Foo::bar() const` produce
-            // a `qualified_identifier` (e.g. `Foo::bar`) where we want the
-            // last segment as the method name. Drill down to the trailing
-            // identifier child.
-            if child.kind() == "qualified_identifier" {
-                let mut qc = child.walk();
-                let mut last_id: Option<&str> = None;
-                for sub in child.children(&mut qc) {
-                    if matches!(sub.kind(), "identifier" | "destructor_name") {
-                        last_id = Some(node_text(sub, source));
+            match child.kind() {
+                // Destructor (`~Widget`) and operator overloads (`operator()`,
+                // `operator==`, `operator[]`) are single specifier nodes whose
+                // full text *is* the name. Keep the `~` / `operator` so graph
+                // queries can distinguish them from ordinary members.
+                "destructor_name" | "operator_name" => {
+                    return Some(node_text(child, source));
+                }
+                // Out-of-class / nested-qualified / template names —
+                // `Foo::bar`, `A::B::c`, `Foo::operator==`, `convert<T>` — drill
+                // to the trailing segment recursively.
+                "qualified_identifier" | "template_function" | "template_method" => {
+                    if let Some(n) = Self::resolve_trailing_name(child, source) {
+                        return Some(n);
                     }
                 }
-                if let Some(id) = last_id {
-                    return Some(id);
+                k if k == name_type
+                    || k == "type_identifier"
+                    || k == "field_identifier"
+                    || k == "identifier" =>
+                {
+                    let text = node_text(child, source);
+                    // Skip macro-shaped tokens (SPDLOG_INLINE, FMT_API, etc.) so
+                    // the parser doesn't pick them up as the function name.
+                    if looks_like_macro_decorator(text) {
+                        continue;
+                    }
+                    return Some(text);
                 }
-            }
-            if child.kind() == name_type
-                || child.kind() == "type_identifier"
-                || child.kind() == "field_identifier"
-                || child.kind() == "identifier"
-            {
-                let text = node_text(child, source);
-                // Skip macro-shaped tokens (SPDLOG_INLINE, FMT_API, etc.) so
-                // the parser doesn't pick them up as the function name.
-                if looks_like_macro_decorator(text) {
-                    continue;
-                }
-                return Some(text);
+                _ => {}
             }
         }
         None
+    }
+
+    /// Resolve the *trailing* (rightmost) name of a possibly-nested declarator:
+    /// `A::B::c` → `c`, `Foo::operator==` → `operator==`, `convert<T>` →
+    /// `convert`, `~Widget` → `~Widget`. A nested `qualified_identifier` exposes
+    /// the trailing piece as its last named child; `template_function`/
+    /// `template_method` via the `name` field. Recursion terminates at the leaf.
+    fn resolve_trailing_name<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
+        match node.kind() {
+            // No macro-decorator filter here: by the time we've drilled to the
+            // trailing segment of a qualified/template name, the leaf *is* the
+            // name — even an all-caps one (`a::b::Ctx::MINUS`, `Lexer::OK`). The
+            // filter only belongs in the leading/decorator position (get_name).
+            "identifier" | "field_identifier" | "type_identifier" => Some(node_text(node, source)),
+            "destructor_name" | "operator_name" => Some(node_text(node, source)),
+            // Nested qualified names (`a::b::Ctx::MINUS`) have *no* `name`
+            // field — the `::` separators are anonymous and the segments nest
+            // left-deep, so the trailing piece is the last *named* child.
+            "qualified_identifier" => {
+                let mut last = None;
+                let mut c = node.walk();
+                for sub in node.children(&mut c) {
+                    if sub.is_named() {
+                        last = Some(sub);
+                    }
+                }
+                last.and_then(|n| Self::resolve_trailing_name(n, source))
+            }
+            // `convert<T>` — the name is the `name` field (an identifier).
+            "template_function" | "template_method" => node
+                .child_by_field_name("name")
+                .or_else(|| node.named_child(0))
+                .and_then(|n| Self::resolve_trailing_name(n, source)),
+            _ => None,
+        }
     }
 
     fn get_doc_comment(node: Node, source: &[u8]) -> Option<String> {
