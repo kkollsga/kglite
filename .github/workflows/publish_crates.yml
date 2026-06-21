@@ -107,13 +107,44 @@ jobs:
       # crates.io publishes are permanent, so a green-but-incomplete gate is the
       # worst case (the gap that shipped 0.11.6 while the free-threading job was
       # red).
+      #
+      # Poll the GitHub Checks API directly instead of lewagon/wait-on-check.
+      # `CI success` `needs` every CI job, so it only registers as a check run
+      # minutes in (when its deps complete) — past lewagon's ~60s check-discovery
+      # window, which made it exit "the requested check was never run against
+      # this ref" and fail every real publish (first hit on 0.11.7, the first
+      # version actually exercising this gate). This loop tolerates the
+      # late-appearing check and waits up to 45 min.
       - name: Wait for CI to pass
-        uses: lewagon/wait-on-check-action@v1.7.0
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'CI success'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 15
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 2700 ))
+          while :; do
+            line=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
+              -q '.check_runs[] | select(.name=="CI success") | "\(.status) \(.conclusion // "")"' \
+              2>/dev/null | head -n1 || true)
+            status=${line%% *}
+            conclusion=${line#* }
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "✅ CI success"
+                exit 0
+              fi
+              echo "🔴 CI success concluded: $conclusion"
+              exit 1
+            fi
+            [ -n "$status" ] && echo "CI success: $status…" \
+              || echo "CI success check not registered yet…"
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for the 'CI success' check"
+              exit 1
+            fi
+            sleep 20
+          done
       # Wait for the per-OS wheel builds. Crates.io publishes are
       # permanent — if the wheel matrix would break on a kglite
       # change, we want to know BEFORE publishing kglite the crate.
