@@ -398,8 +398,7 @@ fn finalize_and_load(
     }
 
     let t_load = std::time::Instant::now();
-    // `mut` is consumed only by the `okf`-gated docs pass below (Arc::get_mut).
-    #[cfg_attr(not(feature = "okf"), allow(unused_mut))]
+    // `mut` is consumed by the cross-language pass below (and the okf docs pass).
     let (mut graph, call_stats) = load::load_into_graph(&combined, project_info.as_ref())?;
     if verbose {
         eprintln!("[timing] load: {:.3}s", t_load.elapsed().as_secs_f64());
@@ -423,6 +422,22 @@ fn finalize_and_load(
         {
             let _ = (project_root, t_docs);
             return Err("include_docs=true requires the 'okf' Cargo feature".into());
+        }
+    }
+
+    // Cross-language HTTP boundary edges: link client HTTP calls to the server
+    // Route nodes they target (by normalized path), so impact analysis crosses
+    // the client/server (and language) boundary. Runs after load so Route nodes
+    // exist; a no-op when the graph has none.
+    {
+        let g = std::sync::Arc::get_mut(&mut graph).expect("graph is uniquely owned during build");
+        let t_xlang = std::time::Instant::now();
+        crate::code_tree::cross_lang::ingest_http_cross_edges(g, project_root, verbose)?;
+        if verbose {
+            eprintln!(
+                "[timing] cross-lang: {:.3}s",
+                t_xlang.elapsed().as_secs_f64()
+            );
         }
     }
 
