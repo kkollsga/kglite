@@ -1402,6 +1402,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <proc name=\"label_propagation\" yields=\"node, community\">Community detection (label propagation).</proc>\n");
     xml.push_str("    <proc name=\"connected_components\" yields=\"node, component\">Weakly connected components.</proc>\n");
     xml.push_str("    <proc name=\"cluster\" yields=\"node, cluster\">DBSCAN/K-means clustering on spatial or property data.</proc>\n");
+    xml.push_str("    <proc name=\"dead_code\" yields=\"node\">Functions with no inbound use edge (CALLS / REFERENCES_FN / HANDLES / IMPLEMENTED_BY / DECORATES) — graph-native dead-code detection. Excludes tests, dunder and main; pass exclude_public to also drop pub/exported, include_tests to keep tests.</proc>\n");
     xml.push_str("  </procedures>\n");
 
     // Patterns

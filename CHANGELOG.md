@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`CALL dead_code(...)` Cypher procedure.** Graph-native dead-code
+  detection over a `code_tree` graph: reports `Function` nodes with no
+  inbound *use* edge (`CALLS` / `REFERENCES_FN` / `HANDLES` /
+  `IMPLEMENTED_BY` / `DECORATES`), which avoids the false positives a naive
+  "no inbound CALLS" query hits (callbacks passed by value, route handlers,
+  decorated entry points). Test functions, dunder methods and `main` are
+  excluded as implicit entry points; `include_tests` keeps tests and
+  `exclude_public` drops `pub`/exported visibility. See CYPHER.md →
+  "Code-graph analysis" for this plus copy-paste recipe queries for
+  complexity hotspots, blast radius, god functions and call-recursion
+  cycles (all expressible directly over the metrics/edges already captured
+  at parse time).
+
+### Fixed
+
+- **`code_tree` — calls inside anonymous functions are now captured.** Every
+  parser that listed its anonymous-function node kind in the call-walk skip
+  set silently dropped calls made inside lambdas / closures / arrow
+  callbacks (e.g. Python `sorted(xs, key=lambda x: helper(x))`, JS/TS
+  `xs.map(x => helper(x))`, Java/C# lambdas, Go func literals, C++ lambdas).
+  An anonymous function has no graph node of its own, so its call sites now
+  attribute to the enclosing function — matching how Rust closures were
+  already handled. Complexity metrics are unchanged. Fixed across python /
+  typescript / go / java / csharp / cpp.
+
 ## [0.11.7] — 2026-06-21 — code_tree extraction robustness (C++ + TypeScript/TSX)
 
 ### Fixed

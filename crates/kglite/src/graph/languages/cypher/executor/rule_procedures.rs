@@ -823,7 +823,7 @@ fn optional_string_param(
     }
 }
 
-fn require_node_yield(
+pub(super) fn require_node_yield(
     yield_items: &[YieldItem],
     proc: &str,
     expected: &str,
@@ -885,7 +885,7 @@ fn call_param_opt_i64(params: &HashMap<String, Value>, key: &str) -> Option<i64>
     }
 }
 
-fn type_indices<'a>(
+pub(super) fn type_indices<'a>(
     graph: &'a DirGraph,
     node_type: &str,
 ) -> Result<crate::graph::storage::disk::type_index::TypeNodesRef<'a>, String> {
@@ -895,7 +895,7 @@ fn type_indices<'a>(
         .ok_or_else(|| format!("Type '{node_type}' has no nodes in this graph"))
 }
 
-fn make_node_row(yield_var: &str, nidx: NodeIndex) -> ResultRow {
+pub(super) fn make_node_row(yield_var: &str, nidx: NodeIndex) -> ResultRow {
     let mut row = ResultRow::new();
     row.node_bindings.insert(yield_var.to_string(), nidx);
     row
