@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`code_tree` Python `REFERENCES_FN` edges.** The Python parser now records
+  function-pointer / callback arguments (`map(handler, xs)`,
+  `sorted(xs, key=keyfn)`, `register(callback)`) as references, matching the
+  Rust parser. They surface as `REFERENCES_FN` edges, so a function only ever
+  passed as a callback is no longer reported as dead and its real usage is
+  reflected. Positional and keyword-argument callbacks are both captured;
+  the builder keeps only references that resolve to a known project function.
+
 - **`code_tree` inheritance-aware CALLS resolution.** A `self.method()`
   call whose method is defined on an *ancestor* class/trait (via
   `EXTENDS` / `IMPLEMENTS`), not the caller's own type, now resolves to the
