@@ -1,0 +1,4 @@
+[package]
+name = "rust_xfile_fixture"
+version = "0.0.0"
+edition = "2021"
