@@ -319,6 +319,13 @@ fn apply_foreach_body_clause(
     stats: &mut MutationStats,
     interrupt: &Interrupt,
 ) -> Result<ResultSet, String> {
+    // Per-element flush+sync is REQUIRED on disk, not just for add_nodes: disk
+    // property reads (e.g. `coalesce(n.hits, 0)` in a same/later iteration)
+    // consult DirGraph.column_stores, which only reflects a write after
+    // sync_column_stores_from_disk. Deferring the sync to once-after-loop
+    // (tried in Phase 1) returned stale/None properties on disk — reverted.
+    // Reducing this safely needs the disk read path to consult the mut-cache,
+    // a deeper storage change out of scope here. (Memory mode pays ~nothing.)
     match clause {
         Clause::Create(create) => execute_create(graph, create, result_set, params, stats),
         Clause::Set(set) => {
