@@ -20,6 +20,43 @@ pub struct CallEdge {
     pub call_count: i64,
 }
 
+/// Aggregate counters describing how the resolver classified every call
+/// site in one `build_call_edges` pass — the measurement substrate the
+/// re-resolution phases (and the `code_tree_stats` dev bin) track.
+///
+/// The denominator for resolver *quality* is `total_calls - excluded_noise`.
+/// Of those: `no_candidate` reference a bare name absent from the project
+/// (external / stdlib — nothing we could resolve to); `ambiguous_dropped`
+/// still had more than `max_targets` candidates after every tier;
+/// `resolved_call_sites` matched at least one in-project symbol.
+/// `resolved_edges` is the de-duplicated caller→callee pair count actually
+/// emitted (one call site can fan out to several when tiers can't separate
+/// overloads, and repeated calls on different lines collapse to one edge).
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct CallResolutionStats {
+    pub total_calls: u64,
+    pub excluded_noise: u64,
+    pub no_candidate: u64,
+    pub ambiguous_dropped: u64,
+    pub resolved_call_sites: u64,
+    pub resolved_edges: u64,
+}
+
+/// Per-function scratch counters, summed into [`CallResolutionStats`] after
+/// the parallel match loop. Kept `Copy` so the rayon reduce stays alloc-free.
+#[derive(Debug, Clone, Copy, Default)]
+struct Counts {
+    total: u64,
+    excluded: u64,
+    no_candidate: u64,
+    ambiguous: u64,
+    resolved: u64,
+}
+
+/// Per-function output of the parallel match loop: borrowed
+/// `(caller, callee, line)` tuples plus that function's [`Counts`].
+type FnMatchResult<'a> = (Vec<(&'a str, &'a str, u32)>, Counts);
+
 /// True if `qname` lives under any of the namespace prefixes in `scopes`.
 /// A "lives under" match requires `qname` to start with `scope` followed by
 /// a `.` or `::` separator — `System` matches `System.IO.Stream` but not
@@ -67,7 +104,7 @@ pub fn build_call_edges(
     files: &[FileInfo],
     excluded_names: &std::collections::HashSet<&str>,
     max_targets: usize,
-) -> Vec<CallEdge> {
+) -> (Vec<CallEdge>, CallResolutionStats) {
     let verbose = std::env::var_os("KGLITE_CODE_TREE_VERBOSE").is_some();
     let t0 = std::time::Instant::now();
     // Bare name → every qualified_name that matches.
@@ -128,7 +165,7 @@ pub fn build_call_edges(
     // Parallelise the per-function match loop: each caller's edges are
     // independent, so we collect per-function edge vectors and merge.
     // Keys stay as &str (borrowed from `functions`) to avoid alloc per edge.
-    let per_fn: Vec<Vec<(&str, &str, u32)>> = functions
+    let per_fn: Vec<FnMatchResult> = functions
         .par_iter()
         .map(|fn_info| {
             let caller_qn = fn_info.qualified_name.as_str();
@@ -138,21 +175,26 @@ pub fn build_call_edges(
             let caller_file = fn_info.file_path.as_str();
 
             let mut out: Vec<(&str, &str, u32)> = Vec::new();
+            let mut counts = Counts::default();
 
             for (called_name, line) in &fn_info.calls {
+                counts.total += 1;
                 let (explicit_hint, method_name) = match called_name.rfind('.') {
                     Some(idx) => (Some(&called_name[..idx]), &called_name[idx + 1..]),
                     None => (None, called_name.as_str()),
                 };
 
                 if excluded_names.contains(method_name) {
+                    counts.excluded += 1;
                     continue;
                 }
                 let Some(candidates) = name_lookup.get(method_name) else {
+                    counts.no_candidate += 1;
                     continue;
                 };
 
                 if candidates.len() == 1 {
+                    counts.resolved += 1;
                     let target = candidates[0];
                     if target != caller_qn {
                         out.push((caller_qn, target, *line));
@@ -249,23 +291,35 @@ pub fn build_call_edges(
                 }
 
                 if targets.len() > max_targets {
+                    counts.ambiguous += 1;
                     continue;
                 }
 
+                counts.resolved += 1;
                 for &target in targets {
                     if target != caller_qn {
                         out.push((caller_qn, target, *line));
                     }
                 }
             }
-            out
+            (out, counts)
         })
         .collect();
 
+    // Aggregate per-function counters into the pass-level stats.
+    let mut stats = CallResolutionStats::default();
+    for (_, c) in &per_fn {
+        stats.total_calls += c.total;
+        stats.excluded_noise += c.excluded;
+        stats.no_candidate += c.no_candidate;
+        stats.ambiguous_dropped += c.ambiguous;
+        stats.resolved_call_sites += c.resolved;
+    }
+
     // Merge into the final dedupe map sequentially — 200K inserts is ~5ms.
-    let total: usize = per_fn.iter().map(|v| v.len()).sum();
+    let total: usize = per_fn.iter().map(|(v, _)| v.len()).sum();
     let mut seen: HashMap<(&str, &str), Vec<u32>> = HashMap::with_capacity(total);
-    for edges in per_fn {
+    for (edges, _) in per_fn {
         for (caller, callee, line) in edges {
             seen.entry((caller, callee)).or_default().push(line);
         }
@@ -307,11 +361,61 @@ pub fn build_call_edges(
             }
         })
         .collect();
+    stats.resolved_edges = result.len() as u64;
     if verbose {
         eprintln!(
-            "[calls]     output build: {:.3}s",
-            t_out.elapsed().as_secs_f64()
+            "[calls]     output build: {:.3}s ({} edges, {}/{} call sites resolved)",
+            t_out.elapsed().as_secs_f64(),
+            stats.resolved_edges,
+            stats.resolved_call_sites,
+            stats.total_calls.saturating_sub(stats.excluded_noise),
         );
     }
-    result
+    (result, stats)
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+    use crate::code_tree::models::{FileInfo, FunctionInfo};
+
+    fn func(qn: &str, file: &str, calls: &[(&str, u32)]) -> FunctionInfo {
+        FunctionInfo {
+            name: qn.rsplit(['.', ':']).next().unwrap_or(qn).to_string(),
+            qualified_name: qn.to_string(),
+            file_path: file.to_string(),
+            calls: calls.iter().map(|(n, l)| (n.to_string(), *l)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stats_classify_every_call_site() {
+        // `a.foo` calls `bar` twice (resolvable, single candidate → 1 edge),
+        // an external name (no candidate), and a noise name (excluded).
+        let functions = vec![
+            func(
+                "a.foo",
+                "a.py",
+                &[("bar", 1), ("bar", 2), ("external_thing", 3), ("noisy", 4)],
+            ),
+            func("a.bar", "a.py", &[]),
+        ];
+        let files = vec![FileInfo {
+            path: "a.py".into(),
+            ..Default::default()
+        }];
+        let mut noise = std::collections::HashSet::new();
+        noise.insert("noisy");
+
+        let (edges, stats) = build_call_edges(&functions, &files, &noise, 5);
+
+        assert_eq!(stats.total_calls, 4);
+        assert_eq!(stats.excluded_noise, 1);
+        assert_eq!(stats.no_candidate, 1);
+        assert_eq!(stats.ambiguous_dropped, 0);
+        assert_eq!(stats.resolved_call_sites, 2); // two `bar` sites
+        assert_eq!(stats.resolved_edges, 1); // collapsed to one a.foo→a.bar edge
+        assert_eq!(edges.len(), 1);
+    }
 }

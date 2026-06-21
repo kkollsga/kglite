@@ -1422,7 +1422,13 @@ fn defines_edges_df(edges: &[DefinesEdge]) -> HashMap<(String, String), DataFram
 pub fn load_into_graph(
     result: &ParseResult,
     project_info: Option<&ProjectInfo>,
-) -> Result<std::sync::Arc<DirGraph>, String> {
+) -> Result<
+    (
+        std::sync::Arc<DirGraph>,
+        super::call_edges::CallResolutionStats,
+    ),
+    String,
+> {
     let verbose = std::env::var_os("KGLITE_CODE_TREE_VERBOSE").is_some();
     let mark = |t: std::time::Instant, label: &str| {
         if verbose {
@@ -2108,7 +2114,7 @@ pub fn load_into_graph(
     for name in super::super::parsers::php::PHP_NOISE_NAMES {
         noise.insert(*name);
     }
-    let call_edges =
+    let (call_edges, call_stats) =
         super::call_edges::build_call_edges(&result.functions, &result.files, &noise, 5);
     if !call_edges.is_empty() {
         maintain::add_connections(
@@ -2548,7 +2554,7 @@ pub fn load_into_graph(
         .map_err(py_err)?;
     }
     mark(t_proc, "procedures");
-    Ok(std::sync::Arc::new(dir))
+    Ok((std::sync::Arc::new(dir), call_stats))
 }
 
 impl Clone for super::other_edges::FfiExposesEdge {
