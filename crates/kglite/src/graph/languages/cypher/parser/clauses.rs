@@ -617,6 +617,51 @@ impl CypherParser {
     }
 
     // ========================================================================
+    // FOREACH Clause
+    // ========================================================================
+
+    /// `FOREACH (var IN listExpr | <update clauses>)`. The body holds only
+    /// update clauses (CREATE / SET / DELETE / REMOVE / MERGE) and nested
+    /// FOREACH, matching Neo4j's restriction.
+    pub(super) fn parse_foreach_clause(&mut self) -> Result<Clause, String> {
+        self.expect(&CypherToken::Foreach)?;
+        self.expect(&CypherToken::LParen)?;
+        let variable = self.consume_identifier()?;
+        self.expect(&CypherToken::In)?;
+        let list = self.parse_expression()?; // stops at the '|'
+        self.expect(&CypherToken::Pipe)?;
+
+        let mut body = Vec::new();
+        while !self.check(&CypherToken::RParen) {
+            let clause = match self.peek() {
+                Some(CypherToken::Create) => self.parse_create_clause()?,
+                Some(CypherToken::Set) => self.parse_set_clause()?,
+                Some(CypherToken::Delete) | Some(CypherToken::Detach) => {
+                    self.parse_delete_clause()?
+                }
+                Some(CypherToken::Remove) => self.parse_remove_clause()?,
+                Some(CypherToken::Merge) => self.parse_merge_clause()?,
+                Some(CypherToken::Foreach) => self.parse_foreach_clause()?,
+                other => {
+                    return Err(format!(
+                        "FOREACH body may only contain CREATE / SET / DELETE / REMOVE / \
+                         MERGE / FOREACH, got {:?}",
+                        other
+                    ));
+                }
+            };
+            body.push(clause);
+        }
+        self.expect(&CypherToken::RParen)?;
+
+        Ok(Clause::Foreach {
+            variable,
+            list,
+            body,
+        })
+    }
+
+    // ========================================================================
     // CALL Clause
     // ========================================================================
 

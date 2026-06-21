@@ -225,6 +225,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::Delete(_) => "Delete".into(),
         Clause::Remove(_) => "Remove".into(),
         Clause::Merge(_) => "Merge".into(),
+        Clause::Foreach { .. } => "Foreach".into(),
         Clause::Call(_) => "Call".into(),
         Clause::CallSubquery { .. } => "CallSubquery".into(),
         Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
@@ -865,14 +866,15 @@ impl<'a> CypherExecutor<'a> {
             // (`execute_mutable`) upstream in `session::execute`, so the
             // read engine never sees a live mutation. This arm is a
             // defensive guard for a mutation clause reaching the read path
-            // directly (e.g. a hand-built clause list in a test). A future
-            // `FOREACH` (mutation control-flow) is handled in the mutable
-            // engine — do NOT wire its execution in here.
+            // directly (e.g. a hand-built clause list in a test). FOREACH
+            // always classifies as a mutation, so it is handled in the
+            // mutable engine and only reaches here via that same direct path.
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Delete(_)
             | Clause::Remove(_)
-            | Clause::Merge(_) => {
+            | Clause::Merge(_)
+            | Clause::Foreach { .. } => {
                 Err("Mutation clauses cannot be executed in read-only mode".to_string())
             }
         }

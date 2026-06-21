@@ -122,6 +122,7 @@ impl CypherParser {
             | Some(CypherToken::Detach)
             | Some(CypherToken::Merge)
             | Some(CypherToken::Remove)
+            | Some(CypherToken::Foreach)
             | Some(CypherToken::On)
             | Some(CypherToken::Call)
             | Some(CypherToken::Yield)
@@ -278,6 +279,9 @@ impl CypherParser {
                 }
                 Some(CypherToken::Call) => {
                     clauses.push(self.parse_call_clause()?);
+                }
+                Some(CypherToken::Foreach) => {
+                    clauses.push(self.parse_foreach_clause()?);
                 }
                 Some(CypherToken::Identifier(s)) if s.eq_ignore_ascii_case("FORMAT") => {
                     if end_at_rbrace {

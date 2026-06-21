@@ -59,6 +59,18 @@ pub enum Clause {
     Delete(DeleteClause),
     Remove(RemoveClause),
     Merge(MergeClause),
+    /// `FOREACH (var IN listExpr | <update clauses>)` — run the update
+    /// clauses once per element of `list`, with `variable` bound to the
+    /// element. A side-effect loop: the surrounding row set is unchanged.
+    /// `body` holds update clauses (Create/Set/Delete/Remove/Merge) and
+    /// nested Foreach only. Mutation control-flow → executed in the
+    /// mutable engine (`executor/write.rs`); `clause_is_mutation` recurses
+    /// into `body` so a FOREACH with a write routes there.
+    Foreach {
+        variable: String,
+        list: Expression,
+        body: Vec<Clause>,
+    },
     Call(CallClause),
     /// `CALL { ... }` subquery: a nested sub-pipeline evaluated once per outer
     /// row (correlated) or exactly once (uncorrelated). `import` holds the

@@ -1388,6 +1388,21 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
                 collect_clause_variables(c, out);
             }
         }
+        Clause::Foreach {
+            variable,
+            list,
+            body,
+        } => {
+            // The list expression references outer variables; body clauses
+            // may too. The loop variable is body-internal but recording it
+            // is harmless (it can't collide with a pre-WITH projection name
+            // the fold check cares about).
+            collect_expression_refs(list, out);
+            out.insert(variable.clone());
+            for c in body {
+                collect_clause_variables(c, out);
+            }
+        }
         Clause::Call(_)
         | Clause::Create(_)
         | Clause::Set(_)

@@ -51,6 +51,11 @@ fn clause_is_mutation(clause: &Clause) -> bool {
         // enclosing query a mutation.
         Clause::CallSubquery { body, .. } => is_mutation_query(body),
         Clause::Union(u) => is_mutation_query(&u.query),
+        // FOREACH is an updating clause by nature (its body holds only
+        // update clauses), so it always routes to the mutable engine —
+        // matching Neo4j. A degenerate empty-body FOREACH is then a
+        // harmless no-op there rather than erroring on the read path.
+        Clause::Foreach { .. } => true,
         _ => false,
     }
 }
@@ -150,6 +155,27 @@ pub fn execute_mutable(
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
             }
+            // FOREACH: side-effect loop. Runs its body's update clauses once
+            // per list element with the loop var bound; the outer row set is
+            // left unchanged.
+            Clause::Foreach {
+                variable,
+                list,
+                body,
+            } => {
+                execute_foreach(
+                    graph,
+                    variable,
+                    list,
+                    body,
+                    &result_set,
+                    &params,
+                    &mut stats,
+                    &interrupt,
+                )?;
+                GraphWrite::flush_pending_writes(&mut graph.graph);
+                graph.sync_column_stores_from_disk();
+            }
             // Correlated CALL { } import validation needs the declared outer
             // scope (variables bound by clauses 0..i), distinct from the
             // bindings present in any single row.
@@ -214,6 +240,130 @@ pub fn execute_mutable(
             diagnostics: None,
             lazy: None,
         })
+    }
+}
+
+/// Execute a `FOREACH (var IN list | body)` loop.
+///
+/// For each incoming row, evaluate `list` in that row's context and run
+/// `body`'s update clauses once per element with `variable` bound to it.
+/// The outer row set is a side-effect input only — it is not modified
+/// and body bindings do not propagate out. A standalone FOREACH (no
+/// incoming rows) still runs once over an empty binding row.
+#[allow(clippy::too_many_arguments)]
+fn execute_foreach(
+    graph: &mut DirGraph,
+    variable: &str,
+    list: &Expression,
+    body: &[Clause],
+    outer: &ResultSet,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+    interrupt: &Interrupt,
+) -> Result<(), String> {
+    // A FOREACH at the start of a query has no incoming rows; run it once
+    // over a single empty binding row so standalone loops work.
+    let seed = [ResultRow::new()];
+    let rows: &[ResultRow] = if outer.rows.is_empty() {
+        &seed
+    } else {
+        &outer.rows
+    };
+
+    for row in rows {
+        if interrupt.exceeded() {
+            return Err("Query interrupted".to_string());
+        }
+        // Evaluate the list in this row's context (read-only borrow of the
+        // graph, dropped before the per-element mutations below).
+        let list_val = {
+            let executor = CypherExecutor::with_params(graph, params, interrupt.deadline)
+                .with_cancel(interrupt.cancel);
+            executor.evaluate_expression(list, row)?
+        };
+        let items = match list_val {
+            Value::List(items) => items,
+            // FOREACH over null is a no-op (Neo4j semantics).
+            Value::Null => continue,
+            other => {
+                return Err(format!("FOREACH expects a list, got {}", other.type_name()));
+            }
+        };
+
+        for item in items {
+            let mut elem_row = row.clone();
+            elem_row.projected.insert(variable.to_string(), item);
+            let mut elem_set = ResultSet {
+                rows: vec![elem_row],
+                columns: outer.columns.clone(),
+                lazy_return_items: None,
+            };
+            for bclause in body {
+                elem_set =
+                    apply_foreach_body_clause(graph, bclause, elem_set, params, stats, interrupt)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply one clause inside a FOREACH body. Only update clauses and nested
+/// FOREACH are valid (the parser enforces this; the catch-all is a guard).
+/// Mirrors the per-clause mutation handling (incl. disk flush/sync) from
+/// `execute_mutable`.
+fn apply_foreach_body_clause(
+    graph: &mut DirGraph,
+    clause: &Clause,
+    result_set: ResultSet,
+    params: &HashMap<String, Value>,
+    stats: &mut MutationStats,
+    interrupt: &Interrupt,
+) -> Result<ResultSet, String> {
+    match clause {
+        Clause::Create(create) => execute_create(graph, create, result_set, params, stats),
+        Clause::Set(set) => {
+            execute_set(graph, set, &result_set, params, stats)?;
+            GraphWrite::flush_pending_writes(&mut graph.graph);
+            graph.sync_column_stores_from_disk();
+            Ok(result_set)
+        }
+        Clause::Delete(del) => {
+            execute_delete(graph, del, &result_set, stats)?;
+            Ok(result_set)
+        }
+        Clause::Remove(rem) => {
+            execute_remove(graph, rem, &result_set, stats)?;
+            GraphWrite::flush_pending_writes(&mut graph.graph);
+            graph.sync_column_stores_from_disk();
+            Ok(result_set)
+        }
+        Clause::Merge(merge) => {
+            let rs = execute_merge(graph, merge, result_set, params, stats)?;
+            GraphWrite::flush_pending_writes(&mut graph.graph);
+            graph.sync_column_stores_from_disk();
+            Ok(rs)
+        }
+        Clause::Foreach {
+            variable,
+            list,
+            body,
+        } => {
+            execute_foreach(
+                graph,
+                variable,
+                list,
+                body,
+                &result_set,
+                params,
+                stats,
+                interrupt,
+            )?;
+            Ok(result_set)
+        }
+        other => Err(format!(
+            "FOREACH body may only contain update clauses, got {}",
+            clause_display_name(other)
+        )),
     }
 }
 
