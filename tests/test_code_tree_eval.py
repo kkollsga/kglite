@@ -23,10 +23,10 @@ Fixtures live in `tests/code_tree/corpus/<name>/` (source + ground_truth.toml).
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
-import tomllib
 
 pytest.importorskip("tree_sitter")
 
@@ -47,7 +47,7 @@ EXPECTED = {
 
 
 def _fixtures() -> list[pathlib.Path]:
-    return sorted(p.parent for p in CORPUS.glob("*/ground_truth.toml"))
+    return sorted(p.parent for p in CORPUS.glob("*/ground_truth.json"))
 
 
 def _resolve(graph, label: str) -> str:
@@ -105,7 +105,7 @@ def _cross_connected(graph, src_qn: str, dst_qn: str) -> bool:
 
 @pytest.mark.parametrize("fixture", _fixtures(), ids=lambda p: p.name)
 def test_corpus_fixture(fixture: pathlib.Path):
-    truth = tomllib.loads((fixture / "ground_truth.toml").read_text())
+    truth = json.loads((fixture / "ground_truth.json").read_text())
     graph = build(str(fixture))
 
     # ── call-edge precision / recall / F1 ──
