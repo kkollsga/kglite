@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
+
 ### Performance
 
 - **Faster `to_list()` / `to_dicts()` materialization.** The row→dict loop now
