@@ -29,8 +29,8 @@ a Python app or notebook, shipping a queryable `.kgl` artifact, or
 serving a read-mostly graph to LLM agents (KGLite bundles an MCP
 server and a `describe()` schema). See the
 [README comparison table](https://github.com/kkollsga/kglite#how-it-compares)
-for the side-by-side against Kuzu / NetworkX / rustworkx / Neo4j
-Embedded.
+for the side-by-side against other embedded graph engines, NetworkX,
+rustworkx, and Neo4j Embedded.
 
 **KGLite does not fit** when you need server-mode RBAC, multiple
 databases per instance, a causal cluster with routing, or full ACID

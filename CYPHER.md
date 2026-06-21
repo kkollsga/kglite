@@ -1,8 +1,37 @@
 # Cypher Reference
 
-Full Cypher subset supported by KGLite. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
+The Cypher KGLite supports — broad openCypher coverage, all running
+**in-process** (no server). For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
 
 > **Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'` (`REMOVE n:Primary` errors deliberately).
+
+## Feature coverage
+
+If you're evaluating an embedded, Cypher-queryable graph, here's the
+surface at a glance — most of what you'd reach for is here, in-process:
+
+| Area | Supported |
+|---|---|
+| **Reading** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY` / `SKIP` / `LIMIT`, `UNWIND`, `UNION` |
+| **Writing** | `CREATE`, `MERGE` (+ `ON CREATE` / `ON MATCH SET`), `SET`, `DELETE` / `DETACH DELETE`, `REMOVE`, `FOREACH (x IN list \| …)` |
+| **Subqueries** | `CALL { … }` (correlated + uncorrelated), `EXISTS { … }`, `COUNT { … }` |
+| **Path finding** | variable-length `-[*1..n]->`, `shortestPath(…)`, `allShortestPaths(…)`, weighted shortest path (`CALL`) |
+| **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
+| **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
+| **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
+| **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
+| **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (pluggable embedder) — hybrid semantic + structural in one query |
+| **Spatial** | `point(…)`, `distance(…)`, `wkt_within` / `intersects`, buffer / hull / union, k-NN — see [Spatial](#spatial-functions) |
+| **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
+| **Value types** | int, float, string, bool, **date**, **timestamp** (date + time), duration, point, list, map, node, relationship, path |
+| **Transactions** | multi-statement with snapshot isolation + rollback (`Session` / `Transaction`) |
+| **Storage** | identical Cypher across in-memory, mmap, and on-disk modes (1B+ edges) |
+
+Deliberately **not** supported (by design, not gaps): per-write
+`UNIQUE` / `NOT NULL` / PRIMARY KEY constraints — uniqueness is a
+load-time concern, handled by `MERGE`, the duplicate-id warning, and the
+`duplicate_title` validator (see the data-integrity recipes), so it never
+costs the in-memory write path.
 
 ---
 
