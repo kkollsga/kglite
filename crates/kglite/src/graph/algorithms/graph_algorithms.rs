@@ -197,6 +197,149 @@ pub fn shortest_path(
     Some(PathResult { path, cost })
 }
 
+/// Enumerate ALL shortest paths between two anchored endpoints — the
+/// `allShortestPaths(...)` Cypher form. Unlike [`shortest_path`] (one
+/// minimal path), this returns every path of the minimal length.
+/// Undirected. Capped at `max_paths` to bound pathological fan-out;
+/// honours `deadline`.
+pub fn all_shortest_paths(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    connection_types: Option<&[String]>,
+    deadline: Interrupt,
+    max_paths: usize,
+) -> Vec<PathResult> {
+    all_shortest_paths_impl(
+        graph,
+        source,
+        target,
+        connection_types,
+        deadline,
+        max_paths,
+        false,
+    )
+}
+
+/// Directed variant of [`all_shortest_paths`] — follows outgoing edges
+/// only (mirrors [`shortest_path_directed`]).
+pub fn all_shortest_paths_directed(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    connection_types: Option<&[String]>,
+    deadline: Interrupt,
+    max_paths: usize,
+) -> Vec<PathResult> {
+    all_shortest_paths_impl(
+        graph,
+        source,
+        target,
+        connection_types,
+        deadline,
+        max_paths,
+        true,
+    )
+}
+
+fn all_shortest_paths_impl(
+    graph: &DirGraph,
+    source: NodeIndex,
+    target: NodeIndex,
+    connection_types: Option<&[String]>,
+    deadline: Interrupt,
+    max_paths: usize,
+    directed: bool,
+) -> Vec<PathResult> {
+    use std::collections::HashMap;
+
+    if source == target {
+        return vec![PathResult {
+            path: vec![source],
+            cost: 0,
+        }];
+    }
+
+    let interned = intern_connection_types(connection_types);
+    let interned_ref = interned.as_deref();
+
+    // Level-synchronous BFS recording EVERY minimal-distance predecessor
+    // of each node (a predecessor DAG), so all shortest paths can be
+    // reconstructed. Frontier nodes are at `level - 1`; their newly seen
+    // neighbours land at `level`.
+    let mut dist: HashMap<NodeIndex, usize> = HashMap::new();
+    let mut preds: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    dist.insert(source, 0);
+    let mut frontier = vec![source];
+    let mut level = 0usize;
+    let mut found = false;
+    let mut visit_count = 0u32;
+
+    while !frontier.is_empty() && !found {
+        level += 1;
+        let mut next: Vec<NodeIndex> = Vec::new();
+        for &u in &frontier {
+            visit_count += 1;
+            if visit_count.is_multiple_of(1000) && deadline.exceeded() {
+                return Vec::new();
+            }
+            let neighbors = if directed {
+                filtered_neighbors_outgoing(graph, u, interned_ref)
+            } else {
+                filtered_neighbors_undirected(graph, u, interned_ref)
+            };
+            for v in neighbors {
+                match dist.get(&v).copied() {
+                    None => {
+                        dist.insert(v, level);
+                        preds.entry(v).or_default().push(u);
+                        if v == target {
+                            found = true;
+                        }
+                        next.push(v);
+                    }
+                    // Another equally-short predecessor seen this level.
+                    Some(dv) if dv == level => {
+                        preds.entry(v).or_default().push(u);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let Some(&d) = dist.get(&target) else {
+        return Vec::new();
+    };
+
+    // Back-track target → source over the predecessor DAG, enumerating
+    // every distinct minimal path. Capped to bound fan-out.
+    let mut results: Vec<PathResult> = Vec::new();
+    let mut stack: Vec<Vec<NodeIndex>> = vec![vec![target]];
+    while let Some(path_rev) = stack.pop() {
+        if results.len() >= max_paths {
+            break;
+        }
+        let head = *path_rev.last().expect("path_rev is never empty");
+        if head == source {
+            let mut p = path_rev.clone();
+            p.reverse();
+            results.push(PathResult { path: p, cost: d });
+            continue;
+        }
+        if let Some(ps) = preds.get(&head) {
+            for &pnode in ps {
+                let mut np = path_rev.clone();
+                np.push(pnode);
+                stack.push(np);
+            }
+        }
+    }
+
+    results
+}
+
 /// Find the shortest path LENGTH between two nodes using undirected BFS.
 /// Only returns the hop count, avoiding parent tracking and path reconstruction.
 /// Uses level-by-level BFS to avoid per-node distance tracking.

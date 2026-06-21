@@ -277,6 +277,9 @@ pub struct PathAssignment {
     pub variable: String,
     pub pattern_index: usize,
     pub is_shortest_path: bool,
+    /// `allShortestPaths(...)`: enumerate every minimal-length path, not
+    /// just one. Only meaningful when `is_shortest_path` is also true.
+    pub all_shortest: bool,
 }
 
 // ============================================================================
