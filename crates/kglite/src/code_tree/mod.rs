@@ -28,6 +28,8 @@
 //! `kglite.code_tree.build` etc.
 
 pub mod builder;
+/// Cross-language HTTP boundary edges — links client calls to server routes.
+pub mod cross_lang;
 /// Optional docs pass — ingests a repo's markdown as `:Doc` nodes and links them
 /// to code symbols. Reuses the OKF parser, so it's gated on the `okf` feature.
 #[cfg(feature = "okf")]
