@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.7] — 2026-06-21 — code_tree extraction robustness (C++ + TypeScript/TSX)
+
 ### Fixed
 
 - **`code_tree` C/C++ extraction.** Three robustness fixes for C++ codebases:
