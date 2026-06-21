@@ -73,6 +73,16 @@ const NESTED_SCOPES: &[&str] = &[
     "local_function_statement",
 ];
 
+/// Scopes that own their own graph node — the call-walk stops here. Unlike
+/// [`NESTED_SCOPES`] (complexity) this excludes `lambda_expression`: a C#
+/// lambda gets no node, so calls inside `x => Foo(x)` belong to the
+/// enclosing method (mirrors the Rust closure handling).
+const NAMED_NESTED_SCOPES: &[&str] = &[
+    "method_declaration",
+    "constructor_declaration",
+    "local_function_statement",
+];
+
 const TYPE_NODES: &[&str] = &[
     "predefined_type",
     "type_identifier",
@@ -290,7 +300,7 @@ impl CSharpParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
                     walk(child, source, out);
                 }
             }

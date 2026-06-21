@@ -22,6 +22,12 @@ pub const GO_NOISE_NAMES: &[&str] = &[
 
 const NESTED_SCOPES: &[&str] = &["function_declaration", "method_declaration", "func_literal"];
 
+/// Scopes that own their own graph node — the call-walk stops here. Unlike
+/// [`NESTED_SCOPES`] (complexity) this excludes `func_literal`: a Go
+/// anonymous function gets no node, so calls inside `func(){ foo() }()`
+/// belong to the enclosing function (mirrors the Rust closure handling).
+const NAMED_NESTED_SCOPES: &[&str] = &["function_declaration", "method_declaration"];
+
 pub struct GoParser;
 
 thread_local! {
@@ -136,7 +142,7 @@ impl GoParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
                     walk(child, source, out);
                 }
             }

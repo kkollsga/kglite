@@ -347,7 +347,18 @@ impl JstsParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                let k = child.kind();
+                // Inline anonymous functions — callbacks like `.map(x => foo(x))`
+                // and JSX handlers like `onClick={() => foo()}` — get no graph
+                // node, so their calls belong to the enclosing function. Arrow /
+                // function expressions *assigned to a name* are node-ified
+                // elsewhere; we keep skipping those (they're in NESTED_SCOPES) to
+                // avoid double-counting, and only descend when the anonymous fn
+                // sits directly in a call-argument or JSX-expression position,
+                // which is never node-ified.
+                let inline_anon = matches!(k, "arrow_function" | "function")
+                    && matches!(node.kind(), "arguments" | "jsx_expression");
+                if inline_anon || !NESTED_SCOPES.contains(&k) {
                     walk(child, source, out);
                 }
             }
