@@ -26,7 +26,22 @@ pub struct CypherQuery {
     pub output_format: OutputFormat,
 }
 
-/// Each clause in the query pipeline
+/// A node in the query pipeline.
+///
+/// **Deliberately overloaded** (not a mess): this one enum carries both
+/// *surface* clauses parsed from Cypher (`Match`, `With`, `Create`, …)
+/// AND the optimizer's *physical* fused nodes (`Fused*`, below). They
+/// share a type so the optimizer can rewrite in place and the SAME
+/// execution loop runs both — a deliberate perf trade-off (no
+/// logical→physical translation layer on the hot path). The cost is a
+/// wide exhaustive-`match` surface; the compiler enforces it, so adding
+/// a variant is mechanical.
+///
+/// **Execution is split across two engines** keyed on whether a clause
+/// mutates (see `clause_is_mutation` / `is_mutation_query` in
+/// `executor/write.rs`): reads + fused nodes run in `executor/mod.rs`;
+/// `Create`/`Set`/`Delete`/`Remove`/`Merge` (and future mutation
+/// control-flow like `FOREACH`) run in `executor/write.rs`.
 #[derive(Debug, Clone)]
 pub enum Clause {
     Match(MatchClause),
