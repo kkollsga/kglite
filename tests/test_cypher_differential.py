@@ -106,6 +106,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN a.name AS a, b.name AS b, c.name AS c",
         None,
     ),
+    # ── NDV-based selectivity (Tier 0) ──
+    # Both ends carry a non-indexed equality on `city`; the optimizer now
+    # estimates selectivity via per-(type,property) distinct-value counts and
+    # may reverse the pattern to start from the rarer city. Optimised vs naive
+    # must return the same rows regardless of which end is chosen as start.
+    (
+        "ndv_two_end_city_eq",
+        "social_graph",
+        "MATCH (a:Person {city: 'Oslo'})-[:KNOWS]->(b:Person {city: 'Bergen'}) "
+        "RETURN a.name AS a, b.name AS b",
+        None,
+    ),
     # ── cyclic pattern (matcher target_hint fast path) ──
     # `a` reappears at the end → the closing segment is a bound-target check,
     # not a full expansion. Optimised vs naive must agree on the cycle count.

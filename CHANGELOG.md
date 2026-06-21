@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Planner: data-driven selectivity for non-indexed equality.** The query
+  planner's start-node/pattern-reversal estimator now uses the real
+  per-`(type, property)` distinct-value count (NDV) — `type_count / ndv` —
+  instead of a flat `÷100` guess for equality on a non-indexed property. This
+  fixes mis-rating low-cardinality fields (a boolean ≈ `count/2`, an enum ≈
+  `count/k`) as highly selective, which could pick a far worse start node. On
+  a two-ended equality pattern (`{active:true}` vs `{city:'Oslo'}`) the planner
+  now reverses to the rarer end — ~3.7× faster on the repro (0.67 ms → 0.18 ms).
+  NDV is computed lazily and cached per graph version (auto-invalidated on
+  mutation), gated to types ≤200k nodes (above which a property index — which
+  already gives exact selectivity — is the right tool); the write hot path and
+  indexed/id-anchored lookups are unaffected.
+
 ### Added
 
 - **`FOREACH (var IN list | <update clauses>)`.** Runs the body's update
