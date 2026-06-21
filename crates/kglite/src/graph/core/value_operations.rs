@@ -77,6 +77,32 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
             let total_days = (*months as i64) * 30 + (*days as i64);
             Value::DateTime(*d + chrono::Duration::days(total_days))
         }
+        // Timestamp + Int → Timestamp (add days).
+        (Value::Timestamp(d), Value::Int64(n)) | (Value::Int64(n), Value::Timestamp(d)) => {
+            Value::Timestamp(*d + chrono::Duration::days(*n))
+        }
+        // Timestamp + Duration → Timestamp. Unlike DateTime, the seconds
+        // component IS applied (Timestamp carries sub-day precision).
+        // Months approximated as 30 days (matches the DateTime convention).
+        (
+            Value::Timestamp(d),
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+        )
+        | (
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+            Value::Timestamp(d),
+        ) => Value::Timestamp(
+            *d + chrono::Duration::days((*months as i64) * 30 + (*days as i64))
+                + chrono::Duration::seconds(*seconds),
+        ),
         // Duration + Duration — component-wise sum.
         (
             Value::Duration {
@@ -131,6 +157,26 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
             let total_days = (*months as i64) * 30 + (*days as i64);
             Value::DateTime(*d - chrono::Duration::days(total_days))
         }
+        // Timestamp - Int → Timestamp (subtract days).
+        (Value::Timestamp(d), Value::Int64(n)) => Value::Timestamp(*d - chrono::Duration::days(*n)),
+        // Timestamp - Timestamp → Duration at full second precision.
+        (Value::Timestamp(a), Value::Timestamp(b)) => Value::Duration {
+            months: 0,
+            days: 0,
+            seconds: (*a - *b).num_seconds(),
+        },
+        // Timestamp - Duration → Timestamp (seconds applied).
+        (
+            Value::Timestamp(d),
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+        ) => Value::Timestamp(
+            *d - chrono::Duration::days((*months as i64) * 30 + (*days as i64))
+                - chrono::Duration::seconds(*seconds),
+        ),
         // Duration - Duration → Duration.
         (
             Value::Duration {
@@ -270,6 +316,7 @@ pub fn format_value_compact(val: &Value) -> String {
         Value::String(v) => v.clone(),
         Value::Boolean(v) => v.to_string(),
         Value::DateTime(v) => v.format("%Y-%m-%d").to_string(),
+        Value::Timestamp(v) => v.format("%Y-%m-%dT%H:%M:%S").to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Duration {
             months,
@@ -317,6 +364,7 @@ pub fn format_value_compact_into(buf: &mut String, val: &Value) {
         Value::String(v) => buf.push_str(v),
         Value::Boolean(v) => write!(buf, "{}", v).unwrap(),
         Value::DateTime(v) => write!(buf, "{}", v.format("%Y-%m-%d")).unwrap(),
+        Value::Timestamp(v) => write!(buf, "{}", v.format("%Y-%m-%dT%H:%M:%S")).unwrap(),
         Value::Point { lat, lon } => write!(buf, "point({}, {})", lat, lon).unwrap(),
         Value::Duration {
             months,

@@ -765,6 +765,9 @@ fn value_type_name(value: &Value) -> String {
         Value::Float64(_) => "float".to_string(),
         Value::Boolean(_) => "bool".to_string(),
         Value::DateTime(_) => "date".to_string(),
+        // No blueprint "timestamp" column type; export as ISO string so the
+        // value survives CSV round-trip as text.
+        Value::Timestamp(_) => "string".to_string(),
         Value::UniqueId(_) => "int".to_string(),
         Value::Point { .. } => "string".to_string(), // serialized as string in CSV
         // Durations are query-time-only — CSV export serializes as string.
@@ -930,6 +933,7 @@ fn json_value(value: &Value) -> String {
         }
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(dt) => json_string(&dt.to_string()),
+        Value::Timestamp(dt) => json_string(&dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("{{\"lat\":{},\"lon\":{}}}", lat, lon),
         Value::Duration {

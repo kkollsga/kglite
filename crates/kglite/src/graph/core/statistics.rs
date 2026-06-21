@@ -168,6 +168,7 @@ fn calculate_stats_for_nodes(
                             Value::Float64(_) => "float64",
                             Value::Boolean(_) => "boolean",
                             Value::DateTime(_) => "datetime",
+                            Value::Timestamp(_) => "timestamp",
                             Value::UniqueId(_) => "unique_id",
                             Value::Point { .. } => "point",
                             Value::Duration { .. } => "duration",

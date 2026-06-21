@@ -342,6 +342,7 @@ fn csv_value(buf: &mut String, val: &Value) {
             let _ = write!(buf, "{}", u);
         }
         Value::DateTime(d) => buf.push_str(&d.format("%Y-%m-%d").to_string()),
+        Value::Timestamp(d) => buf.push_str(&d.format("%Y-%m-%dT%H:%M:%S").to_string()),
         Value::Point { lat, lon } => {
             use std::fmt::Write;
             let _ = write!(buf, "POINT({} {})", lon, lat);

@@ -170,8 +170,24 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::String(s), Value::DateTime(date)) => {
             parse_date_string(s).map(|parsed| parsed.cmp(date))
         }
+        // Timestamp comparisons (0.12 Cluster 1).
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        // Mixed with date-only DateTime: treat the date as midnight.
+        (Value::Timestamp(a), Value::DateTime(b)) => b.and_hms_opt(0, 0, 0).map(|bt| a.cmp(&bt)),
+        (Value::DateTime(a), Value::Timestamp(b)) => a.and_hms_opt(0, 0, 0).map(|at| at.cmp(b)),
+        // Timestamp vs String: parse ISO datetime (or a bare date at midnight).
+        (Value::Timestamp(ts), Value::String(s)) => parse_datetime_string(s).map(|p| ts.cmp(&p)),
+        (Value::String(s), Value::Timestamp(ts)) => parse_datetime_string(s).map(|p| p.cmp(ts)),
         _ => None,
     }
+}
+
+/// Parse a datetime string: full ISO `YYYY-MM-DDTHH:MM:SS`, falling back
+/// to a bare date (midnight). Mirrors `parse_date_string` for timestamps.
+fn parse_datetime_string(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .or_else(|| parse_date_string(s).and_then(|d| d.and_hms_opt(0, 0, 0)))
 }
 
 /// Parse a date string in common formats (ISO YYYY-MM-DD preferred)

@@ -38,8 +38,8 @@ use std::collections::HashMap;
 
 use boltr::error::BoltError;
 use boltr::types::{
-    BoltDate, BoltDict, BoltDuration, BoltNode, BoltPath, BoltPoint2D, BoltRelationship,
-    BoltUnboundRelationship, BoltValue,
+    BoltDate, BoltDict, BoltDuration, BoltLocalDateTime, BoltNode, BoltPath, BoltPoint2D,
+    BoltRelationship, BoltUnboundRelationship, BoltValue,
 };
 
 use kglite::api::Value;
@@ -85,6 +85,18 @@ pub fn to_bolt(value: &Value) -> Result<BoltValue, BoltError> {
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a valid date");
             Ok(BoltValue::Date(BoltDate {
                 days: date.signed_duration_since(epoch).num_days(),
+            }))
+        }
+        Value::Timestamp(dt) => {
+            // kglite Timestamp is a naive (zoneless) date+time at second
+            // precision → Bolt LocalDateTime (seconds since epoch + nanos).
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .expect("1970-01-01 is a valid date")
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is a valid time");
+            Ok(BoltValue::LocalDateTime(BoltLocalDateTime {
+                seconds: dt.signed_duration_since(epoch).num_seconds(),
+                nanoseconds: 0,
             }))
         }
         Value::Point { lat, lon } => Ok(BoltValue::Point2D(BoltPoint2D {
@@ -343,13 +355,23 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
         BoltValue::Bytes(_) => Err(BoltError::Protocol(
             "Bolt Bytes parameter not supported — kglite has no byte-string Value variant".into(),
         )),
+        // LocalDateTime (zoneless) maps cleanly to Value::Timestamp
+        // (second precision; sub-second nanos are dropped).
+        BoltValue::LocalDateTime(dt) => {
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .expect("1970-01-01 is a valid date")
+                .and_hms_opt(0, 0, 0)
+                .expect("00:00:00 is a valid time");
+            Ok(Value::Timestamp(
+                epoch + chrono::Duration::seconds(dt.seconds),
+            ))
+        }
         BoltValue::Time(_)
         | BoltValue::LocalTime(_)
         | BoltValue::DateTime(_)
-        | BoltValue::DateTimeZoneId(_)
-        | BoltValue::LocalDateTime(_) => Err(BoltError::Protocol(
-            "Bolt time-of-day / timestamp parameters not yet supported — kglite's \
-             Value::DateTime is date-only (Phase A.1 deferred time precision)"
+        | BoltValue::DateTimeZoneId(_) => Err(BoltError::Protocol(
+            "Bolt zoned timestamp / time-of-day parameters not supported — kglite's \
+             temporal Values are zoneless (use LocalDateTime / Date)"
                 .into(),
         )),
         BoltValue::Point3D(_) => Err(BoltError::Protocol(
