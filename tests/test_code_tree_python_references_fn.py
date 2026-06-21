@@ -16,9 +16,7 @@ from kglite.code_tree import build  # noqa: E402
 
 
 def _refs(graph) -> set[tuple[str, str]]:
-    rows = graph.cypher(
-        "MATCH (a:Function)-[:REFERENCES_FN]->(b:Function) RETURN a.name AS a, b.name AS b"
-    ).to_list()
+    rows = graph.cypher("MATCH (a:Function)-[:REFERENCES_FN]->(b:Function) RETURN a.name AS a, b.name AS b").to_list()
     return {(r["a"], r["b"]) for r in rows}
 
 

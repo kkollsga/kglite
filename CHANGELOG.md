@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.8] — 2026-06-21 — code_tree resolution accuracy + dead-code analysis
+
+Validated across 18 real repos (7 languages, zero crashes); the
+inheritance tier alone resolved 5,350 otherwise-misattributed calls on the
+neo4j source tree.
+
 ### Added
+
+- **`code_tree` cross-language HTTP edges.** A client HTTP call
+  (`fetch`/`axios` in JS/TS, `requests`/`httpx` in Python, `reqwest` in Rust,
+  `net/http` in Go) is now linked to the server `Route` it targets, by
+  normalized path: `Function -[CALLS_SERVICE]-> Route -[HANDLES]-> Function`.
+  Impact analysis crosses the client/server (and language) boundary — a TS
+  `fetch("/api/users")` reaches the Python FastAPI handler for `/api/users`.
+  Concrete client paths match parameterized routes (`/users/7` →
+  `/users/{id}`). Detection is best-effort source matching, so edges are
+  tagged `confidence = "inferred"`; the pass is a no-op on repos with no
+  routes. See CYPHER.md → Code-graph analysis → Edge confidence.
 
 - **`code_tree` Python `REFERENCES_FN` edges.** The Python parser now records
   function-pointer / callback arguments (`map(handler, xs)`,
