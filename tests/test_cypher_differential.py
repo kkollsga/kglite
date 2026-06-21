@@ -114,8 +114,7 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "ndv_two_end_city_eq",
         "social_graph",
-        "MATCH (a:Person {city: 'Oslo'})-[:KNOWS]->(b:Person {city: 'Bergen'}) "
-        "RETURN a.name AS a, b.name AS b",
+        "MATCH (a:Person {city: 'Oslo'})-[:KNOWS]->(b:Person {city: 'Bergen'}) RETURN a.name AS a, b.name AS b",
         None,
     ),
     # ── cyclic pattern (matcher target_hint fast path) ──
