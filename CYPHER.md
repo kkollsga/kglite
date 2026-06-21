@@ -1207,6 +1207,25 @@ ORDER BY size(members) DESC
 For test-impact analysis from a set of changed files, see
 `CALL affected_tests({files: [...]})`.
 
+### Edge confidence
+
+Most edges are **extracted** — parsed facts (a `CALLS` edge is a real call
+site). A few are **inferred** — best-effort heuristics, notably the
+cross-language coupling edges (a client request matched to a server route by
+path). Inferred edges carry `confidence = "inferred"`; extracted edges leave
+the property unset. So:
+
+```cypher
+-- facts only (exclude heuristic edges)
+MATCH (a)-[r:CALLS]->(b) WHERE r.confidence IS NULL RETURN a, b
+
+-- just the heuristic cross-language couplings
+MATCH (a)-[r]->(b) WHERE r.confidence = 'inferred' RETURN type(r), a.name, b.name
+```
+
+Inheritance-resolved `CALLS` edges stay **extracted** — they're pinned via
+the type graph, not guessed, so they're facts, not heuristics.
+
 ## Scoping graph algorithms to a subgraph
 
 The centrality (`pagerank`, `degree`, `betweenness`, `closeness`) and community
