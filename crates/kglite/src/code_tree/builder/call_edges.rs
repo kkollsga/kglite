@@ -7,9 +7,9 @@
 //! ~9% to a meaningfully higher rate by pinning calls like
 //! `Assert.True` to the Assert class actually imported by the caller.
 
-use crate::code_tree::models::{FileInfo, FunctionInfo};
+use crate::code_tree::models::{FileInfo, FunctionInfo, TypeRelationship};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One resolved caller → callee edge, with call-site line numbers.
 pub struct CallEdge {
@@ -40,6 +40,11 @@ pub struct CallResolutionStats {
     pub ambiguous_dropped: u64,
     pub resolved_call_sites: u64,
     pub resolved_edges: u64,
+    /// Subset of `resolved_call_sites` pinned via the inheritance tier — a
+    /// `self.method()` whose method is defined on an ancestor (EXTENDS /
+    /// IMPLEMENTS), not the caller's own type. The headline win of the
+    /// inheritance-aware resolution.
+    pub resolved_via_inheritance: u64,
 }
 
 /// Per-function scratch counters, summed into [`CallResolutionStats`] after
@@ -51,6 +56,54 @@ struct Counts {
     no_candidate: u64,
     ambiguous: u64,
     resolved: u64,
+    inherited: u64,
+}
+
+/// Terminal segment of a `::` / `.` / `/`-separated type name — the form
+/// stored in `qname_to_owner`, so ancestor lookups match call candidates.
+fn short_type_name(name: &str) -> &str {
+    let mut cut = 0usize;
+    for sep in ["::", ".", "/"] {
+        if let Some(i) = name.rfind(sep) {
+            let after = i + sep.len();
+            if after > cut {
+                cut = after;
+            }
+        }
+    }
+    &name[cut..]
+}
+
+/// type short-name → transitive ancestor short-names, derived from the
+/// EXTENDS / IMPLEMENTS relationships in the parse. Borrowed from
+/// `rels`, so the map lives as long as the caller's `type_relationships`.
+fn build_ancestor_map(rels: &[TypeRelationship]) -> HashMap<&str, HashSet<&str>> {
+    let mut parents: HashMap<&str, Vec<&str>> = HashMap::new();
+    for tr in rels {
+        if tr.relationship == "extends" || tr.relationship == "implements" {
+            if let Some(tgt) = tr.target_type.as_deref() {
+                parents
+                    .entry(short_type_name(&tr.source_type))
+                    .or_default()
+                    .push(short_type_name(tgt));
+            }
+        }
+    }
+    let mut out: HashMap<&str, HashSet<&str>> = HashMap::with_capacity(parents.len());
+    for &child in parents.keys() {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = parents.get(child).cloned().unwrap_or_default();
+        while let Some(p) = stack.pop() {
+            // Guard against inheritance cycles (malformed input) via `seen`.
+            if p != child && seen.insert(p) {
+                if let Some(gp) = parents.get(p) {
+                    stack.extend(gp.iter().copied());
+                }
+            }
+        }
+        out.insert(child, seen);
+    }
+    out
 }
 
 /// Per-function output of the parallel match loop: borrowed
@@ -91,6 +144,7 @@ fn infer_lang_group(qname: &str) -> &'static str {
 ///
 /// Tiers (first non-empty wins):
 ///   0. Receiver hint: `Receiver.method` → narrow by owner short-name
+///   0b. Inheritance: a self-call to a method defined on an ancestor (EXTENDS/IMPLEMENTS, not the caller's own type) resolves to the unique inherited definition
 ///   1. Same owner: caller and target share qualified prefix
 ///   2. Same file
 ///   3. Same language group (separator convention)
@@ -104,6 +158,7 @@ pub fn build_call_edges(
     files: &[FileInfo],
     excluded_names: &std::collections::HashSet<&str>,
     max_targets: usize,
+    type_relationships: &[TypeRelationship],
 ) -> (Vec<CallEdge>, CallResolutionStats) {
     let verbose = std::env::var_os("KGLITE_CODE_TREE_VERBOSE").is_some();
     let t0 = std::time::Instant::now();
@@ -153,6 +208,9 @@ pub fn build_call_edges(
         .filter(|f| !f.imports.is_empty())
         .map(|f| (f.path.as_str(), &f.imports))
         .collect();
+
+    // type short-name → transitive ancestors, for the inheritance tier.
+    let ancestors = build_ancestor_map(type_relationships);
 
     if verbose {
         eprintln!(
@@ -221,6 +279,7 @@ pub fn build_call_edges(
                 } else {
                     None
                 };
+                let mut owner_hint_hit = false;
                 if let Some(hint) = explicit_hint.or(implicit_hint) {
                     filtered = targets
                         .iter()
@@ -229,6 +288,43 @@ pub fn build_call_edges(
                         .collect();
                     if !filtered.is_empty() {
                         targets = &filtered[..];
+                        owner_hint_hit = true;
+                    }
+                }
+
+                // Inheritance tier: a `self.method()` whose method isn't
+                // defined on the caller's own type resolves to the method
+                // *inherited* from an ancestor (EXTENDS / IMPLEMENTS). Only
+                // fires for implicit (self) calls whose direct-owner filter
+                // above found nothing — `obj.method()` is left alone (we
+                // can't infer obj's type). Conservative: a unique inherited
+                // definition resolves immediately; a diamond narrows the set
+                // and defers to the later tiers.
+                if !owner_hint_hit && targets.len() > 1 {
+                    if let Some(owner) = implicit_hint {
+                        if let Some(anc) = ancestors.get(owner) {
+                            let inh: Vec<&str> = candidates
+                                .iter()
+                                .copied()
+                                .filter(|t| {
+                                    qname_to_owner
+                                        .get(t)
+                                        .copied()
+                                        .is_some_and(|o| anc.contains(o))
+                                })
+                                .collect();
+                            if inh.len() == 1 {
+                                counts.resolved += 1;
+                                counts.inherited += 1;
+                                if inh[0] != caller_qn {
+                                    out.push((caller_qn, inh[0], *line));
+                                }
+                                continue;
+                            } else if !inh.is_empty() {
+                                filtered = inh;
+                                targets = &filtered[..];
+                            }
+                        }
                     }
                 }
 
@@ -314,6 +410,7 @@ pub fn build_call_edges(
         stats.no_candidate += c.no_candidate;
         stats.ambiguous_dropped += c.ambiguous;
         stats.resolved_call_sites += c.resolved;
+        stats.resolved_via_inheritance += c.inherited;
     }
 
     // Merge into the final dedupe map sequentially — 200K inserts is ~5ms.
@@ -377,7 +474,7 @@ pub fn build_call_edges(
 #[cfg(test)]
 mod stats_tests {
     use super::*;
-    use crate::code_tree::models::{FileInfo, FunctionInfo};
+    use crate::code_tree::models::{FileInfo, FunctionInfo, TypeRelationship};
 
     fn func(qn: &str, file: &str, calls: &[(&str, u32)]) -> FunctionInfo {
         FunctionInfo {
@@ -408,7 +505,7 @@ mod stats_tests {
         let mut noise = std::collections::HashSet::new();
         noise.insert("noisy");
 
-        let (edges, stats) = build_call_edges(&functions, &files, &noise, 5);
+        let (edges, stats) = build_call_edges(&functions, &files, &noise, 5, &[]);
 
         assert_eq!(stats.total_calls, 4);
         assert_eq!(stats.excluded_noise, 1);
@@ -417,5 +514,57 @@ mod stats_tests {
         assert_eq!(stats.resolved_call_sites, 2); // two `bar` sites
         assert_eq!(stats.resolved_edges, 1); // collapsed to one a.foo→a.bar edge
         assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn inheritance_tier_resolves_self_call_to_ancestor_method() {
+        // `m` exists on Base and Other. Derived extends Base. A self-call to
+        // `m()` from Derived must resolve to the inherited Base.m — not Other.m
+        // (which the same-file / global fallbacks could otherwise pick).
+        let files = vec![FileInfo {
+            path: "a.py".into(),
+            ..Default::default()
+        }];
+        let functions = vec![
+            func("mod.Base.m", "a.py", &[]),
+            func("mod.Other.m", "a.py", &[]),
+            func("mod.Derived.caller", "a.py", &[("m", 1)]),
+        ];
+        let rels = vec![TypeRelationship {
+            source_type: "mod.Derived".into(),
+            target_type: Some("mod.Base".into()),
+            relationship: "extends".into(),
+            methods: vec![],
+        }];
+        let noise = std::collections::HashSet::new();
+
+        let (edges, stats) = build_call_edges(&functions, &files, &noise, 5, &rels);
+
+        assert_eq!(stats.resolved_via_inheritance, 1);
+        let pairs: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|e| (e.caller.as_str(), e.callee.as_str()))
+            .collect();
+        assert!(pairs.contains(&("mod.Derived.caller", "mod.Base.m")));
+        assert!(!pairs.iter().any(|(_, callee)| *callee == "mod.Other.m"));
+    }
+
+    #[test]
+    fn no_type_relationships_means_no_inheritance_resolution() {
+        // Same shape, but without the EXTENDS relationship the self-call to a
+        // multi-owner `m` is left to the ordinary tiers (no inheritance pin).
+        let files = vec![FileInfo {
+            path: "a.py".into(),
+            ..Default::default()
+        }];
+        let functions = vec![
+            func("mod.Base.m", "a.py", &[]),
+            func("mod.Other.m", "a.py", &[]),
+            func("mod.Derived.caller", "a.py", &[("m", 1)]),
+        ];
+        let noise = std::collections::HashSet::new();
+
+        let (_edges, stats) = build_call_edges(&functions, &files, &noise, 5, &[]);
+        assert_eq!(stats.resolved_via_inheritance, 0);
     }
 }

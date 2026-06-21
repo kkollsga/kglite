@@ -2114,8 +2114,13 @@ pub fn load_into_graph(
     for name in super::super::parsers::php::PHP_NOISE_NAMES {
         noise.insert(*name);
     }
-    let (call_edges, call_stats) =
-        super::call_edges::build_call_edges(&result.functions, &result.files, &noise, 5);
+    let (call_edges, call_stats) = super::call_edges::build_call_edges(
+        &result.functions,
+        &result.files,
+        &noise,
+        5,
+        &result.type_relationships,
+    );
     if !call_edges.is_empty() {
         maintain::add_connections(
             graph,
