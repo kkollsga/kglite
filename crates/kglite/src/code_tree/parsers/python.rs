@@ -426,6 +426,54 @@ impl PythonParser {
         calls
     }
 
+    /// Function-value arguments — `map(helper, xs)`, `sorted(xs, key=helper)`,
+    /// `register(callback)` — are *references*, not call sites: the function
+    /// is passed by value, not invoked here. Recorded separately so the
+    /// builder can emit `REFERENCES_FN` edges (and so a function only ever
+    /// passed as a callback isn't reported as dead code).
+    ///
+    /// Unlike Rust, Python can't use case to tell a function name from a
+    /// variable (both are snake_case), so we record every bare-identifier
+    /// argument and let the builder keep only those that resolve to a known
+    /// project function. Descends like `extract_calls` (into lambdas, not
+    /// into nested named definitions).
+    fn extract_function_pointer_refs(body: Node, source: &[u8]) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = Vec::new();
+        fn walk(node: Node, source: &[u8], out: &mut Vec<(String, u32)>) {
+            if node.kind() == "call" {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    let mut cursor = args.walk();
+                    for arg in args.children(&mut cursor) {
+                        let ident = match arg.kind() {
+                            "identifier" => Some(arg),
+                            // `key=helper` — the value side of a keyword arg.
+                            "keyword_argument" => arg
+                                .child_by_field_name("value")
+                                .filter(|v| v.kind() == "identifier"),
+                            _ => None,
+                        };
+                        if let Some(id) = ident {
+                            let text = node_text(id, source);
+                            if text.len() >= 2 {
+                                out.push((text.to_string(), id.start_position().row as u32 + 1));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
+                    walk(child, source, out);
+                }
+            }
+        }
+        walk(body, source, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn file_to_module_path(filepath: &Path, src_root: &Path) -> String {
         let rel = filepath.strip_prefix(src_root).unwrap_or(filepath);
         let mut parts: Vec<String> = rel
@@ -712,6 +760,9 @@ impl PythonParser {
         let calls = block
             .map(|b| Self::extract_calls(b, source))
             .unwrap_or_default();
+        let function_refs = block
+            .map(|b| Self::extract_function_pointer_refs(b, source))
+            .unwrap_or_default();
         let parameters = Self::extract_parameters(node, source);
         let param_count = Some(
             parameters
@@ -744,7 +795,7 @@ impl PythonParser {
             return_type: Self::get_return_type(node, source),
             calls,
             references: Vec::new(),
-            function_refs: Vec::new(),
+            function_refs,
             type_parameters: get_type_parameters(node, source, "type_parameter"),
             decorators: Vec::new(),
             parameters,
