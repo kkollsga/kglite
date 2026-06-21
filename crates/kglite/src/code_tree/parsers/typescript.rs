@@ -106,6 +106,17 @@ thread_local! {
             .expect("loading tree-sitter-typescript grammar");
         std::cell::RefCell::new(p)
     };
+    // `.tsx` needs the JSX-aware grammar: the plain TypeScript grammar can't
+    // parse JSX, so every component body desyncs into ERROR nodes and the
+    // enclosing `export default function App()` loses its name. The two grammars
+    // are NOT interchangeable the other way — TSX reads `<T>expr` as JSX, which
+    // would misparse `.ts` type assertions/generics — so we keep them separate.
+    static TSX_PARSER: std::cell::RefCell<Parser> = {
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .expect("loading tree-sitter-tsx grammar");
+        std::cell::RefCell::new(p)
+    };
     static JS_PARSER: std::cell::RefCell<Parser> = {
         let mut p = Parser::new();
         p.set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -129,10 +140,15 @@ impl JstsParser {
         }
     }
 
-    fn parse_tree(&self, source: &[u8]) -> Option<Tree> {
+    fn parse_tree(&self, source: &[u8], is_tsx: bool) -> Option<Tree> {
         if self.lang_name == "typescript" {
-            TS_PARSER.with(|p| p.borrow_mut().parse(source, None))
+            if is_tsx {
+                TSX_PARSER.with(|p| p.borrow_mut().parse(source, None))
+            } else {
+                TS_PARSER.with(|p| p.borrow_mut().parse(source, None))
+            }
         } else {
+            // tree-sitter-javascript already handles JSX, so `.jsx` is fine here.
             JS_PARSER.with(|p| p.borrow_mut().parse(source, None))
         }
     }
@@ -1066,7 +1082,11 @@ impl LanguageParser for JstsParser {
             return r;
         }
 
-        let Some(tree) = self.parse_tree(&source) else {
+        let is_tsx = filepath
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("tsx"));
+        let Some(tree) = self.parse_tree(&source, is_tsx) else {
             return ParseResult::new();
         };
         let root = tree.root_node();

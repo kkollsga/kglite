@@ -22,9 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Top-level `struct Foo { … };` / `enum E { … };` in pure-C files are now
     extracted (the C path previously only handled them inside a `declaration`
     wrapper, dropping bare top-level definitions).
+  - C++ function names are now resolved for operator overloads (`operator()`,
+    `operator=`, `operator[]`, …), out-of-line definitions under nested
+    namespaces (`Ret a::b::Ctx::method()`), and explicit template
+    specializations (`template<> bool fits<T>(…)`) — all previously `unknown`.
+    All-caps method names (`MINUS`, `OK`) are no longer mistaken for macro
+    decorators in the name position.
 
-  Measured on the kuzu source tree: extracted classes 349 → 2664, `unknown`
-  function rate 88% → 2%, EXTENDS edges 206 → 1272.
+  Measured on the kuzu source tree: extracted classes 349 → 2679, `unknown`
+  function rate 88% → 1.2%, EXTENDS edges 206 → 1272. (duckdb: `unknown`
+  1.1% → 0.3%.)
+
+- **`code_tree` TypeScript `.tsx` parsing.** `.tsx` files are now parsed with
+  the JSX-aware grammar. Previously they used the plain TypeScript grammar,
+  whose inability to parse JSX desynced every component body into error nodes —
+  so `export default function App() { return <div/> }` and similar lost their
+  names (extracted as `unknown`). `.ts` files keep the TypeScript grammar (TSX
+  would misread `<T>` type assertions/generics as JSX).
 
 ## [0.11.6] — 2026-06-21 — interruptible Cypher (Ctrl-C) + free-threading readiness
 

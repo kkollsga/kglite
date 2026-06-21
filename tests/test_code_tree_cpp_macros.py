@@ -331,3 +331,66 @@ def test_pure_c_dot_h_unaffected(tmp_path):
     # The C struct is still extracted (labeled :Struct), nothing misclassified.
     structs = {r["t"] for r in g.cypher("MATCH (s:Struct) RETURN s.title AS t").to_list()}
     assert "Point" in structs, structs
+
+
+def _names(graph) -> set[str]:
+    return {r["n"] for r in graph.cypher("MATCH (f:Function) RETURN f.name AS n").to_list()}
+
+
+def test_operator_overloads_named(tmp_path):
+    """`std::size_t operator()(…)`, `T& operator=(…)`, `bool operator==(…)` —
+    operator overloads are named `operator()` / `operator=` / `operator==`,
+    not `unknown`."""
+    _write(
+        tmp_path,
+        {
+            "ops.cpp": """
+            struct H {
+                std::size_t operator()(int k) const { return 0; }
+                H& operator=(const H& o) { return *this; }
+                bool operator==(const H& o) const { return true; }
+                int operator[](int i) const { return i; }
+            };
+            """,
+        },
+    )
+    names = _names(build(str(tmp_path)))
+    for op in ("operator()", "operator=", "operator==", "operator[]"):
+        assert op in names, f"{op} missing from {names}"
+    assert "unknown" not in names, names
+
+
+def test_nested_qualified_method_name(tmp_path):
+    """`Ret a::b::Ctx::method()` — out-of-line definition under nested
+    namespaces resolves to the trailing segment, including all-caps names."""
+    _write(
+        tmp_path,
+        {
+            "m.cpp": """
+            namespace a { namespace b {
+            struct Ctx { int run(); int MINUS(); };
+            }}
+            int a::b::Ctx::run() { return 1; }
+            int a::b::Ctx::MINUS() { return 2; }
+            """,
+        },
+    )
+    names = _names(build(str(tmp_path)))
+    assert "run" in names, names
+    # All-caps method names must survive the macro-decorator heuristic.
+    assert "MINUS" in names, names
+
+
+def test_template_specialization_named(tmp_path):
+    """`template<> bool fits<uint8_t>(int)` — the explicit specialization is
+    named `fits`, not `unknown`."""
+    _write(
+        tmp_path,
+        {
+            "t.cpp": """
+            template <typename T> bool fits(int v);
+            template <> bool fits<unsigned char>(int v) { return v >= 0; }
+            """,
+        },
+    )
+    assert "fits" in _names(build(str(tmp_path)))
