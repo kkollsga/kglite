@@ -244,6 +244,19 @@ impl Default for DirGraph {
 /// Detected here (at index build) rather than per-mutation so bulk
 /// `UNWIND … CREATE` and `add_nodes` stay O(n), not O(n²). `id` is meant to
 /// be unique (like `add_nodes(unique_id_field=…)`); use MERGE or dedupe input.
+///
+/// **Uniqueness is detective-by-design — preventive constraints are a
+/// deliberate non-feature, not a gap.** Per-write `UNIQUE` / `NOT NULL` /
+/// PRIMARY KEY constraints (à la Neo4j/Kùzu) are intentionally NOT
+/// supported: they validate data-quality, which for an embedded
+/// exploration/analytical engine belongs at load time (this batch O(n)
+/// warning), not on the in-memory write hot path. The realistic needs are
+/// already covered — `MERGE` (don't-duplicate upsert), this warning
+/// (dirty-load signal), and the `db.duplicate_title` / `parallel_edges`
+/// rule procedures (on-demand audit). Re-evaluate only for a concrete
+/// interactive-write / untrusted-input workflow; even then, scope to
+/// opt-in `id`-uniqueness (cheap — piggybacks `id_indices`), never an
+/// arbitrary-property index maintained per write.
 fn warn_on_duplicate_ids(node_type: &str, entry_count: usize, unique_count: usize) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
