@@ -165,25 +165,29 @@ pub(super) fn estimate_node_selectivity(
                     }
                 }
             }
-            // Heuristic: equality filters on string properties typically have many
-            // distinct values (~100x reduction each). Range/comparison filters are
-            // gentler (~10x). Multiple filters multiply the reduction.
-            let eq_count = props
-                .values()
-                .filter(|m| {
-                    matches!(
-                        m,
-                        PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_)
-                    )
-                })
-                .count();
-            let other_count = props.len() - eq_count;
+            // Per-property reduction. These props are all NON-indexed (an
+            // indexed equality returned exact selectivity above). Equality on
+            // a typed node uses the real distinct-value count (NDV) when
+            // available — `type_count / ndv` — so a low-cardinality field
+            // (bool ≈ /2, enum ≈ /k) isn't mis-rated as highly selective and a
+            // high-cardinality one isn't under-rated. Falls back to the flat
+            // ~100x heuristic when NDV is unavailable (no type, or type too
+            // large to scan). Range/other filters use the gentler ~10x guess.
             let mut est = type_count;
-            for _ in 0..eq_count {
-                est /= 100;
-            }
-            for _ in 0..other_count {
-                est /= 10;
+            for (prop, matcher) in props {
+                match matcher {
+                    PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_) => {
+                        match np
+                            .node_type
+                            .as_ref()
+                            .and_then(|nt| graph.property_ndv(nt, prop))
+                        {
+                            Some(ndv) => est /= ndv.max(1),
+                            None => est /= 100,
+                        }
+                    }
+                    _ => est /= 10,
+                }
             }
             est.max(1)
         }

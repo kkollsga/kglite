@@ -38,6 +38,11 @@ fn next_graph_id() -> u64 {
     NEXT_GRAPH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
+/// for the planner's selectivity estimator. The `u64` is the graph `version`
+/// the map was built at; a mismatch triggers a recompute (auto-invalidation).
+type PropertyNdvCache = Arc<RwLock<(u64, HashMap<(String, String), usize>)>>;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirGraph {
     pub graph: GraphBackend,
@@ -130,6 +135,14 @@ pub struct DirGraph {
     /// Invalidated on edge mutations alongside edge_type_counts_cache.
     #[serde(skip)]
     pub type_connectivity_cache: Arc<RwLock<Option<Vec<ConnectivityTriple>>>>,
+    /// Lazy per-`(type, property)` distinct-value count (NDV), used by the
+    /// planner to estimate non-indexed equality selectivity
+    /// (`type_count / ndv`) instead of a flat heuristic. The tuple's `u64` is
+    /// the graph `version` the map was built at: a mismatch means a mutation
+    /// happened, so the map is dropped and recomputed — auto-invalidation
+    /// without per-mutation-site bookkeeping. Plan-time read path only.
+    #[serde(skip)]
+    pub property_ndv_cache: PropertyNdvCache,
     /// Columnar embedding storage: (node_type, property_name) -> EmbeddingStore.
     /// Stored separately from NodeData.properties — invisible to normal node API.
     /// Persisted as a separate section in v2 .kgl files.
@@ -337,6 +350,7 @@ impl DirGraph {
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Arc::new(RwLock::new(None)),
             type_connectivity_cache: Arc::new(RwLock::new(None)),
+            property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -383,6 +397,7 @@ impl DirGraph {
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
             edge_type_counts_cache: Arc::new(RwLock::new(None)),
             type_connectivity_cache: Arc::new(RwLock::new(None)),
+            property_ndv_cache: Arc::new(RwLock::new((0, HashMap::new()))),
             embeddings: HashMap::new(),
             timeseries_configs: HashMap::new(),
             timeseries_store: HashMap::new(),
@@ -677,6 +692,50 @@ impl DirGraph {
     pub(crate) fn invalidate_edge_type_counts_cache(&self) {
         *self.edge_type_counts_cache.write().unwrap() = None;
         *self.type_connectivity_cache.write().unwrap() = None;
+    }
+
+    /// Distinct-value count (NDV) for `(node_type, property)`, lazily computed
+    /// and cached per graph `version`. The planner uses it to estimate
+    /// non-indexed equality selectivity as `type_count / ndv` instead of a
+    /// flat heuristic (so a boolean ≈ `count/2`, an enum ≈ `count/k`, a
+    /// high-cardinality field ≈ `count/N`). Returns `None` when the type is
+    /// absent or larger than `MAX_SCAN` (caller falls back to the heuristic);
+    /// at that scale a real property index is the right tool and gives exact
+    /// selectivity anyway. Plan-time read path only — never the write hot path.
+    pub fn property_ndv(&self, node_type: &str, property: &str) -> Option<usize> {
+        const MAX_SCAN: usize = 200_000;
+        let nodes = self.type_indices.get(node_type)?;
+        if nodes.is_empty() || nodes.len() > MAX_SCAN {
+            return None;
+        }
+        let key = (node_type.to_string(), property.to_string());
+        // Fast path: cache hit at the current graph version.
+        {
+            let read = self.property_ndv_cache.read().unwrap();
+            if read.0 == self.version {
+                if let Some(&ndv) = read.1.get(&key) {
+                    return Some(ndv);
+                }
+            }
+        }
+        // Slow path: count distinct values across the type's nodes (O(type)).
+        let mut seen: std::collections::HashSet<Value> = std::collections::HashSet::new();
+        for idx in nodes.iter() {
+            if let Some(node) = self.get_node(idx) {
+                if let Some(val) = node.get_property(property) {
+                    seen.insert(val.into_owned());
+                }
+            }
+        }
+        let ndv = seen.len().max(1);
+        let mut write = self.property_ndv_cache.write().unwrap();
+        // Drop a stale-version map before inserting (auto-invalidation).
+        if write.0 != self.version {
+            write.1.clear();
+            write.0 = self.version;
+        }
+        write.1.insert(key, ndv);
+        Some(ndv)
     }
 
     /// Check if edge type count cache is populated (avoids O(E) scan).
