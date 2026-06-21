@@ -390,6 +390,35 @@ impl ResultView {
         }
         Ok(dict.into_any().unbind())
     }
+
+    /// Row → dict using pre-interned column-name keys. The bulk `to_list`
+    /// path interns the column names ONCE and reuses them for every row,
+    /// instead of re-creating the same Python strings per cell (the old
+    /// `set_item(col, …)` allocated a fresh key string for every cell —
+    /// rows × cols allocations of a handful of distinct names).
+    fn row_to_py_keyed(
+        &self,
+        py: Python<'_>,
+        index: usize,
+        keys: &[pyo3::Bound<'_, pyo3::types::PyString>],
+    ) -> PyResult<Py<PyAny>> {
+        let owned;
+        let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
+            owned = self.materialise_lazy_row(index);
+            &owned
+        } else {
+            &self.rows[index]
+        };
+        let dict = PyDict::new(py);
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(pv) = row.get(i) {
+                dict.set_item(key, preprocessed_value_to_py(py, pv)?)?;
+            } else {
+                dict.set_item(key, py.None())?;
+            }
+        }
+        Ok(dict.into_any().unbind())
+    }
 }
 
 /// Resolve `node_idx . property` against the graph for the lazy path.
@@ -610,8 +639,15 @@ impl ResultView {
     /// ```
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
+        // Intern the column-name dict keys ONCE and reuse them for every row
+        // (Phase 2: avoids re-creating the same Python strings per cell).
+        let keys: Vec<pyo3::Bound<'_, pyo3::types::PyString>> = self
+            .columns
+            .iter()
+            .map(|c| pyo3::types::PyString::intern(py, c))
+            .collect();
         for i in 0..self.effective_len() {
-            list.append(self.row_to_py(py, i)?)?;
+            list.append(self.row_to_py_keyed(py, i, &keys)?)?;
         }
         Ok(list.into_any().unbind())
     }
