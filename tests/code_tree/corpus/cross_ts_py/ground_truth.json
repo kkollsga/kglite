@@ -1,0 +1,6 @@
+{
+  "_comment": "Cross-language coupling: a TS client fetch(\"/api/session\") must connect to the Python FastAPI handler for the same path via the shared Route node. The distractor (/api/nope) targets no route and must not connect to the unrelated `unused` handler.",
+  "family": "cross-lang",
+  "cross_edge": [{ "from": "web/api.ts::createSession", "to": "server/app.py::create_session" }],
+  "cross_nonedge": [{ "from": "web/api.ts::fetchOther", "to": "server/app.py::unused" }]
+}
