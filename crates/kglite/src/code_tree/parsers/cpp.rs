@@ -109,6 +109,12 @@ pub const CPP_NOISE_NAMES: &[&str] = &[
 
 const NESTED_SCOPES: &[&str] = &["function_definition", "lambda_expression"];
 
+/// Scopes that own their own graph node — the call-walk stops here. Unlike
+/// [`NESTED_SCOPES`] (complexity) this excludes `lambda_expression`: a C++
+/// lambda gets no node, so calls inside `[&]{ foo(); }` belong to the
+/// enclosing function (mirrors the Rust closure handling).
+const NAMED_NESTED_SCOPES: &[&str] = &["function_definition"];
+
 const TYPE_NODES: &[&str] = &[
     "primitive_type",
     "type_identifier",
@@ -431,7 +437,7 @@ impl CppParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
                     walk(child, source, out);
                 }
             }

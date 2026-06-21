@@ -93,6 +93,13 @@ pub const PYTHON_NOISE_NAMES: &[&str] = &[
 
 const NESTED_SCOPES: &[&str] = &["function_definition", "lambda", "decorated_definition"];
 
+/// Scopes that own their *own* graph node — the call-walk stops here so a
+/// nested definition's calls aren't attributed to the enclosing function.
+/// Unlike [`NESTED_SCOPES`] (used by complexity) this excludes `lambda`:
+/// a lambda gets no node, so calls inside it belong to the enclosing fn
+/// (mirrors the Rust closure handling).
+const NAMED_NESTED_SCOPES: &[&str] = &["function_definition", "decorated_definition"];
+
 pub struct PythonParser;
 
 thread_local! {
@@ -410,7 +417,7 @@ impl PythonParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
                     walk(child, source, out);
                 }
             }

@@ -68,6 +68,12 @@ const NESTED_SCOPES: &[&str] = &[
     "lambda_expression",
 ];
 
+/// Scopes that own their own graph node — the call-walk stops here. Unlike
+/// [`NESTED_SCOPES`] (complexity) this excludes `lambda_expression`: a Java
+/// lambda gets no node, so calls inside `x -> foo(x)` belong to the
+/// enclosing method (mirrors the Rust closure handling).
+const NAMED_NESTED_SCOPES: &[&str] = &["method_declaration", "constructor_declaration"];
+
 const TYPE_NODES: &[&str] = &[
     "type_identifier",
     "integral_type",
@@ -249,7 +255,7 @@ impl JavaParser {
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if !NESTED_SCOPES.contains(&child.kind()) {
+                if !NAMED_NESTED_SCOPES.contains(&child.kind()) {
                     walk(child, source, out);
                 }
             }
