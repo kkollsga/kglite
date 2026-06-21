@@ -21,9 +21,7 @@ from kglite.code_tree import build  # noqa: E402
 
 
 def _call_pairs(graph) -> set[tuple[str, str]]:
-    rows = graph.cypher(
-        "MATCH (a:Function)-[:CALLS]->(b:Function) RETURN a.name AS caller, b.name AS callee"
-    ).to_list()
+    rows = graph.cypher("MATCH (a:Function)-[:CALLS]->(b:Function) RETURN a.name AS caller, b.name AS callee").to_list()
     return {(r["caller"], r["callee"]) for r in rows}
 
 

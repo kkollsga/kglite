@@ -28,9 +28,7 @@ def _dead(graph, **params) -> set[str]:
     if params:
         inner = ", ".join(f"{k}: {_fmt(v)}" for k, v in params.items())
         arg = f"{{{inner}}}"
-    rows = graph.cypher(
-        f"CALL dead_code({arg}) YIELD node RETURN node.name AS name"
-    ).to_list()
+    rows = graph.cypher(f"CALL dead_code({arg}) YIELD node RETURN node.name AS name").to_list()
     return {r["name"] for r in rows}
 
 
@@ -90,9 +88,7 @@ def test_dead_code_excludes_decorated(tmp_path):
 
 def test_dead_code_excludes_fn_pointer_reference(tmp_path):
     # A function passed by reference (REFERENCES_FN) is used, not dead.
-    (tmp_path / "Cargo.toml").write_text(
-        "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"
-    )
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n')
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(
         textwrap.dedent(
