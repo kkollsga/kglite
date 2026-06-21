@@ -1285,6 +1285,7 @@ impl<'a> CypherExecutor<'a> {
 pub mod affected_tests;
 pub mod call_clause;
 pub mod call_subquery;
+pub mod dead_code;
 pub mod expression;
 pub mod helpers;
 pub mod match_clause;

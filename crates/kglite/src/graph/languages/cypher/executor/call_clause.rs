@@ -307,6 +307,7 @@ impl<'a> CypherExecutor<'a> {
             "parallel_edges" => &["a", "b", "count"],
             "kg_knn" => &["node", "distance_m"],
             "affected_tests" => &["test_file", "depth"],
+            "dead_code" => &["node"],
             "refresh_stats" => &["src_type", "edge_type", "tgt_type", "count"],
             // Phase A.3 / Phase F (#7) — Neo4j-compatible schema
             // introspection procedures. Yield column names match
@@ -714,6 +715,9 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
+            "dead_code" => {
+                super::dead_code::execute_dead_code(self.graph, &params, &clause.yield_items)?
+            }
             "refresh_stats" => super::refresh_stats::execute_refresh_stats(
                 self.graph,
                 &params,
@@ -846,6 +850,11 @@ impl<'a> CypherExecutor<'a> {
                         "kg_knn",
                         "Spatial: k nearest nodes of {target_type} to ({lat}, {lon})",
                         "node, distance_m",
+                    ),
+                    (
+                        "dead_code",
+                        "Functions with no inbound use edge (CALLS / REFERENCES_FN / HANDLES / IMPLEMENTED_BY / DECORATES); excludes tests, dunder and main (pass exclude_public to also drop pub/exported, include_tests to keep tests)",
+                        "node",
                     ),
                     (
                         "list_procedures",

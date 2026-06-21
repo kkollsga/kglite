@@ -1147,6 +1147,66 @@ from a Bolt client or inside a Cypher pipeline; use `list_indexes()`
 from Python code where you'd rather have a Python list of dicts than
 a `cypher()` result.
 
+## Code-graph analysis
+
+When the graph was built by `kglite.code_tree` (a parsed codebase), the
+data needed for the analyses other tools ship as bespoke commands is
+*already on the graph* — most are one query. The metrics are captured at
+parse time (`branch_count`, `max_nesting`, `loc`) and the relationships
+are first-class (`CALLS`, `REFERENCES_FN`, `USES_TYPE`, `EXTENDS`,
+`IMPLEMENTS`).
+
+### `CALL dead_code(...)` — unreferenced functions
+
+```cypher
+CALL dead_code() YIELD node
+RETURN node.qualified_name AS fn, node.file_path AS file
+ORDER BY file
+```
+
+Reports `Function` nodes with no inbound *use* edge — nothing `CALLS`
+them, references them as a value (`REFERENCES_FN`), `HANDLES` them
+(route), or `IMPLEMENTED_BY` (procedure), and no `DECORATES` participation.
+Bundling all of those is the point: a naive `WHERE NOT (:Function)-[:CALLS]->(f)`
+falsely flags callbacks, route handlers and decorated entry points.
+
+Implicit entry points are excluded automatically: test functions, dunder
+methods (`__x__`), and `main`. Options:
+
+| Param | Default | Effect |
+|---|---|---|
+| `include_tests` | `false` | also report test functions |
+| `exclude_public` | `false` | also drop `pub`/`public`/`export`/`exported` visibility (useful for Rust-style codebases; off by default because in Python every non-underscore name is nominally public) |
+
+### Recipe queries (no procedure needed — the data is already there)
+
+```cypher
+-- Complexity hotspots (cyclomatic-style branch count is stored per fn)
+MATCH (f:Function)
+RETURN f.qualified_name, f.branch_count, f.max_nesting
+ORDER BY f.branch_count DESC LIMIT 20
+
+-- Blast radius: everything that (transitively) calls a target
+MATCH (caller:Function)-[:CALLS*1..5]->(t:Function {name: 'parse'})
+RETURN DISTINCT caller.qualified_name
+
+-- God functions: large + high fan-in + high fan-out
+MATCH (f:Function)
+RETURN f.qualified_name, f.branch_count,
+       size([(f)-[:CALLS]->() | 1]) AS fan_out,
+       size([()-[:CALLS]->(f) | 1]) AS fan_in
+ORDER BY fan_out + fan_in DESC LIMIT 20
+
+-- Call-recursion cycles (strongly-connected components over CALLS)
+CALL connected_components({node_type: 'Function', relationship: 'CALLS'})
+YIELD node, component
+RETURN component, collect(node.name) AS members
+ORDER BY size(members) DESC
+```
+
+For test-impact analysis from a set of changed files, see
+`CALL affected_tests({files: [...]})`.
+
 ## Scoping graph algorithms to a subgraph
 
 The centrality (`pagerank`, `degree`, `betweenness`, `closeness`) and community
