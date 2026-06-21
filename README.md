@@ -113,10 +113,10 @@ questions traverse it.
 
 ## How it compares
 
-|                                            | KGLite                            | Kuzu                       | NetworkX           | rustworkx          | Neo4j Embedded         |
+|                                            | KGLite                            | Embedded columnar graph DB | NetworkX           | rustworkx          | Neo4j Embedded         |
 |--------------------------------------------|-----------------------------------|----------------------------|--------------------|--------------------|------------------------|
-| **Install**                                | `pip install kglite`              | `pip install kuzu`         | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
-| **Query language**                         | Cypher (subset)                   | Cypher (full)              | Python API         | Python API         | Cypher (full)          |
+| **Install**                                | `pip install kglite`              | `pip install …`            | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
+| **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher (full) | Python API         | Python API         | Cypher (full)          |
 | **Storage**                                | in-mem · mmap · disk (1B+ edges)  | in-mem · disk (columnar)   | in-mem             | in-mem             | in-mem · disk (JVM)    |
 | **Bulk-load from pandas**                  | one-liner                         | via Arrow                  | manual             | manual             | via driver             |
 | **Bundled MCP server for LLM agents**      | ✅                                 | —                          | —                  | —                  | —                      |
@@ -127,18 +127,22 @@ questions traverse it.
 | **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want Cypher + Python ergonomics + LLM-agent
-plumbing in one wheel. **Pick Kuzu** if your workload is heavy
-analytical OLAP and you can accept that the project is no longer
-maintained (archived 2025). **Pick NetworkX** when you need its
-enormous graph-algorithm library and your data fits in RAM. **Pick
-rustworkx** when you want NetworkX's API in Rust with no query
+plumbing in one wheel — embedded, in-process, with the [Cypher
+surface](CYPHER.md#feature-coverage) (subqueries, path-finding,
+vector + text search, graph algorithms) you'd expect from a columnar
+graph DB, plus a code-graph parser, bundled datasets, and an MCP
+server none of them ship. **Pick a columnar OLAP graph engine** if
+your workload is heavy analytical scans over a mostly-static graph and
+you don't need the Python/agent ergonomics. **Pick NetworkX** when you
+need its enormous graph-algorithm library and your data fits in RAM.
+**Pick rustworkx** when you want NetworkX's API in Rust with no query
 language. **Pick Neo4j Embedded** when you've standardised on
 server-mode Cypher and want the in-process driver for tests.
 
 📊 **[Benchmarks →](BENCHMARKS.md)** — wall-to-wall time per topic (load,
-filter/aggregate, traversal, pathfinding, algorithms, mutations) vs Kùzu,
-NetworkX, rustworkx, igraph, and DuckDB on one shared synthetic graph.
-Reproduce with `python benchmarks/benchmark.py`.
+filter/aggregate, traversal, pathfinding, algorithms, mutations) against
+other embedded graph engines, NetworkX, rustworkx, igraph, and DuckDB on
+one shared synthetic graph. Reproduce with `python benchmarks/benchmark.py`.
 
 ## Quick Start
 
