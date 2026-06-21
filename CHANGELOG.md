@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Faster `to_list()` / `to_dicts()` materialization.** The row→dict loop now
+  interns each column-name key once and reuses it across all rows, instead of
+  re-creating the same Python strings per cell. ~22% faster result
+  marshalling on a 30k×3 result (8.2 ms → 6.4 ms), more on wider/longer
+  results. Results are byte-identical.
+
 ### Changed
 
 - **Planner: data-driven selectivity for non-indexed equality.** The query
