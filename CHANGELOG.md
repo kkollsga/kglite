@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`code_tree` C/C++ extraction.** Three robustness fixes for C++ codebases:
+  - Export-visibility macros in the `class`/`struct` keyword slot
+    (`class KUZU_API Foo { … }`) no longer desync the parse — the macro is
+    neutralized before parsing so the class, its bases, and its members are all
+    extracted. Previously the whole class (and often everything after it) was
+    dropped.
+  - `.h` headers in a C++ codebase are now parsed by the C++ parser. `.h` is
+    C-by-default, but many engines (kuzu, LevelDB, …) use `.h` for C++ headers;
+    the C grammar silently dropped every `class` / `namespace` / `template` in
+    them. (`.c` files and pure-C repos are unaffected.)
+  - Top-level `struct Foo { … };` / `enum E { … };` in pure-C files are now
+    extracted (the C path previously only handled them inside a `declaration`
+    wrapper, dropping bare top-level definitions).
+
+  Measured on the kuzu source tree: extracted classes 349 → 2664, `unknown`
+  function rate 88% → 2%, EXTENDS edges 206 → 1272.
+
 ## [0.11.6] — 2026-06-21 — interruptible Cypher (Ctrl-C) + free-threading readiness
 
 ### Added

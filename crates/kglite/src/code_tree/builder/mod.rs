@@ -189,6 +189,28 @@ fn parse_directory(
                 .push(entry.path().to_path_buf());
         }
     }
+
+    // `.h` is ambiguous: C or C++. `language_for_path` maps it to C, but many
+    // C++ engines (kuzu, LevelDB, …) use `.h` for their C++ headers — parsed by
+    // the C grammar, every `class` / `namespace` / `template` is dropped (the
+    // dominant cause of kuzu's empty type layer). If the repo contains any
+    // definitively-C++ source, route its `.h` files to the C++ parser, which is
+    // a superset of C and still extracts any genuine C headers correctly. `.c`
+    // files stay C.
+    if by_lang.contains_key("cpp") {
+        if let Some(c_files) = by_lang.remove("c") {
+            let (h_files, c_only): (Vec<PathBuf>, Vec<PathBuf>) = c_files
+                .into_iter()
+                .partition(|p| p.extension().and_then(|e| e.to_str()) == Some("h"));
+            if !h_files.is_empty() {
+                by_lang.entry("cpp").or_default().extend(h_files);
+            }
+            if !c_only.is_empty() {
+                by_lang.insert("c", c_only);
+            }
+        }
+    }
+
     if verbose {
         let langs: Vec<&'static str> = by_lang.keys().copied().collect();
         eprintln!(

@@ -250,3 +250,84 @@ def test_lowercase_function_name_not_treated_as_macro(tmp_path):
     b = _function(g, "::Reader_init")
     assert a.get("n") == "io_count", a
     assert b.get("n") == "Reader_init", b
+
+
+def _type_names(graph) -> set[str]:
+    """Names of every extracted class and struct (the C++ parser labels
+    `class` as :Class and `struct` as :Struct)."""
+    names = {r["t"] for r in graph.cypher("MATCH (c:Class) RETURN c.title AS t").to_list()}
+    names |= {r["t"] for r in graph.cypher("MATCH (s:Struct) RETURN s.title AS t").to_list()}
+    return names
+
+
+def test_export_macro_in_class_keyword_slot_extracts_class(tmp_path):
+    """`class KUZU_API Foo { … }` — the export-visibility macro between the
+    `class` keyword and the type name used to make tree-sitter-cpp read the
+    whole thing as a function (the real class dropped). The class, its base,
+    and its methods must now all be extracted."""
+    _write(
+        tmp_path,
+        {
+            "lib.cpp": """
+            #define KUZU_API
+            struct Plain { int x; };
+            class KUZU_API PhysicalOperator : public Base {
+            public:
+                KUZU_API void execute();
+            };
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    names = _type_names(g)
+    assert "PhysicalOperator" in names, names
+    assert "Plain" in names, names
+    assert _function(g, "::execute").get("n") == "execute"
+    assert not g.cypher("MATCH (f:Function) WHERE f.name='unknown' RETURN count(f) AS c").to_list()[0]["c"]
+
+
+def test_cpp_headers_with_dot_h_extension_are_parsed_as_cpp(tmp_path):
+    """Many C++ engines (kuzu, …) use `.h` for C++ headers. `.h` maps to C by
+    extension, and the C grammar drops every `class`/`namespace`/`template`. When
+    the repo has C++ source, `.h` files must be routed to the C++ parser."""
+    _write(
+        tmp_path,
+        {
+            # A definitively-C++ file makes this a C++ repo.
+            "src/main.cpp": "int main() { return 0; }\n",
+            # The C++ header uses `.h` and is wrapped in nested namespaces.
+            "src/include/engine.h": """
+            #define ENGINE_API
+            namespace eng {
+            namespace core {
+            class ENGINE_API Engine : public Base {
+            public:
+                void run();
+            };
+            struct Config { int n; };
+            enum class Mode { Fast, Slow };
+            }  // namespace core
+            }  // namespace eng
+            """,
+        },
+    )
+    g = build(str(tmp_path))
+    names = _type_names(g)
+    assert "Engine" in names, f"C++ class in a .h file was dropped: {names}"
+    assert "Config" in names, names
+    assert "Mode" in {r["t"] for r in g.cypher("MATCH (e:Enum) RETURN e.title AS t").to_list()}
+
+
+def test_pure_c_dot_h_unaffected(tmp_path):
+    """A repo with no C++ source keeps `.h` as C (no false C++ routing)."""
+    _write(
+        tmp_path,
+        {
+            "main.c": "int main(void) { return 0; }\n",
+            "api.h": "struct Point { int x; int y; };\nint add(int a, int b);\n",
+        },
+    )
+    g = build(str(tmp_path))
+    # The C struct is still extracted (labeled :Struct), nothing misclassified.
+    structs = {r["t"] for r in g.cypher("MATCH (s:Struct) RETURN s.title AS t").to_list()}
+    assert "Point" in structs, structs

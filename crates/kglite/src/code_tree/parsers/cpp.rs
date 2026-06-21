@@ -1430,6 +1430,14 @@ impl CppParser {
                     None,
                 ));
             }
+            // A bare top-level `struct Foo { … };` / `enum E { … };` is emitted
+            // by tree-sitter-c as a direct specifier child (no `declaration`
+            // wrapper), mirroring the C++ path above. Without these arms every
+            // top-level struct/enum in a pure-C file was silently dropped.
+            "struct_specifier" => {
+                self.parse_struct(node, source, module_path, rel_path, result);
+            }
+            "enum_specifier" => self.parse_enum(node, source, module_path, rel_path, result),
             "declaration" => {
                 let mut cursor = node.walk();
                 let mut handled = false;
