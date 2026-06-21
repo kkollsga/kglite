@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`FOREACH (var IN list | <update clauses>)`.** Runs the body's update
+  clauses (`CREATE` / `SET` / `DELETE` / `REMOVE` / `MERGE`, and nested
+  `FOREACH`) once per element of `list`, with `var` bound to the element — the
+  standard Cypher mutation loop. Works standalone
+  (`FOREACH (x IN [1,2,3] | CREATE (:N {id: x}))`) or per matched row
+  (`MATCH (a) FOREACH (i IN a.items | CREATE (:Item {v: i}))`); `list` may be a
+  literal, parameter, or property. A `null` list is a no-op (Neo4j semantics).
+  The surrounding row set is unchanged (side-effect loop).
+
 - **`allShortestPaths(...)` Cypher path function.** Enumerates *every*
   minimal-length path between two anchored endpoints (one result row each),
   where `shortestPath(...)` returns a single path. Honours edge direction and
