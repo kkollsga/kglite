@@ -66,6 +66,7 @@ fn main() {
         "no_candidate": stats.no_candidate,
         "ambiguous_dropped": stats.ambiguous_dropped,
         "resolved_call_sites": stats.resolved_call_sites,
+        "resolved_via_inheritance": stats.resolved_via_inheritance,
         "resolved_edges": stats.resolved_edges,
         "resolution_rate": (resolution_rate * 10000.0).round() / 10000.0,
     });

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`code_tree` inheritance-aware CALLS resolution.** A `self.method()`
+  call whose method is defined on an *ancestor* class/trait (via
+  `EXTENDS` / `IMPLEMENTS`), not the caller's own type, now resolves to the
+  inherited definition — even when the same method name exists on unrelated
+  types that the same-file / global fallbacks would otherwise pick. The
+  resolver builds a transitive ancestor map from the parse's type
+  relationships and applies it as a high-precision tier (a unique inherited
+  definition resolves immediately; diamonds narrow and defer). Conservative
+  and build-time-flat: it only acts on implicit self-calls the direct-owner
+  filter left unresolved. Surfaced as `resolved_via_inheritance` in the
+  `code_tree_stats` harness.
+
 - **`CALL dead_code(...)` Cypher procedure.** Graph-native dead-code
   detection over a `code_tree` graph: reports `Function` nodes with no
   inbound *use* edge (`CALLS` / `REFERENCES_FN` / `HANDLES` /
