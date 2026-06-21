@@ -1,0 +1,89 @@
+{
+  "sha": "fd81c61",
+  "results": {
+    "M5_planner_overhead_trivial": {
+      "min_ms": 0.0008,
+      "note": "RETURN 1 \u2014 pure parse+plan floor"
+    },
+    "M4_return_full_node_10k": {
+      "min_ms": 9.4322,
+      "note": "RETURN n (clones Value::Node)"
+    },
+    "M4_return_scalar_10k": {
+      "min_ms": 1.2389,
+      "note": "RETURN n.id (scalar)"
+    },
+    "M4_node_clone_delta": {
+      "min_ms": 8.1933,
+      "note": "delta \u2248 node clone+marshal"
+    },
+    "M6_props_x4_fullscan": {
+      "min_ms": 9.9028,
+      "note": "4 property accesses \u00d7 30k"
+    },
+    "M6_props_x1_fullscan": {
+      "min_ms": 4.0604,
+      "note": "1 property access \u00d7 30k"
+    },
+    "M6_per_extra_prop_delta": {
+      "min_ms": 1.9475,
+      "note": "\u2248 per-property interning+hash"
+    },
+    "M7_where_distinct_orderby": {
+      "min_ms": 2.6272,
+      "note": "filter + DISTINCT + ORDER BY"
+    },
+    "M3_two_hop_fanout": {
+      "min_ms": 1.0573,
+      "note": "2-hop count (large intermediate)"
+    },
+    "M9_varlen_depth_2": {
+      "min_ms": 0.0028,
+      "note": "-[*1..2]- from one node"
+    },
+    "M9_varlen_depth_3": {
+      "min_ms": 0.0027,
+      "note": "-[*1..3]- from one node"
+    },
+    "M9_varlen_depth_4": {
+      "min_ms": 0.0027,
+      "note": "-[*1..4]- from one node"
+    },
+    "M10_materialize_30k_x3": {
+      "min_ms": 8.1722,
+      "note": "to_list 30k\u00d73 cells"
+    },
+    "M10_count_only": {
+      "min_ms": 0.0015,
+      "note": "count() \u2014 no marshalling"
+    },
+    "M10_marshal_delta": {
+      "min_ms": 8.1706,
+      "note": "delta \u2248 py_out marshalling"
+    },
+    "M2_ndv_warm": {
+      "min_ms": 0.3482,
+      "note": "equality query, NDV cached"
+    },
+    "M2_ndv_cold_after_mutation": {
+      "min_ms": 1.5996,
+      "note": "incl. mutation + NDV re-scan"
+    },
+    "M1_foreach_merge_set_mem": {
+      "min_ms": 39.5781,
+      "note": "FOREACH 2000 (per-elem flush)"
+    },
+    "M1_unwind_merge_set_mem": {
+      "min_ms": 38.4634,
+      "note": "UNWIND 2000 (batch flush)"
+    },
+    "M1_foreach_merge_set_disk": {
+      "min_ms": 78.6292,
+      "note": "FOREACH disk (per-elem flush+sync)"
+    },
+    "M1_unwind_merge_set_disk": {
+      "min_ms": 52.6978,
+      "note": "UNWIND disk (batch flush+sync)"
+    }
+  }
+}
