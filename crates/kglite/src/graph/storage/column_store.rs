@@ -953,6 +953,16 @@ impl ColumnStore {
                 *pos += slen;
                 Some(Value::String(s))
             }
+            7 => {
+                // Timestamp: 8 bytes as i64 seconds since the unix epoch
+                if *pos + 8 > blob.len() {
+                    return None;
+                }
+                let secs = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
+                *pos += 8;
+                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
+                Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
+            }
             _ => None,
         }
     }
@@ -960,10 +970,10 @@ impl ColumnStore {
     /// Skip over a value in the overflow blob without decoding it.
     fn skip_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) {
         match type_tag {
-            0 => {}             // Null: no data
-            1 | 2 => *pos += 8, // Int64 or Float64
-            3 | 5 => *pos += 4, // UniqueId or Date
-            4 => *pos += 1,     // Bool
+            0 => {}                 // Null: no data
+            1 | 2 | 7 => *pos += 8, // Int64 / Float64 / Timestamp (i64 seconds)
+            3 | 5 => *pos += 4,     // UniqueId or Date
+            4 => *pos += 1,         // Bool
             6 if *pos + 4 <= blob.len() => {
                 // String: u32 length prefix + bytes
                 let slen =
@@ -999,6 +1009,12 @@ impl ColumnStore {
                 buf.push(5);
                 let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
                 buf.extend_from_slice(&days.to_le_bytes());
+            }
+            Value::Timestamp(dt) => {
+                buf.push(7);
+                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0).unwrap_or_default();
+                let secs = (*dt - epoch).num_seconds();
+                buf.extend_from_slice(&secs.to_le_bytes());
             }
             Value::String(s) => {
                 buf.push(6);

@@ -564,6 +564,7 @@ pub(super) fn value_type_name(v: &Value) -> &'static str {
         Value::Float64(_) => "float",
         Value::Boolean(_) => "bool",
         Value::DateTime(_) => "datetime",
+        Value::Timestamp(_) => "timestamp",
         Value::UniqueId(_) => "uniqueid",
         Value::Point { .. } => "point",
         Value::Duration { .. } => "duration",
@@ -604,6 +605,7 @@ pub(super) fn value_display_compact(v: &Value, truncate_at: Option<usize>) -> St
         }
         .to_string(),
         Value::DateTime(d) => d.to_string(),
+        Value::Timestamp(d) => d.to_string(),
         Value::UniqueId(u) => u.to_string(),
         Value::Point { lat, lon } => format!("({},{})", lat, lon),
         Value::Duration {

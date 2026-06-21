@@ -442,6 +442,7 @@ fn push_value_repr(out: &mut String, val: &Value) {
             let _ = write!(out, "{u}");
         }
         Value::DateTime(d) => out.push_str(&d.format("%Y-%m-%d").to_string()),
+        Value::Timestamp(dt) => out.push_str(&dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
         Value::Point { lat, lon } => {
             let _ = write!(out, "POINT({lon} {lat})");
         }

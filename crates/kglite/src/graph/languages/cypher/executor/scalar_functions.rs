@@ -102,6 +102,18 @@ fn next_random_u128_halves() -> (u64, u64) {
     (next_random_u64(), next_random_u64())
 }
 
+/// Coerce a temporal Value to `NaiveDateTime` for cross-type temporal
+/// arithmetic (`date_diff`, `duration.between`). A date-only `DateTime`
+/// is treated as midnight, so mixing `date()` and `datetime()` operands
+/// works. Returns `None` for non-temporal values.
+fn coerce_naive_datetime(v: &Value) -> Option<chrono::NaiveDateTime> {
+    match v {
+        Value::Timestamp(dt) => Some(*dt),
+        Value::DateTime(d) => d.and_hms_opt(0, 0, 0),
+        _ => None,
+    }
+}
+
 impl<'a> CypherExecutor<'a> {
     /// Evaluate `localdatetime()` / `localtime()` / `time()`. No-arg form
     /// returns the local wall-clock "now" as an ISO-8601 string; the
@@ -117,11 +129,16 @@ impl<'a> CypherExecutor<'a> {
         use chrono::{NaiveTime, Timelike};
         if args.is_empty() {
             let now = chrono::Local::now();
-            let s = match kind {
-                LocalTemporalKind::DateTime => now.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                LocalTemporalKind::Time => now.format("%H:%M:%S").to_string(),
+            return match kind {
+                // localdatetime() → full date+time at second precision.
+                LocalTemporalKind::DateTime => Ok(Value::Timestamp(
+                    now.naive_local()
+                        .with_nanosecond(0)
+                        .unwrap_or(now.naive_local()),
+                )),
+                // localtime() stays a string — there is no time-of-day Value variant.
+                LocalTemporalKind::Time => Ok(Value::String(now.format("%H:%M:%S").to_string())),
             };
-            return Ok(Value::String(s));
         }
         if args.len() != 1 {
             return Err("local temporal functions take 0 or 1 string argument".into());
@@ -135,12 +152,13 @@ impl<'a> CypherExecutor<'a> {
         match kind {
             LocalTemporalKind::DateTime => {
                 // Accept full ISO datetime, or a bare date (midnight).
+                // Returns a Value::Timestamp (date + time, second precision).
                 if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S") {
-                    Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string()))
+                    Ok(Value::Timestamp(dt))
                 } else if let Ok(d) =
                     chrono::NaiveDate::parse_from_str(s.split('T').next().unwrap_or(&s), "%Y-%m-%d")
                 {
-                    Ok(Value::String(format!("{}T00:00:00", d.format("%Y-%m-%d"))))
+                    Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default()))
                 } else {
                     Ok(Value::Null)
                 }
@@ -245,11 +263,13 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
             "datetime" => {
-                // 0-arg form returns "now" (today's date — Value::DateTime
-                // is NaiveDate, so subsecond precision is dropped).
-                // 0.9.0 §3.
+                // Full date + time at second precision (Value::Timestamp).
+                // 0-arg form returns local "now"; a bare date parses to
+                // midnight. 0.12 Cluster 1 (was date-only via DateTime).
                 if args.is_empty() {
-                    return Ok(Value::DateTime(chrono::Local::now().date_naive()));
+                    use chrono::Timelike;
+                    let now = chrono::Local::now().naive_local();
+                    return Ok(Value::Timestamp(now.with_nanosecond(0).unwrap_or(now)));
                 }
                 if args.len() != 1 {
                     return Err(
@@ -259,22 +279,21 @@ impl<'a> CypherExecutor<'a> {
                 let val = self.evaluate_expression(&args[0], row)?;
                 match val {
                     Value::String(s) => {
-                        // Try parsing as ISO datetime with T separator
-                        if s.contains('T') {
-                            let date_part = s.split('T').next().unwrap_or("");
-                            match crate::graph::features::timeseries::parse_date_query(date_part) {
-                                Ok((d, _)) => Ok(Value::DateTime(d)),
-                                Err(_) => Ok(Value::Null),
-                            }
-                        } else {
-                            // Fallback: try as plain date
-                            match crate::graph::features::timeseries::parse_date_query(&s) {
-                                Ok((d, _)) => Ok(Value::DateTime(d)),
-                                Err(_) => Ok(Value::Null),
-                            }
-                        }
+                        // Full ISO datetime, else a bare date at midnight.
+                        let parsed = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S")
+                            .ok()
+                            .or_else(|| {
+                                let date_part = s.split('T').next().unwrap_or(&s);
+                                crate::graph::features::timeseries::parse_date_query(date_part)
+                                    .ok()
+                                    .and_then(|(d, _)| d.and_hms_opt(0, 0, 0))
+                            });
+                        Ok(parsed.map_or(Value::Null, Value::Timestamp))
                     }
-                    Value::DateTime(_) => Ok(val),
+                    Value::Timestamp(_) => Ok(val),
+                    Value::DateTime(d) => {
+                        Ok(Value::Timestamp(d.and_hms_opt(0, 0, 0).unwrap_or_default()))
+                    }
                     Value::Null => Ok(Value::Null),
                     _ => Err(format!(
                         "datetime() argument must be a string, got {:?}",
@@ -288,11 +307,12 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let a = self.evaluate_expression(&args[0], row)?;
                 let b = self.evaluate_expression(&args[1], row)?;
-                match (&a, &b) {
-                    (Value::DateTime(d1), Value::DateTime(d2)) => {
-                        Ok(Value::Int64((*d1 - *d2).num_days()))
-                    }
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                if matches!(a, Value::Null) || matches!(b, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                // Accepts date() and datetime() operands (and a mix).
+                match (coerce_naive_datetime(&a), coerce_naive_datetime(&b)) {
+                    (Some(d1), Some(d2)) => Ok(Value::Int64((d1 - d2).num_days())),
                     _ => Err("date_diff() arguments must be dates".into()),
                 }
             }
@@ -352,17 +372,21 @@ impl<'a> CypherExecutor<'a> {
                 }
                 let a = self.evaluate_expression(&args[0], row)?;
                 let b = self.evaluate_expression(&args[1], row)?;
-                match (&a, &b) {
-                    (Value::DateTime(d1), Value::DateTime(d2)) => {
-                        // Whole-day delta carried in `days`. Months and
-                        // seconds are 0 — Value::DateTime is date-only.
+                if matches!(a, Value::Null) || matches!(b, Value::Null) {
+                    return Ok(Value::Null);
+                }
+                // Accepts date() and datetime() operands (and a mix). Whole
+                // days go in `days`; any remaining sub-day delta (when a
+                // Timestamp is involved) is carried in `seconds`.
+                match (coerce_naive_datetime(&a), coerce_naive_datetime(&b)) {
+                    (Some(start), Some(end)) => {
+                        let total_secs = (end - start).num_seconds();
                         Ok(Value::Duration {
                             months: 0,
-                            days: (*d2 - *d1).num_days() as i32,
-                            seconds: 0,
+                            days: (total_secs / 86_400) as i32,
+                            seconds: total_secs % 86_400,
                         })
                     }
-                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     _ => Err("duration.between() arguments must be datetime values".into()),
                 }
             }

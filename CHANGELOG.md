@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Timestamp` value type — date + time-of-day at second precision.**
+  Complements the date-only `DateTime`. A Python `datetime.datetime` property
+  now round-trips with its time component intact (a `datetime.date` still maps
+  to the date-only `DateTime`); previously a Python date/datetime property was
+  silently dropped to `Null`. The `datetime()` and `localdatetime()` Cypher
+  constructors now return a real timestamp (a bare date parses to midnight)
+  instead of truncating to a date. `Timestamp` values compare and sort
+  chronologically (including mixed with date-only values), support
+  `+ duration(...)` / `- duration(...)` arithmetic *with* the seconds
+  component applied, and `duration.between(...)` / `date_diff(...)` accept
+  timestamp (and mixed date/timestamp) operands. Over Bolt, `Timestamp` maps
+  to the wire `LocalDateTime` type. Persisted losslessly in `.kgl` (additive
+  `Value` discriminant — existing files load unchanged, no format bump).
+
 ## [0.11.8] — 2026-06-21 — code_tree resolution accuracy + dead-code analysis
 
 Validated across 18 real repos (7 languages, zero crashes); the

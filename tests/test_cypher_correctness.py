@@ -661,14 +661,15 @@ class TestRandomUUID:
 
 
 class TestLocalTemporal:
-    """localdatetime(), localtime(), time() — ISO-8601 string values."""
+    """localdatetime() → datetime.datetime; localtime(), time() → ISO strings."""
 
-    def test_localdatetime_no_arg_iso(self):
-        import re
+    def test_localdatetime_no_arg_is_datetime(self):
+        import datetime
 
         g = rg.KnowledgeGraph()
         v = g.cypher("RETURN localdatetime() AS v")[0]["v"]
-        assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", v), v
+        # 0.12 Cluster 1: localdatetime() now returns a real datetime value.
+        assert isinstance(v, datetime.datetime), repr(v)
 
     def test_localtime_no_arg_iso(self):
         import re
@@ -685,14 +686,18 @@ class TestLocalTemporal:
         assert re.match(r"^\d{2}:\d{2}:\d{2}$", v), v
 
     def test_localdatetime_parse(self):
+        import datetime
+
         g = rg.KnowledgeGraph()
         v = g.cypher("RETURN localdatetime('2024-03-15T10:30:00') AS v")[0]["v"]
-        assert v == "2024-03-15T10:30:00"
+        assert v == datetime.datetime(2024, 3, 15, 10, 30, 0)
 
     def test_localdatetime_parse_bare_date(self):
+        import datetime
+
         g = rg.KnowledgeGraph()
         v = g.cypher("RETURN localdatetime('2024-03-15') AS v")[0]["v"]
-        assert v == "2024-03-15T00:00:00"
+        assert v == datetime.datetime(2024, 3, 15, 0, 0, 0)
 
     def test_time_parse_hh_mm(self):
         g = rg.KnowledgeGraph()

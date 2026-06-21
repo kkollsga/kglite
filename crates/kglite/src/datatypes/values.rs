@@ -1,5 +1,5 @@
 // src/datatypes/values.rs
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -98,6 +98,21 @@ pub enum Value {
     /// so equality / hashing / serialisation are deterministic by
     /// key order (Cypher consumers expect stable iteration order).
     Map(BTreeMap<String, Value>),
+    /// A date *and* time-of-day, second precision (`NaiveDateTime`).
+    ///
+    /// Complements [`Value::DateTime`] (date-only `NaiveDate`): use
+    /// `Timestamp` when the wall-clock time matters (event logs,
+    /// `created_at`, scheduling). Produced by the `datetime()` /
+    /// `localdatetime()` Cypher constructors and by passing a Python
+    /// `datetime.datetime` with a non-midnight time component.
+    ///
+    /// **Layout note**: appended LAST (serde discriminant 15) so
+    /// existing `.kgl` files — which never contain this variant —
+    /// still deserialize unchanged; no format bump. Discriminants
+    /// 0..=14 are untouched. Timestamp properties ride the generic
+    /// `Value` serialization path (no dedicated typed column), so the
+    /// hot date-only columnar path is unaffected.
+    Timestamp(NaiveDateTime),
 }
 
 /// Owned, serialisable shape for a node value at the consumer
@@ -232,6 +247,9 @@ impl Ord for Value {
                 Value::Node(_) => 12,
                 Value::Relationship(_) => 13,
                 Value::Path(_) => 14,
+                // Sorts after the date-only DateTime in mixed compares;
+                // same-variant timestamps order chronologically below.
+                Value::Timestamp(_) => 15,
             }
         }
         match (self, other) {
@@ -287,6 +305,7 @@ impl Ord for Value {
             (Value::Node(a), Value::Node(b)) => a.cmp(b),
             (Value::Relationship(a), Value::Relationship(b)) => a.cmp(b),
             (Value::Path(a), Value::Path(b)) => a.cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
             // Cross-variant: order by discriminant
             _ => disc(self).cmp(&disc(other)),
         }
@@ -354,6 +373,7 @@ impl Hash for Value {
             Value::Node(v) => v.hash(state),
             Value::Relationship(v) => v.hash(state),
             Value::Path(v) => v.hash(state),
+            Value::Timestamp(v) => v.hash(state),
         }
     }
 }
@@ -390,6 +410,7 @@ impl Value {
             Value::Node(_) => "Node",
             Value::Relationship(_) => "Relationship",
             Value::Path(_) => "Path",
+            Value::Timestamp(_) => "Timestamp",
         }
     }
 }
@@ -626,6 +647,9 @@ impl DataFrame {
                     Value::String(_) => Some(ColumnType::String),
                     Value::Boolean(_) => Some(ColumnType::Boolean),
                     Value::DateTime(_) => Some(ColumnType::DateTime),
+                    // Timestamp has no dedicated DataFrame column; serialize
+                    // via the String column as ISO 8601 (round-trips as text).
+                    Value::Timestamp(_) => Some(ColumnType::String),
                     Value::Point { .. } => Some(ColumnType::String), // Serialize as WKT
                     // Durations are query-time-only — never persisted as
                     // a column (Cluster 2). Serialize via the String column.
@@ -770,6 +794,13 @@ impl DataFrame {
                 ColumnType::DateTime,
                 ColumnData::DateTime(vec![Some(v); num_rows]),
             ),
+            Value::Timestamp(v) => (
+                ColumnType::String,
+                ColumnData::String(vec![
+                    Some(v.format("%Y-%m-%dT%H:%M:%S").to_string());
+                    num_rows
+                ]),
+            ),
             Value::Null => return Err("Cannot add a constant column with Null value".to_string()),
             Value::Point { lat, lon } => (
                 ColumnType::String,
@@ -898,6 +929,7 @@ pub fn raw_string(value: &Value) -> String {
         Value::Float64(f) => f.to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(dt) => dt.to_string(),
+        Value::Timestamp(dt) => dt.to_string(),
         Value::UniqueId(id) => id.to_string(),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Duration {
@@ -929,6 +961,7 @@ pub fn format_value(value: &Value) -> String {
         Value::String(v) => format!("\"{}\"", v),
         Value::Boolean(v) => format!("{}", v),
         Value::DateTime(v) => format!("\"{}\"", v.format("%Y-%m-%d")),
+        Value::Timestamp(v) => format!("\"{}\"", v.format("%Y-%m-%dT%H:%M:%S")),
         Value::Point { lat, lon } => format!("point({}, {})", lat, lon),
         Value::Null => "NULL".to_string(),
         Value::NodeRef(idx) => format!("node#{}", idx),
@@ -994,6 +1027,38 @@ mod tests {
     fn test_as_string_with_string_value() {
         let v = Value::String("hello".to_string());
         assert_eq!(v.as_string(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_timestamp_roundtrip_order_and_meta() {
+        use chrono::{NaiveDate, NaiveDateTime};
+        let dt: NaiveDateTime = NaiveDate::from_ymd_opt(2024, 3, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        let v = Value::Timestamp(dt);
+
+        // type_name + display carry the time component.
+        assert_eq!(v.type_name(), "Timestamp");
+        assert_eq!(format_value(&v), "\"2024-03-15T10:30:45\"");
+
+        // serde round-trip (the .kgl path for Mixed columns).
+        let bytes = bincode::serialize(&v).unwrap();
+        assert_eq!(bincode::deserialize::<Value>(&bytes).unwrap(), v);
+
+        // Appended last → discriminant 15 unchanged-prefix property:
+        // a date-only value still orders before any timestamp.
+        let date = Value::DateTime(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
+        assert!(date < v);
+
+        // Same-variant ordering is chronological.
+        let later = Value::Timestamp(
+            NaiveDate::from_ymd_opt(2024, 3, 15)
+                .unwrap()
+                .and_hms_opt(10, 30, 46)
+                .unwrap(),
+        );
+        assert!(v < later);
     }
 
     #[test]

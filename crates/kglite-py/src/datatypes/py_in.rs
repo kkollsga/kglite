@@ -616,6 +616,20 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::UniqueId(u));
     }
 
+    // datetime.datetime → Timestamp; datetime.date → DateTime.
+    // datetime IS-A date in Python, so check PyDateTime FIRST. Before
+    // this, a Python date/datetime property silently became Null.
+    if value.is_instance_of::<pyo3::types::PyDateTime>() {
+        if let Ok(dt) = value.extract::<chrono::NaiveDateTime>() {
+            return Ok(Value::Timestamp(dt));
+        }
+    }
+    if value.is_instance_of::<pyo3::types::PyDate>() {
+        if let Ok(d) = value.extract::<chrono::NaiveDate>() {
+            return Ok(Value::DateTime(d));
+        }
+    }
+
     // dict → native Map (recursive). Enables `$m.prop`, and
     // `UNWIND $rows AS r ... r.key` over a parameterised list of dicts — the
     // common batch-insert/update shape. Without this a dict param became

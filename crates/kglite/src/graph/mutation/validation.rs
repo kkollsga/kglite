@@ -215,7 +215,9 @@ pub fn value_matches_type(value: &Value, expected_type: &str) -> bool {
             )
         }
         "boolean" | "bool" => matches!(value, Value::Boolean(_)),
-        "datetime" | "date" => matches!(value, Value::DateTime(_)),
+        "datetime" => matches!(value, Value::DateTime(_) | Value::Timestamp(_)),
+        "date" => matches!(value, Value::DateTime(_)),
+        "timestamp" => matches!(value, Value::Timestamp(_)),
         "uniqueid" => matches!(value, Value::Int64(_) | Value::UniqueId(_)),
         "point" => matches!(value, Value::Point { .. }),
         "null" => matches!(value, Value::Null),
@@ -232,6 +234,7 @@ pub fn get_value_type_name(value: &Value) -> String {
         Value::Float64(_) => "float".to_string(),
         Value::Boolean(_) => "boolean".to_string(),
         Value::DateTime(_) => "datetime".to_string(),
+        Value::Timestamp(_) => "timestamp".to_string(),
         Value::UniqueId(_) => "integer".to_string(),
         Value::Point { .. } => "point".to_string(),
         Value::Duration { .. } => "duration".to_string(),

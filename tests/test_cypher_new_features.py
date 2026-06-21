@@ -131,9 +131,14 @@ class TestStringAutoCoercion:
 
 
 class TestDatetimeAlias:
-    def test_datetime_equals_date(self, graph):
+    def test_datetime_of_bare_date_is_midnight_timestamp(self, graph):
+        # 0.12 Cluster 1: datetime() now yields a real timestamp (midnight
+        # for a bare date), whereas date() stays date-only.
+        import datetime
+
         rows = graph.cypher("RETURN date('2020-01-15') AS d1, datetime('2020-01-15') AS d2")
-        assert rows[0]["d1"] == rows[0]["d2"]
+        assert rows[0]["d1"] == "2020-01-15"
+        assert rows[0]["d2"] == datetime.datetime(2020, 1, 15, 0, 0, 0)
 
 
 # ── Scientific notation ────────────────────────────────────
