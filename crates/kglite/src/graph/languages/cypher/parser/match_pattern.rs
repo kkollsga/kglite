@@ -20,10 +20,11 @@ impl CypherParser {
             let path_var = self.consume_identifier()?;
             self.expect(&CypherToken::Equals)?;
 
-            // Check for shortestPath( wrapper
-            let is_shortest = self.is_shortest_path_call();
+            // Check for shortestPath( / allShortestPaths( wrapper
+            let is_all_shortest = self.is_all_shortest_paths_call();
+            let is_shortest = is_all_shortest || self.is_shortest_path_call();
             if is_shortest {
-                self.advance(); // consume "shortestPath" identifier
+                self.advance(); // consume the wrapper identifier
                 self.expect(&CypherToken::LParen)?;
             }
 
@@ -37,6 +38,7 @@ impl CypherParser {
                 variable: path_var,
                 pattern_index: 0,
                 is_shortest_path: is_shortest,
+                all_shortest: is_all_shortest,
             });
 
             let clause = MatchClause {
@@ -78,6 +80,16 @@ impl CypherParser {
     pub(super) fn is_shortest_path_call(&self) -> bool {
         if let Some(CypherToken::Identifier(name)) = self.peek() {
             name.eq_ignore_ascii_case("shortestPath")
+                && self.peek_at(1) == Some(&CypherToken::LParen)
+        } else {
+            false
+        }
+    }
+
+    /// Check if current position is allShortestPaths( — called AFTER consuming "var ="
+    pub(super) fn is_all_shortest_paths_call(&self) -> bool {
+        if let Some(CypherToken::Identifier(name)) = self.peek() {
+            name.eq_ignore_ascii_case("allShortestPaths")
                 && self.peek_at(1) == Some(&CypherToken::LParen)
         } else {
             false

@@ -121,33 +121,64 @@ impl<'a> CypherExecutor<'a> {
                     continue;
                 }
 
-                // Dispatch based on edge direction in the pattern
-                let path_result = match edge_direction {
-                    EdgeDirection::Both => {
-                        // Undirected BFS — same behavior as fluent API shortest_path()
-                        crate::graph::algorithms::graph_algorithms::shortest_path(
+                // Dispatch based on edge direction + the all-shortest flag.
+                // `shortestPath` yields ≤1 path; `allShortestPaths` yields
+                // every minimal path (one output row each), capped to bound
+                // pathological fan-out.
+                use crate::graph::algorithms::graph_algorithms as ga;
+                const MAX_ALL_SHORTEST: usize = 256;
+                let path_results: Vec<ga::PathResult> = if path_assignment.all_shortest {
+                    match edge_direction {
+                        EdgeDirection::Both => ga::all_shortest_paths(
+                            self.graph,
+                            source_idx,
+                            target_idx,
+                            connection_types,
+                            self.interrupt(),
+                            MAX_ALL_SHORTEST,
+                        ),
+                        EdgeDirection::Outgoing => ga::all_shortest_paths_directed(
+                            self.graph,
+                            source_idx,
+                            target_idx,
+                            connection_types,
+                            self.interrupt(),
+                            MAX_ALL_SHORTEST,
+                        ),
+                        EdgeDirection::Incoming => ga::all_shortest_paths_directed(
+                            self.graph,
+                            target_idx,
+                            source_idx,
+                            connection_types,
+                            self.interrupt(),
+                            MAX_ALL_SHORTEST,
+                        )
+                        .into_iter()
+                        .map(|mut pr| {
+                            pr.path.reverse();
+                            pr
+                        })
+                        .collect(),
+                    }
+                } else {
+                    let single = match edge_direction {
+                        EdgeDirection::Both => ga::shortest_path(
                             self.graph,
                             source_idx,
                             target_idx,
                             connection_types,
                             None,
                             self.interrupt(),
-                        )
-                    }
-                    EdgeDirection::Outgoing => {
-                        // Directed BFS — only follow outgoing edges
-                        crate::graph::algorithms::graph_algorithms::shortest_path_directed(
+                        ),
+                        EdgeDirection::Outgoing => ga::shortest_path_directed(
                             self.graph,
                             source_idx,
                             target_idx,
                             connection_types,
                             None,
                             self.interrupt(),
-                        )
-                    }
-                    EdgeDirection::Incoming => {
-                        // Reverse source/target and follow outgoing, then reverse path
-                        crate::graph::algorithms::graph_algorithms::shortest_path_directed(
+                        ),
+                        EdgeDirection::Incoming => ga::shortest_path_directed(
                             self.graph,
                             target_idx,
                             source_idx,
@@ -158,11 +189,12 @@ impl<'a> CypherExecutor<'a> {
                         .map(|mut pr| {
                             pr.path.reverse();
                             pr
-                        })
-                    }
+                        }),
+                    };
+                    single.into_iter().collect()
                 };
 
-                if let Some(path_result) = path_result {
+                for path_result in path_results {
                     // Start from the prior row's bindings (if any) so
                     // downstream RETURN can see fields the prior MATCH
                     // exposed (e.g. `RETURN start.foo`).

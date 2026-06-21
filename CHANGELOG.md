@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`allShortestPaths(...)` Cypher path function.** Enumerates *every*
+  minimal-length path between two anchored endpoints (one result row each),
+  where `shortestPath(...)` returns a single path. Honours edge direction and
+  `:TYPE` filters, undirected and directed; capped at 256 paths per endpoint
+  pair to bound fan-out. Example:
+  `MATCH p = allShortestPaths((a {id:1})-[:R*..5]->(b {id:9})) RETURN nodes(p)`.
+
 - **`Timestamp` value type — date + time-of-day at second precision.**
   Complements the date-only `DateTime`. A Python `datetime.datetime` property
   now round-trips with its time component intact (a `datetime.date` still maps
