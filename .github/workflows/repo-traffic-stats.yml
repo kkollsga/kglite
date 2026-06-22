@@ -1,0 +1,28 @@
+# Snapshots GitHub repository traffic (views / clones / referrers / popular
+# paths) on a daily schedule and accumulates them into the `github-repo-stats`
+# branch, plus an auto-generated trend report. GitHub itself only retains the
+# last 14 days, so this is the only way to build long-term history — going
+# forward from the first run (it can't recover anything already aged out).
+#
+# REQUIRES a repository secret named `ghtoken`: a Personal Access Token with
+# traffic + data-branch access. Either
+#   - classic PAT with the `repo` scope, or
+#   - fine-grained PAT scoped to this repo with
+#       Administration: Read  (traffic API)  +  Contents: Read and write (data branch)
+# The built-in GITHUB_TOKEN can't read the traffic API, hence the PAT.
+
+name: repo-traffic-stats
+
+on:
+  schedule:
+    - cron: "27 4 * * *" # daily at 04:27 UTC
+  workflow_dispatch: {} # manual run from the Actions tab / `gh workflow run`
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - name: collect + accumulate repo traffic stats
+        uses: jgehrcke/github-repo-stats@HEAD
+        with:
+          ghtoken: ${{ secrets.ghtoken }}
