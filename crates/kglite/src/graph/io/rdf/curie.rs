@@ -1,7 +1,13 @@
 //! CURIE compaction for predicate / type IRIs.
 //!
 //! Folds full IRIs like `http://xmlns.com/foaf/0.1/knows` into compact
-//! `foaf:knows` labels so the property-graph schema reads naturally.
+//! `foaf__knows` labels so the property-graph schema reads naturally.
+//! The separator is `__` (double underscore), NOT `:` — a colon is
+//! Cypher's label/relationship-type separator, so `foaf:knows` can't be
+//! written as `[:foaf:knows]` in a pattern; `foaf__knows` is a plain
+//! identifier that matches natively (`(:foaf__Person)-[:foaf__knows]->()`).
+//! This mirrors the Neo4j neosemantics (`n10s`) convention.
+//!
 //! Seeded with the well-known RDF/RDFS/OWL/XSD/FOAF/schema.org/SKOS/DC
 //! prefixes; document-declared `@prefix`es are added as parsing
 //! progresses. When several namespaces match (one a prefix of another)
@@ -58,10 +64,11 @@ impl Curiefier {
         self.prefixes.push((name.to_string(), iri.to_string()));
     }
 
-    /// Compact `iri` to `prefix:local` using the longest matching
-    /// namespace. Falls back to the fragment after the last `#`/`/`, and
-    /// finally to the full IRI. Never emits a CURIE with an empty local
-    /// part (e.g. the namespace IRI itself).
+    /// Compact `iri` to `prefix__local` (double-underscore separator, so
+    /// the result is a valid Cypher label/type/property identifier) using
+    /// the longest matching namespace. Falls back to the fragment after
+    /// the last `#`/`/`, and finally to the full IRI. Never emits a CURIE
+    /// with an empty local part (e.g. the namespace IRI itself).
     pub(super) fn compact(&self, iri: &str) -> String {
         if self.keep_full {
             return iri.to_string();
@@ -82,7 +89,7 @@ impl Curiefier {
             }
         }
         if let Some((name, ns)) = best {
-            return format!("{}:{}", name, &iri[ns.len()..]);
+            return format!("{}__{}", name, &iri[ns.len()..]);
         }
 
         // Fallback: the fragment after the last separator.
@@ -103,10 +110,10 @@ mod tests {
     #[test]
     fn well_known_compaction() {
         let c = Curiefier::new(false);
-        assert_eq!(c.compact("http://xmlns.com/foaf/0.1/knows"), "foaf:knows");
+        assert_eq!(c.compact("http://xmlns.com/foaf/0.1/knows"), "foaf__knows");
         assert_eq!(
             c.compact("http://www.w3.org/2000/01/rdf-schema#label"),
-            "rdfs:label"
+            "rdfs__label"
         );
     }
 
@@ -115,8 +122,8 @@ mod tests {
         let mut c = Curiefier::new(false);
         c.add("ex", "http://example.org/");
         c.add("exsub", "http://example.org/sub/");
-        assert_eq!(c.compact("http://example.org/sub/thing"), "exsub:thing");
-        assert_eq!(c.compact("http://example.org/thing"), "ex:thing");
+        assert_eq!(c.compact("http://example.org/sub/thing"), "exsub__thing");
+        assert_eq!(c.compact("http://example.org/thing"), "ex__thing");
     }
 
     #[test]
