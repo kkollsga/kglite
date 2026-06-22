@@ -116,7 +116,7 @@ impl FoldState {
 
 /// Load an RDF file into `graph` (in-memory backend). Dispatches on the
 /// file extension: `.ttl` → Turtle, `.nt` → N-Triples, `.nq` → N-Quads,
-/// `.trig` → TriG. Quad graph names are ignored in Phase 1.
+/// `.trig` → TriG. Quad graph names are ignored.
 pub fn load_rdf(graph: &mut DirGraph, path: &str, config: &RdfConfig) -> Result<RdfStats, String> {
     if graph.graph.is_mapped() || graph.graph.is_disk() {
         return Err(
@@ -131,6 +131,16 @@ pub fn load_rdf(graph: &mut DirGraph, path: &str, config: &RdfConfig) -> Result<
         .next()
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
+
+    // Validate the format before touching the filesystem, so an
+    // unsupported extension fails fast and deterministically (regardless
+    // of whether the file exists).
+    if !matches!(ext.as_str(), "ttl" | "nt" | "nq" | "trig") {
+        return Err(format!(
+            "Unsupported RDF extension '{}': expected ttl, nt, nq, or trig",
+            ext
+        ));
+    }
 
     let file = File::open(path).map_err(|e| format!("Cannot open {}: {}", path, e))?;
     let reader = BufReader::new(file);
@@ -207,12 +217,8 @@ pub fn load_rdf(graph: &mut DirGraph, path: &str, config: &RdfConfig) -> Result<
                 }
             }
         }
-        other => {
-            return Err(format!(
-                "Unsupported RDF extension '{}': expected ttl, nt, nq, or trig",
-                other
-            ));
-        }
+        // `ext` was validated against this set before the file was opened.
+        _ => unreachable!("extension validated before dispatch"),
     }
 
     let (nodes_created, edges_created) = materialize(graph, &mut state, config);
@@ -521,18 +527,19 @@ ex:bob a foaf:Person ;
 
         let (alice_type, props) =
             find_by_uri(&graph, "http://example.org/alice").expect("alice node");
-        assert_eq!(alice_type, "foaf:Person");
+        assert_eq!(alice_type, "foaf__Person");
         assert_eq!(
             title_of(&graph, "http://example.org/alice").as_deref(),
             Some("Alice")
         );
-        // `ex:` is a document-declared prefix, so predicates compact to `ex:*`.
-        assert_eq!(props.get("ex:age"), Some(&Value::Int64(30)));
-        assert_eq!(props.get("ex:height"), Some(&Value::Float64(1.75)));
-        assert_eq!(props.get("ex:active"), Some(&Value::Boolean(true)));
-        assert!(matches!(props.get("ex:born"), Some(Value::DateTime(_))));
+        // `ex:` is a document-declared prefix; predicates compact to
+        // `ex__*` (double-underscore separator, Cypher-queryable).
+        assert_eq!(props.get("ex__age"), Some(&Value::Int64(30)));
+        assert_eq!(props.get("ex__height"), Some(&Value::Float64(1.75)));
+        assert_eq!(props.get("ex__active"), Some(&Value::Boolean(true)));
+        assert!(matches!(props.get("ex__born"), Some(Value::DateTime(_))));
         assert!(matches!(
-            props.get("ex:lastSeen"),
+            props.get("ex__lastSeen"),
             Some(Value::Timestamp(_))
         ));
 
@@ -553,7 +560,7 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
         let (node_type, props) =
             find_by_uri(&graph, "http://example.org/carol").expect("carol node");
         // First rdf:type wins as the node type.
-        assert_eq!(node_type, "foaf:Person");
+        assert_eq!(node_type, "foaf__Person");
         match props.get("rdf_types") {
             Some(Value::List(l)) => assert_eq!(l.len(), 2),
             other => panic!("expected rdf_types list of 2, got {:?}", other),
@@ -601,7 +608,11 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
             for i in 0..entities {
                 let s = format!("<http://www.wikidata.org/entity/Q{i}>");
                 writeln!(w, "{s} <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .").unwrap();
-                writeln!(w, "{s} <http://www.w3.org/2000/01/rdf-schema#label> \"Person {i}\"@en .").unwrap();
+                writeln!(
+                    w,
+                    "{s} <http://www.w3.org/2000/01/rdf-schema#label> \"Person {i}\"@en ."
+                )
+                .unwrap();
                 writeln!(w, "{s} <http://www.wikidata.org/prop/direct/P1082> \"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer> .").unwrap();
                 writeln!(w, "{s} <http://www.wikidata.org/prop/direct/P569> \"1990-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .").unwrap();
                 writeln!(w, "{s} <http://www.wikidata.org/prop/direct/P26> <http://www.wikidata.org/entity/Q{}> .", (i + 1) % entities).unwrap();
@@ -616,12 +627,17 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
         // oxttl parse-only (no graph build).
         let t = Instant::now();
         let mut n = 0u64;
-        for item in oxttl::NTriplesParser::new().for_reader(BufReader::new(File::open(&path).unwrap())) {
+        for item in
+            oxttl::NTriplesParser::new().for_reader(BufReader::new(File::open(&path).unwrap()))
+        {
             item.unwrap();
             n += 1;
         }
         let (mt, mbs) = rate(t.elapsed().as_secs_f64());
-        eprintln!("oxttl parse-only:   {n} triples in {:.3}s = {mt:.2} M triples/s, {mbs:.0} MB/s", t.elapsed().as_secs_f64());
+        eprintln!(
+            "oxttl parse-only:   {n} triples in {:.3}s = {mt:.2} M triples/s, {mbs:.0} MB/s",
+            t.elapsed().as_secs_f64()
+        );
 
         // load_rdf full build (memory).
         let mut g = DirGraph::new();
@@ -649,7 +665,10 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
         let secs2 = t.elapsed().as_secs_f64();
         let (mt, mbs) = rate(secs2);
         eprintln!("load_ntriples (WD): {} entities, {} edges in {secs2:.3}s = {mt:.2} M triples/s, {mbs:.0} MB/s", stats2.entities_created, stats2.edges_created);
-        eprintln!("\nload_rdf / load_ntriples wall-clock ratio: {:.2}x\n", secs / secs2);
+        eprintln!(
+            "\nload_rdf / load_ntriples wall-clock ratio: {:.2}x\n",
+            secs / secs2
+        );
     }
 
     #[test]
