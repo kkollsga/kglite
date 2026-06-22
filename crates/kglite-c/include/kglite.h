@@ -812,6 +812,67 @@ KgliteStatusCode kglite_load_file(const char *path,
                                   struct KgliteGraph **out_graph,
                                   const char **out_error_msg);
 
+#if defined(KGLITE_FEATURE_RDF)
+/**
+ * Load an RDF file into a fresh in-memory graph — the C-side handle on
+ * the wheel's `kglite.load_rdf`. Dispatches on the extension: `.ttl`
+ * (Turtle), `.nt` (N-Triples), `.nq` (N-Quads), `.trig` (TriG).
+ *
+ * The RDF → property-graph fold: object literals become typed node
+ * properties, resource objects become edges, and `rdf:type` sets the
+ * node label (first wins; extras kept in an `rdf_types` property).
+ * Predicate / type IRIs are CURIE-compacted with a `__` separator
+ * (so `[:foaf__knows]` matches in Cypher); each node keeps its full
+ * subject IRI in a `uri` property. In-memory backend only.
+ *
+ * # Arguments
+ *
+ * - `path` (in, borrowed): UTF-8 file path; the extension picks the parser.
+ * - `languages_json` (in, borrowed): JSON array of language tags to keep
+ *   (e.g. `["en","de"]`), or null to keep all literals.
+ * - `label_predicates_json` (in, borrowed): JSON array of predicate IRIs
+ *   whose literal object sets the node title, or null for
+ *   `["http://www.w3.org/2000/01/rdf-schema#label"]`.
+ * - `keep_full_iris` (in): non-zero keeps full IRIs instead of CURIEs.
+ * - `default_type` (in, borrowed): node type for subjects without an
+ *   `rdf:type`, or null for `"Resource"`.
+ * - `max_triples` (in): stop after this many triples; negative = no limit.
+ * - `out_graph` (out, owned): the loaded graph on success (free via
+ *   [`kglite_graph_free`] or hand to
+ *   [`kglite_session_new`](crate::kglite_session_new)); null on failure.
+ * - `out_stats_json` (out, owned): `{"nodes":N,"edges":M,"triples":T}` on
+ *   success — free via [`kglite_free_string`](crate::kglite_free_string).
+ *   May be null if the caller doesn't want stats.
+ * - `out_error_msg` (out, owned): error message on failure — free via
+ *   [`kglite_free_string`](crate::kglite_free_string); null on success.
+ *
+ * # Errors
+ *
+ * - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
+ * - `KGLITE_ERR_INVALID_UTF8` — a string argument isn't valid UTF-8
+ * - `KGLITE_ERR_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
+ *   array, or the file extension isn't a supported RDF format
+ * - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
+ * - `KGLITE_ERR_FILE_FORMAT` — a parse error in the RDF
+ *
+ * # Safety
+ *
+ * String arguments must each be a null-terminated UTF-8 string or null;
+ * `out_graph` a valid writable `*mut KgliteGraph` slot; `out_stats_json`
+ * and `out_error_msg` null or valid writable slots.
+ */
+
+KgliteStatusCode kglite_load_rdf(const char *path,
+                                 const char *languages_json,
+                                 const char *label_predicates_json,
+                                 uint8_t keep_full_iris,
+                                 const char *default_type,
+                                 int64_t max_triples,
+                                 struct KgliteGraph **out_graph,
+                                 const char **out_stats_json,
+                                 const char **out_error_msg);
+#endif
+
 /**
  * Save a knowledge graph to disk. The on-disk format depends on
  * the underlying storage mode — in-memory and mapped graphs

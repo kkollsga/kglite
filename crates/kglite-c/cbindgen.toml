@@ -40,6 +40,7 @@ parse_deps = false
 "feature = sec" = "KGLITE_FEATURE_SEC"
 "feature = wikidata" = "KGLITE_FEATURE_WIKIDATA"
 "feature = fastembed" = "KGLITE_FEATURE_FASTEMBED"
+"feature = rdf" = "KGLITE_FEATURE_RDF"
 
 [export]
 # Don't add any prefix; the Rust types are already `Kglite*`.
