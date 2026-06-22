@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite.load_rdf(path)` — general RDF loader.** Loads Turtle (`.ttl`),
+  N-Triples (`.nt`), N-Quads (`.nq`), and TriG (`.trig`) into a fresh
+  in-memory graph (parsed via the pure-Rust `oxttl`/`oxrdf` stack, behind a
+  new optional `rdf` Cargo feature). The RDF→property-graph fold maps object
+  literals to typed node properties (`xsd:integer`/`double`/`boolean` →
+  int/float/bool, `xsd:date` → date, `xsd:dateTime` → datetime, GeoSPARQL
+  `POINT` → point; a repeated predicate becomes a list), resource objects to
+  edges, and `rdf:type` to the node label (first wins; extra types kept in an
+  `rdf_types` property). Predicate and type IRIs are CURIE-compacted with a
+  `__` separator (`foaf__knows`, so they're valid Cypher identifiers —
+  `MATCH (:foaf__Person)-[:foaf__knows]->()`) from the document's own
+  `@prefix` declarations plus a well-known prefix table; each node keeps its
+  full subject IRI in a `uri` property and `n.id` is a dense integer.
+  In-memory backend only — for Wikidata-scale dumps use
+  `KnowledgeGraph.load_ntriples`.
+
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 
 ### Performance
