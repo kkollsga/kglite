@@ -1,28 +1,61 @@
-# Snapshots GitHub repository traffic (views / clones / referrers / popular
-# paths) on a daily schedule and accumulates them into the `github-repo-stats`
-# branch, plus an auto-generated trend report. GitHub itself only retains the
-# last 14 days, so this is the only way to build long-term history — going
-# forward from the first run (it can't recover anything already aged out).
+# Hand-rolled GitHub traffic collector — NO third-party Actions.
 #
-# REQUIRES a repository secret named `ghtoken`: a Personal Access Token with
-# traffic + data-branch access. Either
-#   - classic PAT with the `repo` scope, or
-#   - fine-grained PAT scoped to this repo with
-#       Administration: Read  (traffic API)  +  Contents: Read and write (data branch)
-# The built-in GITHUB_TOKEN can't read the traffic API, hence the PAT.
+# GitHub keeps repository traffic (views / clones / referrers) for only 14 days.
+# This snapshots them daily via GitHub's own Traffic API (the `gh` CLI) and
+# accumulates them as CSVs + a PDF report into a SEPARATE PRIVATE repo — so the
+# numbers stay private and this (public) repo stays clean. The only moving parts
+# are GitHub's own `actions/checkout`, the `gh` CLI, this repo's
+# `scripts/repo_traffic_stats.py`, and matplotlib. No community action ever
+# sees the token.
+#
+# ── One-time setup (repo owner) ───────────────────────────────────────────────
+#   1. Create a PRIVATE repo to hold the data, e.g. `kkollsga/kglite-traffic`
+#      (it can be completely empty).
+#   2. Create a fine-grained PAT with:
+#        • this repo (kglite)  → Administration: Read           (traffic API)
+#        • the data repo       → Contents: Read and write        (store CSV/PDF)
+#      Add it as a repository secret named  TRAFFIC_TOKEN.
+#   3. (optional) If the data repo isn't `kkollsga/kglite-traffic`, set a repo
+#      variable  TRAFFIC_DATA_REPO  to `owner/name`.
+# Then run it from the Actions tab (or `gh workflow run repo-traffic-stats.yml`).
 
 name: repo-traffic-stats
 
 on:
   schedule:
     - cron: "27 4 * * *" # daily at 04:27 UTC
-  workflow_dispatch: {} # manual run from the Actions tab / `gh workflow run`
+  workflow_dispatch: {}
 
 jobs:
-  stats:
+  collect:
     runs-on: ubuntu-latest
     steps:
-      - name: collect + accumulate repo traffic stats
-        uses: jgehrcke/github-repo-stats@HEAD
-        with:
-          ghtoken: ${{ secrets.ghtoken }}
+      - uses: actions/checkout@v4 # GitHub's own action — only to get the collector script
+
+      - name: install matplotlib (PDF rendering)
+        run: pip install --quiet matplotlib
+
+      - name: collect traffic → CSV + PDF → push to the private data repo
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          DATA_REPO: ${{ vars.TRAFFIC_DATA_REPO || 'kkollsga/kglite-traffic' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::TRAFFIC_TOKEN secret not set — see this workflow's header for setup."
+            exit 1
+          fi
+          # Clone the private data repo (keeps its history; an empty repo is fine).
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${DATA_REPO}.git" data
+          git -C data config user.name  "github-actions[bot]"
+          git -C data config user.email "github-actions[bot]@users.noreply.github.com"
+          # Upsert the daily series + render the PDF in-place in the data repo.
+          python scripts/repo_traffic_stats.py --repo "${GITHUB_REPOSITORY}" --data-dir data
+          cd data
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no traffic changes today"
+          else
+            git commit -q -m "traffic snapshot $(date -u +%F)"
+            git push origin HEAD:main
+          fi
