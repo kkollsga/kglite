@@ -11,6 +11,8 @@ use crate::strings::alloc_c_string;
 use kglite::api::blueprint::{build as blueprint_build, load_blueprint_file};
 use kglite::api::introspection::{compute_schema, schema_overview_to_json};
 use kglite::api::io::{load_file, load_kgl_bytes, save_graph, save_graph_with, write_kgl_to};
+#[cfg(feature = "rdf")]
+use kglite::api::io::{load_rdf as core_load_rdf, RdfConfig};
 use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{graphgen, DirGraph, GraphGenConfig};
 use std::ffi::{c_char, CStr};
@@ -284,6 +286,197 @@ fn classify_io_error(err: &std::io::Error) -> (KgliteStatusCode, String) {
         _ => KgliteStatusCode::FileIo,
     };
     (code, err.to_string())
+}
+
+/// Load an RDF file into a fresh in-memory graph — the C-side handle on
+/// the wheel's `kglite.load_rdf`. Dispatches on the extension: `.ttl`
+/// (Turtle), `.nt` (N-Triples), `.nq` (N-Quads), `.trig` (TriG).
+///
+/// The RDF → property-graph fold: object literals become typed node
+/// properties, resource objects become edges, and `rdf:type` sets the
+/// node label (first wins; extras kept in an `rdf_types` property).
+/// Predicate / type IRIs are CURIE-compacted with a `__` separator
+/// (so `[:foaf__knows]` matches in Cypher); each node keeps its full
+/// subject IRI in a `uri` property. In-memory backend only.
+///
+/// # Arguments
+///
+/// - `path` (in, borrowed): UTF-8 file path; the extension picks the parser.
+/// - `languages_json` (in, borrowed): JSON array of language tags to keep
+///   (e.g. `["en","de"]`), or null to keep all literals.
+/// - `label_predicates_json` (in, borrowed): JSON array of predicate IRIs
+///   whose literal object sets the node title, or null for
+///   `["http://www.w3.org/2000/01/rdf-schema#label"]`.
+/// - `keep_full_iris` (in): non-zero keeps full IRIs instead of CURIEs.
+/// - `default_type` (in, borrowed): node type for subjects without an
+///   `rdf:type`, or null for `"Resource"`.
+/// - `max_triples` (in): stop after this many triples; negative = no limit.
+/// - `out_graph` (out, owned): the loaded graph on success (free via
+///   [`kglite_graph_free`] or hand to
+///   [`kglite_session_new`](crate::kglite_session_new)); null on failure.
+/// - `out_stats_json` (out, owned): `{"nodes":N,"edges":M,"triples":T}` on
+///   success — free via [`kglite_free_string`](crate::kglite_free_string).
+///   May be null if the caller doesn't want stats.
+/// - `out_error_msg` (out, owned): error message on failure — free via
+///   [`kglite_free_string`](crate::kglite_free_string); null on success.
+///
+/// # Errors
+///
+/// - `KGLITE_ERR_NULL_POINTER` — `path` or `out_graph` is null
+/// - `KGLITE_ERR_INVALID_UTF8` — a string argument isn't valid UTF-8
+/// - `KGLITE_ERR_INVALID_ARGUMENT` — a `*_json` arg isn't a JSON string
+///   array, or the file extension isn't a supported RDF format
+/// - `KGLITE_ERR_FILE_NOT_FOUND` — `path` doesn't exist
+/// - `KGLITE_ERR_FILE_FORMAT` — a parse error in the RDF
+///
+/// # Safety
+///
+/// String arguments must each be a null-terminated UTF-8 string or null;
+/// `out_graph` a valid writable `*mut KgliteGraph` slot; `out_stats_json`
+/// and `out_error_msg` null or valid writable slots.
+#[cfg(feature = "rdf")]
+#[no_mangle]
+pub unsafe extern "C" fn kglite_load_rdf(
+    path: *const c_char,
+    languages_json: *const c_char,
+    label_predicates_json: *const c_char,
+    keep_full_iris: u8,
+    default_type: *const c_char,
+    max_triples: i64,
+    out_graph: *mut *mut KgliteGraph,
+    out_stats_json: *mut *const c_char,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    use std::collections::HashSet;
+
+    if path.is_null() || out_graph.is_null() {
+        return KgliteStatusCode::NullPointer;
+    }
+    unsafe {
+        *out_graph = std::ptr::null_mut();
+        if !out_stats_json.is_null() {
+            *out_stats_json = std::ptr::null();
+        }
+    }
+
+    let set_err = |msg: &str| {
+        if !out_error_msg.is_null() {
+            unsafe {
+                *out_error_msg = alloc_c_string(msg);
+            }
+        }
+    };
+
+    // Borrow an optional, null-terminated UTF-8 argument. Returns
+    // `Err(())` on invalid UTF-8 so the caller can map to InvalidUtf8.
+    let cstr_opt = |p: *const c_char| -> Result<Option<&str>, ()> {
+        if p.is_null() {
+            Ok(None)
+        } else {
+            unsafe { CStr::from_ptr(p) }
+                .to_str()
+                .map(Some)
+                .map_err(|_| ())
+        }
+    };
+
+    let path_str = match cstr_opt(path) {
+        Ok(Some(s)) => s,
+        Ok(None) => unreachable!("path null-checked above"),
+        Err(()) => return KgliteStatusCode::InvalidUtf8,
+    };
+
+    // JSON-array args (the §7 JSON-at-boundary convention for nested shapes).
+    let languages = match cstr_opt(languages_json) {
+        Ok(None) => None,
+        Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
+            Ok(v) => Some(v.into_iter().collect::<HashSet<_>>()),
+            Err(e) => {
+                set_err(&format!(
+                    "languages_json must be a JSON array of strings: {e}"
+                ));
+                return KgliteStatusCode::InvalidArgument;
+            }
+        },
+        Err(()) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let label_predicates = match cstr_opt(label_predicates_json) {
+        Ok(None) => vec!["http://www.w3.org/2000/01/rdf-schema#label".to_string()],
+        Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
+            Ok(v) => v,
+            Err(e) => {
+                set_err(&format!(
+                    "label_predicates_json must be a JSON array of strings: {e}"
+                ));
+                return KgliteStatusCode::InvalidArgument;
+            }
+        },
+        Err(()) => return KgliteStatusCode::InvalidUtf8,
+    };
+    let default_type = match cstr_opt(default_type) {
+        Ok(Some(s)) => s.to_string(),
+        Ok(None) => "Resource".to_string(),
+        Err(()) => return KgliteStatusCode::InvalidUtf8,
+    };
+
+    let config = RdfConfig {
+        languages,
+        label_predicates,
+        keep_full_iris: keep_full_iris != 0,
+        default_type,
+        max_triples: if max_triples < 0 {
+            None
+        } else {
+            Some(max_triples as u64)
+        },
+    };
+
+    let mut graph = DirGraph::new();
+    match core_load_rdf(&mut graph, path_str, &config) {
+        Ok(stats) => {
+            unsafe {
+                *out_graph = GraphState::into_handle(Arc::new(graph));
+            }
+            if !out_stats_json.is_null() {
+                let json = serde_json::json!({
+                    "nodes": stats.nodes_created,
+                    "edges": stats.edges_created,
+                    "triples": stats.triples_processed,
+                })
+                .to_string();
+                unsafe {
+                    *out_stats_json = alloc_c_string(&json);
+                }
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        }
+        Err(msg) => {
+            let code = classify_rdf_error(&msg);
+            set_err(&msg);
+            code
+        }
+    }
+}
+
+/// Map a `load_rdf` error string to a `KgliteStatusCode`. `load_rdf`
+/// returns `Result<_, String>`; we sniff the message prefix to pick the
+/// right C-side code (file-not-found vs unsupported format vs parse error).
+#[cfg(feature = "rdf")]
+fn classify_rdf_error(msg: &str) -> KgliteStatusCode {
+    if msg.starts_with("Cannot open") {
+        KgliteStatusCode::FileNotFound
+    } else if msg.starts_with("Unsupported RDF extension") {
+        KgliteStatusCode::InvalidArgument
+    } else if msg.contains("parse error") {
+        KgliteStatusCode::FileFormat
+    } else {
+        KgliteStatusCode::InvalidArgument
+    }
 }
 
 /// Save a knowledge graph to disk. The on-disk format depends on
@@ -905,5 +1098,109 @@ mod tests {
         assert!(graph.is_null());
         assert!(!err.is_null());
         unsafe { crate::kglite_free_string(err) };
+    }
+
+    #[cfg(feature = "rdf")]
+    #[test]
+    fn load_rdf_turtle_builds_graph() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("kglite_c_rdf_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("g.ttl");
+        {
+            let mut f = std::fs::File::create(&p).unwrap();
+            write!(
+                f,
+                "@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n\
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+                 <http://ex/a> a foaf:Person ; rdfs:label \"A\" ; foaf:knows <http://ex/b> .\n\
+                 <http://ex/b> a foaf:Person ; rdfs:label \"B\" .\n"
+            )
+            .unwrap();
+        }
+        let path_c = CString::new(p.to_str().unwrap()).unwrap();
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut stats: *const c_char = std::ptr::null();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_load_rdf(
+                path_c.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                &mut graph as *mut _,
+                &mut stats as *mut _,
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::Ok);
+        assert!(!graph.is_null());
+        assert!(!stats.is_null());
+        let s = unsafe { CStr::from_ptr(stats).to_str().unwrap() };
+        let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
+        assert_eq!(parsed["nodes"].as_u64().unwrap(), 2);
+        assert_eq!(parsed["edges"].as_u64().unwrap(), 1);
+        unsafe { crate::kglite_free_string(stats) };
+        unsafe { kglite_graph_free(graph) };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "rdf")]
+    #[test]
+    fn load_rdf_missing_file_returns_file_not_found() {
+        let path_c = CString::new("/tmp/__kglite_c_no_rdf__.ttl").unwrap();
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_load_rdf(
+                path_c.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                &mut graph as *mut _,
+                std::ptr::null_mut(),
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::FileNotFound);
+        assert!(graph.is_null());
+        assert!(!err.is_null());
+        unsafe { crate::kglite_free_string(err) };
+    }
+
+    #[cfg(feature = "rdf")]
+    #[test]
+    fn load_rdf_bad_extension_is_invalid_argument() {
+        // An existing file with an unsupported extension → InvalidArgument
+        // (the format is rejected before the file is opened).
+        let dir = std::env::temp_dir().join(format!("kglite_c_rdfext_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("g.rdfxml");
+        std::fs::write(&p, b"x").unwrap();
+        let path_c = CString::new(p.to_str().unwrap()).unwrap();
+        let mut graph: *mut KgliteGraph = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let rc = unsafe {
+            kglite_load_rdf(
+                path_c.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                &mut graph as *mut _,
+                std::ptr::null_mut(),
+                &mut err as *mut _,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::InvalidArgument);
+        assert!(graph.is_null());
+        assert!(!err.is_null());
+        unsafe { crate::kglite_free_string(err) };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

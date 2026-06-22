@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.10] — 2026-06-23 — General RDF loader (`load_rdf`)
+
 ### Added
 
 - **`kglite.load_rdf(path)` — general RDF loader.** Loads Turtle (`.ttl`),
@@ -24,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full subject IRI in a `uri` property and `n.id` is a dense integer.
   In-memory backend only — for Wikidata-scale dumps use
   `KnowledgeGraph.load_ntriples`.
+- **C ABI: `kglite_load_rdf`.** The same loader is reachable from non-Rust
+  bindings through a new `rdf`-gated C entry point (header guard
+  `KGLITE_FEATURE_RDF`), with JSON-array config at the boundary and
+  owned out-stats / error strings — mirroring the Python surface.
 
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 

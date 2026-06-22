@@ -80,11 +80,11 @@ jobs:
       # is off here because it pulls a ~200 MB ONNX runtime we don't
       # want on every CI run; the default-feature build below
       # verifies the no-fastembed path stays compilable.
-      - name: Clippy (sec + sodir + wikidata)
-        run: cargo clippy -p kglite-c --all-targets --features sec,sodir,wikidata -- -D warnings
+      - name: Clippy (sec + sodir + wikidata + rdf)
+        run: cargo clippy -p kglite-c --all-targets --features sec,sodir,wikidata,rdf -- -D warnings
 
-      - name: Tests (sec + sodir + wikidata)
-        run: cargo test -p kglite-c --features sec,sodir,wikidata
+      - name: Tests (sec + sodir + wikidata + rdf)
+        run: cargo test -p kglite-c --features sec,sodir,wikidata,rdf
 
       # Default-feature build — what consumers get without opting
       # into any dataset / embedder feature. Keeps the no-extras
@@ -108,9 +108,9 @@ jobs:
           # against the committed copy.
           rm -f crates/kglite-c/include/kglite.h
           touch crates/kglite-c/build.rs
-          cargo build -p kglite-c --features sec,sodir,wikidata,fastembed
+          cargo build -p kglite-c --features sec,sodir,wikidata,fastembed,rdf
           git diff --exit-code -- crates/kglite-c/include/kglite.h || {
-            echo "::error::Committed include/kglite.h is out of date — re-run 'cargo build -p kglite-c --features sec,sodir,wikidata,fastembed' and commit the result."
+            echo "::error::Committed include/kglite.h is out of date — re-run 'cargo build -p kglite-c --features sec,sodir,wikidata,fastembed,rdf' and commit the result."
             exit 1
           }
 
