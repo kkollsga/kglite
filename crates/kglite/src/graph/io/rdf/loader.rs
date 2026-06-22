@@ -8,6 +8,7 @@
 //! supported (a single-stream RDF parse isn't a Wikidata-scale path; use
 //! `load_ntriples` for that).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
@@ -245,11 +246,13 @@ fn hit_limit(processed: &mut u64, config: &RdfConfig) -> bool {
 }
 
 /// The intern key for a subject/object resource: the IRI for a named
-/// node, `_:<id>` for a blank node.
-fn resource_key(n: &NamedOrBlankNode) -> String {
+/// node, `_:<id>` for a blank node. Borrows the IRI for named nodes
+/// (the common case) so the per-statement hot path allocates nothing on
+/// an intern *hit*; only blank nodes need an owned `_:`-prefixed key.
+fn resource_key(n: &NamedOrBlankNode) -> Cow<'_, str> {
     match n {
-        NamedOrBlankNode::NamedNode(nn) => nn.as_str().to_string(),
-        NamedOrBlankNode::BlankNode(bn) => format!("_:{}", bn.as_str()),
+        NamedOrBlankNode::NamedNode(nn) => Cow::Borrowed(nn.as_str()),
+        NamedOrBlankNode::BlankNode(bn) => Cow::Owned(format!("_:{}", bn.as_str())),
     }
 }
 
@@ -264,7 +267,7 @@ fn process(
     state: &mut FoldState,
 ) {
     let subject_key = resource_key(subject);
-    let s_id = state.ensure(&subject_key);
+    let s_id = state.ensure(subject_key.as_ref());
 
     // rdf:type → node type (+ multi-type tracking).
     if predicate == RDF_TYPE {
@@ -306,7 +309,7 @@ fn process(
         // node that only ever appears as an object still exists.
         Term::NamedNode(_) | Term::BlankNode(_) => {
             let object_key = term_resource_key(object);
-            let o_id = state.ensure(&object_key);
+            let o_id = state.ensure(object_key.as_ref());
             let pred = state.curie.compact(predicate);
             state.edges.push((s_id, o_id, pred));
         }
@@ -319,21 +322,22 @@ fn process(
 
 /// Extract the IRI of a resource `Term` (named or blank), if it is one.
 /// Used for `rdf:type` objects, which may be a named node or blank node.
-fn resource_iri(term: &Term) -> Option<String> {
+/// Borrows for named nodes (no alloc).
+fn resource_iri(term: &Term) -> Option<Cow<'_, str>> {
     match term {
-        Term::NamedNode(nn) => Some(nn.as_str().to_string()),
-        Term::BlankNode(bn) => Some(format!("_:{}", bn.as_str())),
+        Term::NamedNode(nn) => Some(Cow::Borrowed(nn.as_str())),
+        Term::BlankNode(bn) => Some(Cow::Owned(format!("_:{}", bn.as_str()))),
         _ => None,
     }
 }
 
 /// Intern key for a resource `Term` (assumes named/blank — literals are
-/// handled before this is reached).
-fn term_resource_key(term: &Term) -> String {
+/// handled before this is reached). Borrows the IRI for named nodes.
+fn term_resource_key(term: &Term) -> Cow<'_, str> {
     match term {
-        Term::NamedNode(nn) => nn.as_str().to_string(),
-        Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
-        _ => String::new(),
+        Term::NamedNode(nn) => Cow::Borrowed(nn.as_str()),
+        Term::BlankNode(bn) => Cow::Owned(format!("_:{}", bn.as_str())),
+        _ => Cow::Borrowed(""),
     }
 }
 
@@ -645,7 +649,33 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
         let stats = load_rdf(&mut g, path.to_str().unwrap(), &RdfConfig::default()).unwrap();
         let secs = t.elapsed().as_secs_f64();
         let (mt, mbs) = rate(secs);
-        eprintln!("load_rdf:           {} nodes, {} edges in {secs:.3}s = {mt:.2} M triples/s, {mbs:.0} MB/s", stats.nodes_created, stats.edges_created);
+        eprintln!("load_rdf (nt):      {} nodes, {} edges in {secs:.3}s = {mt:.2} M triples/s, {mbs:.0} MB/s", stats.nodes_created, stats.edges_created);
+
+        // load_rdf on the SAME data as Turtle — exercises @prefix handling
+        // (the prefix-copy path) and CURIE compaction from declared prefixes.
+        let ttl_path = dir.path().join("bench.ttl");
+        {
+            let mut w = BufWriter::new(File::create(&ttl_path).unwrap());
+            writeln!(w, "@prefix wd: <http://www.wikidata.org/entity/> .").unwrap();
+            writeln!(w, "@prefix wdt: <http://www.wikidata.org/prop/direct/> .").unwrap();
+            writeln!(w, "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .").unwrap();
+            writeln!(w, "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .").unwrap();
+            for i in 0..entities {
+                writeln!(w, "wd:Q{i} wdt:P31 wd:Q5 ; rdfs:label \"Person {i}\"@en ; wdt:P1082 \"{i}\"^^xsd:integer ; wdt:P569 \"1990-01-01T00:00:00Z\"^^xsd:dateTime ; wdt:P26 wd:Q{} .", (i + 1) % entities).unwrap();
+            }
+        }
+        let ttl_mb = std::fs::metadata(&ttl_path).unwrap().len() as f64 / 1e6;
+        let mut gt = DirGraph::new();
+        let t = Instant::now();
+        let statst = load_rdf(&mut gt, ttl_path.to_str().unwrap(), &RdfConfig::default()).unwrap();
+        let secst = t.elapsed().as_secs_f64();
+        eprintln!(
+            "load_rdf (turtle):  {} nodes, {} edges in {secst:.3}s = {:.2} M triples/s, {:.0} MB/s",
+            statst.nodes_created,
+            statst.edges_created,
+            triples as f64 / 1e6 / secst,
+            ttl_mb / secst
+        );
 
         // load_ntriples full build (memory, Wikidata-tuned path).
         let mut g2 = DirGraph::new();
