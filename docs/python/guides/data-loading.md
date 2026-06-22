@@ -355,6 +355,66 @@ graph.report_history()    # all reports
 
 ## N-Triples and RDF
 
+Two loaders read RDF, for two different jobs:
+
+- **`kglite.load_rdf(path)`** — a general RDF loader for **Turtle**
+  (`.ttl`), **N-Triples** (`.nt`), **N-Quads** (`.nq`), and **TriG**
+  (`.trig`). Parses the full Turtle family and folds it into an
+  in-memory property graph. Reach for this for ontologies, FOAF/
+  schema.org data, DBpedia slices — any RDF file that fits in memory.
+- **`KnowledgeGraph.load_ntriples(path)`** — a Wikidata-tuned,
+  disk-scale N-Triples streamer (parallel `.bz2`, columnar/CSR build).
+  Reach for this for `latest-truthy`-style dumps.
+
+### General RDF — `load_rdf`
+
+```python
+import kglite
+
+g = kglite.load_rdf("foaf.ttl")          # → a new in-memory KnowledgeGraph
+
+g.cypher('''
+    MATCH (p:foaf__Person)-[:foaf__knows]->(friend)
+    RETURN p.title AS person, friend.title AS friend
+''')
+```
+
+The RDF → property-graph fold:
+
+| RDF                              | Becomes                                           |
+| -------------------------------- | ------------------------------------------------- |
+| object **literal**               | a typed node property                             |
+| object **resource** (IRI / blank)| an **edge**                                       |
+| `rdf:type`                       | the node **label** (first wins; extras → `rdf_types`) |
+| `rdfs:label`                     | the node **title**                                |
+
+Literals are coerced to native types: `xsd:integer` → int,
+`xsd:double` → float, `xsd:boolean` → bool, `xsd:date` → date,
+`xsd:dateTime` → datetime, GeoSPARQL `POINT` → point. A predicate that
+repeats on one subject becomes a list.
+
+Predicate and type IRIs are **CURIE-compacted** using the document's
+own `@prefix` declarations plus a well-known prefix table, with a `__`
+(double-underscore) separator so the result is a valid Cypher
+identifier — `http://xmlns.com/foaf/0.1/knows` → `foaf__knows`, matched
+natively as `[:foaf__knows]`. (A colon would clash with Cypher's
+label separator.) Each node keeps its full subject IRI in a `uri`
+property, and `n.id` is a dense integer.
+
+```python
+# Keep full IRIs instead of compacting; keep only English labels.
+g = kglite.load_rdf("data.ttl", keep_full_iris=True, languages=["en"])
+```
+
+Keyword args: `languages` (keep only these literal language tags),
+`label_predicates` (IRIs that set the title; default `rdfs:label`),
+`keep_full_iris`, `default_type` (label for subjects without an
+`rdf:type`; default `"Resource"`), `max_triples`. The loader builds an
+**in-memory** graph; for Wikidata-scale dumps use `load_ntriples`
+below.
+
+### Wikidata-scale N-Triples — `load_ntriples`
+
 `load_ntriples()` streams an RDF/N-Triples file directly into the
 graph — designed for Wikidata `latest-truthy` dumps but works with
 any N-Triples input:
