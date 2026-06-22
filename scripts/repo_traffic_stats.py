@@ -12,8 +12,8 @@ Usage:
 
 Note on referrers / popular content: GitHub returns these as a single 14-day
 aggregate (top 10), NOT a per-day series. We snapshot that aggregate daily
-(stamped with the capture date) and chart each entry's rolling-14-day count
-over the capture dates — the closest to a daily breakdown the API allows.
+(stamped with the capture date) and chart it as standing bars; once ≥2 capture
+dates exist it becomes a separate curve per entry over the capture dates.
 """
 
 from __future__ import annotations
@@ -81,58 +81,69 @@ def read_csv(path: Path) -> list[dict]:
 
 
 def _plot_timeseries(ax, data: dict, total_key: str, label: str) -> None:
+    """Total on the left y-axis; unique on a secondary (right) y-axis."""
+    ax.set_title(label, fontsize=10)
     if not data:
-        ax.text(0.5, 0.5, f"no {label.lower()} data yet", ha="center", va="center")
-        ax.set_axis_off()
+        ax.text(0.5, 0.5, f"no {label.lower()} data yet", ha="center", va="center", color="#9E9E9E")
         return
     items = sorted(data.values(), key=lambda r: r["date"])
     xs = [dt.date.fromisoformat(r["date"]) for r in items]
     total = [int(r[total_key]) for r in items]
     uniq = [int(r["unique"]) for r in items]
-    ax.plot(xs, total, marker="o", ms=3, lw=1.4, color="#4FC3F7", label=f"{label.lower()} (total)")
-    ax.plot(xs, uniq, marker="o", ms=3, lw=1.4, color="#FFB74D", label=f"unique {label.lower()}")
-    ax.fill_between(xs, uniq, color="#FFB74D", alpha=0.12)
+    (l_total,) = ax.plot(xs, total, marker="o", ms=3, lw=1.4, color="#4FC3F7", label=f"{label.lower()} (total)")
+    ax.set_ylabel(f"{label.lower()} (total)", color="#4FC3F7", fontsize=8)
+    ax.tick_params(axis="y", labelcolor="#4FC3F7")
+    ax.grid(True, alpha=0.25)
+    ax2 = ax.twinx()  # secondary axis for unique
+    (l_uniq,) = ax2.plot(xs, uniq, marker="o", ms=3, lw=1.4, color="#FFB74D", label=f"unique {label.lower()}")
+    ax2.set_ylabel(f"unique {label.lower()}", color="#FFB74D", fontsize=8)
+    ax2.tick_params(axis="y", labelcolor="#FFB74D")
     ax.set_title(
         f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} → {xs[-1]:%Y-%m-%d})",
         fontsize=10,
     )
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.25)
+    ax.legend(handles=[l_total, l_uniq], fontsize=8, loc="upper left")
 
 
-def _plot_aggregate_by_day(ax, rows: list[dict], key: str, title: str, top: int = 8) -> None:
-    """Chart each top entry's rolling-14d count across capture dates. One capture
-    date → horizontal bar of the current snapshot; multiple → line per entry."""
+def _plot_aggregate_by_day(
+    ax, rows: list[dict], key: str, title: str, label_field: str | None = None, top: int = 8
+) -> None:
+    """Standing (vertical) bars of the current 14-day snapshot; once ≥2 capture
+    dates exist, a separate curve per entry over the capture dates. Always
+    rendered, even with no data yet."""
+    label_field = label_field or key
+    ax.set_title(title, fontsize=10)
     if not rows:
-        ax.text(0.5, 0.5, "no data yet", ha="center", va="center")
-        ax.set_axis_off()
-        ax.set_title(title, fontsize=10)
+        ax.text(0.5, 0.5, "no data yet (last 14 days)", ha="center", va="center", color="#9E9E9E", fontsize=8)
+        ax.set_yticks([])
+        ax.set_xticks([])
         return
 
-    by_entry: dict[str, dict[str, int]] = defaultdict(dict)
+    by_count: dict[str, dict[str, int]] = defaultdict(dict)
+    labels: dict[str, str] = {}
     dates = sorted({r["captured"] for r in rows})
     for r in rows:
-        by_entry[r[key]][r["captured"]] = int(r["count"])
+        by_count[r[key]][r["captured"]] = int(r["count"])
+        labels[r[key]] = r.get(label_field) or r[key]
     latest = dates[-1]
-    ranked = sorted(by_entry, key=lambda e: by_entry[e].get(latest, 0), reverse=True)[:top]
+    ranked = sorted(by_count, key=lambda e: by_count[e].get(latest, 0), reverse=True)[:top]
 
     if len(dates) < 2:
-        vals = [by_entry[e].get(latest, 0) for e in ranked]
-        ax.barh(range(len(ranked)), vals, color="#4FC3F7")
-        ax.set_yticks(range(len(ranked)))
-        ax.set_yticklabels([e[:42] for e in ranked], fontsize=7)
-        ax.invert_yaxis()
-        ax.set_xlabel("count (last 14 days)", fontsize=8)
-        ax.set_title(f"{title} — snapshot {latest} (daily trend builds as runs accumulate)", fontsize=10)
+        vals = [by_count[e].get(latest, 0) for e in ranked]
+        ax.bar(range(len(ranked)), vals, color="#4FC3F7")
+        ax.set_xticks(range(len(ranked)))
+        ax.set_xticklabels([labels[e][:24] for e in ranked], rotation=45, ha="right", fontsize=7)
+        ax.set_ylabel("count (last 14 days)", fontsize=8)
+        ax.set_title(f"{title} (14-day snapshot {latest})", fontsize=10)
     else:
         xs = [dt.date.fromisoformat(d) for d in dates]
         for e in ranked:
-            ys = [by_entry[e].get(d, 0) for d in dates]
-            ax.plot(xs, ys, marker="o", ms=2.5, lw=1.2, label=e[:34])
+            ys = [by_count[e].get(d, 0) for d in dates]
+            ax.plot(xs, ys, marker="o", ms=2.5, lw=1.2, label=labels[e][:24])
         ax.legend(fontsize=6, ncol=2, loc="upper left")
         ax.grid(True, alpha=0.25)
         ax.set_ylabel("rolling 14-day count", fontsize=8)
-        ax.set_title(f"{title} — by capture date (rolling 14-day totals)", fontsize=10)
+        ax.set_title(f"{title} (by capture date)", fontsize=10)
 
 
 def render_pdf(out_dir: Path, repo: str, views: dict, clones: dict) -> None:
@@ -149,7 +160,7 @@ def render_pdf(out_dir: Path, repo: str, views: dict, clones: dict) -> None:
     now = dt.datetime.now(dt.timezone.utc)
 
     with PdfPages(out_dir / "report.pdf") as pdf:
-        # Page 1 — views + clones (total + unique), true daily series.
+        # Page 1 (portrait) — views + clones; total left axis, unique right axis.
         fig, axes = plt.subplots(2, 1, figsize=(8.5, 11))
         fig.suptitle(f"GitHub traffic — {repo}\ngenerated {now:%Y-%m-%d %H:%M UTC}", fontsize=13)
         _plot_timeseries(axes[0], views, "views", "Views")
@@ -162,23 +173,24 @@ def render_pdf(out_dir: Path, repo: str, views: dict, clones: dict) -> None:
         pdf.savefig(fig)
         plt.close(fig)
 
-        # Page 2 — referring sites + popular content, by capture date.
-        fig, axes = plt.subplots(2, 1, figsize=(8.5, 11))
+        # Page 2 (landscape) — referrers + popular content, SIDE BY SIDE.
+        fig, axes = plt.subplots(1, 2, figsize=(11, 6))
         fig.suptitle(f"Referrers & popular content — {repo}", fontsize=13)
         _plot_aggregate_by_day(axes[0], referrers, "referrer", "Referring sites")
-        _plot_aggregate_by_day(axes[1], paths, "path", "Popular content")
+        _plot_aggregate_by_day(axes[1], paths, "path", "Popular content", label_field="title")
         for ax in axes:
-            if ax.lines:  # only the line-chart variant has a dated x-axis
+            if ax.lines:  # only the (multi-date) curve variant has a dated x-axis
                 ax.xaxis.set_major_formatter(DateFormatter("%m-%d"))
         fig.text(
             0.5,
-            0.015,
-            "GitHub exposes referrers/content only as a 14-day aggregate; this charts daily snapshots of it.",
+            0.02,
+            "GitHub exposes referrers/content only as a 14-day aggregate — bars now, "
+            "per-entry curves as daily snapshots accumulate.",
             ha="center",
             fontsize=7,
             color="#9E9E9E",
         )
-        fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+        fig.tight_layout(rect=(0, 0.04, 1, 0.93))
         pdf.savefig(fig)
         plt.close(fig)
 
