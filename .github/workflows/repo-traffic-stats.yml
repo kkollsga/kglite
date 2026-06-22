@@ -2,22 +2,24 @@
 #
 # GitHub keeps repository traffic (views / clones / referrers) for only 14 days.
 # This snapshots them daily via GitHub's own Traffic API (the `gh` CLI) and
-# accumulates them as CSVs + a PDF report into a SEPARATE PRIVATE repo — so the
-# numbers stay private and this (public) repo stays clean. The only moving parts
-# are GitHub's own `actions/checkout`, the `gh` CLI, this repo's
-# `scripts/repo_traffic_stats.py`, and matplotlib. No community action ever
-# sees the token.
+# accumulates them as CSVs + a PDF into the PRIVATE `kkollsga/statistics` repo,
+# under a per-repo dir (this repo lands in `statistics/<repo-name>/`). So the
+# numbers stay private, this public repo stays clean, and one statistics repo
+# aggregates every source repo. The only moving parts are GitHub's own
+# `actions/checkout`, the `gh` CLI, this repo's `scripts/repo_traffic_stats.py`,
+# and matplotlib — no community action ever sees the token.
 #
 # ── One-time setup (repo owner) ───────────────────────────────────────────────
-#   1. Create a PRIVATE repo to hold the data, e.g. `kkollsga/kglite-traffic`
-#      (it can be completely empty).
-#   2. Create a fine-grained PAT with:
-#        • this repo (kglite)  → Administration: Read           (traffic API)
-#        • the data repo       → Contents: Read and write        (store CSV/PDF)
+#   The private data repo `kkollsga/statistics` already exists. Remaining:
+#   1. Create a fine-grained PAT with:
+#        • this repo (kglite)        → Administration: Read     (traffic API)
+#        • kkollsga/statistics       → Contents: Read and write  (store CSV/PDF)
 #      Add it as a repository secret named  TRAFFIC_TOKEN.
-#   3. (optional) If the data repo isn't `kkollsga/kglite-traffic`, set a repo
-#      variable  TRAFFIC_DATA_REPO  to `owner/name`.
-# Then run it from the Actions tab (or `gh workflow run repo-traffic-stats.yml`).
+#   2. (optional) Override the data repo via a repo variable  TRAFFIC_DATA_REPO.
+#
+# ── Adding another repo later ─────────────────────────────────────────────────
+#   Copy this workflow + scripts/repo_traffic_stats.py into that repo, add its
+#   own TRAFFIC_TOKEN. It auto-writes to `statistics/<that-repo-name>/`.
 
 name: repo-traffic-stats
 
@@ -35,27 +37,28 @@ jobs:
       - name: install matplotlib (PDF rendering)
         run: pip install --quiet matplotlib
 
-      - name: collect traffic → CSV + PDF → push to the private data repo
+      - name: collect traffic → CSV + PDF → push to the private statistics repo
         env:
           GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
-          DATA_REPO: ${{ vars.TRAFFIC_DATA_REPO || 'kkollsga/kglite-traffic' }}
+          DATA_REPO: ${{ vars.TRAFFIC_DATA_REPO || 'kkollsga/statistics' }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then
             echo "::error::TRAFFIC_TOKEN secret not set — see this workflow's header for setup."
             exit 1
           fi
+          repo_name="${GITHUB_REPOSITORY##*/}"   # e.g. kglite → data lands in statistics/<repo_name>/
           # Clone the private data repo (keeps its history; an empty repo is fine).
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${DATA_REPO}.git" data
           git -C data config user.name  "github-actions[bot]"
           git -C data config user.email "github-actions[bot]@users.noreply.github.com"
-          # Upsert the daily series + render the PDF in-place in the data repo.
-          python scripts/repo_traffic_stats.py --repo "${GITHUB_REPOSITORY}" --data-dir data
+          # Upsert this repo's daily series + render its PDF, namespaced by repo.
+          python scripts/repo_traffic_stats.py --repo "${GITHUB_REPOSITORY}" --data-dir "data/${repo_name}"
           cd data
           git add -A
           if git diff --cached --quiet; then
             echo "no traffic changes today"
           else
-            git commit -q -m "traffic snapshot $(date -u +%F)"
+            git commit -q -m "${repo_name}: traffic snapshot $(date -u +%F)"
             git push origin HEAD:main
           fi
