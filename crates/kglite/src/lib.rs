@@ -339,6 +339,10 @@ pub mod api {
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
+        /// General-purpose RDF loader (Turtle / N-Triples / N-Quads /
+        /// TriG). Gated behind the `rdf` Cargo feature.
+        #[cfg(feature = "rdf")]
+        pub use crate::graph::io::rdf::{load_rdf, RdfConfig, RdfStats};
         /// Streaming disk subset export (bounded-memory subgraph save).
         pub use crate::graph::mutation::subgraph_streaming::{
             pass_a_scan, pass_a_scan_to_file, save_subset, save_subset_streaming_disk, RankIndex,

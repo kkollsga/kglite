@@ -69,7 +69,7 @@ pyo3 = { version = "0.28", features = ["multiple-pymethods", "chrono"] }
 # crate's source to avoid an extern-crate collision with this
 # crate's own `[lib] name = "kglite"` (the cdylib that becomes
 # the wheel's `kglite.abi3.so`).
-kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata", "okf"] }
+kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata", "okf", "rdf"] }
 
 # The MCP server, hosted in-process. This is a pure-Rust lib (no pyo3,
 # no libpython link) depending on the SAME `kglite` core crate as

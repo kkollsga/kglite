@@ -113,6 +113,11 @@ wikidata = [
     # wikidata correctly (just slower); opt into `parallel-bz2`
     # explicitly for the ~10× speedup on M-series hardware.
 ]
+# General-purpose RDF loader (Turtle / N-Triples / N-Quads / TriG via
+# the oxttl parser family). Off by default so the bare crate pulls no
+# RDF parser; `oxttl` + `oxrdf` are only in the dep tree when `rdf` is
+# enabled. Phase 1 covers the in-memory (Default) backend only.
+rdf = ["dep:oxttl", "dep:oxrdf"]
 
 # `--cfg loom` is set manually when running the loom interleaving model
 # (tests/loom_session.rs); register it so normal builds don't warn (and
@@ -191,6 +196,14 @@ quick-xml = { version = "0.36", optional = true }
 # `unsafe`/libyaml, no unmaintained advisory); only pulled when `okf` is
 # enabled (the wheel enables it; bare builds don't).
 yaml-rust2 = { version = "0.10", optional = true }
+
+# RDF loader deps — gated behind the `rdf` feature. `oxttl` is the
+# Oxigraph family's standalone Turtle/N-Triples/N-Quads/TriG parser;
+# it re-exports `oxrdf` term types (Triple / Quad / Term / Literal).
+# oxttl 0.2.3 resolves oxrdf 0.3.x — pin oxrdf to the version oxttl
+# pulls so they agree on the term types.
+oxttl = { version = "0.2", optional = true }
+oxrdf = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
