@@ -80,8 +80,17 @@ def read_csv(path: Path) -> list[dict]:
 # ── PDF rendering (dark mode) ────────────────────────────────────────────────
 
 
+def _set_split_ylim(ax_primary, ax_secondary, primary_vals, secondary_vals) -> None:
+    """Give the primary (unique) axis ~1.6× headroom and the secondary (total)
+    axis a tight ~1.05× — so the always-larger total typically renders a little
+    higher than unique instead of overlapping it. (Independent axes, so it's a
+    visual heuristic, not a per-point guarantee.)"""
+    ax_primary.set_ylim(0, (max(primary_vals) or 1) * 1.6)
+    ax_secondary.set_ylim(0, (max(secondary_vals) or 1) * 1.05)
+
+
 def _plot_timeseries(ax, data: dict, total_key: str, label: str) -> None:
-    """Total on the left y-axis; unique on a secondary (right) y-axis."""
+    """Unique on the primary (left) y-axis; total on a secondary (right) axis."""
     ax.set_title(label, fontsize=10)
     if not data:
         ax.text(0.5, 0.5, f"no {label.lower()} data yet", ha="center", va="center", color="#9E9E9E")
@@ -90,19 +99,20 @@ def _plot_timeseries(ax, data: dict, total_key: str, label: str) -> None:
     xs = [dt.date.fromisoformat(r["date"]) for r in items]
     total = [int(r[total_key]) for r in items]
     uniq = [int(r["unique"]) for r in items]
-    (l_total,) = ax.plot(xs, total, marker="o", ms=3, lw=1.4, color="#4FC3F7", label=f"{label.lower()} (total)")
-    ax.set_ylabel(f"{label.lower()} (total)", color="#4FC3F7", fontsize=8)
+    (l_uniq,) = ax.plot(xs, uniq, marker="o", ms=3, lw=1.4, color="#4FC3F7", label=f"unique {label.lower()}")
+    ax.set_ylabel(f"unique {label.lower()}", color="#4FC3F7", fontsize=8)
     ax.tick_params(axis="y", labelcolor="#4FC3F7")
     ax.grid(True, alpha=0.25)
-    ax2 = ax.twinx()  # secondary axis for unique
-    (l_uniq,) = ax2.plot(xs, uniq, marker="o", ms=3, lw=1.4, color="#FFB74D", label=f"unique {label.lower()}")
-    ax2.set_ylabel(f"unique {label.lower()}", color="#FFB74D", fontsize=8)
+    ax2 = ax.twinx()  # secondary axis for total
+    (l_total,) = ax2.plot(xs, total, marker="o", ms=3, lw=1.4, color="#FFB74D", label=f"{label.lower()} (total)")
+    ax2.set_ylabel(f"{label.lower()} (total)", color="#FFB74D", fontsize=8)
     ax2.tick_params(axis="y", labelcolor="#FFB74D")
+    _set_split_ylim(ax, ax2, uniq, total)
     ax.set_title(
         f"{label}: {sum(total)} total / {sum(uniq)} unique  ({xs[0]:%Y-%m-%d} → {xs[-1]:%Y-%m-%d})",
         fontsize=10,
     )
-    ax.legend(handles=[l_total, l_uniq], fontsize=8, loc="upper left")
+    ax.legend(handles=[l_uniq, l_total], fontsize=8, loc="upper left")
 
 
 def _plot_aggregate_by_day(
@@ -119,31 +129,49 @@ def _plot_aggregate_by_day(
         ax.set_xticks([])
         return
 
-    by_count: dict[str, dict[str, int]] = defaultdict(dict)
+    uniq_by: dict[str, dict[str, int]] = defaultdict(dict)
+    tot_by: dict[str, dict[str, int]] = defaultdict(dict)
     labels: dict[str, str] = {}
     dates = sorted({r["captured"] for r in rows})
     for r in rows:
-        by_count[r[key]][r["captured"]] = int(r["count"])
+        uniq_by[r[key]][r["captured"]] = int(r["unique"])
+        tot_by[r[key]][r["captured"]] = int(r["count"])
         labels[r[key]] = r.get(label_field) or r[key]
     latest = dates[-1]
-    ranked = sorted(by_count, key=lambda e: by_count[e].get(latest, 0), reverse=True)[:top]
+    ranked = sorted(uniq_by, key=lambda e: uniq_by[e].get(latest, 0), reverse=True)[:top]
+
+    ax2 = ax.twinx()  # total on the secondary axis (★)
+    ax.set_ylabel("unique", color="#4FC3F7", fontsize=8)
+    ax.tick_params(axis="y", labelcolor="#4FC3F7")
+    ax2.set_ylabel("total (★)", color="#FFB74D", fontsize=8)
+    ax2.tick_params(axis="y", labelcolor="#FFB74D")
 
     if len(dates) < 2:
-        vals = [by_count[e].get(latest, 0) for e in ranked]
-        ax.bar(range(len(ranked)), vals, color="#4FC3F7")
-        ax.set_xticks(range(len(ranked)))
+        u = [uniq_by[e].get(latest, 0) for e in ranked]
+        t = [tot_by[e].get(latest, 0) for e in ranked]
+        x = list(range(len(ranked)))
+        bars = ax.bar(x, u, color="#4FC3F7", label="unique (bars)")
+        (stars,) = ax2.plot(x, t, "*", color="#FFB74D", ms=13, linestyle="none", label="total (★)")
+        ax.set_xticks(x)
         ax.set_xticklabels([labels[e][:24] for e in ranked], rotation=45, ha="right", fontsize=7)
-        ax.set_ylabel("count (last 14 days)", fontsize=8)
+        _set_split_ylim(ax, ax2, u, t)
+        ax.legend([bars, stars], ["unique (bars)", "total (★)"], fontsize=7, loc="upper right")
         ax.set_title(f"{title} (14-day snapshot {latest})", fontsize=10)
     else:
         xs = [dt.date.fromisoformat(d) for d in dates]
+        all_u: list[int] = []
+        all_t: list[int] = []
         for e in ranked:
-            ys = [by_count[e].get(d, 0) for d in dates]
-            ax.plot(xs, ys, marker="o", ms=2.5, lw=1.2, label=labels[e][:24])
+            us = [uniq_by[e].get(d, 0) for d in dates]
+            ts = [tot_by[e].get(d, 0) for d in dates]
+            all_u += us
+            all_t += ts
+            (line,) = ax.plot(xs, us, marker="o", ms=2.5, lw=1.2, label=labels[e][:24])
+            ax2.plot(xs, ts, "*", ms=9, linestyle="none", color=line.get_color())
+        _set_split_ylim(ax, ax2, all_u, all_t)
         ax.legend(fontsize=6, ncol=2, loc="upper left")
-        ax.grid(True, alpha=0.25)
-        ax.set_ylabel("rolling 14-day count", fontsize=8)
-        ax.set_title(f"{title} (by capture date)", fontsize=10)
+        ax.set_title(f"{title} (by date — line=unique, ★=total)", fontsize=10)
+    ax.grid(True, alpha=0.25)
 
 
 def render_pdf(out_dir: Path, repo: str, views: dict, clones: dict) -> None:
