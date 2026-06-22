@@ -179,6 +179,56 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
         .map_err(|e| load_err_to_pyerr(e, Some(&path)))
 }
 
+/// Load an RDF file into a fresh in-memory graph and return it.
+///
+/// Dispatches on the file extension: `.ttl` → Turtle, `.nt` → N-Triples,
+/// `.nq` → N-Quads, `.trig` → TriG. The RDF→property-graph fold is:
+/// object literals become typed node properties, resource objects become
+/// edges, and `rdf:type` sets the node label (first wins; any extra types
+/// are kept in an `rdf_types` list property). Predicate and type IRIs are
+/// CURIE-compacted using the document's own `@prefix` declarations plus a
+/// well-known prefix table; the full subject IRI is kept in each node's
+/// `uri` property and `n.id` is a dense integer.
+///
+/// Keyword args: `languages` (keep only literals in these language tags),
+/// `label_predicates` (IRIs whose literal sets the node title; defaults to
+/// `rdfs:label`), `keep_full_iris` (skip CURIE compaction), `default_type`
+/// (node type for subjects without `rdf:type`; defaults to `"Resource"`),
+/// `max_triples` (stop after N).
+#[pyfunction]
+#[pyo3(signature = (path, *, languages=None, label_predicates=None, keep_full_iris=false, default_type=None, max_triples=None))]
+fn load_rdf(
+    py: Python<'_>,
+    path: String,
+    languages: Option<Vec<String>>,
+    label_predicates: Option<Vec<String>>,
+    keep_full_iris: bool,
+    default_type: Option<String>,
+    max_triples: Option<u64>,
+) -> PyResult<KnowledgeGraph> {
+    use std::collections::HashSet;
+
+    let config = kglite_core::api::io::RdfConfig {
+        languages: languages.map(|v| v.into_iter().collect::<HashSet<_>>()),
+        label_predicates: label_predicates
+            .unwrap_or_else(|| vec!["http://www.w3.org/2000/01/rdf-schema#label".to_string()]),
+        keep_full_iris,
+        default_type: default_type.unwrap_or_else(|| "Resource".to_string()),
+        max_triples,
+    };
+
+    let mut graph = kglite_core::api::DirGraph::new();
+    py.detach(|| kglite_core::api::io::load_rdf(&mut graph, &path, &config))
+        .map_err(|e| {
+            if e.starts_with("Cannot open") {
+                PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(e)
+            } else {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(e)
+            }
+        })?;
+    Ok(KnowledgeGraph::from_arc(std::sync::Arc::new(graph)))
+}
+
 /// Load a saved graph at `path` directly as a thread-safe [`Session`] — the
 /// one-call shortcut for the concurrent-serving case (equivalent to
 /// `kglite.load(path).session()`).
@@ -364,6 +414,7 @@ fn _run_mcp_server(
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    m.add_function(wrap_pyfunction!(load_rdf, m)?)?;
     m.add_function(wrap_pyfunction!(open_session, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(open, m)?)?;

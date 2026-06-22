@@ -464,6 +464,58 @@ def load(path: str) -> KnowledgeGraph:
     """
     ...
 
+def load_rdf(
+    path: str,
+    *,
+    languages: list[str] | None = None,
+    label_predicates: list[str] | None = None,
+    keep_full_iris: bool = False,
+    default_type: str | None = None,
+    max_triples: int | None = None,
+) -> KnowledgeGraph:
+    """Load an RDF file into a fresh in-memory graph.
+
+    Dispatches on the file extension: ``.ttl`` → Turtle, ``.nt`` → N-Triples,
+    ``.nq`` → N-Quads, ``.trig`` → TriG (parsed via the ``oxttl`` family).
+
+    The RDF→property-graph fold: object literals become typed node properties
+    (``xsd:integer`` → int, ``xsd:double`` → float, ``xsd:boolean`` → bool,
+    ``xsd:date`` → date, ``xsd:dateTime`` → datetime, GeoSPARQL ``POINT`` →
+    point; a repeated predicate becomes a list); resource objects become
+    edges; and ``rdf:type`` sets the node label (first wins — any extra types
+    are kept in an ``rdf_types`` list property). Predicate and type IRIs are
+    CURIE-compacted with a ``__`` separator (e.g. ``foaf__knows``) using the
+    document's own ``@prefix`` declarations plus a well-known prefix table —
+    so they are valid Cypher identifiers
+    (``MATCH (:foaf__Person)-[:foaf__knows]->()``). Each node keeps its full
+    subject IRI in a ``uri`` property, and ``n.id`` is a dense integer.
+
+    Args:
+        path: Path to the RDF file. Extension selects the parser.
+        languages: If given, keep only language-tagged literals whose tag is
+            in this set (untagged literals are always kept).
+        label_predicates: IRIs whose literal object sets the node title.
+            Defaults to ``["http://www.w3.org/2000/01/rdf-schema#label"]``.
+        keep_full_iris: Keep full predicate/type IRIs instead of CURIE-
+            compacting them.
+        default_type: Node type for subjects without an ``rdf:type``.
+            Defaults to ``"Resource"``.
+        max_triples: Stop after this many triples.
+
+    Returns:
+        A new in-memory KnowledgeGraph.
+
+    Raises:
+        FileNotFoundError: The file does not exist.
+        ValueError: Unsupported extension or a parse error.
+
+    Note:
+        Builds an in-memory graph; mapped/disk backends are not supported.
+        For Wikidata-scale N-Triples dumps use
+        :meth:`KnowledgeGraph.load_ntriples` instead.
+    """
+    ...
+
 def open_session(path: str) -> "Session":
     """Load a saved graph at ``path`` directly as a thread-safe :class:`Session`.
 
