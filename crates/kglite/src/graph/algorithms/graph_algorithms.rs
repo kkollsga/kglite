@@ -1221,6 +1221,54 @@ pub fn clustering_coefficient_scoped(
     Ok(out)
 }
 
+/// Global triangle count + transitivity over the scoped undirected subgraph.
+///
+/// Returns `(triangles, transitivity)`:
+/// - `triangles` — the number of distinct triangles (3-cliques).
+/// - `transitivity` — the global clustering coefficient
+///   `3 * triangles / connected_triples` (a connected triple is a path of
+///   length 2), in `[0, 1]`; `0.0` when there are no connected triples.
+///
+/// Shares the adjacency build + sorted-neighbour intersection counting with
+/// [`clustering_coefficient_scoped`]. The per-node "edges among my
+/// neighbours" count is summed across all nodes; since each triangle is seen
+/// once at each of its three corners, that raw sum is `3 * triangles` — so
+/// `triangles = sum / 3`, and dividing the sum by the connected-triple count
+/// yields transitivity directly (the factor of 3 cancels).
+pub fn triangle_count_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Interrupt,
+) -> Result<(u64, f64), String> {
+    let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
+    let n = nodes.len();
+    // `link_sum` = Σ_v (edges among v's neighbours) = 3 × triangles.
+    // `triple_sum` = Σ_v C(deg(v), 2) = number of connected triples.
+    let mut link_sum: u64 = 0;
+    let mut triple_sum: u64 = 0;
+    for (v, nbrs) in adj.iter().enumerate().take(n) {
+        if v & 0xFFFF == 0 && deadline.exceeded() {
+            return Err(algorithm_timeout_err());
+        }
+        let k = nbrs.len() as u64;
+        if k < 2 {
+            continue;
+        }
+        triple_sum += k * (k - 1) / 2;
+        for &a in nbrs {
+            link_sum += intersection_count_gt(&adj[a as usize], nbrs, a);
+        }
+    }
+    let triangles = link_sum / 3;
+    let transitivity = if triple_sum > 0 {
+        link_sum as f64 / triple_sum as f64
+    } else {
+        0.0
+    };
+    Ok((triangles, transitivity))
+}
+
 /// Count elements common to two sorted slices that are strictly greater than
 /// `gt`. Linear merge.
 fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {

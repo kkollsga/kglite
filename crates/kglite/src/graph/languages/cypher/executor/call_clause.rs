@@ -90,7 +90,9 @@ fn algo_allowed_keys(proc: &str) -> Option<Vec<&'static str>> {
         | "k_core"
         | "coreness"
         | "clustering_coefficient"
-        | "local_clustering_coefficient" => vec![],
+        | "local_clustering_coefficient"
+        | "triangle_count"
+        | "transitivity" => vec![],
         _ => return None,
     };
     // Scoping keys accepted on every algorithm procedure. `relationship` and
@@ -291,6 +293,7 @@ impl<'a> CypherExecutor<'a> {
             "connected_components" | "weakly_connected_components" => &["node", "component"],
             "k_core" | "coreness" => &["node", "coreness"],
             "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
+            "triangle_count" | "transitivity" => &["triangles", "transitivity"],
             "cluster" => &["node", "cluster"],
             "list_procedures" => &["name", "description", "yield_columns"],
             "orphan_node"
@@ -643,6 +646,36 @@ impl<'a> CypherExecutor<'a> {
                 }
                 rows
             }
+            "triangle_count" | "transitivity" => {
+                // Scoped global triangle count + transitivity, as a single
+                // aggregate row. YIELD triangles, transitivity. Reuses the
+                // clustering-coefficient adjacency + neighbour-intersection
+                // counting in one pass.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let (triangles, transitivity) =
+                    crate::graph::algorithms::graph_algorithms::triangle_count_scoped(
+                        self.graph,
+                        node_types.as_deref(),
+                        rel_types.as_deref(),
+                        self.interrupt(),
+                    )?;
+                let mut row = ResultRow::new();
+                for item in &clause.yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    match item.name.as_str() {
+                        "triangles" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Int64(triangles as i64));
+                        }
+                        "transitivity" => {
+                            row.projected
+                                .insert(alias.to_string(), Value::Float64(transitivity));
+                        }
+                        _ => {}
+                    }
+                }
+                vec![row]
+            }
             "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
             "orphan_node" => super::rule_procedures::execute_orphan_node(
                 self.graph,
@@ -774,6 +807,11 @@ impl<'a> CypherExecutor<'a> {
                         "clustering_coefficient",
                         "Local clustering coefficient per node (how interconnected its neighbours are). Optional {node_type, relationship} scoping.",
                         "node, coefficient",
+                    ),
+                    (
+                        "triangle_count",
+                        "Global triangle count + transitivity (global clustering coefficient) for the whole graph. Single aggregate row. Optional {node_type, relationship} scoping. (Alias: transitivity.)",
+                        "triangles, transitivity",
                     ),
                     (
                         "cluster",

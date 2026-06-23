@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incoming/outgoing. Resolves bound variables and nodes carried through
   `WITH n AS x` / `collect(n)` / `UNWIND` (consistent with `id()`/`labels()`).
   Previously there was no degree function and `size((n)--())` isn't supported.
+- **`CALL triangle_count()` / `CALL transitivity()`.** Global triangle count
+  (number of 3-cliques) plus transitivity (global clustering coefficient =
+  `3*triangles / connected_triples`) as a single aggregate row, with optional
+  `{node_type, relationship}` scoping. A native single-pass count (reusing the
+  `clustering_coefficient` adjacency/intersection logic) — far faster than the
+  equivalent Cypher pattern-join, which doesn't scale.
 
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 
