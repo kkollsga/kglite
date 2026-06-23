@@ -30,7 +30,6 @@
 //! - bare — framework + manifest tools only.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -400,43 +399,48 @@ fn bind_mode(
             options = options.with_workspace(ws);
         }
         Mode::LocalWorkspace { root, .. } => {
-            // Operator inbox 2026-05-25: with a wide `workspace.root`
-            // (the documented "lateral swap" pattern,
-            // e.g. `/Volumes/EksternalHome/Koding` ≈ 360k files), the
-            // mcp-methods `Workspace::open_local(root, hook)` fires
-            // `hook(workspace.root, ...)` synchronously inside the
-            // open. The hook here calls `gs.build_code_tree(root)`
-            // which parses every source file under the wide root
-            // before returning — blowing past Claude Desktop's 60s
-            // MCP `initialize` window. The user sees only
-            // "Could not attach to MCP server."
+            // mcp-methods `Workspace::open_local(root, hook)` STORES the
+            // post-activate hook but does NOT fire it at open — verified
+            // against mcp-methods 0.3.42 `src/server/workspace.rs`:
+            // `open_local` (`:145`) just stores `post_activate`; the hook
+            // fires only inside `activate()` (`:491-492`), which
+            // `set_root_dir` calls on every swap. So every fire reaching this
+            // closure is a real user activate — build the code-tree on each.
             //
-            // Fix: defer the very first hook invocation (the boot-
-            // time activate). The first `set_root_dir(path)` becomes
-            // the first real activate; we build the code-tree for
-            // exactly the one repo the operator picked. Boot returns
-            // in ms. mcp-methods unchanged.
+            // History (do not re-add): an older mcp-methods contract fired
+            // the hook synchronously inside `open` with the wide
+            // `workspace.root` (~360k files), parsing everything before
+            // returning and blowing past Claude Desktop's 60s `initialize`
+            // window. We added an `initial_activate_seen` deferral to swallow
+            // that one boot fire. mcp-methods has since removed the boot fire
+            // (`open_local` no longer calls the hook), so the deferral was
+            // instead swallowing the user's FIRST `set_root_dir` — leaving the
+            // graph permanently unbuilt in local mode ("No active graph" on
+            // every graph tool). Operator inbox 2026-06-23 (+ original
+            // 2026-06-06 repro). Deferral removed; building eagerly is safe
+            // because mcp-methods no longer fires at boot.
             //
-            // Active root is also captured in a shared RwLock so the
-            // watch callback (later in this fn) can scope its
-            // rebuilds.
+            // Active root is captured in a shared RwLock so the watch
+            // callback (later in this fn) can scope its rebuilds.
             let gs = graph_state.clone();
-            let initial_activate_seen = Arc::new(AtomicBool::new(false));
-            let initial_flag = initial_activate_seen.clone();
             let active_root_for_hook = local_active_root.clone();
             let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-                if !initial_flag.swap(true, Ordering::SeqCst) {
-                    tracing::info!(
-                        root = %path.display(),
-                        "deferring local-workspace code_tree build until first set_root_dir"
-                    );
-                    return Ok(());
-                }
                 if let Ok(mut guard) = active_root_for_hook.write() {
                     *guard = Some(path.to_path_buf());
                 }
                 tracing::info!(repo = name, "code_tree::build on local-workspace activate");
-                gs.build_code_tree(path)
+                // Surface a build failure instead of leaving the tools to
+                // report a bare "No active graph" (operator ask, 2026-06-23).
+                if let Err(e) = gs.build_code_tree(path) {
+                    tracing::error!(
+                        repo = name,
+                        root = %path.display(),
+                        error = %e,
+                        "local-workspace code_tree build failed"
+                    );
+                    return Err(e);
+                }
+                Ok(())
             });
             let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
                 .context("local-workspace init failed")?;
