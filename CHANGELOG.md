@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite-mcp-server` local-workspace mode never built the code graph.** In
+  `kind: local` mode, the first `set_root_dir` activate was silently swallowed,
+  so every graph tool (`graph_overview`, `cypher_query`, `read_code_source`, …)
+  returned "No active graph". The post-activate hook carried a stale
+  `initial_activate_seen` deferral that assumed the old mcp-methods contract
+  (a boot-time hook fire to skip); mcp-methods ≥ 0.3.x no longer fires the hook
+  at `open_local` (only on `activate()`), so the deferral was instead eating the
+  user's first real activate. Removed the deferral — every hook fire is now a
+  real activate and builds eagerly (no boot-hang risk, since mcp-methods doesn't
+  fire at open). Also surface a build failure via `tracing::error!` instead of a
+  bare "No active graph". Standing since 0.10.13.
+
 ## [0.11.10] — 2026-06-23 — General RDF loader + graph topology functions
 
 ### Added
