@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.11] — 2026-06-23 — Fix: mcp-server local-workspace code graph never built
+
 ### Fixed
 
 - **`kglite-mcp-server` local-workspace mode never built the code graph.** In
