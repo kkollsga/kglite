@@ -92,7 +92,9 @@ fn algo_allowed_keys(proc: &str) -> Option<Vec<&'static str>> {
         | "clustering_coefficient"
         | "local_clustering_coefficient"
         | "triangle_count"
-        | "transitivity" => vec![],
+        | "transitivity"
+        | "eccentricity"
+        | "diameter" => vec![],
         _ => return None,
     };
     // Scoping keys accepted on every algorithm procedure. `relationship` and
@@ -294,6 +296,8 @@ impl<'a> CypherExecutor<'a> {
             "k_core" | "coreness" => &["node", "coreness"],
             "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
             "triangle_count" | "transitivity" => &["triangles", "transitivity"],
+            "eccentricity" => &["node", "eccentricity"],
+            "diameter" => &["diameter"],
             "cluster" => &["node", "cluster"],
             "list_procedures" => &["name", "description", "yield_columns"],
             "orphan_node"
@@ -676,6 +680,55 @@ impl<'a> CypherExecutor<'a> {
                 }
                 vec![row]
             }
+            "eccentricity" => {
+                // Per-node eccentricity (longest shortest path to any node in
+                // its component). YIELD node, eccentricity. All-pairs BFS —
+                // node-capped inside the algorithm.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let eccs = crate::graph::algorithms::graph_algorithms::eccentricity_scoped(
+                    self.graph,
+                    node_types.as_deref(),
+                    rel_types.as_deref(),
+                    self.interrupt(),
+                )?;
+                let mut rows = Vec::with_capacity(eccs.len());
+                for (node_idx, ecc) in eccs {
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        match item.name.as_str() {
+                            "node" => {
+                                row.node_bindings.insert(alias.to_string(), node_idx);
+                            }
+                            "eccentricity" => {
+                                row.projected.insert(alias.to_string(), Value::Int64(ecc));
+                            }
+                            _ => {}
+                        }
+                    }
+                    rows.push(row);
+                }
+                rows
+            }
+            "diameter" => {
+                // Graph diameter (max eccentricity), single aggregate row.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let diameter = crate::graph::algorithms::graph_algorithms::diameter_scoped(
+                    self.graph,
+                    node_types.as_deref(),
+                    rel_types.as_deref(),
+                    self.interrupt(),
+                )?;
+                let mut row = ResultRow::new();
+                for item in &clause.yield_items {
+                    let alias = item.alias.as_deref().unwrap_or(&item.name);
+                    if item.name.as_str() == "diameter" {
+                        row.projected
+                            .insert(alias.to_string(), Value::Int64(diameter));
+                    }
+                }
+                vec![row]
+            }
             "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
             "orphan_node" => super::rule_procedures::execute_orphan_node(
                 self.graph,
@@ -812,6 +865,16 @@ impl<'a> CypherExecutor<'a> {
                         "triangle_count",
                         "Global triangle count + transitivity (global clustering coefficient) for the whole graph. Single aggregate row. Optional {node_type, relationship} scoping. (Alias: transitivity.)",
                         "triangles, transitivity",
+                    ),
+                    (
+                        "eccentricity",
+                        "Per-node eccentricity (longest shortest path to any node in its component). All-pairs BFS, capped at 20k scoped nodes — narrow with {node_type, relationship}.",
+                        "node, eccentricity",
+                    ),
+                    (
+                        "diameter",
+                        "Graph diameter (max eccentricity). Single aggregate row. Same all-pairs cost + 20k-node cap as eccentricity.",
+                        "diameter",
                     ),
                     (
                         "cluster",
