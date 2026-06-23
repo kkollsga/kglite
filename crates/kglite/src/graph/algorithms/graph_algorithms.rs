@@ -1269,6 +1269,83 @@ pub fn triangle_count_scoped(
     Ok((triangles, transitivity))
 }
 
+/// Maximum scoped-subgraph size for the all-pairs eccentricity / diameter
+/// procedures. They run a BFS from every node — O(V·(V+E)) — so they are a
+/// small/medium-graph feature; beyond this the procedure errors with guidance
+/// to scope down rather than churning for minutes.
+const MAX_ECCENTRICITY_NODES: usize = 20_000;
+
+/// Per-node eccentricity over the scoped undirected subgraph: the greatest
+/// shortest-path distance from a node to any other node in its connected
+/// component. Returns `(node, eccentricity)`; an isolated node has
+/// eccentricity 0. Distances ignore unreachable nodes, so the result is
+/// well-defined on a disconnected graph (unlike NetworkX, which errors).
+///
+/// All-pairs (a BFS per node, O(V·(V+E))) — capped at
+/// [`MAX_ECCENTRICITY_NODES`] scoped nodes; narrow with
+/// `{node_type, relationship}` for larger graphs.
+pub fn eccentricity_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Interrupt,
+) -> Result<Vec<(NodeIndex, i64)>, String> {
+    use std::collections::VecDeque;
+    let (nodes, adj) = build_scoped_undirected_adjacency(graph, node_types, rel_types, deadline)?;
+    let n = nodes.len();
+    if n > MAX_ECCENTRICITY_NODES {
+        return Err(format!(
+            "eccentricity/diameter is an all-pairs O(V·(V+E)) computation; the scoped \
+             subgraph has {n} nodes (cap {MAX_ECCENTRICITY_NODES}). Narrow it with \
+             {{node_type, relationship}} scoping, or compute on a smaller subgraph."
+        ));
+    }
+    let mut out = Vec::with_capacity(n);
+    // Generation-stamped visited markers avoid an O(n) reset per source.
+    let mut seen = vec![0u32; n];
+    let mut dist = vec![0u32; n];
+    let mut queue: VecDeque<u32> = VecDeque::with_capacity(64);
+    let mut generation = 0u32;
+    for (s, &node) in nodes.iter().enumerate() {
+        if s & 0x3FF == 0 && deadline.exceeded() {
+            return Err(algorithm_timeout_err());
+        }
+        generation += 1;
+        seen[s] = generation;
+        dist[s] = 0;
+        queue.clear();
+        queue.push_back(s as u32);
+        let mut ecc = 0u32;
+        while let Some(u) = queue.pop_front() {
+            let du = dist[u as usize];
+            for &w in &adj[u as usize] {
+                if seen[w as usize] != generation {
+                    seen[w as usize] = generation;
+                    dist[w as usize] = du + 1;
+                    ecc = ecc.max(du + 1);
+                    queue.push_back(w);
+                }
+            }
+        }
+        out.push((node, ecc as i64));
+    }
+    Ok(out)
+}
+
+/// Graph diameter over the scoped undirected subgraph: the greatest
+/// eccentricity (i.e. the longest shortest path within any connected
+/// component). `0` for an empty or edgeless subgraph. Same all-pairs cost +
+/// node cap as [`eccentricity_scoped`].
+pub fn diameter_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    deadline: Interrupt,
+) -> Result<i64, String> {
+    let eccs = eccentricity_scoped(graph, node_types, rel_types, deadline)?;
+    Ok(eccs.iter().map(|(_, e)| *e).max().unwrap_or(0))
+}
+
 /// Count elements common to two sorted slices that are strictly greater than
 /// `gt`. Linear merge.
 fn intersection_count_gt(a: &[u32], b: &[u32], gt: u32) -> u64 {

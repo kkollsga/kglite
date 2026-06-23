@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{node_type, relationship}` scoping. A native single-pass count (reusing the
   `clustering_coefficient` adjacency/intersection logic) — far faster than the
   equivalent Cypher pattern-join, which doesn't scale.
+- **`CALL eccentricity()` / `CALL diameter()`.** Per-node eccentricity (the
+  longest shortest path from a node to any node in its connected component)
+  and graph diameter (the max eccentricity), with optional
+  `{node_type, relationship}` scoping. Well-defined on disconnected graphs
+  (distances ignore unreachable nodes). These are all-pairs O(V·(V+E))
+  computations, so they're capped at 20k scoped nodes — narrow the scope for
+  larger graphs.
 
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 
