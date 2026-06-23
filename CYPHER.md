@@ -205,6 +205,8 @@ graph.cypher("""
 | `type(r)` | Relationship type |
 | `id(n)` | Node ID |
 | `labels(n)` | Node labels as a list, primary type first |
+| `degree(n)` | Node's total edge count (in + out; a self-loop counts twice) — e.g. `WHERE degree(n) > 100` to find hubs |
+| `inDegree(n)` / `outDegree(n)` | Node's incoming / outgoing edge count |
 | `keys(n)` / `keys(r)` | Property names of a node or relationship (as JSON list) |
 | `properties(n)` / `properties(r)` | Full property map of a node or relationship (as JSON map) |
 | `start_node(r)` | Source node of a bound relationship; supports dotted access: `start_node(r).name` |

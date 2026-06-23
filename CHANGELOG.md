@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`degree(n)` / `inDegree(n)` / `outDegree(n)` Cypher functions.** A node's
+  edge count, usable anywhere an expression is — e.g. find hubs with
+  `MATCH (n) WHERE degree(n) > 100 RETURN n`, or a degree distribution with
+  `MATCH (n) WITH degree(n) AS d RETURN d, count(*)`. `degree` is both
+  directions (a self-loop counts twice), `inDegree`/`outDegree` are
+  incoming/outgoing. Resolves bound variables and nodes carried through
+  `WITH n AS x` / `collect(n)` / `UNWIND` (consistent with `id()`/`labels()`).
+  Previously there was no degree function and `size((n)--())` isn't supported.
+
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 
 ### Performance
