@@ -660,6 +660,57 @@ impl<'a> CypherExecutor<'a> {
                     None => Ok(Value::Null),
                 }
             }
+            // degree(n) / inDegree(n) / outDegree(n) → the node's edge
+            // count. `degree` is both directions (a self-loop counts
+            // twice — the standard graph-theory convention, matching
+            // `degree_centrality`); `inDegree` counts incoming edges,
+            // `outDegree` outgoing. Accepts a bound node variable, a
+            // `NodeRef`, or a materialised node value (carried through
+            // `WITH n AS x` / `collect(n)[0]` / `UNWIND`); returns Null
+            // when the argument isn't a resolvable node.
+            //
+            // Real query: "find hubs" — `MATCH (n) WHERE degree(n) > 100
+            // RETURN n`. Previously impossible: there was no degree
+            // function and the `size((n)--())` pattern-count shorthand
+            // isn't supported by the parser.
+            "degree" | "indegree" | "outdegree" => {
+                use petgraph::Direction;
+                let Some(arg) = args.first() else {
+                    return Ok(Value::Null);
+                };
+                // Resolve to a live NodeIndex. Fast path: a bound variable
+                // or NodeRef. Fallback: a materialised node value (passed
+                // through `WITH n AS x`, `collect(n)[0]`, `UNWIND`) — resolve
+                // it by its (primary label, id) via the same lookup
+                // `MATCH (n {id:…})` uses, so degree() stays consistent with
+                // id()/labels() on carried-through nodes.
+                let idx = match self.node_arg_index(arg, row) {
+                    Some(idx) => idx,
+                    None => match self.evaluate_expression(arg, row) {
+                        Ok(Value::Node(nv)) => match (nv.labels.first(), nv.properties.get("id")) {
+                            (Some(label), Some(id_val)) => {
+                                match self.graph.lookup_by_id_readonly(label, id_val) {
+                                    Some(idx) => idx,
+                                    None => return Ok(Value::Null),
+                                }
+                            }
+                            _ => return Ok(Value::Null),
+                        },
+                        _ => return Ok(Value::Null),
+                    },
+                };
+                let g = &self.graph.graph;
+                let count = match name {
+                    "indegree" => g.edges_directed(idx, Direction::Incoming).count(),
+                    "outdegree" => g.edges_directed(idx, Direction::Outgoing).count(),
+                    // "degree": both directions.
+                    _ => {
+                        g.edges_directed(idx, Direction::Outgoing).count()
+                            + g.edges_directed(idx, Direction::Incoming).count()
+                    }
+                };
+                Ok(Value::Int64(count as i64))
+            }
             "labels" => {
                 // labels(n) returns the list of node labels: primary
                 // first, then secondaries in insertion order.

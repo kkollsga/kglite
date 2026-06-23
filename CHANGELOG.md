@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.10] — 2026-06-23 — General RDF loader (`load_rdf`)
+## [0.11.10] — 2026-06-23 — General RDF loader + graph topology functions
 
 ### Added
 
@@ -30,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bindings through a new `rdf`-gated C entry point (header guard
   `KGLITE_FEATURE_RDF`), with JSON-array config at the boundary and
   owned out-stats / error strings — mirroring the Python surface.
+- **`degree(n)` / `inDegree(n)` / `outDegree(n)` Cypher functions.** A node's
+  edge count, usable anywhere an expression is — e.g. find hubs with
+  `MATCH (n) WHERE degree(n) > 100 RETURN n`, or a degree distribution with
+  `MATCH (n) WITH degree(n) AS d RETURN d, count(*)`. `degree` is both
+  directions (a self-loop counts twice), `inDegree`/`outDegree` are
+  incoming/outgoing. Resolves bound variables and nodes carried through
+  `WITH n AS x` / `collect(n)` / `UNWIND` (consistent with `id()`/`labels()`).
+  Previously there was no degree function and `size((n)--())` isn't supported.
+- **`CALL triangle_count()` / `CALL transitivity()`.** Global triangle count
+  (number of 3-cliques) plus transitivity (global clustering coefficient =
+  `3*triangles / connected_triples`) as a single aggregate row, with optional
+  `{node_type, relationship}` scoping. A native single-pass count (reusing the
+  `clustering_coefficient` adjacency/intersection logic) — far faster than the
+  equivalent Cypher pattern-join, which doesn't scale.
+- **`CALL eccentricity()` / `CALL diameter()`.** Per-node eccentricity (the
+  longest shortest path from a node to any node in its connected component)
+  and graph diameter (the max eccentricity), with optional
+  `{node_type, relationship}` scoping. Well-defined on disconnected graphs
+  (distances ignore unreachable nodes). These are all-pairs O(V·(V+E))
+  computations, so they're capped at 20k scoped nodes — narrow the scope for
+  larger graphs.
 
 ## [0.11.9] — 2026-06-21 — Timestamp + allShortestPaths + FOREACH; NDV planner selectivity
 
