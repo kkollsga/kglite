@@ -1472,14 +1472,24 @@ fn test_split_function() {
     let val = eval_string_fn("MATCH (n:Item) RETURN split(n.path, '/')");
     assert_eq!(
         val,
-        Value::String(r#"["src", "graph", "mod.rs"]"#.to_string())
+        Value::List(vec![
+            Value::String("src".to_string()),
+            Value::String("graph".to_string()),
+            Value::String("mod.rs".to_string()),
+        ])
     );
 }
 
 #[test]
 fn test_split_function_single_char() {
     let val = eval_string_fn("MATCH (n:Item) RETURN split(n.name, ' ')");
-    assert_eq!(val, Value::String(r#"["hello", "world"]"#.to_string()));
+    assert_eq!(
+        val,
+        Value::List(vec![
+            Value::String("hello".to_string()),
+            Value::String("world".to_string()),
+        ])
+    );
 }
 
 #[test]
@@ -1597,14 +1607,14 @@ fn test_string_functions_auto_coerce() {
     )
     .unwrap();
 
-    // split(42, '/') → ["42"] (coerced to "42", no '/' found)
+    // split(42, '/') → ["42"] as a native list (coerced to "42", no '/' found)
     let q = super::super::parser::parse_cypher("MATCH (n:Item) RETURN split(n.num, '/')").unwrap();
     let no_params = HashMap::new();
     let executor = CypherExecutor::with_params(&graph, &no_params, None);
     let result = executor.execute(&q).unwrap();
     assert_eq!(
         result.rows[0].first(),
-        Some(&Value::String("[\"42\"]".to_string())),
+        Some(&Value::List(vec![Value::String("42".to_string())])),
     );
 
     // substring(42, 0) → "42"
