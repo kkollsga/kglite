@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Cypher integer **division and modulo** now wrap on overflow instead of panicking. `arithmetic_div`/`_mod` used the raw `/`/`%` operators, so `i64::MIN / -1` (e.g. `RETURN (-9223372036854775807 - 1) / -1`) and `i64::MIN % -1` trapped in **both** debug and release builds (division overflow always traps in Rust). They now use `wrapping_div`/`wrapping_rem`, matching the `wrapping_*` treatment `add`/`sub`/`mul`/`negate` received in 0.11.14. Divide-by-zero is unaffected — still guarded upstream to return `null`.
+
 ## [0.11.14] — 2026-06-24 — Cypher: relationship SET/REMOVE + integer-arithmetic overflow
 
 ### Fixed

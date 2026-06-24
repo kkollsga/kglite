@@ -221,7 +221,7 @@ pub fn arithmetic_mul(a: &Value, b: &Value) -> Value {
 /// (e.g. `year / 10 * 10`); see 0.9.0 readiness §5.
 pub fn arithmetic_div(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x / y),
+        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x.wrapping_div(*y)),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) if y != 0.0 => Value::Float64(x / y),
             _ => Value::Null,
@@ -232,7 +232,7 @@ pub fn arithmetic_div(a: &Value, b: &Value) -> Value {
 /// Modulo of two Values. Preserves Int64 when both operands are integers.
 pub fn arithmetic_mod(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x % y),
+        (Value::Int64(x), Value::Int64(y)) if *y != 0 => Value::Int64(x.wrapping_rem(*y)),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) if y != 0.0 => Value::Float64(x % y),
             _ => Value::Null,
@@ -436,6 +436,30 @@ mod tests {
         assert_eq!(
             arithmetic_negate(&Value::Int64(i64::MIN)),
             Value::Int64(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn test_arithmetic_div_mod_int_overflow_wraps() {
+        // `i64::MIN / -1` overflows (result exceeds i64::MAX) and traps with the
+        // raw `/` operator in *both* debug and release; wrapping_div yields MIN.
+        assert_eq!(
+            arithmetic_div(&Value::Int64(i64::MIN), &Value::Int64(-1)),
+            Value::Int64(i64::MIN)
+        );
+        // `i64::MIN % -1` similarly traps with raw `%`; wrapping_rem yields 0.
+        assert_eq!(
+            arithmetic_mod(&Value::Int64(i64::MIN), &Value::Int64(-1)),
+            Value::Int64(0)
+        );
+        // Divide-by-zero stays guarded upstream → Null (wrapping_div would panic).
+        assert_eq!(
+            arithmetic_div(&Value::Int64(1), &Value::Int64(0)),
+            Value::Null
+        );
+        assert_eq!(
+            arithmetic_mod(&Value::Int64(1), &Value::Int64(0)),
+            Value::Null
         );
     }
 
