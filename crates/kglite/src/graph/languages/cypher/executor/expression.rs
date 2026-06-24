@@ -591,7 +591,11 @@ impl<'a> CypherExecutor<'a> {
                             let node_type_name =
                                 node_val.labels.first().map(|s| s.as_str()).unwrap_or("");
                             let resolved = self.graph.resolve_alias(node_type_name, property);
-                            Ok(node_val.properties.get(resolved).cloned().unwrap_or(Value::Null))
+                            Ok(node_val
+                                .properties
+                                .get(resolved)
+                                .cloned()
+                                .unwrap_or(Value::Null))
                         }
                     }
                     Value::Relationship(rel_val) => Ok(match property.as_str() {
@@ -599,7 +603,11 @@ impl<'a> CypherExecutor<'a> {
                         "type" => Value::String(rel_val.rel_type.clone()),
                         "start" | "start_id" => Value::Int64(rel_val.start_id as i64),
                         "end" | "end_id" => Value::Int64(rel_val.end_id as i64),
-                        other => rel_val.properties.get(other).cloned().unwrap_or(Value::Null),
+                        other => rel_val
+                            .properties
+                            .get(other)
+                            .cloned()
+                            .unwrap_or(Value::Null),
                     }),
                     _ => Ok(Value::Null),
                 }
