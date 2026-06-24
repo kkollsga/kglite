@@ -1364,6 +1364,14 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
         "match_create_edge",
         "MATCH (a:Person {person_id: 1}), (b:Person {person_id: 2}) CREATE (a)-[:KNOWS_NEW]->(b) RETURN count(*) AS n",
     ),
+    (
+        "set_rel_property",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) SET r.since = 2099 RETURN count(r) AS n",
+    ),
+    (
+        "remove_rel_property",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) REMOVE r.since RETURN count(r) AS n",
+    ),
 ]
 
 

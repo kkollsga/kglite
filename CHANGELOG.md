@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Cypher `SET`/`REMOVE` now works on a **relationship** variable, e.g. `MATCH (a)-[r:KNOWS]->(b) SET r.weight = 0.9` and `MERGE (a)-[r:KNOWS]->(b) ON CREATE SET r.since = 2020`. Previously these errored `Variable 'r' not bound to a node in SET/REMOVE` — the handlers only resolved node bindings and ignored the bound edge. This unblocks edge-property upsert (`MERGE … SET r.prop`), the canonical write path for primary-keyed relationship stores.
 - Cypher integer arithmetic now wraps on overflow instead of panicking under a debug build's overflow-checks. `arithmetic_add`/`_sub`/`_mul`/`_negate` and the `Duration` component sums used raw operators, so e.g. `RETURN 9223372036854775807 + 1` panicked in a debug build (release wrapped to `-9223372036854775808` — the documented intent). They now use `wrapping_*` consistently, so the wrap semantics hold in every build.
 
 ## [0.11.13] — 2026-06-24 — Cypher scalar-fn split, public-API gate, list/property fixes
