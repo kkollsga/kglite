@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.12] — 2026-06-24 — MCP server: screen_stargazers tool (mcp-methods 0.3.44)
+
 ### Added
 
 - **MCP server: `screen_stargazers` GitHub tool** (via mcp-methods 0.3.42 → 0.3.44).
