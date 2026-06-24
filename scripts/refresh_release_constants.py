@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Refresh the captured constants that drift across releases.
 
-Three captured values are version-coupled and silently rot if nobody
-updates them at release time:
+Four captured values are version-/toolchain-coupled and silently rot if
+nobody updates them at release time:
 
   1. ``tests/test_phase4_parity.py::GOLDEN_V3_DIGEST`` — embeds the
      version string in the ``.kgl`` header. Every release shifts the
@@ -14,8 +14,15 @@ updates them at release time:
   3. ``tests/benchmarks/baselines/<version>.json`` — pytest-benchmark
      JSON for the 11 tracked benchmarks. ``current.json`` is a copy.
 
+  4. ``tests/api-baselines/kglite.txt`` — the ``kglite`` public API
+     surface (cargo-public-api on the pinned nightly). Drifts whenever
+     the public API legitimately changes; the CI public-api gate fails
+     until it's refreshed and committed.
+
 This script reads ``Cargo.toml`` for the version, then refreshes all
-three. Idempotent: running it twice in a row produces no diff.
+four. Idempotent: running it twice in a row produces no diff. Step 4
+is best-effort: it no-ops with a message if cargo-public-api / the
+pinned nightly aren't installed locally.
 
 Usage:
     python scripts/refresh_release_constants.py [--skip-benchmarks]
@@ -32,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -43,6 +51,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE4_TEST = REPO_ROOT / "tests" / "test_phase4_parity.py"
 PHASE5_TEST = REPO_ROOT / "tests" / "test_phase5_parity.py"
 BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
+API_BASELINE = REPO_ROOT / "tests" / "api-baselines" / "kglite.txt"
+# Pinned nightly for cargo-public-api. Keep in sync with the public-api job in
+# .github/workflows/ci.yml and KGLITE_API_NIGHTLY in the Makefile.
+PUBLIC_API_NIGHTLY = "nightly-2026-01-09"
 
 
 def read_version() -> str:
@@ -248,6 +260,33 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
 # ── orchestration ──────────────────────────────────────────────────────
 
 
+# ── 4. public-api baseline ──────────────────────────────────────────────
+
+
+def refresh_api_baseline() -> tuple[bool, str]:
+    """Regenerate tests/api-baselines/kglite.txt via cargo-public-api on the
+    pinned nightly. Best-effort locally: no-ops with a clear message if the
+    tool or toolchain is absent (the gate still runs in CI either way)."""
+    if shutil.which("cargo-public-api") is None:
+        return False, "cargo-public-api not installed — `cargo install cargo-public-api --locked` (skipped)"
+    before = API_BASELINE.read_text() if API_BASELINE.exists() else ""
+    proc = subprocess.run(
+        ["cargo", "public-api", "-p", "kglite", "-ss"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "RUSTUP_TOOLCHAIN": PUBLIC_API_NIGHTLY},
+    )
+    if proc.returncode != 0:
+        last = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "unknown error"
+        return False, f"cargo public-api failed (is {PUBLIC_API_NIGHTLY} installed?): {last}"
+    API_BASELINE.parent.mkdir(parents=True, exist_ok=True)
+    if proc.stdout == before:
+        return False, f"api baseline already current ({API_BASELINE.relative_to(REPO_ROOT)})"
+    API_BASELINE.write_text(proc.stdout)
+    return True, f"api baseline updated ({API_BASELINE.relative_to(REPO_ROOT)})"
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--skip-benchmarks", action="store_true", help="Skip the perf-baseline capture (~15s wall-clock).")
@@ -280,6 +319,11 @@ def main() -> int:
         changed, msg = refresh_perf_baseline(version)
         print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 
+    # 4. public-api baseline
+    print("4. public-api baseline (cargo-public-api on pinned nightly)")
+    changed, msg = refresh_api_baseline()
+    print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
+
     # Pretty diff summary.
     diff = subprocess.run(
         [
@@ -290,6 +334,7 @@ def main() -> int:
             "tests/test_phase4_parity.py",
             "tests/test_phase5_parity.py",
             "tests/benchmarks/baselines/",
+            "tests/api-baselines/",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -301,7 +346,7 @@ def main() -> int:
             print(f"  {line}")
         print("\nIf the deltas are expected, stage the files and amend into the release commit:")
         print("  git add tests/test_phase4_parity.py tests/test_phase5_parity.py \\")
-        print("          tests/benchmarks/baselines/")
+        print("          tests/benchmarks/baselines/ tests/api-baselines/")
         print("  git commit --amend --no-edit")
     else:
         print("All constants already current — no changes to stage.")

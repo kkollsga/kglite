@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -80,6 +80,16 @@ bench-check:
 refresh-release-constants:
 	$(ACTIVATE) && maturin develop --release --quiet
 	$(ACTIVATE) && python scripts/refresh_release_constants.py
+
+## Refresh the committed public-API baseline (tests/api-baselines/kglite.txt)
+## via cargo-public-api on the pinned nightly. Keep KGLITE_API_NIGHTLY in sync
+## with the public-api job in .github/workflows/ci.yml. One-time setup:
+##   rustup toolchain install $(KGLITE_API_NIGHTLY)
+##   cargo install cargo-public-api --locked --version 0.49.0
+KGLITE_API_NIGHTLY ?= nightly-2026-01-09
+refresh-api-baseline:
+	RUSTUP_TOOLCHAIN=$(KGLITE_API_NIGHTLY) cargo public-api -p kglite -ss > tests/api-baselines/kglite.txt
+	@echo "refreshed tests/api-baselines/kglite.txt ($(KGLITE_API_NIGHTLY))"
 
 ## On-demand openCypher conformance check vs Neo4j. Not part of CI.
 ## See docs/explanation/cypher-conformance.md for the full workflow.
