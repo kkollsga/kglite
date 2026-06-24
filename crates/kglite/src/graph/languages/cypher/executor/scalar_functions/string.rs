@@ -298,13 +298,12 @@ impl<'a> CypherExecutor<'a> {
                 let delim_val = self.evaluate_expression(&args[1], row)?;
                 match (&str_val, &delim_val) {
                     (Value::String(s), Value::String(delim)) => {
-                        let parts: Vec<String> = s
-                            .split(delim.as_str())
-                            .map(|p| {
-                                format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\""))
-                            })
-                            .collect();
-                        Ok(Value::String(format!("[{}]", parts.join(", "))))
+                        // Return a native Value::List (Cypher semantics),
+                        // consistent with range()/labels()/keys(). Downstream
+                        // list ops (head/last/size/index/reverse) all accept it.
+                        let parts: Vec<Value> =
+                            s.split(delim.as_str()).map(|p| Value::String(p.to_string())).collect();
+                        Ok(Value::List(parts))
                     }
                     _ => Ok(Value::Null),
                 }

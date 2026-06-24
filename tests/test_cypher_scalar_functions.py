@@ -29,7 +29,7 @@ SCALAR_CASES: list[tuple[str, str, object]] = [
     ("str_tostring", "RETURN toString(42) AS x", "42"),
     ("str_substring", "RETURN substring('hello',1,3) AS x", "ell"),
     ("str_replace", "RETURN replace('abcabc','a','X') AS x", "XbcXbc"),
-    ("str_split", "RETURN split('a,b,c',',') AS x", '["a", "b", "c"]'),
+    ("str_split", "RETURN split('a,b,c',',') AS x", ["a", "b", "c"]),
     ("str_trim", "RETURN trim('  hi  ') AS x", "hi"),
     ("str_ltrim", "RETURN ltrim('  hi') AS x", "hi"),
     ("str_rtrim", "RETURN rtrim('hi  ') AS x", "hi"),
