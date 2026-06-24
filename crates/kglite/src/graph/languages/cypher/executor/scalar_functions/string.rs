@@ -301,8 +301,10 @@ impl<'a> CypherExecutor<'a> {
                         // Return a native Value::List (Cypher semantics),
                         // consistent with range()/labels()/keys(). Downstream
                         // list ops (head/last/size/index/reverse) all accept it.
-                        let parts: Vec<Value> =
-                            s.split(delim.as_str()).map(|p| Value::String(p.to_string())).collect();
+                        let parts: Vec<Value> = s
+                            .split(delim.as_str())
+                            .map(|p| Value::String(p.to_string()))
+                            .collect();
                         Ok(Value::List(parts))
                     }
                     _ => Ok(Value::Null),
