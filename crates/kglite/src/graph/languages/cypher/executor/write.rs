@@ -712,6 +712,36 @@ fn execute_set(
                     property,
                     expression,
                 } => {
+                    // Relationship property SET: the variable is bound as an
+                    // edge, not a node. Edges carry none of the node id/type
+                    // guards or columnar/index machinery below, so write the
+                    // property straight onto the edge and move on.
+                    if !row.node_bindings.contains_key(variable) {
+                        if let Some(edge_binding) = row.edge_bindings.get(variable) {
+                            let edge_index = edge_binding.edge_index;
+                            let value = {
+                                let executor = CypherExecutor::with_params(graph, params, None);
+                                executor.evaluate_expression(expression, row)?
+                            };
+                            let key = graph.interner.get_or_intern(property);
+                            if let Some(EdgeData {
+                                properties: edge_props,
+                                ..
+                            }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_index)
+                            {
+                                if let Some((_, existing)) =
+                                    edge_props.iter_mut().find(|(ek, _)| *ek == key)
+                                {
+                                    *existing = value;
+                                } else {
+                                    edge_props.push((key, value));
+                                }
+                                stats.properties_set += 1;
+                            }
+                            continue;
+                        }
+                    }
+
                     // Validate: cannot change id or type
                     if property == "id" {
                         return Err("Cannot SET node id — it is immutable".to_string());
@@ -1036,6 +1066,26 @@ fn execute_remove(
         for item in &remove.items {
             match item {
                 RemoveItem::Property { variable, property } => {
+                    // Relationship property REMOVE: edge variable, not a node.
+                    if !row.node_bindings.contains_key(variable) {
+                        if let Some(edge_binding) = row.edge_bindings.get(variable) {
+                            let edge_index = edge_binding.edge_index;
+                            let key = graph.interner.get_or_intern(property);
+                            if let Some(EdgeData {
+                                properties: edge_props,
+                                ..
+                            }) = GraphWrite::edge_weight_mut(&mut graph.graph, edge_index)
+                            {
+                                let before = edge_props.len();
+                                edge_props.retain(|(ek, _)| *ek != key);
+                                if edge_props.len() != before {
+                                    stats.properties_removed += 1;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
                     // Protect immutable fields
                     if property == "id" {
                         return Err("Cannot REMOVE node id — it is immutable".to_string());

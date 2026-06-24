@@ -635,6 +635,53 @@ fn test_create_edge_between_matched() {
 }
 
 #[test]
+fn test_set_and_remove_relationship_property() {
+    use crate::graph::storage::GraphRead;
+    let mut graph = build_test_graph();
+    let edge_idx = petgraph::graph::EdgeIndex::new(0);
+
+    // SET a property on a matched relationship variable (the bug: this used to
+    // error "Variable 'r' not bound to a node in SET").
+    let q = super::super::parser::parse_cypher(
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r.since = 2020",
+    )
+    .unwrap();
+    let result = execute_mutable(
+        &mut graph,
+        &q,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+    assert_eq!(result.stats.unwrap().properties_set, 1);
+    assert_eq!(
+        GraphRead::edge_weight(&graph.graph, edge_idx)
+            .unwrap()
+            .get_property("since"),
+        Some(&Value::Int64(2020))
+    );
+
+    // REMOVE it again.
+    let q2 =
+        super::super::parser::parse_cypher("MATCH (a:Person)-[r:KNOWS]->(b:Person) REMOVE r.since")
+            .unwrap();
+    let result2 = execute_mutable(
+        &mut graph,
+        &q2,
+        HashMap::new(),
+        crate::graph::algorithms::Interrupt::default(),
+    )
+    .unwrap();
+    assert_eq!(result2.stats.unwrap().properties_removed, 1);
+    assert_eq!(
+        GraphRead::edge_weight(&graph.graph, edge_idx)
+            .unwrap()
+            .get_property("since"),
+        None
+    );
+}
+
+#[test]
 fn test_create_path() {
     let mut graph = DirGraph::new();
     let query = super::super::parser::parse_cypher(
