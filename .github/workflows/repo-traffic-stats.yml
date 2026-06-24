@@ -25,7 +25,7 @@ name: repo-traffic-stats
 
 on:
   schedule:
-    - cron: "27 4 * * *" # daily at 04:27 UTC
+    - cron: "27 14 * * *" # daily at 14:27 UTC — ≈16:27 Norway (CEST) / 15:27 (CET). Afternoon so the day's traffic is fully populated before we snapshot. Off-the-hour minute avoids GitHub's top-of-hour scheduling delays. (UTC is fixed; the Norway clock-time drifts ±1h across DST.)
   workflow_dispatch: {}
 
 jobs:
