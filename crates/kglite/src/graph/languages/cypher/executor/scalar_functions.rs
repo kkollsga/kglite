@@ -1279,12 +1279,20 @@ impl<'a> CypherExecutor<'a> {
             }
             "reverse" => {
                 if args.len() != 1 {
-                    return Err("reverse() requires 1 argument: string".into());
+                    return Err("reverse() requires 1 argument".into());
                 }
-                let val = coerce_to_string(self.evaluate_expression(&args[0], row)?);
-                match val {
-                    Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
-                    _ => Ok(Value::Null),
+                match self.evaluate_expression(&args[0], row)? {
+                    // Cypher reverse() on a list reverses its elements.
+                    Value::List(mut items) => {
+                        items.reverse();
+                        Ok(Value::List(items))
+                    }
+                    Value::Null => Ok(Value::Null),
+                    // Anything string-like reverses characters.
+                    other => match coerce_to_string(other) {
+                        Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                        _ => Ok(Value::Null),
+                    },
                 }
             }
             // ── List functions ────────────────────────────────────

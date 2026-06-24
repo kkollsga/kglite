@@ -109,12 +109,12 @@ def test_graph_function_value(name: str, query: str, expected: object) -> None:
     assert got == expected, f"{name}: {got!r} != {expected!r}"
 
 
-@pytest.mark.xfail(strict=True, reason="reverse() list bug — fixed in Phase 1b; drop this marker then")
 def test_reverse_list() -> None:
     """reverse() on a list must reverse elements, not stringify-and-char-reverse.
 
-    Regression for the bug found while splitting evaluate_scalar_function
-    (fixed in Phase 1b). reverse() on a string is covered by str_reverse above.
+    Regression for a bug found while splitting evaluate_scalar_function:
+    reverse() coerced its arg to a string first, so a list was JSON-stringified
+    then char-reversed. reverse() on a string is covered by str_reverse above.
     """
     kg = kglite.KnowledgeGraph()
     assert kg.cypher("RETURN reverse([1,2,3]) AS x").to_list()[0]["x"] == [3, 2, 1]
