@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Cypher `reverse()` on a list now reverses its elements (e.g. `reverse([1,2,3])` → `[3,2,1]`). It previously coerced the argument to a string first, so a list was JSON-stringified then character-reversed (`reverse([1,2,3])` → `']3 ,2 ,1['`). A bracketed string is now treated as a list too (consistent with `head`/`last`/`size`); a plain string still reverses characters.
+- Cypher inline property access on a function-returned node/relationship now resolves (e.g. `endNode(r).name`, `startNode(r).age`). It previously returned `null`; the bound form (`WITH endNode(r) AS s RETURN s.name`) already worked.
 - Cypher `split()` now returns a native list (e.g. `split('a,b,c', ',')` → `['a','b','c']`), consistent with `range()`/`labels()`/`keys()`. It previously returned a JSON-encoded string (`'["a", "b", "c"]'`); list operations (`head`/`last`/`size`/indexing) already accepted that form, so they are unaffected, but the value now renders as a real list.
 
 ## [0.11.12] — 2026-06-24 — MCP server: screen_stargazers tool (mcp-methods 0.3.44)
