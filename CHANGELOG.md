@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Cypher `reverse()` on a list now reverses its elements (e.g. `reverse([1,2,3])` → `[3,2,1]`). It previously coerced the argument to a string first, so a list was JSON-stringified then character-reversed (`reverse([1,2,3])` → `']3 ,2 ,1['`). `reverse()` on a string is unchanged.
+
 ## [0.11.12] — 2026-06-24 — MCP server: screen_stargazers tool (mcp-methods 0.3.44)
 
 ### Added
