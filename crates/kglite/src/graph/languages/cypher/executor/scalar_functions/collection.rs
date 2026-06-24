@@ -78,11 +78,23 @@ impl<'a> CypherExecutor<'a> {
                         Ok(Value::List(items))
                     }
                     Value::Null => Ok(Value::Null),
-                    // Anything string-like reverses characters.
-                    other => match coerce_to_string(other) {
-                        Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
-                        _ => Ok(Value::Null),
-                    },
+                    other => {
+                        let s = match coerce_to_string(other) {
+                            Value::String(s) => s,
+                            _ => return Ok(Some(Value::Null)),
+                        };
+                        let trimmed = s.trim();
+                        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                            // A bracketed string is a list, consistent with
+                            // head/last/size (parse_list_value) — reverse elements.
+                            let mut items = parse_list_value(&Value::String(s));
+                            items.reverse();
+                            Ok(Value::List(items))
+                        } else {
+                            // Otherwise reverse characters.
+                            Ok(Value::String(s.chars().rev().collect()))
+                        }
+                    }
                 }
             }
             // ── List functions ────────────────────────────────────
