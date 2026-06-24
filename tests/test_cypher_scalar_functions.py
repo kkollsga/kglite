@@ -109,6 +109,17 @@ def test_graph_function_value(name: str, query: str, expected: object) -> None:
     assert got == expected, f"{name}: {got!r} != {expected!r}"
 
 
+def test_inline_property_access_on_function_node() -> None:
+    """Inline property access on a function-returned node/relationship must
+    resolve (e.g. `startNode(r).name`), not return None. Regression for an
+    expression-evaluator bug surfaced during the scalar-fn split — the bound
+    form `WITH startNode(r) AS s RETURN s.name` always worked.
+    """
+    kg = _graph()
+    assert kg.cypher("MATCH (a)-[r:KNOWS]->(b) RETURN startNode(r).name AS x").to_list()[0]["x"] == "Alice"
+    assert kg.cypher("MATCH (a)-[r:KNOWS]->(b) RETURN endNode(r).name AS x").to_list()[0]["x"] == "Bob"
+
+
 def test_reverse_list() -> None:
     """reverse() on a list must reverse elements, not stringify-and-char-reverse.
 

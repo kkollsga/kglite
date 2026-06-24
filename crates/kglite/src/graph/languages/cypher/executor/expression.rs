@@ -571,6 +571,36 @@ impl<'a> CypherExecutor<'a> {
                         _ => Ok(Value::Null),
                     },
                     Value::Point { .. } => Ok(point_field(&val, property)),
+                    // Property access on a node/relationship that an
+                    // expression produced — e.g. `endNode(r).name`,
+                    // `startNode(r).age`. Without these arms the value fell
+                    // through to Null (the bound-variable path `WITH endNode(r)
+                    // AS s RETURN s.name` worked, but inline access didn't).
+                    // Mirrors the projected-value resolution in resolve_property.
+                    Value::NodeRef(idx) => {
+                        let node_idx = petgraph::graph::NodeIndex::new(*idx as usize);
+                        match self.graph.graph.node_weight(node_idx) {
+                            Some(node) => Ok(resolve_node_property(node, property, self.graph)),
+                            None => Ok(Value::Null),
+                        }
+                    }
+                    Value::Node(node_val) => {
+                        if let Some(v) = node_val.properties.get(property) {
+                            Ok(v.clone())
+                        } else {
+                            let node_type_name =
+                                node_val.labels.first().map(|s| s.as_str()).unwrap_or("");
+                            let resolved = self.graph.resolve_alias(node_type_name, property);
+                            Ok(node_val.properties.get(resolved).cloned().unwrap_or(Value::Null))
+                        }
+                    }
+                    Value::Relationship(rel_val) => Ok(match property.as_str() {
+                        "id" => Value::Int64(rel_val.id as i64),
+                        "type" => Value::String(rel_val.rel_type.clone()),
+                        "start" | "start_id" => Value::Int64(rel_val.start_id as i64),
+                        "end" | "end_id" => Value::Int64(rel_val.end_id as i64),
+                        other => rel_val.properties.get(other).cloned().unwrap_or(Value::Null),
+                    }),
                     _ => Ok(Value::Null),
                 }
             }
