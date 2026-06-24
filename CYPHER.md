@@ -33,6 +33,28 @@ load-time concern, handled by `MERGE`, the duplicate-id warning, and the
 `duplicate_title` validator (see the data-integrity recipes), so it never
 costs the in-memory write path.
 
+### Node identity — use `id` as your primary key
+
+`id` is the **indexed** identity property, and it accepts **strings as well as
+integers**:
+
+```python
+graph.cypher("CREATE (:Memory {id: 'a3f9-uuid', text: 'hello'})")
+graph.cypher("MATCH (n:Memory {id: 'a3f9-uuid'}) RETURN n.text")   # O(1), indexed
+graph.cypher("MATCH (n:Memory) WHERE n.id IN $keys RETURN n", params={"keys": [...]})  # multi-probe
+```
+
+Put your application key in `id` — **not** a custom property. An anchored lookup
+on `id` is O(1) in every storage mode; an arbitrary property (`mid`, `key`, …) is
+**not indexed**, so `MATCH (n {mid: $k})` is a full label scan (linear in node
+count). Two semantics to keep in mind:
+
+- **No uniqueness constraint** (see above): `CREATE` does not reject a duplicate
+  `id` — two `CREATE (:T {id: 'k'})` make two nodes. For primary-keyed writes use
+  **`MERGE`, not `CREATE`** — `MERGE (:T {id: $k})` is idempotent.
+- **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
+  writes and reads.
+
 ---
 
 ## Basic Query
@@ -93,6 +115,19 @@ graph.cypher("MATCH (p)-[r:RATED]->(m) RETURN p.name, r.score, r.comment, type(r
 graph.cypher("MATCH (p)-[r:RATED]->(m) WHERE r.score >= 4 RETURN p.name, m.title")
 graph.cypher("MATCH (p)-[r:RATED]->(m) RETURN avg(r.score) AS avg_rating")
 graph.cypher("MATCH ()-[r:RATED]->(m) RETURN m.title, r.score ORDER BY r.score DESC")
+```
+
+`SET` / `REMOVE` work on a relationship variable, so you can upsert edge
+properties — including via `MERGE`:
+
+```python
+graph.cypher("MATCH (p)-[r:RATED]->(m) WHERE r.score < 3 SET r.flagged = true")
+graph.cypher("MATCH (p)-[r:RATED]->(m) REMOVE r.comment")
+# idempotent edge upsert:
+graph.cypher("""
+    MATCH (p:Person {id: $a}), (m:Movie {id: $b})
+    MERGE (p)-[r:RATED]->(m) ON CREATE SET r.score = $s
+""", params={"a": "p1", "b": "m1", "s": 5})
 ```
 
 ## Aggregation
