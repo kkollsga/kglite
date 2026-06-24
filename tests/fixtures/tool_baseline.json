@@ -1,44 +1,127 @@
 {
-  "_doc": "Expected tool surface per (mode, manifest, github_token_present) combo. The CI gate in tests/test_mcp_server_python_entry.py asserts kglite-mcp-server's tools/list output matches these sets exactly — any drift (added or removed tool) fails the build. Adopted in 0.9.21 after the 0.9.20 regression where 8 of 11 tools were silently dropped.",
+  "_doc": "Expected tool surface per (mode, manifest, github_token_present) combo. The CI gate in tests/test_mcp_server_python_entry.py asserts kglite-mcp-server's tools/list output matches these sets exactly \u2014 any drift (added or removed tool) fails the build. Adopted in 0.9.21 after the 0.9.20 regression where 8 of 11 tools were silently dropped.",
   "_legend": {
-    "kglite_core": ["cypher_query", "graph_overview", "read_code_source"],
+    "kglite_core": [
+      "cypher_query",
+      "graph_overview",
+      "read_code_source"
+    ],
     "save_graph_conditional": "registers when builtins.save_graph: true",
-    "source_tools": ["read_source", "grep", "list_source"],
-    "framework_always": ["ping"],
-    "github_token_gated": ["github_issues", "github_api"],
-    "workspace_remote": ["repo_management"],
-    "workspace_local": ["set_root_dir"]
+    "source_tools": [
+      "read_source",
+      "grep",
+      "list_source"
+    ],
+    "framework_always": [
+      "ping"
+    ],
+    "github_token_gated": [
+      "github_issues",
+      "github_api",
+      "screen_stargazers"
+    ],
+    "workspace_remote": [
+      "repo_management"
+    ],
+    "workspace_local": [
+      "set_root_dir"
+    ]
   },
   "cases": {
     "source_root_no_token": {
-      "args": ["--source-root", "${SRC}"],
+      "args": [
+        "--source-root",
+        "${SRC}"
+      ],
       "env": {},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping", "read_source", "grep", "list_source"]
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping",
+        "read_source",
+        "grep",
+        "list_source"
+      ]
     },
     "source_root_with_token": {
-      "args": ["--source-root", "${SRC}"],
-      "env": {"GITHUB_TOKEN": "fake"},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping", "read_source", "grep", "list_source", "github_issues", "github_api"]
+      "args": [
+        "--source-root",
+        "${SRC}"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "fake"
+      },
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping",
+        "read_source",
+        "grep",
+        "list_source",
+        "github_issues",
+        "github_api",
+        "screen_stargazers"
+      ]
     },
     "workspace_no_token": {
-      "args": ["--workspace", "${WS}"],
+      "args": [
+        "--workspace",
+        "${WS}"
+      ],
       "env": {},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping", "repo_management"]
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping",
+        "repo_management"
+      ]
     },
     "workspace_with_token": {
-      "args": ["--workspace", "${WS}"],
-      "env": {"GITHUB_TOKEN": "fake"},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping", "github_issues", "github_api", "repo_management"]
+      "args": [
+        "--workspace",
+        "${WS}"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "fake"
+      },
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping",
+        "github_issues",
+        "github_api",
+        "screen_stargazers",
+        "repo_management"
+      ]
     },
     "bare": {
       "args": [],
       "env": {},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping"]
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping"
+      ]
     },
     "bare_with_token": {
       "args": [],
-      "env": {"GITHUB_TOKEN": "fake"},
-      "expect": ["cypher_query", "graph_overview", "read_code_source", "ping", "github_issues", "github_api"]
+      "env": {
+        "GITHUB_TOKEN": "fake"
+      },
+      "expect": [
+        "cypher_query",
+        "graph_overview",
+        "read_code_source",
+        "ping",
+        "github_issues",
+        "github_api",
+        "screen_stargazers"
+      ]
     }
   }
 }
