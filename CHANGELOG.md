@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP server: `screen_stargazers` GitHub tool** (via mcp-methods 0.3.42 → 0.3.44).
+  A read-only, token-gated tool that screens a repo's stargazers (or an explicit
+  user list) to surface relevant/notable developers and actual adopters. Auto-
+  registers alongside `github_issues` / `github_api` when a GitHub token is
+  reachable, hidden otherwise. Opt out per-deployment with
+  `builtins.screen_stargazers: false` in the MCP manifest. No kglite wiring — it's
+  a framework tool inherited from mcp-methods.
+
 ## [0.11.11] — 2026-06-23 — Fix: mcp-server local-workspace code graph never built
 
 ### Fixed
