@@ -119,3 +119,10 @@ def test_reverse_list() -> None:
     kg = kglite.KnowledgeGraph()
     assert kg.cypher("RETURN reverse([1,2,3]) AS x").to_list()[0]["x"] == [3, 2, 1]
     assert kg.cypher("RETURN reverse(['a','b']) AS x").to_list()[0]["x"] == ["b", "a"]
+    # End-to-end: split() returns a native list, so reverse() of it reverses
+    # elements (regression for the case the first reverse fix didn't reach).
+    assert kg.cypher("RETURN reverse(split('a,b,c',',')) AS x").to_list()[0]["x"] == ["c", "b", "a"]
+    # Consistency with head/last/size: a bracketed string is treated as a list.
+    assert kg.cypher("RETURN reverse('[1, 2, 3]') AS x").to_list()[0]["x"] == [3, 2, 1]
+    # A plain (non-bracketed) string still reverses characters.
+    assert kg.cypher("RETURN reverse('abc') AS x").to_list()[0]["x"] == "cba"
