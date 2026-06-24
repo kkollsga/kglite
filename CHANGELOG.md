@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Cypher integer arithmetic now wraps on overflow instead of panicking under a debug build's overflow-checks. `arithmetic_add`/`_sub`/`_mul`/`_negate` and the `Duration` component sums used raw operators, so e.g. `RETURN 9223372036854775807 + 1` panicked in a debug build (release wrapped to `-9223372036854775808` — the documented intent). They now use `wrapping_*` consistently, so the wrap semantics hold in every build.
+
 ## [0.11.13] — 2026-06-24 — Cypher scalar-fn split, public-API gate, list/property fixes
 
 ### Fixed

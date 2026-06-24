@@ -48,7 +48,7 @@ pub fn to_float(val: &Value) -> Value {
 /// (unless the other is Null, which propagates).
 pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x + y),
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_add(*y)),
         // DateTime + Int → DateTime (add days)
         (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d + chrono::Duration::days(*n)),
         (Value::Int64(n), Value::DateTime(d)) => Value::DateTime(*d + chrono::Duration::days(*n)),
@@ -116,9 +116,9 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
                 seconds: bs,
             },
         ) => Value::Duration {
-            months: am + bm,
-            days: ad + bd,
-            seconds: as_ + bs,
+            months: am.wrapping_add(*bm),
+            days: ad.wrapping_add(*bd),
+            seconds: as_.wrapping_add(*bs),
         },
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
         // Null propagation for string ops
@@ -136,7 +136,7 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
 /// Subtract two Values. Returns Null for incompatible types.
 pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x - y),
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_sub(*y)),
         // DateTime - Int → DateTime (subtract days)
         (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d - chrono::Duration::days(*n)),
         // DateTime - DateTime → Duration (0.9.0 Cluster 2 — was Int64 days).
@@ -190,9 +190,9 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
                 seconds: bs,
             },
         ) => Value::Duration {
-            months: am - bm,
-            days: ad - bd,
-            seconds: as_ - bs,
+            months: am.wrapping_sub(*bm),
+            days: ad.wrapping_sub(*bd),
+            seconds: as_.wrapping_sub(*bs),
         },
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x - y),
@@ -204,7 +204,7 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
 /// Multiply two Values. Returns Null for incompatible types.
 pub fn arithmetic_mul(a: &Value, b: &Value) -> Value {
     match (a, b) {
-        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x * y),
+        (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_mul(*y)),
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x * y),
             _ => Value::Null,
@@ -243,7 +243,7 @@ pub fn arithmetic_mod(a: &Value, b: &Value) -> Value {
 /// Negate a Value. Returns Null for non-numeric types.
 pub fn arithmetic_negate(a: &Value) -> Value {
     match a {
-        Value::Int64(x) => Value::Int64(-x),
+        Value::Int64(x) => Value::Int64(x.wrapping_neg()),
         Value::Float64(x) => Value::Float64(-x),
         _ => Value::Null,
     }
@@ -413,6 +413,66 @@ pub fn parse_value_string(s: &str) -> Value {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
+
+    // -- Integer overflow wraps silently (no debug-build panic) --
+    // Raw `+`/`-`/`*`/`-x` panic under debug overflow-checks; these assert the
+    // wrapping semantics `test_int64_overflow_wraps_silently` (Python) documents,
+    // and crucially run under a *debug* `cargo test` where the old code panicked.
+
+    #[test]
+    fn test_arithmetic_int_overflow_wraps() {
+        assert_eq!(
+            arithmetic_add(&Value::Int64(i64::MAX), &Value::Int64(1)),
+            Value::Int64(i64::MIN)
+        );
+        assert_eq!(
+            arithmetic_sub(&Value::Int64(i64::MIN), &Value::Int64(1)),
+            Value::Int64(i64::MAX)
+        );
+        assert_eq!(
+            arithmetic_mul(&Value::Int64(i64::MAX), &Value::Int64(2)),
+            Value::Int64(-2)
+        );
+        assert_eq!(
+            arithmetic_negate(&Value::Int64(i64::MIN)),
+            Value::Int64(i64::MIN)
+        );
+    }
+
+    #[test]
+    fn test_duration_component_overflow_wraps() {
+        let max = Value::Duration {
+            months: i32::MAX,
+            days: i32::MAX,
+            seconds: i64::MAX,
+        };
+        let one = Value::Duration {
+            months: 1,
+            days: 1,
+            seconds: 1,
+        };
+        assert_eq!(
+            arithmetic_add(&max, &one),
+            Value::Duration {
+                months: i32::MIN,
+                days: i32::MIN,
+                seconds: i64::MIN,
+            }
+        );
+        let min = Value::Duration {
+            months: i32::MIN,
+            days: i32::MIN,
+            seconds: i64::MIN,
+        };
+        assert_eq!(
+            arithmetic_sub(&min, &one),
+            Value::Duration {
+                months: i32::MAX,
+                days: i32::MAX,
+                seconds: i64::MAX,
+            }
+        );
+    }
 
     // -- Type coercion --
 
