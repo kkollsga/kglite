@@ -817,7 +817,40 @@ fn run_cypher_write(
     opts.write_scope = scope.as_ref();
     let outcome = kglite::api::session::execute_mut(dir, query, &opts)
         .map_err(|e| format!("Cypher execution error: {e}"))?;
+    // A mutation with no RETURN yields no rows — acknowledge with a write
+    // summary (nodes/edges/props changed) instead of the bare "No results."
+    // that a *read* matching nothing returns, so an agent can tell a
+    // successful write apart from a no-op match. (A mutation that does RETURN
+    // falls through to the normal row rendering.)
+    if !output_csv && outcome.result.rows.is_empty() {
+        return Ok(format_mutation_ack(&outcome.result));
+    }
     render_cypher_output(&outcome.result, output_csv, csv_http)
+}
+
+/// One-line acknowledgement of a write that returned no rows, summarising the
+/// mutation stats (e.g. `OK: 1 node(s) created, 1 relationship(s) created.`).
+fn format_mutation_ack(result: &cypher::CypherResult) -> String {
+    let Some(st) = result.stats.as_ref() else {
+        return "OK (write applied).".to_string();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |n: usize, label: &str| {
+        if n > 0 {
+            parts.push(format!("{n} {label}"));
+        }
+    };
+    push(st.nodes_created, "node(s) created");
+    push(st.relationships_created, "relationship(s) created");
+    push(st.properties_set, "property(ies) set");
+    push(st.nodes_deleted, "node(s) deleted");
+    push(st.relationships_deleted, "relationship(s) deleted");
+    push(st.properties_removed, "property(ies) removed");
+    if parts.is_empty() {
+        "OK (no changes).".to_string()
+    } else {
+        format!("OK: {}.", parts.join(", "))
+    }
 }
 
 fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
@@ -984,6 +1017,22 @@ mod tests {
         // A subsequent read on the writable path observes the mutation.
         let out = write(&mut a, "MATCH (t:Task) RETURN count(t) AS c", None).unwrap();
         assert!(out.contains('1'), "expected 1 task, got: {out}");
+    }
+
+    #[test]
+    fn write_with_no_return_acknowledges_stats() {
+        // A CREATE/SET/MERGE with no RETURN must NOT read back "No results"
+        // (indistinguishable from a no-op match) — it acknowledges the write.
+        let mut a = fresh_active();
+        let out = write(&mut a, "CREATE (:Task {id:'t1'})", None).unwrap();
+        assert!(out.starts_with("OK:"), "expected write ack, got: {out}");
+        assert!(out.contains("node(s) created"), "got: {out}");
+        // SET acks too.
+        let out = write(&mut a, "MATCH (t:Task{id:'t1'}) SET t.status='done'", None).unwrap();
+        assert!(out.contains("property(ies) set"), "got: {out}");
+        // A read that matches nothing still says "No results" (distinct signal).
+        let out = write(&mut a, "MATCH (x:Nope) RETURN x", None).unwrap();
+        assert!(out.contains("No results"), "got: {out}");
     }
 
     #[test]
