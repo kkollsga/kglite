@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.16] — 2026-06-25 — Primary-key uniqueness + the `kglite` shell on pip (kglite-cli)
+
 ### Added
 - **`pip install kglite-cli`** now provides the `kglite` interactive shell — a separate, lightweight wheel (built via maturin's `bin` binding, one `py3-none-<platform>` wheel per platform) that installs the compiled binary on PATH. The core `kglite` wheel stays library-only (no shell-binary bloat). Mirrors the crates.io split (`cargo install kglite-cli` ↔ `pip install kglite-cli`). (aarch64-linux wheels are best-effort; `cargo install kglite-cli` is the fallback where a cross-build isn't available.)
 - `kglite` shell polish: **multi-line statements** (sqlite3-style — a Cypher statement now runs when terminated by `;`; otherwise the prompt keeps reading, so a query can span lines), **`.timing on|off`** (prints query wall-time), and **tab-completion** of dot-commands and the live graph's labels / relationship types.
