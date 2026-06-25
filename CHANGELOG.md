@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Critical: a relationship type introduced via Cypher `CREATE`/`MERGE` is no
+  longer silently dropped on `save()`.** Cypher edge creation registered the new
+  type only in the lightweight `connection_types` cache, not in
+  `connection_type_metadata`. The columnar `save()` consolidates edges *by
+  registered connection type*, so on a loaded/columnar graph a brand-new edge
+  type's edges were lost on save (and queries warned "unknown relationship
+  type") — while the endpoint nodes survived. Edge CREATE now upserts the full
+  connection-type metadata (matching `add_connections`), so the type and its
+  edges persist. Covers `CREATE` and `MERGE`. Reported by SimulatoRS (it broke
+  the agent-contract pattern of an agent linking runtime nodes to managed ones);
+  verified end-to-end through a full research-`managed_reload`-over-agent-board
+  round-trip.
+
 ## [0.12.1] — 2026-06-25 — write_scope edge-scoping fix + Transaction.cypher write_scope + 0.12.0 docs
 
 ### Fixed

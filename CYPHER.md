@@ -1371,6 +1371,12 @@ root with no dependencies is ready as soon as it isn't done.
 
 `YIELD node, dependency_count` (how many dependencies the ready node had, all satisfied).
 
+> **Scope to the type you care about.** A node with *no* outgoing-`E` edge is a
+> root — vacuously "all dependencies satisfied" — so an unscoped `ready_set`
+> over a sparse edge type also returns every unrelated node. To get e.g. "ready
+> **tasks**", pass `node_type: 'Task'` so only that type is emitted (dependencies
+> are still followed across types).
+
 ```python
 # Which tasks can the agent pick up next?
 graph.cypher("""

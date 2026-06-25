@@ -477,16 +477,19 @@ fn execute_create(
                     // `create_node`, which enforces the scope. (Whitelisting
                     // relationship types is a possible future refinement.)
 
+                    // Endpoint types — needed for both the schema-lock check
+                    // and the connection-type metadata upsert below.
+                    let src_type = graph
+                        .get_node(actual_source)
+                        .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                        .unwrap_or_default();
+                    let tgt_type = graph
+                        .get_node(actual_target)
+                        .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                        .unwrap_or_default();
+
                     // Schema lock validation for edge
                     if graph.schema_locked {
-                        let src_type = graph
-                            .get_node(actual_source)
-                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                            .unwrap_or_default();
-                        let tgt_type = graph
-                            .get_node(actual_target)
-                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                            .unwrap_or_default();
                         crate::graph::mutation::validation::validate_edge_creation(
                             &edge_pat.connection_type,
                             &src_type,
@@ -506,7 +509,26 @@ fn execute_create(
                         }
                     }
 
+                    // Register the connection type fully — both the lightweight
+                    // cache (for `has_connection_type`) AND the metadata map.
+                    // The metadata is what `connection_types()`, the planner's
+                    // schema check, and the columnar edge-store save all read;
+                    // without it a brand-new relationship type created via
+                    // Cypher was treated as "unknown" (spurious warnings) and
+                    // — on a columnar graph — its edges were silently dropped
+                    // on `save()`, since the columnar edge store serializes by
+                    // registered connection type. (SimulatoRS, 0.12.1.)
                     graph.register_connection_type(edge_pat.connection_type.clone());
+                    let prop_types: HashMap<String, String> = edge_props
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.type_name().to_string()))
+                        .collect();
+                    graph.upsert_connection_type_metadata(
+                        &edge_pat.connection_type,
+                        &src_type,
+                        &tgt_type,
+                        prop_types,
+                    );
                     stats.relationships_created += 1;
 
                     let edge_data = EdgeData::new(
