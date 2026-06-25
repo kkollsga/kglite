@@ -884,7 +884,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     dict with 'nodes_created', 'nodes_updated', 'nodes_skipped',
     ///     'processing_time_ms', 'has_errors', and optionally 'errors'.
-    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None))]
+    #[pyo3(signature = (data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=false, labels=None, managed_reload=false))]
     #[allow(clippy::too_many_arguments)]
     fn add_nodes(
         &mut self,
@@ -899,8 +899,25 @@ impl KnowledgeGraph {
         timeseries: Option<&Bound<'_, PyDict>>,
         nullable_int_downcast: bool,
         labels: Option<Vec<String>>,
+        managed_reload: bool,
     ) -> PyResult<Py<PyAny>> {
         let py = data.py();
+        // Managed-reload guard: a managed reload (research rebuilding from
+        // source) must never write a `runtime`-layer type (agent-owned). Skip
+        // it as a no-op + report, so disjoint ownership is enforced, not
+        // trusted. Undeclared / `managed` types proceed normally.
+        if managed_reload && self.inner.layer_for(&node_type) == Some("runtime") {
+            let report = PyDict::new(py);
+            report.set_item("nodes_created", 0)?;
+            report.set_item("nodes_updated", 0)?;
+            report.set_item("skipped_runtime_layer", true)?;
+            report.set_item("node_type", &node_type)?;
+            report.set_item(
+                "message",
+                format!("'{node_type}' is a runtime-owned type — skipped in managed reload"),
+            )?;
+            return Ok(report.into_any().unbind());
+        }
         let parsed = parse_inline_config(
             data,
             &unique_id_field,

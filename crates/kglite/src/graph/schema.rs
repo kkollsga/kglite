@@ -2053,6 +2053,14 @@ pub struct NodeSchemaDefinition {
     /// with `None`.
     #[serde(default)]
     pub primary_key: Option<String>,
+    /// Ownership layer for the two-writer contract: `"managed"` (rebuilt from
+    /// source by a batch writer) or `"runtime"` (owned/mutated live by another
+    /// writer, e.g. an agent). A **managed reload** (`add_nodes(...,
+    /// managed_reload=True)`) refuses to write a `runtime` type, turning a
+    /// "research never touches agent-owned nodes" convention into an enforced
+    /// guarantee. `None` = unlayered (no restriction). Additive serde field.
+    #[serde(default)]
+    pub layer: Option<String>,
 }
 
 /// Defines the expected schema for a connection type
