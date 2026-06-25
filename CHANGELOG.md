@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Documented guarantee:** `add_nodes(conflict_handling="update")` writes **only the columns present in the call**, leaving an existing node's other properties untouched. This was already the behaviour; it is now a stated contract (regression-tested) so a batch reload can re-assert a subset of fields without clobbering fields another writer owns (e.g. an agent's live `status`/`notes`).
+
 ## [0.11.16] — 2026-06-25 — Primary-key uniqueness + the `kglite` shell on pip (kglite-cli)
 
 ### Added
