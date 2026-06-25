@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-25 — Agent-contract graph: from_records, write-scope, ready-set, native lists, ownership layers + instructions
+
 ### Added
 - **`CALL ready_set(...)`** — a general dependency-frontier procedure: over a
   DAG on a chosen edge type, return the nodes whose dependencies (their
