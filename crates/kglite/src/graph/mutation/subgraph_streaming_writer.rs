@@ -939,6 +939,7 @@ fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
         BorrowedValue::UniqueId(_) => "UniqueId",
         BorrowedValue::String(_) => "String",
         BorrowedValue::DateTime(_) => "DateTime",
+        BorrowedValue::List(_) => "List",
     }
 }
 

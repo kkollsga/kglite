@@ -995,7 +995,11 @@ class KnowledgeGraph:
                 fields another writer owns (e.g. an agent's ``status``/``notes``).
                 ``'replace'`` instead overwrites the whole node.
             skip_columns: Columns to exclude.
-            column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}``.
+            column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'|'list'}``.
+                A column of Python lists/tuples is auto-detected as a native
+                ``'list'`` property (stored structurally, not stringified), so
+                ``'y' IN n.aliases`` tests membership and ``UNWIND n.aliases``
+                yields the elements; pass ``'list'`` explicitly to force it.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.

@@ -10,9 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Ownership layers + managed-reload guard** for two-writer contract graphs. A node type can declare `layer: 'managed'` (rebuilt from source) or `'runtime'` (owned/mutated live by another writer) in `define_schema`. `add_nodes(..., managed_reload=True)` then **refuses to write a `runtime` type** (skips it as a reported no-op), so a batch "research" rebuild can never clobber agent-owned nodes — turning a disjoint-ownership convention into an enforced guarantee. Opt-in; undeclared/`managed` types are unaffected. Persists in the `.kgl` (additive).
 - **`graph.set_instructions(text)`** — a graph-level instructions/briefing slot rendered **verbatim and un-truncated** at the top of `describe()` (as `<instructions>`), so an agent opening a `.kgl` cold reads how to use it first (unlike sample values, which truncate). Persists in the `.kgl` (additive — old files load without it); pass empty text to clear. A reserved `channel=` keyword leaves room for per-audience briefings later.
+- **Native list properties on ingestion.** A pandas column of Python
+  lists/tuples now ingests as a real list-valued property (`ColumnData::List`)
+  instead of a stringified `"['x', 'y']"`. `IN` tests membership over the
+  elements (`'y' IN n.aliases`), with no false-positive substring match, and
+  `UNWIND n.aliases` yields the individual elements. List typing is also
+  selectable explicitly via `add_nodes(..., column_types={"col": "list"})`.
+  This is ingestion-side only — `Value::List` already round-trips through
+  storage, so there is no `.kgl` format change.
 
 ### Changed
 - **Documented guarantee:** `add_nodes(conflict_handling="update")` writes **only the columns present in the call**, leaving an existing node's other properties untouched. This was already the behaviour; it is now a stated contract (regression-tested) so a batch reload can re-assert a subset of fields without clobbering fields another writer owns (e.g. an agent's live `status`/`notes`).
+
+### Fixed
+- **List (and timestamp) properties are no longer dropped through the
+  overflow property bag.** The mapped/disk overflow serializer encoded
+  `Value::List` as NULL (and the mapped reader/borrowed streaming-disk path
+  silently skipped lists), so a sparse list property could vanish on a
+  streaming-disk subset save. Lists now round-trip via a new additive
+  overflow wire tag (`8` = length-prefixed bincode); the mapped overflow
+  reader also gained the previously-missing `Timestamp` tag, restoring
+  memory↔mapped parity for timestamp overflow values. The tag is additive —
+  existing `.kgl` files never contain it, so this is read-compatible.
 
 ## [0.11.16] — 2026-06-25 — Primary-key uniqueness + the `kglite` shell on pip (kglite-cli)
 
