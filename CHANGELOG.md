@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "No results." — so an agent can tell a successful write from a no-op match.
 
 ### Fixed
+- **`UNION` with mismatched column names now errors instead of returning silent
+  NULL rows.** `... RETURN a UNION ... RETURN b` previously kept the left arm's
+  column names and filled the right arm's misaligned columns with `NULL`; it now
+  rejects with "All sub queries in a UNION must have the same return column
+  names" (matching Neo4j). Same for `INTERSECT`/`EXCEPT`.
+- **Inline node-pattern property referencing an `UNWIND` map member now
+  resolves.** `UNWIND $rows AS x MATCH (n {id: x.id}) …` (and the common bulk
+  `SET` form) previously matched nothing — `x.id` (member access on the unwound
+  map) wasn't evaluated, so the pattern silently found no nodes. (Bare-variable,
+  `WHERE`, and `WITH`-projected forms always worked.) Found via a clean-agent
+  MCP stress test.
 - **Critical: a relationship type introduced via Cypher `CREATE`/`MERGE` is no
   longer silently dropped on `save()`.** Cypher edge creation registered the new
   type only in the lightweight `connection_types` cache, not in

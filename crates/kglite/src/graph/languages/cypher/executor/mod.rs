@@ -935,6 +935,12 @@ impl<'a> CypherExecutor<'a> {
                                             helpers::resolve_node_property(n, prop, self.graph)
                                         }),
                                     Some(Value::Node(nv)) => nv.properties.get(prop).cloned(),
+                                    // A projected MAP value — e.g. a row from
+                                    // `UNWIND $rows AS x MATCH (n {id: x.id})`.
+                                    // Read the member directly; previously this
+                                    // fell through to `In([])` and silently
+                                    // matched nothing.
+                                    Some(Value::Map(m)) => m.get(prop).cloned(),
                                     _ => None,
                                 });
                             match val {

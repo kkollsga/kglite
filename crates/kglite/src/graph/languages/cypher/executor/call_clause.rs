@@ -1547,6 +1547,25 @@ impl<'a> CypherExecutor<'a> {
         // Execute the right side query
         let right_result = self.execute(&clause.query)?;
 
+        // All arms of a set operation must return the same column names, in the
+        // same order — matching Neo4j ("All sub queries in an UNION must have
+        // the same return column names"). Without this check a mismatch produced
+        // silently wrong rows: the right arm's values are keyed by its own
+        // column names, then projected by the left arm's names, so the
+        // misaligned columns came back as NULL instead of erroring.
+        if !result_set.columns.is_empty() && result_set.columns != right_result.columns {
+            let op = match clause.kind {
+                SetOpKind::Union => "UNION",
+                SetOpKind::Intersect => "INTERSECT",
+                SetOpKind::Except => "EXCEPT",
+            };
+            return Err(format!(
+                "All sub queries in a {op} must have the same return column names \
+                 (left side {:?} != right side {:?}).",
+                result_set.columns, right_result.columns,
+            ));
+        }
+
         // Combine columns (should be compatible)
         let columns = if result_set.columns.is_empty() {
             right_result.columns.clone()

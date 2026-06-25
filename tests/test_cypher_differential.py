@@ -945,6 +945,15 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN edge_type, count ORDER BY edge_type, count",
         None,
     ),
+    # ── inline pattern referencing an UNWIND map member (`{id: x.id}`) ──
+    # Regression: `MATCH (n {id: x.id})` where x is an UNWIND'd map must resolve
+    # the member per row (previously matched nothing).
+    (
+        "unwind_inline_map_member",
+        "social_graph",
+        "UNWIND [{pid: 1}, {pid: 2}] AS x MATCH (p:Person {person_id: x.pid}) RETURN p.name AS n ORDER BY n",
+        None,
+    ),
     # ── ready_set() dependency-frontier procedure ──
     # A node is "ready" when every outgoing-KNOWS neighbour satisfies the
     # `done` predicate. Confirms the optimizer leaves the CALL's output
