@@ -130,6 +130,30 @@ def test_save_roundtrips_via_load(tmp_path):
     assert rows[0]["n"] == 2
 
 
+def test_import_csv_loads_nodes(tmp_path):
+    """`.import file.csv Type` loads rows as nodes with type inference; `id`
+    becomes the node identity."""
+    csv = tmp_path / "people.csv"
+    csv.write_text("id,name,age\n1,Alice,30\n2,Bob,25\n")
+    out = _run(
+        f".import {csv} Person\n"
+        "MATCH (p:Person) RETURN count(p) AS c\n"
+        "MATCH (p:Person {id: 2}) RETURN p.name AS n, p.age AS a\n"
+        ".quit\n"
+    )
+    assert "imported 2 Person node(s)" in out
+    assert "(1 row)" in out
+    assert "Bob" in out
+    assert "25" in out  # age inferred as a number, matchable
+
+
+def test_import_rejects_bad_node_type(tmp_path):
+    csv = tmp_path / "x.csv"
+    csv.write_text("id\n1\n")
+    out = _run(f".import {csv} 9bad\n.quit\n")
+    assert "not a valid node type" in out
+
+
 def test_read_runs_a_cypher_file(tmp_path):
     script = tmp_path / "seed.cypher"
     script.write_text("CREATE (:Person {name: 'Alice'});\nCREATE (:Person {name: 'Bob'});\n")
