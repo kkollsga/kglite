@@ -397,6 +397,7 @@ pub mod api {
     /// JS, JVM, …) call these directly.
     pub mod blueprint {
         pub use crate::graph::blueprint::build::{build, BuildReport, FlatSpec};
+        pub use crate::graph::blueprint::json_records::{from_records, RecordsReport};
         pub use crate::graph::blueprint::schema::{
             load_blueprint_file, AggregateEdge, Blueprint, CalendarLink, ComputeOp, Connections,
             FkEdge, JunctionEdge, NodeSpec, Settings, TimeKey, TimeseriesSpec,

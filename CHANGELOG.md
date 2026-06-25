@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`kglite.from_records(spec)`** — build a graph from an **inline JSON records
+  spec** (nodes + connections), no CSV files on disk. A JSON-native sibling to
+  `from_blueprint`, the natural ingestion path for agent-authored graphs.
+  Column types are inferred from the record values, so a JSON array becomes a
+  native list property; missing edge endpoints are auto-vivified as provisional
+  stub nodes (same as `add_connections`). Accepts a `dict` or JSON string;
+  `save=`, `lock_schema=`, `storage=`/`path=` mirror `from_blueprint`.
 - **Ownership layers + managed-reload guard** for two-writer contract graphs. A node type can declare `layer: 'managed'` (rebuilt from source) or `'runtime'` (owned/mutated live by another writer) in `define_schema`. `add_nodes(..., managed_reload=True)` then **refuses to write a `runtime` type** (skips it as a reported no-op), so a batch "research" rebuild can never clobber agent-owned nodes — turning a disjoint-ownership convention into an enforced guarantee. Opt-in; undeclared/`managed` types are unaffected. Persists in the `.kgl` (additive).
 - **`graph.set_instructions(text)`** — a graph-level instructions/briefing slot rendered **verbatim and un-truncated** at the top of `describe()` (as `<instructions>`), so an agent opening a `.kgl` cold reads how to use it first (unlike sample values, which truncate). Persists in the `.kgl` (additive — old files load without it); pass empty text to clear. A reserved `channel=` keyword leaves room for per-audience briefings later.
 - **Native list properties on ingestion.** A pandas column of Python

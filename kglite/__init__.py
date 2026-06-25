@@ -1,6 +1,9 @@
 """KGLite - A high-performance graph database library with Python bindings written in Rust."""
 
-from .blueprint import from_blueprint  # noqa: E402  (must override star-import from .kglite)
+from .blueprint import (  # noqa: E402  (must override star-import from .kglite)
+    from_blueprint,
+    from_records,
+)
 from .kglite import *  # noqa: F401, F403
 from .kglite import (  # explicit re-exports — names listed in __all__ below
     ArgumentError,
@@ -263,6 +266,7 @@ __all__ = [
     "from_bytes",
     "cypher_pass_names",
     "from_blueprint",
+    "from_records",
     "build_code_tree",
     "repo_tree",
     "graphgen",
