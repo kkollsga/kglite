@@ -8,6 +8,7 @@ pub mod csv_stream;
 pub mod expr;
 pub mod filter;
 pub mod geometry;
+pub mod json_records;
 pub mod schema;
 pub mod timeseries;
 pub mod validation;

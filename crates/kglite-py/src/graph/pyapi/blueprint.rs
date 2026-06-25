@@ -157,3 +157,43 @@ pub fn from_blueprint_rust(
 
     Ok((kg, output_path.map(|p| p.to_string_lossy().into_owned())))
 }
+
+/// Build a `KnowledgeGraph` from an inline JSON records spec (nodes +
+/// connections), no CSV files on disk. JSON-native sibling to
+/// `from_blueprint_rust`. Returns the populated graph; the Python shim handles
+/// optional save / lock_schema. Exposed as `kglite.kglite.from_records_rust`.
+#[pyfunction]
+#[pyo3(signature = (records_json, *, storage=None, path=None))]
+pub fn from_records_rust(
+    py: Python<'_>,
+    records_json: String,
+    storage: Option<&str>,
+    path: Option<&str>,
+) -> PyResult<KnowledgeGraph> {
+    let spec: serde_json::Value = serde_json::from_str(&records_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid JSON: {}", e)))?;
+
+    let kg = py
+        .detach(|| -> Result<KnowledgeGraph, String> {
+            let mode = match storage {
+                None | Some("") => kglite_core::api::storage::StorageMode::Memory,
+                Some(s) => kglite_core::api::storage::StorageMode::parse(s)?,
+            };
+            let mut graph =
+                kglite_core::api::storage::new_dir_graph_in_mode(mode, path.map(Path::new))?;
+
+            blueprint::from_records(&mut graph, &spec)?;
+
+            Ok(KnowledgeGraph {
+                inner: Arc::new(graph),
+                cursor: crate::graph::CursorState::new(),
+                embedder: None,
+                default_timeout_ms: None,
+                default_max_rows: None,
+                lifecycle: crate::graph::GraphLifecycle::detached(),
+            })
+        })
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+    Ok(kg)
+}

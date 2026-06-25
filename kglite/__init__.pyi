@@ -750,6 +750,54 @@ def from_blueprint(
     """
     ...
 
+def from_records(
+    spec: Union[dict, str],
+    *,
+    save: Optional[str] = None,
+    lock_schema: bool = False,
+    storage: str = "default",
+    path: Optional[str] = None,
+) -> KnowledgeGraph:
+    """Build a KnowledgeGraph from an inline JSON records spec.
+
+    A JSON-native sibling to :func:`from_blueprint`: instead of pointing at
+    CSV files on disk, the spec carries node and connection records inline —
+    the natural ingestion path for agent-authored graphs. Column types are
+    inferred from the record values, so a JSON array becomes a **native list
+    property** (``'x' IN n.tags`` membership, ``UNWIND n.tags``). Missing edge
+    endpoints are auto-vivified as provisional stub nodes (same as
+    ``add_connections``).
+
+    Spec shape (``records`` are arrays of flat JSON objects)::
+
+        {
+          "nodes": [
+            {"type": "Person", "id_field": "id", "title_field": "name",
+             "conflict_handling": "update",
+             "records": [{"id": 1, "name": "Alice", "aliases": ["a", "b"]}]}
+          ],
+          "connections": [
+            {"type": "KNOWS", "source_type": "Person", "source_id_field": "from",
+             "target_type": "Person", "target_id_field": "to",
+             "records": [{"from": 1, "to": 2, "since": 2020}]}
+          ]
+        }
+
+    Args:
+        spec: The records spec as a ``dict`` or a JSON string.
+        save: If set, save the built graph to this ``.kgl`` path.
+        lock_schema: If True, lock the schema after building.
+        storage: ``"default"`` (in-memory), ``"mapped"``, or ``"disk"``.
+        path: Directory for disk storage (only with ``storage="disk"``).
+
+    Returns:
+        A new KnowledgeGraph populated from the records.
+
+    Raises:
+        ValueError: If the spec JSON is malformed or a required field is missing.
+    """
+    ...
+
 def from_networkx(
     nx_graph: Any,
     *,
