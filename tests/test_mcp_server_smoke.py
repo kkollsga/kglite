@@ -338,6 +338,54 @@ class TestGraphMode:
         finally:
             client.shutdown()
 
+    def test_readonly_rejects_mutation(self, graph_fixture: Path):
+        # Default (no --writable): mutations are rejected.
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            r = client.call_tool("cypher_query", {"query": "CREATE (:Task {id: 't1'})"})
+            text = _text_content(r)
+            assert "not allowed" in text.lower() or "mutation" in text.lower()
+        finally:
+            client.shutdown()
+
+
+class TestWritableMode:
+    """`--graph X.kgl --writable` = the agent graph workbench: cypher_query
+    accepts (scoped) mutations + the lifecycle tools are registered."""
+
+    def test_lists_lifecycle_tools(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            names = {t["name"] for t in client.list_tools()}
+            assert {"load_graph", "create_graph", "save_graph_as"} <= names
+            # save_graph is implied by --writable (no manifest needed).
+            assert "save_graph" in names
+        finally:
+            client.shutdown()
+
+    def test_accepts_scoped_mutation_and_reads_back(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Task {id: 't1', status: 'todo'})", "write_scope": ["Task"]},
+            )
+            r = client.call_tool("cypher_query", {"query": "MATCH (t:Task) RETURN count(t) AS n"})
+            assert "1" in _text_content(r)
+        finally:
+            client.shutdown()
+
+    def test_write_scope_blocks_out_of_scope(self, graph_fixture: Path):
+        client = _spawn(["--graph", str(graph_fixture), "--writable"])
+        try:
+            r = client.call_tool(
+                "cypher_query",
+                {"query": "CREATE (:Algorithm {id: 'a1'})", "write_scope": ["Task"]},
+            )
+            assert "write scope" in _text_content(r).lower()
+        finally:
+            client.shutdown()
+
     def test_save_graph_round_trip(self, tmp_path: Path):
         # Use a copy so we don't churn the shared fixture across tests.
         src = tmp_path / "saveable.kgl"
