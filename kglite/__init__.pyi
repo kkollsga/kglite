@@ -3186,7 +3186,17 @@ class KnowledgeGraph:
 
         Args:
             schema_dict: Schema definition with ``nodes`` and ``connections`` keys.
-                See the Rust docstring for full structure.
+                Each node entry may set ``required``/``optional``/``types`` and,
+                optionally, ``primary_key`` to declare an enforced PRIMARY KEY::
+
+                    g.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+
+                Declaring ``primary_key`` makes the write path enforce uniqueness
+                on that key — a ``CREATE`` that would duplicate it is rejected
+                (use ``MERGE`` to upsert). It is opt-in: types without a declared
+                ``primary_key`` keep the permissive default. For now the key must
+                be ``"id"`` (the identity field); an enforced PK on an arbitrary
+                property is not yet supported.
 
         Returns:
             Self with schema defined.

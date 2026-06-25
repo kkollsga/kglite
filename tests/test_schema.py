@@ -116,3 +116,43 @@ class TestSchemaValidation:
         )
         errors = graph.validate_schema()
         assert len(errors) == 0
+
+
+class TestPrimaryKeyDeclaration:
+    """Phase 1 — declaring a PRIMARY KEY (declaration + round-trip only; the
+    write-path enforcement lands in a later phase)."""
+
+    def test_declare_primary_key_roundtrips(self):
+        graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"Person": {"primary_key": "id", "required": ["id"]}}})
+        sd = graph.schema_definition()
+        assert sd["nodes"]["Person"]["primary_key"] == "id"
+
+    def test_non_id_primary_key_rejected(self):
+        """MVP enforces only on the identity key; a PK on an arbitrary property
+        is rejected at declaration (not silently a no-op)."""
+        graph = KnowledgeGraph()
+        try:
+            graph.define_schema({"nodes": {"T": {"primary_key": "name"}}})
+            raise AssertionError("non-id primary_key should be rejected")
+        except ValueError as e:
+            assert "must be 'id'" in str(e)
+
+    def test_no_primary_key_means_none(self):
+        graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"Doc": {"required": ["id"]}}})
+        sd = graph.schema_definition()
+        assert sd["nodes"]["Doc"].get("primary_key") is None
+
+    def test_primary_key_survives_save_load(self, tmp_path):
+        graph = KnowledgeGraph()
+        graph.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+        graph.cypher("CREATE (:Person {id: 1, name: 'A'})")
+        p = str(tmp_path / "g.kgl")
+        graph.save(p)
+
+        import kglite
+
+        reloaded = kglite.load(p)
+        sd = reloaded.schema_definition()
+        assert sd["nodes"]["Person"]["primary_key"] == "id"

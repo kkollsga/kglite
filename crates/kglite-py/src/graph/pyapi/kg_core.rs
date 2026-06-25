@@ -1048,6 +1048,22 @@ impl KnowledgeGraph {
                         }
                     }
 
+                    // Parse the (opt-in) primary key. MVP enforces uniqueness only
+                    // on the identity key ('id'); a PK on an arbitrary property
+                    // needs a unique secondary index (follow-up), so reject it
+                    // explicitly rather than silently declaring a no-op constraint.
+                    if let Some(pk_val) = node_schema_dict.get_item("primary_key")? {
+                        let pk: String = pk_val.extract()?;
+                        if pk != "id" {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "primary_key for node type '{node_type}' must be 'id' — \
+                                 enforcing a primary key on an arbitrary property is not yet \
+                                 supported (it needs a unique secondary index). Got '{pk}'."
+                            )));
+                        }
+                        node_schema.primary_key = Some(pk);
+                    }
+
                     schema.add_node_schema(node_type, node_schema);
                 }
             }
@@ -1266,6 +1282,10 @@ impl KnowledgeGraph {
                 types_dict.set_item(field, field_type)?;
             }
             schema_dict.set_item("types", types_dict)?;
+
+            if let Some(pk) = &node_schema.primary_key {
+                schema_dict.set_item("primary_key", pk)?;
+            }
 
             nodes_dict.set_item(node_type, schema_dict)?;
         }

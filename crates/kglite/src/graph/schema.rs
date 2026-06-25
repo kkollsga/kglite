@@ -2043,6 +2043,16 @@ pub struct NodeSchemaDefinition {
     pub optional_fields: Vec<String>,
     /// Expected types for fields: "string", "integer", "float", "boolean", "datetime"
     pub field_types: HashMap<String, String>,
+    /// Declared PRIMARY KEY property for this node type (opt-in). When set,
+    /// the write path enforces uniqueness on this key — a CREATE that would
+    /// duplicate it is rejected (use MERGE to upsert). `None` = no constraint
+    /// (today's permissive behaviour). For the current release the key must be
+    /// the type's identity field (`id`); an enforced PK on an arbitrary
+    /// property would need a unique secondary index and is a follow-up.
+    /// Serialized additively in the JSON metadata, so older `.kgl` files load
+    /// with `None`.
+    #[serde(default)]
+    pub primary_key: Option<String>,
 }
 
 /// Defines the expected schema for a connection type
