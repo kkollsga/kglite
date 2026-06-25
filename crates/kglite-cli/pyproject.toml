@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kglite-cli"
+description = "The kglite interactive Cypher shell — a sqlite3-style REPL for .kgl knowledge graphs (provides the `kglite` command)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["cypher", "repl", "shell", "knowledge-graph", "kglite"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Database",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/kkollsga/kglite"
+Repository = "https://github.com/kkollsga/kglite"
+
+# Build a binary wheel (not a Python extension): maturin compiles the
+# `kglite-cli` crate's `[[bin]]` and installs it as the `kglite` command, so
+# `pip install kglite-cli` puts the shell on PATH. No Python sources, no
+# extension module — the inverse of the main `kglite` wheel.
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"

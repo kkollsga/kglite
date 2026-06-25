@@ -67,7 +67,6 @@ networkx = ["networkx>=3.0"]
 # server; 0.10.25 dropped it for cargo-only; 0.10.26 brings it back pip-native
 # as the bundled Rust server.)
 [project.scripts]
-kglite = "kglite.cli:main"
 kglite-mcp-server = "kglite.mcp_server:main"
 
 [project.urls]
