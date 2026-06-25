@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Role-scoped writes** — `cypher(..., write_scope=["Plan", "Task"])` (and
+  `Session.execute(..., write_scope=[...])`) restrict Cypher `CREATE`/`SET` to a
+  node-type whitelist (integrity, not secrecy: a coding role may write its own
+  types but not research-owned `Algorithm`/`Assessment` nodes; an edge may not
+  wire onto an out-of-scope endpoint either). Enforced at the executor's
+  CREATE/SET chokepoints, per-call and execution-scoped (never persisted, zero
+  cost when unset). `MERGE` and the low-level `Transaction.cypher` are not yet
+  scoped — use `cypher`/`Session.execute` for scoped writes.
 - **`kglite.from_records(spec)`** — build a graph from an **inline JSON records
   spec** (nodes + connections), no CSV files on disk. A JSON-native sibling to
   `from_blueprint`, the natural ingestion path for agent-authored graphs.

@@ -231,6 +231,17 @@ impl core::fmt::Debug for kglite::api::blueprint::NodeSpec
 pub fn kglite::api::blueprint::NodeSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::NodeSpec
 pub fn kglite::api::blueprint::NodeSpec::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+pub struct kglite::api::blueprint::RecordsReport
+pub kglite::api::blueprint::RecordsReport::connection_types: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::blueprint::RecordsReport::edges_added: usize
+pub kglite::api::blueprint::RecordsReport::node_types: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::blueprint::RecordsReport::nodes_added: usize
+impl core::clone::Clone for kglite::api::blueprint::RecordsReport
+pub fn kglite::api::blueprint::RecordsReport::clone(&self) -> kglite::api::blueprint::RecordsReport
+impl core::default::Default for kglite::api::blueprint::RecordsReport
+pub fn kglite::api::blueprint::RecordsReport::default() -> kglite::api::blueprint::RecordsReport
+impl core::fmt::Debug for kglite::api::blueprint::RecordsReport
+pub fn kglite::api::blueprint::RecordsReport::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::blueprint::Settings
 pub kglite::api::blueprint::Settings::auto_purge: bool
 pub kglite::api::blueprint::Settings::input_root: core::option::Option<alloc::string::String>
@@ -254,6 +265,7 @@ pub fn kglite::api::blueprint::TimeseriesSpec::fmt(&self, f: &mut core::fmt::For
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::blueprint::TimeseriesSpec
 pub fn kglite::api::blueprint::TimeseriesSpec::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path) -> core::result::Result<kglite::api::blueprint::BuildReport, alloc::string::String>
+pub fn kglite::api::blueprint::from_records(graph: &mut kglite::api::DirGraph, spec: &serde_json::value::Value) -> core::result::Result<kglite::api::blueprint::RecordsReport, alloc::string::String>
 pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> core::result::Result<kglite::api::blueprint::Blueprint, alloc::string::String>
 pub mod kglite::api::code_tree
 pub enum kglite::api::code_tree::SourceLookup
@@ -1058,6 +1070,7 @@ pub kglite::api::session::ExecuteOptions::lazy_eligible: bool
 pub kglite::api::session::ExecuteOptions::max_rows: core::option::Option<usize>
 pub kglite::api::session::ExecuteOptions::params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub kglite::api::session::ExecuteOptions::value_codecs: core::option::Option<&'a [kglite::api::cypher::ValueCodec]>
+pub kglite::api::session::ExecuteOptions::write_scope: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
 impl<'a> kglite::api::session::ExecuteOptions<'a>
 pub fn kglite::api::session::ExecuteOptions<'a>::eager(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
 pub fn kglite::api::session::ExecuteOptions<'a>::new(params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> Self
@@ -3084,6 +3097,7 @@ pub kglite::datatypes::values::BorrowedValue::Boolean(bool)
 pub kglite::datatypes::values::BorrowedValue::DateTime(chrono::naive::date::NaiveDate)
 pub kglite::datatypes::values::BorrowedValue::Float64(f64)
 pub kglite::datatypes::values::BorrowedValue::Int64(i64)
+pub kglite::datatypes::values::BorrowedValue::List(&'a [kglite::datatypes::values::Value])
 pub kglite::datatypes::values::BorrowedValue::Null
 pub kglite::datatypes::values::BorrowedValue::String(&'a str)
 pub kglite::datatypes::values::BorrowedValue::UniqueId(u32)
@@ -3099,6 +3113,7 @@ pub kglite::datatypes::values::ColumnData::Boolean(alloc::vec::Vec<core::option:
 pub kglite::datatypes::values::ColumnData::DateTime(alloc::vec::Vec<core::option::Option<chrono::naive::date::NaiveDate>>)
 pub kglite::datatypes::values::ColumnData::Float64(alloc::vec::Vec<core::option::Option<f64>>)
 pub kglite::datatypes::values::ColumnData::Int64(alloc::vec::Vec<core::option::Option<i64>>)
+pub kglite::datatypes::values::ColumnData::List(alloc::vec::Vec<core::option::Option<alloc::vec::Vec<kglite::datatypes::values::Value>>>)
 pub kglite::datatypes::values::ColumnData::String(alloc::vec::Vec<core::option::Option<alloc::string::String>>)
 pub kglite::datatypes::values::ColumnData::UniqueId(alloc::vec::Vec<core::option::Option<u32>>)
 impl core::fmt::Debug for kglite::datatypes::values::ColumnData
@@ -3108,6 +3123,7 @@ pub kglite::datatypes::values::ColumnType::Boolean
 pub kglite::datatypes::values::ColumnType::DateTime
 pub kglite::datatypes::values::ColumnType::Float64
 pub kglite::datatypes::values::ColumnType::Int64
+pub kglite::datatypes::values::ColumnType::List
 pub kglite::datatypes::values::ColumnType::String
 pub kglite::datatypes::values::ColumnType::UniqueId
 impl core::clone::Clone for kglite::datatypes::values::ColumnType

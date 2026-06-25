@@ -110,6 +110,8 @@ impl FrozenGraph {
                     embedder,
                     value_codecs: None,
                     cancel,
+                    // FrozenGraph is read-only — write-scope never applies.
+                    write_scope: None,
                 };
                 let outcome = execute_read(&inner, &query_owned, &opts)?;
                 let mut result = outcome.result;

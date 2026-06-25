@@ -1453,7 +1453,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None, write_scope=None))]
     #[allow(clippy::too_many_arguments)]
     fn cypher(
         slf: &Bound<'_, Self>,
@@ -1466,7 +1466,11 @@ impl KnowledgeGraph {
         streaming: bool,
         disable_optimizer: bool,
         disabled_passes: Option<Vec<String>>,
+        write_scope: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
+        // Role-scoped write whitelist (mutation path only). Build the set once.
+        let write_scope_set: Option<std::collections::HashSet<String>> =
+            write_scope.map(|v| v.into_iter().collect());
         let self_ref = slf.try_borrow().map_err(|_| concurrent_access_pyerr())?;
         let effective_timeout = timeout_ms
             .or(self_ref.default_timeout_ms)
@@ -1561,6 +1565,7 @@ impl KnowledgeGraph {
                 // copy-on-write working graph that's discarded on abort. The
                 // deadline still bounds this path.
                 cancel: None,
+                write_scope: write_scope_set.as_ref(),
             };
 
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
@@ -1633,6 +1638,8 @@ impl KnowledgeGraph {
                 value_codecs: None,
                 // Overridden with the live cancel flag inside enter_kg below.
                 cancel: None,
+                // Read path: write-scope is irrelevant (no mutation).
+                write_scope: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
             py.enter_kg(
