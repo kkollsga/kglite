@@ -75,11 +75,16 @@ jobs:
           shared-key: "cliwheel-${{ matrix.target }}"
       - run: pip install maturin
       - name: Build kglite-cli bin wheel
-        run: maturin build --release -m crates/kglite-cli/pyproject.toml --target ${{ matrix.target }} --out wheels
+        # Run from the crate dir so maturin uses crates/kglite-cli/pyproject.toml
+        # (`bindings = "bin"`), not the workspace-root pyproject (which configures
+        # the python-extension wheel). `-m <pyproject>` is invalid — maturin's
+        # manifest-path wants a Cargo.toml — so cd in instead.
+        working-directory: crates/kglite-cli
+        run: maturin build --release --target ${{ matrix.target }} --out wheels
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-${{ matrix.os }}-${{ matrix.target }}
-          path: wheels/*.whl
+          path: crates/kglite-cli/wheels/*.whl
 
   build-linux:
     name: cli wheel - linux - ${{ matrix.target }}
@@ -101,11 +106,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release -m crates/kglite-cli/pyproject.toml --out wheels
+          working-directory: crates/kglite-cli
+          args: --release --out wheels
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-linux-${{ matrix.target }}
-          path: wheels/*.whl
+          path: crates/kglite-cli/wheels/*.whl
 
   build-linux-arm:
     name: cli wheel - linux - ${{ matrix.target }} (best-effort)
@@ -131,11 +137,12 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release -m crates/kglite-cli/pyproject.toml --out wheels
+          working-directory: crates/kglite-cli
+          args: --release --out wheels
       - uses: actions/upload-artifact@v7
         with:
           name: cli-wheels-linux-${{ matrix.target }}
-          path: wheels/*.whl
+          path: crates/kglite-cli/wheels/*.whl
 
   publish:
     name: Publish kglite-cli to PyPI
