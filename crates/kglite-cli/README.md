@@ -30,7 +30,13 @@ Pure-Rust single binary over `kglite::api::*` — no Python, no server.
 
 - `.help` — list commands
 - `.quit` / `.exit` — leave the shell
+- `.labels` / `.rels` / `.schema` / `.indexes` — schema introspection
+- `.mode table|csv|json` — set the output format
+- `.dump <dir>` — export a portable CSV + `blueprint.json` copy
+  (reload with `kglite.from_blueprint(...)`)
+- `.read <file>` — run the Cypher statements in a file
+- `.save [path]` — write the graph to a `.kgl` file
 
-Anything else is executed as Cypher. More dot-commands (`.labels`, `.schema`,
-`.dump`, `.read`, `.mode`, `.save`) plus Ctrl-C query cancellation are on the
-way.
+Anything else is executed as Cypher. **Ctrl-C** cancels a running query;
+**Ctrl-D** exits. (`.import` is not yet supported — there's no `LOAD CSV`; use
+`.read` or `kglite.from_blueprint()`.)

@@ -75,3 +75,64 @@ def test_cypher_error_is_reported_not_fatal():
     out = _run("MATCH bogus syntax\nRETURN 1 AS one\n.quit\n")
     assert "error:" in out
     assert "(1 row)" in out  # the next statement still ran
+
+
+def test_mode_csv_and_json():
+    # CREATE first (table mode), then switch mode and run only the query, so the
+    # formatted output is a single result (a write under json mode renders []).
+    create = 'CREATE (:Person {name: "Alice", age: 30})\n'
+    query = "MATCH (p:Person) RETURN p.name AS name, p.age AS age\n"
+
+    csv_out = _run(create + ".mode csv\n" + query + ".quit\n")
+    assert "name,age" in csv_out
+    assert "Alice,30" in csv_out  # string unquoted, int bare
+
+    json_out = _run(create + ".mode json\n" + query + ".quit\n")
+    import json
+
+    start = json_out.index("[")
+    end = json_out.rindex("]") + 1
+    parsed = json.loads(json_out[start:end])
+    assert parsed[0]["name"] == "Alice"
+    assert parsed[0]["age"] == 30  # number, not "30"
+
+
+def test_schema_dotcommand():
+    out = _run("CREATE (:Person {name: 'A', city: 'Oslo'})\n.schema\n.quit\n")
+    assert "Person" in out
+
+
+def test_dump_roundtrips_via_from_blueprint(tmp_path):
+    """`.dump` writes a portable copy that from_blueprint() rebuilds."""
+    import kglite
+
+    dump_dir = tmp_path / "backup"
+    _run(
+        'CREATE (:Person {name: "Alice", age: 30})\n'
+        'CREATE (:Person {name: "Bob", age: 25})\n'
+        f".dump {dump_dir}\n.quit\n"
+    )
+    assert (dump_dir / "blueprint.json").exists()
+    g = kglite.from_blueprint(str(dump_dir / "blueprint.json"))
+    rows = g.cypher("MATCH (p:Person) RETURN count(p) AS n")
+    assert rows[0]["n"] == 2
+
+
+def test_save_roundtrips_via_load(tmp_path):
+    """`.save` writes a .kgl that kglite.load() reopens."""
+    import kglite
+
+    kgl = tmp_path / "demo.kgl"
+    _run(f'CREATE (:Person {{name: "Alice"}})\nCREATE (:Person {{name: "Bob"}})\n.save {kgl}\n.quit\n')
+    assert kgl.exists()
+    g = kglite.load(str(kgl))
+    rows = g.cypher("MATCH (p:Person) RETURN count(p) AS n")
+    assert rows[0]["n"] == 2
+
+
+def test_read_runs_a_cypher_file(tmp_path):
+    script = tmp_path / "seed.cypher"
+    script.write_text("CREATE (:Person {name: 'Alice'});\nCREATE (:Person {name: 'Bob'});\n")
+    out = _run(f".read {script}\nMATCH (p:Person) RETURN count(p) AS n\n.quit\n")
+    assert "(1 row)" in out
+    assert "2" in out  # the count after seeding
