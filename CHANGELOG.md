@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime **graph-lifecycle tools** (write-enabled only): `load_graph(path)`,
   `create_graph(path, storage)`, and `save_graph_as(path)` — so an agent can
   load or create a graph, work, persist, and swap to another within one
-  session (the "graph workbench").
+  session (the "graph workbench"). A mutation with no `RETURN` now returns a
+  write acknowledgement (`OK: 1 node(s) created, …`) instead of the bare
+  "No results." — so an agent can tell a successful write from a no-op match.
 
 ### Fixed
 - **Critical: a relationship type introduced via Cypher `CREATE`/`MERGE` is no
