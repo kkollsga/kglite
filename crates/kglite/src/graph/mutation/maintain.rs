@@ -153,6 +153,20 @@ pub fn add_nodes(
     let mut skipped_null_id = 0;
     let mut skipped_parse_fail = 0;
 
+    // For a declared-PRIMARY-KEY type, a within-batch duplicate id is a data
+    // error (the id-index would silently collapse it into a hidden duplicate),
+    // so reject it — consistent with Cypher CREATE's reject-on-dup. The
+    // conflict-handling modes still apply to duplicates vs. the *existing*
+    // graph (add_nodes is the upsert path, like MERGE); this only guards
+    // repeats *within the same input batch*. Gated on a declared PK, so the
+    // common bulk path allocates nothing.
+    let pk_enforced = graph.primary_key_for(&node_type).is_some();
+    let mut seen_pk_ids: std::collections::HashSet<Value> = if pk_enforced {
+        std::collections::HashSet::with_capacity(df_data.row_count())
+    } else {
+        std::collections::HashSet::new()
+    };
+
     for row_idx in 0..df_data.row_count() {
         let id = match df_data.get_value_by_index(row_idx, id_idx) {
             Some(Value::Null) => {
@@ -167,6 +181,14 @@ pub fn add_nodes(
                 continue;
             }
         };
+
+        if pk_enforced && !seen_pk_ids.insert(id.clone()) {
+            return Err(format!(
+                "duplicate primary key: node type '{node_type}' declares a primary key but \
+                 the input has more than one row with id {id}. Deduplicate the input before \
+                 add_nodes, or drop the primary-key declaration."
+            ));
+        }
 
         let title = df_data
             .get_value_by_index(row_idx, title_idx)
@@ -1968,6 +1990,60 @@ mod id_index_tests {
         assert!(g
             .lookup_by_id_readonly("Person", &Value::Int64(999))
             .is_some());
+    }
+
+    /// A declared-PRIMARY-KEY type rejects a within-batch duplicate id; a
+    /// clean batch loads. Undeclared types keep the permissive default.
+    #[test]
+    fn add_nodes_rejects_within_batch_pk_duplicate() {
+        use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition};
+
+        let mut g = DirGraph::new();
+        let mut schema = SchemaDefinition::new();
+        schema.add_node_schema(
+            "Person".to_string(),
+            NodeSchemaDefinition {
+                primary_key: Some("id".to_string()),
+                ..Default::default()
+            },
+        );
+        g.set_schema(schema);
+
+        let dup = DataFrame::from_cypher_rows(
+            vec!["id".to_string()],
+            vec![
+                vec![Value::Int64(1)],
+                vec![Value::Int64(2)],
+                vec![Value::Int64(2)],
+            ],
+        )
+        .unwrap();
+        let err = add_nodes(
+            &mut g,
+            dup,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate primary key"), "got: {err}");
+
+        // A clean batch on the same declared-PK type succeeds.
+        let clean = DataFrame::from_cypher_rows(
+            vec!["id".to_string()],
+            vec![vec![Value::Int64(10)], vec![Value::Int64(11)]],
+        )
+        .unwrap();
+        let report = add_nodes(
+            &mut g,
+            clean,
+            "Person".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        );
+        assert!(report.is_ok(), "clean batch should load: {report:?}");
     }
 
     /// Regression (issue #20): the read path self-heals. When the index is

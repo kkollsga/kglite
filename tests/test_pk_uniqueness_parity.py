@@ -11,6 +11,7 @@ Run: pytest tests/test_pk_uniqueness_parity.py
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from kglite import KnowledgeGraph
@@ -79,3 +80,41 @@ def test_string_id_pk_enforced(mode, tmp_path):
     with pytest.raises(Exception, match="duplicate primary key"):
         kg.cypher("CREATE (:Mem {id: 'k1', body: 'second'})")
     assert _count(kg, "Mem") == 1
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_add_nodes_within_batch_dup_rejected(mode, tmp_path):
+    """A repeated id within one add_nodes input is a data error for a
+    declared-PK type (it would otherwise become a hidden duplicate)."""
+    kg = _fresh(mode, tmp_path)
+    kg.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+    df = pd.DataFrame({"id": [1, 2, 2, 3], "name": ["a", "b", "b2", "c"]})
+    with pytest.raises(Exception, match="duplicate primary key"):
+        kg.add_nodes(df, "Person", "id", "name")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_add_nodes_vs_existing_still_upserts(mode, tmp_path):
+    """add_nodes stays the upsert path vs the *existing* graph: re-adding an
+    existing id updates in place (no new node, no error) — only within-batch
+    repeats are rejected."""
+    kg = _fresh(mode, tmp_path)
+    kg.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+    kg.add_nodes(pd.DataFrame({"id": [1, 2], "name": ["a", "b"]}), "Person", "id", "name")
+    kg.add_nodes(pd.DataFrame({"id": [1], "name": ["a-updated"]}), "Person", "id", "name")
+    assert _count(kg, "Person") == 2
+    assert kg.cypher("MATCH (p:Person {id: 1}) RETURN p.name AS n").to_dicts()[0]["n"] == "a-updated"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_add_nodes_unique_batch_ok_on_pk_type(mode, tmp_path):
+    """A clean (already-unique) batch loads fine on a declared-PK type."""
+    kg = _fresh(mode, tmp_path)
+    kg.define_schema({"nodes": {"Person": {"primary_key": "id"}}})
+    kg.add_nodes(
+        pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]}),
+        "Person",
+        "id",
+        "name",
+    )
+    assert _count(kg, "Person") == 3
