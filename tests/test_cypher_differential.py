@@ -981,6 +981,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'C' RETURN label ORDER BY name",
         None,
     ),
+    (
+        "db_property_keys_basic",
+        "social_graph",
+        "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey",
+        None,
+    ),
+    (
+        "db_schema_basic",
+        "social_graph",
+        "CALL db.schema() YIELD nodeType, properties RETURN nodeType, properties ORDER BY nodeType",
+        None,
+    ),
     # ── Multi-label (secondary-label) read paths ──────────────────────────
     # On a multi-label graph the label-dependent fusions are gated to the
     # general matcher path, so optimised==naive proves the fused fast-paths

@@ -496,6 +496,26 @@ pub(crate) fn collect_relationship_types(graph: &DirGraph) -> Vec<String> {
     out
 }
 
+/// All property keys declared anywhere in the graph (node + relationship
+/// property names), sorted and de-duplicated.
+///
+/// Single source of truth for `db.propertyKeys()` (Neo4j-compatible). Unions
+/// `node_type_metadata` (per-type `prop → declared_type`) with each
+/// `connection_type_metadata` entry's `property_types`. Mirrors how
+/// `collect_labels`/`collect_relationship_types` feed their `db.*` procedures.
+pub(crate) fn collect_property_keys(graph: &DirGraph) -> Vec<String> {
+    let mut keys: HashSet<String> = HashSet::new();
+    for props in graph.node_type_metadata.values() {
+        keys.extend(props.keys().cloned());
+    }
+    for info in graph.connection_type_metadata.values() {
+        keys.extend(info.property_types.keys().cloned());
+    }
+    let mut out: Vec<String> = keys.into_iter().collect();
+    out.sort();
+    out
+}
+
 /// Full schema overview: node types, connection types, indexes, totals.
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
     // Node types from type_indices

@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cypher schema introspection now reaches **property keys** and the **per-type schema**, not just labels/relationship-types/indexes: `CALL db.propertyKeys() YIELD propertyKey` (every declared property name, sorted) and `CALL db.schema() YIELD nodeType, properties` (one row per node type with its sorted property-name list — the in-language counterpart of Python `describe()`). Both are Neo4j-named so Bolt drivers can call them, and reuse the same `schema_overview` helpers `describe()` does. Listed in `list_procedures` and CYPHER.md.
+
 ### Changed
+- CYPHER.md: corrected the `db.labels()` / `db.relationshipTypes()` YIELD columns in the procedure reference (they yield `label` / `relationshipType`, not `name` — the docs predated the Neo4j-name alignment and the examples would have errored).
 - `.kgl` hard-break load errors (v3-in-v4, unrecognized-format file/byte-buffer) now point at the **format-stable export escape hatch**: if you no longer have the original source but can still run the old binary, `g.export_csv('backup/')` writes a portable CSV+`blueprint.json` copy that `kglite.from_blueprint(...)` rebuilds on any version. New guide section "Back up before upgrading" documents it as the recommended pre-upgrade step (SQLite `.dump` parity). No format change.
 
 ### Fixed

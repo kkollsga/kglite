@@ -344,6 +344,13 @@ impl<'a> CypherExecutor<'a> {
             ],
             "db.property_stats" => &["value_count", "null_count", "distinct_count"],
             "db.property_uniqueness" => &["is_unique", "violation_count", "distinct_count"],
+            // Neo4j-compatible: db.propertyKeys() yields `propertyKey` (one row
+            // per declared property name); db.schema() yields one row per node
+            // type with its property-name list, the in-language counterpart of
+            // the Python `describe()` schema. Makes property keys + per-type
+            // schema reachable from a Cypher/Bolt client, not just describe().
+            "db.propertykeys" => &["propertyKey"],
+            "db.schema" => &["nodeType", "properties"],
             _ => {
                 return Err(format!(
                     "Unknown procedure '{}'. Available: pagerank, betweenness, degree, \
@@ -354,7 +361,8 @@ impl<'a> CypherExecutor<'a> {
                      null_property, inverse_violation, transitivity_violation, \
                      cardinality_violation, type_domain_violation, \
                      type_range_violation, parallel_edges, \
-                     db.labels, db.relationshipTypes, db.indexes",
+                     db.labels, db.relationshipTypes, db.indexes, \
+                     db.propertyKeys, db.schema",
                     clause.procedure_name
                 ));
             }
@@ -978,6 +986,16 @@ impl<'a> CypherExecutor<'a> {
                         "All indexes in the graph (equality, composite, range), sorted by name",
                         "name, type, entityType, labelsOrTypes, properties, state",
                     ),
+                    (
+                        "db.propertyKeys",
+                        "All property keys declared in the graph (node + relationship), sorted",
+                        "propertyKey",
+                    ),
+                    (
+                        "db.schema",
+                        "One row per node type with its sorted property-name list",
+                        "nodeType, properties",
+                    ),
                 ];
                 let mut rows = Vec::new();
                 for (name, desc, yields) in &procedures {
@@ -1026,6 +1044,38 @@ impl<'a> CypherExecutor<'a> {
                         self.graph,
                     );
                 indexes_to_rows(&infos, &clause.yield_items)
+            }
+            // db.propertyKeys() — every declared property name, one per row.
+            "db.propertykeys" => {
+                let keys =
+                    crate::graph::introspection::schema_overview::collect_property_keys(self.graph);
+                names_to_rows(&keys, &clause.yield_items)
+            }
+            // db.schema() — one row per node type: its name + the sorted list
+            // of its property names. The in-language counterpart of describe(),
+            // reusing compute_schema() so the two never drift.
+            "db.schema" => {
+                let schema =
+                    crate::graph::introspection::schema_overview::compute_schema(self.graph);
+                let mut rows = Vec::with_capacity(schema.node_types.len());
+                for (node_type, overview) in &schema.node_types {
+                    let mut props: Vec<String> = overview.properties.keys().cloned().collect();
+                    props.sort();
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        let value = match item.name.as_str() {
+                            "nodeType" => Value::String(node_type.clone()),
+                            "properties" => {
+                                Value::List(props.iter().cloned().map(Value::String).collect())
+                            }
+                            _ => continue,
+                        };
+                        row.projected.insert(alias.to_string(), value);
+                    }
+                    rows.push(row);
+                }
+                rows
             }
             // 2026-05-25 Batch 6 — graph + property introspection.
             //
