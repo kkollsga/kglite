@@ -586,6 +586,20 @@ impl DirGraph {
         self.schema_definition = None;
     }
 
+    /// The declared PRIMARY KEY property for `node_type`, if one is set via
+    /// `define_schema`. `Some("id")` means uniqueness on the type's identity
+    /// key is enforced at the write path (CREATE rejects a duplicate); `None`
+    /// means the permissive default. Single source of truth for the
+    /// enforcement check and for introspection, so they never diverge.
+    pub fn primary_key_for(&self, node_type: &str) -> Option<&str> {
+        self.schema_definition
+            .as_ref()?
+            .node_schemas
+            .get(node_type)?
+            .primary_key
+            .as_deref()
+    }
+
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
         // Fast path: check the interned connection_types cache (O(1))
         if !self.connection_types.is_empty() {

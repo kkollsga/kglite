@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `define_schema(...)` node entries accept an optional **`primary_key`** to declare a node type's primary key, e.g. `g.define_schema({"nodes": {"Person": {"primary_key": "id"}}})`. The declaration round-trips through `schema_definition()` and persists in the `.kgl` (older files load with no PK). For now the key must be `"id"` (the identity field) — a non-`id` declaration is rejected — and this first step only records the declaration; write-path uniqueness enforcement follows.
+
 ## [0.11.15] — 2026-06-25 — SQLite-conventions: kglite shell, db.* introspection, export escape hatch + div/mod overflow fix
 
 ### Added
