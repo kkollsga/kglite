@@ -1158,9 +1158,11 @@ autocomplete, and surface index advisors.
 
 | Procedure | YIELD columns | Returns |
 |-----------|---------------|---------|
-| `CALL db.labels()` | `name` | One row per node-type ("label") in the graph, sorted alphabetically |
-| `CALL db.relationshipTypes()` | `name` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
+| `CALL db.labels()` | `label` | One row per node-type ("label") in the graph, sorted alphabetically |
+| `CALL db.relationshipTypes()` | `relationshipType` | One row per connection-type ("relationship type") in the graph, sorted alphabetically |
 | `CALL db.indexes()` | `name`, `type`, `entityType`, `labelsOrTypes`, `properties`, `state` | One row per index installed on the graph, sorted by `name` |
+| `CALL db.propertyKeys()` | `propertyKey` | One row per declared property name (node + relationship), sorted alphabetically |
+| `CALL db.schema()` | `nodeType`, `properties` | One row per node-type with its sorted list of property names — the in-language counterpart of Python `describe()` |
 
 Procedure names are case-insensitive on dispatch (Neo4j convention
 preserves camelCase in docs: `db.relationshipTypes`, not
@@ -1168,14 +1170,14 @@ preserves camelCase in docs: `db.relationshipTypes`, not
 
 ```python
 # Enumerate node types
-for row in graph.cypher("CALL db.labels() YIELD name RETURN name"):
-    print(row["name"])
+for row in graph.cypher("CALL db.labels() YIELD label RETURN label"):
+    print(row["label"])
 
 # Find relationship types matching a prefix
 graph.cypher("""
-    CALL db.relationshipTypes() YIELD name
-    WHERE name STARTS WITH 'WORKS'
-    RETURN name
+    CALL db.relationshipTypes() YIELD relationshipType
+    WHERE relationshipType STARTS WITH 'WORKS'
+    RETURN relationshipType
 """)
 
 # Inspect indexes
@@ -1184,6 +1186,11 @@ for idx in graph.cypher("""
     RETURN name, type, properties ORDER BY name
 """):
     print(f"{idx['name']:30}  type={idx['type']:9}  props={idx['properties']}")
+
+# All property keys, and the per-type schema (no separate API needed)
+graph.cypher("CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey")
+for row in graph.cypher("CALL db.schema() YIELD nodeType, properties RETURN nodeType, properties"):
+    print(f"{row['nodeType']}: {row['properties']}")
 ```
 
 ### `db.indexes()` column semantics
