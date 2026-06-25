@@ -87,6 +87,14 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["graph", "source_root", "workspace"])]
     watch: Option<PathBuf>,
 
+    /// Enable the write-mode "agent graph workbench" (single-graph mode):
+    /// `cypher_query` accepts mutations (CREATE/SET/DELETE/MERGE, optionally
+    /// `write_scope`-restricted) and the runtime graph-lifecycle tools
+    /// (`load_graph` / `create_graph` / `save_graph_as`) are registered.
+    /// Off by default — read-only is the safe default for analysis servers.
+    #[arg(long)]
+    writable: bool,
+
     #[arg(long = "mcp-config")]
     mcp_config: Option<PathBuf>,
     #[arg(long)]
@@ -570,7 +578,11 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
         save_graph: manifest
             .as_ref()
             .map(|m| m.builtins.save_graph)
-            .unwrap_or(false),
+            .unwrap_or(false)
+            // Write mode implies save_graph (an agent that mutates needs to
+            // persist) so `--writable` alone gives the full workbench.
+            || cli.writable,
+        writable: cli.writable,
         temp_cleanup_on_overview: manifest
             .as_ref()
             .map(|m| {

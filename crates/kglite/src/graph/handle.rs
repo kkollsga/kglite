@@ -284,6 +284,17 @@ impl KnowledgeGraph {
         &self.inner
     }
 
+    /// Mutable borrow of the underlying `Arc<DirGraph>` — the write
+    /// counterpart of [`dir`](Self::dir). Pair with
+    /// [`make_dir_graph_mut`] to obtain a `&mut DirGraph` for the
+    /// mutation surface (`execute_mut`, …). Used by bindings that hold a
+    /// long-lived handle and mutate it in place (e.g. the write-enabled
+    /// MCP server), so the mutation lands on *this* handle's graph rather
+    /// than a detached clone.
+    pub fn dir_mut(&mut self) -> &mut Arc<DirGraph> {
+        &mut self.inner
+    }
+
     /// Bind an embedder implementing the [`Embedder`] trait — used
     /// by `text_score()` Cypher to map text queries onto stored
     /// vectors. Replaces any previously-bound embedder. Callers
