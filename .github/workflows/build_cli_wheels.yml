@@ -1,0 +1,179 @@
+name: Build & Publish kglite-cli wheels
+# Builds the `kglite-cli` binary wheel (the `kglite` interactive shell) for each
+# platform and publishes it to PyPI as the separate `kglite-cli` distribution —
+# so `pip install kglite-cli` puts the shell on PATH while the core `kglite`
+# wheel stays lean. Mirrors build_wheels.yml but for the maturin `bin` wheel
+# (one `py3-none-<platform>` wheel per target, no Python-version matrix).
+#
+# PREREQUISITE (maintainer, one-time): the `kglite-cli` PyPI project must accept
+# uploads from this workflow — set up Trusted Publishing for kglite-cli, or use
+# an account-scoped PYPI_API_TOKEN. A project-scoped `kglite`-only token cannot
+# create/publish `kglite-cli`. Until then the publish step fails (builds still
+# run); `cargo install kglite-cli` is the fallback.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+  workflow_dispatch:
+
+jobs:
+  version-check:
+    name: Check if kglite-cli needs publishing
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: check
+        run: |
+          VERSION=$(grep -m1 '^version' crates/kglite-cli/Cargo.toml | cut -d '"' -f 2)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "kglite-cli version: $VERSION"
+          # 404 from PyPI's per-version JSON ⇒ not yet published ⇒ publish.
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://pypi.org/pypi/kglite-cli/$VERSION/json")
+          if [ "$CODE" = "404" ]; then
+            echo "kglite-cli $VERSION not on PyPI — will publish"
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "kglite-cli $VERSION already on PyPI or unverifiable (HTTP $CODE) — skipping"
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-native:
+    name: cli wheel - ${{ matrix.os }} - ${{ matrix.target }}
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Force cargo PATH precedence (macOS rustup-init shim workaround)
+        if: matrix.os == 'macos-latest'
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "cliwheel-${{ matrix.target }}"
+      - run: pip install maturin
+      - name: Build kglite-cli bin wheel
+        run: maturin build --release -m crates/kglite-cli/pyproject.toml --target ${{ matrix.target }} --out wheels
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: wheels/*.whl
+
+  build-linux:
+    name: cli wheel - linux - ${{ matrix.target }}
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            manylinux: '2014'
+          - target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build kglite-cli bin wheel (manylinux/musllinux)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release -m crates/kglite-cli/pyproject.toml --out wheels
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+
+  build-linux-arm:
+    name: cli wheel - linux - ${{ matrix.target }} (best-effort)
+    needs: [version-check]
+    if: needs.version-check.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    # aarch64 cross-builds are the fragile combos (native C deps); keep a
+    # failure from blocking the release. A target that builds is published; a
+    # broken one is simply absent until a later release — `cargo install
+    # kglite-cli` covers it meanwhile.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            manylinux: '2_28'
+          - target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release -m crates/kglite-cli/pyproject.toml --out wheels
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-wheels-linux-${{ matrix.target }}
+          path: wheels/*.whl
+
+  publish:
+    name: Publish kglite-cli to PyPI
+    needs: [version-check, build-native, build-linux, build-linux-arm]
+    if: always() && needs.version-check.outputs.should_publish == 'true' && needs.build-native.result == 'success' && needs.build-linux.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # Gate on the main CI being green (the cli is exercised by the workspace
+      # tests). Poll the Checks API directly — the `CI success` aggregate
+      # registers late, past lewagon/wait-on-check's discovery window.
+      - name: Wait for CI to pass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 2700 ))
+          while :; do
+            line=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
+              -q '.check_runs[] | select(.name=="CI success") | "\(.status) \(.conclusion // "")"' \
+              2>/dev/null | head -n1 || true)
+            status=${line%% *}; conclusion=${line#* }
+            if [ "$status" = "completed" ]; then
+              [ "$conclusion" = "success" ] && { echo "✅ CI success"; exit 0; }
+              echo "🔴 CI success: $conclusion"; exit 1
+            fi
+            [ "$(date +%s)" -ge "$deadline" ] && { echo "::error::timed out waiting for CI"; exit 1; }
+            sleep 20
+          done
+      - name: Download all cli wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-wheels-*
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
