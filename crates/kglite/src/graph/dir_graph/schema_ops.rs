@@ -35,4 +35,24 @@ impl DirGraph {
             .primary_key
             .as_deref()
     }
+
+    /// Set the free-text instructions/briefing rendered verbatim at the top of
+    /// `describe()`. `channel` selects an audience slot; `None` = the default
+    /// (the only one the v1 surface uses). Empty text clears the slot.
+    pub fn set_instructions(&mut self, text: &str, channel: Option<&str>) {
+        let key = channel.unwrap_or("").to_string();
+        if text.is_empty() {
+            self.graph_instructions.remove(&key);
+        } else {
+            self.graph_instructions.insert(key, text.to_string());
+        }
+    }
+
+    /// The instructions for `channel`, falling back to the default slot.
+    pub fn get_instructions(&self, channel: Option<&str>) -> Option<&str> {
+        self.graph_instructions
+            .get(channel.unwrap_or(""))
+            .or_else(|| self.graph_instructions.get(""))
+            .map(String::as_str)
+    }
 }

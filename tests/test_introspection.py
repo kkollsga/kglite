@@ -1211,3 +1211,50 @@ class TestRebuildCaches:
         # describe should still work and show the new connection
         desc = social_graph.describe()
         assert "NEW_REL" in desc
+
+
+class TestInstructionsSlot:
+    """`set_instructions` renders a verbatim, un-truncated briefing at the top
+    of describe() — so an agent opening the graph cold reads it first."""
+
+    def test_renders_verbatim_and_untruncated(self):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:Task {id: 1, status: 'todo'})")
+        text = "# Briefing\n\n" + ("Read the AlgorithmSpec nodes. " * 6) + "MERGE Tasks by id."
+        g.set_instructions(text)
+        d = g.describe()
+        assert "<instructions>" in d
+        # Full text present — NOT truncated like sample values are.
+        assert "MERGE Tasks by id." in d
+        # Appears before the type inventory.
+        assert d.index("<instructions>") < d.index("<types>")
+
+    def test_absent_when_unset(self):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:X {id: 1})")
+        assert "<instructions>" not in g.describe()
+
+    def test_persists_and_clears(self, tmp_path):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:X {id: 1})")
+        g.set_instructions("MARKER_PERSIST")
+        p = str(tmp_path / "g.kgl")
+        g.save(p)
+        assert "MARKER_PERSIST" in kglite.load(p).describe()
+        g.set_instructions("")  # empty clears the slot
+        assert "<instructions>" not in g.describe()
+
+    def test_xml_escaped(self):
+        import kglite
+
+        g = kglite.KnowledgeGraph()
+        g.cypher("CREATE (:X {id: 1})")
+        g.set_instructions("use a < b & c > d")
+        d = g.describe()
+        assert "&lt;" in d and "&amp;" in d and "&gt;" in d

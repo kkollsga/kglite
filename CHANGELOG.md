@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`graph.set_instructions(text)`** — a graph-level instructions/briefing slot rendered **verbatim and un-truncated** at the top of `describe()` (as `<instructions>`), so an agent opening a `.kgl` cold reads how to use it first (unlike sample values, which truncate). Persists in the `.kgl` (additive — old files load without it); pass empty text to clear. A reserved `channel=` keyword leaves room for per-audience briefings later.
+
 ### Changed
 - **Documented guarantee:** `add_nodes(conflict_handling="update")` writes **only the columns present in the call**, leaving an existing node's other properties untouched. This was already the behaviour; it is now a stated contract (regression-tested) so a batch reload can re-assert a subset of fields without clobbering fields another writer owns (e.g. an agent's live `status`/`notes`).
 
