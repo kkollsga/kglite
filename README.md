@@ -16,10 +16,16 @@ structural validators that compose with Cypher.
 
 > kglite is a **pure-Rust knowledge graph engine**
 > ([`crates/kglite`](https://github.com/kkollsga/kglite/tree/main/crates/kglite))
-> packaged for Python via `pip install kglite`. The Bolt-server and
-> MCP-server binaries are sibling Rust crates wrapping the same
-> engine. If you want kglite as a Rust library — without the Python
-> wheel in your build — see **[Use from Rust](#use-from-rust)** below.
+> packaged for Python via `pip install kglite`. The interactive shell,
+> Bolt-server, and MCP-server binaries are sibling Rust crates wrapping
+> the same engine. If you want kglite as a Rust library — without the
+> Python wheel in your build — see **[Use from Rust](#use-from-rust)** below.
+
+> **Interactive shell.** `pip install kglite-cli` (or `cargo install
+> kglite-cli`) gives you `kglite` — a `sqlite3`-style REPL: `kglite app.kgl`
+> opens a Cypher prompt with `.import`, `.dump`, `.schema`, multi-line input,
+> and tab-completion. It's a separate lightweight package, so the core
+> `kglite` wheel stays library-only.
 
 > ### Codebase → Claude
 >
