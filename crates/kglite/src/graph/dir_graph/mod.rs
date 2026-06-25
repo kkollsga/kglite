@@ -42,6 +42,7 @@ fn next_graph_id() -> u64 {
 // connectivity, per-(type,property) NDV) live in a child module so the
 // file stays under the god-file ceiling; child = retains private access.
 mod caches;
+mod schema_ops;
 
 /// Version-keyed cache of per-`(type, property)` distinct-value counts (NDV)
 /// for the planner's selectivity estimator. The `u64` is the graph `version`
@@ -569,35 +570,6 @@ impl DirGraph {
     pub fn lookup_by_id_normalized(&self, node_type: &str, id: &Value) -> Option<NodeIndex> {
         self.id_indices
             .lookup_or_build(node_type, id, || self.compute_id_index(node_type))
-    }
-
-    /// Set the schema definition for this graph
-    pub fn set_schema(&mut self, schema: SchemaDefinition) {
-        self.schema_definition = Some(schema);
-    }
-
-    /// Get the schema definition if one is set
-    pub fn get_schema(&self) -> Option<&SchemaDefinition> {
-        self.schema_definition.as_ref()
-    }
-
-    /// Clear the schema definition
-    pub fn clear_schema(&mut self) {
-        self.schema_definition = None;
-    }
-
-    /// The declared PRIMARY KEY property for `node_type`, if one is set via
-    /// `define_schema`. `Some("id")` means uniqueness on the type's identity
-    /// key is enforced at the write path (CREATE rejects a duplicate); `None`
-    /// means the permissive default. Single source of truth for the
-    /// enforcement check and for introspection, so they never diverge.
-    pub fn primary_key_for(&self, node_type: &str) -> Option<&str> {
-        self.schema_definition
-            .as_ref()?
-            .node_schemas
-            .get(node_type)?
-            .primary_key
-            .as_deref()
     }
 
     pub fn has_connection_type(&self, connection_type: &str) -> bool {
