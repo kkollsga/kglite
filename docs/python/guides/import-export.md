@@ -86,6 +86,32 @@ graph.export('my_graph.csv', format='csv')           # creates _nodes.csv + _edg
 graphml_string = graph.export_string(format='graphml')
 ```
 
+## Back up before upgrading (the format-stable escape hatch)
+
+The `.kgl` file (and `to_bytes()`) is a **versioned binary cache**, not a
+forever-stable archive. KGLite occasionally hard-breaks the on-disk format
+across major versions (e.g. the v3→v4 `Value`-layout change), and a newer
+binary will **refuse** an older file rather than silently misread it. If you
+still have the original source (CSV, DataFrame, dataset loader), you just
+rebuild. If you *don't*, you want a portable copy made **before** you upgrade.
+
+`export_csv()` + `from_blueprint()` are that copy — a schema-complete,
+format-stable round-trip (plain CSV + a `blueprint.json` manifest) that
+survives version changes, the way `sqlite3 .dump` does for SQLite:
+
+```python
+# Under the version that can still open the graph:
+graph.export_csv('backup/')            # nodes/*.csv + connections/*.csv + blueprint.json
+
+# Later, on any version — rebuild the full graph from the portable copy:
+import kglite
+graph = kglite.from_blueprint('backup/blueprint.json')
+```
+
+Treat `export_csv('backup/')` as the thing you run before a major-version
+upgrade. Unlike the lossy visualization exports above (GraphML/GEXF/D3), it
+preserves every node, edge, and property and reloads to an equivalent graph.
+
 ## NetworkX Interop
 
 Round-trip with [NetworkX](https://networkx.org/) for graph algorithms.

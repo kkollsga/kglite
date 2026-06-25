@@ -113,6 +113,11 @@ except kglite.FileFormatError:
     g = build_from_source()          # corrupt/old format → rebuild, don't trust it
 ```
 
+If the original source may not be available at recovery time, keep a
+format-stable backup so `FileFormatError` is always survivable — see
+[Back up before upgrading](guides/import-export.md#back-up-before-upgrading-the-format-stable-escape-hatch)
+(`export_csv()` → `from_blueprint()`).
+
 ## Sharing a graph across threads
 
 A `KnowledgeGraph` is single-owner. If one thread mutates it (`add_nodes`,

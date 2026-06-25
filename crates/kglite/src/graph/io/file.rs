@@ -1516,7 +1516,10 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
         }
         return Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
-             Please rebuild the graph with the current version and save again.",
+             Please rebuild the graph with the current version and save again. If you no \
+             longer have the original source but can still run the old binary, open the file \
+             there and export a portable copy with g.export_csv('backup/'), then rebuild here \
+             with kglite.from_blueprint('backup/blueprint.json').",
         ));
     }
 
@@ -1534,7 +1537,10 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     } else {
         Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
-             Please rebuild the graph with the current version and save again.",
+             Please rebuild the graph with the current version and save again. If you no \
+             longer have the original source but can still run the old binary, open the file \
+             there and export a portable copy with g.export_csv('backup/'), then rebuild here \
+             with kglite.from_blueprint('backup/blueprint.json').",
         ))
     }
 }
@@ -1558,7 +1564,9 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
     } else {
         Err(io::Error::other(
             "Unrecognized byte buffer — not a kglite graph (bad magic). It may be \
-             truncated, from an incompatible version, or not a .kgl payload at all.",
+             truncated, from an incompatible version, or not a .kgl payload at all. If it \
+             came from an older binary, re-export a portable copy there with \
+             g.export_csv('backup/') and rebuild via kglite.from_blueprint('backup/blueprint.json').",
         ))
     }
 }
@@ -1583,7 +1591,10 @@ const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by 
      serialised property representation. Rebuild your graph from its \
      original source (CSV, DataFrame, dataset loader) and save again, \
      or downgrade kglite to the 0.9.x line if you need to read this \
-     file.";
+     file. If you no longer have the original source but can still run \
+     the old binary, open the file there and export a portable, \
+     format-stable copy with g.export_csv('backup/'), then rebuild here \
+     with kglite.from_blueprint('backup/blueprint.json').";
 
 /// Load a disk-mode graph from a directory.
 fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
@@ -2655,6 +2666,27 @@ mod atomic_save_tests {
         assert_eq!(&buf[..4], &V4_MAGIC, "buffer must carry the v4 magic");
         let loaded = load_kgl_bytes(&buf).unwrap();
         assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    /// A v3 (or otherwise unreadable) file is a hard break, but the error must
+    /// point the operator at the format-stable export escape hatch so a user
+    /// without the original source still has a recovery path (SQLite `.dump`
+    /// parity). Guards the recovery hint added to the break messages.
+    #[test]
+    fn hard_break_errors_point_at_export_recovery() {
+        assert!(
+            V3_HARD_BREAK_MSG.contains("export_csv")
+                && V3_HARD_BREAK_MSG.contains("from_blueprint"),
+            "v3 hard-break message must name the export_csv/from_blueprint recovery path"
+        );
+        // A fabricated v3-magic byte buffer surfaces the hint through load_kgl_bytes.
+        let v3_buf = [V3_MAGIC[0], V3_MAGIC[1], V3_MAGIC[2], V3_MAGIC[3], 0, 0];
+        let err = load_kgl_bytes(&v3_buf).err().unwrap();
+        assert!(err.to_string().contains("export_csv"));
+        // An unrecognized buffer carries the hint too.
+        let bad = [0u8, 1, 2, 3, 4, 5];
+        let err = load_kgl_bytes(&bad).err().unwrap();
+        assert!(err.to_string().contains("from_blueprint"));
     }
 
     /// Build a tiny graph carrying one HNSW-indexed embedding store.
