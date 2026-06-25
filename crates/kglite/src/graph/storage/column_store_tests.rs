@@ -293,3 +293,55 @@ fn test_column_store_materialize_roundtrip() {
     assert_eq!(store.get(0, name_key), Some(Value::String("Alice".into())));
     assert_eq!(store.get(1, age_key), Some(Value::Int64(25)));
 }
+
+#[test]
+fn test_overflow_value_list_roundtrip() {
+    // Native list properties must survive the overflow-bag wire format
+    // (tag 8 = u32 length prefix + bincode(Vec<Value>)). Before the
+    // 0.11.x fix this serialized as null and the list was silently lost.
+    let mut interner = StringInterner::new();
+    let key = interner.get_or_intern("aliases");
+
+    let list = Value::List(vec![
+        Value::String("x".into()),
+        Value::String("y".into()),
+        Value::Int64(7),
+    ]);
+
+    let mut buf = 1u16.to_le_bytes().to_vec(); // entry-count header
+    ColumnStore::serialize_overflow_value(&mut buf, key, &list);
+
+    let decoded = ColumnStore::decode_overflow_blob(&buf);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].0, key);
+    assert_eq!(decoded[0].1, list);
+}
+
+#[test]
+fn test_overflow_blob_mixed_scalars_and_list_roundtrip() {
+    // A list entry sandwiched between scalars must not desync the reader
+    // (skip_overflow_value has to advance past the tag-8 blob correctly).
+    let mut interner = StringInterner::new();
+    let k_a = interner.get_or_intern("a");
+    let k_list = interner.get_or_intern("tags");
+    let k_b = interner.get_or_intern("b");
+
+    let entries = [
+        (k_a, Value::Int64(1)),
+        (k_list, Value::List(vec![Value::String("red".into())])),
+        (k_b, Value::Boolean(true)),
+    ];
+    let mut buf = (entries.len() as u16).to_le_bytes().to_vec(); // entry-count header
+    for (k, v) in &entries {
+        ColumnStore::serialize_overflow_value(&mut buf, *k, v);
+    }
+
+    let decoded = ColumnStore::decode_overflow_blob(&buf);
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0], (k_a, Value::Int64(1)));
+    assert_eq!(
+        decoded[1],
+        (k_list, Value::List(vec![Value::String("red".into())]))
+    );
+    assert_eq!(decoded[2], (k_b, Value::Boolean(true)));
+}

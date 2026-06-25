@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This is ingestion-side only — `Value::List` already round-trips through
   storage, so there is no `.kgl` format change.
 
+### Fixed
+- **List (and timestamp) properties are no longer dropped through the
+  overflow property bag.** The mapped/disk overflow serializer encoded
+  `Value::List` as NULL (and the mapped reader/borrowed streaming-disk path
+  silently skipped lists), so a sparse list property could vanish on a
+  streaming-disk subset save. Lists now round-trip via a new additive
+  overflow wire tag (`8` = length-prefixed bincode); the mapped overflow
+  reader also gained the previously-missing `Timestamp` tag, restoring
+  memory↔mapped parity for timestamp overflow values. The tag is additive —
+  existing `.kgl` files never contain it, so this is read-compatible.
+
 ## [0.11.16] — 2026-06-25 — Primary-key uniqueness + the `kglite` shell on pip (kglite-cli)
 
 ### Added
