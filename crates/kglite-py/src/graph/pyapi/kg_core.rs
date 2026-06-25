@@ -1261,6 +1261,13 @@ impl KnowledgeGraph {
         Ok(self.clone())
     }
 
+    /// Set free-text instructions rendered verbatim at the top of describe().
+    #[pyo3(signature = (text, *, channel=None))]
+    fn set_instructions(&mut self, text: &str, channel: Option<&str>) -> PyResult<Self> {
+        get_graph_mut(&mut self.inner).set_instructions(text, channel);
+        Ok(self.clone())
+    }
+
     /// Get the current schema definition as a dictionary
     fn schema_definition(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let schema = match self.inner.get_schema() {

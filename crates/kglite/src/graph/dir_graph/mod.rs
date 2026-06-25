@@ -118,6 +118,13 @@ pub struct DirGraph {
     /// Types without an entry are "core" types (shown in describe() inventory).
     #[serde(default)]
     pub parent_types: HashMap<String, String>,
+    /// Free-text instructions/briefing rendered verbatim at the top of
+    /// `describe()` so an agent opening the graph cold sees how to use it.
+    /// Keyed by channel; the empty string `""` is the default channel (the
+    /// only one the v1 API writes). Storing a map keeps per-audience channels
+    /// a trivial v2 without changing the format. Additive — absent in old files.
+    #[serde(default)]
+    pub graph_instructions: HashMap<String, String>,
     /// Auto-vacuum threshold: if Some(t), vacuum() is triggered automatically after
     /// DELETE operations when fragmentation_ratio exceeds t and tombstones > 100.
     /// Default: Some(0.3). Set to None to disable.
@@ -351,6 +358,7 @@ impl DirGraph {
             id_field_aliases: FxHashMap::default(),
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
+            graph_instructions: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -398,6 +406,7 @@ impl DirGraph {
             id_field_aliases: FxHashMap::default(),
             title_field_aliases: FxHashMap::default(),
             parent_types: HashMap::new(),
+            graph_instructions: HashMap::new(),
             auto_vacuum_threshold: default_auto_vacuum_threshold(),
             spatial_configs: HashMap::new(),
             wkt_cache: Arc::new(RwLock::new(HashMap::new())),

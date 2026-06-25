@@ -147,6 +147,10 @@ pub(crate) struct FileMetadata {
     /// "core" vs "supporting" in describe() output.
     #[serde(default)]
     parent_types: HashMap<String, String>,
+    /// Graph-level instructions/briefing per channel (rendered at the top of
+    /// describe()). Additive — old files default to empty.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    graph_instructions: HashMap<String, String>,
     /// Spatial configuration per node type.
     #[serde(default)]
     spatial_configs: HashMap<String, SpatialConfig>,
@@ -220,6 +224,7 @@ impl FileMetadata {
             title_field_aliases: graph.title_field_aliases.clone(),
             auto_vacuum_threshold: graph.auto_vacuum_threshold,
             parent_types: graph.parent_types.clone(),
+            graph_instructions: graph.graph_instructions.clone(),
             spatial_configs: graph.spatial_configs.clone(),
             timeseries_configs: graph.timeseries_configs.clone(),
             temporal_node_configs: graph.temporal_node_configs.clone(),
@@ -273,6 +278,7 @@ impl FileMetadata {
         graph.title_field_aliases = self.title_field_aliases;
         graph.auto_vacuum_threshold = self.auto_vacuum_threshold;
         graph.parent_types = self.parent_types;
+        graph.graph_instructions = self.graph_instructions;
         graph.spatial_configs = self.spatial_configs;
         graph.timeseries_configs = self.timeseries_configs;
         graph.temporal_node_configs = self.temporal_node_configs;

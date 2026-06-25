@@ -72,6 +72,17 @@ fn write_read_only_notice(xml: &mut String, graph: &DirGraph) {
     }
 }
 
+/// Write the graph-level `<instructions>` block (the default-channel briefing)
+/// verbatim at the top of describe(), so an agent opening the graph cold reads
+/// it first. Rendered in full — NOT subject to the sample-value truncation.
+fn write_graph_instructions(xml: &mut String, graph: &DirGraph) {
+    if let Some(text) = graph.get_instructions(None) {
+        xml.push_str("  <instructions>");
+        xml.push_str(&xml_escape(text));
+        xml.push_str("</instructions>\n");
+    }
+}
+
 /// Write the `<connections>` element from global edge stats.
 /// When `parent_types` is non-empty, filter out connections where ALL source types
 /// are supporting children of the target type (the implicit OF_* pattern).
@@ -1122,6 +1133,7 @@ fn build_inventory_capped(graph: &DirGraph, max_types: Option<usize>) -> String 
         graph.graph.edge_count()
     ));
 
+    write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
     write_read_only_notice(&mut xml, graph);
 
@@ -1225,6 +1237,7 @@ fn build_extreme_inventory(graph: &DirGraph) -> String {
         conn_type_count
     ));
 
+    write_graph_instructions(&mut xml, graph);
     xml.push_str("  <conventions>All nodes have .id and .title</conventions>\n");
     write_read_only_notice(&mut xml, graph);
 
@@ -1353,6 +1366,7 @@ fn build_inventory_with_detail(graph: &DirGraph, truncate_at: Option<usize>) -> 
         graph.graph.edge_count()
     ));
 
+    write_graph_instructions(&mut xml, graph);
     write_conventions(&mut xml, &caps);
     write_read_only_notice(&mut xml, graph);
 
@@ -1438,6 +1452,7 @@ fn build_focused_detail(
         "<graph kglite_version=\"{}\">\n",
         env!("CARGO_PKG_VERSION")
     ));
+    write_graph_instructions(&mut xml, graph);
     write_read_only_notice(&mut xml, graph);
 
     for t in types {

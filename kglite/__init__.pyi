@@ -3230,6 +3230,23 @@ class KnowledgeGraph:
         """Remove the schema definition from the graph."""
         ...
 
+    def set_instructions(self, text: str, *, channel: str | None = None) -> KnowledgeGraph:
+        """Set free-text instructions/briefing rendered verbatim at the top of
+        ``describe()`` — so an agent that opens the graph cold reads it first.
+
+        Unlike sample values in ``describe()``, this text is shown in full (no
+        truncation). It persists in the ``.kgl``. Pass empty ``text`` to clear.
+
+        Args:
+            text: The instructions (plain text / markdown). Shown verbatim.
+            channel: Reserved for per-audience instructions; ``None`` (default)
+                sets the single graph-level slot.
+
+        Returns:
+            Self (chainable).
+        """
+        ...
+
     def schema_definition(self) -> Optional[dict[str, Any]]:
         """Get the current schema definition as a dict, or ``None``."""
         ...
