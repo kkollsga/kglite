@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Write-enabled MCP server ("agent graph workbench").** Launch the MCP server
+  with `--graph foo.kgl --writable` and `cypher_query` now accepts mutations
+  (`CREATE`/`SET`/`DELETE`/`MERGE`) — so an agent can *plan and work inside the
+  graph* over MCP, not just read it. Pass `write_scope=["Plan","Task"]` to
+  restrict mutations to those node types (role-scoped writes). Mutations are
+  in-memory; `save_graph` persists. Read-only stays the **default** (analysis /
+  code-review servers are unaffected); writes route through the active graph's
+  write-lock so they serialize safely across concurrent MCP clients.
+
 ### Fixed
 - **Critical: a relationship type introduced via Cypher `CREATE`/`MERGE` is no
   longer silently dropped on `save()`.** Cypher edge creation registered the new

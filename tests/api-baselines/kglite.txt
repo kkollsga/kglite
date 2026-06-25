@@ -1928,6 +1928,7 @@ pub fn kglite::api::InternedKey::deserialize<D: serde_core::de::Deserializer<'de
 pub struct kglite::api::KnowledgeGraph
 impl kglite::api::KnowledgeGraph
 pub fn kglite::api::KnowledgeGraph::dir(&self) -> &alloc::sync::Arc<kglite::api::DirGraph>
+pub fn kglite::api::KnowledgeGraph::dir_mut(&mut self) -> &mut alloc::sync::Arc<kglite::api::DirGraph>
 pub fn kglite::api::KnowledgeGraph::embedder(&self) -> core::option::Option<&alloc::sync::Arc<dyn kglite::api::Embedder>>
 pub fn kglite::api::KnowledgeGraph::from_arc(inner: alloc::sync::Arc<kglite::api::DirGraph>) -> Self
 pub fn kglite::api::KnowledgeGraph::set_embedder_native(&mut self, embedder: alloc::sync::Arc<dyn kglite::api::Embedder>)

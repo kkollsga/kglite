@@ -235,6 +235,19 @@ impl GraphState {
         guard.as_ref().map(|active| f(&active.kg))
     }
 
+    /// Exclusive (write-locked) access to the active graph, for the
+    /// write-enabled `cypher_query` path. The `RwLock` write-lock
+    /// serializes mutations and excludes concurrent readers for the
+    /// duration of the mutation — correct under any MCP dispatch model
+    /// (serial or concurrent). Returns `None` when no graph is active.
+    fn with_active_mut<F, T>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce(&mut ActiveGraph) -> T,
+    {
+        let mut guard = self.inner.write().unwrap();
+        guard.as_mut().map(f)
+    }
+
     /// Resolve a code-entity qualified name to its source location via
     /// `KnowledgeGraph::source_location`. Used by the `read_code_source`
     /// tool to bridge the qualified-name → file path lookup.
@@ -349,8 +362,17 @@ fn run_cypher_inner(
     opts.value_codecs = value_codecs;
     let outcome = kglite::api::session::execute_read(kg.dir(), query, &opts)
         .map_err(|e| format!("Cypher execution error: {e}"))?;
-    let result = outcome.result;
+    render_cypher_output(&outcome.result, output_csv, csv_http)
+}
 
+/// Render a `CypherResult` for the MCP text surface: CSV (inline or via the
+/// csv_http server) or a 15-row inline preview. Shared by the read path and
+/// the write path so both format results identically.
+fn render_cypher_output(
+    result: &cypher::CypherResult,
+    output_csv: bool,
+    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+) -> Result<String, String> {
     if output_csv {
         let csv = result.to_csv();
         if let Some(cfg) = csv_http {
@@ -381,7 +403,7 @@ fn run_cypher_inner(
             Ok(csv)
         }
     } else {
-        Ok(format_cypher_inline(&result))
+        Ok(format_cypher_inline(result))
     }
 }
 
@@ -479,6 +501,12 @@ fn push_value_repr(out: &mut String, val: &Value) {
 struct CypherArgs {
     /// Cypher query string. Append `FORMAT CSV` for CSV-encoded output.
     pub query: String,
+    /// Role-scoped write whitelist (write-enabled servers only). When set, a
+    /// `CREATE`/`SET` whose node type is not in this list is rejected — so an
+    /// agent can plan in its own types (`["Plan","Task"]`) without touching
+    /// research-owned ones. Ignored on read-only servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_scope: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -501,6 +529,12 @@ struct SaveGraphArgs {}
 #[derive(Clone, Debug, Default)]
 pub struct Builtins {
     pub save_graph: bool,
+    /// Write-enabled "agent graph workbench" mode (CLI `--writable`). When
+    /// true, `cypher_query` accepts mutations (routed through the write-lock)
+    /// and the runtime graph-lifecycle tools (`load_graph` / `create_graph` /
+    /// `save_graph_as`) are registered. Off by default — read-only is the safe
+    /// default for code-review / analysis deployments.
+    pub writable: bool,
     pub temp_cleanup_on_overview: bool,
     /// Directory wiped by `temp_cleanup: on_overview`. Resolved against
     /// the manifest's parent in `main.rs` — when csv_http_server is
@@ -518,13 +552,24 @@ pub fn register(
 ) {
     let s = state.clone();
     let csv = csv_http.clone();
-    let cypher_desc: &'static str = if csv.is_some() {
-        "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
-         inline; append FORMAT CSV to export results — large CSVs are written to the \
-         csv_http_server directory and returned as a fetch URL."
-    } else {
-        "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
-         inline; append FORMAT CSV to export full results to a CSV string."
+    let writable = builtins.writable;
+    let cypher_desc: &'static str = match (csv.is_some(), writable) {
+        (_, true) => {
+            "Run a Cypher query against the active knowledge graph. Reads AND writes \
+             (CREATE/SET/DELETE/MERGE) are accepted — this is a write-enabled graph. \
+             Pass write_scope=[...] to restrict mutations to those node types. \
+             Mutations are in-memory; call save_graph to persist. Append FORMAT CSV \
+             to export results."
+        }
+        (true, false) => {
+            "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
+             inline; append FORMAT CSV to export results — large CSVs are written to the \
+             csv_http_server directory and returned as a fetch URL."
+        }
+        (false, false) => {
+            "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
+             inline; append FORMAT CSV to export full results to a CSV string."
+        }
     };
     server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
         let csv = csv.clone();
@@ -534,7 +579,22 @@ pub fn register(
         // extensions.value_codecs: passed via ExecuteOptions (decoded after
         // parsing), not by rewriting the query text. No-op when unconfigured.
         let codecs = s.value_codecs();
-        s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()))
+        if writable {
+            let scope = args.write_scope.clone();
+            s.with_active_mut(|active| {
+                run_cypher_write(
+                    active,
+                    &args.query,
+                    scope.as_deref(),
+                    codecs,
+                    csv.as_deref(),
+                )
+                .unwrap_or_else(|e| format!("Cypher error: {e}"))
+            })
+            .unwrap_or_else(|| NO_GRAPH.to_string())
+        } else {
+            s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()))
+        }
     });
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
@@ -620,6 +680,47 @@ fn run_cypher_tool(
     }
 }
 
+/// Write-enabled Cypher path (only reachable when the server is `--writable`).
+/// A read query delegates to the read path; a mutation routes through
+/// `execute_mut` against a `&mut DirGraph` obtained under the active graph's
+/// write-lock, with an optional role-scoped `write_scope`. Mutations land on
+/// the live active graph (in-memory) so subsequent queries observe them;
+/// persistence is the separate `save_graph` step.
+fn run_cypher_write(
+    active: &mut ActiveGraph,
+    query: &str,
+    write_scope: Option<&[String]>,
+    value_codecs: Option<&[ValueCodec]>,
+    csv_http: Option<&crate::csv_http::CsvHttpConfig>,
+) -> Result<String, String> {
+    let (pre_parsed, is_mutation) =
+        kglite::api::cypher::parse_with_mutation_check(query).map_err(|e| e.to_string())?;
+    if !is_mutation {
+        // Read on a writable server — same path as the read-only tool.
+        return run_cypher_inner(
+            &active.kg,
+            query,
+            std::collections::HashMap::new(),
+            value_codecs,
+            csv_http,
+        );
+    }
+    let output_csv = pre_parsed.output_format == kglite::api::cypher::OutputFormat::Csv;
+    let params = std::collections::HashMap::new();
+    let scope: Option<std::collections::HashSet<String>> =
+        write_scope.map(|v| v.iter().cloned().collect());
+    // Snapshot the embedder Arc before the mutable borrow of `kg`.
+    let embedder = active.kg.embedder().cloned();
+    let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
+    let mut opts = kglite::api::session::ExecuteOptions::eager(&params);
+    opts.embedder = embedder;
+    opts.value_codecs = value_codecs;
+    opts.write_scope = scope.as_ref();
+    let outcome = kglite::api::session::execute_mut(dir, query, &opts)
+        .map_err(|e| format!("Cypher execution error: {e}"))?;
+    render_cypher_output(&outcome.result, output_csv, csv_http)
+}
+
 fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
     let conn = parse_connection_detail(args.connections.as_ref());
     let cy = parse_cypher_detail(args.cypher.as_ref());
@@ -703,5 +804,78 @@ fn run_save(graph: &ActiveGraph) -> String {
             )
         }
         Err(e) => format!("save_graph error: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+
+    fn fresh_active() -> ActiveGraph {
+        let dir = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create graph");
+        ActiveGraph {
+            kg: KnowledgeGraph::from_arc(Arc::new(dir)),
+            source_path: None,
+        }
+    }
+
+    fn write(
+        active: &mut ActiveGraph,
+        q: &str,
+        scope: Option<&[String]>,
+    ) -> Result<String, String> {
+        run_cypher_write(active, q, scope, None, None)
+    }
+
+    #[test]
+    fn write_path_creates_and_reads_back() {
+        let mut a = fresh_active();
+        write(&mut a, "CREATE (:Task {id:'t1', status:'todo'})", None).unwrap();
+        // A subsequent read on the writable path observes the mutation.
+        let out = write(&mut a, "MATCH (t:Task) RETURN count(t) AS c", None).unwrap();
+        assert!(out.contains('1'), "expected 1 task, got: {out}");
+    }
+
+    #[test]
+    fn write_scope_blocks_out_of_scope_create() {
+        let mut a = fresh_active();
+        let scope = vec!["Plan".to_string(), "Task".to_string()];
+        // In-scope is allowed.
+        write(&mut a, "CREATE (:Task {id:'t1'})", Some(&scope)).unwrap();
+        // Out-of-scope is rejected.
+        let err = write(&mut a, "CREATE (:Algorithm {id:'a1'})", Some(&scope)).unwrap_err();
+        assert!(
+            err.contains("write scope"),
+            "expected scope error, got: {err}"
+        );
+        // The rejected CREATE did not land.
+        let out = write(&mut a, "MATCH (n:Algorithm) RETURN count(n) AS c", None).unwrap();
+        assert!(
+            out.contains('0') || out.contains("No results"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn new_edge_type_via_write_path_registers() {
+        // The 0.12.2 edge-persistence fix in action through the MCP write path:
+        // a brand-new relationship type is registered (queryable, would persist).
+        let mut a = fresh_active();
+        write(&mut a, "CREATE (:Task {id:'t'})", None).unwrap();
+        write(&mut a, "CREATE (:Spec {id:'s'})", None).unwrap();
+        write(
+            &mut a,
+            "MATCH (t:Task{id:'t'}),(s:Spec{id:'s'}) CREATE (t)-[:IMPLEMENTS_SPEC]->(s)",
+            None,
+        )
+        .unwrap();
+        let out = write(
+            &mut a,
+            "MATCH (:Task)-[:IMPLEMENTS_SPEC]->() RETURN count(*) AS c",
+            None,
+        )
+        .unwrap();
+        assert!(out.contains('1'), "expected 1 edge, got: {out}");
     }
 }
