@@ -572,6 +572,25 @@ fn create_node(
 
     let label = node_pat.label.clone().unwrap_or_else(|| "Node".to_string());
 
+    // PRIMARY KEY enforcement (opt-in). When this node type declares a primary
+    // key via `define_schema`, reject a CREATE that would duplicate it — MERGE
+    // is the explicit upsert path. `lookup_by_id_readonly` self-heals (builds +
+    // caches the id-index on a miss) and is cross-mode, so the probe is O(1)
+    // amortised and behaves identically across memory/mapped/disk. Undeclared
+    // types skip the probe entirely, leaving the permissive default (and the
+    // dense-int hot path) untouched.
+    let pk_declared = graph.primary_key_for(&label).is_some();
+    if pk_declared && graph.lookup_by_id_readonly(&label, &id).is_some() {
+        return Err(format!(
+            "duplicate primary key: node type '{label}' declares a primary key and a \
+             node with id {id} already exists. Use MERGE to upsert instead of CREATE, \
+             or remove the duplicate."
+        ));
+    }
+    // Clone the id for incremental index maintenance below (it is moved into
+    // insert_node_routed). Only needed for declared-PK types.
+    let pk_id = if pk_declared { Some(id.clone()) } else { None };
+
     // Schema lock validation
     if graph.schema_locked {
         crate::graph::mutation::validation::validate_node_creation(
@@ -594,8 +613,23 @@ fn create_node(
         .entry_or_default(label.clone())
         .push(node_idx);
 
-    // Invalidate id_indices for this type (lazy rebuild on next lookup)
-    graph.id_indices.remove(&label);
+    // Keep the id-index consistent. A declared-PK type maintains it
+    // incrementally — the readonly probe above already built it, so a
+    // sequential CREATE (e.g. UNWIND … CREATE) stays O(1)/node instead of
+    // O(n) rebuild-per-node. Other types invalidate for lazy rebuild (the
+    // established behaviour). The `contains_key` guard means we never insert
+    // into a partial index: if it isn't cached, fall back to invalidation.
+    match pk_id {
+        Some(idv) if graph.id_indices.contains_key(&label) => {
+            graph
+                .id_indices
+                .entry_or_default(label.clone())
+                .insert(idv, node_idx);
+        }
+        _ => {
+            graph.id_indices.remove(&label);
+        }
+    }
 
     // Update property and composite indices for the new node
     graph.update_property_indices_for_add(&label, node_idx);
