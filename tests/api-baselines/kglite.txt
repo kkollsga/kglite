@@ -1722,6 +1722,7 @@ pub kglite::api::DirGraph::edge_type_counts_cache: alloc::sync::Arc<std::sync::p
 pub kglite::api::DirGraph::embeddings: std::collections::hash::map::HashMap<(alloc::string::String, alloc::string::String), kglite::api::storage::EmbeddingStore>
 pub kglite::api::DirGraph::graph: kglite::api::storage::GraphBackend
 pub kglite::api::DirGraph::graph_id: u64
+pub kglite::api::DirGraph::graph_instructions: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::DirGraph::has_secondary_labels: bool
 pub kglite::api::DirGraph::id_field_aliases: rustc_hash::FxHashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::DirGraph::id_indices: kglite::graph::storage::disk::id_index::IdIndexStore
@@ -1832,8 +1833,11 @@ pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::
 pub fn kglite::api::DirGraph::version(&self) -> u64
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::clear_schema(&mut self)
+pub fn kglite::api::DirGraph::get_instructions(&self, channel: core::option::Option<&str>) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite::api::SchemaDefinition>
+pub fn kglite::api::DirGraph::layer_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
+pub fn kglite::api::DirGraph::set_instructions(&mut self, text: &str, channel: core::option::Option<&str>)
 pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::copy_embeddings_from(&mut self, src: &kglite::api::DirGraph) -> (usize, usize, usize)
@@ -1964,6 +1968,7 @@ impl core::fmt::Debug for kglite::api::NodeInfo
 pub fn kglite::api::NodeInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::NodeSchemaDefinition
 pub kglite::api::NodeSchemaDefinition::field_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
+pub kglite::api::NodeSchemaDefinition::layer: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::optional_fields: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::primary_key: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::required_fields: alloc::vec::Vec<alloc::string::String>
