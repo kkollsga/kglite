@@ -9,14 +9,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use std::time::Instant;
+
 use anyhow::Result;
 use kglite::api::io::{save_graph, to_csv_dir};
-use kglite::api::session::{execute_mut, ExecuteOptions};
+use kglite::api::session::{execute_mut, execute_read, ExecuteOptions};
 use kglite::api::{make_dir_graph_mut, DirGraph, Value};
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::history::DefaultHistory;
+use rustyline::Editor;
 
 use crate::format::{render, Mode};
+use crate::helper::ShellHelper;
 
 const PROMPT: &str = "kglite> ";
 
@@ -37,8 +41,11 @@ Commands:
   .read <file>           run the Cypher statements in a file
   .import <csv> <Type>   load a CSV as nodes  [--id <col>] [--title <col>]
   .save [path]           save the graph to a .kgl file
+  .timing on|off         show query wall-time after each statement
 Anything else is run as Cypher, e.g.
   MATCH (n) RETURN labels(n), count(*)
+Statements can span lines — input continues until brackets/quotes close
+(a trailing ; also terminates). Tab completes dot-commands + labels.
 Ctrl-C cancels a running query; Ctrl-D (or .quit) exits.";
 
 /// Mutable shell state threaded through the loop.
@@ -47,6 +54,8 @@ struct Shell {
     /// The file the graph is associated with (for `.save` with no argument).
     path: Option<String>,
     mode: Mode,
+    /// Print wall-time after each statement (`.timing on`).
+    timing: bool,
 }
 
 /// Run the REPL against `graph` until EOF / `.quit`.
@@ -56,11 +65,13 @@ pub fn run(graph: Arc<DirGraph>, source: Option<&str>) -> Result<()> {
     // mid-query cancellation.
     let _ = ctrlc::set_handler(|| CANCEL.store(true, Ordering::SeqCst));
 
-    let mut rl = DefaultEditor::new()?;
+    let mut rl: Editor<ShellHelper, DefaultHistory> = Editor::new()?;
+    rl.set_helper(Some(ShellHelper::default()));
     let mut shell = Shell {
         graph,
         path: source.map(str::to_string),
         mode: Mode::default(),
+        timing: false,
     };
     match &shell.path {
         Some(p) => println!("kglite shell — {p}"),
@@ -69,9 +80,16 @@ pub fn run(graph: Arc<DirGraph>, source: Option<&str>) -> Result<()> {
     println!("Type .help for commands, .quit to exit.");
 
     loop {
+        // Refresh tab-completion candidates (labels + relationship types) from
+        // the current graph before each prompt.
+        if let Some(h) = rl.helper_mut() {
+            h.set_candidates(shell.completion_candidates());
+        }
         match rl.readline(PROMPT) {
             Ok(line) => {
-                let line = line.trim();
+                // A multi-line statement arrives as one input; drop a trailing
+                // `;` terminator before dispatch.
+                let line = line.trim().trim_end_matches(';').trim();
                 if line.is_empty() {
                     continue;
                 }
@@ -120,6 +138,20 @@ impl Shell {
                  RETURN name, type, properties ORDER BY name",
             ),
             "mode" => self.set_mode(arg),
+            "timing" => match arg {
+                "on" => {
+                    self.timing = true;
+                    println!("timing on");
+                }
+                "off" => {
+                    self.timing = false;
+                    println!("timing off");
+                }
+                _ => println!(
+                    "Usage: .timing on|off (current: {})",
+                    if self.timing { "on" } else { "off" }
+                ),
+            },
             "dump" => self.dump(arg),
             "read" => self.read_file(arg),
             "save" => self.save(arg),
@@ -209,11 +241,16 @@ impl Shell {
         opts.cancel = Some(&CANCEL);
         CANCEL.store(false, Ordering::SeqCst);
 
+        let timing = self.timing;
+        let start = Instant::now();
         let g = make_dir_graph_mut(&mut self.graph);
         match execute_mut(g, query, &opts) {
             Ok(outcome) => {
                 let r = &outcome.result;
                 println!("{}", render(self.mode, &r.columns, &r.rows));
+                if timing {
+                    println!("({:.3} ms)", start.elapsed().as_secs_f64() * 1e3);
+                }
             }
             Err(e) => {
                 if CANCEL.load(Ordering::SeqCst) {
@@ -223,6 +260,28 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// Snapshot of completion candidates from the current graph — node labels
+    /// and relationship types, fetched via the `db.*` procedures. Best-effort:
+    /// an empty list on error just means completion falls back to dot-commands.
+    fn completion_candidates(&self) -> Vec<String> {
+        let params: HashMap<String, Value> = HashMap::new();
+        let opts = ExecuteOptions::new(&params);
+        let mut out = Vec::new();
+        for q in [
+            "CALL db.labels() YIELD label RETURN label",
+            "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType",
+        ] {
+            if let Ok(outcome) = execute_read(&self.graph, q, &opts) {
+                for row in &outcome.result.rows {
+                    if let Some(Value::String(s)) = row.first() {
+                        out.push(s.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// `.import <file.csv> <NodeType> [--id <col>] [--title <col>]` — load a CSV

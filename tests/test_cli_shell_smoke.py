@@ -43,9 +43,9 @@ def _run(script: str) -> str:
 
 def test_create_and_query_roundtrip():
     out = _run(
-        'CREATE (:Person {name: "Alice", age: 30})\n'
-        'CREATE (:Person {name: "Bob", age: 25})\n'
-        "MATCH (p:Person) RETURN p.name AS name ORDER BY name\n"
+        'CREATE (:Person {name: "Alice", age: 30});\n'
+        'CREATE (:Person {name: "Bob", age: 25});\n'
+        "MATCH (p:Person) RETURN p.name AS name ORDER BY name;\n"
         ".quit\n"
     )
     assert "Alice" in out
@@ -56,8 +56,8 @@ def test_create_and_query_roundtrip():
 def test_db_introspection_in_shell():
     """The new db.* procedures are reachable from the shell."""
     out = _run(
-        "CREATE (:Person {name: 'A'})\n"
-        "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey\n"
+        "CREATE (:Person {name: 'A'});\n"
+        "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey ORDER BY propertyKey;\n"
         ".quit\n"
     )
     assert "propertyKey" in out
@@ -72,16 +72,22 @@ def test_help_and_unknown_dotcommand():
 
 def test_cypher_error_is_reported_not_fatal():
     """A bad query prints an error but the session continues."""
-    out = _run("MATCH bogus syntax\nRETURN 1 AS one\n.quit\n")
+    out = _run("MATCH bogus syntax;\nRETURN 1 AS one;\n.quit\n")
     assert "error:" in out
     assert "(1 row)" in out  # the next statement still ran
+
+
+def test_multiline_statement_runs_on_semicolon():
+    """A statement split across lines runs only once `;` terminates it."""
+    out = _run("MATCH (n)\nRETURN count(n)\nAS c;\n.quit\n")
+    assert "(1 row)" in out  # combined into one statement, ran once
 
 
 def test_mode_csv_and_json():
     # CREATE first (table mode), then switch mode and run only the query, so the
     # formatted output is a single result (a write under json mode renders []).
-    create = 'CREATE (:Person {name: "Alice", age: 30})\n'
-    query = "MATCH (p:Person) RETURN p.name AS name, p.age AS age\n"
+    create = 'CREATE (:Person {name: "Alice", age: 30});\n'
+    query = "MATCH (p:Person) RETURN p.name AS name, p.age AS age;\n"
 
     csv_out = _run(create + ".mode csv\n" + query + ".quit\n")
     assert "name,age" in csv_out
@@ -98,7 +104,7 @@ def test_mode_csv_and_json():
 
 
 def test_schema_dotcommand():
-    out = _run("CREATE (:Person {name: 'A', city: 'Oslo'})\n.schema\n.quit\n")
+    out = _run("CREATE (:Person {name: 'A', city: 'Oslo'});\n.schema\n.quit\n")
     assert "Person" in out
 
 
@@ -108,8 +114,8 @@ def test_dump_roundtrips_via_from_blueprint(tmp_path):
 
     dump_dir = tmp_path / "backup"
     _run(
-        'CREATE (:Person {name: "Alice", age: 30})\n'
-        'CREATE (:Person {name: "Bob", age: 25})\n'
+        'CREATE (:Person {name: "Alice", age: 30});\n'
+        'CREATE (:Person {name: "Bob", age: 25});\n'
         f".dump {dump_dir}\n.quit\n"
     )
     assert (dump_dir / "blueprint.json").exists()
@@ -123,7 +129,7 @@ def test_save_roundtrips_via_load(tmp_path):
     import kglite
 
     kgl = tmp_path / "demo.kgl"
-    _run(f'CREATE (:Person {{name: "Alice"}})\nCREATE (:Person {{name: "Bob"}})\n.save {kgl}\n.quit\n')
+    _run(f'CREATE (:Person {{name: "Alice"}});\nCREATE (:Person {{name: "Bob"}});\n.save {kgl}\n.quit\n')
     assert kgl.exists()
     g = kglite.load(str(kgl))
     rows = g.cypher("MATCH (p:Person) RETURN count(p) AS n")
@@ -137,14 +143,20 @@ def test_import_csv_loads_nodes(tmp_path):
     csv.write_text("id,name,age\n1,Alice,30\n2,Bob,25\n")
     out = _run(
         f".import {csv} Person\n"
-        "MATCH (p:Person) RETURN count(p) AS c\n"
-        "MATCH (p:Person {id: 2}) RETURN p.name AS n, p.age AS a\n"
+        "MATCH (p:Person) RETURN count(p) AS c;\n"
+        "MATCH (p:Person {id: 2}) RETURN p.name AS n, p.age AS a;\n"
         ".quit\n"
     )
     assert "imported 2 Person node(s)" in out
     assert "(1 row)" in out
     assert "Bob" in out
     assert "25" in out  # age inferred as a number, matchable
+
+
+def test_timing_reports_walltime():
+    out = _run(".timing on\nRETURN 1 AS x;\n.quit\n")
+    assert "timing on" in out
+    assert "ms)" in out  # a "(... ms)" line after the result
 
 
 def test_import_rejects_bad_node_type(tmp_path):
@@ -157,6 +169,6 @@ def test_import_rejects_bad_node_type(tmp_path):
 def test_read_runs_a_cypher_file(tmp_path):
     script = tmp_path / "seed.cypher"
     script.write_text("CREATE (:Person {name: 'Alice'});\nCREATE (:Person {name: 'Bob'});\n")
-    out = _run(f".read {script}\nMATCH (p:Person) RETURN count(p) AS n\n.quit\n")
+    out = _run(f".read {script}\nMATCH (p:Person) RETURN count(p) AS n;\n.quit\n")
     assert "(1 row)" in out
     assert "2" in out  # the count after seeding
