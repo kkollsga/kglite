@@ -343,28 +343,34 @@ class TestV3Roundtrip:
 class TestTempDirCleanup:
     def test_load_cleans_temp_dir_on_drop(self, person_graph, tmp_path):
         """Temp dirs created during v3 load are cleaned up when graph is dropped."""
+        import gc
         import glob
 
         fp = str(tmp_path / "cleanup.kgl")
         person_graph.save(fp)
 
-        # Load creates temp dirs in /tmp/kglite_v3_*
-        kg2 = kglite.load(fp)
-        assert kg2.is_columnar
-
-        # Find the temp dirs for this process
+        # The pid-scoped pattern can also match graphs other tests left alive in
+        # this process, so measure the DELTA this test creates, not an absolute
+        # count.
         pid = os.getpid()
         pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
-        dirs_before = glob.glob(pattern)
-        assert len(dirs_before) >= 1, f"Expected temp dir matching {pattern}"
+        baseline = set(glob.glob(pattern))
 
-        # Drop the graph — temp dirs should be cleaned up
+        kg2 = kglite.load(fp)
+        assert kg2.is_columnar
+        created = set(glob.glob(pattern)) - baseline
+        assert created, f"Expected a new temp dir matching {pattern}"
+
+        # Drop the graph — the dir(s) it created must be gone (gc.collect forces
+        # the Rust Drop to run promptly).
         del kg2
-        dirs_after = glob.glob(pattern)
-        assert len(dirs_after) == 0, f"Temp dirs leaked: {dirs_after}"
+        gc.collect()
+        leaked = created & set(glob.glob(pattern))
+        assert not leaked, f"Temp dirs leaked: {leaked}"
 
     def test_multiple_loads_no_leak(self, person_graph, tmp_path):
         """Multiple load/drop cycles don't accumulate temp dirs."""
+        import gc
         import glob
 
         fp = str(tmp_path / "multi.kgl")
@@ -372,14 +378,17 @@ class TestTempDirCleanup:
 
         pid = os.getpid()
         pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
+        baseline = set(glob.glob(pattern))
 
         for _ in range(5):
             kg = kglite.load(fp)
             assert kg.is_columnar
             del kg
+            gc.collect()
 
-        dirs_remaining = glob.glob(pattern)
-        assert len(dirs_remaining) == 0, f"Temp dirs leaked after 5 cycles: {dirs_remaining}"
+        # No dirs beyond what was already alive before this test remain.
+        leaked = set(glob.glob(pattern)) - baseline
+        assert not leaked, f"Temp dirs leaked after 5 cycles: {leaked}"
 
 
 class TestIdTitleSentinel:
