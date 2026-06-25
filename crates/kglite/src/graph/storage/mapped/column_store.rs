@@ -511,6 +511,30 @@ impl MmapColumnStore {
                             pos += slen;
                             f(key, BorrowedValue::String(s))?;
                         }
+                        8 => {
+                            // List: u32 length prefix + bincode(Vec<Value>).
+                            // Unlike strings this can't borrow the blob —
+                            // bincode must allocate — but the owned `Vec`
+                            // lives across the synchronous `f()` call, so a
+                            // borrowed slice into it is valid.
+                            if pos + 4 > blob.len() {
+                                break;
+                            }
+                            let blen =
+                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]))
+                                    as usize;
+                            pos += 4;
+                            if pos + blen > blob.len() {
+                                break;
+                            }
+                            let items: Vec<crate::datatypes::values::Value> =
+                                match bincode::deserialize(&blob[pos..pos + blen]) {
+                                    Ok(v) => v,
+                                    Err(_) => break,
+                                };
+                            pos += blen;
+                            f(key, BorrowedValue::List(&items))?;
+                        }
                         _ => break,
                     }
                 }
@@ -705,6 +729,33 @@ impl MmapColumnStore {
                 *pos += slen;
                 Some(Value::String(s))
             }
+            7 => {
+                // Timestamp: 8 bytes i64 seconds since the unix epoch.
+                // (Parity with the heap ColumnStore reader — this arm was
+                // previously missing here, silently dropping timestamps in
+                // mapped-mode overflow.)
+                if *pos + 8 > blob.len() {
+                    return None;
+                }
+                let secs = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
+                *pos += 8;
+                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
+                Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
+            }
+            8 => {
+                // List: u32 length prefix + bincode(Vec<Value>).
+                if *pos + 4 > blob.len() {
+                    return None;
+                }
+                let blen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
+                *pos += 4;
+                if *pos + blen > blob.len() {
+                    return None;
+                }
+                let items: Vec<Value> = bincode::deserialize(&blob[*pos..*pos + blen]).ok()?;
+                *pos += blen;
+                Some(Value::List(items))
+            }
             _ => None,
         }
     }
@@ -712,12 +763,12 @@ impl MmapColumnStore {
     /// Skip over a value in the overflow blob without decoding it.
     fn skip_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) {
         match type_tag {
-            0 => {}             // Null: no data
-            1 | 2 => *pos += 8, // Int64 or Float64
-            3 | 5 => *pos += 4, // UniqueId or Date
-            4 => *pos += 1,     // Bool
-            6 if *pos + 4 <= blob.len() => {
-                // String: u32 length prefix + bytes
+            0 => {}                 // Null: no data
+            1 | 2 | 7 => *pos += 8, // Int64 / Float64 / Timestamp (i64 seconds)
+            3 | 5 => *pos += 4,     // UniqueId or Date
+            4 => *pos += 1,         // Bool
+            6 | 8 if *pos + 4 <= blob.len() => {
+                // String (6) and List (8): u32 length prefix + payload bytes.
                 let slen =
                     u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
                 *pos += 4 + slen;

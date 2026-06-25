@@ -64,3 +64,51 @@ def test_mixed_int_list_roundtrips():
     kg.add_nodes(df, node_type="S", unique_id_field="id")
     rows = kg.cypher("MATCH (n:S) UNWIND n.scores AS s RETURN s ORDER BY s").to_dicts()
     assert [r["s"] for r in rows] == [1, 2, 3]
+
+
+# ── Cross-mode parity (Phase 2): lists survive every storage backend and
+#    the persistence round-trips (.kgl save/load + streaming-disk subset). ──
+
+_EXPECTED = [{"id": 1, "al": ["x", "y"]}, {"id": 2, "al": ["z"]}]
+_Q = "MATCH (n:Person) RETURN n.id AS id, n.aliases AS al ORDER BY id"
+
+
+def _person_df():
+    return pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "aliases": [["x", "y"], ["z"]]})
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+def test_list_property_cross_mode_live(mode, tmp_path):
+    if mode == "memory":
+        kg = kglite.KnowledgeGraph()
+    elif mode == "mapped":
+        kg = kglite.KnowledgeGraph(storage="mapped")
+    else:
+        kg = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "g"))
+    kg.add_nodes(_person_df(), node_type="Person", unique_id_field="id")
+    assert kg.cypher(_Q).to_dicts() == _EXPECTED
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+def test_list_property_save_reload(mode, tmp_path):
+    if mode == "memory":
+        kg = kglite.KnowledgeGraph()
+    elif mode == "mapped":
+        kg = kglite.KnowledgeGraph(storage="mapped")
+    else:
+        kg = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "g"))
+    kg.add_nodes(_person_df(), node_type="Person", unique_id_field="id")
+    p = str(tmp_path / f"{mode}.kgl")
+    kg.save(p)
+    assert kglite.load(p).cypher(_Q).to_dicts() == _EXPECTED
+
+
+def test_list_property_streaming_disk_subset(tmp_path):
+    # save_subset on a disk-backed source takes the streaming-disk writer,
+    # which marshals each property through the borrowed-value overflow path.
+    # Before Phase 2 a list there serialized to NULL; now it round-trips.
+    src = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "src"))
+    src.add_nodes(_person_df(), node_type="Person", unique_id_field="id")
+    out = str(tmp_path / "subset.kgl")
+    src.select("Person").save_subset(out)
+    assert kglite.load(out).cypher(_Q).to_dicts() == _EXPECTED

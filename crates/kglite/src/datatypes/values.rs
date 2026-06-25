@@ -184,6 +184,11 @@ pub enum BorrowedValue<'a> {
     UniqueId(u32),
     String(&'a str),
     DateTime(NaiveDate),
+    /// A borrowed list of owned values. Unlike the scalar variants this
+    /// borrows the `Vec<Value>` slice from the source rather than copying;
+    /// it lets native list properties survive the streaming-disk save path
+    /// (which otherwise can only carry scalars).
+    List(&'a [Value]),
 }
 
 impl<'a> BorrowedValue<'a> {
@@ -198,6 +203,7 @@ impl<'a> BorrowedValue<'a> {
             BorrowedValue::UniqueId(v) => Value::UniqueId(v),
             BorrowedValue::String(s) => Value::String(s.to_string()),
             BorrowedValue::DateTime(d) => Value::DateTime(d),
+            BorrowedValue::List(items) => Value::List(items.to_vec()),
         }
     }
 }
