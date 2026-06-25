@@ -1183,6 +1183,58 @@ fn coreness_scoped_streaming(
     Ok(src.nodes.into_iter().zip(core).collect())
 }
 
+/// Dependency-frontier / "ready set": over a DAG on edge type `E`, return the
+/// nodes whose dependencies are all satisfied (the nodes ready to be worked
+/// next). A node's **dependencies** are its outgoing-`E` neighbours — so
+/// `(task)-[:DEPENDS_ON]->(dependency)` reads naturally: `task` is ready once
+/// every `dependency` it points to is in the `done` set. A node already in
+/// `done` is excluded (it's finished, not "ready"); a node with no
+/// dependencies (a root) is ready as soon as it isn't done.
+///
+/// `done` is precomputed by the caller (the CALL dispatcher evaluates the
+/// `done` predicate per node). `node_types` limits which nodes are *emitted*;
+/// dependencies are followed regardless of type. Returns
+/// `(node, dependency_count)` where the count is how many `E`-dependencies the
+/// ready node had (all satisfied). General graph op (build ordering,
+/// scheduling, dataflow), not a Task concept.
+pub fn ready_set_scoped(
+    graph: &DirGraph,
+    node_types: Option<&[String]>,
+    rel_types: Option<&[InternedKey]>,
+    done: &HashSet<NodeIndex>,
+    deadline: Interrupt,
+) -> Result<Vec<(NodeIndex, i64)>, String> {
+    // Candidate nodes to emit: union of the requested types, or every node.
+    let candidates: Vec<NodeIndex> = match node_types {
+        Some(types) => {
+            let mut v = Vec::new();
+            for t in types {
+                if let Some(idxs) = graph.type_indices.get(t.as_str()) {
+                    v.extend(idxs.iter());
+                }
+            }
+            v
+        }
+        None => graph.graph.node_indices().collect(),
+    };
+
+    let mut ready = Vec::new();
+    for (i, node) in candidates.into_iter().enumerate() {
+        if i & 0xFFFF == 0 && deadline.exceeded() {
+            return Err("Query interrupted".to_string());
+        }
+        // Already done → not part of the ready frontier.
+        if done.contains(&node) {
+            continue;
+        }
+        let deps = filtered_neighbors_outgoing(graph, node, rel_types);
+        if deps.iter().all(|d| done.contains(d)) {
+            ready.push((node, deps.len() as i64));
+        }
+    }
+    Ok(ready)
+}
+
 /// Local clustering coefficient per node over the scoped undirected subgraph:
 /// `2 * (links among neighbours) / (k * (k-1))`, where `k` is the node's
 /// degree. Nodes with degree < 2 get `0.0`. Returns `(node, coefficient)`.

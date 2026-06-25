@@ -945,6 +945,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN edge_type, count ORDER BY edge_type, count",
         None,
     ),
+    # ── ready_set() dependency-frontier procedure ──
+    # A node is "ready" when every outgoing-KNOWS neighbour satisfies the
+    # `done` predicate. Confirms the optimizer leaves the CALL's output
+    # untouched (aggregated to a count so the comparison is order-stable).
+    (
+        "ready_set_basic",
+        "social_graph",
+        "CALL ready_set({relationship: 'KNOWS', done: 'n.age > 30'}) "
+        "YIELD node, dependency_count "
+        "RETURN count(node) AS ready, sum(dependency_count) AS deps",
+        None,
+    ),
     # ── reorder_match_clauses w/ label-pair selectivity (0.9.35) ──
     # Two MATCH clauses where the label-pair cardinalities differ
     # significantly. With the new selectivity-aware branch the planner

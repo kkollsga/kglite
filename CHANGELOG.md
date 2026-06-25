@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`CALL ready_set(...)`** — a general dependency-frontier procedure: over a
+  DAG on a chosen edge type, return the nodes whose dependencies (their
+  outgoing-E neighbours) all satisfy a `done` predicate — the "ready set" of a
+  build/scheduling/dataflow graph. `CALL ready_set({relationship: 'DEPENDS_ON',
+  done: 'n.status = "done"'}) YIELD node, dependency_count`. Opt-in like
+  `pagerank`/`louvain`, with the same `{node_type, relationship}` scoping; the
+  done-predicate reuses the standard `where`-style syntax over `n`.
 - **Role-scoped writes** — `cypher(..., write_scope=["Plan", "Task"])` (and
   `Session.execute(..., write_scope=[...])`) restrict Cypher `CREATE`/`SET` to a
   node-type whitelist (integrity, not secrecy: a coding role may write its own
