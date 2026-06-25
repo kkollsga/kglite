@@ -6,6 +6,7 @@
 //! kglite-bolt-server / kglite-mcp-server crate pattern.
 
 mod format;
+mod helper;
 mod repl;
 
 use std::path::PathBuf;
