@@ -205,6 +205,14 @@ pub struct DirGraph {
     /// Unlike read_only, mutations are still allowed — they just must conform.
     #[serde(skip)]
     pub schema_locked: bool,
+    /// Transient, **execution-scoped** write whitelist. When `Some(set)`, a
+    /// Cypher `CREATE`/`SET` whose node type is not in `set` is rejected
+    /// (role-scoped writes — integrity, not secrecy). Set by `execute_mut`
+    /// for the duration of one mutation and cleared immediately after; never
+    /// a persistent graph property and never serialized. `None` = unrestricted
+    /// (the default; zero cost).
+    #[serde(skip, default)]
+    pub(crate) active_write_scope: Option<std::collections::HashSet<String>>,
     /// Monotonically increasing version counter — incremented on every mutation.
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
@@ -376,6 +384,7 @@ impl DirGraph {
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: false,
             schema_locked: false,
+            active_write_scope: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
@@ -424,6 +433,7 @@ impl DirGraph {
             temp_dirs: Arc::new(std::sync::Mutex::new(Vec::new())),
             read_only: false,
             schema_locked: false,
+            active_write_scope: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),

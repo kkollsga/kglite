@@ -375,6 +375,28 @@ fn apply_foreach_body_clause(
 }
 
 /// Execute a CREATE clause, creating nodes and edges in the graph.
+/// Enforce the graph's transient role-scoped write whitelist. When
+/// `active_write_scope` is `Some(set)`, a `CREATE`/`SET` touching a node type
+/// not in `set` is rejected. `None` = unrestricted (the common case; this is a
+/// single `Option` check with no allocation). See
+/// [`crate::graph::DirGraph::active_write_scope`].
+fn enforce_write_scope(graph: &DirGraph, node_type: &str) -> Result<(), String> {
+    if let Some(scope) = &graph.active_write_scope {
+        if !scope.contains(node_type) {
+            return Err(format!(
+                "write scope violation: node type '{}' is not in the allowed write set ({})",
+                node_type,
+                {
+                    let mut types: Vec<&str> = scope.iter().map(|s| s.as_str()).collect();
+                    types.sort_unstable();
+                    types.join(", ")
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn execute_create(
     graph: &mut DirGraph,
     create: &CreateClause,
@@ -443,6 +465,23 @@ fn execute_create(
                         CreateEdgeDirection::Outgoing => (source_idx, target_idx),
                         CreateEdgeDirection::Incoming => (target_idx, source_idx),
                     };
+
+                    // Role-scoped write guard: an edge CREATE may not wire
+                    // onto a node type outside the write whitelist (both
+                    // endpoints must be writable). Skipped entirely when no
+                    // scope is active.
+                    if graph.active_write_scope.is_some() {
+                        let src_type = graph
+                            .get_node(actual_source)
+                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                            .unwrap_or_default();
+                        let tgt_type = graph
+                            .get_node(actual_target)
+                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
+                            .unwrap_or_default();
+                        enforce_write_scope(graph, &src_type)?;
+                        enforce_write_scope(graph, &tgt_type)?;
+                    }
 
                     // Schema lock validation for edge
                     if graph.schema_locked {
@@ -590,6 +629,10 @@ fn create_node(
     // Clone the id for incremental index maintenance below (it is moved into
     // insert_node_routed). Only needed for declared-PK types.
     let pk_id = if pk_declared { Some(id.clone()) } else { None };
+
+    // Role-scoped write guard (integrity): reject CREATE of a node type
+    // outside the active write whitelist, before any storage mutation.
+    enforce_write_scope(graph, &label)?;
 
     // Schema lock validation
     if graph.schema_locked {
@@ -822,6 +865,10 @@ fn execute_set(
                         }
                         None => continue,
                     };
+
+                    // Role-scoped write guard: reject SET on a node type
+                    // outside the active write whitelist.
+                    enforce_write_scope(graph, &node_type_str)?;
 
                     // Schema lock validation for SET
                     if graph.schema_locked {

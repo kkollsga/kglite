@@ -4011,6 +4011,7 @@ class KnowledgeGraph:
         streaming: bool = True,
         disable_optimizer: bool = False,
         disabled_passes: Optional[list[str]] = None,
+        write_scope: Optional[list[str]] = None,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 
@@ -4078,6 +4079,13 @@ class KnowledgeGraph:
                 :func:`kglite.cypher_pass_names()` — typos raise
                 ``ValueError``. Useful for bisecting which pass
                 introduces a divergence.
+            write_scope: Role-scoped write whitelist. When given, a
+                ``CREATE``/``SET`` whose node type is not in the list is
+                rejected (integrity, not secrecy — e.g. a coding role may
+                write ``["Plan", "Task"]`` but not research-owned
+                ``Algorithm`` nodes; an edge may not wire onto an
+                out-of-scope endpoint). ``None`` (default) = unrestricted.
+                Applies per-call; also available on :meth:`Session.execute`.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
@@ -5141,8 +5149,12 @@ class Session:
         params: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
         max_rows: int | None = None,
+        write_scope: list[str] | None = None,
     ) -> Any:
         """Run a Cypher write against the shared graph, serialized.
+
+        ``write_scope`` (optional) restricts ``CREATE``/``SET`` to the given
+        node-type whitelist — see :meth:`KnowledgeGraph.cypher`.
 
         Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
         take the Session's writer lock for ``begin → mutate → commit``, so

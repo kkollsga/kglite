@@ -87,6 +87,12 @@ pub struct ExecuteOptions<'a> {
     /// handler flips. Bindings that need this provide a `'static` flag;
     /// the rest pass `None`.
     pub cancel: Option<&'static AtomicBool>,
+    /// Optional role-scoped write whitelist. When `Some`, a Cypher
+    /// `CREATE`/`SET` whose node type is not in the set is rejected (integrity,
+    /// not secrecy — e.g. a coding role may write `Plan`/`Task` but not
+    /// `Algorithm`). `None` = unrestricted (the default; zero hot-path cost).
+    /// Only meaningful on the mutation path (`execute_mut`).
+    pub write_scope: Option<&'a HashSet<String>>,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -125,6 +131,7 @@ impl<'a> ExecuteOptions<'a> {
             embedder: None,
             value_codecs: None,
             cancel: None,
+            write_scope: None,
         }
     }
 }
@@ -257,8 +264,13 @@ pub fn execute_mut(
             deadline: opts.deadline,
             cancel: opts.cancel,
         };
-        let r = cypher::execute_mutable(graph, &parsed, params, interrupt)
-            .map_err(|message| exec_err(opts, message))?;
+        // Install the execution-scoped write whitelist for the duration of this
+        // mutation, then clear it unconditionally (even on error) so it never
+        // leaks into a later execution on the same working copy.
+        graph.active_write_scope = opts.write_scope.cloned();
+        let r = cypher::execute_mutable(graph, &parsed, params, interrupt);
+        graph.active_write_scope = None;
+        let r = r.map_err(|message| exec_err(opts, message))?;
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.
         // Bumps the working copy directly so a read-after-write *within* the

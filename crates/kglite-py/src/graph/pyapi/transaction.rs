@@ -205,6 +205,9 @@ impl Transaction {
             // state). For interruptible + atomic mutations use `Session.execute`
             // (separate working copy + atomic-swap commit). The deadline applies.
             cancel: None,
+            // Transaction.cypher does not yet expose a write-scope; use
+            // Session.execute or KnowledgeGraph.cypher for role-scoped writes.
+            write_scope: None,
         };
 
         let result = if is_mut {

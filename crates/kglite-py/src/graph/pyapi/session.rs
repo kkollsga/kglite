@@ -98,6 +98,8 @@ struct QueryOpts {
     deadline: Option<std::time::Instant>,
     max_rows: Option<usize>,
     output_csv: bool,
+    /// Role-scoped write whitelist; only consulted on the write path.
+    write_scope: Option<std::collections::HashSet<String>>,
 }
 
 impl QueryOpts {
@@ -106,12 +108,14 @@ impl QueryOpts {
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
         csv: bool,
+        write_scope: Option<std::collections::HashSet<String>>,
     ) -> Self {
         QueryOpts {
             to_df,
             deadline: deadline_from(timeout_ms),
             max_rows,
             output_csv: csv,
+            write_scope,
         }
     }
 }
@@ -156,6 +160,7 @@ impl Session {
                 embedder,
                 value_codecs: None,
                 cancel,
+                write_scope: None,
             };
             let outcome = execute_read(&inner, &query_owned, &opts)?;
             let mut result = outcome.result;
@@ -181,6 +186,7 @@ impl Session {
         let query_owned = query.to_string();
         let deadline = qopts.deadline;
         let max_rows = qopts.max_rows;
+        let write_scope = qopts.write_scope;
         // Mutations don't take an embedder snapshot (matches the live
         // KnowledgeGraph mutation path — text_score in a write is atypical and
         // would force a GIL re-acquire inside the detached block).
@@ -203,6 +209,7 @@ impl Session {
                 embedder: None,
                 value_codecs: None,
                 cancel,
+                write_scope: write_scope.as_ref(),
             };
             let outcome = execute_mut(graph, &query_owned, &opts)?;
             let mut result = outcome.result;
@@ -270,7 +277,7 @@ impl Session {
         }
         let param_map = decode_params(params)?;
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
-        let qopts = QueryOpts::from_parts(to_df, timeout_ms, max_rows, output_csv);
+        let qopts = QueryOpts::from_parts(to_df, timeout_ms, max_rows, output_csv, None);
         self.run_read(py, query, param_map, qopts)
     }
 
@@ -289,7 +296,8 @@ impl Session {
     ///
     /// Returns the query result (rows for `... RETURN`, otherwise mutation
     /// stats), same shape as `KnowledgeGraph.cypher`.
-    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_rows=None))]
+    #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_rows=None, write_scope=None))]
+    #[allow(clippy::too_many_arguments)]
     fn execute(
         &self,
         py: Python<'_>,
@@ -298,11 +306,13 @@ impl Session {
         params: Option<&Bound<'_, PyDict>>,
         timeout_ms: Option<u64>,
         max_rows: Option<usize>,
+        write_scope: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let pre_parsed = cypher::parse_cypher(query).map_err(crate::error_py::kg_to_pyerr)?;
         let param_map = decode_params(params)?;
         let output_csv = pre_parsed.output_format == cypher::OutputFormat::Csv;
-        let qopts = QueryOpts::from_parts(to_df, timeout_ms, max_rows, output_csv);
+        let scope_set = write_scope.map(|v| v.into_iter().collect());
+        let qopts = QueryOpts::from_parts(to_df, timeout_ms, max_rows, output_csv, scope_set);
         if cypher::is_mutation_query(&pre_parsed) {
             self.run_write(py, query, param_map, qopts)
         } else {
