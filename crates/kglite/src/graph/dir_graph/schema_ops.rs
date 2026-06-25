@@ -48,6 +48,17 @@ impl DirGraph {
         }
     }
 
+    /// The declared ownership layer (`"managed"`/`"runtime"`) for `node_type`,
+    /// if set via `define_schema`. Drives the managed-reload guard.
+    pub fn layer_for(&self, node_type: &str) -> Option<&str> {
+        self.schema_definition
+            .as_ref()?
+            .node_schemas
+            .get(node_type)?
+            .layer
+            .as_deref()
+    }
+
     /// The instructions for `channel`, falling back to the default slot.
     pub fn get_instructions(&self, channel: Option<&str>) -> Option<&str> {
         self.graph_instructions

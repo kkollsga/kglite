@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Ownership layers + managed-reload guard** for two-writer contract graphs. A node type can declare `layer: 'managed'` (rebuilt from source) or `'runtime'` (owned/mutated live by another writer) in `define_schema`. `add_nodes(..., managed_reload=True)` then **refuses to write a `runtime` type** (skips it as a reported no-op), so a batch "research" rebuild can never clobber agent-owned nodes — turning a disjoint-ownership convention into an enforced guarantee. Opt-in; undeclared/`managed` types are unaffected. Persists in the `.kgl` (additive).
 - **`graph.set_instructions(text)`** — a graph-level instructions/briefing slot rendered **verbatim and un-truncated** at the top of `describe()` (as `<instructions>`), so an agent opening a `.kgl` cold reads how to use it first (unlike sample values, which truncate). Persists in the `.kgl` (additive — old files load without it); pass empty text to clear. A reserved `channel=` keyword leaves room for per-audience briefings later.
 
 ### Changed

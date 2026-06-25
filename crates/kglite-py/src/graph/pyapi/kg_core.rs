@@ -1064,6 +1064,19 @@ impl KnowledgeGraph {
                         node_schema.primary_key = Some(pk);
                     }
 
+                    // Parse the (opt-in) ownership layer for the two-writer
+                    // contract. Reject an unknown value as a typo-guard.
+                    if let Some(layer_val) = node_schema_dict.get_item("layer")? {
+                        let layer: String = layer_val.extract()?;
+                        if layer != "managed" && layer != "runtime" {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "layer for node type '{node_type}' must be 'managed' or \
+                                 'runtime'. Got '{layer}'."
+                            )));
+                        }
+                        node_schema.layer = Some(layer);
+                    }
+
                     schema.add_node_schema(node_type, node_schema);
                 }
             }
@@ -1292,6 +1305,9 @@ impl KnowledgeGraph {
 
             if let Some(pk) = &node_schema.primary_key {
                 schema_dict.set_item("primary_key", pk)?;
+            }
+            if let Some(layer) = &node_schema.layer {
+                schema_dict.set_item("layer", layer)?;
             }
 
             nodes_dict.set_item(node_type, schema_dict)?;

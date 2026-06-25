@@ -965,6 +965,7 @@ class KnowledgeGraph:
         timeseries: Optional[dict[str, Any]] = None,
         nullable_int_downcast: bool = False,
         labels: Optional[list[str]] = None,
+        managed_reload: bool = False,
     ) -> dict[str, Any]:
         """Add nodes from a DataFrame.
 
@@ -1002,6 +1003,13 @@ class KnowledgeGraph:
                 values are all integer-valued (e.g. ``pd.NA``-bearing ints that
                 pandas auto-promoted to float64) are silently downcast to Int64.
                 Default ``False`` — explicit opt-in protects existing callers.
+            managed_reload: When ``True``, this call is part of a *managed
+                reload* (a batch writer rebuilding from source). If ``node_type``
+                declares ``layer='runtime'`` in the schema (an agent-owned type),
+                the write is **skipped** as a no-op and reported — so a research
+                rebuild can never clobber agent-owned nodes. Undeclared or
+                ``layer='managed'`` types are written normally. Pairs with the
+                ``layer`` declaration in ``define_schema`` and ``conflict_handling``.
             timeseries: Inline timeseries configuration dict with keys:
 
                 - ``time`` (required): column name containing date strings
@@ -3205,6 +3213,18 @@ class KnowledgeGraph:
                 ``primary_key`` keep the permissive default. For now the key must
                 be ``"id"`` (the identity field); an enforced PK on an arbitrary
                 property is not yet supported.
+
+                A node entry may also set ``layer`` to ``'managed'`` (rebuilt
+                from source by a batch writer) or ``'runtime'`` (owned/mutated
+                live by another writer, e.g. an agent). With layers declared, an
+                ``add_nodes(..., managed_reload=True)`` call refuses to write a
+                ``runtime`` type — enforcing disjoint ownership in a two-writer
+                contract graph::
+
+                    g.define_schema({"nodes": {
+                        "AlgorithmSpec": {"layer": "managed"},
+                        "Task":         {"layer": "runtime"},
+                    }})
 
         Returns:
             Self with schema defined.

@@ -156,3 +156,60 @@ class TestPrimaryKeyDeclaration:
         reloaded = kglite.load(p)
         sd = reloaded.schema_definition()
         assert sd["nodes"]["Person"]["primary_key"] == "id"
+
+
+class TestManagedReloadGuard:
+    """Per-type `layer` + `add_nodes(managed_reload=True)`: a managed reload
+    (research rebuilding from source) never writes a runtime-owned (agent) type."""
+
+    def test_managed_reload_skips_runtime_type(self):
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Spec": {"layer": "managed"}, "Task": {"layer": "runtime"}}})
+        g.cypher("CREATE (:Task {id: 1, status: 'in_progress'})")
+        rep = g.add_nodes(
+            pd.DataFrame({"id": [1], "status": ["RESET"]}),
+            "Task",
+            "id",
+            "id",
+            conflict_handling="update",
+            managed_reload=True,
+        )
+        assert rep.get("skipped_runtime_layer") is True
+        # The agent's live field is untouched.
+        assert g.cypher("MATCH (t:Task {id: 1}) RETURN t.status AS s").to_dicts()[0]["s"] == "in_progress"
+
+    def test_managed_type_writes_in_managed_reload(self):
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Spec": {"layer": "managed"}}})
+        g.add_nodes(
+            pd.DataFrame({"id": [10], "title": ["A"]}),
+            "Spec",
+            "id",
+            "title",
+            managed_reload=True,
+        )
+        assert g.cypher("MATCH (s:Spec) RETURN count(s) AS c").to_dicts()[0]["c"] == 1
+
+    def test_guard_is_opt_in(self):
+        """Without managed_reload, a runtime type is written normally."""
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Task": {"layer": "runtime"}}})
+        g.cypher("CREATE (:Task {id: 1, status: 'old'})")
+        g.add_nodes(
+            pd.DataFrame({"id": [1], "status": ["new"]}),
+            "Task",
+            "id",
+            "id",
+            conflict_handling="update",
+        )
+        assert g.cypher("MATCH (t:Task {id: 1}) RETURN t.status AS s").to_dicts()[0]["s"] == "new"
+
+    def test_layer_roundtrips_and_validates(self):
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Task": {"layer": "runtime"}}})
+        assert g.schema_definition()["nodes"]["Task"]["layer"] == "runtime"
+        try:
+            KnowledgeGraph().define_schema({"nodes": {"X": {"layer": "bogus"}}})
+            raise AssertionError("bogus layer should be rejected")
+        except ValueError as e:
+            assert "'managed' or 'runtime'" in str(e)
