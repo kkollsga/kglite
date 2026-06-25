@@ -49,12 +49,17 @@ pub enum NodeAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ConflictHandling {
-    Replace, // Replace all properties and title
+    Replace, // Replace all properties and title (whole-node overwrite)
     Skip,    // Don't update existing nodes/edges
     #[default]
-    Update, // Merge properties, new values overwrite existing
+    // Merge: write the incoming properties, leave properties NOT in this batch
+    // untouched. STABLE CONTRACT (partial-update guarantee): a reload can
+    // re-assert a subset of fields without clobbering fields another writer
+    // owns — see the regression test `add_nodes_update_is_partial` and the
+    // `add_nodes` pyi docstring. Drives the managed-reload guard.
+    Update,
     Preserve, // Merge properties, existing values take precedence
-    Sum,     // Merge properties, add numeric values (edges); acts as Update for nodes
+    Sum,      // Merge properties, add numeric values (edges); acts as Update for nodes
 }
 
 /// Add two Values if both are numeric. Mixed Int64+Float64 promotes to Float64.

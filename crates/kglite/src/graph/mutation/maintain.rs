@@ -2046,6 +2046,69 @@ mod id_index_tests {
         assert!(report.is_ok(), "clean batch should load: {report:?}");
     }
 
+    /// Partial-update guarantee (load-bearing contract): `conflict_handling =
+    /// Update` writes only the columns present in the batch, leaving other
+    /// properties of the existing node untouched. A reload can re-assert a
+    /// subset of fields without clobbering fields another writer owns.
+    #[test]
+    fn add_nodes_update_is_partial() {
+        let mut g = DirGraph::new();
+        // Seed: id + status + notes.
+        let seed = DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "status".to_string(), "notes".to_string()],
+            vec![vec![
+                Value::Int64(1),
+                Value::String("in_progress".into()),
+                Value::String("agent work".into()),
+            ]],
+        )
+        .unwrap();
+        add_nodes(
+            &mut g,
+            seed,
+            "Task".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            None,
+        )
+        .unwrap();
+
+        // Reload: only id + spec_link (the "research re-assert").
+        let reload = DataFrame::from_cypher_rows(
+            vec!["id".to_string(), "spec_link".to_string()],
+            vec![vec![Value::Int64(1), Value::String("AlgoSpec-7".into())]],
+        )
+        .unwrap();
+        add_nodes(
+            &mut g,
+            reload,
+            "Task".to_string(),
+            "id".to_string(),
+            Some("id".to_string()),
+            Some("update".to_string()),
+        )
+        .unwrap();
+
+        let idx = g.lookup_by_id("Task", &Value::Int64(1)).unwrap();
+        let node = g.graph.node_weight(idx).unwrap();
+        // Agent-owned fields preserved; new field added.
+        assert_eq!(
+            node.get_field_ref("status").as_deref(),
+            Some(&Value::String("in_progress".into())),
+            "status must survive a partial update"
+        );
+        assert_eq!(
+            node.get_field_ref("notes").as_deref(),
+            Some(&Value::String("agent work".into())),
+            "notes must survive a partial update"
+        );
+        assert_eq!(
+            node.get_field_ref("spec_link").as_deref(),
+            Some(&Value::String("AlgoSpec-7".into())),
+            "the new field must be written"
+        );
+    }
+
     /// Regression (issue #20): the read path self-heals. When the index is
     /// *absent* for a type (the state CREATE / DELETE leave it in), the very
     /// first `lookup_by_id_readonly` — a `&self` call — must build and cache

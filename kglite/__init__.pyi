@@ -985,6 +985,14 @@ class KnowledgeGraph:
             columns: Whitelist of columns to include. ``None`` = all.
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``. ``'sum'`` acts as ``'update'`` for nodes.
+
+                **Partial-update guarantee:** ``'update'`` writes **only the
+                columns present in this call's data** — properties of an existing
+                node that are *not* in the incoming columns are left untouched.
+                This is a stable contract: it lets a batch reload re-assert a
+                subset of fields (e.g. identity + links) without clobbering
+                fields another writer owns (e.g. an agent's ``status``/``notes``).
+                ``'replace'`` instead overwrites the whole node.
             skip_columns: Columns to exclude.
             column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'}``.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
