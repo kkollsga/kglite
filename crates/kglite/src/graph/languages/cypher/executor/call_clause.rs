@@ -85,6 +85,10 @@ fn algo_allowed_keys(proc: &str) -> Option<Vec<&'static str>> {
             vec!["resolution", "weight_property", "where"]
         }
         "label_propagation" => vec!["max_iterations", "where"],
+        // Ready-set takes a required `done` predicate (which nodes count as
+        // satisfied) instead of `where`; `relationship` (the dependency edge
+        // type) + `node_type` come from the shared scoping keys below.
+        "ready_set" | "dependency_frontier" => vec!["done"],
         "connected_components"
         | "weakly_connected_components"
         | "k_core"
@@ -294,6 +298,7 @@ impl<'a> CypherExecutor<'a> {
             | "label_propagation" => &["node", "community", "level"],
             "connected_components" | "weakly_connected_components" => &["node", "component"],
             "k_core" | "coreness" => &["node", "coreness"],
+            "ready_set" | "dependency_frontier" => &["node", "dependency_count"],
             "clustering_coefficient" | "local_clustering_coefficient" => &["node", "coefficient"],
             "triangle_count" | "transitivity" => &["triangles", "transitivity"],
             "eccentricity" => &["node", "eccentricity"],
@@ -620,6 +625,62 @@ impl<'a> CypherExecutor<'a> {
                             }
                             "coreness" => {
                                 row.projected.insert(alias.to_string(), Value::Int64(core));
+                            }
+                            _ => {}
+                        }
+                    }
+                    rows.push(row);
+                }
+                rows
+            }
+            "ready_set" | "dependency_frontier" => {
+                // Dependency-frontier ready set over edge type E (the
+                // `relationship` param). A node is "done" when it matches the
+                // required `done` predicate; it is "ready" when every node it
+                // depends on (its outgoing-E neighbours) is done.
+                // YIELD node, dependency_count.
+                let (node_types, rel_types) = scoped_node_and_rel(&params);
+                let done_src = match params.get("done") {
+                    Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+                    _ => {
+                        return Err("CALL ready_set(): requires a `done` predicate over `n`, \
+                                    e.g. done: 'n.status = \"done\"'"
+                            .to_string())
+                    }
+                };
+                let predicate = parse_scope_predicate(&done_src)?;
+                // Evaluate `done` over every node — a dependency may be any node,
+                // not just one of `node_type`.
+                let mut done: HashSet<NodeIndex> = HashSet::new();
+                for (i, idx) in self.graph.graph.node_indices().enumerate() {
+                    if i & 0xFFFF == 0 {
+                        self.check_deadline()?;
+                    }
+                    let mut row = ResultRow::new();
+                    row.node_bindings.insert("n".to_string(), idx);
+                    if self.evaluate_predicate(&predicate, &row)? {
+                        done.insert(idx);
+                    }
+                }
+                let ready = crate::graph::algorithms::graph_algorithms::ready_set_scoped(
+                    self.graph,
+                    node_types.as_deref(),
+                    rel_types.as_deref(),
+                    &done,
+                    self.interrupt(),
+                )?;
+                let mut rows = Vec::with_capacity(ready.len());
+                for (node_idx, dep_count) in ready {
+                    let mut row = ResultRow::new();
+                    for item in &clause.yield_items {
+                        let alias = item.alias.as_deref().unwrap_or(&item.name);
+                        match item.name.as_str() {
+                            "node" => {
+                                row.node_bindings.insert(alias.to_string(), node_idx);
+                            }
+                            "dependency_count" => {
+                                row.projected
+                                    .insert(alias.to_string(), Value::Int64(dep_count));
                             }
                             _ => {}
                         }
