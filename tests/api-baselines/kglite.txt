@@ -1813,6 +1813,7 @@ pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::N
 pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
+pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices_and_compact(&mut self)
@@ -1963,6 +1964,7 @@ pub fn kglite::api::NodeInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> co
 pub struct kglite::api::NodeSchemaDefinition
 pub kglite::api::NodeSchemaDefinition::field_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::optional_fields: alloc::vec::Vec<alloc::string::String>
+pub kglite::api::NodeSchemaDefinition::primary_key: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::required_fields: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for kglite::api::NodeSchemaDefinition
 pub fn kglite::api::NodeSchemaDefinition::clone(&self) -> kglite::api::NodeSchemaDefinition
