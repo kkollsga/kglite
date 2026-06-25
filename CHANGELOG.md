@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
+
 ### Added
 - **Write-enabled MCP server ("agent graph workbench").** Launch the MCP server
   with `--graph foo.kgl --writable` and `cypher_query` now accepts mutations
