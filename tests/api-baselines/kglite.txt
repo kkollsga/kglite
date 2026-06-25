@@ -1760,7 +1760,6 @@ pub fn kglite::api::DirGraph::build_id_index(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::build_id_index_from_columns(&mut self, node_type: &str)
 pub fn kglite::api::DirGraph::bump_version(&mut self)
 pub fn kglite::api::DirGraph::check_auto_vacuum(&mut self) -> bool
-pub fn kglite::api::DirGraph::clear_schema(&mut self)
 pub fn kglite::api::DirGraph::compact_disk(&mut self) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::DirGraph::compact_properties(&mut self)
 pub fn kglite::api::DirGraph::create_composite_index(&mut self, node_type: &str, properties: &[&str]) -> usize
@@ -1786,7 +1785,6 @@ pub fn kglite::api::DirGraph::get_node_timeseries(&self, node_index: usize) -> c
 pub fn kglite::api::DirGraph::get_node_type_metadata(&self, node_type: &str) -> core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
 pub fn kglite::api::DirGraph::get_node_types(&self) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::DirGraph::get_or_compute_type_connectivity(&self) -> alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>
-pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite::api::SchemaDefinition>
 pub fn kglite::api::DirGraph::get_spatial_config(&self, node_type: &str) -> core::option::Option<&kglite::api::SpatialConfig>
 pub fn kglite::api::DirGraph::get_type_connectivity(&self) -> core::option::Option<alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>>
 pub fn kglite::api::DirGraph::graph_id(&self) -> u64
@@ -1813,7 +1811,6 @@ pub fn kglite::api::DirGraph::node_has_label(&self, idx: petgraph::graph_impl::N
 pub fn kglite::api::DirGraph::node_labels(&self, idx: petgraph::graph_impl::NodeIndex) -> alloc::vec::Vec<kglite::api::InternedKey>
 pub fn kglite::api::DirGraph::nodes_with_label(&self, label: &str) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::populate_index_keys(&mut self)
-pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::rebuild_indices_from_keys(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices(&mut self)
 pub fn kglite::api::DirGraph::rebuild_type_indices_and_compact(&mut self)
@@ -1822,7 +1819,6 @@ pub fn kglite::api::DirGraph::reindex(&mut self)
 pub fn kglite::api::DirGraph::remove_node_label(&mut self, idx: petgraph::graph_impl::NodeIndex, label: kglite::api::InternedKey) -> core::result::Result<bool, alloc::string::String>
 pub fn kglite::api::DirGraph::resolve_alias<'a>(&'a self, node_type: &str, property: &'a str) -> &'a str
 pub fn kglite::api::DirGraph::save_disk(&mut self, path: &str) -> core::result::Result<(), alloc::string::String>
-pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition)
 pub fn kglite::api::DirGraph::set_type_connectivity(&self, triples: alloc::vec::Vec<kglite::graph::schema::ConnectivityTriple>)
 pub fn kglite::api::DirGraph::set_version(&mut self, v: u64)
 pub fn kglite::api::DirGraph::sync_column_stores_from_disk(&mut self)
@@ -1834,6 +1830,11 @@ pub fn kglite::api::DirGraph::upsert_connection_type_metadata(&mut self, conn_ty
 pub fn kglite::api::DirGraph::upsert_node_type_metadata(&mut self, node_type: &str, props: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>)
 pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::HashMap<petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::version(&self) -> u64
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::clear_schema(&mut self)
+pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite::api::SchemaDefinition>
+pub fn kglite::api::DirGraph::primary_key_for(&self, node_type: &str) -> core::option::Option<&str>
+pub fn kglite::api::DirGraph::set_schema(&mut self, schema: kglite::api::SchemaDefinition)
 impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::copy_embeddings_from(&mut self, src: &kglite::api::DirGraph) -> (usize, usize, usize)
 impl kglite::api::DirGraph
