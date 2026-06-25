@@ -137,6 +137,28 @@ impl GraphState {
         Ok(())
     }
 
+    /// Save the active graph to an explicit `path` and rebind the active
+    /// graph's `source_path` to it, so subsequent `save_graph` calls target
+    /// the new location. Backs the `save_graph_as` workbench tool. Returns a
+    /// human-readable status (node/edge counts) or an error string.
+    fn save_as(&self, path: &Path) -> std::result::Result<String, String> {
+        let mut guard = self.inner.write().unwrap();
+        let Some(active) = guard.as_mut() else {
+            return Err(NO_GRAPH.to_string());
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        let mut dir_arc = active.kg.dir().clone();
+        kglite::api::io::save_graph(&mut dir_arc, &path_str)
+            .map_err(|e| format!("save_graph_as error: {e}"))?;
+        active.source_path = Some(path.to_path_buf());
+        let dir = std::sync::Arc::make_mut(&mut dir_arc);
+        let overview = compute_schema(dir);
+        Ok(format!(
+            "Saved {path_str} ({} nodes, {} edges); save target rebound here.",
+            overview.node_count, overview.edge_count
+        ))
+    }
+
     /// Whether this state builds with the markdown docs pass (so the watch
     /// predicate also treats `.md` changes as graph-relevant).
     pub fn include_docs(&self) -> bool {
@@ -525,6 +547,30 @@ struct OverviewArgs {
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct SaveGraphArgs {}
 
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
+struct LoadGraphArgs {
+    /// Path to a `.kgl` file (or disk-graph directory) to load as the new
+    /// active graph, replacing the current one. Unsaved in-memory changes to
+    /// the previous graph are discarded — call `save_graph` first to keep them.
+    pub path: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
+struct CreateGraphArgs {
+    /// Path the new empty graph is bound to (its `save_graph` target).
+    pub path: String,
+    /// Storage mode: `memory` (default), `mapped`, or `disk`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
+struct SaveGraphAsArgs {
+    /// Path to save the active graph to; also becomes the new `save_graph`
+    /// target.
+    pub path: String,
+}
+
 /// Builtins toggled by the manifest's `builtins:` block.
 #[derive(Clone, Debug, Default)]
 pub struct Builtins {
@@ -618,13 +664,66 @@ pub fn register(
         },
     );
     if builtins.save_graph {
-        let s = state;
+        let s = state.clone();
         server.register_typed_tool::<SaveGraphArgs, _>(
             "save_graph",
             "Persist the active graph to its source .kgl file (single-graph mode only).",
             move |_| {
                 s.ensure_code_tree_fresh();
                 s.with_active(run_save)
+            },
+        );
+    }
+
+    // Runtime graph-lifecycle tools — only on a write-enabled workbench server.
+    // They reuse the existing GraphState swap methods (which take the write-lock
+    // internally), so an agent can load/create/save graphs and switch between
+    // them within one session.
+    if builtins.writable {
+        let s = state.clone();
+        server.register_typed_tool::<LoadGraphArgs, _>(
+            "load_graph",
+            "Load a .kgl file as the new active graph (replaces the current one — \
+             save_graph first to keep unsaved changes). Write-enabled servers only.",
+            move |args| match s.load_kgl(Path::new(&args.path)) {
+                Ok(()) => match s.schema() {
+                    Some((n, e)) => format!("Loaded {} ({n} nodes, {e} edges).", args.path),
+                    None => format!("Loaded {}.", args.path),
+                },
+                Err(e) => format!("load_graph error: {e}"),
+            },
+        );
+        let s = state.clone();
+        server.register_typed_tool::<CreateGraphArgs, _>(
+            "create_graph",
+            "Create a fresh, empty graph bound to a path (its save_graph target) and \
+             make it active. storage = memory (default) | mapped | disk. Write-enabled \
+             servers only.",
+            move |args| {
+                let mode = match args.storage.as_deref() {
+                    None | Some("") | Some("memory") => StorageMode::Memory,
+                    Some(other) => match StorageMode::parse(other) {
+                        Ok(m) => m,
+                        Err(e) => return format!("create_graph error: invalid storage: {e}"),
+                    },
+                };
+                match s.create_in_mode(Path::new(&args.path), mode) {
+                    Ok(()) => format!("Created empty graph at {} (active).", args.path),
+                    Err(e) => format!("create_graph error: {e}"),
+                }
+            },
+        );
+        let s = state;
+        server.register_typed_tool::<SaveGraphAsArgs, _>(
+            "save_graph_as",
+            "Save the active graph to an explicit path and rebind the save target there. \
+             Write-enabled servers only.",
+            move |args| {
+                s.ensure_code_tree_fresh();
+                match s.save_as(Path::new(&args.path)) {
+                    Ok(msg) => msg,
+                    Err(e) => e,
+                }
             },
         );
     }
@@ -818,6 +917,56 @@ mod tests {
             kg: KnowledgeGraph::from_arc(Arc::new(dir)),
             source_path: None,
         }
+    }
+
+    fn tmp_kgl(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("kglmcp_{}_{}.kgl", std::process::id(), tag));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn lifecycle_create_mutate_save_load() {
+        let p = tmp_kgl("lifecycle");
+        let s = GraphState::default();
+        // create empty → mutate via the write path → save_as
+        s.create_in_mode(&p, StorageMode::Memory).unwrap();
+        let r = s
+            .with_active_mut(|a| write(a, "CREATE (:Task {id:'t1', status:'todo'})", None))
+            .unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        s.save_as(&p).unwrap();
+        // load into a *fresh* state → the node survived (the 0.12.2 fix path too)
+        let s2 = GraphState::default();
+        s2.load_kgl(&p).unwrap();
+        assert_eq!(s2.schema().unwrap().0, 1, "expected 1 node after reload");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn load_graph_swaps_active() {
+        let pa = tmp_kgl("swapA");
+        let pb = tmp_kgl("swapB");
+        // build two distinct graphs on disk
+        for (p, n) in [(&pa, 1u64), (&pb, 3u64)] {
+            let s = GraphState::default();
+            s.create_in_mode(p, StorageMode::Memory).unwrap();
+            for i in 0..n {
+                s.with_active_mut(|a| write(a, &format!("CREATE (:N {{id:'{i}'}})"), None))
+                    .unwrap()
+                    .unwrap();
+            }
+            s.save_as(p).unwrap();
+        }
+        // one state loads A then B → active reflects B
+        let s = GraphState::default();
+        s.load_kgl(&pa).unwrap();
+        assert_eq!(s.schema().unwrap().0, 1);
+        s.load_kgl(&pb).unwrap();
+        assert_eq!(s.schema().unwrap().0, 3, "load_graph should swap to B");
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
     }
 
     fn write(

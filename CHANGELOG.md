@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restrict mutations to those node types (role-scoped writes). Mutations are
   in-memory; `save_graph` persists. Read-only stays the **default** (analysis /
   code-review servers are unaffected); writes route through the active graph's
-  write-lock so they serialize safely across concurrent MCP clients.
+  write-lock so they serialize safely across concurrent MCP clients. Plus
+  runtime **graph-lifecycle tools** (write-enabled only): `load_graph(path)`,
+  `create_graph(path, storage)`, and `save_graph_as(path)` — so an agent can
+  load or create a graph, work, persist, and swap to another within one
+  session (the "graph workbench").
 
 ### Fixed
 - **Critical: a relationship type introduced via Cypher `CREATE`/`MERGE` is no
