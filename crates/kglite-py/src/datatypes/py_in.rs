@@ -2,7 +2,7 @@
 use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::Bound;
 use std::collections::HashMap;
 
@@ -275,7 +275,34 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
             }
             Ok(ColumnData::DateTime(vec))
         }
+        ColumnType::List => {
+            // Object column of Python lists/tuples → native List property.
+            let py_list = py_list.cast::<PyList>()?;
+            let mut vec: Vec<Option<Vec<Value>>> = Vec::with_capacity(length);
+            for (i, &is_null) in null_mask.iter().enumerate() {
+                if is_null {
+                    vec.push(None);
+                } else {
+                    let item = py_list.get_item(i)?;
+                    vec.push(Some(py_cell_to_value_list(&item)?));
+                }
+            }
+            Ok(ColumnData::List(vec))
+        }
     }
+}
+
+/// Convert a single pandas cell into a `Vec<Value>`. A Python list/tuple maps
+/// element-wise via [`py_value_to_value`]; any scalar is wrapped as a
+/// single-element list so it isn't silently dropped.
+fn py_cell_to_value_list(item: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
+    if let Ok(list) = item.cast::<PyList>() {
+        return list.iter().map(|el| py_value_to_value(&el)).collect();
+    }
+    if let Ok(tuple) = item.cast::<PyTuple>() {
+        return tuple.iter().map(|el| py_value_to_value(&el)).collect();
+    }
+    Ok(vec![py_value_to_value(item)?])
 }
 
 pub fn pandas_to_dataframe(
@@ -345,6 +372,7 @@ pub fn pandas_to_dataframe_with_options(
                         "str" | "string" | "text" => ColumnType::String,
                         "bool" | "boolean" => ColumnType::Boolean,
                         "date" | "datetime" | "timestamp" => ColumnType::DateTime,
+                        "list" | "array" => ColumnType::List,
                         _ => {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                 "Unsupported column type '{}' specified for column '{}'",
@@ -444,6 +472,11 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
         "bool" | "boolean" => Ok(ColumnType::Boolean),
         s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
         "object" => {
+            // A column of Python lists/tuples → native List property (so
+            // `IN`/UNWIND see real elements, not a stringified list).
+            if first_non_null_is_list(series)? {
+                return Ok(ColumnType::List);
+            }
             // Object dtype may contain booleans mixed with None (common in code_tree
             // metadata like is_test, is_abstract).  Use pandas' own type inference
             // which handles skipna correctly.
@@ -465,6 +498,20 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
             format!("Unsupported column type '{}' for column '{}'. Supported types: int, float, bool, datetime, string/object.", type_str, col_name)
         )),
     }
+}
+
+/// True when the first non-null value of an object-dtype series is a Python
+/// list or tuple — the signal for inferring a native `List` column.
+fn first_non_null_is_list(series: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let non_null = series.call_method0("dropna")?;
+    if non_null.len()? == 0 {
+        return Ok(false);
+    }
+    let first = non_null
+        .call_method0("tolist")?
+        .cast::<PyList>()?
+        .get_item(0)?;
+    Ok(first.cast::<PyList>().is_ok() || first.cast::<PyTuple>().is_ok())
 }
 
 pub fn ensure_columns(

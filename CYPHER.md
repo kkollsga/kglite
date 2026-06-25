@@ -694,6 +694,24 @@ graph.cypher("""
 """)
 ```
 
+## List Properties
+
+Node properties can be **native lists**, not just scalars. When a pandas
+column passed to `add_nodes` holds Python lists, it is ingested as a real
+list property (auto-detected, or forced with `column_types={'col': 'list'}`)
+— stored structurally rather than stringified. List properties behave like
+list literals in every list operation:
+
+```python
+# aliases is a list property, e.g. ['Bob', 'Bobby']
+graph.cypher("MATCH (n:Person) WHERE 'Bobby' IN n.aliases RETURN n.name")  # membership
+graph.cypher("MATCH (n:Person) UNWIND n.aliases AS a RETURN n.name, a")    # explode
+graph.cypher("MATCH (n:Person) RETURN size(n.aliases) AS n_aliases")       # length
+```
+
+`IN` over a list property is true *membership* — `'Bob' IN ['Bobby']` is
+false (no substring matching).
+
 ## List Comprehensions
 
 `[x IN list WHERE predicate | expression]` syntax:

@@ -963,6 +963,20 @@ impl ColumnStore {
                 let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
                 Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
             }
+            8 => {
+                // List: u32 length prefix + bincode(Vec<Value>).
+                if *pos + 4 > blob.len() {
+                    return None;
+                }
+                let blen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
+                *pos += 4;
+                if *pos + blen > blob.len() {
+                    return None;
+                }
+                let items: Vec<Value> = bincode::deserialize(&blob[*pos..*pos + blen]).ok()?;
+                *pos += blen;
+                Some(Value::List(items))
+            }
             _ => None,
         }
     }
@@ -974,8 +988,9 @@ impl ColumnStore {
             1 | 2 | 7 => *pos += 8, // Int64 / Float64 / Timestamp (i64 seconds)
             3 | 5 => *pos += 4,     // UniqueId or Date
             4 => *pos += 1,         // Bool
-            6 if *pos + 4 <= blob.len() => {
-                // String: u32 length prefix + bytes
+            6 | 8 if *pos + 4 <= blob.len() => {
+                // String (6) and List (8) share the layout: u32 length
+                // prefix + that many payload bytes.
                 let slen =
                     u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
                 *pos += 4 + slen;
@@ -1037,17 +1052,25 @@ impl ColumnStore {
                 // the overflow bag (Cluster 2). Skip as null.
                 buf.push(0);
             }
-            // Phase A.1 — collection / graph-entity variants are
-            // query-result-time values; they don't belong in the
-            // overflow property bag. Skip as null (matches the
-            // Duration/NodeRef precedent). C5 (the .kgl v4 format
-            // bump) revisits this if structural property storage
-            // becomes a requirement.
-            Value::List(_)
-            | Value::Map(_)
-            | Value::Node(_)
-            | Value::Relationship(_)
-            | Value::Path(_) => {
+            // Lists ARE real persistable property values (native list
+            // properties, 0.11.x). Tag 8: u32 length prefix + bincode of
+            // the `Vec<Value>` — additive to the wire format (old files
+            // never contain tag 8; the reader maps unknown tags to null).
+            Value::List(items) => match bincode::serialize(items) {
+                Ok(bytes) => {
+                    buf.push(8);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&bytes);
+                }
+                // Serialisation should never fail for a Vec<Value>; if it
+                // somehow does, fall back to null rather than corrupting
+                // the blob.
+                Err(_) => buf.push(0),
+            },
+            // Map / graph-entity variants are query-result-time values;
+            // they don't belong in the overflow property bag. Skip as null
+            // (matches the Duration/NodeRef precedent).
+            Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
                 buf.push(0);
             }
         }
@@ -1216,6 +1239,9 @@ impl ColumnStore {
                 Value::UniqueId(v) => crate::datatypes::values::BorrowedValue::UniqueId(*v),
                 Value::String(s) => crate::datatypes::values::BorrowedValue::String(s.as_str()),
                 Value::DateTime(d) => crate::datatypes::values::BorrowedValue::DateTime(*d),
+                // Native list properties survive the streaming path by
+                // borrowing the slice; the overflow serializer encodes it.
+                Value::List(items) => crate::datatypes::values::BorrowedValue::List(items),
                 _ => continue,
             };
             f(*key, bv)?;
@@ -1734,6 +1760,14 @@ impl ColumnStore {
                 buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 buf.extend_from_slice(s.as_bytes());
             }
+            BorrowedValue::List(items) => match bincode::serialize(items) {
+                Ok(bytes) => {
+                    buf.push(8);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(&bytes);
+                }
+                Err(_) => buf.push(0),
+            },
         }
     }
 
