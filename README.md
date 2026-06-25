@@ -91,6 +91,20 @@ parsed codebase.
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
   [Code analysis guide](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html).**
+- 🤝 **A shared graph as an agent contract.** One `.kgl` can be the
+  two-way contract between collaborating agents (e.g. a *research* agent
+  that batch-rebuilds specs and *coding* agents that plan and mutate
+  status live). The primitives that make this safe are first-class:
+  **ownership layers** (`define_schema(layer='managed'|'runtime')` +
+  `add_nodes(managed_reload=True)` so a rebuild provably can't clobber
+  agent-owned nodes), **role-scoped writes**
+  (`cypher(..., write_scope=[...])` rejects out-of-scope CREATE/SET), a
+  verbatim **instructions slot** at the top of `describe()`
+  (`set_instructions(text)`), **native list properties**, JSON-native
+  ingestion (`from_records(spec)`), and a **dependency frontier**
+  (`CALL ready_set(...)`) to find the next actionable work. Keep the
+  graph general — these are small, opt-in building blocks, not a baked-in
+  workflow.
 - 🧠 **Markdown knowledge bases & agent memory.** `kglite.okf.build(dir)`
   ingests an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)
   bundle — or a Claude memory dir, skills folder, or Obsidian vault — into a

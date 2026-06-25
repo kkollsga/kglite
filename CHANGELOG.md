@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`write_scope` no longer rejects creating an edge to a matched out-of-scope
+  node.** 0.12.0's edge guard checked both endpoint *node* types, which broke
+  the central pattern of linking a runtime node to an existing managed one
+  (`MATCH (t:Task),(s:AlgorithmSpec) CREATE (t)-[:IMPLEMENTS_SPEC]->(s)` with a
+  scope excluding `AlgorithmSpec`). Linking to a matched node doesn't mutate it,
+  so it's now allowed; *creating* a new out-of-scope endpoint node is still
+  rejected (via the node-CREATE guard). Reported by SimulatoRS.
+
+### Changed
+- **`write_scope` now also available on `Transaction.cypher(...)`** — previously
+  only `cypher` / `Session.execute` carried it, so a scoped write reaching for a
+  transaction silently lost its scope. `MERGE` is (and already was in 0.12.0)
+  scoped — the 0.12.0 note saying otherwise was wrong; docs corrected.
+
 ## [0.12.0] — 2026-06-25 — Agent-contract graph: from_records, write-scope, ready-set, native lists, ownership layers + instructions
 
 ### Added

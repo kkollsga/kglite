@@ -19,7 +19,7 @@ surface at a glance — most of what you'd reach for is here, in-process:
 | **Predicates** | `=, <>, <, >, <=, >=`, `AND` / `OR` / `NOT`, `IS [NOT] NULL`, `IN`, `CONTAINS` / `STARTS WITH` / `ENDS WITH`, regex `=~` |
 | **Expressions** | list comprehension `[x IN xs WHERE … \| …]`, `reduce(…)`, `CASE`, list/map literals, parameters `$p` |
 | **Aggregation** | `count` / `sum` / `avg` / `min` / `max` / `collect` / `percentile_cont` / `mode` / `stdev` …, `DISTINCT`, `HAVING`, window functions (`OVER`, `PARTITION BY`, ranking) |
-| **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
+| **Procedures** (`CALL`) | centralities (pagerank, betweenness, closeness, degree), community (louvain, leiden, label propagation), components, k-core, clustering, `triangle_count` / `transitivity`, `eccentricity` / `diameter`, `ready_set` (dependency frontier), `shortest_path_length`, `kg_knn`, structural validators (`duplicate_title`, `cycle_2step`, `parallel_edges`, …) |
 | **Vector + text** | `vector_score(…)` (HNSW index, exact fallback), `text_score(…)` (pluggable embedder) — hybrid semantic + structural in one query |
 | **Spatial** | `point(…)`, `distance(…)`, `wkt_within` / `intersects`, buffer / hull / union, k-NN — see [Spatial](#spatial-functions) |
 | **Temporal** | `date()` / `datetime()` / `localdatetime()`, `duration(…)`, `duration.between`, date arithmetic, `valid_at` / `valid_during` — see [Temporal](#temporal-functions) |
@@ -1352,6 +1352,33 @@ explicit scope also lifts the large-graph refusal guard (you've bounded the
 run yourself). Scoping is an **in-memory-only** feature; on disk/mapped graphs
 the procedures reject `node_type` / `where` (filter with a preceding `MATCH`
 instead).
+
+## Dependency frontier — `CALL ready_set(...)`
+
+Over a DAG on a chosen edge type, `ready_set` returns the nodes whose
+dependencies are all satisfied — the "ready set" of a build / scheduling /
+plan graph. A node's **dependencies** are its outgoing-edge neighbours, so
+`(task)-[:DEPENDS_ON]->(dependency)` reads naturally: a task is ready once
+every dependency it points to is *done*. "Done" is a predicate over the node
+variable `n` (same grammar as `where`); a node already done is excluded, and a
+root with no dependencies is ready as soon as it isn't done.
+
+| Param | Meaning |
+|-------|---------|
+| `relationship` | the dependency edge type (string or list) |
+| `done` | predicate over `n` marking a node satisfied, e.g. `'n.status = "done"'` |
+| `node_type` | optional — limit which nodes are *emitted* (dependencies are followed regardless) |
+
+`YIELD node, dependency_count` (how many dependencies the ready node had, all satisfied).
+
+```python
+# Which tasks can the agent pick up next?
+graph.cypher("""
+    CALL ready_set({relationship: 'DEPENDS_ON', done: 'n.status = "done"'})
+    YIELD node, dependency_count
+    RETURN node.id AS id, dependency_count AS deps ORDER BY id
+""")
+```
 
 ## CREATE / SET / DELETE / REMOVE / MERGE
 

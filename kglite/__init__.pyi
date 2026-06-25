@@ -4080,12 +4080,16 @@ class KnowledgeGraph:
                 ``ValueError``. Useful for bisecting which pass
                 introduces a divergence.
             write_scope: Role-scoped write whitelist. When given, a
-                ``CREATE``/``SET`` whose node type is not in the list is
-                rejected (integrity, not secrecy — e.g. a coding role may
-                write ``["Plan", "Task"]`` but not research-owned
-                ``Algorithm`` nodes; an edge may not wire onto an
-                out-of-scope endpoint). ``None`` (default) = unrestricted.
-                Applies per-call; also available on :meth:`Session.execute`.
+                ``CREATE``/``SET``/``MERGE`` that **creates or mutates** a node
+                whose type is not in the list is rejected (integrity, not
+                secrecy — e.g. a coding role may write ``["Plan", "Task"]`` but
+                not research-owned ``Algorithm`` nodes). Creating an *edge*
+                between already-existing (matched) nodes is allowed even when an
+                endpoint's type is out of scope — linking to a node does not
+                mutate it — but *creating* a new out-of-scope endpoint node is
+                still rejected. ``None`` (default) = unrestricted. Applies
+                per-call; also on :meth:`Session.execute` and
+                ``Transaction.cypher``.
 
         Returns:
             ResultView by default, DataFrame when ``to_df=True``,
@@ -5284,6 +5288,7 @@ class Transaction:
         params: dict[str, Any] | None = None,
         to_df: bool = False,
         timeout_ms: Optional[int] = None,
+        write_scope: list[str] | None = None,
     ) -> ResultView | pd.DataFrame:
         """Execute a Cypher query within this transaction.
 
@@ -5294,6 +5299,8 @@ class Transaction:
             query: Cypher query string. Supports ``EXPLAIN`` and ``PROFILE`` prefixes.
             params: Optional query parameters.
             to_df: If True, return a pandas DataFrame.
+            write_scope: Role-scoped write whitelist — see
+                :meth:`KnowledgeGraph.cypher`.
             timeout_ms: Per-query timeout in milliseconds (merged with transaction deadline).
         """
         ...
