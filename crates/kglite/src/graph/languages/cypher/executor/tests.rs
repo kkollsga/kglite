@@ -586,6 +586,48 @@ fn test_create_single_node() {
 }
 
 #[test]
+fn test_create_rejects_duplicate_primary_key() {
+    use crate::graph::schema::{NodeSchemaDefinition, SchemaDefinition};
+
+    let mut graph = DirGraph::new();
+    // Declare Person.id as an enforced primary key; Doc has none.
+    let mut schema = SchemaDefinition::new();
+    schema.add_node_schema(
+        "Person".to_string(),
+        NodeSchemaDefinition {
+            primary_key: Some("id".to_string()),
+            ..Default::default()
+        },
+    );
+    graph.set_schema(schema);
+
+    fn run(g: &mut DirGraph, q: &str) -> Result<(), String> {
+        let query = super::super::parser::parse_cypher(q).unwrap();
+        execute_mutable(
+            g,
+            &query,
+            HashMap::new(),
+            crate::graph::algorithms::Interrupt::default(),
+        )
+        .map(|_| ())
+    }
+
+    run(&mut graph, "CREATE (n:Person {id: 1, name: 'A'})").unwrap();
+
+    // A duplicate id on the declared-PK type is rejected; no partial insert.
+    match run(&mut graph, "CREATE (n:Person {id: 1, name: 'B'})") {
+        Ok(()) => panic!("expected a duplicate-primary-key error"),
+        Err(e) => assert!(e.contains("duplicate primary key"), "got: {e}"),
+    }
+    assert_eq!(graph.graph.node_count(), 1);
+
+    // An undeclared type keeps the permissive default (two nodes).
+    run(&mut graph, "CREATE (n:Doc {id: 1})").unwrap();
+    run(&mut graph, "CREATE (n:Doc {id: 1})").unwrap();
+    assert_eq!(graph.graph.node_count(), 3);
+}
+
+#[test]
 fn test_create_node_with_properties() {
     let mut graph = DirGraph::new();
     let query =
