@@ -466,22 +466,16 @@ fn execute_create(
                         CreateEdgeDirection::Incoming => (target_idx, source_idx),
                     };
 
-                    // Role-scoped write guard: an edge CREATE may not wire
-                    // onto a node type outside the write whitelist (both
-                    // endpoints must be writable). Skipped entirely when no
-                    // scope is active.
-                    if graph.active_write_scope.is_some() {
-                        let src_type = graph
-                            .get_node(actual_source)
-                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                            .unwrap_or_default();
-                        let tgt_type = graph
-                            .get_node(actual_target)
-                            .map(|n| n.get_node_type_ref(&graph.interner).to_string())
-                            .unwrap_or_default();
-                        enforce_write_scope(graph, &src_type)?;
-                        enforce_write_scope(graph, &tgt_type)?;
-                    }
+                    // NOTE: edge creation is deliberately NOT write-scoped by
+                    // its endpoint node types. Creating an edge between two
+                    // *existing* (MATCH-bound) nodes does not mutate either
+                    // node — it's a read of both endpoints — so the central
+                    // agent-contract pattern (link a runtime `Task` to a
+                    // managed `AlgorithmSpec`) must be allowed under a scope
+                    // that excludes the managed type. A *newly created*
+                    // endpoint is still caught: its node CREATE goes through
+                    // `create_node`, which enforces the scope. (Whitelisting
+                    // relationship types is a possible future refinement.)
 
                     // Schema lock validation for edge
                     if graph.schema_locked {

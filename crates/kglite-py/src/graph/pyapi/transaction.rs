@@ -93,7 +93,7 @@ impl Transaction {
             .is_some_and(CoreTransaction::is_read_only)
     }
 
-    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None))]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, write_scope=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
@@ -101,7 +101,10 @@ impl Transaction {
         params: Option<&Bound<'_, PyDict>>,
         to_df: bool,
         timeout_ms: Option<u64>,
+        write_scope: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
+        let write_scope_set: Option<std::collections::HashSet<String>> =
+            write_scope.map(|v| v.into_iter().collect());
         // Check transaction-level deadline first
         if let Some(tx_deadline) = self.deadline {
             if std::time::Instant::now() >= tx_deadline {
@@ -205,9 +208,7 @@ impl Transaction {
             // state). For interruptible + atomic mutations use `Session.execute`
             // (separate working copy + atomic-swap commit). The deadline applies.
             cancel: None,
-            // Transaction.cypher does not yet expose a write-scope; use
-            // Session.execute or KnowledgeGraph.cypher for role-scoped writes.
-            write_scope: None,
+            write_scope: write_scope_set.as_ref(),
         };
 
         let result = if is_mut {
