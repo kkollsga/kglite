@@ -945,6 +945,13 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN edge_type, count ORDER BY edge_type, count",
         None,
     ),
+    # ── multi-pattern MATCH after a seeded pipeline must cross-join ──
+    (
+        "with_then_multi_pattern_cross_join",
+        "social_graph",
+        "WITH 1 AS x MATCH (a:Person), (c:Company) RETURN a.name AS a, c.name AS c ORDER BY a, c LIMIT 5",
+        None,
+    ),
     # ── inline pattern referencing an UNWIND map member (`{id: x.id}`) ──
     # Regression: `MATCH (n {id: x.id})` where x is an UNWIND'd map must resolve
     # the member per row (previously matched nothing).

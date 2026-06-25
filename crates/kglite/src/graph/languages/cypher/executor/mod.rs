@@ -1158,65 +1158,84 @@ impl<'a> CypherExecutor<'a> {
                 })
                 .collect();
 
+            // Comma-separated patterns CROSS-JOIN: each pattern expands the
+            // working set produced by the previous one (seeded with the incoming
+            // row), not independent rows. Earlier this branch pushed a separate
+            // row per pattern, so `WITH/UNWIND … MATCH (a),(b)` produced
+            // half-rows ({a, null}, {null, b}) instead of the joined {a, b} —
+            // which in turn made `… CREATE (a)-[:R]->(b)` mis-bind and create
+            // spurious nodes. The single-pattern case (the hot path) reduces to
+            // one chain step and keeps the executor's `remaining` limit cap.
+            let single_pattern = clause.patterns.len() == 1;
             for row in &existing.rows {
-                for (pi, pattern) in clause.patterns.iter().enumerate() {
-                    let remaining = limit_hint.map(|l| l.saturating_sub(new_rows.len()));
-                    if remaining == Some(0) {
-                        break;
-                    }
-
-                    // Fast path: probe the transient index when one was
-                    // built and the bind-var isn't already constrained
-                    // by a prior binding (which would need full
-                    // pattern-execute compatibility checks).
-                    if let Some(idx) = &transient_indexes[pi] {
-                        if !row.node_bindings.contains_key(idx.bind_var.as_str()) {
-                            if let Some(probe) = idx.probe_value(row, self.graph) {
-                                for &node_idx in idx.lookup(&probe) {
-                                    let mut new_row = row.clone();
-                                    new_row.node_bindings.insert(idx.bind_var.clone(), node_idx);
-                                    new_rows.push(new_row);
-                                    if limit_hint.is_some_and(|l| new_rows.len() >= l) {
-                                        break;
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                    }
-
-                    // Resolve EqualsVar references against current row
-                    let resolved;
-                    let pat = if Self::pattern_has_vars(pattern) {
-                        resolved = self.resolve_pattern_vars(pattern, row);
-                        &resolved
-                    } else {
-                        pattern
-                    };
-                    let executor = PatternExecutor::with_bindings_and_params(
-                        self.graph,
-                        remaining,
-                        &row.node_bindings,
-                        self.params,
-                    )
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel);
-                    let matches = executor.execute(pat)?;
-
-                    for m in &matches {
-                        if !self.bindings_compatible(row, m) {
-                            continue;
-                        }
-                        let mut new_row = row.clone();
-                        self.merge_match_into_row(&mut new_row, m);
-                        new_rows.push(new_row);
-                        if limit_hint.is_some_and(|l| new_rows.len() >= l) {
-                            break;
-                        }
-                    }
-                }
                 if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                     break;
+                }
+                let mut row_set: Vec<ResultRow> = vec![row.clone()];
+                for (pi, pattern) in clause.patterns.iter().enumerate() {
+                    if row_set.is_empty() {
+                        break;
+                    }
+                    // For a single pattern we can still cap the executor at the
+                    // outer LIMIT; for a cross-join the per-pattern count isn't
+                    // the final count, so don't pre-cap (apply at push instead).
+                    let exec_limit = if single_pattern {
+                        limit_hint.map(|l| l.saturating_sub(new_rows.len()))
+                    } else {
+                        None
+                    };
+                    let mut expanded: Vec<ResultRow> = Vec::with_capacity(row_set.len());
+                    for cur in &row_set {
+                        // Fast path: probe the transient index when one was built
+                        // and the bind-var isn't already constrained by a prior
+                        // binding.
+                        if let Some(idx) = &transient_indexes[pi] {
+                            if !cur.node_bindings.contains_key(idx.bind_var.as_str()) {
+                                if let Some(probe) = idx.probe_value(cur, self.graph) {
+                                    for &node_idx in idx.lookup(&probe) {
+                                        let mut nr = cur.clone();
+                                        nr.node_bindings.insert(idx.bind_var.clone(), node_idx);
+                                        expanded.push(nr);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+
+                        // Resolve EqualsVar / EqualsNodeProp references against
+                        // the current (partially-bound) row.
+                        let resolved;
+                        let pat = if Self::pattern_has_vars(pattern) {
+                            resolved = self.resolve_pattern_vars(pattern, cur);
+                            &resolved
+                        } else {
+                            pattern
+                        };
+                        let executor = PatternExecutor::with_bindings_and_params(
+                            self.graph,
+                            exec_limit,
+                            &cur.node_bindings,
+                            self.params,
+                        )
+                        .set_deadline(self.deadline)
+                        .set_cancel(self.cancel);
+                        let matches = executor.execute(pat)?;
+                        for m in &matches {
+                            if !self.bindings_compatible(cur, m) {
+                                continue;
+                            }
+                            let mut nr = cur.clone();
+                            self.merge_match_into_row(&mut nr, m);
+                            expanded.push(nr);
+                        }
+                    }
+                    row_set = expanded;
+                }
+                for r in row_set {
+                    new_rows.push(r);
+                    if limit_hint.is_some_and(|l| new_rows.len() >= l) {
+                        break;
+                    }
                 }
             }
             new_rows

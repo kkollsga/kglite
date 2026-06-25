@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Multi-pattern `MATCH (a), (b)` after a `WITH`/`UNWIND` now cross-joins.**
+  A comma-separated multi-pattern MATCH that followed a seeded pipeline matched
+  each pattern independently and emitted half-rows (`{a, null}`, `{null, b}`)
+  instead of the joined `{a, b}` — a silent wrong result. As a knock-on, the
+  bulk pattern `UNWIND $rows AS r MATCH (a {id:r.a}),(b {id:r.b}) CREATE/MERGE
+  (a)-[:R]->(b)` mis-bound the endpoints and created **spurious unlabelled
+  nodes** (CREATE) or errored "must be bound by prior MATCH" (MERGE). The
+  subsequent-MATCH branch now chains patterns into a proper cross-join (the
+  single-pattern hot path is unchanged and keeps its LIMIT pushdown). Bulk edge
+  creation via `UNWIND` now works.
+
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 
 ### Added
