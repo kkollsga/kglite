@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Native list properties on ingestion.** A pandas column of Python
+  lists/tuples now ingests as a real list-valued property (`ColumnData::List`)
+  instead of a stringified `"['x', 'y']"`. `IN` tests membership over the
+  elements (`'y' IN n.aliases`), with no false-positive substring match, and
+  `UNWIND n.aliases` yields the individual elements. List typing is also
+  selectable explicitly via `add_nodes(..., column_types={"col": "list"})`.
+  This is ingestion-side only — `Value::List` already round-trips through
+  storage, so there is no `.kgl` format change.
+
 ## [0.11.16] — 2026-06-25 — Primary-key uniqueness + the `kglite` shell on pip (kglite-cli)
 
 ### Added

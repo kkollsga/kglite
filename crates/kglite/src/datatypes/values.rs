@@ -435,6 +435,9 @@ pub enum ColumnType {
     String,
     Boolean,
     DateTime,
+    /// A list-valued column — each cell is a `Value::List`. Heterogeneous
+    /// inner values (matches `Value::List(Vec<Value>)`), so no inner type tag.
+    List,
 }
 
 impl fmt::Display for ColumnType {
@@ -446,6 +449,7 @@ impl fmt::Display for ColumnType {
             ColumnType::String => "String",
             ColumnType::Boolean => "Boolean",
             ColumnType::DateTime => "DateTime",
+            ColumnType::List => "List",
         };
         write!(f, "{}", type_str)
     }
@@ -466,6 +470,9 @@ pub enum ColumnData {
     String(Vec<Option<String>>),
     Boolean(Vec<Option<bool>>),
     DateTime(Vec<Option<NaiveDate>>),
+    /// One `Value::List` payload per cell (None = null). The inner `Vec<Value>`
+    /// is the list; values are heterogeneous, mirroring `Value::List`.
+    List(Vec<Option<Vec<Value>>>),
 }
 
 #[derive(Debug)]
@@ -483,6 +490,7 @@ impl Column {
             ColumnData::String(vec) => vec.get(row_idx)?.as_ref().map(|s| Value::String(s.clone())),
             ColumnData::Boolean(vec) => vec.get(row_idx)?.map(Value::Boolean),
             ColumnData::DateTime(vec) => vec.get(row_idx)?.map(Value::DateTime),
+            ColumnData::List(vec) => vec.get(row_idx)?.as_ref().map(|v| Value::List(v.clone())),
         }
     }
 
@@ -494,6 +502,7 @@ impl Column {
             ColumnData::String(vec) => vec.len(),
             ColumnData::Boolean(vec) => vec.len(),
             ColumnData::DateTime(vec) => vec.len(),
+            ColumnData::List(vec) => vec.len(),
         }
     }
 }
@@ -512,6 +521,7 @@ impl DataFrame {
                     ColumnType::String => ColumnData::String(Vec::new()),
                     ColumnType::Boolean => ColumnData::Boolean(Vec::new()),
                     ColumnType::DateTime => ColumnData::DateTime(Vec::new()),
+                    ColumnType::List => ColumnData::List(Vec::new()),
                 };
                 column_indices.insert(name.clone(), idx);
                 Column {
@@ -586,7 +596,8 @@ impl DataFrame {
             | (ColumnType::Float64, ColumnData::Float64(_))
             | (ColumnType::String, ColumnData::String(_))
             | (ColumnType::Boolean, ColumnData::Boolean(_))
-            | (ColumnType::DateTime, ColumnData::DateTime(_)) => (),
+            | (ColumnType::DateTime, ColumnData::DateTime(_))
+            | (ColumnType::List, ColumnData::List(_)) => (),
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
@@ -654,15 +665,14 @@ impl DataFrame {
                     // Durations are query-time-only — never persisted as
                     // a column (Cluster 2). Serialize via the String column.
                     Value::Duration { .. } => Some(ColumnType::String),
-                    // Phase A.1 — collection / graph-entity variants
-                    // don't fit columnar; serialise via String column
-                    // (JSON-ish). A future enhancement could add
-                    // dedicated columnar shapes.
-                    Value::List(_)
-                    | Value::Map(_)
-                    | Value::Node(_)
-                    | Value::Relationship(_)
-                    | Value::Path(_) => Some(ColumnType::String),
+                    // Lists get a dedicated columnar shape so they round-trip
+                    // structurally (UNWIND/IN), not as stringified JSON.
+                    Value::List(_) => Some(ColumnType::List),
+                    // The remaining collection / graph-entity variants don't fit
+                    // columnar; serialise via the String column (JSON-ish).
+                    Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+                        Some(ColumnType::String)
+                    }
                     Value::Null | Value::NodeRef(_) => None,
                 };
             }
@@ -687,6 +697,7 @@ impl DataFrame {
                 ColumnType::String => ColumnData::String(Vec::with_capacity(num_rows)),
                 ColumnType::Boolean => ColumnData::Boolean(Vec::with_capacity(num_rows)),
                 ColumnType::DateTime => ColumnData::DateTime(Vec::with_capacity(num_rows)),
+                ColumnType::List => ColumnData::List(Vec::with_capacity(num_rows)),
             })
             .collect();
 
@@ -735,6 +746,14 @@ impl DataFrame {
                         Value::DateTime(v) => vec.push(Some(v)),
                         Value::Null => vec.push(None),
                         _ => vec.push(None),
+                    },
+                    ColumnData::List(vec) => match val {
+                        Value::List(v) => vec.push(Some(v)),
+                        Value::Null => vec.push(None),
+                        // A non-list value in an inferred-list column is a
+                        // heterogeneous mix; store it as a 1-element list so it
+                        // isn't silently dropped.
+                        other => vec.push(Some(vec![other])),
                     },
                 }
             }
@@ -1010,6 +1029,7 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::String => "str",
         ColumnType::Boolean => "bool",
         ColumnType::DateTime => "datetime",
+        ColumnType::List => "list",
     }
     .to_string()
 }

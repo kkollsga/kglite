@@ -6,7 +6,7 @@
 //! column without an explicit type falls back to light inference on
 //! the first non-empty cell in each column.
 
-use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
+use crate::datatypes::values::{ColumnData, ColumnType, DataFrame, Value};
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::path::Path;
@@ -356,6 +356,51 @@ fn build_column_data(
             }
             Ok(ColumnData::UniqueId(out))
         }
+        ColumnType::List => {
+            // CSV never *infers* a list — this arm only fires when a blueprint
+            // declares `column_types = {col: "list"}`. The cell is parsed as a
+            // JSON array (`["a","b"]`); a non-array cell becomes a 1-elem list.
+            let mut out: Vec<Option<Vec<Value>>> = Vec::with_capacity(n);
+            for (r, row) in raw.rows.iter().enumerate() {
+                if raw.nulls[r][src_idx] {
+                    out.push(None);
+                    continue;
+                }
+                let s = row[src_idx].trim();
+                if s.is_empty() {
+                    out.push(None);
+                } else {
+                    out.push(Some(parse_list_cell(s)));
+                }
+            }
+            Ok(ColumnData::List(out))
+        }
+    }
+}
+
+/// Parse a CSV cell declared as a list. A JSON array maps element-wise; any
+/// other value is wrapped as a single-element list so it isn't dropped.
+fn parse_list_cell(s: &str) -> Vec<Value> {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(serde_json::Value::Array(items)) => items.iter().map(json_scalar_to_value).collect(),
+        Ok(other) => vec![json_scalar_to_value(&other)],
+        Err(_) => vec![Value::String(s.to_string())],
+    }
+}
+
+/// Minimal JSON-scalar → `Value` mapping for list elements. Nested
+/// arrays/objects are stringified — list cells are expected to hold scalars.
+fn json_scalar_to_value(j: &serde_json::Value) -> Value {
+    match j {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(num) => num
+            .as_i64()
+            .map(Value::Int64)
+            .or_else(|| num.as_f64().map(Value::Float64))
+            .unwrap_or(Value::Null),
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        other => Value::String(other.to_string()),
     }
 }
 
