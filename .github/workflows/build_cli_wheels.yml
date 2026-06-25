@@ -5,11 +5,12 @@ name: Build & Publish kglite-cli wheels
 # wheel stays lean. Mirrors build_wheels.yml but for the maturin `bin` wheel
 # (one `py3-none-<platform>` wheel per target, no Python-version matrix).
 #
-# PREREQUISITE (maintainer, one-time): the `kglite-cli` PyPI project must accept
-# uploads from this workflow — set up Trusted Publishing for kglite-cli, or use
-# an account-scoped PYPI_API_TOKEN. A project-scoped `kglite`-only token cannot
-# create/publish `kglite-cli`. Until then the publish step fails (builds still
-# run); `cargo install kglite-cli` is the fallback.
+# Publishing uses PyPI Trusted Publishing (OIDC) — a pending publisher for the
+# `kglite-cli` project is configured against this workflow (owner kkollsga, repo
+# kglite, workflow build_cli_wheels.yml), so no API token is needed. The first
+# successful publish converts the pending publisher into a real one and creates
+# the project. `cargo install kglite-cli` is the fallback on any platform whose
+# wheel isn't available.
 on:
   push:
     branches: [main]
@@ -141,6 +142,10 @@ jobs:
     needs: [version-check, build-native, build-linux, build-linux-arm]
     if: always() && needs.version-check.outputs.should_publish == 'true' && needs.build-native.result == 'success' && needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
+    # Trusted Publishing (OIDC) — the `kglite-cli` PyPI project has a pending
+    # publisher configured for this workflow, so no API token is needed.
+    permissions:
+      id-token: write
     steps:
       # Gate on the main CI being green (the cli is exercised by the workspace
       # tests). Poll the Checks API directly — the `CI success` aggregate
@@ -172,8 +177,7 @@ jobs:
           path: dist
           merge-multiple: true
       - run: ls -la dist
-      - name: Publish to PyPI
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
-          password: ${{ secrets.PYPI_API_TOKEN }}
