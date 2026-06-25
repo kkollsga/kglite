@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`kglite` interactive shell** (new `kglite-cli` crate) — the `sqlite3`-style REPL for `.kgl` graphs: `kglite app.kgl` opens a Cypher prompt that runs queries and prints aligned tables, no Python or server needed (`cargo install kglite-cli` ships the `kglite` binary). This first cut supports running any Cypher plus `.help`/`.quit`; dot-commands (`.labels`/`.schema`/`.dump`/`.read`/`.mode`/`.save`) and Ctrl-C query cancellation follow.
 - Cypher schema introspection now reaches **property keys** and the **per-type schema**, not just labels/relationship-types/indexes: `CALL db.propertyKeys() YIELD propertyKey` (every declared property name, sorted) and `CALL db.schema() YIELD nodeType, properties` (one row per node type with its sorted property-name list — the in-language counterpart of Python `describe()`). Both are Neo4j-named so Bolt drivers can call them, and reuse the same `schema_overview` helpers `describe()` does. Listed in `list_procedures` and CYPHER.md.
 
 ### Changed

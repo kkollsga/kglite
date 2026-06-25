@@ -5,6 +5,7 @@ members = [
     "crates/kglite-mcp-server",
     "crates/kglite-bolt-server",
     "crates/kglite-c",
+    "crates/kglite-cli",
 ]
 resolver = "2"
 
