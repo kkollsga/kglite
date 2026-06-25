@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-06-25 — write_scope edge-scoping fix + Transaction.cypher write_scope + 0.12.0 docs
+
 ### Fixed
 - **`write_scope` no longer rejects creating an edge to a matched out-of-scope
   node.** 0.12.0's edge guard checked both endpoint *node* types, which broke

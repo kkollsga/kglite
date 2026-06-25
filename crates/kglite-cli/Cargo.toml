@@ -1,6 +1,6 @@
 [package]
 name = "kglite-cli"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
