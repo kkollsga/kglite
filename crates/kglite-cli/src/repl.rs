@@ -5,7 +5,7 @@
 //! rustyline keeps the terminal in raw mode, so SIGINT only fires while a
 //! query is executing).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -35,11 +35,11 @@ Commands:
   .mode table|csv|json   set output format
   .dump <dir>            export a portable CSV + blueprint copy
   .read <file>           run the Cypher statements in a file
+  .import <csv> <Type>   load a CSV as nodes  [--id <col>] [--title <col>]
   .save [path]           save the graph to a .kgl file
 Anything else is run as Cypher, e.g.
   MATCH (n) RETURN labels(n), count(*)
-Ctrl-C cancels a running query; Ctrl-D (or .quit) exits.
-Note: .import is not yet supported (no LOAD CSV) — use .read or .dump/from_blueprint.";
+Ctrl-C cancels a running query; Ctrl-D (or .quit) exits.";
 
 /// Mutable shell state threaded through the loop.
 struct Shell {
@@ -123,9 +123,7 @@ impl Shell {
             "dump" => self.dump(arg),
             "read" => self.read_file(arg),
             "save" => self.save(arg),
-            "import" => {
-                println!("`.import` is not supported (no LOAD CSV). Use .read <file.cypher>, or load a CSV+blueprint via kglite.from_blueprint().")
-            }
+            "import" => self.import_csv(arg),
             other => println!("Unknown command '.{other}'. Try .help."),
         }
         true
@@ -197,12 +195,16 @@ impl Shell {
         }
     }
 
-    /// Execute one Cypher statement and print it in the active mode. Everything
-    /// goes through `execute_mut`: a read query run that way executes as a read
-    /// (no version bump), so one path serves reads and writes in this
-    /// single-user shell.
+    /// Execute one Cypher statement (no params) and print it in the active mode.
     fn run_cypher(&mut self, query: &str) {
-        let params: HashMap<String, Value> = HashMap::new();
+        self.exec(query, HashMap::new());
+    }
+
+    /// Execute a Cypher statement with bound params and render the result.
+    /// Everything goes through `execute_mut`: a read query run that way
+    /// executes as a read (no version bump), so one path serves reads and
+    /// writes in this single-user shell.
+    fn exec(&mut self, query: &str, params: HashMap<String, Value>) {
         let mut opts = ExecuteOptions::new(&params);
         opts.cancel = Some(&CANCEL);
         CANCEL.store(false, Ordering::SeqCst);
@@ -221,6 +223,141 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// `.import <file.csv> <NodeType> [--id <col>] [--title <col>]` — load a CSV
+    /// as nodes. Each row is fed through `UNWIND $rows AS r CREATE (:Type {...})`
+    /// with the row values bound as a parameter (so cell contents are never
+    /// interpolated into the query — no injection); only the node type and
+    /// column names appear as identifiers, and those are validated. `id`/`name`
+    /// columns become the node identity/title via the usual CREATE rules; `--id`
+    /// / `--title` override which column maps to each.
+    fn import_csv(&mut self, arg: &str) {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        if toks.len() < 2 {
+            println!("Usage: .import <file.csv> <NodeType> [--id <col>] [--title <col>]");
+            return;
+        }
+        let (file, node_type) = (toks[0], toks[1]);
+        if !is_ident(node_type) {
+            eprintln!("error: '{node_type}' is not a valid node type (letters/digits/_, not starting with a digit)");
+            return;
+        }
+        let (mut id_col, mut title_col) = (None, None);
+        let mut i = 2;
+        while i < toks.len() {
+            match toks[i] {
+                "--id" => {
+                    id_col = toks.get(i + 1).copied();
+                    i += 2;
+                }
+                "--title" => {
+                    title_col = toks.get(i + 1).copied();
+                    i += 2;
+                }
+                other => {
+                    eprintln!("error: unknown .import flag '{other}'");
+                    return;
+                }
+            }
+        }
+
+        let mut rdr = match csv::Reader::from_path(file) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: cannot read {file}: {e}");
+                return;
+            }
+        };
+        let headers: Vec<String> = match rdr.headers() {
+            Ok(h) => h.iter().map(str::to_string).collect(),
+            Err(e) => {
+                eprintln!("error: reading CSV header: {e}");
+                return;
+            }
+        };
+        for h in &headers {
+            if !is_ident(h) {
+                eprintln!("error: column '{h}' is not a valid identifier — rename it in the CSV");
+                return;
+            }
+        }
+        for (flag, col) in [("--id", id_col), ("--title", title_col)] {
+            if let Some(c) = col {
+                if !headers.iter().any(|h| h == c) {
+                    eprintln!("error: {flag} column '{c}' is not in the CSV header");
+                    return;
+                }
+            }
+        }
+
+        // Build the row params (values parameterized) and the CREATE assignment
+        // list (identifiers only). A column chosen as id/title maps to the
+        // `id`/`title` property; every other column maps to itself.
+        let mut rows: Vec<Value> = Vec::new();
+        for rec in rdr.records() {
+            let rec = match rec {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: reading CSV row: {e}");
+                    return;
+                }
+            };
+            let mut map: BTreeMap<String, Value> = BTreeMap::new();
+            for (h, cell) in headers.iter().zip(rec.iter()) {
+                map.insert(h.clone(), infer_value(cell));
+            }
+            rows.push(Value::Map(map));
+        }
+        let n = rows.len();
+
+        let assignments: Vec<String> = headers
+            .iter()
+            .map(|h| {
+                if Some(h.as_str()) == id_col {
+                    format!("id: r.{h}")
+                } else if Some(h.as_str()) == title_col {
+                    format!("title: r.{h}")
+                } else {
+                    format!("{h}: r.{h}")
+                }
+            })
+            .collect();
+        let query = format!(
+            "UNWIND $rows AS r CREATE (:{node_type} {{{}}})",
+            assignments.join(", ")
+        );
+        let mut params = HashMap::new();
+        params.insert("rows".to_string(), Value::List(rows));
+        self.exec(&query, params);
+        println!("imported {n} {node_type} node(s) from {file}");
+    }
+}
+
+/// A valid Cypher identifier: `[A-Za-z_][A-Za-z0-9_]*`. Guards the node type
+/// and CSV column names that land in the query text (values go through params).
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Infer a typed `Value` from a raw CSV cell: integer, then float, then bool,
+/// else string. Empty cells become `Null`.
+fn infer_value(cell: &str) -> Value {
+    if cell.is_empty() {
+        return Value::Null;
+    }
+    if let Ok(i) = cell.parse::<i64>() {
+        return Value::Int64(i);
+    }
+    if let Ok(f) = cell.parse::<f64>() {
+        return Value::Float64(f);
+    }
+    match cell {
+        "true" | "True" | "TRUE" => Value::Boolean(true),
+        "false" | "False" | "FALSE" => Value::Boolean(false),
+        _ => Value::String(cell.to_string()),
     }
 }
 
@@ -247,7 +384,31 @@ fn split_statements(contents: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_statements;
+    use super::{infer_value, is_ident, split_statements};
+    use kglite::api::Value;
+
+    #[test]
+    fn ident_validation() {
+        assert!(is_ident("Person"));
+        assert!(is_ident("_x9"));
+        assert!(!is_ident("9bad")); // leading digit
+        assert!(!is_ident("a b")); // space
+        assert!(!is_ident("a-b")); // hyphen
+        assert!(!is_ident("")); // empty
+    }
+
+    #[test]
+    fn value_inference() {
+        assert_eq!(infer_value("42"), Value::Int64(42));
+        assert_eq!(infer_value("-7"), Value::Int64(-7));
+        assert_eq!(infer_value("2.5"), Value::Float64(2.5));
+        assert_eq!(infer_value("true"), Value::Boolean(true));
+        assert_eq!(infer_value("False"), Value::Boolean(false));
+        assert_eq!(infer_value("hello"), Value::String("hello".to_string()));
+        assert_eq!(infer_value(""), Value::Null);
+        // A leading-zero/alpha string stays a string (not coerced to int).
+        assert_eq!(infer_value("007x"), Value::String("007x".to_string()));
+    }
 
     #[test]
     fn split_on_semicolons() {
