@@ -336,6 +336,8 @@ fn apply_foreach_body_clause(
         }
         Clause::Delete(del) => {
             execute_delete(graph, del, &result_set, stats)?;
+            GraphWrite::flush_pending_writes(&mut graph.graph);
+            graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Remove(rem) => {
@@ -1085,8 +1087,23 @@ fn execute_delete(
                 // single-statement cascade `MATCH (root) OPTIONAL MATCH
                 // (root)-->(child) DETACH DELETE root, child` works even
                 // when a branch is empty). Skip it.
-                if let Some(Value::NodeRef(i)) = row.projected.get(var_name) {
-                    nodes_to_delete.insert(petgraph::graph::NodeIndex::new(*i as usize));
+                match row.projected.get(var_name) {
+                    Some(Value::NodeRef(i)) => {
+                        nodes_to_delete.insert(petgraph::graph::NodeIndex::new(*i as usize));
+                    }
+                    // A materialised node value (`collect(n)` / `RETURN n`) is
+                    // deletable too — this is the load-bearing case for
+                    // `FOREACH (e IN collect(n) | DETACH DELETE e)`, where the
+                    // loop variable is bound in `projected` as a `Value::Node`,
+                    // not a `NodeRef`. Both `NodeValue` constructors
+                    // (`materialize_node_value` + the Variable-resolution path)
+                    // set `id` to the petgraph index, so it resolves the same
+                    // way as `NodeRef`. (Without this arm, DELETE inside FOREACH
+                    // over a collected list was a silent no-op.)
+                    Some(Value::Node(nv)) => {
+                        nodes_to_delete.insert(petgraph::graph::NodeIndex::new(nv.id as usize));
+                    }
+                    _ => {}
                 }
             }
         }

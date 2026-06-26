@@ -69,6 +69,30 @@ def test_foreach_delete_in_body():
     assert g.cypher("MATCH (k:Keep) RETURN count(k) AS c")[0]["c"] == 1
 
 
+def test_foreach_detach_delete_collected_list():
+    """Regression (0.12.3): DETACH DELETE inside FOREACH over a *collected*
+    list. The loop var binds a materialised node value (`Value::Node` in
+    `projected`), not a MATCH-bound node — `execute_delete` only resolved
+    `NodeRef`, so this was a silent no-op (the dedup idiom deleted nothing)."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:T {id: 1}), (:T {id: 2}), (:T {id: 3})")
+    # Keep-first dedup idiom: delete every element past the head of a collected list.
+    g.cypher("MATCH (t:T) WITH collect(t) AS ns FOREACH (e IN ns[1..] | DETACH DELETE e)")
+    assert g.cypher("MATCH (t:T) RETURN count(t) AS c")[0]["c"] == 1
+    # Whole-list variant removes the rest.
+    g.cypher("MATCH (t:T) WITH collect(t) AS ns FOREACH (e IN ns | DETACH DELETE e)")
+    assert g.cypher("MATCH (t:T) RETURN count(t) AS c")[0]["c"] == 0
+
+
+def test_foreach_detach_delete_collected_detaches_edges():
+    """DETACH inside FOREACH over a collected list must drop incident edges too."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (a:N {id: 1})-[:R]->(b:N {id: 2})")
+    g.cypher("MATCH (n:N) WITH collect(n) AS ns FOREACH (e IN ns | DETACH DELETE e)")
+    assert g.cypher("MATCH (n:N) RETURN count(n) AS c")[0]["c"] == 0
+    assert g.cypher("MATCH ()-[r:R]->() RETURN count(r) AS c")[0]["c"] == 0
+
+
 def test_foreach_non_list_errors():
     g = kglite.KnowledgeGraph()
     with pytest.raises(Exception):

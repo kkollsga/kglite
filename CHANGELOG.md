@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`DETACH DELETE` (and `DELETE`) inside `FOREACH` over a collected list now
+  runs.** `MATCH (n) WITH collect(n) AS ns FOREACH (e IN ns[1..] | DETACH DELETE
+  e)` — the keep-first dedup idiom — was a silent no-op: the FOREACH loop
+  variable binds a *materialised* node value (`Value::Node` in `projected`), but
+  `execute_delete` only resolved a `NodeRef`, so the deletes were dropped. It
+  now resolves a materialised node value the same way, so FOREACH-driven
+  deletion over a `collect()`ed list works (incident edges detach as expected).
+  A MATCH-bound `DELETE t` inside FOREACH was already correct and is unchanged.
 - **Multi-pattern `MATCH (a), (b)` after a `WITH`/`UNWIND` now cross-joins.**
   A comma-separated multi-pattern MATCH that followed a seeded pipeline matched
   each pattern independently and emitted half-rows (`{a, null}`, `{null, b}`)
