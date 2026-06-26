@@ -122,10 +122,17 @@ pub fn add_nodes(
         .collect();
 
     // Build TypeSchema from DataFrame columns for compact storage
-    let schema_keys: Vec<InternedKey> = property_columns
+    let mut schema_keys: Vec<InternedKey> = property_columns
         .iter()
         .map(|(col_name, _)| graph.interner.get_or_intern(col_name))
         .collect();
+    // Freshness provenance: opted-in types carry a reserved `updated_at` column
+    // (engine-managed metadata, stamped below). Register the key so the columnar
+    // store has a slot.
+    let stamps_updated_at = graph.auto_timestamp_for(&node_type);
+    if stamps_updated_at {
+        schema_keys.push(graph.interner.get_or_intern("updated_at"));
+    }
     let type_schema = Arc::new(TypeSchema::from_keys(schema_keys));
 
     // Store or extend the schema for this node type
@@ -148,6 +155,17 @@ pub fn add_nodes(
         .map(|(col_name, col_idx)| (graph.interner.get_or_intern(col_name), *col_idx))
         .collect();
     let property_count = property_columns.len();
+    // One clock read per `add_nodes` call for opted-in types; the same reserved
+    // `updated_at` value stamps every row (engine-owned — overwrites any
+    // user-supplied column of the same name in the row loop below).
+    let provenance_stamp: Option<(InternedKey, Value)> = if stamps_updated_at {
+        Some((
+            graph.interner.get_or_intern("updated_at"),
+            Value::Timestamp(chrono::Local::now().naive_local()),
+        ))
+    } else {
+        None
+    };
     let mut batch = BatchProcessor::new(df_data.row_count());
     let mut skipped_count = 0;
     let mut skipped_null_id = 0;
@@ -203,6 +221,12 @@ pub fn add_nodes(
             if !matches!(value, Value::Null) {
                 properties_interned.push((*interned_key, value));
             }
+        }
+        // Stamp the reserved `updated_at` (engine owns the key — drop any
+        // user-supplied value of the same name, then push ours).
+        if let Some((k, ts)) = &provenance_stamp {
+            properties_interned.retain(|(ik, _)| ik != k);
+            properties_interned.push((*k, ts.clone()));
         }
 
         let action = match type_lookup.check_uid(&id) {

@@ -796,6 +796,11 @@ fn execute_set(
     // regression on the loaded Sodir graph).
     let mut touched_columnar_types: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Freshness provenance: nodes (of opted-in types) modified by this SET get a
+    // single `updated_at` bump after the loop (engine-managed reserved key) —
+    // collected here so multiple property writes on one node stamp it once.
+    let mut nodes_to_stamp: std::collections::HashMap<NodeIndex, String> =
+        std::collections::HashMap::new();
 
     for row in &result_set.rows {
         for item in &set.items {
@@ -1006,6 +1011,12 @@ fn execute_set(
                         prop_type.insert(property.clone(), value_type_name(&value_for_index));
                         graph.upsert_node_type_metadata(&node_type_str, prop_type);
                     }
+
+                    // Record this node for a post-loop `updated_at` bump (don't
+                    // recurse on a write to the reserved key itself).
+                    if property != "updated_at" && graph.auto_timestamp_for(&node_type_str) {
+                        nodes_to_stamp.insert(*node_idx, node_type_str.clone());
+                    }
                 }
                 SetItem::Label { variable, label } => {
                     let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
@@ -1017,6 +1028,49 @@ fn execute_set(
                     }
                 }
             }
+        }
+    }
+
+    // Stamp the reserved `updated_at` once per modified node of an opted-in
+    // type — one clock read for the whole SET. Writes through the in-memory
+    // columnar master (fast path) or the per-node setter, mirroring the
+    // property writes above; the type-schema slot + metadata are registered so
+    // it persists. No equality-index update — `updated_at` is range-queried.
+    if !nodes_to_stamp.is_empty() {
+        let ts = Value::Timestamp(chrono::Local::now().naive_local());
+        let key = graph.interner.get_or_intern("updated_at");
+        let is_in_memory = !graph.graph.is_disk();
+        for (node_idx, node_type) in &nodes_to_stamp {
+            if let Some(schema_arc) = graph.type_schemas.get_mut(node_type) {
+                if schema_arc.slot(key).is_none() {
+                    Arc::make_mut(schema_arc).add_key(key);
+                }
+            }
+            let columnar_row_id = match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
+                Some(crate::graph::schema::PropertyStorage::Columnar { row_id, .. }) => {
+                    Some(*row_id)
+                }
+                _ => None,
+            };
+            let mut wrote = false;
+            if is_in_memory {
+                if let Some(row_id) = columnar_row_id {
+                    if let Some(master) = graph.column_stores.get_mut(node_type) {
+                        Arc::make_mut(master).set(row_id, key, &ts, None);
+                        touched_columnar_types.insert(node_type.clone());
+                        graph.graph.note_recorded_node_upsert(*node_idx);
+                        wrote = true;
+                    }
+                }
+            }
+            if !wrote {
+                if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
+                    node.set_property("updated_at", ts.clone(), &mut graph.interner);
+                }
+            }
+            let mut prop_type = HashMap::new();
+            prop_type.insert("updated_at".to_string(), value_type_name(&ts));
+            graph.upsert_node_type_metadata(node_type, prop_type);
         }
     }
 

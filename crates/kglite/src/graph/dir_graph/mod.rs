@@ -2440,8 +2440,13 @@ impl DirGraph {
         id: Value,
         title: Value,
         node_type: &str,
-        properties: HashMap<String, Value>,
+        mut properties: HashMap<String, Value>,
     ) -> NodeIndex {
+        // Freshness provenance: stamp `updated_at` (+ git_sha in phase 3) when
+        // this type opted into `auto_timestamp`. Single chokepoint for every
+        // create route — Cypher CREATE, `add_nodes`, and MERGE-create all land
+        // here. A no-op for types that didn't opt in.
+        self.inject_provenance(node_type, &mut properties);
         if self.graph.is_disk() {
             // Register property types in node_type_metadata from the values we
             // have in hand. Do NOT read the node back for this: on disk the

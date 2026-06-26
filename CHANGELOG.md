@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Opt-in freshness provenance (`auto_timestamp`).** Tag a node type with
+  `define_schema({"nodes": {"Task": {"auto_timestamp": True}}})` and the engine
+  stamps a reserved `updated_at` timestamp on every write to that type — Cypher
+  `CREATE`/`MERGE`/`SET` and `add_nodes` — so "when was this last touched" is a
+  query (`MATCH (n:Task) WHERE n.updated_at < $cutoff`), not a guess. The stamp
+  is **engine-managed** (a user-supplied `updated_at` is overwritten) and
+  **off by default**, so writes stay deterministic unless a type opts in. A
+  `SET` bumps it once per modified node. (Edges, hiding the key from data views,
+  and caller-supplied `git_sha` land in follow-up changes.)
+
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 
 ### Added

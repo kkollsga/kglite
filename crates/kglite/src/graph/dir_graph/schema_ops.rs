@@ -3,7 +3,10 @@
 //! out of `mod.rs` to keep it under the god-file LoC ceiling; these are a
 //! small, cohesive group with no other dependencies.
 
+use std::collections::HashMap;
+
 use super::DirGraph;
+use crate::datatypes::values::Value;
 use crate::graph::schema::SchemaDefinition;
 
 impl DirGraph {
@@ -69,6 +72,22 @@ impl DirGraph {
             .and_then(|s| s.node_schemas.get(node_type))
             .and_then(|n| n.auto_timestamp)
             .unwrap_or(false)
+    }
+
+    /// Inject freshness-provenance properties into `props` when `node_type`
+    /// opted into `auto_timestamp`. Stamps `updated_at` (wall-clock now, as a
+    /// `Timestamp`, matching `datetime()`); phase 3 adds the caller-supplied
+    /// `git_sha`/`modified_by`. A no-op (one bool check, no clock read) for
+    /// types that didn't opt in — so writes stay deterministic by default.
+    /// Shared by the create path (`insert_node_routed`) and the SET path.
+    pub(crate) fn inject_provenance(&self, node_type: &str, props: &mut HashMap<String, Value>) {
+        if !self.auto_timestamp_for(node_type) {
+            return;
+        }
+        props.insert(
+            "updated_at".to_string(),
+            Value::Timestamp(chrono::Local::now().naive_local()),
+        );
     }
 
     /// The instructions for `channel`, falling back to the default slot.
