@@ -78,6 +78,17 @@ def test_set_bumps_once_and_advances():
     assert _updated_at(g, "Task", 1) > created
 
 
+def test_label_set_bumps_updated_at():
+    """A label add (`SET n:Label`) is a modification — it bumps updated_at too,
+    not just property SETs."""
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1})")
+    created = _updated_at(g, "Task", 1)
+    time.sleep(0.01)
+    g.cypher("MATCH (n:Task {id: 1}) SET n:Extra")
+    assert _updated_at(g, "Task", 1) > created
+
+
 def test_set_off_type_not_stamped():
     g = _opted_graph()
     g.cypher("CREATE (:Other {id: 1})")

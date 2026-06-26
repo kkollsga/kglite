@@ -1046,6 +1046,18 @@ fn execute_set(
                     let key = graph.interner.get_or_intern(label);
                     if graph.add_node_label(node_idx, key) {
                         stats.properties_set += 1;
+                        // A label add is a modification — bump `updated_at` if
+                        // the node's type opted in (same post-loop stamp as a
+                        // property SET).
+                        if let Some(nt) = graph
+                            .graph
+                            .node_weight(node_idx)
+                            .map(|n| n.node_type_str(&graph.interner).to_string())
+                        {
+                            if graph.auto_timestamp_for(&nt) {
+                                nodes_to_stamp.insert(node_idx, nt);
+                            }
+                        }
                     }
                 }
             }
