@@ -865,10 +865,15 @@ fn format_mutation_ack(result: &cypher::CypherResult) -> String {
     push(st.nodes_deleted, "node(s) deleted");
     push(st.relationships_deleted, "relationship(s) deleted");
     push(st.properties_removed, "property(ies) removed");
+    // Stamp the running engine version on every write ack. A long-running
+    // server pins its engine; after a venv upgrade the *running* binary may lag,
+    // so writes silently stop honouring a newer feature (e.g. auto_timestamp
+    // stamping) until restart. Surfacing the version makes that visible.
+    let engine = env!("CARGO_PKG_VERSION");
     if parts.is_empty() {
-        "OK (no changes).".to_string()
+        format!("OK (no changes). [engine {engine}]")
     } else {
-        format!("OK: {}.", parts.join(", "))
+        format!("OK: {}. [engine {engine}]", parts.join(", "))
     }
 }
 
@@ -1046,6 +1051,11 @@ mod tests {
         let out = write(&mut a, "CREATE (:Task {id:'t1'})", None).unwrap();
         assert!(out.starts_with("OK:"), "expected write ack, got: {out}");
         assert!(out.contains("node(s) created"), "got: {out}");
+        // The ack stamps the running engine version (stale-server footgun).
+        assert!(
+            out.contains(&format!("[engine {}]", env!("CARGO_PKG_VERSION"))),
+            "ack should carry the engine version, got: {out}"
+        );
         // SET acks too.
         let out = write(&mut a, "MATCH (t:Task{id:'t1'}) SET t.status='done'", None).unwrap();
         assert!(out.contains("property(ies) set"), "got: {out}");

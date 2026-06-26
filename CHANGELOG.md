@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MCP write acks now stamp the engine version** (`OK: 1 node(s) created.
+  [engine 0.12.3]`). A long-running `kglite-mcp-server` pins its engine, so a
+  venv upgrade that doesn't restart the server silently keeps writing with the
+  old engine (e.g. not honouring `auto_timestamp` until restart) — surfacing the
+  version on every write makes that visible.
+
 ## [0.12.3] — 2026-06-26 — Opt-in freshness provenance + SimulatoRS Cypher fixes
 
 ### Added
