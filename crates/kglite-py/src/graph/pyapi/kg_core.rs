@@ -1077,6 +1077,12 @@ impl KnowledgeGraph {
                         node_schema.layer = Some(layer);
                     }
 
+                    // Opt-in freshness provenance: stamp `updated_at` (+ the
+                    // caller's git_sha) on every write to this type.
+                    if let Some(ts_val) = node_schema_dict.get_item("auto_timestamp")? {
+                        node_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
+                    }
+
                     schema.add_node_schema(node_type, node_schema);
                 }
             }
@@ -1308,6 +1314,9 @@ impl KnowledgeGraph {
             }
             if let Some(layer) = &node_schema.layer {
                 schema_dict.set_item("layer", layer)?;
+            }
+            if let Some(auto_timestamp) = node_schema.auto_timestamp {
+                schema_dict.set_item("auto_timestamp", auto_timestamp)?;
             }
 
             nodes_dict.set_item(node_type, schema_dict)?;

@@ -59,6 +59,18 @@ impl DirGraph {
             .as_deref()
     }
 
+    /// Whether `node_type` opted into freshness auto-stamping via
+    /// `define_schema({..., auto_timestamp: True})`. Drives the `updated_at` /
+    /// `git_sha` provenance stamp on writes. `false` (the default) keeps writes
+    /// deterministic.
+    pub fn auto_timestamp_for(&self, node_type: &str) -> bool {
+        self.schema_definition
+            .as_ref()
+            .and_then(|s| s.node_schemas.get(node_type))
+            .and_then(|n| n.auto_timestamp)
+            .unwrap_or(false)
+    }
+
     /// The instructions for `channel`, falling back to the default slot.
     pub fn get_instructions(&self, channel: Option<&str>) -> Option<&str> {
         self.graph_instructions

@@ -213,3 +213,18 @@ class TestManagedReloadGuard:
             raise AssertionError("bogus layer should be rejected")
         except ValueError as e:
             assert "'managed' or 'runtime'" in str(e)
+
+    def test_auto_timestamp_tag_roundtrips(self, tmp_path):
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"Task": {"auto_timestamp": True}, "Spec": {"layer": "managed"}}})
+        sd = g.schema_definition()
+        assert sd["nodes"]["Task"]["auto_timestamp"] is True
+        # Not opted in → absent (off by default).
+        assert "auto_timestamp" not in sd["nodes"]["Spec"]
+        # Survives save → load (additive serde field).
+        p = str(tmp_path / "g.kgl")
+        g.cypher("CREATE (:Task {id: 1})")
+        g.save(p)
+        import kglite
+
+        assert kglite.load(p).schema_definition()["nodes"]["Task"]["auto_timestamp"] is True

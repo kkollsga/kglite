@@ -3278,6 +3278,15 @@ class KnowledgeGraph:
                         "Task":         {"layer": "runtime"},
                     }})
 
+                A node entry may also set ``auto_timestamp: True`` to opt that
+                type into **freshness provenance**: every write (Cypher
+                ``CREATE``/``SET``/``MERGE`` and ``add_nodes``) auto-stamps an
+                ``updated_at`` timestamp, plus the caller-supplied ``git_sha`` /
+                ``modified_by`` when provided. It is off by default (writes stay
+                deterministic) and independent of ``layer`` / ``lock_schema``::
+
+                    g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
+
         Returns:
             Self with schema defined.
         """

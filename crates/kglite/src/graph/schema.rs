@@ -2061,6 +2061,15 @@ pub struct NodeSchemaDefinition {
     /// guarantee. `None` = unlayered (no restriction). Additive serde field.
     #[serde(default)]
     pub layer: Option<String>,
+    /// Opt-in freshness provenance: when `Some(true)`, every write to a node of
+    /// this type auto-stamps an `updated_at` timestamp (and the caller-supplied
+    /// `git_sha`/`modified_by`, when provided) — so "this node describes the
+    /// world as of X" is checkable and drift becomes a query, not a silent lie.
+    /// `None`/`Some(false)` = off (the default), which keeps writes
+    /// deterministic. Independent of `layer` and of `schema_locked`. Additive
+    /// serde field — older `.kgl` files load with `None`.
+    #[serde(default)]
+    pub auto_timestamp: Option<bool>,
 }
 
 /// Defines the expected schema for a connection type
