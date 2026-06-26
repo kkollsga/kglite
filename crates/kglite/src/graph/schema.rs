@@ -18,6 +18,20 @@ pub use crate::graph::storage::backend::GraphBackend;
 pub use crate::graph::storage::{MappedGraph, MemoryGraph};
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
+
+/// Engine-managed freshness-provenance keys. Stamped by the engine on writes to
+/// `auto_timestamp`-opted types (never user-supplied); queryable directly
+/// (`n.updated_at`, `r.updated_at`), but **hidden from property enumerations**
+/// (`keys`/`properties`/`RETURN n`/`RETURN n.*`/`describe`) so they read as
+/// metadata, not user data.
+pub const RESERVED_PROVENANCE_KEYS: &[&str] = &["updated_at", "git_sha", "modified_by"];
+
+/// Whether `key` is an engine-managed provenance key (see
+/// [`RESERVED_PROVENANCE_KEYS`]).
+#[inline]
+pub fn is_reserved_provenance_key(key: &str) -> bool {
+    RESERVED_PROVENANCE_KEYS.contains(&key)
+}
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

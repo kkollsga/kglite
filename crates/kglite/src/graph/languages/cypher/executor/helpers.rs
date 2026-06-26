@@ -498,9 +498,16 @@ pub(crate) fn materialize_node_value(
     if let Some(stored) = node.get_property_value("type") {
         properties.insert("type".to_string(), stored);
     }
-    // Then every user-set property the node carries.
+    // Then every user-set property the node carries. Reserved provenance keys
+    // (updated_at, …) are engine metadata, not user data — omit them from the
+    // materialised value so they stay out of keys()/properties()/RETURN n[.*]
+    // (direct `n.updated_at` still resolves via the property path).
     for (key, val) in node.property_iter(&graph.interner) {
-        if key == "id" || key == "title" || key == "type" {
+        if key == "id"
+            || key == "title"
+            || key == "type"
+            || crate::graph::schema::is_reserved_provenance_key(key)
+        {
             continue;
         }
         properties.insert(key.to_string(), val.clone());
@@ -537,7 +544,11 @@ pub(crate) fn materialize_node_value(
     if node.properties_are_columnar() {
         if let Some(type_meta) = graph.get_node_type_metadata(&node_type) {
             for prop_name in type_meta.keys() {
-                if prop_name == "id" || prop_name == "title" || prop_name == "type" {
+                if prop_name == "id"
+                    || prop_name == "title"
+                    || prop_name == "type"
+                    || crate::graph::schema::is_reserved_provenance_key(prop_name)
+                {
                     continue;
                 }
                 if properties.contains_key(prop_name) {

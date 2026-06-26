@@ -99,6 +99,20 @@ def test_user_supplied_updated_at_is_overwritten_by_engine():
     assert _updated_at(g, "Task", 1) != "nonsense"
 
 
+def test_reserved_key_hidden_from_data_views_but_directly_queryable():
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1, name: 'x'})")
+    # Hidden from every property enumeration...
+    assert "updated_at" not in g.cypher("MATCH (n:Task) RETURN keys(n) AS k").to_dicts()[0]["k"]
+    assert "updated_at" not in g.cypher("MATCH (n:Task) RETURN properties(n) AS p").to_dicts()[0]["p"]
+    assert "updated_at" not in g.cypher("MATCH (n:Task) RETURN n {.*} AS m").to_dicts()[0]["m"]
+    assert "updated_at" not in g.cypher("MATCH (n:Task) RETURN n").to_dicts()[0]["n"]["properties"]
+    assert "updated_at" not in g.describe()
+    # ...but explicitly accessible for stale checks.
+    assert _updated_at(g, "Task", 1) is not None
+    assert "updated_at" in g.cypher("MATCH (n:Task) RETURN n {.updated_at} AS m").to_dicts()[0]["m"]
+
+
 def test_survives_save_load(tmp_path):
     g = _opted_graph()
     g.cypher("CREATE (:Task {id: 1})")

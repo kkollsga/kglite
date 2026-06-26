@@ -806,7 +806,7 @@ fn write_type_detail(
                     !matches!(
                         k.as_str(),
                         "type" | "title" | "id" | "nid" | "description" | "label"
-                    )
+                    ) && !crate::graph::schema::is_reserved_provenance_key(k)
                 })
                 .collect();
             prop_names.sort();
@@ -831,6 +831,9 @@ fn write_type_detail(
         let filtered: Vec<&PropertyStatInfo> = stats
             .iter()
             .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))
+            // Reserved provenance keys (updated_at, …) are engine metadata, not
+            // user data — keep them out of the schema's property listing.
+            .filter(|p| !crate::graph::schema::is_reserved_provenance_key(&p.property_name))
             .filter(|p| p.non_null > 0)
             // Suppress uniformly-`false` boolean columns: these are the
             // cross-language frontend flags (`flutter_build`, `is_ffi`,
@@ -1075,7 +1078,10 @@ fn write_type_detail(
                     // 4-property preview with no signal. A `true` boolean still
                     // shows. (Consistent with the all-false suppression in the
                     // <properties> block above.)
-                    if is_null_value(v) || matches!(v, Value::Boolean(false)) {
+                    if is_null_value(v)
+                        || matches!(v, Value::Boolean(false))
+                        || crate::graph::schema::is_reserved_provenance_key(k)
+                    {
                         continue;
                     }
                     if prop_count < 4 {

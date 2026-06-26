@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   query (`MATCH (n:Task) WHERE n.updated_at < $cutoff`), not a guess. The stamp
   is **engine-managed** (a user-supplied `updated_at` is overwritten) and
   **off by default**, so writes stay deterministic unless a type opts in. A
-  `SET` bumps it once per modified node. (Edges, hiding the key from data views,
-  and caller-supplied `git_sha` land in follow-up changes.)
+  `SET` bumps it once per modified node. `updated_at` is **metadata, not data**:
+  directly queryable (`n.updated_at`, `n {.updated_at}`) but hidden from
+  property enumerations (`keys(n)`, `properties(n)`, `RETURN n` / `n {.*}`,
+  `describe()`). (Edges and caller-supplied `git_sha` land in follow-up changes.)
 
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 
