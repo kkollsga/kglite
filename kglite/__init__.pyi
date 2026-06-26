@@ -4021,6 +4021,8 @@ class KnowledgeGraph:
         disable_optimizer: bool = False,
         disabled_passes: Optional[list[str]] = None,
         write_scope: Optional[list[str]] = None,
+        git_sha: Optional[str] = None,
+        modified_by: Optional[str] = None,
     ) -> Union[ResultView, pd.DataFrame, str]:
         """Execute a Cypher query.
 

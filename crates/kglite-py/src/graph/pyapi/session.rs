@@ -161,6 +161,8 @@ impl Session {
                 value_codecs: None,
                 cancel,
                 write_scope: None,
+                git_sha: None,
+                modified_by: None,
             };
             let outcome = execute_read(&inner, &query_owned, &opts)?;
             let mut result = outcome.result;
@@ -210,6 +212,8 @@ impl Session {
                 value_codecs: None,
                 cancel,
                 write_scope: write_scope.as_ref(),
+                git_sha: None,
+                modified_by: None,
             };
             let outcome = execute_mut(graph, &query_owned, &opts)?;
             let mut result = outcome.result;

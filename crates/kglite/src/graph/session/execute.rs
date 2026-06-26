@@ -93,6 +93,11 @@ pub struct ExecuteOptions<'a> {
     /// `Algorithm`). `None` = unrestricted (the default; zero hot-path cost).
     /// Only meaningful on the mutation path (`execute_mut`).
     pub write_scope: Option<&'a HashSet<String>>,
+    /// Caller-supplied freshness provenance, stamped alongside `updated_at` on
+    /// writes to `auto_timestamp` types: the git SHA the writer is working
+    /// against and an actor id. `None` = not supplied. Mutation path only.
+    pub git_sha: Option<&'a str>,
+    pub modified_by: Option<&'a str>,
 }
 
 impl<'a> ExecuteOptions<'a> {
@@ -132,6 +137,8 @@ impl<'a> ExecuteOptions<'a> {
             value_codecs: None,
             cancel: None,
             write_scope: None,
+            git_sha: None,
+            modified_by: None,
         }
     }
 }
@@ -268,8 +275,12 @@ pub fn execute_mut(
         // mutation, then clear it unconditionally (even on error) so it never
         // leaks into a later execution on the same working copy.
         graph.active_write_scope = opts.write_scope.cloned();
+        graph.active_git_sha = opts.git_sha.map(str::to_string);
+        graph.active_modified_by = opts.modified_by.map(str::to_string);
         let r = cypher::execute_mutable(graph, &parsed, params, interrupt);
         graph.active_write_scope = None;
+        graph.active_git_sha = None;
+        graph.active_modified_by = None;
         let r = r.map_err(|message| exec_err(opts, message))?;
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.

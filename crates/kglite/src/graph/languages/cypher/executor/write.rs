@@ -1052,64 +1052,72 @@ fn execute_set(
         }
     }
 
-    // Stamp the reserved `updated_at` once per modified node of an opted-in
-    // type — one clock read for the whole SET. Writes through the in-memory
-    // columnar master (fast path) or the per-node setter, mirroring the
-    // property writes above; the type-schema slot + metadata are registered so
-    // it persists. No equality-index update — `updated_at` is range-queried.
+    // Stamp the reserved provenance keys (updated_at + caller git_sha/
+    // modified_by) once per modified node of an opted-in type — one clock read
+    // for the whole SET. Writes through the in-memory columnar master (fast
+    // path) or the per-node setter, mirroring the property writes above; the
+    // type-schema slot + metadata are registered so they persist. No
+    // equality-index update — provenance is range-queried, not equality-matched.
     if !nodes_to_stamp.is_empty() {
-        let ts = Value::Timestamp(chrono::Local::now().naive_local());
-        let key = graph.interner.get_or_intern("updated_at");
+        let prov = graph.provenance_props();
         let is_in_memory = !graph.graph.is_disk();
         for (node_idx, node_type) in &nodes_to_stamp {
-            if let Some(schema_arc) = graph.type_schemas.get_mut(node_type) {
-                if schema_arc.slot(key).is_none() {
-                    Arc::make_mut(schema_arc).add_key(key);
-                }
-            }
             let columnar_row_id = match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
                 Some(crate::graph::schema::PropertyStorage::Columnar { row_id, .. }) => {
                     Some(*row_id)
                 }
                 _ => None,
             };
-            let mut wrote = false;
-            if is_in_memory {
-                if let Some(row_id) = columnar_row_id {
-                    if let Some(master) = graph.column_stores.get_mut(node_type) {
-                        Arc::make_mut(master).set(row_id, key, &ts, None);
-                        touched_columnar_types.insert(node_type.clone());
-                        graph.graph.note_recorded_node_upsert(*node_idx);
-                        wrote = true;
+            for &(pname, ref pval) in &prov {
+                let key = graph.interner.get_or_intern(pname);
+                if let Some(schema_arc) = graph.type_schemas.get_mut(node_type) {
+                    if schema_arc.slot(key).is_none() {
+                        Arc::make_mut(schema_arc).add_key(key);
                     }
                 }
-            }
-            if !wrote {
-                if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
-                    node.set_property("updated_at", ts.clone(), &mut graph.interner);
+                let mut wrote = false;
+                if is_in_memory {
+                    if let Some(row_id) = columnar_row_id {
+                        if let Some(master) = graph.column_stores.get_mut(node_type) {
+                            Arc::make_mut(master).set(row_id, key, pval, None);
+                            touched_columnar_types.insert(node_type.clone());
+                            graph.graph.note_recorded_node_upsert(*node_idx);
+                            wrote = true;
+                        }
+                    }
                 }
+                if !wrote {
+                    if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, *node_idx) {
+                        node.set_property(pname, pval.clone(), &mut graph.interner);
+                    }
+                }
+                let mut prop_type = HashMap::new();
+                prop_type.insert(pname.to_string(), value_type_name(pval));
+                graph.upsert_node_type_metadata(node_type, prop_type);
             }
-            let mut prop_type = HashMap::new();
-            prop_type.insert("updated_at".to_string(), value_type_name(&ts));
-            graph.upsert_node_type_metadata(node_type, prop_type);
         }
     }
 
-    // Edge freshness provenance: bump `updated_at` once per modified edge of an
-    // opted-in connection type (engine owns the key).
+    // Edge freshness provenance: bump the reserved keys (updated_at + caller
+    // git_sha/modified_by) once per modified edge of an opted-in type.
     if !edges_to_stamp.is_empty() {
-        let ts = Value::Timestamp(chrono::Local::now().naive_local());
-        let key = graph.interner.get_or_intern("updated_at");
+        let interned: Vec<(InternedKey, Value)> = graph
+            .provenance_props()
+            .into_iter()
+            .map(|(k, v)| (graph.interner.get_or_intern(k), v))
+            .collect();
         for edge_index in &edges_to_stamp {
             if let Some(EdgeData {
                 properties: edge_props,
                 ..
             }) = GraphWrite::edge_weight_mut(&mut graph.graph, *edge_index)
             {
-                if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| *ek == key) {
-                    *existing = ts.clone();
-                } else {
-                    edge_props.push((key, ts.clone()));
+                for (key, val) in &interned {
+                    if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| ek == key) {
+                        *existing = val.clone();
+                    } else {
+                        edge_props.push((*key, val.clone()));
+                    }
                 }
             }
         }

@@ -529,6 +529,16 @@ struct CypherArgs {
     /// research-owned ones. Ignored on read-only servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_scope: Option<Vec<String>>,
+    /// Freshness provenance for this write (write-enabled servers only): the git
+    /// commit SHA the agent is working against, stamped as `updated_at`'s
+    /// companion on writes to `auto_timestamp` node/edge types — so a node can
+    /// record "describes the code as of sha X". Optional; ignored on reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// Optional actor id stamped alongside `git_sha` (e.g. the agent/session
+    /// name). Same gating as `git_sha`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_by: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -627,11 +637,15 @@ pub fn register(
         let codecs = s.value_codecs();
         if writable {
             let scope = args.write_scope.clone();
+            let git_sha = args.git_sha.clone();
+            let modified_by = args.modified_by.clone();
             s.with_active_mut(|active| {
                 run_cypher_write(
                     active,
                     &args.query,
                     scope.as_deref(),
+                    git_sha.as_deref(),
+                    modified_by.as_deref(),
                     codecs,
                     csv.as_deref(),
                 )
@@ -785,10 +799,13 @@ fn run_cypher_tool(
 /// write-lock, with an optional role-scoped `write_scope`. Mutations land on
 /// the live active graph (in-memory) so subsequent queries observe them;
 /// persistence is the separate `save_graph` step.
+#[allow(clippy::too_many_arguments)]
 fn run_cypher_write(
     active: &mut ActiveGraph,
     query: &str,
     write_scope: Option<&[String]>,
+    git_sha: Option<&str>,
+    modified_by: Option<&str>,
     value_codecs: Option<&[ValueCodec]>,
     csv_http: Option<&crate::csv_http::CsvHttpConfig>,
 ) -> Result<String, String> {
@@ -815,6 +832,8 @@ fn run_cypher_write(
     opts.embedder = embedder;
     opts.value_codecs = value_codecs;
     opts.write_scope = scope.as_ref();
+    opts.git_sha = git_sha;
+    opts.modified_by = modified_by;
     let outcome = kglite::api::session::execute_mut(dir, query, &opts)
         .map_err(|e| format!("Cypher execution error: {e}"))?;
     // A mutation with no RETURN yields no rows — acknowledge with a write
@@ -1007,7 +1026,7 @@ mod tests {
         q: &str,
         scope: Option<&[String]>,
     ) -> Result<String, String> {
-        run_cypher_write(active, q, scope, None, None)
+        run_cypher_write(active, q, scope, None, None, None, None)
     }
 
     #[test]

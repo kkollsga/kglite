@@ -113,6 +113,41 @@ def test_reserved_key_hidden_from_data_views_but_directly_queryable():
     assert "updated_at" in g.cypher("MATCH (n:Task) RETURN n {.updated_at} AS m").to_dicts()[0]["m"]
 
 
+# --- caller git_sha / modified_by (phase 5) ----------------------------------
+
+
+def test_git_sha_and_modified_by_stamped_and_hidden():
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1})", git_sha="abc123", modified_by="agent-x")
+    r = g.cypher("MATCH (n:Task {id: 1}) RETURN n.git_sha AS s, n.modified_by AS m, n.updated_at AS u").to_dicts()[0]
+    assert r["s"] == "abc123"
+    assert r["m"] == "agent-x"
+    assert r["u"] is not None
+    # Reserved → hidden from data views.
+    props = g.cypher("MATCH (n:Task) RETURN properties(n) AS p").to_dicts()[0]["p"]
+    assert "git_sha" not in props and "modified_by" not in props
+
+
+def test_git_sha_context_cleared_after_each_query():
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1})", git_sha="abc123")
+    g.cypher("CREATE (:Task {id: 2})")  # no context
+    assert g.cypher("MATCH (n:Task {id: 2}) RETURN n.git_sha AS s").to_dicts()[0]["s"] is None
+
+
+def test_git_sha_stamped_on_set():
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1})")
+    g.cypher("MATCH (n:Task {id: 1}) SET n.x = 1", git_sha="def456")
+    assert g.cypher("MATCH (n:Task {id: 1}) RETURN n.git_sha AS s").to_dicts()[0]["s"] == "def456"
+
+
+def test_git_sha_only_on_opted_in_types():
+    g = _opted_graph()
+    g.cypher("CREATE (:Other {id: 1})", git_sha="abc123")
+    assert g.cypher("MATCH (n:Other {id: 1}) RETURN n.git_sha AS s").to_dicts()[0]["s"] is None
+
+
 # --- edges / connections (phase 4) -------------------------------------------
 
 

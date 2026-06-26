@@ -209,6 +209,8 @@ impl Transaction {
             // (separate working copy + atomic-swap commit). The deadline applies.
             cancel: None,
             write_scope: write_scope_set.as_ref(),
+            git_sha: None,
+            modified_by: None,
         };
 
         let result = if is_mut {

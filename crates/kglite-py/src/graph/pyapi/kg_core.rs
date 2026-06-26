@@ -1471,7 +1471,7 @@ impl KnowledgeGraph {
     ///     for row in result:
     ///         print(f"{row['person']}: {row['friends']} friends")
     ///     ```
-    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None, write_scope=None))]
+    #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
     fn cypher(
         slf: &Bound<'_, Self>,
@@ -1485,6 +1485,8 @@ impl KnowledgeGraph {
         disable_optimizer: bool,
         disabled_passes: Option<Vec<String>>,
         write_scope: Option<Vec<String>>,
+        git_sha: Option<String>,
+        modified_by: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         // Role-scoped write whitelist (mutation path only). Build the set once.
         let write_scope_set: Option<std::collections::HashSet<String>> =
@@ -1584,6 +1586,8 @@ impl KnowledgeGraph {
                 // deadline still bounds this path.
                 cancel: None,
                 write_scope: write_scope_set.as_ref(),
+                git_sha: git_sha.as_deref(),
+                modified_by: modified_by.as_deref(),
             };
 
             let outcome = kglite_core::api::session::execute_mut(graph, query, &opts)
@@ -1656,8 +1660,10 @@ impl KnowledgeGraph {
                 value_codecs: None,
                 // Overridden with the live cancel flag inside enter_kg below.
                 cancel: None,
-                // Read path: write-scope is irrelevant (no mutation).
+                // Read path: write-scope + provenance are irrelevant (no mutation).
                 write_scope: None,
+                git_sha: None,
+                modified_by: None,
             };
             let inner_for_detach = std::sync::Arc::clone(&inner);
             py.enter_kg(

@@ -21,8 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `describe()`). **Edges/connections** opt in the same way
   (`define_schema({"connections": {"LINKS": {"auto_timestamp": True}}})`) and
   stamp `updated_at` on edge CREATE / `add_connections` / SET, queryable as
-  `r.updated_at` and likewise hidden from edge data views. (Caller-supplied
-  `git_sha` lands in a follow-up change.)
+  `r.updated_at` and likewise hidden from edge data views.
+- **Caller-supplied `git_sha` / `modified_by` provenance.** Pass
+  `cypher(query, git_sha="<sha>", modified_by="<actor>")` (or the MCP
+  `cypher_query` `git_sha`/`modified_by` args) and the write stamps those
+  reserved keys alongside `updated_at` on `auto_timestamp` types — so a node
+  records "describes the world as of commit X, written by Y". Queryable
+  (`n.git_sha`, `r.git_sha`), hidden from data views, scoped to the one
+  mutation (cleared after), and only on opted-in types.
 
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 

@@ -213,6 +213,16 @@ pub struct DirGraph {
     /// (the default; zero cost).
     #[serde(skip, default)]
     pub(crate) active_write_scope: Option<std::collections::HashSet<String>>,
+    /// Caller-supplied freshness provenance for the current mutation: the git
+    /// commit SHA the writer is working against (`active_git_sha`) and an actor
+    /// id (`active_modified_by`). Stamped alongside `updated_at` on writes to
+    /// `auto_timestamp` types. Set by `execute_mut` for one mutation and cleared
+    /// immediately after (same lifecycle as `active_write_scope`); never
+    /// serialized. `None` = not supplied (the default; zero cost).
+    #[serde(skip, default)]
+    pub(crate) active_git_sha: Option<String>,
+    #[serde(skip, default)]
+    pub(crate) active_modified_by: Option<String>,
     /// Monotonically increasing version counter — incremented on every mutation.
     /// Used for optimistic concurrency control in transactions.
     #[serde(skip, default)]
@@ -385,6 +395,8 @@ impl DirGraph {
             read_only: false,
             schema_locked: false,
             active_write_scope: None,
+            active_git_sha: None,
+            active_modified_by: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
@@ -434,6 +446,8 @@ impl DirGraph {
             read_only: false,
             schema_locked: false,
             active_write_scope: None,
+            active_git_sha: None,
+            active_modified_by: None,
             version: 0,
             interner: StringInterner::new(),
             type_schemas: HashMap::new(),
