@@ -1041,7 +1041,11 @@ class KnowledgeGraph:
                 This is a stable contract: it lets a batch reload re-assert a
                 subset of fields (e.g. identity + links) without clobbering
                 fields another writer owns (e.g. an agent's ``status``/``notes``).
-                ``'replace'`` instead overwrites the whole node.
+                ``'replace'`` instead **reconciles** the node to the incoming
+                record — it overwrites the whole node, so a property *absent*
+                from the new data is **dropped** (set to null). Use ``'replace'``
+                (not ``'update'``) when the source data is the single source of
+                truth and you want field *deletions* to propagate on rebuild.
             skip_columns: Columns to exclude.
             column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'|'list'}``.
                 A column of Python lists/tuples is auto-detected as a native
