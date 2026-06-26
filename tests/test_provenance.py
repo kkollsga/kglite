@@ -209,6 +209,15 @@ def test_connection_auto_timestamp_roundtrips():
     assert "auto_timestamp" not in sd["connections"]["PLAIN"]
 
 
+def test_fluent_stale_check_on_updated_at():
+    """The fluent path can filter on `updated_at` for stale checks, same as
+    Cypher (it's directly accessible, just hidden from listings)."""
+    g = _opted_graph()
+    g.cypher("CREATE (:Task {id: 1}), (:Task {id: 2})")
+    rows = g.select("Task").where({"updated_at": {">": "2020-01-01T00:00:00"}}).collect()
+    assert len(rows) == 2
+
+
 def test_survives_save_load(tmp_path):
     g = _opted_graph()
     g.cypher("CREATE (:Task {id: 1})")

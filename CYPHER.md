@@ -1298,6 +1298,52 @@ ORDER BY size(members) DESC
 For test-impact analysis from a set of changed files, see
 `CALL affected_tests({files: [...]})`.
 
+### Freshness provenance & staleness (`auto_timestamp`)
+
+Opt a node or connection type into engine-managed freshness stamping:
+
+```python
+g.define_schema({
+    "nodes":       {"Task":  {"auto_timestamp": True}},
+    "connections": {"LINKS": {"source": "N", "target": "N", "auto_timestamp": True}},
+})
+```
+
+Every write to an opted-in type then stamps a reserved **`updated_at`** (a
+`Timestamp`) — Cypher `CREATE`/`MERGE`/`SET` and `add_nodes`/`add_connections`.
+Pass `git_sha` / `modified_by` to record who/where too:
+
+```python
+g.cypher("MERGE (t:Task {id: $id}) SET t.status = 'done'",
+         params={"id": "T1"}, git_sha=current_sha, modified_by="coding-agent")
+```
+
+These are **metadata, not data**: queryable directly (`n.updated_at`,
+`n.git_sha`, `r.updated_at`) but hidden from `properties(n)` / `keys(n)` /
+`RETURN n` / `describe()`. The engine owns them (a user-supplied value is
+overwritten) and only stamps opted-in types, so other writes stay deterministic.
+
+**Staleness is a pure query — the engine never touches the filesystem.** Have
+the *writer* stamp the linked file's state (`file_path`, `file_mtime` /
+`content_hash`) when it writes the node; drift is then a check:
+
+```cypher
+-- Nodes whose linked file changed since we last described it
+MATCH (n:Artifact) WHERE n.updated_at < n.file_mtime
+RETURN n.id, n.file_path, n.updated_at, n.file_mtime
+
+-- Linked-path-gone: the writer stamps a flag (it owns fs access)
+MATCH (n:Artifact) WHERE n.file_missing = true RETURN n.id, n.file_path
+
+-- "As of which commit?" — group runtime nodes by the sha they were written at
+MATCH (n:Task) WHERE n.git_sha IS NOT NULL
+RETURN n.git_sha, count(n) ORDER BY count(n) DESC
+```
+
+Store `file_mtime` as a `Timestamp` (or ISO string) so it compares with
+`updated_at`. For low-stakes drift you want to defer, mark your own
+`stale = true` property and sweep later (`MATCH (n) WHERE n.stale = true ...`).
+
 ### Edge confidence
 
 Most edges are **extracted** — parsed facts (a `CALLS` edge is a real call
