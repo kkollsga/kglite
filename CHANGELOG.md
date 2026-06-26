@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] — 2026-06-26 — Opt-in freshness provenance + SimulatoRS Cypher fixes
+
 ### Added
 - **Opt-in freshness provenance (`auto_timestamp`).** Tag a node type with
   `define_schema({"nodes": {"Task": {"auto_timestamp": True}}})` and the engine

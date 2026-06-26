@@ -1066,8 +1066,10 @@ pub kglite::api::session::ExecuteOptions::cancel: core::option::Option<&'static 
 pub kglite::api::session::ExecuteOptions::deadline: core::option::Option<std::time::Instant>
 pub kglite::api::session::ExecuteOptions::disabled_passes: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
 pub kglite::api::session::ExecuteOptions::embedder: core::option::Option<alloc::sync::Arc<dyn kglite::api::Embedder>>
+pub kglite::api::session::ExecuteOptions::git_sha: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::lazy_eligible: bool
 pub kglite::api::session::ExecuteOptions::max_rows: core::option::Option<usize>
+pub kglite::api::session::ExecuteOptions::modified_by: core::option::Option<&'a str>
 pub kglite::api::session::ExecuteOptions::params: &'a std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub kglite::api::session::ExecuteOptions::value_codecs: core::option::Option<&'a [kglite::api::cypher::ValueCodec]>
 pub kglite::api::session::ExecuteOptions::write_scope: core::option::Option<&'a std::collections::hash::set::HashSet<alloc::string::String>>
@@ -1680,6 +1682,7 @@ pub fn kglite::datatypes::values::Value::serialize<__S>(&self, __serializer: __S
 impl<'de> serde_core::de::Deserialize<'de> for kglite::datatypes::values::Value
 pub fn kglite::datatypes::values::Value::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub struct kglite::api::ConnectionSchemaDefinition
+pub kglite::api::ConnectionSchemaDefinition::auto_timestamp: core::option::Option<bool>
 pub kglite::api::ConnectionSchemaDefinition::cardinality: core::option::Option<alloc::string::String>
 pub kglite::api::ConnectionSchemaDefinition::property_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::ConnectionSchemaDefinition::required_properties: alloc::vec::Vec<alloc::string::String>
@@ -1809,7 +1812,6 @@ pub fn kglite::api::DirGraph::has_connection_type(&self, connection_type: &str) 
 pub fn kglite::api::DirGraph::has_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::DirGraph::has_node_type(&self, node_type: &str) -> bool
 pub fn kglite::api::DirGraph::has_type_shadowing_property(&self) -> bool
-pub fn kglite::api::DirGraph::insert_node_routed(&mut self, id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: &str, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> petgraph::graph_impl::NodeIndex
 pub fn kglite::api::DirGraph::is_columnar(&self) -> bool
 pub fn kglite::api::DirGraph::list_composite_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<alloc::string::String>)>
 pub fn kglite::api::DirGraph::list_indexes(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
@@ -1845,6 +1847,8 @@ pub fn kglite::api::DirGraph::upsert_node_type_metadata(&mut self, node_type: &s
 pub fn kglite::api::DirGraph::vacuum(&mut self) -> std::collections::hash::map::HashMap<petgraph::graph_impl::NodeIndex, petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::DirGraph::version(&self) -> u64
 impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::auto_timestamp_for(&self, node_type: &str) -> bool
+pub fn kglite::api::DirGraph::auto_timestamp_for_connection(&self, conn_type: &str) -> bool
 pub fn kglite::api::DirGraph::clear_schema(&mut self)
 pub fn kglite::api::DirGraph::get_instructions(&self, channel: core::option::Option<&str>) -> core::option::Option<&str>
 pub fn kglite::api::DirGraph::get_schema(&self) -> core::option::Option<&kglite::api::SchemaDefinition>
@@ -1859,6 +1863,8 @@ pub fn kglite::api::DirGraph::get_edge_type_counts(&self) -> std::collections::h
 pub fn kglite::api::DirGraph::has_edge_type_counts_cache(&self) -> bool
 pub fn kglite::api::DirGraph::has_type_connectivity_cache(&self) -> bool
 pub fn kglite::api::DirGraph::property_ndv(&self, node_type: &str, property: &str) -> core::option::Option<usize>
+impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::insert_node_routed(&mut self, id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: &str, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> petgraph::graph_impl::NodeIndex
 impl core::clone::Clone for kglite::api::DirGraph
 pub fn kglite::api::DirGraph::clone(&self) -> kglite::api::DirGraph
 impl core::default::Default for kglite::api::DirGraph
@@ -1981,6 +1987,7 @@ pub fn kglite::api::NodeInfo::clone(&self) -> kglite::api::NodeInfo
 impl core::fmt::Debug for kglite::api::NodeInfo
 pub fn kglite::api::NodeInfo::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::NodeSchemaDefinition
+pub kglite::api::NodeSchemaDefinition::auto_timestamp: core::option::Option<bool>
 pub kglite::api::NodeSchemaDefinition::field_types: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::layer: core::option::Option<alloc::string::String>
 pub kglite::api::NodeSchemaDefinition::optional_fields: alloc::vec::Vec<alloc::string::String>
