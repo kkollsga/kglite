@@ -31,7 +31,12 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
                 source_types.sort();
                 let mut target_types: Vec<String> = info.target_types.iter().cloned().collect();
                 target_types.sort();
-                let mut property_names: Vec<String> = info.property_types.keys().cloned().collect();
+                let mut property_names: Vec<String> = info
+                    .property_types
+                    .keys()
+                    .filter(|k| !crate::graph::schema::is_reserved_provenance_key(k))
+                    .cloned()
+                    .collect();
                 property_names.sort();
                 ConnectionTypeStats {
                     connection_type: conn_type.clone(),
@@ -131,7 +136,11 @@ pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStat
             source_types.sort();
             let mut target_types: Vec<String> = acc.targets.into_iter().collect();
             target_types.sort();
-            let mut property_names: Vec<String> = acc.props.into_iter().collect();
+            let mut property_names: Vec<String> = acc
+                .props
+                .into_iter()
+                .filter(|k| !crate::graph::schema::is_reserved_provenance_key(k))
+                .collect();
             property_names.sort();
             ConnectionTypeStats {
                 connection_type: conn_type,

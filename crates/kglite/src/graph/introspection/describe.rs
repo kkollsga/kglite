@@ -517,6 +517,7 @@ fn write_connections_detail(
                 .props
                 .into_iter()
                 .map(|(k, v)| (graph.interner.resolve(k).to_string(), v))
+                .filter(|(k, _)| !crate::graph::schema::is_reserved_provenance_key(k))
                 .collect();
             prop_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -611,6 +612,7 @@ fn write_connections_detail(
                 .iter()
                 .filter(|(_, v)| !is_null_value(v))
                 .map(|(k, v)| (graph.interner.resolve(*k), v))
+                .filter(|(k, _)| !crate::graph::schema::is_reserved_provenance_key(k))
                 .collect();
             prop_refs.sort_by_key(|(k, _)| *k);
             for (key, v) in prop_refs.iter().take(4) {

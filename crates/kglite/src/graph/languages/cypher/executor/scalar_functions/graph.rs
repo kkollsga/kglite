@@ -271,6 +271,9 @@ impl<'a> CypherExecutor<'a> {
                                 keys.extend(
                                     edge_data
                                         .property_keys(&self.graph.interner)
+                                        .filter(|k| {
+                                            !crate::graph::schema::is_reserved_provenance_key(k)
+                                        })
                                         .map(String::from),
                                 );
                                 keys.sort();
@@ -327,6 +330,9 @@ impl<'a> CypherExecutor<'a> {
                                 ),
                             );
                             for key in edge_data.property_keys(&self.graph.interner) {
+                                if crate::graph::schema::is_reserved_provenance_key(key) {
+                                    continue; // engine metadata, not user data
+                                }
                                 if let Some(val) = edge_data.get_property(key) {
                                     props.insert(key.to_string(), val.clone());
                                 }

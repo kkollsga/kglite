@@ -609,10 +609,14 @@ impl ConnectionBatchProcessor {
         &mut self,
         source_idx: NodeIndex,
         target_idx: NodeIndex,
-        properties: HashMap<String, Value>,
+        mut properties: HashMap<String, Value>,
         graph: &mut DirGraph,
         connection_type: &str,
     ) -> Result<(), String> {
+        // Freshness provenance: stamp `updated_at` when this edge type opted in
+        // (single chokepoint for every `add_connections` route; registered into
+        // `schema_properties` below so the columnar edge store gets a slot).
+        graph.inject_edge_provenance(connection_type, &mut properties);
         // Skip existence check on initial load (no existing edges of this type)
         if !self.skip_existence_check {
             // Check if an edge of the same type already exists between these nodes

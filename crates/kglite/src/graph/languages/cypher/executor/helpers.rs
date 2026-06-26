@@ -594,6 +594,11 @@ pub(crate) fn materialize_rel_value(
     let (src, dst) = graph.graph.edge_endpoints(edge_idx)?;
     let mut properties: BTreeMap<String, Value> = BTreeMap::new();
     for key in edge_data.property_keys(&graph.interner) {
+        // Reserved provenance keys are engine metadata — kept out of the
+        // materialised edge value (direct `r.updated_at` still resolves).
+        if crate::graph::schema::is_reserved_provenance_key(key) {
+            continue;
+        }
         if let Some(val) = edge_data.get_property(key) {
             properties.insert(key.to_string(), val.clone());
         }

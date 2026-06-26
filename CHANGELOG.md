@@ -18,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SET` bumps it once per modified node. `updated_at` is **metadata, not data**:
   directly queryable (`n.updated_at`, `n {.updated_at}`) but hidden from
   property enumerations (`keys(n)`, `properties(n)`, `RETURN n` / `n {.*}`,
-  `describe()`). (Edges and caller-supplied `git_sha` land in follow-up changes.)
+  `describe()`). **Edges/connections** opt in the same way
+  (`define_schema({"connections": {"LINKS": {"auto_timestamp": True}}})`) and
+  stamp `updated_at` on edge CREATE / `add_connections` / SET, queryable as
+  `r.updated_at` and likewise hidden from edge data views. (Caller-supplied
+  `git_sha` lands in a follow-up change.)
 
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 

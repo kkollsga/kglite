@@ -74,6 +74,16 @@ impl DirGraph {
             .unwrap_or(false)
     }
 
+    /// Whether `conn_type` (an edge/connection type) opted into
+    /// `auto_timestamp`. The edge sibling of [`Self::auto_timestamp_for`].
+    pub fn auto_timestamp_for_connection(&self, conn_type: &str) -> bool {
+        self.schema_definition
+            .as_ref()
+            .and_then(|s| s.connection_schemas.get(conn_type))
+            .and_then(|c| c.auto_timestamp)
+            .unwrap_or(false)
+    }
+
     /// Inject freshness-provenance properties into `props` when `node_type`
     /// opted into `auto_timestamp`. Stamps `updated_at` (wall-clock now, as a
     /// `Timestamp`, matching `datetime()`); phase 3 adds the caller-supplied
@@ -82,6 +92,23 @@ impl DirGraph {
     /// Shared by the create path (`insert_node_routed`) and the SET path.
     pub(crate) fn inject_provenance(&self, node_type: &str, props: &mut HashMap<String, Value>) {
         if !self.auto_timestamp_for(node_type) {
+            return;
+        }
+        props.insert(
+            "updated_at".to_string(),
+            Value::Timestamp(chrono::Local::now().naive_local()),
+        );
+    }
+
+    /// Edge sibling of [`Self::inject_provenance`]: stamp a reserved
+    /// `updated_at` into an edge's property map when `conn_type` opted in
+    /// (engine owns the key — replaces any user value).
+    pub(crate) fn inject_edge_provenance(
+        &self,
+        conn_type: &str,
+        props: &mut HashMap<String, Value>,
+    ) {
+        if !self.auto_timestamp_for_connection(conn_type) {
             return;
         }
         props.insert(

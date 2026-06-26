@@ -113,6 +113,67 @@ def test_reserved_key_hidden_from_data_views_but_directly_queryable():
     assert "updated_at" in g.cypher("MATCH (n:Task) RETURN n {.updated_at} AS m").to_dicts()[0]["m"]
 
 
+# --- edges / connections (phase 4) -------------------------------------------
+
+
+def _edge_graph():
+    g = kglite.KnowledgeGraph()
+    g.define_schema(
+        {
+            "connections": {
+                "LINKS": {"source": "N", "target": "N", "auto_timestamp": True},
+                "PLAIN": {"source": "N", "target": "N"},
+            }
+        }
+    )
+    g.cypher("CREATE (a:N {id: 1}), (b:N {id: 2})")
+    return g
+
+
+def _edge_updated_at(g, rel):
+    return g.cypher(f"MATCH ()-[r:{rel}]->() RETURN r.updated_at AS u").to_dicts()[0]["u"]
+
+
+def test_cypher_edge_create_stamps_opted_in_only():
+    g = _edge_graph()
+    g.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:LINKS]->(b)")
+    g.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:PLAIN]->(b)")
+    assert _edge_updated_at(g, "LINKS") is not None
+    assert _edge_updated_at(g, "PLAIN") is None
+
+
+def test_add_connections_edge_stamps():
+    g = _edge_graph()
+    g.add_connections(pd.DataFrame([{"s": 1, "t": 2}]), "LINKS", "N", "s", "N", "t")
+    assert _edge_updated_at(g, "LINKS") is not None
+
+
+def test_edge_set_bumps_and_advances():
+    g = _edge_graph()
+    g.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:LINKS {w: 1}]->(b)")
+    created = _edge_updated_at(g, "LINKS")
+    time.sleep(0.01)
+    g.cypher("MATCH ()-[r:LINKS]->() SET r.w = 5")
+    assert _edge_updated_at(g, "LINKS") > created
+
+
+def test_edge_reserved_key_hidden_but_queryable():
+    g = _edge_graph()
+    g.cypher("MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:LINKS {w: 1}]->(b)")
+    assert "updated_at" not in g.cypher("MATCH ()-[r:LINKS]->() RETURN keys(r) AS k").to_dicts()[0]["k"]
+    assert "updated_at" not in g.cypher("MATCH ()-[r:LINKS]->() RETURN properties(r) AS p").to_dicts()[0]["p"]
+    assert "updated_at" not in g.cypher("MATCH ()-[r:LINKS]->() RETURN r").to_dicts()[0]["r"]["properties"]
+    assert "updated_at" not in g.describe()
+    assert _edge_updated_at(g, "LINKS") is not None  # direct access works
+
+
+def test_connection_auto_timestamp_roundtrips():
+    g = _edge_graph()
+    sd = g.schema_definition()
+    assert sd["connections"]["LINKS"]["auto_timestamp"] is True
+    assert "auto_timestamp" not in sd["connections"]["PLAIN"]
+
+
 def test_survives_save_load(tmp_path):
     g = _opted_graph()
     g.cypher("CREATE (:Task {id: 1})")

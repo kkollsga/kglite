@@ -508,6 +508,9 @@ fn execute_create(
                             edge_props.insert(key.clone(), val);
                         }
                     }
+                    // Freshness provenance: stamp `updated_at` if this edge type
+                    // opted in (before metadata/EdgeData pick up the props).
+                    graph.inject_edge_provenance(&edge_pat.connection_type, &mut edge_props);
 
                     // Register the connection type fully — both the lightweight
                     // cache (for `has_connection_type`) AND the metadata map.
@@ -801,6 +804,10 @@ fn execute_set(
     // collected here so multiple property writes on one node stamp it once.
     let mut nodes_to_stamp: std::collections::HashMap<NodeIndex, String> =
         std::collections::HashMap::new();
+    // Edges (of opted-in connection types) modified by this SET — bumped once
+    // after the loop, same as nodes.
+    let mut edges_to_stamp: std::collections::HashSet<petgraph::graph::EdgeIndex> =
+        std::collections::HashSet::new();
 
     for row in &result_set.rows {
         for item in &set.items {
@@ -835,6 +842,20 @@ fn execute_set(
                                     edge_props.push((key, value));
                                 }
                                 stats.properties_set += 1;
+                            }
+                            // Record for a post-loop updated_at bump if the edge
+                            // type opted in (skip writes to the reserved key).
+                            if property != "updated_at" {
+                                if let Some(ct_key) = graph
+                                    .graph
+                                    .edge_weight(edge_index)
+                                    .map(|e| e.connection_type)
+                                {
+                                    let ct = graph.interner.resolve(ct_key).to_string();
+                                    if graph.auto_timestamp_for_connection(&ct) {
+                                        edges_to_stamp.insert(edge_index);
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -1071,6 +1092,26 @@ fn execute_set(
             let mut prop_type = HashMap::new();
             prop_type.insert("updated_at".to_string(), value_type_name(&ts));
             graph.upsert_node_type_metadata(node_type, prop_type);
+        }
+    }
+
+    // Edge freshness provenance: bump `updated_at` once per modified edge of an
+    // opted-in connection type (engine owns the key).
+    if !edges_to_stamp.is_empty() {
+        let ts = Value::Timestamp(chrono::Local::now().naive_local());
+        let key = graph.interner.get_or_intern("updated_at");
+        for edge_index in &edges_to_stamp {
+            if let Some(EdgeData {
+                properties: edge_props,
+                ..
+            }) = GraphWrite::edge_weight_mut(&mut graph.graph, *edge_index)
+            {
+                if let Some((_, existing)) = edge_props.iter_mut().find(|(ek, _)| *ek == key) {
+                    *existing = ts.clone();
+                } else {
+                    edge_props.push((key, ts.clone()));
+                }
+            }
         }
     }
 

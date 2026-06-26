@@ -2099,6 +2099,11 @@ pub struct ConnectionSchemaDefinition {
     pub required_properties: Vec<String>,
     /// Expected types for connection properties
     pub property_types: HashMap<String, String>,
+    /// Opt-in freshness provenance (mirrors [`NodeSchemaDefinition::auto_timestamp`]):
+    /// `Some(true)` stamps a reserved `updated_at` on every write to an edge of
+    /// this type. `None`/`Some(false)` = off (default). Additive serde field.
+    #[serde(default)]
+    pub auto_timestamp: Option<bool>,
 }
 
 /// Complete schema definition for the graph

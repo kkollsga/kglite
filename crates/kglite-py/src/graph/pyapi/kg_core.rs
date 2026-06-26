@@ -1126,11 +1126,17 @@ impl KnowledgeGraph {
                         cardinality: None,
                         required_properties: Vec::new(),
                         property_types: HashMap::new(),
+                        auto_timestamp: None,
                     };
 
                     // Parse optional cardinality
                     if let Some(cardinality) = conn_schema_dict.get_item("cardinality")? {
                         conn_schema.cardinality = Some(cardinality.extract::<String>()?);
+                    }
+
+                    // Opt-in freshness provenance for edges of this type.
+                    if let Some(ts_val) = conn_schema_dict.get_item("auto_timestamp")? {
+                        conn_schema.auto_timestamp = Some(ts_val.extract::<bool>()?);
                     }
 
                     // Parse required_properties
@@ -1332,6 +1338,9 @@ impl KnowledgeGraph {
 
             if let Some(cardinality) = &conn_schema.cardinality {
                 schema_dict.set_item("cardinality", cardinality)?;
+            }
+            if let Some(auto_timestamp) = conn_schema.auto_timestamp {
+                schema_dict.set_item("auto_timestamp", auto_timestamp)?;
             }
 
             if !conn_schema.required_properties.is_empty() {
