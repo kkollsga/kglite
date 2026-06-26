@@ -310,6 +310,7 @@ impl<'a> CypherExecutor<'a> {
             | "missing_required_edge"
             | "missing_inbound_edge"
             | "duplicate_title"
+            | "duplicate_id"
             | "null_property" => &["node"],
             "cycle_2step" => &["node_a", "node_b"],
             "inverse_violation" => &["a", "b"],
@@ -363,7 +364,7 @@ impl<'a> CypherExecutor<'a> {
                      k_core, clustering_coefficient, \
                      cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
                      missing_required_edge, missing_inbound_edge, duplicate_title, \
-                     null_property, inverse_violation, transitivity_violation, \
+                     duplicate_id, null_property, inverse_violation, transitivity_violation, \
                      cardinality_violation, type_domain_violation, \
                      type_range_violation, parallel_edges, \
                      db.labels, db.relationshipTypes, db.indexes, \
@@ -827,6 +828,11 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
+            "duplicate_id" => super::rule_procedures::execute_duplicate_id(
+                self.graph,
+                &params,
+                &clause.yield_items,
+            )?,
             "null_property" => super::rule_procedures::execute_null_property(
                 self.graph,
                 &params,
@@ -979,6 +985,11 @@ impl<'a> CypherExecutor<'a> {
                     (
                         "duplicate_title",
                         "Rule: nodes of {type} whose title is shared with another node of the same type",
+                        "node",
+                    ),
+                    (
+                        "duplicate_id",
+                        "Rule: nodes of {type} whose id is shared with another node of the same type",
                         "node",
                     ),
                     (

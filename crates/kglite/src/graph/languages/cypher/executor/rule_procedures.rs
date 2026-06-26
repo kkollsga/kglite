@@ -274,6 +274,51 @@ pub(super) fn execute_duplicate_title(
     Ok(rows)
 }
 
+/// `CALL duplicate_id({type: 'Artifact'}) YIELD node`
+///
+/// Yields one row per node of `type` whose id is shared with at least one
+/// other node of the same type. The sibling of `duplicate_title` for the
+/// identity column — useful after bulk writes, since a `CREATE` fanned out
+/// over a multi-row `MATCH` (standard Cypher: one create per row) can mint
+/// several nodes with the same id without complaint. Aggregate downstream:
+///
+/// ```cypher
+/// CALL duplicate_id({type: 'Artifact'}) YIELD node
+/// WITH node.id AS i, collect(node) AS dups
+/// WHERE size(dups) > 1
+/// RETURN i, size(dups) AS count
+/// ORDER BY count DESC LIMIT 20
+/// ```
+///
+/// @procedure: duplicate_id
+pub(super) fn execute_duplicate_id(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    let node_type = require_string_param(params, "type", "duplicate_id")?;
+    let yield_var = require_node_yield(yield_items, "duplicate_id", "node")?;
+    let nodes = type_indices(graph, &node_type)?;
+
+    // Pass 1 — count ids
+    let mut counts: HashMap<String, u32> = HashMap::with_capacity(nodes.len());
+    for nidx in nodes.iter() {
+        if let Some(id) = id_of(graph, nidx) {
+            *counts.entry(id).or_insert(0) += 1;
+        }
+    }
+    // Pass 2 — emit nodes whose id count > 1
+    let mut rows = Vec::new();
+    for nidx in nodes.iter() {
+        if let Some(id) = id_of(graph, nidx) {
+            if counts.get(&id).copied().unwrap_or(0) > 1 {
+                rows.push(make_node_row(&yield_var, nidx));
+            }
+        }
+    }
+    Ok(rows)
+}
+
 /// `CALL inverse_violation({rel_a: 'parent_of', rel_b: 'child_of'}) YIELD a, b`
 ///
 /// Yields one row per `(a, b)` pair where `(a)-[rel_a]->(b)` exists but
@@ -696,6 +741,7 @@ const RULE_PARAM_SCHEMAS: &[(&str, &[(&str, bool)])] = &[
     ),
     ("cycle_2step", &[("type", true), ("edge", true)]),
     ("duplicate_title", &[("type", true)]),
+    ("duplicate_id", &[("type", true)]),
     ("inverse_violation", &[("rel_a", true), ("rel_b", true)]),
     (
         "kg_knn",
@@ -777,6 +823,15 @@ fn has_edge_of_type(
 fn title_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
     let nd = graph.graph.node_weight(nidx)?;
     match nd.title().as_ref() {
+        Value::String(s) => Some(s.clone()),
+        Value::Null => None,
+        other => Some(format!("{other:?}")),
+    }
+}
+
+fn id_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {
+    let nd = graph.graph.node_weight(nidx)?;
+    match nd.id().as_ref() {
         Value::String(s) => Some(s.clone()),
         Value::Null => None,
         other => Some(format!("{other:?}")),

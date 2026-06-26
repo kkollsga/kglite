@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`CALL duplicate_id({type}) YIELD node` structural validator.** The
+  identity-column sibling of `duplicate_title`: yields every node of `type`
+  whose `id` is shared with another node of the same type. Handy after bulk
+  writes — a `CREATE` fanned out over a multi-row `MATCH` (standard Cypher: one
+  create per matched row) can mint several same-id nodes without complaint, and
+  this surfaces them. Composes with `WITH`/aggregation like the other rule
+  procedures.
+
 ### Fixed
 - **`DETACH DELETE` (and `DELETE`) inside `FOREACH` over a collected list now
   runs.** `MATCH (n) WITH collect(n) AS ns FOREACH (e IN ns[1..] | DETACH DELETE
