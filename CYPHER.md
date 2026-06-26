@@ -54,6 +54,12 @@ count). Two semantics to keep in mind:
   **`MERGE`, not `CREATE`** — `MERGE (:T {id: $k})` is idempotent.
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
+- **Property typos pass silently by default** (open schema): an unknown property
+  on `CREATE`/`SET`/`MERGE` is simply stored. To catch typos (`summary` vs
+  `note`), call `lock_schema()` — a write with an unknown property is then
+  rejected with a `Valid properties: …` / "did you mean?" hint (the same
+  guidance reads give). The bulk loaders (`add_nodes`/`add_connections`)
+  deliberately bypass the lock; it gates the Cypher write path.
 
 ---
 
