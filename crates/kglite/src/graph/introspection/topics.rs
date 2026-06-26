@@ -10,7 +10,7 @@ const CYPHER_TOPIC_LIST: &str = "MATCH, WHERE, RETURN, WITH, HAVING, ORDER BY, U
     temporal, pagerank, betweenness, degree, closeness, louvain, leiden, \
     label_propagation, connected_components, k_core, clustering_coefficient, cluster, orphan_node, self_loop, \
     cycle_2step, missing_required_edge, missing_inbound_edge, duplicate_title, \
-    null_property, inverse_violation, transitivity_violation, cardinality_violation, \
+    duplicate_id, null_property, inverse_violation, transitivity_violation, cardinality_violation, \
     type_domain_violation, type_range_violation, parallel_edges";
 
 /// Tier 3: detailed Cypher docs for specific topics with params and examples.
@@ -65,6 +65,7 @@ pub(super) fn write_cypher_topics(xml: &mut String, topics: &[String]) -> Result
             "MISSING_REQUIRED_EDGE" => write_topic_missing_required_edge(xml),
             "MISSING_INBOUND_EDGE" => write_topic_missing_inbound_edge(xml),
             "DUPLICATE_TITLE" => write_topic_duplicate_title(xml),
+            "DUPLICATE_ID" => write_topic_duplicate_id(xml),
             "NULL_PROPERTY" => write_topic_null_property(xml),
             "INVERSE_VIOLATION" => write_topic_inverse_violation(xml),
             "TRANSITIVITY_VIOLATION" => write_topic_transitivity_violation(xml),
@@ -613,6 +614,20 @@ pub(super) fn write_topic_duplicate_title(xml: &mut String) {
     xml.push_str("      <ex desc=\"group + count\">CALL duplicate_title({type: 'Prospect'}) YIELD node WITH node.title AS title, collect(node) AS dups WITH title, size(dups) AS n WHERE n &gt; 1 RETURN title, n ORDER BY n DESC LIMIT 20</ex>\n");
     xml.push_str("    </examples>\n");
     xml.push_str("  </duplicate_title>\n");
+}
+
+pub(super) fn write_topic_duplicate_id(xml: &mut String) {
+    xml.push_str("  <duplicate_id>\n");
+    xml.push_str("    <desc>Yields one row per node of {type} whose id is shared with at least one other node of the same type. The identity-column sibling of duplicate_title — handy after bulk writes, since a CREATE fanned out over a multi-row MATCH can mint duplicate-id nodes. Aggregate downstream for per-group rollups.</desc>\n");
+    xml.push_str("    <syntax>CALL duplicate_id({type: 'Artifact'}) YIELD node</syntax>\n");
+    xml.push_str(
+        "    <yield>node — bound to a NodeIndex whose id appears more than once</yield>\n",
+    );
+    xml.push_str("    <examples>\n");
+    xml.push_str("      <ex desc=\"all duplicates\">CALL duplicate_id({type: 'Artifact'}) YIELD node RETURN count(node)</ex>\n");
+    xml.push_str("      <ex desc=\"group + count\">CALL duplicate_id({type: 'Artifact'}) YIELD node WITH node.id AS id, collect(node) AS dups WITH id, size(dups) AS n WHERE n &gt; 1 RETURN id, n ORDER BY n DESC LIMIT 20</ex>\n");
+    xml.push_str("    </examples>\n");
+    xml.push_str("  </duplicate_id>\n");
 }
 
 pub(super) fn write_topic_null_property(xml: &mut String) {

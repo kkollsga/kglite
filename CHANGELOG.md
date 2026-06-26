@@ -29,6 +29,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records "describes the world as of commit X, written by Y". Queryable
   (`n.git_sha`, `r.git_sha`), hidden from data views, scoped to the one
   mutation (cleared after), and only on opted-in types.
+- **`CALL duplicate_id({type}) YIELD node` structural validator.** The
+  identity-column sibling of `duplicate_title`: yields every node of `type`
+  whose `id` is shared with another node of the same type. Handy after bulk
+  writes — a `CREATE` fanned out over a multi-row `MATCH` (standard Cypher: one
+  create per matched row) can mint several same-id nodes without complaint, and
+  this surfaces them. Composes with `WITH`/aggregation like the other rule
+  procedures.
+
+### Fixed
+- **`DETACH DELETE` (and `DELETE`) inside `FOREACH` over a collected list now
+  runs.** `MATCH (n) WITH collect(n) AS ns FOREACH (e IN ns[1..] | DETACH DELETE
+  e)` — the keep-first dedup idiom — was a silent no-op: the FOREACH loop
+  variable binds a *materialised* node value (`Value::Node` in `projected`), but
+  `execute_delete` only resolved a `NodeRef`, so the deletes were dropped. It
+  now resolves a materialised node value the same way, so FOREACH-driven
+  deletion over a `collect()`ed list works (incident edges detach as expected).
+  A MATCH-bound `DELETE t` inside FOREACH was already correct and is unchanged.
+- **Multi-pattern `MATCH (a), (b)` after a `WITH`/`UNWIND` now cross-joins.**
+  A comma-separated multi-pattern MATCH that followed a seeded pipeline matched
+  each pattern independently and emitted half-rows (`{a, null}`, `{null, b}`)
+  instead of the joined `{a, b}` — a silent wrong result. As a knock-on, the
+  bulk pattern `UNWIND $rows AS r MATCH (a {id:r.a}),(b {id:r.b}) CREATE/MERGE
+  (a)-[:R]->(b)` mis-bound the endpoints and created **spurious unlabelled
+  nodes** (CREATE) or errored "must be bound by prior MATCH" (MERGE). The
+  subsequent-MATCH branch now chains patterns into a proper cross-join (the
+  single-pattern hot path is unchanged and keeps its LIMIT pushdown). Bulk edge
+  creation via `UNWIND` now works.
 
 ## [0.12.2] — 2026-06-25 — Write-enabled agent-graph MCP server + edge-persistence & Cypher fixes
 

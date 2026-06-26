@@ -327,6 +327,41 @@ def test_duplicate_title_aggregates_downstream(integrity_graph):
 
 
 # ---------------------------------------------------------------------
+# duplicate_id
+
+
+def test_duplicate_id_emits_one_row_per_duplicate():
+    """The identity-column sibling of duplicate_title. A CREATE fanned out over a
+    multi-row MATCH (standard Cypher) can mint same-id nodes with no complaint;
+    duplicate_id surfaces them."""
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Artifact {id: 'x', n: 1}), (:Artifact {id: 'x', n: 2}), (:Artifact {id: 'y', n: 3})")
+    rows = list(g.cypher("CALL duplicate_id({type: 'Artifact'}) YIELD node RETURN node.n AS n"))
+    assert sorted(r["n"] for r in rows) == [1, 2]
+
+
+def test_duplicate_id_aggregates_downstream():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Artifact {id: 'x'}), (:Artifact {id: 'x'}), (:Artifact {id: 'z'})")
+    rows = list(
+        g.cypher(
+            "CALL duplicate_id({type: 'Artifact'}) YIELD node "
+            "WITH node.id AS id, collect(node) AS dups "
+            "WITH id, size(dups) AS dup_count "
+            "RETURN id, dup_count"
+        )
+    )
+    assert rows == [{"id": "x", "dup_count": 2}]
+
+
+def test_duplicate_id_no_false_positives_when_unique():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:T {id: 1}), (:T {id: 2})")
+    rows = list(g.cypher("CALL duplicate_id({type: 'T'}) YIELD node RETURN count(node) AS c"))
+    assert rows[0]["c"] == 0
+
+
+# ---------------------------------------------------------------------
 # Composability — rule procedures flow into surrounding Cypher
 
 
@@ -373,6 +408,7 @@ def test_list_procedures_includes_rule_procedures(integrity_graph):
         "missing_required_edge",
         "missing_inbound_edge",
         "duplicate_title",
+        "duplicate_id",
         "null_property",
         "inverse_violation",
         "transitivity_violation",

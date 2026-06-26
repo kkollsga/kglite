@@ -54,6 +54,12 @@ count). Two semantics to keep in mind:
   **`MERGE`, not `CREATE`** — `MERGE (:T {id: $k})` is idempotent.
 - **Matching is type-exact**: `'42'` ≠ `42`. Keep id types consistent across
   writes and reads.
+- **Property typos pass silently by default** (open schema): an unknown property
+  on `CREATE`/`SET`/`MERGE` is simply stored. To catch typos (`summary` vs
+  `note`), call `lock_schema()` — a write with an unknown property is then
+  rejected with a `Valid properties: …` / "did you mean?" hint (the same
+  guidance reads give). The bulk loaders (`add_nodes`/`add_connections`)
+  deliberately bypass the lock; it gates the Cypher write path.
 
 ---
 
@@ -1759,7 +1765,10 @@ storage mode (in-memory / mapped / disk). `CREATE (n {id: X})` and
 `add_nodes(unique_id_field='id')` both make `X` the identity; `MATCH (n {id: X})`
 finds it; it survives save → load. `id` is unique by convention — if duplicate
 ids are created, `MATCH (n {id: X})` returns one node per id (a stderr warning
-is emitted; use `MERGE` or dedupe the input).
+is emitted; use `MERGE` or dedupe the input). To audit a type for collisions
+after the fact, `CALL duplicate_id({type: 'Artifact'}) YIELD node` yields every
+node of that type whose id is shared (the identity-column sibling of
+`duplicate_title`).
 
 For datasets whose ids are a prefix + number (Wikidata `Q42`, `P31`, …), the
 loader stores the **integer** as `id` (compact, identical across modes — disk
@@ -1789,7 +1798,7 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code-tree graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
 | **Schema** | `CALL db.labels() YIELD name`, `CALL db.relationshipTypes() YIELD name`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` (0.10.0+, Bolt-compatible) |
-| **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
+| **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
 ## openCypher Compatibility Matrix
