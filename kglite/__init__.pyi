@@ -3252,6 +3252,11 @@ class KnowledgeGraph:
     def define_schema(self, schema_dict: dict[str, Any]) -> KnowledgeGraph:
         """Define the expected schema for the graph.
 
+        **Replaces** the entire schema — this is not a merge. Any previous
+        ``define_schema`` call is fully superseded, so a call with a *subset* of
+        types drops the types it omits. Redefine all types each call (or read
+        the current schema via :meth:`schema_definition` and merge yourself).
+
         Args:
             schema_dict: Schema definition with ``nodes`` and ``connections`` keys.
                 Each node entry may set ``required``/``optional``/``types`` and,

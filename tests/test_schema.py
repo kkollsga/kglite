@@ -214,6 +214,15 @@ class TestManagedReloadGuard:
         except ValueError as e:
             assert "'managed' or 'runtime'" in str(e)
 
+    def test_define_schema_replaces_not_merges(self):
+        """define_schema replaces the whole schema — a subset call drops omitted
+        types (documented behaviour; locks against an accidental switch to merge)."""
+        g = KnowledgeGraph()
+        g.define_schema({"nodes": {"A": {"primary_key": "id"}, "B": {"layer": "runtime"}}})
+        assert set(g.schema_definition()["nodes"]) == {"A", "B"}
+        g.define_schema({"nodes": {"A": {"primary_key": "id"}}})  # subset
+        assert set(g.schema_definition()["nodes"]) == {"A"}  # B dropped
+
     def test_auto_timestamp_tag_roundtrips(self, tmp_path):
         g = KnowledgeGraph()
         g.define_schema({"nodes": {"Task": {"auto_timestamp": True}, "Spec": {"layer": "managed"}}})
