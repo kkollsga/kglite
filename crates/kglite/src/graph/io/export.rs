@@ -349,6 +349,117 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
 
 /// Export to CSV format (nodes and edges as separate content).
 ///
+/// Deterministic, human-readable text projection of a graph's full contents —
+/// the canonical form behind the `.kgl` git `textconv` diff filter. Stable
+/// across save/load: nodes are grouped by type then sorted by **id** (not the
+/// petgraph index, which isn't reload-stable), edges sorted by
+/// `(type, source_id, target_id)`. So `git diff` over two `.kgl` snapshots shows
+/// real content changes, not reordering noise. Reserved provenance keys
+/// (`updated_at`/`git_sha`/`modified_by`) are omitted — they change on every
+/// write and would swamp the diff (and they're engine metadata, not data).
+pub fn to_text(graph: &DirGraph) -> String {
+    use crate::datatypes::values::raw_string;
+    use crate::graph::schema::is_reserved_provenance_key;
+
+    let g = &graph.graph;
+    let mut out = String::new();
+
+    let fmt_props = |pairs: BTreeMap<String, String>| -> String {
+        pairs
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    // Nodes, grouped by type (sorted), then by id.
+    let mut by_type: BTreeMap<String, Vec<petgraph::graph::NodeIndex>> = BTreeMap::new();
+    for idx in g.node_indices() {
+        if let Some(node) = g.node_weight(idx) {
+            by_type
+                .entry(node.node_type_str(&graph.interner).to_string())
+                .or_default()
+                .push(idx);
+        }
+    }
+    for (ntype, mut idxs) in by_type {
+        idxs.sort_by_key(|&i| {
+            g.node_weight(i)
+                .map(|n| raw_string(&n.id()))
+                .unwrap_or_default()
+        });
+        out.push_str(&format!("# {} ({} node(s))\n", ntype, idxs.len()));
+        for i in idxs {
+            let Some(node) = g.node_weight(i) else {
+                continue;
+            };
+            let (id, title) = (raw_string(&node.id()), raw_string(&node.title()));
+            // Use the canonical node projection (`materialize_node_value`) for
+            // properties: it is backend-consistent (handles the columnar store
+            // where `property_iter` yields nothing), recovers alias columns
+            // (a `name`/title-aliased field shows the same in-memory and after a
+            // save/load), and already omits reserved provenance keys. Skip the
+            // id/title/type virtuals — they're printed explicitly above.
+            let mut props: BTreeMap<String, String> = BTreeMap::new();
+            if let Some(nv) =
+                crate::graph::languages::cypher::executor::helpers::materialize_node_value(i, graph)
+            {
+                for (k, v) in nv.properties {
+                    if k != "id" && k != "title" && k != "type" {
+                        props.insert(k, raw_string(&v));
+                    }
+                }
+            }
+            let propstr = fmt_props(props);
+            out.push_str(&format!("  {id} | {title}"));
+            if !propstr.is_empty() {
+                out.push_str(&format!(" | {propstr}"));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    // Edges, sorted by (type, source_id, target_id).
+    let mut edges: Vec<(String, String, String, String)> = Vec::new();
+    for src in g.node_indices() {
+        let Some(src_node) = g.node_weight(src) else {
+            continue;
+        };
+        let src_id = raw_string(&src_node.id());
+        for e in g.edges(src) {
+            let Some(tgt_node) = g.node_weight(e.target()) else {
+                continue;
+            };
+            let w = e.weight();
+            let mut props: BTreeMap<String, String> = BTreeMap::new();
+            for (k, v) in w.property_iter(&graph.interner) {
+                if !is_reserved_provenance_key(k) {
+                    props.insert(k.to_string(), raw_string(v));
+                }
+            }
+            edges.push((
+                w.connection_type_str(&graph.interner).to_string(),
+                src_id.clone(),
+                raw_string(&tgt_node.id()),
+                fmt_props(props),
+            ));
+        }
+    }
+    edges.sort();
+    if !edges.is_empty() {
+        out.push_str(&format!("# edges ({})\n", edges.len()));
+        for (conn, src, tgt, props) in edges {
+            out.push_str(&format!("  ({src})-[{conn}]->({tgt})"));
+            if !props.is_empty() {
+                out.push_str(&format!(" {{{props}}}"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Returns a tuple of (nodes_csv, edges_csv).
 pub fn to_csv(
     graph: &DirGraph,

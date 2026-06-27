@@ -215,6 +215,16 @@ impl KnowledgeGraph {
         })
     }
 
+    /// Deterministic, human-readable text projection of the whole graph (nodes
+    /// by type sorted by id; edges sorted by endpoints). Stable across
+    /// save/load — the canonical form behind the `.kgl` git ``textconv`` diff
+    /// filter (also available as ``kglite export-text <file>``). Reserved
+    /// provenance keys (``updated_at``/``git_sha``) are omitted so diffs aren't
+    /// swamped by per-write metadata churn.
+    fn to_text(&self) -> String {
+        kglite_core::api::io::to_text(&self.inner)
+    }
+
     /// Export to a string instead of a file.
     ///
     /// Useful for web APIs or further processing.

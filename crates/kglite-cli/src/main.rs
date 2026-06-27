@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use kglite::api::io::load_file;
 use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::DirGraph;
@@ -21,14 +21,36 @@ use kglite::api::DirGraph;
 /// Interactive Cypher shell for kglite `.kgl` graphs.
 #[derive(Parser, Debug)]
 #[command(name = "kglite", version, about)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Path to a `.kgl` file to open. If omitted (or the file does not exist
     /// yet), the shell starts with a fresh in-memory graph.
     graph: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Print a deterministic, human-readable text projection of a `.kgl` to
+    /// stdout — the canonical form for a git `textconv` diff filter. Set up:
+    /// `git config diff.kglite.textconv "kglite export-text"` +
+    /// `echo '*.kgl diff=kglite' >> .gitattributes`.
+    ExportText {
+        /// Path to the `.kgl` file.
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Command::ExportText { file }) = &cli.command {
+        let p = file.to_string_lossy().to_string();
+        let g = load_file(&p).with_context(|| format!("failed to open {p}"))?;
+        print!("{}", kglite::api::io::to_text(&g));
+        return Ok(());
+    }
 
     let (graph, source): (Arc<DirGraph>, Option<String>) = match &cli.graph {
         Some(path) if path.exists() => {

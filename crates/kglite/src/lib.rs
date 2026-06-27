@@ -325,7 +325,9 @@ pub mod api {
     /// callbacks, embedding-vector file export/import, and streaming
     /// disk subset export.
     pub mod io {
-        pub use crate::graph::io::export::{to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml};
+        pub use crate::graph::io::export::{
+            to_csv, to_csv_dir, to_d3_json, to_gexf, to_graphml, to_text,
+        };
         /// Embedding-vector file export / import.
         pub use crate::graph::io::file::{
             export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter,

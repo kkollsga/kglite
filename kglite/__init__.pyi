@@ -3790,6 +3790,22 @@ class KnowledgeGraph:
         """
         ...
 
+    def to_text(self) -> str:
+        """Deterministic, human-readable text projection of the whole graph.
+
+        Nodes grouped by type and sorted by id; edges sorted by endpoints — so
+        the output is **stable across insert order and across save/load**. This
+        is the canonical form behind the ``.kgl`` git ``textconv`` diff filter
+        (also ``kglite export-text <file>`` from the CLI), making ``git diff`` of
+        two ``.kgl`` snapshots show real content changes. Reserved provenance
+        keys (``updated_at``/``git_sha``) are omitted so per-write metadata
+        churn doesn't swamp the diff.
+
+        Returns:
+            The text projection.
+        """
+        ...
+
     def export_string(
         self,
         format: str,
