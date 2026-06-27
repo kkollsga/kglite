@@ -9,7 +9,7 @@ mod format;
 mod helper;
 mod repl;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -40,15 +40,42 @@ enum Command {
         /// Path to the `.kgl` file.
         file: PathBuf,
     },
+    /// Show what changed between two `.kgl` graphs — a structural delta over the
+    /// deterministic text projection: `-` lines dropped from A, `+` lines added
+    /// in B (a node/edge whose properties changed shows as a `-`/`+` pair).
+    Diff {
+        /// The "before" `.kgl`.
+        a: PathBuf,
+        /// The "after" `.kgl`.
+        b: PathBuf,
+    },
+}
+
+fn open_text(path: &Path) -> Result<String> {
+    let p = path.to_string_lossy().to_string();
+    let g = load_file(&p).with_context(|| format!("failed to open {p}"))?;
+    Ok(kglite::api::io::to_text(&g))
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if let Some(Command::ExportText { file }) = &cli.command {
-        let p = file.to_string_lossy().to_string();
-        let g = load_file(&p).with_context(|| format!("failed to open {p}"))?;
-        print!("{}", kglite::api::io::to_text(&g));
+        print!("{}", open_text(file)?);
+        return Ok(());
+    }
+    if let Some(Command::Diff { a, b }) = &cli.command {
+        let (ta, tb) = (open_text(a)?, open_text(b)?);
+        let a_lines: std::collections::BTreeSet<&str> =
+            ta.lines().filter(|l| !l.trim().is_empty()).collect();
+        let b_lines: std::collections::BTreeSet<&str> =
+            tb.lines().filter(|l| !l.trim().is_empty()).collect();
+        for l in a_lines.difference(&b_lines) {
+            println!("-{}", l.trim_start());
+        }
+        for l in b_lines.difference(&a_lines) {
+            println!("+{}", l.trim_start());
+        }
         return Ok(());
     }
 

@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshots shows real content changes. Wire it up as a git `textconv` filter
   (`git config diff.kglite.textconv "kglite export-text"` + `*.kgl diff=kglite`
   in `.gitattributes`). Reserved provenance keys (`updated_at`/`git_sha`) are
-  omitted so per-write churn doesn't swamp the diff.
+  omitted so per-write churn doesn't swamp the diff. `kglite diff a.kgl b.kgl`
+  prints an explicit structural delta (`-`/`+` lines; a changed node is a pair).
 - **MCP write acks now stamp the engine version** (`OK: 1 node(s) created.
   [engine 0.12.3]`). A long-running `kglite-mcp-server` pins its engine, so a
   venv upgrade that doesn't restart the server silently keeps writing with the

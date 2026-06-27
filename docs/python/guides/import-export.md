@@ -316,6 +316,44 @@ graph = kglite.from_bytes(blob)      # round-trips; raises FileFormatError if co
 
 In-memory / mapped graphs only (a disk-mode graph is a directory, not a stream).
 
+## Human-readable diffs (`to_text` + git `textconv`)
+
+A `.kgl` is a compressed binary blob, so `git diff` shows `Binary files differ`
+— useless for reviewing a change to a graph (e.g. an agent-built planning
+graph). `to_text()` projects the whole graph to a **deterministic, readable**
+form (nodes grouped by type + sorted by id, edges sorted by endpoints), stable
+across insert order *and* across save/load:
+
+```python
+print(graph.to_text())
+# Task (2 node(s))
+#   t1 | Plan the API | status=done
+#   t2 | Write tests | status=todo
+#
+# edges (1)
+#   (t1)-[BLOCKS]->(t2)
+```
+
+Reserved provenance keys (`updated_at`/`git_sha`) are omitted so per-write
+metadata churn doesn't swamp the diff.
+
+**Wire it into git** so `git diff` / PR review renders `.kgl` files readably
+(the CLI ships an `export-text` subcommand — `pip install kglite-cli`):
+
+```bash
+git config diff.kglite.textconv "kglite export-text"
+echo "*.kgl diff=kglite" >> .gitattributes
+```
+
+Now `git diff path/to/graph.kgl` shows real content changes. For an explicit
+before/after delta of two files:
+
+```bash
+kglite diff old.kgl new.kgl
+# -t2 | Write tests | status=todo
+# +t2 | Write tests | status=done    # a changed node shows as a -/+ pair
+```
+
 ## Graph Maintenance
 
 After heavy mutation workloads (DELETE, REMOVE), internal storage accumulates tombstones. Monitor with `graph_info()`.

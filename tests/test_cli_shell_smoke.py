@@ -41,6 +41,43 @@ def _run(script: str) -> str:
     return proc.stdout + proc.stderr
 
 
+def _run_args(*args: str) -> str:
+    """Run the binary as a non-interactive subcommand, return stdout."""
+    proc = subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=30)
+    return proc.stdout
+
+
+def test_export_text_subcommand(tmp_path):
+    import kglite
+
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (a:N {id: 1, s: 'todo'})-[:R]->(b:N {id: 2})")
+    p = str(tmp_path / "g.kgl")
+    g.save(p)
+    out = _run_args("export-text", p)
+    assert "# N (2 node(s))" in out
+    assert "1 | N_0 | s=todo" in out
+    assert "(1)-[R]->(2)" in out
+
+
+def test_diff_subcommand(tmp_path):
+    import kglite
+
+    a = str(tmp_path / "a.kgl")
+    b = str(tmp_path / "b.kgl")
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:N {id: 1, s: 'todo'}), (:N {id: 2})")
+    g.save(a)
+    g2 = kglite.KnowledgeGraph()
+    g2.cypher("CREATE (:N {id: 1, s: 'done'}), (:N {id: 3})")
+    g2.save(b)
+    out = _run_args("diff", a, b)
+    assert "-1 | N_0 | s=todo" in out  # node 1 changed
+    assert "+1 | N_0 | s=done" in out
+    assert "-2 | N_1" in out  # node 2 removed
+    assert "+3 | N_1" in out  # node 3 added
+
+
 def test_create_and_query_roundtrip():
     out = _run(
         'CREATE (:Person {name: "Alice", age: 30});\n'
