@@ -840,6 +840,7 @@ def outline(
     edge: str,
     *,
     max_depth: Optional[int] = None,
+    body: Optional[str] = None,
 ) -> str:
     """Render the spanning tree from ``root`` along ``edge`` as a nested outline.
 

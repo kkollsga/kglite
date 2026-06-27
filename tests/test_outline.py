@@ -62,6 +62,13 @@ def test_outline_max_depth():
     assert kglite.outline(_tree(), "a", "DEP", max_depth=1) == ("- Build API\n  - Schema\n  - Handlers")
 
 
+def test_outline_embeds_body_prose():
+    g = _tree()
+    g.cypher("MATCH (n:T {id:'a'}) SET n.notes = 'The public REST surface.'")
+    out = kglite.outline(g, "a", "DEP", body="notes")
+    assert out.splitlines()[:2] == ["- Build API", "  The public REST surface."]
+
+
 def test_outline_empty_for_unknown_root():
     # CALL errors on a missing root; the binding surfaces it.
     import pytest

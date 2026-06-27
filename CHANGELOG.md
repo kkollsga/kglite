@@ -22,8 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CALL outline({root, edge, max_depth?}) YIELD node, depth, parent_id` yields
   the tree *structure* (Cypher-composable, each node once at first-discovery
   depth); the binding-layer `kglite.outline(g, root, edge)` renders it as a
-  nested markdown outline. Presentation stays in the binding; the engine stays a
-  query engine.
+  nested markdown outline; pass `body="<prop>"` to indent each node's prose
+  property under its bullet (the markdown-`body` view — prose is a plain
+  property, not a special field). Presentation stays in the binding; the engine
+  stays a query engine.
 - **`to_text()` / `kglite export-text` — a deterministic text projection of a
   graph**, for human-readable `.kgl` git diffs. Nodes grouped by type + sorted
   by id, edges sorted by endpoints, so the output is stable across insert order

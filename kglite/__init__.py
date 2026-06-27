@@ -261,6 +261,7 @@ def outline(
     edge: str,
     *,
     max_depth: int | None = None,
+    body: str | None = None,
 ) -> str:
     """Render the spanning tree from ``root`` along ``edge`` as a nested outline.
 
@@ -270,11 +271,15 @@ def outline(
     outgoing ``edge``-typed edges from the node whose id is ``root``; each node
     appears once (at first discovery, so a DAG renders as a tree). Nodes are
     labelled by title (falling back to id). ``max_depth`` bounds the descent.
+    Pass ``body="<prop>"`` to indent each node's prose property under its bullet
+    (this is the "markdown body" view — prose lives in a plain string property,
+    not a special engine field).
 
     Example::
 
-        print(kglite.outline(g, "epic-1", "DEPENDS_ON"))
+        print(kglite.outline(g, "epic-1", "DEPENDS_ON", body="notes"))
         # - Build the API
+        #   The public REST surface.
         #   - Define the schema
         #   - Write the handlers
 
@@ -282,10 +287,11 @@ def outline(
         The outline text (empty string if ``root`` has no node).
     """
     md = "" if max_depth is None else ", max_depth: $md"
+    body_col = f", node.`{body}` AS body" if body else ""
     q = (
         f"CALL outline({{root: $root, edge: $edge{md}}}) "
         "YIELD node, depth, parent_id "
-        "RETURN node.id AS id, node.title AS title, parent_id AS parent_id"
+        f"RETURN node.id AS id, node.title AS title, parent_id AS parent_id{body_col}"
     )
     params = {"root": root, "edge": edge}
     if max_depth is not None:
@@ -302,10 +308,15 @@ def outline(
             root_id = r["id"]
 
     label = {r["id"]: (r["title"] if r["title"] is not None else r["id"]) for r in rows}
+    bodies = {r["id"]: r.get("body") for r in rows} if body else {}
     lines: list = []
 
     def _walk(node_id, depth: int) -> None:
         lines.append("  " * depth + f"- {label.get(node_id, node_id)}")
+        prose = bodies.get(node_id)
+        if prose:
+            for prose_line in str(prose).splitlines():
+                lines.append("  " * (depth + 1) + prose_line)
         for child in sorted(children.get(node_id, []), key=lambda x: str(x["id"])):
             _walk(child["id"], depth + 1)
 
