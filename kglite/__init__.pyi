@@ -834,6 +834,39 @@ def from_networkx(
     """
     ...
 
+def outline(
+    graph: KnowledgeGraph,
+    root: Any,
+    edge: str,
+    *,
+    max_depth: Optional[int] = None,
+) -> str:
+    """Render the spanning tree from ``root`` along ``edge`` as a nested outline.
+
+    A projection of the graph into the "open and skim" view it otherwise lacks:
+    a BFS from the node whose id is ``root`` following outgoing ``edge``-typed
+    edges, rendered as an indented markdown-style outline (each node once, at
+    first discovery; labelled by title, falling back to id). Backed by the
+    engine's ``CALL outline(...)`` procedure, which yields the tree structure.
+
+    Example::
+
+        print(kglite.outline(g, "epic-1", "DEPENDS_ON"))
+        # - Build the API
+        #   - Define the schema
+        #   - Write the handlers
+
+    Args:
+        graph: The graph to project.
+        root: Identity (``id``) of the root node.
+        edge: Connection type to follow (outgoing).
+        max_depth: Optional descent bound (0 = just the root).
+
+    Returns:
+        The outline text (empty string if ``root`` has no node).
+    """
+    ...
+
 def to_neo4j(
     graph: KnowledgeGraph,
     uri: str,

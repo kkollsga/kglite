@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Outline projection — `CALL outline` + `kglite.outline()`.** Project a
+  subgraph into the "open and skim" view a graph otherwise lacks: a BFS spanning
+  tree from a root node along one edge type. The engine procedure
+  `CALL outline({root, edge, max_depth?}) YIELD node, depth, parent_id` yields
+  the tree *structure* (Cypher-composable, each node once at first-discovery
+  depth); the binding-layer `kglite.outline(g, root, edge)` renders it as a
+  nested markdown outline. Presentation stays in the binding; the engine stays a
+  query engine.
 - **`to_text()` / `kglite export-text` — a deterministic text projection of a
   graph**, for human-readable `.kgl` git diffs. Nodes grouped by type + sorted
   by id, edges sorted by endpoints, so the output is stable across insert order

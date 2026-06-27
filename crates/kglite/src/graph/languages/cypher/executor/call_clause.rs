@@ -312,6 +312,7 @@ impl<'a> CypherExecutor<'a> {
             | "duplicate_title"
             | "duplicate_id"
             | "null_property" => &["node"],
+            "outline" => &["node", "depth", "parent_id"],
             "cycle_2step" => &["node_a", "node_b"],
             "inverse_violation" => &["a", "b"],
             "transitivity_violation" => &["a", "b", "c"],
@@ -364,7 +365,7 @@ impl<'a> CypherExecutor<'a> {
                      k_core, clustering_coefficient, \
                      cluster, list_procedures, orphan_node, self_loop, cycle_2step, \
                      missing_required_edge, missing_inbound_edge, duplicate_title, \
-                     duplicate_id, null_property, inverse_violation, transitivity_violation, \
+                     duplicate_id, null_property, outline, inverse_violation, transitivity_violation, \
                      cardinality_violation, type_domain_violation, \
                      type_range_violation, parallel_edges, \
                      db.labels, db.relationshipTypes, db.indexes, \
@@ -833,6 +834,9 @@ impl<'a> CypherExecutor<'a> {
                 &params,
                 &clause.yield_items,
             )?,
+            "outline" => {
+                super::rule_procedures::execute_outline(self.graph, &params, &clause.yield_items)?
+            }
             "null_property" => super::rule_procedures::execute_null_property(
                 self.graph,
                 &params,
@@ -991,6 +995,11 @@ impl<'a> CypherExecutor<'a> {
                         "duplicate_id",
                         "Rule: nodes of {type} whose id is shared with another node of the same type",
                         "node",
+                    ),
+                    (
+                        "outline",
+                        "Projection: BFS spanning tree from node id {root} along {edge} — the tree structure (render with kglite.outline)",
+                        "node, depth, parent_id",
                     ),
                     (
                         "null_property",

@@ -742,6 +742,10 @@ const RULE_PARAM_SCHEMAS: &[(&str, &[(&str, bool)])] = &[
     ("cycle_2step", &[("type", true), ("edge", true)]),
     ("duplicate_title", &[("type", true)]),
     ("duplicate_id", &[("type", true)]),
+    (
+        "outline",
+        &[("root", true), ("edge", true), ("max_depth", false)],
+    ),
     ("inverse_violation", &[("rel_a", true), ("rel_b", true)]),
     (
         "kg_knn",
@@ -818,6 +822,98 @@ fn has_edge_of_type(
         .graph
         .edges_directed(nidx, dir)
         .any(|er| er.weight().connection_type == edge_type_key)
+}
+
+/// `CALL outline({root, edge, max_depth?}) YIELD node, depth, parent_id`
+///
+/// BFS from the node whose id is `root`, following outgoing `edge`-typed edges,
+/// yielding the spanning tree — each reachable node once, at its first-discovery
+/// `depth` (0 = root), with `parent_id` the id of the node it was reached from
+/// (`null` for the root). This is the tree **structure**; render it as a nested
+/// outline / markdown document in the binding layer (`g.outline(...)`) — the
+/// engine stays a query engine. `max_depth` (optional) bounds the descent.
+///
+/// @procedure: outline
+pub(super) fn execute_outline(
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    use std::collections::{HashSet, VecDeque};
+
+    let edge_type = require_string_param(params, "edge", "outline")?;
+    let root_id = params
+        .get("root")
+        .ok_or_else(|| "CALL outline: missing required parameter 'root'".to_string())?;
+    let max_depth = match params.get("max_depth") {
+        Some(Value::Int64(n)) => *n as usize,
+        Some(other) => {
+            return Err(format!(
+                "CALL outline: 'max_depth' must be an integer, got {}",
+                other.type_name()
+            ))
+        }
+        None => usize::MAX,
+    };
+    let edge_key = InternedKey::from_str(&edge_type);
+    let root = graph
+        .graph
+        .node_indices()
+        .find(|&i| {
+            graph
+                .graph
+                .node_weight(i)
+                .map(|n| n.id().as_ref() == root_id)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            format!(
+                "CALL outline: no node with id {}",
+                crate::datatypes::values::raw_string(root_id)
+            )
+        })?;
+
+    let mut rows = Vec::new();
+    let mut visited: HashSet<NodeIndex> = HashSet::new();
+    let mut queue: VecDeque<(NodeIndex, usize, Value)> = VecDeque::new();
+    visited.insert(root);
+    queue.push_back((root, 0, Value::Null));
+    while let Some((nidx, depth, parent_id)) = queue.pop_front() {
+        let mut row = ResultRow::new();
+        for item in yield_items {
+            let alias = item.alias.as_deref().unwrap_or(&item.name);
+            match item.name.as_str() {
+                "node" => {
+                    row.node_bindings.insert(alias.to_string(), nidx);
+                }
+                "depth" => {
+                    row.projected
+                        .insert(alias.to_string(), Value::Int64(depth as i64));
+                }
+                "parent_id" => {
+                    row.projected.insert(alias.to_string(), parent_id.clone());
+                }
+                _ => {}
+            }
+        }
+        rows.push(row);
+        if depth < max_depth {
+            let this_id = graph
+                .graph
+                .node_weight(nidx)
+                .map(|n| n.id().into_owned())
+                .unwrap_or(Value::Null);
+            for er in graph.graph.edges_directed(nidx, Direction::Outgoing) {
+                if er.weight().connection_type == edge_key {
+                    let child = er.target();
+                    if visited.insert(child) {
+                        queue.push_back((child, depth + 1, this_id.clone()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn title_of(graph: &DirGraph, nidx: NodeIndex) -> Option<String> {

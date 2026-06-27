@@ -255,6 +255,65 @@ def to_neo4j(
     return _to_neo4j(graph, uri, **kwargs)
 
 
+def outline(
+    graph: "KnowledgeGraph",
+    root,
+    edge: str,
+    *,
+    max_depth: int | None = None,
+) -> str:
+    """Render the spanning tree from ``root`` along ``edge`` as a nested outline.
+
+    A *projection* of the graph — the "open and skim" view a graph otherwise
+    lacks. The engine's ``CALL outline`` yields the tree structure (node, depth,
+    parent_id); this renders it as an indented markdown-style outline. Follows
+    outgoing ``edge``-typed edges from the node whose id is ``root``; each node
+    appears once (at first discovery, so a DAG renders as a tree). Nodes are
+    labelled by title (falling back to id). ``max_depth`` bounds the descent.
+
+    Example::
+
+        print(kglite.outline(g, "epic-1", "DEPENDS_ON"))
+        # - Build the API
+        #   - Define the schema
+        #   - Write the handlers
+
+    Returns:
+        The outline text (empty string if ``root`` has no node).
+    """
+    md = "" if max_depth is None else ", max_depth: $md"
+    q = (
+        f"CALL outline({{root: $root, edge: $edge{md}}}) "
+        "YIELD node, depth, parent_id "
+        "RETURN node.id AS id, node.title AS title, parent_id AS parent_id"
+    )
+    params = {"root": root, "edge": edge}
+    if max_depth is not None:
+        params["md"] = max_depth
+    rows = graph.cypher(q, params=params).to_dicts()
+    if not rows:
+        return ""
+
+    children: dict = {}
+    root_id = None
+    for r in rows:
+        children.setdefault(r["parent_id"], []).append(r)
+        if r["parent_id"] is None:
+            root_id = r["id"]
+
+    label = {r["id"]: (r["title"] if r["title"] is not None else r["id"]) for r in rows}
+    lines: list = []
+
+    def _walk(node_id, depth: int) -> None:
+        lines.append("  " * depth + f"- {label.get(node_id, node_id)}")
+        for child in sorted(children.get(node_id, []), key=lambda x: str(x["id"])):
+            _walk(child["id"], depth + 1)
+
+    if root_id is not None:
+        _walk(root_id, 0)
+    return "\n".join(lines)
+
+
 __all__ = [
     "__version__",
     "KnowledgeGraph",
@@ -270,6 +329,7 @@ __all__ = [
     "build_code_tree",
     "repo_tree",
     "graphgen",
+    "outline",
     "to_neo4j",
     "from_networkx",
     "Agg",
