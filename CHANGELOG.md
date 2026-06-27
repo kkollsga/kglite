@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] — 2026-06-27 — Disciplined graph-as-document projection + file-freshness helpers
+
 ### Added
 - **`stamp_file_freshness()` / `check_file_freshness()` — drift detection for
   nodes that link to files.** The binding-layer answer to SimulatoRS's "auto-stamp
@@ -36,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted so per-write churn doesn't swamp the diff. `kglite diff a.kgl b.kgl`
   prints an explicit structural delta (`-`/`+` lines; a changed node is a pair).
 - **MCP write acks now stamp the engine version** (`OK: 1 node(s) created.
-  [engine 0.12.3]`). A long-running `kglite-mcp-server` pins its engine, so a
+  [engine 0.12.4]`). A long-running `kglite-mcp-server` pins its engine, so a
   venv upgrade that doesn't restart the server silently keeps writing with the
   old engine (e.g. not honouring `auto_timestamp` until restart) — surfacing the
   version on every write makes that visible.

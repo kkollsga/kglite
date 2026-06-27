@@ -940,6 +940,7 @@ pub fn kglite::api::io::to_csv_dir(graph: &kglite::api::DirGraph, output_dir: &s
 pub fn kglite::api::io::to_d3_json(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_gexf(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_graphml(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
+pub fn kglite::api::io::to_text(graph: &kglite::api::DirGraph) -> alloc::string::String
 pub fn kglite::api::io::write_kgl(graph: &kglite::api::DirGraph, path: &str) -> std::io::error::Result<()>
 pub fn kglite::api::io::write_kgl_to<W: std::io::Write>(graph: &kglite::api::DirGraph, writer: &mut W) -> std::io::error::Result<()>
 pub fn kglite::api::io::write_kgl_with(graph: &kglite::api::DirGraph, path: &str, fsync: bool) -> std::io::error::Result<()>
