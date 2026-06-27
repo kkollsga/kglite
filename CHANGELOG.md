@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`stamp_file_freshness()` / `check_file_freshness()` — drift detection for
+  nodes that link to files.** The binding-layer answer to SimulatoRS's "auto-stamp
+  file freshness" ask: the engine still never reads the filesystem (that no-fs
+  line stays), but these Python helpers do. `stamp_file_freshness(g)` captures
+  each node's linked-file `file_mtime`/`content_hash` into properties;
+  `check_file_freshness(g)` re-checks read-only and returns the drifted nodes
+  (`status: "missing"` for a deleted file, `"changed"` for an edited one) — the
+  "Artifact pointing at a deleted crate" case as a one-call gate.
 - **Outline projection — `CALL outline` + `kglite.outline()`.** Project a
   subgraph into the "open and skim" view a graph otherwise lacks: a BFS spanning
   tree from a root node along one edge type. The engine procedure

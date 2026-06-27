@@ -314,6 +314,94 @@ def outline(
     return "\n".join(lines)
 
 
+def _nodes_with_path(graph, node_type, path_property, extra=""):
+    label = f":{node_type}" if node_type else ""
+    return graph.cypher(
+        f"MATCH (n{label}) WHERE n.{path_property} IS NOT NULL RETURN n.id AS id, n.{path_property} AS path{extra}"
+    ).to_dicts()
+
+
+def stamp_file_freshness(
+    graph: "KnowledgeGraph",
+    *,
+    node_type: str | None = None,
+    path_property: str = "file_path",
+    mtime_property: str = "file_mtime",
+    hash_property: str | None = "content_hash",
+    base_dir: str | None = None,
+) -> int:
+    """Capture each node's linked-file state into properties — the binding-layer
+    answer to "auto-stamp file freshness" (the engine never reads the
+    filesystem). For every node carrying ``path_property``, stat the file and SET
+    ``mtime_property`` (a Timestamp) and, unless ``hash_property`` is None, its
+    sha256. A missing file sets both to null. Run after a build/write; pair with
+    :func:`check_file_freshness` to detect later drift.
+
+    Args:
+        node_type: restrict to one type (default: all nodes with the property).
+        base_dir: prefix for relative ``path_property`` values.
+
+    Returns:
+        The number of nodes stamped.
+    """
+    import datetime
+    import hashlib
+    import os
+    import pathlib
+
+    rows = _nodes_with_path(graph, node_type, path_property)
+    label = f":{node_type}" if node_type else ""
+    for r in rows:
+        full = os.path.join(base_dir, r["path"]) if base_dir else r["path"]
+        sets: dict = {mtime_property: None}
+        if hash_property:
+            sets[hash_property] = None
+        if os.path.isfile(full):
+            sets[mtime_property] = datetime.datetime.fromtimestamp(os.path.getmtime(full))
+            if hash_property:
+                sets[hash_property] = hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest()
+        assignments = ", ".join(f"n.`{k}` = ${k}" for k in sets)
+        graph.cypher(
+            f"MATCH (n{label}) WHERE n.id = $_id SET {assignments}",
+            params={"_id": r["id"], **sets},
+        )
+    return len(rows)
+
+
+def check_file_freshness(
+    graph: "KnowledgeGraph",
+    *,
+    node_type: str | None = None,
+    path_property: str = "file_path",
+    hash_property: str | None = "content_hash",
+    base_dir: str | None = None,
+) -> list:
+    """Read-only drift check (binding layer): for each node with ``path_property``,
+    re-stat the file and compare against the stored ``hash_property`` (from
+    :func:`stamp_file_freshness`). Returns the drifted nodes as
+    ``[{"id", "path", "status"}]`` where ``status`` is ``"missing"`` (the file is
+    gone — the stale-Artifact-pointing-at-a-deleted-crate case) or ``"changed"``
+    (its sha256 differs from what was stamped). Nodes that still match are
+    omitted. Replaces an ad-hoc ``os.path.exists`` gate; never mutates the graph.
+    """
+    import hashlib
+    import os
+    import pathlib
+
+    extra = f", n.{hash_property} AS _hash" if hash_property else ""
+    rows = _nodes_with_path(graph, node_type, path_property, extra)
+    drift: list = []
+    for r in rows:
+        full = os.path.join(base_dir, r["path"]) if base_dir else r["path"]
+        if not os.path.isfile(full):
+            drift.append({"id": r["id"], "path": r["path"], "status": "missing"})
+            continue
+        if hash_property and r.get("_hash") is not None:
+            if hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest() != r["_hash"]:
+                drift.append({"id": r["id"], "path": r["path"], "status": "changed"})
+    return drift
+
+
 __all__ = [
     "__version__",
     "KnowledgeGraph",
@@ -330,6 +418,8 @@ __all__ = [
     "repo_tree",
     "graphgen",
     "outline",
+    "stamp_file_freshness",
+    "check_file_freshness",
     "to_neo4j",
     "from_networkx",
     "Agg",
