@@ -2775,14 +2775,13 @@ path's old-value capture).
 
 #### Bench infrastructure
 
-A NornicDB shortestPath competitive bench landed at
-`benchmarks/competitive/nornic/` (untracked; the new
-`/benchmarks/competitive/` area is gitignored for competitive
-library comparisons). It exercises both surfaces — `kglite-py`
-(wheel) and `kglite` (Rust core) — against the same `.kgl` graph
-on all three storage modes. The wheel side reuses the existing
-`bench/nornicdb_compare.py` builder via a thin driver; the Rust
-side is a small standalone Cargo project calling
+A shortestPath competitive bench landed under the new
+`/benchmarks/competitive/` area (untracked; gitignored for
+competitive library comparisons). It exercises both surfaces —
+`kglite-py` (wheel) and `kglite` (Rust core) — against the same
+`.kgl` graph on all three storage modes. The wheel side reuses the
+existing comparison builder via a thin driver; the Rust side is a
+small standalone Cargo project calling
 `kglite::api::session::execute_read`.
 
 Initial runs surfaced an unexplained measurement inversion (the
@@ -3715,11 +3714,9 @@ the M-series CPU plateau, and the Bolt-server design implications.
 `scripts/perf_audit.py` is the re-runnable audit harness for these
 numbers.
 
-### Performance — NornicDB shortestPath benchmark: kglite is now 10–250× faster
+### Performance — shortestPath benchmark: kglite is now 10–250× faster
 
-Replicated NornicDB's published 500K-node `shortestPath` benchmark
-(`scripts/nornicdb_compare.py`, faithful port of
-`pkg/cypher/demo_shortest_path_largescale_test.go`). Pre-fix run on the
+Replicated a published 500K-node `shortestPath` benchmark. Pre-fix run on the
 500K Star / 4M HYPERLANE fixture exposed two compounded bottlenecks
 in the hot Cypher path: a quiet **35 ms floor on every shortestPath
 call** + a **500 K × 500 K cartesian product when prior bindings
@@ -3758,8 +3755,8 @@ out at 10 s per call past depth 3.
    `HashMap<usize, u32>` for parent tracking (presence ⇔ visited);
    shallow paths pay µs of alloc, deep paths pay O(visited_nodes).
    Tradeoff: ~50% slower per-node visit cost for very deep BFS
-   (HashMap hash vs Vec index); on the NornicDB benchmark at d=60
-   this still beats the pre-fix code by 7× and beats NornicDB by
+   (HashMap hash vs Vec index); on this benchmark at d=60 it still
+   beats the pre-fix code by 7× and beats the baseline by
    >100×.
 
 A `VecDeque + HashMap` (no overhead at small N) is a saner default
@@ -3773,9 +3770,9 @@ version's HashMap change had no measurable benefit).
 `test_set_name_updates_index` — the matcher-side routing covers the
 agent-typical case without needing the index-builder change.
 
-**Final NornicDB vs kglite (Apple M4 vs M3 Max, 500K nodes / 4M edges):**
+**Final baseline vs kglite (Apple M4 vs M3 Max, 500K nodes / 4M edges):**
 
-| Depth | kglite med | NornicDB med | Speedup |
+| Depth | kglite med | baseline med | Speedup |
 |---:|---:|---:|---:|
 | 1   | 3.9 µs     | 94.8 µs       | **24×** |
 | 5   | 122.9 µs   | 1.23 ms       | **10×** |
@@ -3785,7 +3782,7 @@ agent-typical case without needing the index-builder change.
 | 60  | 5.70 ms    | >612.7 ms     | **>100×** |
 
 Graph build is **49× faster** on top of the per-query wins (4.25 s
-vs NornicDB's 3 m 32 s, BadgerDB-flush-dominated).
+vs the baseline's 3 m 32 s, storage-flush-dominated).
 
 ### Refactor — Code-rot cleanup (pre-Bolt Tier 1 audit)
 
