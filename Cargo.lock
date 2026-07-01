@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-bolt-server"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-c"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-cli"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-mcp-server"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "bincode",
  "chrono",
@@ -2272,9 +2272,9 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.44"
+version = "0.3.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "103a112683a02b3eaaad0297c64a44e583c639d05b2dda3a7954715a0ef21a1c"
+checksum = "dc948dd7aabf1e052accc8efc38f0cc61ac42dc04112f40d6f7ccbfda4da815e"
 dependencies = [
  "anyhow",
  "clap",

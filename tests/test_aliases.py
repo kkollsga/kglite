@@ -6,6 +6,7 @@ where() calls, and the fluent API.
 """
 
 import os
+import re
 import tempfile
 
 import pandas as pd
@@ -244,6 +245,30 @@ class TestDescribeAliases:
         xml = graph_default_fields.describe()
         assert 'id_alias="' not in xml
         assert 'title_alias="' not in xml
+
+    def test_schema_adapted_example_uses_alias_anchor(self, graph_with_aliases):
+        """describe() emits a per-type example anchored on the type's real
+        identifier property (the id alias), with a concrete sampled value —
+        so a discovery client copies a query that matches THIS type's key
+        shape. (mcp-servers inbox 2026-07-01, Codex/code_mode on-ramp.)"""
+        xml = graph_with_aliases.describe()
+        assert "<example query=" in xml
+        # anchored on the alias (npdid), not the builtin `id`, with a value
+        assert "MATCH (n:Prospect {npdid:" in xml
+
+    def test_schema_adapted_example_uses_id_when_no_alias(self, graph_default_fields):
+        xml = graph_default_fields.describe()
+        assert "MATCH (n:Item {id:" in xml
+
+    def test_schema_adapted_example_is_runnable(self, graph_with_aliases):
+        """The generated example must be valid Cypher that matches a node —
+        a wrong-property example would be worse than none."""
+        xml = graph_with_aliases.describe()
+        m = re.search(r'<example query="([^"]+)"', xml)
+        assert m, "no example query in describe() output"
+        query = m.group(1)
+        rows = graph_with_aliases.cypher(query)
+        assert len(rows) >= 1, f"generated example returned no rows: {query!r}"
 
 
 class TestRepeatedAddNodesPreservesAlias:

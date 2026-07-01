@@ -2603,7 +2603,11 @@ class KnowledgeGraph:
           small graphs get full inline detail, extreme-scale graphs get
           a statistical summary with search hints.
         - ``describe(types=['Field', 'Well'])`` — Focused detail for
-          specific types with properties, connections, and samples.
+          specific types with properties, connections, and samples. Each
+          type carries a schema-adapted ``<example>`` query anchored on its
+          real identifier property (its id alias, else ``id``) with a
+          concrete sampled value, so an agent copies a query that matches
+          that type's key shape.
 
         **Type search** (``type_search`` parameter):
 

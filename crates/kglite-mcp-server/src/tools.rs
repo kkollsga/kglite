@@ -609,22 +609,38 @@ pub fn register(
     let s = state.clone();
     let csv = csv_http.clone();
     let writable = builtins.writable;
+    // Descriptions lead with the code-exploration vocabulary agents actually
+    // search for (explore, understand, "how does", call graph, "where defined",
+    // structure, navigate) so lazy-tool-discovery clients (Codex / code_mode)
+    // surface cypher_query on their first broad tool search instead of falling
+    // back to grep. (mcp-servers inbox 2026-07-01.)
     let cypher_desc: &'static str = match (csv.is_some(), writable) {
         (_, true) => {
-            "Run a Cypher query against the active knowledge graph. Reads AND writes \
-             (CREATE/SET/DELETE/MERGE) are accepted — this is a write-enabled graph. \
-             Pass write_scope=[...] to restrict mutations to those node types. \
-             Mutations are in-memory; call save_graph to persist. Append FORMAT CSV \
-             to export results."
+            "Query, explore, and understand the active knowledge graph with Cypher, and \
+             modify it — reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a \
+             write-enabled graph. The primary tool for structural questions: how things \
+             relate, where an entity/function/type is defined, what references or calls what, \
+             counts, and multi-hop paths (for code graphs: call graphs, definitions, imports — \
+             navigate the codebase structure). Pass write_scope=[...] to restrict mutations to \
+             those node types. Mutations are in-memory; call save_graph to persist. Append \
+             FORMAT CSV to export results."
         }
         (true, false) => {
-            "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
-             inline; append FORMAT CSV to export results — large CSVs are written to the \
-             csv_http_server directory and returned as a fetch URL."
+            "Query, explore, and understand the active knowledge graph with Cypher — the \
+             primary tool for structural questions: how things relate, where an \
+             entity/function/type is defined, what references or calls what, counts, and \
+             multi-hop paths (for code graphs: call graphs, definitions, imports — navigate the \
+             codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export \
+             results — large CSVs are written to the csv_http_server directory and returned as \
+             a fetch URL."
         }
         (false, false) => {
-            "Run a Cypher query against the active knowledge graph. Returns up to 15 rows \
-             inline; append FORMAT CSV to export full results to a CSV string."
+            "Query, explore, and understand the active knowledge graph with Cypher — the \
+             primary tool for structural questions: how things relate, where an \
+             entity/function/type is defined, what references or calls what, counts, and \
+             multi-hop paths (for code graphs: call graphs, definitions, imports — navigate the \
+             codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export \
+             full results to a CSV string."
         }
     };
     server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
@@ -661,8 +677,11 @@ pub fn register(
     let temp_dir = builtins.temp_dir.clone();
     server.register_typed_tool::<OverviewArgs, _>(
         "graph_overview",
-        "Inspect the active graph's schema. With no args returns the inventory; pass \
-         types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+        "Inspect and explore the active graph's schema — start here to understand a codebase \
+         or dataset: node types, properties, connections, sample values, and a per-type \
+         example query (anchored on each type's real identifier property). With no args \
+         returns the inventory; pass types=[...] / connections=true|[...] / \
+         cypher=true|[...] for drill-down.",
         move |args| {
             if cleanup_temp
                 && args.types.is_none()

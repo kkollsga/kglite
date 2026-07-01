@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] — 2026-07-01 — mcp-server activation fix + Codex/code_mode discovery on-ramp
+
+### Added
+
+- **`describe()` / `graph_overview` now emit a schema-adapted example query
+  per node type.** Each `<type>` carries an `<example>` anchored on that type's
+  real identifier property (its id alias, else the builtin `id`) with a concrete
+  sampled value — e.g. `MATCH (n:File {id: 'src/foo.rs'}) RETURN n` vs
+  `MATCH (n:Function {qualified_name: 'mod::bar'}) RETURN n`. Prevents the
+  wrong-property first query a lazy-tool-discovery client (Codex / code_mode)
+  hit when guessing a type's key from generic examples.
+
+### Changed
+
+- **`cypher_query` / `graph_overview` tool descriptions now lead with
+  code-exploration vocabulary** (explore, understand, "how does", call graph,
+  "where defined", structure, navigate) so tool-search / code-mode clients
+  surface the graph tools on their first broad discovery pass instead of
+  falling back to grep.
+
+### Fixed
+
+- **`kglite-mcp-server` workspace/github mode: graph now hydrates when
+  activating an already-built repo in a fresh process.** Bumped the
+  `mcp-methods` dependency `0.3.44 → 0.3.45`, which fixes a post-activate
+  hook skip: the build-skip gate keyed only on the persisted `last_built_sha`,
+  so a fresh server process (empty in-memory graph, but a matching on-disk
+  SHA) reported activation success while leaving no active graph — `graph_overview`
+  / `cypher_query` returned "No active graph" until a `force_rebuild`. Affected
+  both github mode (git SHA) and local mode (directory fingerprint). No kglite
+  code change — clean dependency bump.
+
 ## [0.12.4] — 2026-06-27 — Disciplined graph-as-document projection + file-freshness helpers
 
 ### Added

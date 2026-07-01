@@ -756,6 +756,24 @@ fn is_uninformative_false_bool(p: &PropertyStatInfo) -> bool {
             .is_some_and(|vs| vs.iter().all(|v| matches!(v, Value::Boolean(false))))
 }
 
+/// Render a sampled property value as a Cypher literal for the self-documenting
+/// per-type example query in the schema overview. Strings are quoted + escaped;
+/// numeric / boolean scalars are bare; structural values fall back to a quoted
+/// compact display (a copy-paste starting point, not necessarily a live match).
+fn cypher_literal(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::Int64(i) => i.to_string(),
+        Value::UniqueId(u) => u.to_string(),
+        Value::Float64(f) => format!("{}", f),
+        Value::Boolean(b) => b.to_string(),
+        other => format!(
+            "'{}'",
+            value_display_compact(other, Some(40)).replace('\'', "\\'")
+        ),
+    }
+}
+
 fn write_type_detail(
     xml: &mut String,
     graph: &DirGraph,
@@ -896,6 +914,42 @@ fn write_type_detail(
             }
             xml.push_str(&format!("{}  </properties>\n", indent));
         }
+
+        // Schema-adapted example query: anchor on this type's real identifier
+        // property (its id_alias, else the builtin `id`) with a concrete sampled
+        // value, so a discovery client copies a query matching THIS type's key
+        // shape instead of guessing a wrong property (e.g. File keys on `id`
+        // while code entities key on `qualified_name`). (mcp-servers inbox
+        // 2026-07-01 — Codex/code_mode on-ramp.)
+        let anchor = id_alias.unwrap_or("id");
+        // The identifier's sampled values live under the canonical "id" key in
+        // compute_property_stats regardless of its display alias, so look there
+        // first (this is what makes aliased code-graph types — Function keyed on
+        // `qualified_name` — produce a concrete example, not just a template).
+        let anchor_sample = stats
+            .iter()
+            .find(|p| p.property_name == "id")
+            .or_else(|| stats.iter().find(|p| p.property_name == anchor))
+            .and_then(|p| {
+                p.values
+                    .as_ref()
+                    .and_then(|v| v.first())
+                    .or(p.sample.as_ref())
+            });
+        let example = match anchor_sample {
+            Some(v) => format!(
+                "MATCH (n:{} {{{}: {}}}) RETURN n",
+                node_type,
+                anchor,
+                cypher_literal(v)
+            ),
+            None => format!("MATCH (n:{}) RETURN n LIMIT 25", node_type),
+        };
+        xml.push_str(&format!(
+            "{}  <example query=\"{}\"/>\n",
+            indent,
+            xml_escape(&example)
+        ));
     }
 
     // Connections (neighbors) — prefer: pre-computed cache > type connectivity triples > bounded edge scan
