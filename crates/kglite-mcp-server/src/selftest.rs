@@ -41,19 +41,50 @@ struct Rpc {
     next_id: i64,
 }
 
+/// Resolve the command that launches a fresh server instance for the child
+/// handshake, as `(program, leading_args)`.
+///
+/// The cargo standalone binary is its own `current_exe()`, so re-spawning it
+/// directly works. But in the pip wheel the running process is the Python
+/// interpreter and `kglite-mcp-server` is a console-script shim — there
+/// `current_exe()` is Python, and `python --graph …` fails. The wheel's
+/// `kglite.mcp_server.main` therefore exports `KGLITE_MCP_RESPAWN` (a JSON
+/// array like `["/…/python", "-m", "kglite.mcp_server"]`) telling us how to
+/// relaunch the *server*, not the interpreter. Absent that (standalone
+/// binary), fall back to `current_exe()`.
+fn respawn_command() -> Result<(OsString, Vec<OsString>)> {
+    if let Ok(raw) = std::env::var("KGLITE_MCP_RESPAWN") {
+        let parts: Vec<String> = serde_json::from_str(&raw)
+            .context("KGLITE_MCP_RESPAWN is not a JSON array of strings")?;
+        let mut it = parts.into_iter();
+        let program = it
+            .next()
+            .context("KGLITE_MCP_RESPAWN is an empty array (need at least the program)")?;
+        return Ok((OsString::from(program), it.map(OsString::from).collect()));
+    }
+    let exe =
+        std::env::current_exe().context("cannot resolve current executable for --selftest")?;
+    Ok((exe.into_os_string(), Vec::new()))
+}
+
 impl Rpc {
     fn spawn(child_args: &[OsString]) -> Result<Self> {
-        let exe =
-            std::env::current_exe().context("cannot resolve current executable for --selftest")?;
+        let (program, lead_args) = respawn_command()?;
         // stderr is inherited so the child's boot diagnostics (bad manifest,
         // missing .env, PATH-shadow warnings) reach the operator directly.
-        let mut child = Command::new(&exe)
+        let mut child = Command::new(&program)
+            .args(&lead_args)
             .args(child_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .with_context(|| format!("failed to spawn child server: {}", exe.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to spawn child server: {}",
+                    program.to_string_lossy()
+                )
+            })?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, rx) = mpsc::channel();

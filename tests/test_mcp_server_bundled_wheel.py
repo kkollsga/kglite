@@ -167,3 +167,48 @@ def test_shim_exit_code_on_bad_args(tmp_path: Path) -> None:
         timeout=30,
     )
     assert proc.returncode != 0
+
+
+def test_selftest_on_wheel_install(tmp_path: Path) -> None:
+    """`--selftest` must work on the *wheel* install, not just the cargo
+    binary. Regression: the self-test re-spawns the server, and on the wheel
+    `current_exe()` is the Python interpreter (the console script is a shim),
+    so a naive re-spawn launched `python <server-flags>` and failed with
+    "Unknown option". `kglite.mcp_server.main` now exports KGLITE_MCP_RESPAWN
+    so the child is launched via the module entry. Drives the exact wheel
+    code path (`python -m kglite.mcp_server`)."""
+    kgl = tmp_path / "fixture.kgl"
+    _build_fixture_graph(kgl)
+    proc = subprocess.run(
+        [sys.executable, "-m", "kglite.mcp_server", "--selftest", "--graph", str(kgl)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, out
+    assert "Selftest PASSED" in out
+    assert "graph hydrates" in out
+
+
+def test_selftest_on_wheel_install_bad_graph_fails(tmp_path: Path) -> None:
+    """The wheel self-test still reports a genuine misconfiguration as a
+    non-zero failure (not a false green)."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kglite.mcp_server",
+            "--selftest",
+            "--graph",
+            str(tmp_path / "missing.kgl"),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
+    assert proc.returncode != 0
+    assert "Selftest FAILED" in out

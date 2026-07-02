@@ -23,6 +23,8 @@ they name (`pip install sentence-transformers`, etc.).
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 
 
@@ -50,6 +52,16 @@ def main(argv: list[str] | None = None) -> int:
     from kglite import _run_mcp_server
 
     args = list(sys.argv[1:] if argv is None else argv)
+    # Tell the Rust server how to re-spawn *itself* for `--selftest`. On the
+    # cargo standalone binary `current_exe()` is the server, so the server
+    # re-spawns directly. In the wheel the running process is the Python
+    # interpreter and `kglite-mcp-server` is a console-script shim, so
+    # `current_exe()` is Python — re-spawning it with server flags would launch
+    # `python --graph …` and fail. Hand the server the correct vector: this
+    # same module entry, run under the exact interpreter we're in. The child
+    # inherits (and harmlessly re-sets) this; only the parent's `--selftest`
+    # branch consumes it.
+    os.environ["KGLITE_MCP_RESPAWN"] = json.dumps([sys.executable, "-m", "kglite.mcp_server"])
     try:
         _run_mcp_server(args, embedder_factory=_embedder_factory)
     except KeyboardInterrupt:

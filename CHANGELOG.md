@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite-mcp-server --selftest` on the pip-wheel install.** The self-test
+  re-spawns the server to drive a live handshake; it used `current_exe()`,
+  which on the wheel is the Python interpreter (the `kglite-mcp-server` command
+  is a console-script shim), so the child launched as `python <server-flags>`
+  and failed with "Unknown option" — the tool that catches silent
+  misconfiguration was itself broken on the *primary* install path (0.12.7). The
+  wheel entry (`kglite.mcp_server.main`) now exports `KGLITE_MCP_RESPAWN` so the
+  server re-spawns via the module entry (`python -m kglite.mcp_server`); the
+  cargo standalone binary is unaffected (falls back to `current_exe()`). Added a
+  wheel-install regression test that exercises `--selftest` through the console
+  shim, not just the cargo binary. Reported by the mcp-servers operator.
+
 ## [0.12.7] — 2026-07-02 — MCP-server `--selftest`, default discovery banner, and workspace-archetype docs
 
 ### Added
