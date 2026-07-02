@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite-mcp-server` default lazy-tool-discovery steer.** Workspace modes
+  (`--workspace` / `workspace.kind: local`) now fold a one-line discovery steer
+  into the `initialize` `instructions` by default — "graph_overview and
+  cypher_query are ALWAYS registered; if a broad first tool-search surfaces only
+  grep/read_source, search your registry for 'cypher' before falling back." It's
+  the client-side complement to the 0.12.6 in-band steering, so code-mode /
+  tool-search clients get the guidance without every deployment copy-pasting it
+  into its manifest. Any manifest `instructions:` are preserved (appended), and
+  the steer is skipped when the manifest already carries equivalent text.
+
 ## [0.12.6] — 2026-07-02 — Runtime-write correctness (petekSuite) + MCP graph-over-grep steering
 
 ### Added

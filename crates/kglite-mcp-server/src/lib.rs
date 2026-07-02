@@ -537,6 +537,43 @@ fn bind_mode(
     Ok(options)
 }
 
+/// Client-side tool-discovery steer, folded into workspace-mode
+/// `instructions` so every `--workspace` / `workspace.kind: local`
+/// deployment emits it on `initialize` without copy-pasting it into each
+/// manifest. It complements the 0.12.6 in-band steering (graph-over-grep
+/// vocabulary in tool descriptions, the activation mini-map, the result
+/// footer) by making the *"search the registry"* instruction explicit for
+/// lazy-tool-discovery clients (Codex / code_mode / tool-search), which can
+/// surface only `grep`/`read_source` on a broad first query and miss the
+/// always-registered graph tools. Skipped when the manifest already carries
+/// equivalent guidance (see the dedup check in `run_async`).
+const DISCOVERY_STEER: &str = "Tool discovery: graph_overview and cypher_query are ALWAYS registered. \
+If a broad first tool-search surfaces only grep/read_source, search your tool registry for 'cypher' or \
+'graph_overview' and load those before falling back to grep — a discovery miss does not mean the graph \
+path is unavailable.";
+
+/// Fold [`DISCOVERY_STEER`] into `options.instructions` for the two
+/// workspace modes. Appends (preserving any manifest `instructions:`) or
+/// sets it when none exists; bails when the text already mentions the
+/// always-registered graph tools so an opted-in manifest isn't duplicated.
+fn apply_discovery_steer(mode: &Mode, mut options: ServerOptions) -> ServerOptions {
+    if !matches!(mode, Mode::Workspace { .. } | Mode::LocalWorkspace { .. }) {
+        return options;
+    }
+    let already = options
+        .instructions
+        .as_deref()
+        .is_some_and(|s| s.to_lowercase().contains("always registered"));
+    if already {
+        return options;
+    }
+    options.instructions = Some(match options.instructions.take() {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{DISCOVERY_STEER}"),
+        _ => DISCOVERY_STEER.to_string(),
+    });
+    options
+}
+
 async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> Result<()> {
     init_tracing();
     let mode = pick_mode(&cli);
@@ -562,6 +599,10 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     if cli.name.is_some() {
         options.name = cli.name.clone();
     }
+    // Fold the lazy-tool-discovery steer into workspace-mode instructions so
+    // code-mode / tool-search clients get the "search the registry for cypher"
+    // guidance by default, without every deployment copy-pasting it.
+    let options = apply_discovery_steer(&mode, options);
 
     // The github-workspace (open-source) mode ingests each cloned repo's
     // markdown as `:Doc` nodes and links them to code (MENTIONS/DOCUMENTS) —
@@ -1048,4 +1089,60 @@ fn print_boot_summary(
         parts.push(format!("graph: {nodes} nodes, {edges} edges"));
     }
     eprintln!("kglite-mcp-server: {}", parts.join("; "));
+}
+
+#[cfg(test)]
+mod discovery_steer_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn ws_mode() -> Mode {
+        Mode::LocalWorkspace {
+            root: PathBuf::from("/tmp/ws"),
+            watch: false,
+        }
+    }
+
+    #[test]
+    fn appends_to_workspace_modes() {
+        let out = apply_discovery_steer(&ws_mode(), ServerOptions::default());
+        let text = out.instructions.expect("instructions set");
+        assert!(text.contains("ALWAYS registered"));
+        assert!(text.contains("cypher"));
+    }
+
+    #[test]
+    fn preserves_manifest_instructions() {
+        let opts = ServerOptions {
+            instructions: Some("Domain guidance here.".to_string()),
+            ..Default::default()
+        };
+        let out = apply_discovery_steer(&ws_mode(), opts);
+        let text = out.instructions.expect("instructions set");
+        assert!(text.starts_with("Domain guidance here."));
+        assert!(text.contains("ALWAYS registered"));
+    }
+
+    #[test]
+    fn dedupes_when_already_present() {
+        let opts = ServerOptions {
+            instructions: Some(
+                "graph_overview and cypher_query are ALWAYS registered.".to_string(),
+            ),
+            ..Default::default()
+        };
+        let out = apply_discovery_steer(&ws_mode(), opts);
+        let text = out.instructions.expect("instructions set");
+        // Only the manifest's own copy — not appended a second time.
+        assert_eq!(text.matches("ALWAYS registered").count(), 1);
+    }
+
+    #[test]
+    fn skips_non_workspace_modes() {
+        let mode = Mode::Graph {
+            path: PathBuf::from("/tmp/g.kgl"),
+        };
+        let out = apply_discovery_steer(&mode, ServerOptions::default());
+        assert!(out.instructions.is_none());
+    }
 }

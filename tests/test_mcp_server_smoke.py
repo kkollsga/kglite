@@ -164,6 +164,8 @@ class McpClient:
             }
         )
         resp = self._recv(rid)
+        # Stash so callers can assert on serverInfo / instructions after _spawn.
+        self.init_result = resp
         # Initialized notification (no id).
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return resp
@@ -277,6 +279,17 @@ class TestGraphMode:
         try:
             r = client.call_tool("ping")
             assert "pong" in _text_content(r).lower()
+        finally:
+            client.shutdown()
+
+    def test_no_discovery_steer_in_graph_mode(self, graph_fixture: Path):
+        """The lazy-tool-discovery steer is scoped to workspace modes; a
+        single-graph deployment doesn't get it appended (nothing to steer —
+        no code-tree exploration surface)."""
+        client = _spawn(["--graph", str(graph_fixture)])
+        try:
+            instructions = client.init_result["result"].get("instructions") or ""
+            assert "ALWAYS registered" not in instructions
         finally:
             client.shutdown()
 
@@ -750,6 +763,20 @@ class TestLocalWorkspace:
             r = client.call_tool("read_source", {"file_path": "demo.py"})
             text = _text_content(r)
             assert "hello" in text
+        finally:
+            client.shutdown()
+
+    def test_discovery_steer_in_instructions(self, local_workspace):
+        """Workspace modes fold the lazy-tool-discovery steer into the
+        `initialize` instructions by default (no per-manifest copy-paste),
+        so code-mode / tool-search clients learn to search the registry for
+        `cypher` before falling back to grep."""
+        manifest, _ws = local_workspace
+        client = _spawn(["--mcp-config", str(manifest)])
+        try:
+            instructions = client.init_result["result"].get("instructions", "")
+            assert "ALWAYS registered" in instructions
+            assert "cypher" in instructions
         finally:
             client.shutdown()
 
