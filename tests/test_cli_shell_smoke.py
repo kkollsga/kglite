@@ -156,6 +156,27 @@ def test_write_subcommand_stamps_provenance(tmp_path):
     assert rows == [{"sha": "abc123", "by": "cli-agent"}]
 
 
+def test_concurrent_write_save_serializes(tmp_path):
+    import kglite
+
+    p = tmp_path / "shared.kgl"
+    seed = kglite.KnowledgeGraph()
+    seed.save(str(p))
+
+    commands = [
+        [str(BINARY), "write", str(p), "CREATE (:Task {id: 'a'})", "--save"],
+        [str(BINARY), "write", str(p), "CREATE (:Task {id: 'b'})", "--save"],
+    ]
+    procs = [subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for cmd in commands]
+    results = [proc.communicate(timeout=30) + (proc.returncode,) for proc in procs]
+    for stdout, stderr, code in results:
+        assert code == 0, f"stdout={stdout}\nstderr={stderr}"
+
+    rows = kglite.load(str(p)).cypher("MATCH (t:Task) RETURN t.id AS id ORDER BY id").to_dicts()
+    assert rows == [{"id": "a"}, {"id": "b"}]
+    assert not (tmp_path / "shared.kgl.lock").exists()
+
+
 def test_ready_set_subcommand(tmp_path):
     import json
 

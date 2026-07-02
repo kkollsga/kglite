@@ -11,8 +11,12 @@ mod helper;
 mod repl;
 
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -22,6 +26,8 @@ use kglite::api::{DirGraph, Value};
 
 use crate::exec::QueryOptions;
 use crate::format::Mode;
+
+const WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Interactive Cypher shell for kglite `.kgl` graphs.
 #[derive(Parser, Debug)]
@@ -252,6 +258,11 @@ fn run_write(
     git_sha: Option<String>,
     modified_by: Option<String>,
 ) -> Result<()> {
+    let _lock = if persist {
+        Some(WriteLock::acquire(path, WRITE_LOCK_TIMEOUT)?)
+    } else {
+        None
+    };
     let mut graph = if path.exists() {
         load_graph(path)?
     } else if persist {
@@ -304,4 +315,68 @@ fn run_ready_set(
 
 fn cypher_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+struct WriteLock {
+    path: PathBuf,
+}
+
+impl WriteLock {
+    fn acquire(graph_path: &Path, timeout: Duration) -> Result<Self> {
+        let path = lock_path(graph_path);
+        let started = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    write_lock_metadata(&mut file)?;
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if started.elapsed() >= timeout {
+                        anyhow::bail!(
+                            "timed out waiting for write lock {}; another kglite write may be active",
+                            path.display()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to create write lock {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_path(graph_path: &Path) -> PathBuf {
+    let mut lock = graph_path.as_os_str().to_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+fn write_lock_metadata(file: &mut File) -> io::Result<()> {
+    writeln!(file, "pid={}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lock_path;
+    use std::path::Path;
+
+    #[test]
+    fn lock_path_appends_lock_suffix() {
+        assert_eq!(
+            lock_path(Path::new("/tmp/demo.kgl")),
+            Path::new("/tmp/demo.kgl.lock")
+        );
+    }
 }
