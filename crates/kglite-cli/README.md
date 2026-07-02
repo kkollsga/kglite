@@ -17,6 +17,32 @@ either or both.
 
 ## Use
 
+Run one query and exit:
+
+```console
+$ kglite query app.kgl "MATCH (n:Person) RETURN n.name AS name" --format json
+[
+  {
+    "name": "Alice"
+  }
+]
+```
+
+Run a scoped write and persist it:
+
+```console
+$ kglite write app.kgl "CREATE (:Task {id:'t1', status:'todo'})" \
+    --save --write-scope Task --git-sha abc123 --modified-by agent
+```
+
+Inspect a dependency frontier:
+
+```console
+$ kglite ready-set app.kgl --done 'n.status = "done"' --node-type Task --format csv
+```
+
+Or open the interactive shell:
+
 ```console
 $ kglite app.kgl
 kglite shell — app.kgl
@@ -38,6 +64,17 @@ A Cypher statement runs when terminated by `;`, so it can span multiple lines;
 dot-commands run on Enter. Tab completes dot-commands and the graph's labels.
 
 ## Commands
+
+Non-interactive commands:
+
+- `query <graph.kgl> <cypher> [--format table|csv|json]` — run a read-only Cypher query
+- `write <graph.kgl> <cypher> [--format table|csv|json] [--save]` — run a write-capable Cypher statement
+- `write --write-scope A,B --git-sha <sha> --modified-by <actor>` — restrict writes and stamp provenance on `auto_timestamp` types
+- `ready-set <graph.kgl> --done <predicate> [--relationship DEPENDS_ON] [--node-type T]` — print `CALL ready_set(...)`
+- `export-text <graph.kgl>` — print the deterministic text projection used by git textconv
+- `diff <a.kgl> <b.kgl>` — compare two graph text projections
+
+Interactive dot-commands:
 
 - `.help` — list commands
 - `.quit` / `.exit` — leave the shell

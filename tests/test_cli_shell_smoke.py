@@ -85,6 +85,7 @@ def test_diff_subcommand(tmp_path):
 
 def test_query_subcommand_json(tmp_path):
     import json
+
     import kglite
 
     g = kglite.KnowledgeGraph()
@@ -149,10 +150,37 @@ def test_write_subcommand_stamps_provenance(tmp_path):
         "cli-agent",
     )
     assert proc.returncode == 0, proc.stderr
-    rows = kglite.load(str(p)).cypher(
-        "MATCH (t:Task {id: 't1'}) RETURN t.git_sha AS sha, t.modified_by AS by"
-    ).to_dicts()
+    rows = (
+        kglite.load(str(p)).cypher("MATCH (t:Task {id: 't1'}) RETURN t.git_sha AS sha, t.modified_by AS by").to_dicts()
+    )
     assert rows == [{"sha": "abc123", "by": "cli-agent"}]
+
+
+def test_ready_set_subcommand(tmp_path):
+    import json
+
+    import kglite
+
+    p = tmp_path / "dag.kgl"
+    g = kglite.KnowledgeGraph()
+    for n, s in [("A", "todo"), ("B", "todo"), ("C", "done")]:
+        g.cypher(f"CREATE (:Task {{id:'{n}', status:'{s}'}})")
+    for a, b in [("B", "C"), ("A", "B")]:
+        g.cypher(f"MATCH (x:Task {{id:'{a}'}}),(y:Task {{id:'{b}'}}) CREATE (x)-[:DEPENDS_ON]->(y)")
+    g.save(str(p))
+
+    out = _run_args(
+        "ready-set",
+        str(p),
+        "--done",
+        'n.status = "done"',
+        "--node-type",
+        "Task",
+        "--format",
+        "json",
+    )
+    rows = json.loads(out)
+    assert rows == [{"dependency_count": 1, "id": "B", "title": "Task_1"}]
 
 
 def test_create_and_query_roundtrip():

@@ -69,6 +69,23 @@ enum Command {
         #[arg(long)]
         modified_by: Option<String>,
     },
+    /// Print the dependency frontier from `CALL ready_set(...)`.
+    ReadySet {
+        /// Path to the `.kgl` file.
+        graph: PathBuf,
+        /// Dependency relationship type.
+        #[arg(long, default_value = "DEPENDS_ON")]
+        relationship: String,
+        /// Done predicate over `n`, for example: `n.status = "done"`.
+        #[arg(long)]
+        done: String,
+        /// Optional node type to include in the frontier.
+        #[arg(long)]
+        node_type: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
+    },
     /// Print a deterministic, human-readable text projection of a `.kgl` to
     /// stdout — the canonical form for a git `textconv` diff filter. Set up:
     /// `git config diff.kglite.textconv "kglite export-text"` +
@@ -142,6 +159,23 @@ fn main() -> Result<()> {
             write_scope.as_deref(),
             git_sha.clone(),
             modified_by.clone(),
+        )?;
+        return Ok(());
+    }
+    if let Some(Command::ReadySet {
+        graph,
+        relationship,
+        done,
+        node_type,
+        format,
+    }) = &cli.command
+    {
+        run_ready_set(
+            graph,
+            relationship,
+            done,
+            node_type.as_deref(),
+            (*format).into(),
         )?;
         return Ok(());
     }
@@ -243,4 +277,31 @@ fn run_write(
     }
     exec::write_stdout(&exec::render_outcome(mode, &outcome))?;
     Ok(())
+}
+
+fn run_ready_set(
+    path: &Path,
+    relationship: &str,
+    done: &str,
+    node_type: Option<&str>,
+    mode: Mode,
+) -> Result<()> {
+    let mut config = vec![
+        format!("relationship: '{}'", cypher_string(relationship)),
+        format!("done: '{}'", cypher_string(done)),
+    ];
+    if let Some(node_type) = node_type {
+        config.push(format!("node_type: '{}'", cypher_string(node_type)));
+    }
+    let query = format!(
+        "CALL ready_set({{{}}}) YIELD node, dependency_count \
+         RETURN node.id AS id, node.title AS title, dependency_count \
+         ORDER BY dependency_count, id",
+        config.join(", ")
+    );
+    run_query(path, &query, mode)
+}
+
+fn cypher_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }

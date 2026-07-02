@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite-cli` one-shot agent commands.** The standalone `kglite` binary now
+  supports `query`, `write`, and `ready-set` subcommands with
+  `--format table|csv|json`; `write` also supports `--save`, `--write-scope`,
+  `--git-sha`, and `--modified-by` so automation can use the same scoped-write
+  and provenance controls as MCP/Python paths.
+
 ## [0.12.9] — 2026-07-02 — `--selftest` wide-root fix + production-shape dogfood gate
 
 ### Fixed
