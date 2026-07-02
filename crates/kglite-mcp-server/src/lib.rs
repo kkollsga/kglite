@@ -39,7 +39,7 @@ use mcp_methods::server::manifest::{
 };
 use mcp_methods::server::{
     init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, serve_prompts, watch,
-    workspace, BundledSkill, Manifest, McpServer, PredicateClause, ServerOptions,
+    workspace, BundledSkill, Manifest, McpServer, PredicateClause, ResultCtx, ServerOptions,
     SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
 };
 use rmcp::transport::stdio;
@@ -327,6 +327,62 @@ fn resolve_env_start_dir(mode: &Mode) -> PathBuf {
     }
 }
 
+/// Graph-aware steering footer for a builtin tool result — the content behind
+/// the `with_result_postprocess` hook wired in [`run`]. Only fires against an
+/// active code graph (Function/Class present); everything else returns `None`,
+/// so the framework leaves the result untouched. Cheap: at most two
+/// `has_node_type` read-locks (grep) or a substring test (cypher). The tool has
+/// already released its lock by the time this runs, so there is no re-entrancy.
+fn graph_result_footer(
+    gs: &GraphState,
+    tool: &str,
+    args: &serde_json::Value,
+    body: &str,
+) -> Option<String> {
+    match tool {
+        "grep" => {
+            if !(gs.has_node_type("Function") || gs.has_node_type("Class")) {
+                return None;
+            }
+            // Zero-match: the framework returns "No matches for pattern '…'."
+            if body.starts_with("No matches for pattern") {
+                return Some(
+                    "No grep matches — but the active code graph indexes the layout, so a \
+                     wrong glob won't hide results there. Try `graph_overview()` then \
+                     `cypher_query`."
+                        .to_string(),
+                );
+            }
+            // Definition-shaped pattern → a structural question grep answers poorly.
+            let p = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim_start_matches(['^', '\\', '('])
+                .trim_start();
+            let definition_shaped = ["fn ", "def ", "class ", "impl ", "func ", "function "]
+                .iter()
+                .any(|kw| p.starts_with(kw));
+            if definition_shaped {
+                Some(
+                    "Tip: that looks like a definition search. The active code graph resolves \
+                     definitions and callers exactly — e.g. `cypher_query(\"MATCH (f:Function \
+                     {title:'NAME'}) RETURN f.file_path, f.line_number\")`, and CALLS edges give \
+                     callers. Reserve grep for literal text (log strings, comments, config keys)."
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        }
+        "cypher_query" if body.contains("qualified_name") => Some(
+            "Tip: `read_code_source(qualified_name=…)` pulls a matched symbol's source body."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 /// Apply mode-specific bindings — source roots, workspace handle, initial
 /// graph load/build — onto `options`, returning the transformed value.
 fn bind_mode(
@@ -402,8 +458,16 @@ fn bind_mode(
                 tracing::info!(repo = name, "code_tree::build on activate");
                 gs.build_code_tree(path)
             });
+            // Opening steer: append the graph mini-map to the activation
+            // message (mcp-methods 0.3.46). The post-activate hook above builds
+            // the graph first, so counts are live when this runs. Chained before
+            // the workspace is cloned into `options` (framework caveat).
+            let gs_sum = graph_state.clone();
+            let summary: workspace::ActivationSummaryHook =
+                Arc::new(move |_path, _name| gs_sum.activation_summary());
             let ws = workspace::Workspace::open(canon, cli.stale_after_days, Some(hook))
-                .context("workspace init failed")?;
+                .context("workspace init failed")?
+                .with_activation_summary(summary);
             options = options.with_workspace(ws);
         }
         Mode::LocalWorkspace { root, .. } => {
@@ -450,8 +514,14 @@ fn bind_mode(
                 }
                 Ok(())
             });
+            // Opening steer: mini-map on the activation message (see the
+            // github-workspace arm above). Chained before the clone into `options`.
+            let gs_sum = graph_state.clone();
+            let summary: workspace::ActivationSummaryHook =
+                Arc::new(move |_path, _name| gs_sum.activation_summary());
             let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
-                .context("local-workspace init failed")?;
+                .context("local-workspace init failed")?
+                .with_activation_summary(summary);
             options = options.with_workspace(ws);
         }
         Mode::Bare => {
@@ -533,6 +603,23 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
         &local_active_root,
         options,
     )?;
+
+    // Runtime graph-over-grep steering (mcp-methods 0.3.46 result-postprocess
+    // hook): append a one-line footer to a builtin tool result at the moment of
+    // a likely misuse — a definition-shaped or zero-match `grep`, or a
+    // `cypher_query` result carrying `qualified_name`. Delivered on the RESULT
+    // (read every call), it corrects course where the load-once tool
+    // description could not (petekSuite field report 2026-07-02). Returns `None`
+    // — leaving the result byte-for-byte unchanged — unless a code graph is
+    // active and the shape matches, so non-code deployments are untouched.
+    let options = {
+        let gs = graph_state.clone();
+        options.with_result_postprocess(Arc::new(
+            move |tool: &str, args: &serde_json::Value, body: &str, _ctx: &ResultCtx| {
+                graph_result_footer(&gs, tool, args, body)
+            },
+        ))
+    };
 
     // Snapshot the dynamic source-roots provider before we move
     // `options` into the McpServer. The `read_code_source` tool

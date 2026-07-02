@@ -10,6 +10,10 @@ applies_when:
     - Class
 ---
 
+> **Code-graph workflow — do these in order:** **1** `graph_overview` (map the schema) · **2** `cypher_query` (structure: defs, callers, members, types, counts, paths) · **3** `grep` (literal text ONLY — log strings, comments, config keys) · **4** `read_source` / `read_code_source(qualified_name=…)` (read bodies, cite lines).
+>
+> **Never `grep` for a definition, caller, or call site — that is a `cypher_query` question.** The graph already resolved the cross-file relationships grep can't see.
+
 # Code-graph views: provenance filters & structured fields
 
 A code-tree graph mixes library code with test, benchmark, generated, and

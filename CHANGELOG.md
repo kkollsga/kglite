@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] — 2026-07-02 — Runtime-write correctness (petekSuite) + MCP graph-over-grep steering
+
+### Added
+
+- **`kglite-mcp-server` runtime graph-over-grep steering** (mcp-methods 0.3.46).
+  Two hooks now correct an agent's course at the moment it acts, not just in the
+  load-once tool descriptions:
+  - A **result footer** on builtin tool output: a definition-shaped or
+    zero-match `grep` gets steered to `cypher_query`/`graph_overview`, and a
+    `cypher_query` result carrying `qualified_name` is pointed at
+    `read_code_source`. Fires only when a code graph is active; otherwise the
+    result is byte-for-byte unchanged.
+  - An **activation mini-map**: workspace activation now appends
+    "Graph ready: N Functions · M Classes · … · K edges. Start with
+    graph_overview() → cypher_query; grep = literal text only", so the first
+    message an agent reads steers it graph-first.
+
+### Changed
+
+- **Bumped `mcp-methods` 0.3.45 → 0.3.46** (adds the result-postprocess +
+  activation-summary hooks above and a SKIP-first grep bundled skill).
+- **Bundled MCP code-navigation skills lead with a consistent, truncation-proof
+  4-step workflow banner** (`graph_overview` → `cypher_query` → `grep` for
+  literals only → `read_source`/`read_code_source`). A field report showed an
+  agent grepping for definitions/callers despite the doctrine living lower in a
+  skimmed-once description; the banner puts the steer at the top of every
+  code-nav skill body where it can't be missed.
+
+### Fixed
+
+- **Runtime-write correctness: title updates, edge integrity, and deleted-id
+  cleanup across save/reload** (reported by petekSuite). Four issues, all in the
+  in-memory columnar save path:
+  - **Cypher `\uXXXX` string escapes were dropped** — a title written as
+    `"A—B"` was stored as the literal text `Au2014B`. The tokenizer now
+    decodes 4-hex-digit unicode escapes (non-`\uXXXX` backslash-u stays literal).
+  - **Title updates reverted on save+reload.** Every in-place title write
+    (Cypher `SET n.title`, `add_nodes(conflict_handling="update"/"replace")`)
+    sets the inline `node.title` but not the columnar `__title__`; the save
+    re-consolidated the stale column value once the type had a column store
+    (i.e. after the first save+load). `enable_columnar` now detects the inline
+    override and consolidates the fresh title.
+  - **Edge endpoints scrambled after delete+create+save.** The save wrote
+    column rows in insertion order while load re-bound them in ascending
+    node-index order; once a deletion made those orders diverge, every row (and
+    thus every edge) rebound to the wrong node. Column rows are now built in
+    ascending node-index order to match the load-side re-point.
+  - **Deleted ids resurrected on reload.** After a `DETACH DELETE`,
+    `enable_columnar` early-returned and serialized the stale store still
+    containing the deleted row — the node stayed findable by id-lookup and
+    re-bindable by `MERGE`, inconsistent with the live count. The early-return
+    now rebuilds when store rows exceed the live node count.
+
 ## [0.12.5] — 2026-07-01 — mcp-server activation fix + Codex/code_mode discovery on-ramp
 
 ### Added

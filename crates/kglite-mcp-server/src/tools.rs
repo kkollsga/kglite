@@ -202,6 +202,39 @@ impl GraphState {
         Some((overview.node_count as u64, overview.edge_count as u64))
     }
 
+    /// A one-line schema mini-map for the workspace activation message
+    /// (the mcp-methods 0.3.46 activation-summary hook). Steers an agent's
+    /// FIRST move toward the graph before it defaults to grep — the
+    /// activation result is the one message read before any tool choice.
+    /// `None` when no graph is active (activation stays terse).
+    pub fn activation_summary(&self) -> Option<String> {
+        let guard = self.inner.read().unwrap();
+        let active = guard.as_ref()?;
+        let overview = compute_schema(active.kg.dir());
+        if overview.node_count == 0 {
+            return None;
+        }
+        let mut types: Vec<(&str, usize)> = overview
+            .node_types
+            .iter()
+            .map(|(name, o)| (name.as_str(), o.count))
+            .collect();
+        types.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let top: Vec<String> = types
+            .iter()
+            .take(4)
+            .map(|(n, c)| format!("{c} {n}"))
+            .collect();
+        Some(format!(
+            "Graph ready: {} nodes ({}) · {} edges. Start with graph_overview() \
+             \u{2192} cypher_query for structure (definitions, callers, types, counts, \
+             paths); use grep for literal text only.",
+            overview.node_count,
+            top.join(", "),
+            overview.edge_count,
+        ))
+    }
+
     /// Whether the active graph has at least one node of the named
     /// type. Returns `false` when no graph is active. Backs the
     /// `graph_has_node_type:` predicate for skill `applies_when:`
@@ -993,6 +1026,32 @@ mod tests {
             kg: KnowledgeGraph::from_arc(Arc::new(dir)),
             source_path: None,
         }
+    }
+
+    #[test]
+    fn activation_summary_reports_node_types_or_none() {
+        let gs = GraphState::new(false);
+        assert!(
+            gs.activation_summary().is_none(),
+            "no active graph → terse activation (no mini-map)"
+        );
+        let dir = std::env::temp_dir().join(format!("kgl_actsum_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("m.py"),
+            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n",
+        )
+        .unwrap();
+        gs.build_code_tree(&dir).expect("build code tree");
+        let summary = gs
+            .activation_summary()
+            .expect("summary present once a graph is active");
+        assert!(summary.contains("Function"), "names node types: {summary}");
+        assert!(
+            summary.contains("graph_overview()"),
+            "steers to the graph: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmp_kgl(tag: &str) -> std::path::PathBuf {

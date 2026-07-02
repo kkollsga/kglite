@@ -1895,17 +1895,24 @@ impl ColumnStore {
         let rc = mmap_store.row_count();
         let mut buf: Vec<u8> = Vec::new();
 
-        // Materialize ID column
+        // Read via `self.*` accessors, NOT `mmap_store.*` directly, so any
+        // in-memory write overlay wins over the mmap-backed originals. On an
+        // mmap-backed store a `SET n.title` / property `SET` / `add_nodes(update)`
+        // lands in `self.title_column` / `self.columns` (see `set_title`, `set`),
+        // and `self.get_title` / `self.get` read overlay-first; reading straight
+        // from `mmap_store` here would drop those overrides on re-save. `self.get_*`
+        // falls through to the mmap when no overlay exists, so untouched stores
+        // serialize byte-identically.
         let id_col = TypedColumn::Mixed {
             data: (0..rc)
-                .map(|r| mmap_store.get_id(r).unwrap_or(Value::Null))
+                .map(|r| self.get_id(r).unwrap_or(Value::Null))
                 .collect(),
         };
 
         // Materialize title column
         let title_col = TypedColumn::Mixed {
             data: (0..rc)
-                .map(|r| mmap_store.get_title(r).unwrap_or(Value::Null))
+                .map(|r| self.get_title(r).unwrap_or(Value::Null))
                 .collect(),
         };
 
@@ -1915,7 +1922,7 @@ impl ColumnStore {
             let col_name = interner.resolve(key).to_string();
             let col = TypedColumn::Mixed {
                 data: (0..rc)
-                    .map(|r| mmap_store.get(r, key).unwrap_or(Value::Null))
+                    .map(|r| self.get(r, key).unwrap_or(Value::Null))
                     .collect(),
             };
             prop_columns.push((col_name, col));

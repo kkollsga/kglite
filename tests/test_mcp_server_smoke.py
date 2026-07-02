@@ -942,6 +942,71 @@ class TestExploreAndSkills:
         assert "is_benchmark" in tools["cypher_query"]
 
 
+# ── Test: runtime graph-over-grep steering footers (mcp-methods 0.3.46 hook) ──
+
+
+class TestSteeringFooters:
+    """The result-postprocess hook appends a graph-steering footer at the moment
+    of a likely misuse (petekSuite skill-steering field report). Fires only when
+    a code graph is active."""
+
+    @pytest.fixture
+    def code_proj(self, tmp_path: Path) -> Path:
+        try:
+            from kglite import code_tree
+        except ImportError:
+            pytest.skip("kglite.code_tree (tree-sitter) not installed")
+        project = tmp_path / "steer_proj"
+        project.mkdir()
+        (project / "m.py").write_text(
+            "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
+        )
+        code_tree.build(str(project)).save(str(project / "code.kgl"))
+        return project
+
+    def test_cypher_result_suggests_read_code_source(self, code_proj):
+        """A cypher result carrying qualified_name gets a read_code_source tip."""
+        client = _spawn(["--graph", str(code_proj / "code.kgl")])
+        try:
+            text = _text_content(
+                client.call_tool(
+                    "cypher_query",
+                    {"query": "MATCH (f:Function) RETURN f.qualified_name LIMIT 1"},
+                )
+            )
+        finally:
+            client.shutdown()
+        assert "read_code_source(qualified_name" in text, text
+
+    def test_definition_shaped_grep_steers_to_graph(self, code_proj):
+        """`--watch` builds the graph AND sets a source root, so grep runs with a
+        code graph active. A `def `-shaped pattern gets the cypher_query tip."""
+        client = _spawn(["--watch", str(code_proj)])
+        try:
+            text = _text_content(client.call_tool("grep", {"pattern": "def "}))
+        finally:
+            client.shutdown()
+        assert "definition search" in text and "cypher_query" in text, text
+
+    def test_zero_match_grep_steers_to_graph(self, code_proj):
+        client = _spawn(["--watch", str(code_proj)])
+        try:
+            text = _text_content(client.call_tool("grep", {"pattern": "zzzz_no_such_symbol"}))
+        finally:
+            client.shutdown()
+        assert "No grep matches" in text or "No matches" in text, text
+        assert "graph_overview" in text, text
+
+    def test_literal_grep_not_over_steered(self, code_proj):
+        """A plain literal grep that matches should NOT get the definition tip."""
+        client = _spawn(["--watch", str(code_proj)])
+        try:
+            text = _text_content(client.call_tool("grep", {"pattern": "return"}))
+        finally:
+            client.shutdown()
+        assert "definition search" not in text, text
+
+
 # ── Test: extensions.value_codecs (position-scoped literal codecs) ────────
 
 

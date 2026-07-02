@@ -308,15 +308,55 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, u
                     }
                     if chars[i] == '\\' && i + 1 < len {
                         i += 1;
-                        s.push(match chars[i] {
-                            'n' => '\n',
-                            't' => '\t',
-                            'r' => '\r',
-                            '\\' => '\\',
-                            c if c == quote => c,
-                            other => other,
-                        });
-                        i += 1;
+                        match chars[i] {
+                            'n' => {
+                                s.push('\n');
+                                i += 1;
+                            }
+                            't' => {
+                                s.push('\t');
+                                i += 1;
+                            }
+                            'r' => {
+                                s.push('\r');
+                                i += 1;
+                            }
+                            '\\' => {
+                                s.push('\\');
+                                i += 1;
+                            }
+                            // \uXXXX — 4-hex-digit unicode escape (openCypher /
+                            // the form json.dumps emits, e.g. `—` → em-dash).
+                            // Previously fell into the `other` arm below, which
+                            // dropped the backslash and stored the literal text
+                            // `u2014`. Decode when four valid hex digits follow;
+                            // otherwise keep the literal `u` (lenient, no error).
+                            'u' if i + 4 < len
+                                && chars[i + 1..i + 5].iter().all(char::is_ascii_hexdigit) =>
+                            {
+                                let hex: String = chars[i + 1..i + 5].iter().collect();
+                                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                                    Some(decoded) => {
+                                        s.push(decoded);
+                                        i += 5;
+                                    }
+                                    // Valid hex but not a scalar value (surrogate)
+                                    // — keep the literal `u`, leave digits in place.
+                                    None => {
+                                        s.push('u');
+                                        i += 1;
+                                    }
+                                }
+                            }
+                            c if c == quote => {
+                                s.push(c);
+                                i += 1;
+                            }
+                            other => {
+                                s.push(other);
+                                i += 1;
+                            }
+                        }
                     } else {
                         s.push(chars[i]);
                         i += 1;
@@ -713,6 +753,18 @@ mod tests {
         } else {
             panic!("Expected string literal");
         }
+    }
+
+    #[test]
+    fn test_string_unicode_escape() {
+        // \uXXXX must decode, not drop the backslash (petekSuite bug 3:
+        // `—` was stored as the literal text `u2014`). The raw-string
+        // input below contains a real backslash-u-2014 escape sequence.
+        let tokens = tokenize_cypher(r#""A\u2014B""#).unwrap();
+        assert_eq!(tokens[0], CypherToken::StringLit("A\u{2014}B".to_string()));
+        // A non-\uXXXX backslash-u stays lenient (literal `u`).
+        let tokens = tokenize_cypher(r#""x\uZZZZy""#).unwrap();
+        assert_eq!(tokens[0], CypherToken::StringLit("xuZZZZy".to_string()));
     }
 
     #[test]

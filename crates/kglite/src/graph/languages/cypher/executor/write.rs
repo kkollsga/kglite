@@ -951,6 +951,14 @@ fn execute_set(
                     // master `column_stores` Arc is for the in-memory
                     // Columnar mode only.
                     let is_in_memory = !graph.graph.is_disk();
+                    // NB: title/name are intentionally NOT routed through the
+                    // master store here — the fallthrough sets the inline
+                    // `node.title`, and `enable_columnar` detects that inline
+                    // override on save (it differs from the stale `__title__`
+                    // column) and rebuilds, consolidating the fresh title. That
+                    // single save-side chokepoint covers every title-write path
+                    // (Cypher SET, add_nodes update/replace, connection titles)
+                    // without per-path master writes (petekSuite bug 2).
                     if is_in_memory && property != "title" && property != "name" {
                         if let Some(row_id) = columnar_row_id {
                             // Register the property name in the graph's

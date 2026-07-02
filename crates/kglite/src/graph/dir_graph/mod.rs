@@ -2127,16 +2127,48 @@ impl DirGraph {
                 .node_indices()
                 .filter_map(|idx| self.graph.node_weight(idx))
                 .any(|n| match &n.properties {
-                    PropertyStorage::Columnar { store, .. } => {
+                    PropertyStorage::Columnar { store, row_id } => {
                         let type_str = n.node_type_str(interner);
                         match column_stores.get(type_str) {
-                            Some(graph_store) => !Arc::ptr_eq(store, graph_store),
+                            Some(graph_store) => {
+                                if !Arc::ptr_eq(store, graph_store) {
+                                    return true;
+                                }
+                                // An in-place title write (Cypher `SET n.title`,
+                                // add_nodes update/replace, connection titles)
+                                // sets the inline `node.title` but not the
+                                // columnar `__title__`. Detect that divergence
+                                // so we rebuild and consolidate the fresh title
+                                // (the title-only path doesn't clone the store,
+                                // so it wouldn't otherwise register as drift —
+                                // petekSuite bug 2). A consolidated/loaded node
+                                // has `node.title == Null`, so no false drift.
+                                !matches!(n.title, Value::Null)
+                                    && graph_store.get_title(*row_id).as_ref() != Some(&n.title)
+                            }
                             None => true,
                         }
                     }
                     _ => true,
                 });
-            if !any_drift {
+            // Detect deletions that orphaned column rows. `DETACH DELETE`
+            // removes the node from the topology but leaves the master column
+            // store untouched, so total store rows exceed the live node count.
+            // Without this the early-return below serialized the STALE store —
+            // the deleted row (id/title/props) survived reload as a "ghost":
+            // findable by id-lookup, re-bound by MERGE, and inconsistent with
+            // the live count (petekSuite bug 5). Deletes only ever leave
+            // store_rows >= live, so a total mismatch reliably flags them
+            // (per-node adds/edits are already caught by `any_drift`). O(types),
+            // so the clean fast-path stays cheap. Force a rebuild from live
+            // nodes when they diverge.
+            let total_store_rows: u64 = self
+                .column_stores
+                .values()
+                .map(|s| s.row_count() as u64)
+                .sum();
+            let orphaned_rows = total_store_rows != self.graph.node_count() as u64;
+            if !any_drift && !orphaned_rows {
                 return;
             }
         }
@@ -2172,7 +2204,21 @@ impl DirGraph {
             let mut store = ColumnStore::new(schema, &meta, &self.interner);
             let mut type_row_ids = HashMap::with_capacity(indices.len());
 
-            for idx in indices.iter() {
+            // Build column rows in ascending node-index order so the saved row
+            // order matches the load-side re-point, which enumerates
+            // `type_indices` rebuilt in ascending node-index order (see
+            // io/file.rs "Re-point nodes to columnar storage" +
+            // rebuild_type_indices_and_compact scanning node_indices()). This
+            // `type_indices` may be in insertion order, which diverges from
+            // index order once a node has been deleted (the free slot is reused
+            // or a hole remains). Left unsorted, save wrote row k from the k-th
+            // *inserted* node while load bound row k to the k-th *ascending*
+            // node — rebinding every row's id/title/props to the wrong node and
+            // scrambling edges on reload (petekSuite bug 4). Sorting here is the
+            // single point that guarantees save-order == load-order.
+            let mut sorted_indices: Vec<NodeIndex> = indices.iter().collect();
+            sorted_indices.sort_unstable_by_key(|i| i.index());
+            for idx in sorted_indices {
                 if let Some(node) = self.graph.node_weight(idx) {
                     // Push id/title for every node. For Columnar nodes, read from
                     // the old column store. For Compact/Map nodes, use node.id/title.
@@ -2194,9 +2240,23 @@ impl DirGraph {
                         row_id: old_row,
                     } = &node.properties
                     {
-                        old_store
-                            .get_title(*old_row)
-                            .unwrap_or_else(|| node.title.clone())
+                        // Prefer a non-null inline `node.title` override. Every
+                        // in-place title write (Cypher `SET n.title`, add_nodes
+                        // update/replace, connection-title updates) sets the
+                        // inline field but not necessarily the columnar
+                        // `__title__`; reading only `old_store.get_title` here
+                        // re-consolidated the STALE column value, so titles
+                        // reverted on save+reload (petekSuite bug 2). A loaded,
+                        // untouched columnar node has `node.title == Null`
+                        // (nulled at load), so it correctly falls back to the
+                        // store.
+                        if !matches!(node.title, Value::Null) {
+                            node.title.clone()
+                        } else {
+                            old_store
+                                .get_title(*old_row)
+                                .unwrap_or_else(|| node.title.clone())
+                        }
                     } else {
                         node.title.clone()
                     };

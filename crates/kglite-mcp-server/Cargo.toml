@@ -1,6 +1,6 @@
 [package]
 name = "kglite-mcp-server"
-version = "0.12.5"
+version = "0.12.6"
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
@@ -32,7 +32,7 @@ path = "src/main.rs"
 # pure-Rust crate only (no pyo3 in tree, no libpython link).
 # 0.3.42 required: serve_prompts injects skill `description` (## When to
 # use) + honors `references_tools`, which the cross-tool skills below need.
-mcp-methods = { version = "0.3.45", default-features = false, features = ["server"] }
+mcp-methods = { version = "0.3.46", default-features = false, features = ["server"] }
 
 # kglite (pure-Rust core) — no pyo3 in the resulting binary, no
 # libpython link. The 0.10.1 lift moved KnowledgeGraph +
