@@ -49,6 +49,7 @@ mod code_source;
 mod csv_http;
 mod cypher_tools;
 mod explore;
+mod selftest;
 mod tools;
 mod value_codecs;
 use crate::tools::GraphState;
@@ -94,6 +95,15 @@ struct Cli {
     /// Off by default — read-only is the safe default for analysis servers.
     #[arg(long)]
     writable: bool,
+
+    /// Run a configuration self-test instead of serving: re-spawn this binary
+    /// with the same flags, drive a live MCP handshake (initialize →
+    /// tools/list → activate → cypher_query), and print green/red per
+    /// capability (tools present, graph hydrates, github tools when a token is
+    /// set). Exits non-zero if any check fails, so it doubles as a deployment
+    /// smoke gate.
+    #[arg(long)]
+    selftest: bool,
 
     #[arg(long = "mcp-config")]
     mcp_config: Option<PathBuf>,
@@ -241,7 +251,15 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = Cli::parse_from(args);
+    let argv: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let cli = Cli::parse_from(argv.iter().cloned());
+    // `--selftest` is a diagnostic mode, not a serve mode: it re-spawns this
+    // binary with the operator's other flags and drives a real handshake. It
+    // runs before the tokio runtime is built (the child owns the async serve
+    // loop; the parent's RPC client is plain blocking I/O).
+    if cli.selftest {
+        return selftest::run_selftest(&cli, &argv);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

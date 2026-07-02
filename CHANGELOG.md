@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kglite-mcp-server --selftest`.** A positive "did I set it up right?"
+  check: re-spawns the binary with the operator's own flags, drives a real MCP
+  handshake (`initialize` → `tools/list` → activate → `cypher_query`), and
+  prints green/red per capability (server initializes, graph tools registered,
+  github tools present when a token is reachable, workspace activation, graph
+  hydrates). Exits non-zero if any check fails, so it doubles as a deployment /
+  CI smoke gate. Server misconfigurations were previously silent (missing
+  tools, hidden github tools, stale PATH-shadowing binary, "No active graph")
+  — this makes them loud.
 - **`kglite-mcp-server` default lazy-tool-discovery steer.** Workspace modes
   (`--workspace` / `workspace.kind: local`) now fold a one-line discovery steer
   into the `initialize` `instructions` by default — "graph_overview and

@@ -1145,6 +1145,53 @@ class TestEmbedderLibrary:
         assert "Python embedding library" in stderr or "fastembed-rs" in stderr, stderr[:400]
 
 
+# ── Test: --selftest handshake harness ─────────────────────────────────────
+
+
+def _run_selftest(args: list[str], timeout_s: float = 60.0) -> tuple[int, str]:
+    """Run `kglite-mcp-server --selftest <args>` to completion; return
+    (exit_code, combined_stdout+stderr)."""
+    proc = subprocess.run(
+        [str(BINARY), "--selftest", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_s,
+    )
+    out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
+    return proc.returncode, out
+
+
+class TestSelftest:
+    """`--selftest` re-spawns the binary with the operator's flags, drives a
+    real MCP handshake, and prints green/red per capability — the positive
+    "did I set it up right?" step the operator feedback asked for."""
+
+    def test_graph_mode_passes(self, graph_fixture: Path):
+        rc, out = _run_selftest(["--graph", str(graph_fixture)])
+        assert rc == 0, out
+        assert "Selftest PASSED" in out
+        assert "server initializes" in out
+        assert "graph tools registered" in out
+        assert "graph hydrates" in out
+
+    def test_bad_graph_fails_nonzero(self, tmp_path: Path):
+        missing = tmp_path / "does_not_exist.kgl"
+        rc, out = _run_selftest(["--graph", str(missing)])
+        assert rc != 0, out
+        assert "Selftest FAILED" in out
+
+    def test_local_workspace_passes(self, tmp_path: Path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "demo.py").write_text("def greet(name):\n    return name\n")
+        manifest = tmp_path / "ws_mcp.yaml"
+        manifest.write_text(f"name: WS Selftest\nworkspace:\n  kind: local\n  root: {ws}\n")
+        rc, out = _run_selftest(["--mcp-config", str(manifest)])
+        assert rc == 0, out
+        assert "Selftest PASSED" in out
+        assert "workspace activation" in out
+
+
 # ── Cleanup safety: ensure no orphaned binaries ───────────────────────────
 
 
