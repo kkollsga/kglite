@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`kglite-cli` one-shot agent commands.** The standalone `kglite` binary now
-  supports `query`, `write`, and `ready-set` subcommands with
+  supports `query`, `write`, `ready-set`, `describe`, and `session` subcommands with
   `--format table|csv|json`; `write` also supports `--save`, `--write-scope`,
   `--git-sha`, and `--modified-by` so automation can use the same scoped-write
-  and provenance controls as MCP/Python paths.
+  and provenance controls as MCP/Python paths. `session` processes JSONL
+  requests against one loaded graph, avoiding reload-per-query for agents.
 
 ## [0.12.9] — 2026-07-02 — `--selftest` wide-root fix + production-shape dogfood gate
 

@@ -204,6 +204,54 @@ def test_ready_set_subcommand(tmp_path):
     assert rows == [{"dependency_count": 1, "id": "B", "title": "Task_1"}]
 
 
+def test_describe_subcommand(tmp_path):
+    import kglite
+
+    p = tmp_path / "g.kgl"
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Task {id: 't1', status: 'todo'})")
+    g.save(str(p))
+
+    out = _run_args("describe", str(p), "--types", "Task")
+    assert '<type name="Task"' in out
+    cypher = _run_args("describe", str(p), "--cypher")
+    assert "<cypher" in cypher
+
+
+def test_session_keeps_graph_loaded_between_requests(tmp_path):
+    import json
+
+    import kglite
+
+    p = tmp_path / "session.kgl"
+    seed = kglite.KnowledgeGraph()
+    seed.save(str(p))
+    requests = "\n".join(
+        [
+            json.dumps({"op": "write", "query": "CREATE (:Task {id: 'one'})"}),
+            json.dumps({"op": "query", "query": "MATCH (t:Task) RETURN count(t) AS n", "format": "json"}),
+            json.dumps({"op": "describe", "types": ["Task"]}),
+            json.dumps({"op": "save"}),
+            json.dumps({"op": "exit"}),
+            "",
+        ]
+    )
+    proc = subprocess.run(
+        [str(BINARY), "session", str(p), "--format", "json"],
+        input=requests,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    responses = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert all(r["ok"] for r in responses), responses
+    assert json.loads(responses[1]["output"]) == [{"n": 1}]
+    assert '<type name="Task"' in responses[2]["description"]
+    rows = kglite.load(str(p)).cypher("MATCH (t:Task) RETURN t.id AS id").to_dicts()
+    assert rows == [{"id": "one"}]
+
+
 def test_create_and_query_roundtrip():
     out = _run(
         'CREATE (:Person {name: "Alice", age: 30});\n'

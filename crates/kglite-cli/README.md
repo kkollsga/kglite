@@ -41,6 +41,25 @@ Inspect a dependency frontier:
 $ kglite ready-set app.kgl --done 'n.status = "done"' --node-type Task --format csv
 ```
 
+Ask for the agent-oriented graph description:
+
+```console
+$ kglite describe app.kgl
+$ kglite describe app.kgl --types Task
+$ kglite describe app.kgl --cypher
+```
+
+Keep one graph loaded for an agent loop:
+
+```console
+$ kglite session app.kgl --format json
+{"op":"describe","types":["Task"]}
+{"op":"write","query":"CREATE (:Task {id:'t1', status:'todo'})"}
+{"op":"query","query":"MATCH (t:Task) RETURN count(t) AS n","format":"json"}
+{"op":"save"}
+{"op":"exit"}
+```
+
 Or open the interactive shell:
 
 ```console
@@ -71,6 +90,8 @@ Non-interactive commands:
 - `write <graph.kgl> <cypher> [--format table|csv|json] [--save]` — run a write-capable Cypher statement
 - `write --write-scope A,B --git-sha <sha> --modified-by <actor>` — restrict writes and stamp provenance on `auto_timestamp` types
 - `ready-set <graph.kgl> --done <predicate> [--relationship DEPENDS_ON] [--node-type T]` — print `CALL ready_set(...)`
+- `describe <graph.kgl> [--types T] [--cypher] [--connections]` — print the XML `describe()` document for agents
+- `session <graph.kgl>` — process JSONL requests against one in-memory graph (`query`, `write`, `describe`, `save`, `exit`)
 - `export-text <graph.kgl>` — print the deterministic text projection used by git textconv
 - `diff <a.kgl> <b.kgl>` — compare two graph text projections
 
