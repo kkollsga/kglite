@@ -169,7 +169,7 @@ The loop's pushes are still subject to the same rigor as any release push (lint 
 
 Conversational phrasing from earlier in the session ("ship it", "looks good", "you may push", "we're ready") **does not** carry over to a later moment outside the fix-and-push loop, even within the same turn if other actions intervene. When in doubt, prepare the commit, stop, and ask. The cost of a re-prompt is small; an unapproved push to `main` is not.
 
-Version source of truth: `Cargo.toml` line 3 (post-G.4: `crates/kglite-py/Cargo.toml` for the wheel version, `crates/kglite/Cargo.toml` for the engine — both should match at release time).
+Version source of truth: **`[workspace.package] version` in the root `Cargo.toml`**. Every member crate (engine, wheel, `kglite-c`, servers, cli) sets `version.workspace = true` and inherits it, so a release bumps this one line and all published crates ship in lockstep.
 
 ### One version bump per push
 
