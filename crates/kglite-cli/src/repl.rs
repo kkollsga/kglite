@@ -13,13 +13,14 @@ use std::time::Instant;
 
 use anyhow::Result;
 use kglite::api::io::{save_graph, to_csv_dir};
-use kglite::api::session::{execute_mut, execute_read, ExecuteOptions};
-use kglite::api::{make_dir_graph_mut, DirGraph, Value};
+use kglite::api::session::{execute_read, ExecuteOptions};
+use kglite::api::{DirGraph, Value};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::Editor;
 
-use crate::format::{render, Mode};
+use crate::exec::{self, QueryOptions};
+use crate::format::Mode;
 use crate::helper::ShellHelper;
 
 const PROMPT: &str = "kglite> ";
@@ -237,17 +238,17 @@ impl Shell {
     /// executes as a read (no version bump), so one path serves reads and
     /// writes in this single-user shell.
     fn exec(&mut self, query: &str, params: HashMap<String, Value>) {
-        let mut opts = ExecuteOptions::new(&params);
-        opts.cancel = Some(&CANCEL);
         CANCEL.store(false, Ordering::SeqCst);
 
         let timing = self.timing;
         let start = Instant::now();
-        let g = make_dir_graph_mut(&mut self.graph);
-        match execute_mut(g, query, &opts) {
+        let options = QueryOptions {
+            cancel: Some(&CANCEL),
+            ..QueryOptions::default()
+        };
+        match exec::execute(&mut self.graph, query, &params, &options) {
             Ok(outcome) => {
-                let r = &outcome.result;
-                println!("{}", render(self.mode, &r.columns, &r.rows));
+                println!("{}", exec::render_outcome(self.mode, &outcome));
                 if timing {
                     println!("({:.3} ms)", start.elapsed().as_secs_f64() * 1e3);
                 }

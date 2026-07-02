@@ -5,6 +5,7 @@
 //! Pure-Rust binary over `kglite::api::*` (no libpython link), mirroring the
 //! kglite-bolt-server / kglite-mcp-server crate pattern.
 
+mod exec;
 mod format;
 mod helper;
 mod repl;
