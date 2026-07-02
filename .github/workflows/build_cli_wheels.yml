@@ -31,7 +31,9 @@ jobs:
       - uses: actions/checkout@v6
       - id: check
         run: |
-          VERSION=$(grep -m1 '^version' crates/kglite-cli/Cargo.toml | cut -d '"' -f 2)
+          # Version is single-sourced in [workspace.package] (root Cargo.toml);
+          # kglite-cli inherits it via `version.workspace = true`.
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "kglite-cli version: $VERSION"
           # 404 from PyPI's per-version JSON ⇒ not yet published ⇒ publish.

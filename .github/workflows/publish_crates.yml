@@ -28,12 +28,16 @@ jobs:
       - name: Check kglite + kglite-bolt-server + kglite-mcp-server + kglite-c versions against crates.io
         id: check
         run: |
-          # Source-of-truth version files (post-G.4):
-          KG_VERSION=$(grep -m 1 '^version' crates/kglite/Cargo.toml | cut -d '"' -f 2)
-          BS_VERSION=$(grep -m 1 '^version' crates/kglite-bolt-server/Cargo.toml | cut -d '"' -f 2)
-          MS_VERSION=$(grep -m 1 '^version' crates/kglite-mcp-server/Cargo.toml | cut -d '"' -f 2)
-          C_VERSION=$(grep -m 1 '^version' crates/kglite-c/Cargo.toml | cut -d '"' -f 2)
-          CLI_VERSION=$(grep -m 1 '^version' crates/kglite-cli/Cargo.toml | cut -d '"' -f 2)
+          # Version is single-sourced in [workspace.package] (root Cargo.toml);
+          # every member crate inherits it via `version.workspace = true`, so
+          # all five share one value. The per-crate Cargo.tomls no longer carry
+          # a literal version — read the root table.
+          WS_VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
+          KG_VERSION=$WS_VERSION
+          BS_VERSION=$WS_VERSION
+          MS_VERSION=$WS_VERSION
+          C_VERSION=$WS_VERSION
+          CLI_VERSION=$WS_VERSION
           echo "kglite_version=$KG_VERSION" >> $GITHUB_OUTPUT
           echo "bolt_version=$BS_VERSION" >> $GITHUB_OUTPUT
           echo "mcp_version=$MS_VERSION" >> $GITHUB_OUTPUT

@@ -20,12 +20,11 @@ jobs:
       - name: Check version against PyPI
         id: check
         run: |
-          # The wheel version comes from the PyO3 wrapper crate
-          # (crates/kglite-py/Cargo.toml). G.4 made the workspace root
-          # virtual — pre-G.4 the root Cargo.toml had the version, so
-          # this grep used to target the root. Post-G.4 it must target
-          # the wheel crate explicitly.
-          VERSION=$(grep -m 1 '^version' crates/kglite-py/Cargo.toml | cut -d '"' -f 2)
+          # The version is single-sourced in [workspace.package] in the root
+          # Cargo.toml; every member crate (incl. the wheel crate kglite-py)
+          # inherits it via `version.workspace = true`. Read the root table —
+          # the per-crate Cargo.tomls no longer carry a literal version.
+          VERSION=$(grep -m 1 '^version' Cargo.toml | cut -d '"' -f 2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "kglite-py Cargo.toml version: $VERSION"
 
