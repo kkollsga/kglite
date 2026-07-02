@@ -757,9 +757,45 @@ fn detail_from_json<T: DetailFromTopics>(
         None | Some(serde_json::Value::Null) => Ok(default),
         Some(serde_json::Value::Bool(false)) => Ok(T::off()),
         Some(serde_json::Value::Bool(true)) => Ok(T::overview()),
+        Some(serde_json::Value::Object(obj)) => detail_from_object(obj),
         Some(v) => json_string_vec(v)
             .map(T::topics)
-            .ok_or_else(|| anyhow::anyhow!("detail must be bool, string, or string array")),
+            .ok_or_else(|| anyhow::anyhow!("detail must be bool, string, string array, or object")),
+    }
+}
+
+fn detail_from_object<T: DetailFromTopics>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<T> {
+    if let Some(types) = obj
+        .get("types")
+        .or_else(|| obj.get("topics"))
+        .or_else(|| obj.get("names"))
+    {
+        return json_string_vec(types)
+            .map(T::topics)
+            .ok_or_else(|| anyhow::anyhow!("detail topics must be string or string array"));
+    }
+
+    let detail = obj
+        .get("detail")
+        .or_else(|| obj.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("overview");
+    match detail {
+        "off" | "none" | "false" => Ok(T::off()),
+        "overview" | "true" => Ok(T::overview()),
+        "topics" | "types" => obj
+            .get("value")
+            .or_else(|| obj.get("values"))
+            .and_then(json_string_vec)
+            .map(T::topics)
+            .ok_or_else(|| {
+                anyhow::anyhow!("detail='{detail}' requires value as string or string array")
+            }),
+        other => Err(anyhow::anyhow!(
+            "unknown detail {other:?}; use off, overview, or topics"
+        )),
     }
 }
 

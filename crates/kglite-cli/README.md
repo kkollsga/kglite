@@ -62,6 +62,9 @@ $ kglite session app.kgl --format json
 
 Session JSON responses echo `id` when provided. JSON-mode query/write
 responses return typed `rows`; table/csv modes return rendered `output`.
+For `describe`, the compact forms still work (`"connections":true`,
+`"connections":["KNOWS"]`), and agents can use explicit object forms:
+`"connections":{"detail":"overview"}` or `"connections":{"types":["KNOWS"]}`.
 
 Or open the interactive shell:
 

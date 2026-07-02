@@ -261,6 +261,57 @@ def test_session_keeps_graph_loaded_between_requests(tmp_path):
     assert rows == [{"id": "one"}]
 
 
+def test_session_describe_accepts_detail_objects(tmp_path):
+    import json
+
+    import kglite
+
+    p = tmp_path / "detail-objects.kgl"
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Task {id: 'a'})")
+    g.cypher("CREATE (:Task {id: 'b'})")
+    g.cypher("""
+        MATCH (a:Task {id: 'a'}), (b:Task {id: 'b'})
+        CREATE (a)-[:DEPENDS_ON]->(b)
+    """)
+    g.save(str(p))
+    requests = "\n".join(
+        [
+            json.dumps(
+                {
+                    "id": "overview",
+                    "op": "describe",
+                    "connections": {"detail": "overview"},
+                }
+            ),
+            json.dumps(
+                {
+                    "id": "topic",
+                    "op": "describe",
+                    "connections": {"types": ["DEPENDS_ON"]},
+                }
+            ),
+            json.dumps({"id": "cypher", "op": "describe", "cypher": {"detail": "overview"}}),
+            json.dumps({"id": "exit", "op": "exit"}),
+            "",
+        ]
+    )
+    proc = subprocess.run(
+        [str(BINARY), "session", str(p), "--format", "json"],
+        input=requests,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    responses = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert all(r["ok"] for r in responses), responses
+    assert [r["id"] for r in responses] == ["overview", "topic", "cypher", "exit"]
+    assert '<conn type="DEPENDS_ON" count="1"' in responses[0]["description"]
+    assert '<pair from="Task" to="Task" count="1"/>' in responses[1]["description"]
+    assert "<cypher>" in responses[2]["description"]
+
+
 def test_create_and_query_roundtrip():
     out = _run(
         'CREATE (:Person {name: "Alice", age: 30});\n'
