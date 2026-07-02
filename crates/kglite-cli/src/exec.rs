@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Result;
+use kglite::api::param::kglite_value_to_json;
 use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
 use kglite::api::{make_dir_graph_mut, DirGraph, Value};
 
@@ -54,6 +55,27 @@ pub fn execute_readonly(
 pub fn render_outcome(mode: Mode, outcome: &ExecuteOutcome) -> String {
     let r = &outcome.result;
     render(mode, &r.columns, &r.rows)
+}
+
+/// Convert a Cypher outcome to typed JSON rows for agent protocols.
+pub fn outcome_rows_json(outcome: &ExecuteOutcome) -> serde_json::Value {
+    let r = &outcome.result;
+    let arr: Vec<serde_json::Value> = r
+        .rows
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in r.columns.iter().enumerate() {
+                let value = row
+                    .get(i)
+                    .map(kglite_value_to_json)
+                    .unwrap_or(serde_json::Value::Null);
+                obj.insert(col.clone(), value);
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::Value::Array(arr)
 }
 
 /// Write CLI output, treating a closed downstream pipe as successful exit.

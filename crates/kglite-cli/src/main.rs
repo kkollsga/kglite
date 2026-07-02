@@ -524,6 +524,7 @@ fn handle_session_line(
         .get("op")
         .and_then(|v| v.as_str())
         .unwrap_or("query");
+    let request_id = request.get("id").cloned();
     let result = match op {
         "query" => session_query(graph, &request, mode_from_request(&request, default_mode)),
         "write" => session_write(
@@ -536,7 +537,11 @@ fn handle_session_line(
         "save" => {
             save_loaded_graph(graph, path).map(|()| serde_json::json!({"ok": true, "op": "save"}))
         }
-        "exit" | "quit" => return SessionAction::Exit(serde_json::json!({"ok": true, "op": op})),
+        "exit" | "quit" => {
+            let mut value = serde_json::json!({"ok": true, "op": op});
+            insert_request_id(&mut value, request_id);
+            return SessionAction::Exit(value);
+        }
         other => Err(anyhow::anyhow!("unknown op {other:?}")),
     };
     SessionAction::Continue(match result {
@@ -544,9 +549,14 @@ fn handle_session_line(
             if let Some(obj) = value.as_object_mut() {
                 obj.entry("op").or_insert_with(|| serde_json::json!(op));
             }
+            insert_request_id(&mut value, request_id);
             value
         }
-        Err(e) => json_error(op, e.to_string()),
+        Err(e) => {
+            let mut value = json_error(op, e.to_string());
+            insert_request_id(&mut value, request_id);
+            value
+        }
     })
 }
 
@@ -563,10 +573,7 @@ fn session_query(
     }
     let params = HashMap::new();
     let outcome = exec::execute_readonly(graph, &query, &params)?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "output": exec::render_outcome(mode, &outcome),
-    }))
+    Ok(session_outcome_response(mode, &outcome))
 }
 
 fn session_write(
@@ -594,10 +601,7 @@ fn session_write(
         ..QueryOptions::default()
     };
     let outcome = exec::execute(graph, &query, &params, &options)?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "output": exec::render_outcome(mode, &outcome),
-    }))
+    Ok(session_outcome_response(mode, &outcome))
 }
 
 fn session_describe(
@@ -622,6 +626,32 @@ fn write_json_line(value: serde_json::Value) -> Result<()> {
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(())
+}
+
+fn session_outcome_response(
+    mode: Mode,
+    outcome: &kglite::api::session::ExecuteOutcome,
+) -> serde_json::Value {
+    if mode == Mode::Json {
+        serde_json::json!({
+            "ok": true,
+            "rows": exec::outcome_rows_json(outcome),
+        })
+    } else {
+        serde_json::json!({
+            "ok": true,
+            "output": exec::render_outcome(mode, outcome),
+        })
+    }
+}
+
+fn insert_request_id(value: &mut serde_json::Value, request_id: Option<serde_json::Value>) {
+    let Some(id) = request_id else {
+        return;
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("id").or_insert(id);
+    }
 }
 
 fn json_error(op: &str, message: String) -> serde_json::Value {

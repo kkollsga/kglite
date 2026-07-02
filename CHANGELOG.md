@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and provenance controls as MCP/Python paths. `session` processes JSONL
   requests against one loaded graph, avoiding reload-per-query for agents.
 
+### Fixed
+
+- **Agent-facing CLI protocol polish.** `kglite session --format json` now emits
+  typed `rows` for query/write responses and echoes request `id` values, avoiding
+  double JSON parsing and positional-only response matching.
+- **Focused `describe()` connection counts.** Type-detail and connection-detail
+  views now fall back to live edge scans when an older saved graph carries
+  zero-count connectivity-cache triples, so they no longer report `count="0"`
+  while samples show matching edges.
+
 ## [0.12.9] — 2026-07-02 — `--selftest` wide-root fix + production-shape dogfood gate
 
 ### Fixed

@@ -54,11 +54,14 @@ Keep one graph loaded for an agent loop:
 ```console
 $ kglite session app.kgl --format json
 {"op":"describe","types":["Task"]}
-{"op":"write","query":"CREATE (:Task {id:'t1', status:'todo'})"}
-{"op":"query","query":"MATCH (t:Task) RETURN count(t) AS n","format":"json"}
+{"id":"w1","op":"write","query":"CREATE (:Task {id:'t1', status:'todo'})"}
+{"id":"q1","op":"query","query":"MATCH (t:Task) RETURN count(t) AS n","format":"json"}
 {"op":"save"}
 {"op":"exit"}
 ```
+
+Session JSON responses echo `id` when provided. JSON-mode query/write
+responses return typed `rows`; table/csv modes return rendered `output`.
 
 Or open the interactive shell:
 

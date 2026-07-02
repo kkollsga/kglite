@@ -568,6 +568,19 @@ class TestDescribeConnections:
         assert "pair" in desc
         assert "Well" in desc
         assert "Field" in desc
+        assert 'count="2"' in desc
+
+    def test_type_detail_connection_counts_are_nonzero(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Task {id: 'a'})")
+        g.cypher("CREATE (:Task {id: 'b'})")
+        g.cypher("""
+            MATCH (a:Task {id: 'a'}), (b:Task {id: 'b'})
+            CREATE (a)-[:DEPENDS_ON]->(b)
+        """)
+        desc = g.describe(types=["Task"])
+        assert '<out type="DEPENDS_ON" target="Task" count="1"/>' in desc
+        assert '<in type="DEPENDS_ON" source="Task" count="1"/>' in desc
 
     def test_connections_detail_unknown_error(self, connected_graph):
         with pytest.raises(kglite.KgError, match="not found"):

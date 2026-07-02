@@ -228,11 +228,18 @@ def test_session_keeps_graph_loaded_between_requests(tmp_path):
     seed.save(str(p))
     requests = "\n".join(
         [
-            json.dumps({"op": "write", "query": "CREATE (:Task {id: 'one'})"}),
-            json.dumps({"op": "query", "query": "MATCH (t:Task) RETURN count(t) AS n", "format": "json"}),
-            json.dumps({"op": "describe", "types": ["Task"]}),
-            json.dumps({"op": "save"}),
-            json.dumps({"op": "exit"}),
+            json.dumps({"id": "w1", "op": "write", "query": "CREATE (:Task {id: 'one'})"}),
+            json.dumps(
+                {
+                    "id": "q1",
+                    "op": "query",
+                    "query": "MATCH (t:Task) RETURN count(t) AS n",
+                    "format": "json",
+                }
+            ),
+            json.dumps({"id": "d1", "op": "describe", "types": ["Task"]}),
+            json.dumps({"id": "s1", "op": "save"}),
+            json.dumps({"id": "x1", "op": "exit"}),
             "",
         ]
     )
@@ -246,7 +253,9 @@ def test_session_keeps_graph_loaded_between_requests(tmp_path):
     assert proc.returncode == 0, proc.stderr
     responses = [json.loads(line) for line in proc.stdout.splitlines()]
     assert all(r["ok"] for r in responses), responses
-    assert json.loads(responses[1]["output"]) == [{"n": 1}]
+    assert [r["id"] for r in responses] == ["w1", "q1", "d1", "s1", "x1"]
+    assert responses[1]["rows"] == [{"n": 1}]
+    assert "output" not in responses[1]
     assert '<type name="Task"' in responses[2]["description"]
     rows = kglite.load(str(p)).cypher("MATCH (t:Task) RETURN t.id AS id").to_dicts()
     assert rows == [{"id": "one"}]

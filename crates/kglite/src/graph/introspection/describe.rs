@@ -5,7 +5,7 @@
 //! connections / cypher / fluent) and assembles an XML document.
 
 use crate::datatypes::values::Value;
-use crate::graph::schema::{DirGraph, InternedKey};
+use crate::graph::schema::{ConnectivityTriple, DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use std::collections::{HashMap, HashSet};
 
@@ -234,6 +234,31 @@ impl ConnectionTopicAccum {
     }
 }
 
+/// Return cached type-connectivity triples only when they are trustworthy.
+///
+/// Older saved graphs may carry triples derived from connection metadata
+/// without real per-pair counts. Those zero-count triples are worse than no
+/// cache for agent-facing describe output: samples prove edges exist while
+/// focused type/connection views report `count="0"`. Treat that shape as
+/// stale and fall back to the live edge scan.
+fn validated_type_connectivity_cache(graph: &DirGraph) -> Option<Vec<ConnectivityTriple>> {
+    let triples = graph.type_connectivity_cache.read().unwrap().clone()?;
+    if triples.iter().all(|t| t.count > 0) {
+        return Some(triples);
+    }
+
+    let edge_counts = graph.get_edge_type_counts();
+    let mut sums: HashMap<String, usize> = HashMap::new();
+    for t in &triples {
+        *sums.entry(t.conn.clone()).or_insert(0) += t.count;
+    }
+    let consistent = edge_counts.iter().all(|(conn, count)| {
+        let cached = sums.get(conn).copied().unwrap_or(0);
+        cached == *count
+    });
+    consistent.then_some(triples)
+}
+
 /// Collect pair counts, property stats, and sample edges for one connection
 /// type.
 ///
@@ -261,17 +286,14 @@ fn accumulate_connection_topic(
 
     // Pair counts — prefer cached connectivity triples.
     let mut pair_counts_from_cache = false;
-    {
-        let triples_guard = graph.type_connectivity_cache.read().unwrap();
-        if let Some(triples) = triples_guard.as_ref() {
-            for t in triples {
-                if t.conn == topic {
-                    acc.pair_counts
-                        .insert((t.src.clone(), t.tgt.clone()), t.count);
-                }
+    if let Some(triples) = validated_type_connectivity_cache(graph) {
+        for t in &triples {
+            if t.conn == topic {
+                acc.pair_counts
+                    .insert((t.src.clone(), t.tgt.clone()), t.count);
             }
-            pair_counts_from_cache = true;
         }
+        pair_counts_from_cache = true;
     }
 
     // Property stats — skip when metadata declares no properties.
@@ -958,8 +980,8 @@ fn write_type_detail(
         cache.get(node_type)
     } else {
         // Try type connectivity triples first (instant), then bounded edge scan
-        let triples_guard = graph.type_connectivity_cache.read().unwrap();
-        computed = if let Some(triples) = triples_guard.as_ref() {
+        let triples = validated_type_connectivity_cache(graph);
+        computed = if let Some(triples) = triples.as_ref() {
             Some(neighbors_from_triples(triples, node_type))
         } else {
             compute_neighbors_schema_bounded(graph, node_type, 50_000).ok()
@@ -1595,8 +1617,8 @@ fn build_type_search_results(graph: &DirGraph, pattern: &str) -> String {
 
     // #4: Build O(1) index from cached triples (one-time cost, then instant per lookup),
     // #5: otherwise fall back to bounded edge scan
-    let triples_guard = graph.type_connectivity_cache.read().unwrap();
-    let conn_index = triples_guard
+    let triples = validated_type_connectivity_cache(graph);
+    let conn_index = triples
         .as_ref()
         .map(|t| TypeConnectivityIndex::from_triples(t));
 
