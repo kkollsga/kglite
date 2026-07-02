@@ -5,11 +5,18 @@
 //! present as an *absence* of errors, so an operator can't tell "correctly
 //! configured" from "quietly half-broken". This harness removes that
 //! ambiguity: it re-spawns *this* binary with the operator's own flags
-//! (minus `--selftest`), speaks a real MCP handshake over the child's stdio
-//! (`initialize` → `tools/list` → activate → `cypher_query`), and prints
-//! green/red per capability. Self-spawn (not an in-process GraphState poke)
-//! is deliberate — only a real `tools/list` reflects the mcp-methods-owned
-//! tool registry, which is exactly what "are my tools present?" asks.
+//! (minus the selftest-only flags), speaks a real MCP handshake over the
+//! child's stdio (`initialize` → `tools/list` → activate → `cypher_query`),
+//! and prints green/red per capability. Self-spawn (not an in-process
+//! GraphState poke) is deliberate — only a real `tools/list` reflects the
+//! mcp-methods-owned tool registry, which is exactly what "are my tools
+//! present?" asks.
+//!
+//! For `workspace.kind: local` the `workspace.root` is a wide sandbox that
+//! agents narrow with `set_root_dir` and is never built as a unit, so the
+//! selftest is registration-only by default (building the whole root would be
+//! unbounded work → a hang). `--selftest-path <subdir>` opts into a real
+//! build + `cypher_query` hydration against a small representative directory.
 //!
 //! Exit code is 0 when every non-skipped check passes, 1 otherwise, so it
 //! doubles as a CI / deployment smoke gate.
@@ -198,13 +205,26 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
     let manifest = load_manifest(cli, &mode).ok().flatten();
     let mode = promote_local_workspace(mode.clone(), manifest.as_ref()).unwrap_or(mode);
 
-    // Child argv = our argv minus the program name and the `--selftest` flag.
-    let child_args: Vec<OsString> = argv
-        .iter()
-        .skip(1)
-        .filter(|a| a.as_os_str() != "--selftest")
-        .cloned()
-        .collect();
+    // Child argv = our argv minus the program name and the selftest-only flags
+    // (`--selftest`, and `--selftest-path <val>` in both space and `=` forms) —
+    // the child is a real server and clap would reject those unknown flags.
+    let mut child_args: Vec<OsString> = Vec::new();
+    let mut skip_next = false;
+    for a in argv.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let s = a.to_string_lossy();
+        if s == "--selftest" || s.starts_with("--selftest-path=") {
+            continue;
+        }
+        if s == "--selftest-path" {
+            skip_next = true; // also drop its value
+            continue;
+        }
+        child_args.push(a.clone());
+    }
 
     println!(
         "kglite-mcp-server --selftest  (mode: {})",
@@ -293,23 +313,48 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
         ));
     }
 
-    // 4. activation — local-workspace builds its graph on set_root_dir.
-    if let Mode::LocalWorkspace { root, .. } = &mode {
-        if has("set_root_dir") {
+    // 4. activation — local-workspace. The `workspace.root` is a *wide sandbox
+    //    boundary* that agents narrow with `set_root_dir` at runtime; it is
+    //    never built as a unit. So the selftest must NOT `set_root_dir(root)` —
+    //    for a broad root (the documented code-review archetype) that builds a
+    //    code_tree over the whole tree, which is unbounded work and hangs the
+    //    handshake. Registration-only by default; a real build+hydrate check is
+    //    opt-in via `--selftest-path <subdir>` pointed at a small representative
+    //    directory.
+    let mut local_activated = false;
+    if let Mode::LocalWorkspace { .. } = &mode {
+        if !has("set_root_dir") {
+            checks.push((
+                "workspace activation",
+                Check::Fail("set_root_dir tool not registered for local-workspace mode".into()),
+            ));
+        } else if let Some(path) = cli.selftest_path.as_ref() {
             let r = rpc.request(
                 "tools/call",
-                json!({"name": "set_root_dir", "arguments": {"path": root.to_string_lossy()}}),
+                json!({"name": "set_root_dir", "arguments": {"path": path.to_string_lossy()}}),
             )?;
             let (text, is_error) = call_text(&r);
             if is_error || text.to_lowercase().contains("failed") {
                 checks.push(("workspace activation", Check::Fail(snippet(&text))));
             } else {
-                checks.push(("workspace activation", Check::Pass(snippet(&text))));
+                local_activated = true;
+                checks.push((
+                    "workspace activation",
+                    Check::Pass(format!(
+                        "set_root_dir({}) → {}",
+                        path.display(),
+                        snippet(&text)
+                    )),
+                ));
             }
         } else {
             checks.push((
                 "workspace activation",
-                Check::Fail("set_root_dir tool not registered for local-workspace mode".into()),
+                Check::Pass(
+                    "set_root_dir registered; wide workspace.root not built (built per-\
+                     set_root_dir at runtime). Pass --selftest-path <subdir> to verify a build"
+                        .into(),
+                ),
             ));
         }
     }
@@ -325,6 +370,13 @@ pub fn run_selftest(cli: &Cli, argv: &[OsString]) -> Result<()> {
         Mode::SourceRoot { .. } | Mode::Bare => {
             Check::Skip("no graph in this mode (file/bare tools only)".into())
         }
+        // local-workspace with no `--selftest-path`: nothing was built (the wide
+        // root is not built as a unit), so there's no graph to query yet.
+        Mode::LocalWorkspace { .. } if !local_activated => Check::Skip(
+            "local-workspace: wide root not built; pass --selftest-path <subdir> to build \
+             a representative subdir and verify hydration"
+                .into(),
+        ),
         _ => {
             let r = rpc.request(
                 "tools/call",

@@ -105,6 +105,15 @@ struct Cli {
     #[arg(long)]
     selftest: bool,
 
+    /// (`--selftest` only) Activate this directory for the handshake instead of
+    /// building the whole `workspace.root`. For `workspace.kind: local` the root
+    /// is a wide sandbox that agents narrow with `set_root_dir` and is never
+    /// built as a unit, so `--selftest` does registration-only checks by
+    /// default; pass a small representative subdir here to also verify a real
+    /// code_tree build + `cypher_query` hydration.
+    #[arg(long = "selftest-path")]
+    selftest_path: Option<PathBuf>,
+
     #[arg(long = "mcp-config")]
     mcp_config: Option<PathBuf>,
     #[arg(long)]

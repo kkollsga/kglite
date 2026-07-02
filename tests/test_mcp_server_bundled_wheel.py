@@ -212,3 +212,77 @@ def test_selftest_on_wheel_install_bad_graph_fails(tmp_path: Path) -> None:
     out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
     assert proc.returncode != 0
     assert "Selftest FAILED" in out
+
+
+def _write_wide_local_workspace(tmp_path: Path, n_files: int = 400) -> tuple[Path, Path, Path]:
+    """A broad `workspace.kind: local` root (many files across dirs) plus a
+    tiny representative subdir. Mirrors the deployed code-review archetype's
+    shape (a wide sandbox agents narrow with set_root_dir). Returns
+    (manifest, root, small_subdir)."""
+    root = tmp_path / "wide_root"
+    for d in range(n_files // 20):
+        pkg = root / f"pkg{d}"
+        pkg.mkdir(parents=True, exist_ok=True)
+        for f in range(20):
+            (pkg / f"m{f}.py").write_text(
+                f"class C{f}:\n    def meth(self, x): return x + {f}\ndef fn{f}(a): return a\n"
+            )
+    small = root / "sub_small"
+    small.mkdir(parents=True, exist_ok=True)
+    (small / "a.py").write_text("def g(x):\n    return x\nclass W:\n    def r(self): return 1\n")
+    manifest = tmp_path / "wide_mcp.yaml"
+    manifest.write_text(f"name: Wide Root Selftest\nworkspace: {{ kind: local, root: {root}, watch: true }}\n")
+    return manifest, root, small
+
+
+def test_selftest_wide_local_workspace_does_not_build_root(tmp_path: Path) -> None:
+    """Regression (wide-root hang): `--selftest` against a local-workspace
+    server with a *wide* root must NOT build a code_tree over the whole root
+    (that path no client uses; for a broad root it's unbounded → a silent
+    hang). It stays registration-only and completes fast. Runs on the wheel
+    install, the deployed shape."""
+    manifest, _root, _small = _write_wide_local_workspace(tmp_path)
+    # A 60s cap that the old build-the-whole-root behaviour would blow on a
+    # genuinely wide tree; registration-only returns in a couple of seconds.
+    proc = subprocess.run(
+        [sys.executable, "-m", "kglite.mcp_server", "--selftest", "--mcp-config", str(manifest)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, out
+    assert "Selftest PASSED" in out
+    # The contract: the wide root was NOT built; the operator is pointed at
+    # --selftest-path. If someone reintroduces set_root_dir(root), this flips.
+    assert "not built" in out
+    assert "--selftest-path" in out
+
+
+def test_selftest_path_builds_representative_subdir(tmp_path: Path) -> None:
+    """`--selftest-path <subdir>` opts into a real build + hydration against a
+    small representative directory (the way to verify a local-workspace build
+    without touching the wide root)."""
+    manifest, _root, small = _write_wide_local_workspace(tmp_path)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kglite.mcp_server",
+            "--selftest",
+            "--selftest-path",
+            str(small),
+            "--mcp-config",
+            str(manifest),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    out = proc.stdout.decode(errors="replace") + proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, out
+    assert "Selftest PASSED" in out
+    assert "graph hydrates" in out
+    assert "count(n)" in out  # a real cypher round-trip ran

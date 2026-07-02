@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`kglite-mcp-server --selftest` no longer hangs on a wide `workspace.kind:
+  local` root.** The activation step used to `set_root_dir(workspace.root)`,
+  building a `code_tree` over the *entire* root — but that root is a wide
+  sandbox agents narrow with `set_root_dir` and is never built as a unit, so
+  for the documented code-review archetype (root = a whole dev tree) it was
+  unbounded work → a silent hang. `--selftest` on local-workspace is now
+  **registration-only by default** (verifies the server inits + graph tools +
+  `set_root_dir` are registered, without building), mirroring how the
+  github-workspace selftest already behaves. New **`--selftest-path <subdir>`**
+  opts into a real build + `cypher_query` hydration against a small
+  representative directory. Reported by the mcp-servers operator.
+
+### Changed
+
+- **Dogfood `--selftest` in the test suite at production shape.** The bundled-
+  wheel test suite (which `make test`/CI runs) now exercises `--selftest`
+  through the **pip-wheel** install (`python -m kglite.mcp_server`) against a
+  **wide local-workspace root** and via `--selftest-path`, so the wheel-install
+  and wide-root conditions that produced the last two `--selftest` bugs are a
+  standing gate rather than caught after release.
+
 ## [0.12.8] — 2026-07-02 — `--selftest` wheel-install fix
 
 ### Fixed
