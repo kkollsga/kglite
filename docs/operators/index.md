@@ -1,9 +1,15 @@
 # Operators
 
-Running the kglite protocol servers in production. The Python
-package + wheel are out of scope here — those are the [Python
-guide](../python/index.md). This track is for operators deploying
-the **standalone binaries**.
+Running kglite's standalone binaries in production or automation. The
+Python package + wheel are out of scope here — those are the [Python
+guide](../python/index.md). This track is for operators deploying the
+**standalone binaries**.
+
+## CLI
+
+[`kglite-cli`](cli.md) ships the standalone `kglite` command for
+one-shot Cypher queries, scoped writes, agent JSONL sessions, graph
+description output, text export, diffs, and the interactive shell.
 
 ## Bolt server (Neo4j wire protocol)
 
@@ -97,4 +103,5 @@ Setup, manifest, and tool customization details live in the
 :hidden:
 
 bolt-server
+cli
 ```
