@@ -24,7 +24,7 @@ jobs:
       c_version: ${{ steps.check.outputs.c_version }}
       cli_version: ${{ steps.check.outputs.cli_version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check kglite + kglite-bolt-server + kglite-mcp-server + kglite-c versions against crates.io
         id: check
         run: |
@@ -188,7 +188,7 @@ jobs:
       # crates.io publish. macOS aarch64 (a must-pass `build-native` leg)
       # is NOT excluded — only `aarch64-unknown-linux`.
       - name: Wait for wheel build matrix
-        uses: lewagon/wait-on-check-action@v1.7.0
+        uses: lewagon/wait-on-check-action@v1.8.0
         with:
           ref: ${{ github.sha }}
           check-regexp: '^Build wheel - (?!.*aarch64-unknown-linux).*$'
@@ -202,7 +202,7 @@ jobs:
     if: needs.version-check.outputs.should_publish_kglite == 'true' || needs.version-check.outputs.should_publish_bolt == 'true' || needs.version-check.outputs.should_publish_mcp == 'true' || needs.version-check.outputs.should_publish_c == 'true' || needs.version-check.outputs.should_publish_cli == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry + target

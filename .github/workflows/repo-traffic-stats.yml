@@ -32,7 +32,7 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # GitHub's own action — only to get the collector script
+      - uses: actions/checkout@v7 # GitHub's own action — only to get the collector script
 
       - name: install matplotlib (PDF rendering)
         run: pip install --quiet matplotlib
