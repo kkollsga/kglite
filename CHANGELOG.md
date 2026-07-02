@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.9] — 2026-07-02 — `--selftest` wide-root fix + production-shape dogfood gate
+
 ### Fixed
 
 - **`kglite-mcp-server --selftest` no longer hangs on a wide `workspace.kind:
