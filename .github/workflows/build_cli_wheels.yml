@@ -28,7 +28,7 @@ jobs:
       should_publish: ${{ steps.check.outputs.should_publish }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: check
         run: |
           # Version is single-sourced in [workspace.package] (root Cargo.toml);
@@ -63,7 +63,7 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -102,7 +102,7 @@ jobs:
           - target: x86_64-unknown-linux-musl
             manylinux: musllinux_1_2
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build kglite-cli bin wheel (manylinux/musllinux)
         uses: PyO3/maturin-action@v1
         with:
@@ -134,7 +134,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             manylinux: musllinux_1_2
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
