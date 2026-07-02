@@ -83,16 +83,66 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "my-graph": {
-      "command": "kglite-mcp-server",
+      "command": "/abs/path/to/your/venv/bin/kglite-mcp-server",
       "args": ["--graph", "/abs/path/to/my_graph.kgl"]
     }
   }
 }
 ```
 
+**Use the absolute path to the binary in `command`, not a bare
+`kglite-mcp-server`.** A bare command is resolved against `$PATH`, and if
+an older install sits earlier on `$PATH` (a stray `cargo install`, a Conda
+base env, a previous editable build) the client silently launches *that*
+one — a stale server that may register a different tool set or lazy-load
+tools your client then can't see. There's no error; the tools just quietly
+differ. Point `command` at the exact binary you mean (`which
+kglite-mcp-server` inside your active env prints it). See
+[Operator notes](#operator-notes) on multi-install PATH order.
+
 For Claude Code, add to `.claude/settings.json` with the same shape.
 The agent can now call `graph_overview()` to learn the schema and
 `cypher_query()` to query.
+
+```{important}
+**Restart after any config change.** The manifest and the client's MCP
+config are read **once, at server boot**. If you edit this JSON, the
+manifest YAML, or a `.env`, the running server won't pick it up — fully
+restart Claude Desktop / your MCP client (or the standalone process) so it
+re-reads them. A surprising number of "my change had no effect" reports are
+just this.
+```
+
+### Verify your setup
+
+Because a misconfigured server fails *silently* — missing tools, github
+tools hidden for lack of a token, a stale PATH-shadowing binary, or "No
+active graph" — the absence of errors doesn't mean it's working. Run the
+built-in self-test to get a positive green/red answer:
+
+```bash
+kglite-mcp-server --selftest --graph /abs/path/to/my_graph.kgl
+# …or with a manifest / workspace:
+kglite-mcp-server --selftest --mcp-config /abs/path/to/manifest.yaml
+```
+
+It re-spawns the server with the *same* flags, drives a real MCP handshake
+(`initialize` → `tools/list` → activate → `cypher_query`), and prints one
+line per capability:
+
+```
+kglite-mcp-server --selftest  (mode: single-graph)
+  ✓ server initializes: serverInfo.name = KGLite (single-graph)
+  ✓ graph tools registered: cypher_query + graph_overview present (8 tools total)
+  – github tools: none registered (no GITHUB_TOKEN reachable, or disabled)
+  ✓ graph hydrates: MATCH (n) RETURN count(n) → 1 row(s):
+Selftest PASSED — the server is configured correctly.
+```
+
+It exits non-zero if any check fails, so you can also wire it into a
+deployment or CI smoke gate. Pass the *absolute path to the binary you
+registered* (per the caveat above) so the self-test exercises the same
+server your client launches.
 
 ### 4. (Optional) Add a manifest for more tools
 

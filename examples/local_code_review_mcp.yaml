@@ -1,0 +1,66 @@
+# Local code-review workspace — the second of the two workspace archetypes
+# (the first is examples/open_source_workspace_mcp.yaml, the github-clone
+# tracker). Run it with:
+#
+#   kglite-mcp-server --mcp-config /abs/path/to/local_code_review_mcp.yaml
+#
+# What it is: point the server at a directory tree on disk, and it builds an
+# in-memory code-tree graph (functions, classes, calls, imports, docs) that an
+# agent explores with graph_overview() + cypher_query(). `set_root_dir(path)`
+# swaps the active root at any time (rebuild fires lazily on the next graph
+# tool call); `watch: true` re-tags the graph dirty when a code file under the
+# active root changes. The graph lives only for the server's lifetime — it's
+# never written to disk.
+#
+# Verify it after editing: `kglite-mcp-server --selftest --mcp-config THIS.yaml`
+# drives a live handshake and prints green/red per capability.
+#
+# NOTE: after editing this file (or your client's MCP config), RESTART the
+# server / client — manifest changes are read once at boot.
+
+name: Code Review
+
+# Load a sibling `.env` so GITHUB_TOKEN (and any embedder keys) are visible.
+# The github tools are hidden at boot when no token is reachable.
+env_file: ../.env
+
+# Bundled kglite methodology + framework defaults inject into matching tool
+# descriptions (graph-first sequencing, code-graph hygiene skills).
+skills:
+  - true
+
+# Domain instructions. The lazy-tool-discovery steer ("graph_overview and
+# cypher_query are ALWAYS registered; search the registry for 'cypher' before
+# falling back to grep") is appended automatically for workspace modes — no
+# need to repeat it here.
+instructions: |
+  Local code-graph workspace for reviewing any directory on disk.
+
+  PRIMARY TOOLS: graph_overview + cypher_query. For any structural question —
+  where is X defined, what calls what, which types/properties exist, counts,
+  multi-hop paths — call graph_overview first, then cypher_query. Use grep /
+  read_source ONLY for literal text search (error strings, comments, config
+  keys), never to rediscover structure the graph already encodes.
+
+  Workflow:
+    1. set_root_dir('/abs/path/to/repo')          — switch active root + build graph
+    2. graph_overview()                            — inventory of node types
+    3. graph_overview(types=['Function'])          — properties + samples
+    4. cypher_query("MATCH ... RETURN ...")        — explore
+    5. read_code_source(qualified_name='Type::m')  — single-call source read
+    6. read_source(file_path=..., grep='...')      — direct file slice
+
+  GitHub tools (when GITHUB_TOKEN is in .env):
+  - github_issues(number=N) / github_issues(query='...')  — issues, PRs, discussions
+  - github_api(path)                                       — raw read-only GitHub REST GET
+
+workspace:
+  kind: local
+  # The immutable sandbox boundary for set_root_dir. Set it WIDE (a parent that
+  # contains every project you want reachable) so the agent can swap laterally
+  # between subdirectories without a restart. Replace with your own path.
+  root: /abs/path/to/your/projects
+  # Auto-rebuild on file change. Rebuilds are scoped to the active set_root_dir
+  # target (not the wide root) and fire lazily on the next tool call, so a wide
+  # boundary stays cheap. Boot build is deferred until the first set_root_dir.
+  watch: true

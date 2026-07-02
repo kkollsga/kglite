@@ -250,6 +250,24 @@ stdio. Drop it into Claude Desktop / Cursor / any MCP-capable client
 and your graph is queryable. Works on every graph kglite can build —
 your own, Wikidata, Sodir, code-tree.
 
+When you register it, point `command` at the **absolute path** to the
+binary (`/abs/path/to/venv/bin/kglite-mcp-server`), not a bare name — a
+bare command can silently launch an older PATH-shadowing install. Then
+confirm it with `kglite-mcp-server --selftest --graph path/to/graph.kgl`,
+which drives a real handshake and prints green/red per capability.
+
+**Two ready-made code-intelligence recipes** ship in
+[`examples/`](examples/):
+
+- **Clone-and-explore GitHub repos** —
+  [`open_source_workspace_mcp.yaml`](examples/open_source_workspace_mcp.yaml):
+  the agent calls `repo_management('org/repo')` to clone and build a
+  code-tree graph on demand.
+- **Review a local directory** —
+  [`local_code_review_mcp.yaml`](examples/local_code_review_mcp.yaml):
+  point it at a checked-out tree, `set_root_dir(path)` to swap roots,
+  watch-mode auto-rebuild.
+
 ### 2. Customise with a YAML manifest
 
 Drop `<basename>_mcp.yaml` next to the graph (e.g. `wikidata_mcp.yaml`

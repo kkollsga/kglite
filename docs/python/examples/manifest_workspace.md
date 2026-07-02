@@ -18,6 +18,15 @@ Both share the same source tools (`read_source` / `grep` /
 `list_source`), the same `read_code_source` qualified-name lookup,
 and the same trust gates for extensions.
 
+Copy-pasteable starting points ship in the repo's `examples/`:
+
+- **Local code-review** → [`examples/local_code_review_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/local_code_review_mcp.yaml)
+- **GitHub-clone tracker** → [`examples/open_source_workspace_mcp.yaml`](https://github.com/kkollsga/kglite/blob/main/examples/open_source_workspace_mcp.yaml)
+
+After copying one, run `kglite-mcp-server --selftest --mcp-config <your.yaml>`
+to confirm it stands up correctly (see the guide's
+[Verify your setup](../guides/mcp-servers.md#verify-your-setup)).
+
 ## Variant 1 — `workspace.kind: local` + `watch`
 
 Bind a local source directory as the active source root for source
