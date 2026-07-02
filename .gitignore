@@ -6,11 +6,13 @@
 /.claude/
 /.pytest_cache/
 /data/
-# Local development working folder — consolidated out of the repo root.
-# Holds gitignored dev material: `dev-documentation/` (design docs / audits),
-# local `projects/`, and `bench/` (one-off bench scripts/data). All local
-# working state, never committed.
-/dev_workfolder/
+# Local dev working folder — see dev-docs/README.md for the canonical layout.
+# Durable: `plans/` (actionable plans/backlog), `designs/` (design-decision
+# reference), `bench/scripts/` + `bench/results/`, `todos.md`. Auto-purged by
+# the dev-docs-cleanup skill: `temp/` (>1d, offload large output here to dodge
+# the token gate), `bench/out/` (>14d, generated graphs/dumps), `bin/` (>7d,
+# soft-deleted). Local working state, never committed.
+/dev-docs/
 # Inbox of feedback/coordination notes (`unread/` = needs action, `read/` =
 # archive). Kept at the repo root by preference; local working state, never
 # committed — see the "Inbox hygiene" section in CLAUDE.md.
@@ -55,8 +57,7 @@ coverage.xml
 *.kgl
 # …except the small Cat G-N regression fixtures (5.9 KB total, byte-deterministic
 # from tests/fixtures/build_fixtures.py with a seeded RNG). These are tracked
-# in-repo so CI sees them; reproducible via the script in the inbox cover
-# message (dev_workfolder/inbox/read/2026-05-13-from-mcp-servers-cat-G-N-fixtures.md).
+# in-repo so CI sees them; reproducible by re-running that script.
 !tests/fixtures/*.kgl
 
 # Sphinx docs build output
