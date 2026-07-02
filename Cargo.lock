@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "kglite"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "aho-corasick",
  "bincode",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-bolt-server"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-c"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -2056,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-cli"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-mcp-server"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "kglite-py"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "bincode",
  "chrono",

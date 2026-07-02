@@ -58,20 +58,28 @@ PUBLIC_API_NIGHTLY = "nightly-2026-01-09"
 
 
 def read_version() -> str:
-    """Pull ``version = "X.Y.Z"`` from the wheel crate's ``Cargo.toml``.
+    """Pull ``version = "X.Y.Z"`` from ``[workspace.package]`` in the root
+    ``Cargo.toml``.
 
     Pre-G.4 the root ``Cargo.toml`` held the project version (line 3).
-    Post-G.4 the workspace root is virtual; the wheel version now lives
-    in ``crates/kglite-py/Cargo.toml`` (read by maturin) and the core
-    crate version in ``crates/kglite/Cargo.toml``. Both should match in
-    a release commit. We read the wheel-crate value because the
-    captured constants (.kgl header, binary size, benchmark baselines)
-    all describe the wheel artifact.
+    Post-G.4 the workspace root went virtual; for a while the wheel version
+    lived in ``crates/kglite-py/Cargo.toml``. Since the "single-source the
+    crate version via ``[workspace.package]``" change every member crate sets
+    ``version.workspace = true`` and inherits the one value declared under
+    ``[workspace.package]`` in the root ``Cargo.toml`` — so that table is now
+    the single source of truth the captured constants (.kgl header, binary
+    size, benchmark baselines) all describe.
     """
-    text = (REPO_ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text()
-    m = re.search(r'^\s*version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+    text = (REPO_ROOT / "Cargo.toml").read_text()
+    # Scope the search to the [workspace.package] table so we don't pick up an
+    # unrelated `version = ` from another top-level table.
+    m = re.search(
+        r'^\[workspace\.package\]\s*$.*?^\s*version\s*=\s*"([^"]+)"\s*$',
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
     if not m:
-        sys.exit("crates/kglite-py/Cargo.toml: no version found")
+        sys.exit("Cargo.toml: no [workspace.package] version found")
     return m.group(1)
 
 

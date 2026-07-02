@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.7] — 2026-07-02 — MCP-server `--selftest`, default discovery banner, and workspace-archetype docs
+
 ### Added
 
 - **`kglite-mcp-server --selftest`.** A positive "did I set it up right?"
@@ -27,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool-search clients get the guidance without every deployment copy-pasting it
   into its manifest. Any manifest `instructions:` are preserved (appended), and
   the steer is skipped when the manifest already carries equivalent text.
+
+### Documentation
+
+- **MCP-server docs for the two workspace archetypes** (mcp-servers operator
+  feedback). The Quick Start config example now leads with the **absolute path
+  to the binary** + a one-line "why" (silent PATH-shadow version drift), a
+  prominent **restart-after-config-change** note, and a new **"Verify your
+  setup"** section built around `--selftest`. Ships a copy-pasteable
+  `examples/local_code_review_mcp.yaml` (the local code-review counterpart to
+  the existing github-clone example); README and `operators/index.md` now
+  headline both archetypes.
 
 ## [0.12.6] — 2026-07-02 — Runtime-write correctness (petekSuite) + MCP graph-over-grep steering
 
