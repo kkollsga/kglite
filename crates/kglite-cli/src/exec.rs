@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Result;
-use kglite::api::session::{execute_mut, ExecuteOutcome, ExecuteOptions};
+use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, ExecuteOutcome};
 use kglite::api::{make_dir_graph_mut, DirGraph, Value};
 
 use crate::format::{render, Mode};
@@ -40,6 +40,16 @@ pub fn execute(
     Ok(execute_mut(g, query, &opts)?)
 }
 
+/// Execute one read-only Cypher statement.
+pub fn execute_readonly(
+    graph: &Arc<DirGraph>,
+    query: &str,
+    params: &HashMap<String, Value>,
+) -> Result<ExecuteOutcome> {
+    let opts = ExecuteOptions::new(params);
+    Ok(execute_read(graph, query, &opts)?)
+}
+
 /// Render a Cypher outcome in the requested CLI mode.
 pub fn render_outcome(mode: Mode, outcome: &ExecuteOutcome) -> String {
     let r = &outcome.result;
@@ -47,7 +57,6 @@ pub fn render_outcome(mode: Mode, outcome: &ExecuteOutcome) -> String {
 }
 
 /// Write CLI output, treating a closed downstream pipe as successful exit.
-#[allow(dead_code)] // Used by one-shot commands added in the next phase.
 pub fn write_stdout(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     match stdout.write_all(text.as_bytes()) {

@@ -47,6 +47,11 @@ def _run_args(*args: str) -> str:
     return proc.stdout
 
 
+def _run_args_proc(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run the binary as a non-interactive subcommand, return the full process."""
+    return subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=30)
+
+
 def test_export_text_subcommand(tmp_path):
     import kglite
 
@@ -76,6 +81,78 @@ def test_diff_subcommand(tmp_path):
     assert "+1 | N_0 | s=done" in out
     assert "-2 | N_1" in out  # node 2 removed
     assert "+3 | N_1" in out  # node 3 added
+
+
+def test_query_subcommand_json(tmp_path):
+    import json
+    import kglite
+
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (:Person {name: 'Alice', age: 30})")
+    p = tmp_path / "g.kgl"
+    g.save(str(p))
+
+    out = _run_args(
+        "query",
+        str(p),
+        "MATCH (p:Person) RETURN p.name AS name, p.age AS age",
+        "--format",
+        "json",
+    )
+    rows = json.loads(out)
+    assert rows == [{"name": "Alice", "age": 30}]
+
+
+def test_write_subcommand_saves_graph(tmp_path):
+    import kglite
+
+    p = tmp_path / "g.kgl"
+    proc = _run_args_proc("write", str(p), "CREATE (:Task {id: 't1'})", "--save")
+    assert proc.returncode == 0, proc.stderr
+    assert p.exists()
+    g = kglite.load(str(p))
+    rows = g.cypher("MATCH (t:Task) RETURN t.id AS id").to_dicts()
+    assert rows == [{"id": "t1"}]
+
+
+def test_write_subcommand_scope_rejects_out_of_scope(tmp_path):
+    p = tmp_path / "g.kgl"
+    proc = _run_args_proc(
+        "write",
+        str(p),
+        "CREATE (:Algorithm {id: 'a1'})",
+        "--save",
+        "--write-scope",
+        "Plan,Task",
+    )
+    assert proc.returncode != 0
+    assert "write scope" in proc.stderr
+    assert not p.exists()
+
+
+def test_write_subcommand_stamps_provenance(tmp_path):
+    import kglite
+
+    p = tmp_path / "g.kgl"
+    g = kglite.KnowledgeGraph()
+    g.define_schema({"nodes": {"Task": {"auto_timestamp": True}}})
+    g.save(str(p))
+
+    proc = _run_args_proc(
+        "write",
+        str(p),
+        "CREATE (:Task {id: 't1'})",
+        "--save",
+        "--git-sha",
+        "abc123",
+        "--modified-by",
+        "cli-agent",
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = kglite.load(str(p)).cypher(
+        "MATCH (t:Task {id: 't1'}) RETURN t.git_sha AS sha, t.modified_by AS by"
+    ).to_dicts()
+    assert rows == [{"sha": "abc123", "by": "cli-agent"}]
 
 
 def test_create_and_query_roundtrip():
