@@ -83,15 +83,12 @@ parallel-bz2 = ["dep:bzip2-rs"]
 sec = [
     "dep:thiserror",
     "dep:ureq",
-    "dep:reqwest",
-    "dep:governor",
     "dep:zip",
     "dep:quick-xml",
 ]
 sodir = [
     "dep:thiserror",
-    "dep:reqwest",
-    "dep:governor",
+    "dep:ureq",
 ]
 # OKF (Open Knowledge Format) bundle loader — parses a directory of
 # markdown files with YAML frontmatter, cross-linked by markdown links,
@@ -179,7 +176,6 @@ rustc-hash = "2"
 csv = "1.3"
 geojson = "0.24"
 indexmap = { version = "2", features = ["serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 
 # ── Dataset loader deps (feature-gated, all `optional = true`) ──
 # Folded from the standalone `kglite-{sec,sodir,wikidata}` crates in
@@ -187,14 +183,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util
 # `sec` / `sodir` / `wikidata` features get a build without these
 # in their dep tree.
 thiserror = { version = "1", optional = true }
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "gzip", "stream"] }
-# Shared synchronous HTTP client for the dataset loaders (SEC ported in
-# the fetch-standardization work; SODIR/Wikidata follow). Pinned to 2.x
-# — 3.x is also in the lockfile via mcp-methods but has a different API
-# and pulls native-tls. ureq 2's default features give rustls TLS +
-# automatic gzip; `json` adds serde_json body helpers.
+# Shared synchronous HTTP client for all dataset loaders (SEC / SODIR /
+# Wikidata). Pinned to 2.x — 3.x is also in the lockfile via mcp-methods
+# but has a different API and pulls native-tls. ureq 2's default features
+# give rustls TLS + automatic gzip; `json` adds serde_json body helpers.
+# This replaced the former async reqwest + governor + tokio-bridge stack.
 ureq = { version = "2", optional = true, features = ["json"] }
-governor = { version = "0.7", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.36", optional = true }
 
@@ -214,7 +208,6 @@ oxrdf = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # loom — exhaustive interleaving model-checker for the Session commit/snapshot
 # lock pattern. Only pulled in under `--cfg loom` (the loom test is

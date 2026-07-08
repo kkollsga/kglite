@@ -473,20 +473,12 @@ pub mod api {
     /// See `docs/rust/implementing-a-binding.md` → "Wrapping a
     /// dataset for your binding" for the pattern.
     ///
-    /// **All `fetch_*` entry points are `async`.** Bindings need a
-    /// tokio runtime to drive them. The Python wheel builds one
-    /// per call via `pyo3-async-runtimes`; a Rust binary can spin
-    /// one up via `tokio::runtime::Builder`.
+    /// **All `fetch_*` entry points are synchronous.** They run to
+    /// completion on the calling thread, backed by the shared
+    /// `datasets::http` client (ureq + rate gate + retry). No async
+    /// runtime is needed — bindings call them directly and release the
+    /// GIL / manage threads in their own idiom.
     pub mod datasets {
-        /// Single blocking bridge for the async dataset fetchers: drive any
-        /// `fetch_*` future to completion on a fresh single-thread tokio
-        /// runtime. Bindings without their own async runtime (the C ABI, …)
-        /// wrap the async entry points with this — `block_on(fetch_x(..))` —
-        /// instead of a per-function `*_blocking` twin. Async-aware bindings
-        /// (the wheel) drive the futures on their own runtime and ignore it.
-        #[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
-        pub use crate::datasets::blocking::run as block_on;
-
         /// SEC EDGAR — quarterly filings index, bulk submissions
         /// archive, per-form fetchers (Form 3/4/5, 13F, 8-K, SC 13D/G,
         /// DEF 14A, Form 144, Exhibit 21, XBRL company facts).

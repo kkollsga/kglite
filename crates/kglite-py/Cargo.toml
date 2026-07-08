@@ -36,15 +36,15 @@ python-extension = ["pyo3/extension-module"]
 # per-Python-version wheels alongside the bundled binary.
 abi3 = ["pyo3/abi3-py310"]
 # Dataset loaders (SEC / SODIR / Wikidata / OKF) + RDF import. Pulls the
-# matching core-crate features plus the tokio runtime the SEC client wrapper
-# (src/sec.rs) needs. On by default; a diagnostic build drops it.
+# matching core-crate features. The loaders are synchronous (they drive
+# the shared ureq-based `DatasetClient` on the calling thread), so no
+# async runtime is needed here. On by default; a diagnostic build drops it.
 loaders = [
     "kglite_core/sec",
     "kglite_core/sodir",
     "kglite_core/wikidata",
     "kglite_core/okf",
     "kglite_core/rdf",
-    "dep:tokio",
 ]
 # Bundled in-process MCP server (`_run_mcp_server` + the `kglite-mcp-server`
 # console script). On by default; a diagnostic build drops it.
@@ -120,9 +120,6 @@ chrono = { version = "0.4.43", features = ["serde"] }
 regex = "1"
 rayon = "1.10"
 mimalloc = { version = "0.1", default-features = false }
-# Async runtime needed by the SEC client wrapper at src/sec.rs.
-# `optional = true`: pulled in by the `loaders` feature (default-on).
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 # Scoped SIGINT (Ctrl-C) handler so long Cypher queries are interruptible
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.

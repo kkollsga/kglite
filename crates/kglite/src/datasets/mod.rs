@@ -9,7 +9,7 @@
 //!
 //! - [`sec`] — SEC EDGAR filings (quarterly index, bulk submissions,
 //!   Form 4 / 13F / FSNDS, Exhibit 21, 8-K). Network: ~10 req/s
-//!   ceiling enforced via governor token bucket.
+//!   ceiling enforced via the shared [`http`] client's rate gate.
 //! - [`sodir`] — Norwegian Continental Shelf petroleum data
 //!   (Sodir FactMaps REST). Polite ArcGIS FeatureServer pagination.
 //! - [`wikidata`] — Wikimedia `latest-truthy.nt.bz2` dump fetcher
@@ -20,16 +20,11 @@
 //! (`crates/kglite-{sec,sodir,wikidata}`) into here as part of the
 //! polars-style core consolidation.
 
-// Shared blocking-runtime adapter (see `blocking::run`). Gated on the
-// presence of at least one dataset feature so it doesn't pull a
-// tokio runtime into builds that don't use any dataset loaders.
-#[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
-pub mod blocking;
-
-// Shared synchronous HTTP client (ureq + rate gate + retry). Gated the
-// same way as `blocking` — only compiled when a network-fetching
-// dataset loader is enabled. Loaders migrate onto this per phase
-// (SEC first); reqwest coexists until every loader has ported.
+// Shared synchronous HTTP client (ureq + rate gate + retry). Gated on
+// the presence of at least one network-fetching dataset feature so it
+// only compiles when a loader that needs it is enabled. Every loader
+// (SEC / SODIR / Wikidata) drives its fetches through this client on
+// the calling thread — no async runtime, no tokio.
 #[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
 pub mod http;
 

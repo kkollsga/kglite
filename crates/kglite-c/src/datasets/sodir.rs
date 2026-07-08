@@ -1,7 +1,7 @@
-//! Dataset C ABI — synchronous wrappers over kglite's blocking
-//! fetchers. Each dataset's API uses kglite's existing
-//! `*_blocking` companion functions (Phase 5), so the C side
-//! doesn't drag in tokio.
+//! Dataset C ABI — thin wrappers over kglite's synchronous
+//! fetchers. Each dataset's `fetch_*` entry point runs on the
+//! calling thread (shared ureq `DatasetClient`), so the C side
+//! calls it directly and doesn't drag in tokio.
 //!
 //! Feature-gated: each dataset is enabled by the matching Cargo
 //! feature on this crate (`sec`, `sodir`, `wikidata`). A consumer
@@ -12,7 +12,7 @@
 //!   1. Convert C inputs → Rust args (CStr → str, parse JSON arrays,
 //!      etc.)
 //!   2. Build the dataset's workdir/client from primitive args
-//!   3. Call the existing `_blocking` entry point
+//!   3. Call the synchronous `fetch_*` entry point
 //!   4. On Ok: serialize the report into JSON string per the
 //!      negative-space convention (wire format is a per-binding
 //!      concern)

@@ -31,7 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker pool (per-completion index save preserved for Ctrl-C resume), and the
   Wikidata resumable dump download streams straight to disk with no read timeout
   (10-20 GB stream) and its `Range`/206 resume path intact. The Python API is
-  unchanged.
+  unchanged. With every loader ported, the old async plumbing is deleted: the
+  `datasets/blocking.rs` tokio bridge (and the `api::datasets::block_on`
+  re-export) is gone, and `reqwest` + `governor` are dropped from the `kglite`
+  crate's dependency tree entirely while `tokio` leaves the `kglite` and
+  `kglite-py` loader paths (the bundled MCP/Bolt servers keep their own
+  runtimes). This trims the compile graph and shrinks a loaders-only wheel; the
+  default wheel's size is dominated by the bundled server and is little changed.
 
 ## [0.12.11] — 2026-07-08 — MCP root-swap correctness + active-graph identity
 
