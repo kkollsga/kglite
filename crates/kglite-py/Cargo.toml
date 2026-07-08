@@ -23,7 +23,11 @@ publish = false
 # (via plain cargo) can share the same kglite-py rlib. Maturin is
 # wired to enable it; cargo build leaves it off.
 [features]
-default = ["abi3"]
+# `loaders` + `mcp-server` are on by default so the shipped wheel is
+# feature-identical to before this split. They exist as separate features
+# purely so diagnostic variant wheels can drop them (via
+# `--no-default-features`) to bisect the pyarrow-24 coexistence SIGSEGV.
+default = ["abi3", "loaders", "mcp-server"]
 python-extension = ["pyo3/extension-module"]
 # Single-cdylib-for-many-Pythons mode. On by default so existing
 # `cargo build` / `cargo install` / `maturin develop` flows behave
@@ -31,10 +35,24 @@ python-extension = ["pyo3/extension-module"]
 # `--no-default-features --features python-extension` to produce
 # per-Python-version wheels alongside the bundled binary.
 abi3 = ["pyo3/abi3-py310"]
+# Dataset loaders (SEC / SODIR / Wikidata / OKF) + RDF import. Pulls the
+# matching core-crate features plus the tokio runtime the SEC client wrapper
+# (src/sec.rs) needs. On by default; a diagnostic build drops it.
+loaders = [
+    "kglite_core/sec",
+    "kglite_core/sodir",
+    "kglite_core/wikidata",
+    "kglite_core/okf",
+    "kglite_core/rdf",
+    "dep:tokio",
+]
+# Bundled in-process MCP server (`_run_mcp_server` + the `kglite-mcp-server`
+# console script). On by default; a diagnostic build drops it.
+mcp-server = ["dep:kglite-mcp-server"]
 # Rust-native embedder backend (BAAI/bge-m3 et al via fastembed-rs).
-# Propagates to the kglite core crate's matching feature; the
-# actual `dep:fastembed` lives in `crates/kglite/Cargo.toml`.
-fastembed = ["kglite_core/fastembed", "kglite-mcp-server/fastembed"]
+# Propagates to the core crate always; to the bundled server only when the
+# `mcp-server` feature pulls it in (weak-dep `?` syntax).
+fastembed = ["kglite_core/fastembed", "kglite-mcp-server?/fastembed"]
 
 [lib]
 # `name = "kglite_py"` avoids a workspace rlib filename collision
@@ -69,7 +87,10 @@ pyo3 = { version = "0.28", features = ["multiple-pymethods", "chrono"] }
 # crate's source to avoid an extern-crate collision with this
 # crate's own `[lib] name = "kglite"` (the cdylib that becomes
 # the wheel's `kglite.abi3.so`).
-kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodir", "wikidata", "okf", "rdf"] }
+# Dataset features (sec/sodir/wikidata/okf/rdf) are NOT hard-wired here;
+# they are pulled in via this crate's `loaders` feature (default-on) so a
+# diagnostic variant can drop them.
+kglite_core = { package = "kglite", path = "../kglite" }
 
 # The MCP server, hosted in-process. This is a pure-Rust lib (no pyo3,
 # no libpython link) depending on the SAME `kglite` core crate as
@@ -80,7 +101,9 @@ kglite_core = { package = "kglite", path = "../kglite", features = ["sec", "sodi
 # that, so `pip install kglite` ships the server natively.
 # default-features = false keeps fastembed opt-in (mirrors the core dep);
 # this crate's `fastembed` feature propagates to it.
-kglite-mcp-server = { path = "../kglite-mcp-server", default-features = false }
+# `optional = true`: pulled in by this crate's `mcp-server` feature
+# (default-on). A diagnostic variant drops it via `--no-default-features`.
+kglite-mcp-server = { path = "../kglite-mcp-server", default-features = false, optional = true }
 
 # 0.10.25: dropped the `mcp-methods` (and its `anyhow`) dependency. They
 # backed the `kglite._mcp_internal` bridge (pyo3 wrappers in the former
@@ -98,7 +121,8 @@ regex = "1"
 rayon = "1.10"
 mimalloc = { version = "0.1", default-features = false }
 # Async runtime needed by the SEC client wrapper at src/sec.rs.
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `optional = true`: pulled in by the `loaders` feature (default-on).
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 # Scoped SIGINT (Ctrl-C) handler so long Cypher queries are interruptible
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.

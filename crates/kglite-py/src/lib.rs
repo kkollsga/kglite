@@ -38,10 +38,14 @@ mod datatypes;
 mod error_py;
 mod graph;
 mod graphgen;
+#[cfg(feature = "loaders")]
 mod okf;
+#[cfg(feature = "loaders")]
 mod sec;
+#[cfg(feature = "loaders")]
 mod sodir;
 mod util;
+#[cfg(feature = "loaders")]
 mod wikidata;
 
 // The pyo3 wrapper depends on the kglite engine for everything
@@ -195,6 +199,7 @@ fn load(py: Python<'_>, path: String) -> PyResult<KnowledgeGraph> {
 /// `rdfs:label`), `keep_full_iris` (skip CURIE compaction), `default_type`
 /// (node type for subjects without `rdf:type`; defaults to `"Resource"`),
 /// `max_triples` (stop after N).
+#[cfg(feature = "loaders")]
 #[pyfunction]
 #[pyo3(signature = (path, *, languages=None, label_predicates=None, keep_full_iris=false, default_type=None, max_triples=None))]
 fn load_rdf(
@@ -370,6 +375,7 @@ fn cypher_pass_names() -> Vec<String> {
 /// re-acquired just for the per-query embed) so `text_score()` runs against it
 /// with no Rust toolchain. The standalone cargo binary supplies no factory, so
 /// a Python library errors there (use `library: fastembed-rs`).
+#[cfg(feature = "mcp-server")]
 #[pyfunction]
 #[pyo3(signature = (argv, embedder_factory=None))]
 fn _run_mcp_server(
@@ -414,6 +420,7 @@ fn _run_mcp_server(
 fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
+    #[cfg(feature = "loaders")]
     m.add_function(wrap_pyfunction!(load_rdf, m)?)?;
     m.add_function(wrap_pyfunction!(open_session, m)?)?;
     m.add_function(wrap_pyfunction!(from_bytes, m)?)?;
@@ -421,6 +428,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    #[cfg(feature = "mcp-server")]
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
     m.add_class::<KnowledgeGraph>()?;
     m.add_class::<FrozenGraph>()?;
@@ -433,9 +441,13 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     error_py::register(py, m)?;
     code_tree::pyapi::register(py, m)?;
     graphgen::register(py, m)?;
+    #[cfg(feature = "loaders")]
     okf::pyapi::register(py, m)?;
+    #[cfg(feature = "loaders")]
     sec::register(py, m)?;
+    #[cfg(feature = "loaders")]
     sodir::register(py, m)?;
+    #[cfg(feature = "loaders")]
     wikidata::register(py, m)?;
     Ok(())
 }

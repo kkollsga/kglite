@@ -258,7 +258,8 @@ jobs:
       - name: Build extension into a free-threaded venv (abi3 off)
         # abi3 (the limited API) doesn't cover the free-threaded build, so the
         # extension is built per-version with `--no-default-features` (drops the
-        # `abi3` default) + the `python-extension` feature. The build itself is
+        # `abi3` default) + `python-extension,loaders,mcp-server` (re-adds the
+        # default loaders/server the wheel ships, minus abi3). The build itself is
         # a real test: PyO3 0.28 enforces `Sync` on every `#[pyclass]` for a
         # free-threaded target, so a non-thread-safe class fails to compile here.
         #
@@ -272,7 +273,7 @@ jobs:
           python -m venv .ftvenv
           ./.ftvenv/bin/pip install -q maturin pytest pandas
           VIRTUAL_ENV="$PWD/.ftvenv" ./.ftvenv/bin/maturin develop --release \
-            --no-default-features --features python-extension
+            --no-default-features --features python-extension,loaders,mcp-server
 
       - name: Assert GIL is actually disabled + run concurrency suite
         # Backs the module's `gil_used = false` declaration with a real run:
