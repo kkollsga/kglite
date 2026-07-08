@@ -57,12 +57,11 @@ struct ActiveGraph {
     kg: KnowledgeGraph,
     source_path: Option<std::path::PathBuf>,
     /// The source root this graph was built/loaded from — a code-tree
-    /// directory or a `.kgl` file path. Two jobs: (a) let
-    /// [`GraphState::ensure_root_loaded`] detect a stale single slot after a
-    /// root swap (mcp-methods can skip our rebuild hook — see that method),
-    /// and (b) stamp the active-graph identity into agent-facing output so a
-    /// mismatched/stale graph is immediately visible. `None` for an in-memory
-    /// graph created without a path.
+    /// directory or a `.kgl` file path. Stamped into agent-facing output
+    /// (the `<active_graph/>` header, the `cypher_query` footer, and the
+    /// activation message) so an agent can see which root it is querying and
+    /// spot a stale graph. `None` for an in-memory graph created without a
+    /// path.
     root: Option<std::path::PathBuf>,
     /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
     /// so an agent can tell how fresh the active graph is.
@@ -257,36 +256,6 @@ impl GraphState {
             built_at: SystemTime::now(),
         });
         Ok(())
-    }
-
-    /// Ensure the active slot holds the code-tree for `dir`, rebuilding only
-    /// if it doesn't. Called from the activation-summary hook, which
-    /// mcp-methods fires on **every** successful activate — including its
-    /// rebuild-skip path (`workspace.rs` `already_built`: the repo is at its
-    /// last-built SHA *and* its build hook already ran this process). On that
-    /// skip path our post-activate build hook is **not** called. With a single
-    /// active-graph slot, an intervening `set_root_dir(B)` leaves the slot
-    /// holding B; re-binding A then hits the skip gate and the slot would keep
-    /// serving B under A's name (the "stale graph after root change" bug).
-    /// Reconciling here restores the requested root before the activation
-    /// summary is computed. No-op when the slot already matches `dir`, so the
-    /// skip-gate's perf win for genuine same-root re-binds is preserved.
-    pub fn ensure_root_loaded(&self, dir: &Path) -> Result<()> {
-        let already = {
-            let guard = self.inner.read().unwrap();
-            guard
-                .as_ref()
-                .and_then(|a| a.root.as_deref())
-                .is_some_and(|r| r == dir)
-        };
-        if already {
-            return Ok(());
-        }
-        tracing::info!(
-            root = %dir.display(),
-            "activation reconcile: active graph root mismatch, rebuilding"
-        );
-        self.build_code_tree(dir)
     }
 
     pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
@@ -1158,54 +1127,6 @@ mod tests {
             root: None,
             built_at: SystemTime::now(),
         }
-    }
-
-    /// Write a distinct source tree with `n` free functions under `dir`.
-    fn write_code_tree(dir: &std::path::Path, n: usize) {
-        let _ = std::fs::create_dir_all(dir);
-        let mut src = String::new();
-        for i in 0..n {
-            src.push_str(&format!("def fn_{i}():\n    return {i}\n\n"));
-        }
-        std::fs::write(dir.join("m.py"), src).unwrap();
-    }
-
-    /// Regression: mcp-methods can skip our rebuild hook when a previously
-    /// built root is re-bound (A→B→A), leaving the single active-graph slot
-    /// holding B. `ensure_root_loaded` — invoked from the activation-summary
-    /// hook on that skip path — must restore A. Reproduces the "stale
-    /// code-review graph after root change" report (petekSuite, 2026-07-06).
-    #[test]
-    fn ensure_root_loaded_recovers_stale_slot_after_swap() {
-        let base = std::env::temp_dir().join(format!("kgl_reconcile_{}", std::process::id()));
-        let dir_a = base.join("projA");
-        let dir_b = base.join("projB");
-        write_code_tree(&dir_a, 2); // A: 2 functions
-        write_code_tree(&dir_b, 5); // B: 5 functions — distinct node count
-
-        let gs = GraphState::new(false);
-        // Activate A, then B — the single slot now holds B (as after set_root_dir(B)).
-        gs.build_code_tree(&dir_a).unwrap();
-        let (a_nodes, _) = gs.schema().unwrap();
-        gs.build_code_tree(&dir_b).unwrap();
-        let (b_nodes, _) = gs.schema().unwrap();
-        assert_ne!(a_nodes, b_nodes, "fixtures must differ in node count");
-
-        // Re-bind A on the skip path: our build hook wouldn't fire, so the
-        // reconcile must rebuild A rather than leave B in the slot.
-        gs.ensure_root_loaded(&dir_a).unwrap();
-        assert_eq!(
-            gs.schema().unwrap().0,
-            a_nodes,
-            "ensure_root_loaded must restore A's graph, not keep stale B"
-        );
-
-        // Idempotent: re-binding the already-active root is a no-op (perf win
-        // preserved — no needless rebuild).
-        gs.ensure_root_loaded(&dir_a).unwrap();
-        assert_eq!(gs.schema().unwrap().0, a_nodes);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

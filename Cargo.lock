@@ -2273,9 +2273,9 @@ dependencies = [
 
 [[package]]
 name = "mcp-methods"
-version = "0.3.46"
+version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "336d1c4b394412d87d50159e4df32db06b54ec45b41111e8309574426806d798"
+checksum = "229cb7ead5b6a03af9b65044ba04a5b62db9057b10084b2e763b5dfdfbea1934"
 dependencies = [
  "anyhow",
  "clap",
@@ -2695,7 +2695,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "rand 0.9.4",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2708,7 +2708,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "thiserror 2.0.18",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

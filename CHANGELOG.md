@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale MCP graph after a root swap (code-review / open-source servers).**
   `set_root_dir(A)` → `set_root_dir(B)` → `set_root_dir(A)` (and the equivalent
   `repo_management` A→B→A) could leave the previous graph active while the tool
-  still reported "Graph ready". mcp-methods skips the rebuild hook when a root is
-  re-bound at its last-built SHA, but the server keeps a **single** active-graph
-  slot, so the intervening B swap left B loaded under A's name. The activation
-  hook now reconciles the slot against the requested root and rebuilds when they
-  differ (no-op — perf win preserved — when the slot already matches).
+  still reported "Graph ready": the server keeps a **single** active-graph slot,
+  and mcp-methods' rebuild-skip gate treated any root ever built this process as
+  still-live, so the intervening B swap left B loaded under A's name. Fixed by
+  flooring the `mcp-methods` dependency at **0.3.47**, whose skip gate tracks the
+  currently-active built root — re-binding a different root always rebuilds,
+  while a same-root re-bind still cheap-skips.
 
 ### Added
 
