@@ -186,11 +186,10 @@ typedef struct KgliteCypherResult {
 #if defined(KGLITE_FEATURE_SODIR)
 /**
  * Fetch all Sodir (Norwegian Continental Shelf) datasets the
- * caller asks for. Sync wrapper around the engine's
- * [`fetch_all_blocking`] entry point — spins up a single-thread
- * tokio runtime per call, fetches missing/stale CSVs from the
- * ArcGIS FactMaps REST API, applies preprocessing (FK fixups),
- * returns a report.
+ * caller asks for. Thin wrapper around the engine's synchronous
+ * [`fetch_all`] entry point — fetches missing/stale CSVs from the
+ * ArcGIS FactMaps REST API across a bounded scoped worker pool,
+ * applies preprocessing (FK fixups), returns a report.
  *
  * # Arguments
  *
@@ -242,8 +241,8 @@ typedef struct KgliteCypherResult {
  * - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `datasets_json` isn't a
  *   JSON array of strings
  * - `KGLITE_STATUS_CODE_FILE_IO` — workdir creation or CSV write failed
- * - `KGLITE_STATUS_CODE_INTERNAL` — REST API call failed, tokio
- *   runtime build failed, or other engine-level error
+ * - `KGLITE_STATUS_CODE_INTERNAL` — REST API call failed or another
+ *   engine-level error
  *
  * # Safety
  *

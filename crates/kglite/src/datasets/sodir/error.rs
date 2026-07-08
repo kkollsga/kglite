@@ -9,7 +9,7 @@ pub enum SodirError {
     Io(#[from] std::io::Error),
 
     #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     #[error("rate limited after {retries} retries; back off and try again later")]
     RateLimited { retries: usize },

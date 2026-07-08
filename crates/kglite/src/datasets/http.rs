@@ -208,9 +208,8 @@ impl DatasetClient {
         unreachable!("fetch_bytes loop returns or errors before completing")
     }
 
-    /// Fetch and parse a JSON body. (Used by the SODIR port in a later
-    /// phase; present now so the shared client is API-complete.)
-    #[allow(dead_code)]
+    /// Fetch and parse a JSON body. Consumed by the SODIR loader's
+    /// `ArcGISClient::fetch_json`.
     pub fn fetch_json(&self, url: &str) -> Result<serde_json::Value, HttpError> {
         let bytes = self.fetch_bytes(url)?;
         serde_json::from_slice(&bytes)

@@ -54,19 +54,19 @@ fn refresh(
     let blueprint = parse_json(&blueprint_json, "blueprint")?;
     let needed = datasets_used_by_blueprint(&blueprint);
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
-    let report = rt
-        .block_on(fetch_all(
-            &wd,
-            &needed,
-            index_cooldown_days,
-            dataset_cooldown_days,
-            concurrency,
-        ))
-        .map_err(map_err)?;
+    // `fetch_all` is synchronous now (backed by the shared blocking
+    // `DatasetClient`); its own scoped worker pool overlaps the network
+    // latency. The GIL is held across the call — unchanged from the
+    // prior tokio `block_on`, which also blocked the calling thread
+    // holding the GIL.
+    let report = fetch_all(
+        &wd,
+        &needed,
+        index_cooldown_days,
+        dataset_cooldown_days,
+        concurrency,
+    )
+    .map_err(map_err)?;
 
     let d = PyDict::new(py);
     d.set_item("fetched", report.refresh.fetched)?;

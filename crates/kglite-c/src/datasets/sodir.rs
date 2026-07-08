@@ -23,16 +23,14 @@
 
 use crate::status::KgliteStatusCode;
 use crate::strings::alloc_c_string;
-use kglite::api::datasets::block_on;
 use kglite::api::datasets::sodir::{fetch_all, FetchAllReport, Workdir};
 use std::ffi::{c_char, CStr};
 
 /// Fetch all Sodir (Norwegian Continental Shelf) datasets the
-/// caller asks for. Sync wrapper around the engine's
-/// [`fetch_all_blocking`] entry point — spins up a single-thread
-/// tokio runtime per call, fetches missing/stale CSVs from the
-/// ArcGIS FactMaps REST API, applies preprocessing (FK fixups),
-/// returns a report.
+/// caller asks for. Thin wrapper around the engine's synchronous
+/// [`fetch_all`] entry point — fetches missing/stale CSVs from the
+/// ArcGIS FactMaps REST API across a bounded scoped worker pool,
+/// applies preprocessing (FK fixups), returns a report.
 ///
 /// # Arguments
 ///
@@ -84,8 +82,8 @@ use std::ffi::{c_char, CStr};
 /// - `KGLITE_STATUS_CODE_INVALID_ARGUMENT` — `datasets_json` isn't a
 ///   JSON array of strings
 /// - `KGLITE_STATUS_CODE_FILE_IO` — workdir creation or CSV write failed
-/// - `KGLITE_STATUS_CODE_INTERNAL` — REST API call failed, tokio
-///   runtime build failed, or other engine-level error
+/// - `KGLITE_STATUS_CODE_INTERNAL` — REST API call failed or another
+///   engine-level error
 ///
 /// # Safety
 ///
@@ -119,13 +117,13 @@ pub unsafe extern "C" fn kglite_datasets_sodir_fetch_all(
     };
 
     let workdir = Workdir::new(workdir_str);
-    match block_on(fetch_all(
+    match fetch_all(
         &workdir,
         &datasets,
         index_cooldown_days,
         dataset_cooldown_days,
         concurrency,
-    )) {
+    ) {
         Ok(report) => {
             let json = serialize_fetch_all_report(&report);
             unsafe {

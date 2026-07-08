@@ -7,17 +7,19 @@
 //! 1. **classify** (sequential, no network) — per dataset, decide
 //!    skip / probe / fetch / user-supplied / unfetchable.
 //! 2. **execute** (concurrent) — run probes + fetches across a bounded
-//!    pool of tokio tasks. The `ArcGISClient`'s global token bucket is
-//!    the real throughput gate; concurrency only overlaps latency.
+//!    pool of scoped worker threads that pull from a shared queue. The
+//!    `ArcGISClient`'s Arc-shared rate gate is the real throughput
+//!    gate (global across the per-worker clones); concurrency only
+//!    overlaps latency. Results flow back over an `mpsc` channel; the
+//!    main thread owns all `index` mutation and flushes the index
+//!    after every completion so a Ctrl-C never loses progress.
 
-use std::sync::Arc;
-
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 
 use crate::datasets::sodir::catalog;
 use crate::datasets::sodir::client::ArcGISClient;
-use crate::datasets::sodir::error::{Result, SodirError};
+use crate::datasets::sodir::error::Result;
 use crate::datasets::sodir::fetch;
 use crate::datasets::sodir::index::{self, Action, DatasetEntry, SodirIndex};
 use crate::datasets::sodir::layout::Workdir;
@@ -57,7 +59,7 @@ enum ExecResult {
 /// Refresh the CSVs for `needed`, mutating `index` in place. Returns a
 /// per-dataset classification report. Sets `last_full_check_iso` when
 /// a cooldown sweep ran.
-pub async fn refresh_csvs(
+pub fn refresh_csvs(
     workdir: &Workdir,
     client: &ArcGISClient,
     needed: &[String],
@@ -108,55 +110,94 @@ pub async fn refresh_csvs(
     // everywhere → stable alpha order.
     work.sort_by_key(|item| std::cmp::Reverse(size_hint(index, &item.0)));
 
-    // ── Pass 2: execute concurrently ──
-    if !work.is_empty() {
-        let sem = Arc::new(Semaphore::new(concurrency.max(1)));
-        let mut set: JoinSet<(String, Result<ExecResult>)> = JoinSet::new();
-        for (stem, action) in work {
-            let client = client.clone();
-            let sem = sem.clone();
-            let csv_path = workdir.csv_path(&stem);
-            let prior_count = index.datasets.get(&stem).map(|e| e.row_count);
-            set.spawn(async move {
-                let _permit = sem.acquire().await;
-                let result = execute_one(&client, &stem, action, &csv_path, prior_count).await;
-                (stem, result)
-            });
-        }
+    // Snapshot each item's prior row count now — the workers can't
+    // borrow `index` (the main thread owns its mutation), so the count
+    // `execute_one` compares against on a probe is captured up front.
+    let work: Vec<(String, Action, Option<u64>)> = work
+        .into_iter()
+        .map(|(stem, action)| {
+            let prior = index.datasets.get(&stem).map(|e| e.row_count);
+            (stem, action, prior)
+        })
+        .collect();
 
-        while let Some(joined) = set.join_next().await {
-            let (stem, result) =
-                joined.map_err(|e| SodirError::Decode(format!("task join: {e}")))?;
-            match result {
-                Ok(ExecResult::Fetched { rows, elapsed }) => {
-                    let (base, layer_id) = catalog::resolve(&stem)?;
-                    let kind = catalog::kind_of(&stem)?;
-                    index.datasets.insert(
-                        stem.clone(),
-                        DatasetEntry::fetched(
-                            kind.as_str(),
-                            layer_id,
-                            base,
-                            &stem,
-                            rows,
-                            elapsed,
-                            &index::now_iso(),
-                        ),
-                    );
-                    report.fetched.push(stem);
-                }
-                Ok(ExecResult::Unchanged) => {
-                    if let Some(entry) = index.datasets.get_mut(&stem) {
-                        entry.count_checked_at_iso = index::now_iso();
+    // ── Pass 2: execute across a bounded scoped worker pool ──
+    //
+    // Workers pull from the sorted `work` list via a shared atomic
+    // cursor (largest-first order preserved), run the probe/fetch, and
+    // send each result back over `mpsc`. The main thread does *all*
+    // `index` mutation and the per-completion `index::save`. `abort`
+    // makes workers stop picking new work once the main thread hits a
+    // fatal error (a `save` or catalog-resolution failure); in-flight
+    // fetches finish, but no new ones start — matching the fail-fast
+    // semantics of the prior JoinSet drop.
+    if !work.is_empty() {
+        let n_workers = concurrency.max(1);
+        let next = AtomicUsize::new(0);
+        let abort = AtomicBool::new(false);
+
+        let outcome: Result<()> = std::thread::scope(|scope| {
+            let (tx, rx) = mpsc::channel::<(String, Result<ExecResult>)>();
+            for _ in 0..n_workers {
+                let client = client.clone();
+                let tx = tx.clone();
+                let next = &next;
+                let abort = &abort;
+                let work = &work;
+                scope.spawn(move || {
+                    loop {
+                        if abort.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((stem, action, prior_count)) = work.get(i) else {
+                            break;
+                        };
+                        let csv_path = workdir.csv_path(stem);
+                        let result = execute_one(&client, stem, *action, &csv_path, *prior_count);
+                        // Receiver hung up (main aborted) — stop.
+                        if tx.send((stem.clone(), result)).is_err() {
+                            break;
+                        }
                     }
-                    report.unchanged.push(stem);
-                }
-                Err(e) => report.errors.push((stem, e.to_string())),
+                });
             }
-            // Flush after every completion so a Ctrl-C never loses
-            // progress — the next run resumes from here.
-            index::save(workdir, index)?;
-        }
+            // Drop the main thread's sender so `rx` closes once every
+            // worker's clone is dropped (all work drained).
+            drop(tx);
+
+            for (stem, result) in rx {
+                match result {
+                    Ok(ExecResult::Fetched { rows, elapsed }) => {
+                        match build_fetched_entry(&stem, rows, elapsed) {
+                            Ok(entry) => {
+                                index.datasets.insert(stem.clone(), entry);
+                                report.fetched.push(stem);
+                            }
+                            Err(e) => {
+                                abort.store(true, Ordering::Relaxed);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Ok(ExecResult::Unchanged) => {
+                        if let Some(entry) = index.datasets.get_mut(&stem) {
+                            entry.count_checked_at_iso = index::now_iso();
+                        }
+                        report.unchanged.push(stem);
+                    }
+                    Err(e) => report.errors.push((stem, e.to_string())),
+                }
+                // Flush after every completion so a Ctrl-C never loses
+                // progress — the next run resumes from here.
+                if let Err(e) = index::save(workdir, index) {
+                    abort.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
+            }
+            Ok(())
+        });
+        outcome?;
     }
 
     if sweep_due {
@@ -167,7 +208,7 @@ pub async fn refresh_csvs(
 
 /// Run one classified dataset: a probe (which upgrades to a fetch when
 /// the remote count drifted) or a direct fetch.
-async fn execute_one(
+fn execute_one(
     client: &ArcGISClient,
     stem: &str,
     action: Action,
@@ -176,7 +217,7 @@ async fn execute_one(
 ) -> Result<ExecResult> {
     let mut action = action;
     if action == Action::Probe {
-        let remote = fetch::count(client, stem).await?;
+        let remote = fetch::count(client, stem)?;
         if prior_count == Some(remote) {
             return Ok(ExecResult::Unchanged);
         }
@@ -184,11 +225,30 @@ async fn execute_one(
     }
     debug_assert_eq!(action, Action::Fetch);
     let t0 = std::time::Instant::now();
-    let rows = fetch::fetch_to_csv(client, stem, csv_path).await?;
+    let rows = fetch::fetch_to_csv(client, stem, csv_path)?;
     Ok(ExecResult::Fetched {
         rows: rows as u64,
         elapsed: t0.elapsed().as_secs_f64(),
     })
+}
+
+/// Build the index entry for a freshly fetched dataset. Resolving the
+/// catalog metadata can only fail for a stem that isn't in the catalog
+/// — impossible here (classify already gated on `catalog::is_known`) —
+/// so this is defensive; a failure is fatal (fail-fast) exactly as the
+/// prior inline `?` was.
+fn build_fetched_entry(stem: &str, rows: u64, elapsed: f64) -> Result<DatasetEntry> {
+    let (base, layer_id) = catalog::resolve(stem)?;
+    let kind = catalog::kind_of(stem)?;
+    Ok(DatasetEntry::fetched(
+        kind.as_str(),
+        layer_id,
+        base,
+        stem,
+        rows,
+        elapsed,
+        &index::now_iso(),
+    ))
 }
 
 /// Best-known dataset size for scheduling — the prior fetch's row
@@ -199,7 +259,7 @@ fn size_hint(index: &SodirIndex, stem: &str) -> u64 {
 
 /// Full refresh: ensure the workdir, load the index, refresh every
 /// needed CSV, persist the index, then run the FK preprocessing.
-pub async fn fetch_all(
+pub fn fetch_all(
     workdir: &Workdir,
     needed: &[String],
     index_cooldown_days: i64,
@@ -217,8 +277,7 @@ pub async fn fetch_all(
         index_cooldown_days,
         dataset_cooldown_days,
         concurrency,
-    )
-    .await?;
+    )?;
     index::save(workdir, &index)?;
     let preprocess = preprocess::apply(&workdir.csv_dir())?;
     Ok(FetchAllReport {

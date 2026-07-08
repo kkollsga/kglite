@@ -522,9 +522,10 @@ pub mod api {
         #[cfg(feature = "sodir")]
         pub mod sodir {
             pub use crate::datasets::sodir::{SodirError, Workdir};
-            // Single async fetch entry — pulls all referenced datasets into
-            // csv/, applies preprocessing, returns the report. Drive via
-            // `block_on` or your own runtime.
+            // Single synchronous fetch entry — pulls all referenced
+            // datasets into csv/, applies preprocessing, returns the
+            // report. Call directly (no runtime needed); backed by the
+            // shared `DatasetClient` (ureq + rate gate + retry).
             pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
             // Blueprint utilities the wheel composes with from_blueprint.
             pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};

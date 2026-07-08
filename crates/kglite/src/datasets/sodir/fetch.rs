@@ -27,10 +27,10 @@ const WKT_COLUMN: &str = "wkt_geometry";
 
 /// Cheap row-count probe via `returnCountOnly=true` — a ~50-byte
 /// response used to detect remote changes without re-downloading.
-pub async fn count(client: &ArcGISClient, stem: &str) -> Result<u64> {
+pub fn count(client: &ArcGISClient, stem: &str) -> Result<u64> {
     let (base, layer_id) = resolve(stem)?;
     let url = format!("{base}/{layer_id}/query?where=1%3D1&returnCountOnly=true&f=json");
-    let data = client.fetch_json(&url).await?;
+    let data = client.fetch_json(&url)?;
     Ok(data.get("count").and_then(Value::as_u64).unwrap_or(0))
 }
 
@@ -39,7 +39,7 @@ pub async fn count(client: &ArcGISClient, stem: &str) -> Result<u64> {
 ///
 /// Writes to a `.tmp` sibling and renames on success, so a crash
 /// mid-write never leaves a corrupt cache file.
-pub async fn fetch_to_csv(client: &ArcGISClient, stem: &str, csv_path: &Path) -> Result<usize> {
+pub fn fetch_to_csv(client: &ArcGISClient, stem: &str, csv_path: &Path) -> Result<usize> {
     let (base, layer_id) = resolve(stem)?;
     if let Some(parent) = csv_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -53,7 +53,7 @@ pub async fn fetch_to_csv(client: &ArcGISClient, stem: &str, csv_path: &Path) ->
             "{base}/{layer_id}/query?where=1%3D1&outFields=*&returnGeometry=true\
              &resultOffset={offset}&resultRecordCount={PAGE_SIZE}&f=geojson"
         );
-        let data = client.fetch_json(&url).await?;
+        let data = client.fetch_json(&url)?;
         let features = match data.get("features").and_then(Value::as_array) {
             Some(f) if !f.is_empty() => f.clone(),
             _ => break,
@@ -80,7 +80,7 @@ pub async fn fetch_to_csv(client: &ArcGISClient, stem: &str, csv_path: &Path) ->
 
     // ── empty dataset: header-only CSV from the layer's field list ──
     if rows.is_empty() {
-        let mut columns = layer_field_names(client, base, layer_id).await;
+        let mut columns = layer_field_names(client, base, layer_id);
         columns.push(WKT_COLUMN.to_string());
         write_csv(csv_path, &columns, &[])?;
         return Ok(0);
@@ -146,9 +146,9 @@ fn convert_date_columns(columns: &[String], rows: &mut [HashMap<String, Value>])
 /// only for the empty-dataset header fallback; failures are
 /// non-fatal (an empty field list still yields a `wkt_geometry`
 /// header).
-async fn layer_field_names(client: &ArcGISClient, base: &str, layer_id: u32) -> Vec<String> {
+fn layer_field_names(client: &ArcGISClient, base: &str, layer_id: u32) -> Vec<String> {
     let url = format!("{base}/{layer_id}?f=json");
-    match client.fetch_json(&url).await {
+    match client.fetch_json(&url) {
         Ok(data) => data
             .get("fields")
             .and_then(Value::as_array)
@@ -206,24 +206,20 @@ mod tests {
     /// Skipped unless `SODIR_LIVE_TEST` is set — CI / offline runs must not
     /// depend on the network. Lives in-crate (rather than `tests/`) so it can
     /// reach the `fetch` submodule after `datasets` was sealed to `pub(crate)`.
-    #[tokio::test]
-    async fn fetch_quadrant_live() {
+    #[test]
+    fn fetch_quadrant_live() {
         if std::env::var("SODIR_LIVE_TEST").is_err() {
             eprintln!("skipping fetch_quadrant_live — set SODIR_LIVE_TEST=1 to run");
             return;
         }
         let client = ArcGISClient::new().expect("client constructs");
         // `quadrant` is one of the smallest datasets — good for a probe.
-        let n = count(&client, "quadrant")
-            .await
-            .expect("count probe succeeds");
+        let n = count(&client, "quadrant").expect("count probe succeeds");
         assert!(n > 0, "quadrant should report a non-zero row count");
 
         let tmp = tempfile::tempdir().unwrap();
         let csv_path = tmp.path().join("quadrant.csv");
-        let written = fetch_to_csv(&client, "quadrant", &csv_path)
-            .await
-            .expect("fetch_to_csv succeeds");
+        let written = fetch_to_csv(&client, "quadrant", &csv_path).expect("fetch_to_csv succeeds");
         assert!(written > 0, "expected rows written");
         assert!(csv_path.is_file(), "csv file should exist");
 
