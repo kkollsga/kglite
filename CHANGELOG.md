@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.11] — 2026-07-08 — MCP root-swap correctness + active-graph identity
+
 ### Fixed
 
 - **Stale MCP graph after a root swap (code-review / open-source servers).**
