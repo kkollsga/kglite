@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP server: GitHub API calls now retry transient failures.** Bumped
+  `mcp-methods` 0.3.47 → 0.3.48 — `github_issues`/`github_api` retry 429/5xx
+  and transport errors with exponential backoff (3 retries, 500 ms × 2 capped
+  at 30 s) instead of failing the tool call on the first blip.
+
 ### Fixed
 
 - **pyarrow-24 coexistence — pin the wheel's bundled mimalloc to v2.** Importing
