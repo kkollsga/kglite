@@ -164,6 +164,37 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: wheels/*.whl
 
+      # ---- pyarrow-coexistence canary (macOS arm64 only) ----
+      # The dual-mimalloc teardown SIGSEGV this guards (kglite's Rust global
+      # mimalloc vs pyarrow's bundled copy on CPython 3.14) was ONLY ever
+      # observed on macOS arm64. ci.yml runs the same canary
+      # (tests/test_pyarrow_coexistence.py) on a Linux py3.14 leg; this closes
+      # the macOS blind spot by exercising it on the native arm64 runner BEFORE
+      # any wheel is published (the `publish` job needs build-native == success,
+      # so a nonzero exit here blocks the release).
+      #
+      # Scoped to `aarch64-apple-darwin`: the x86_64 cell cross-builds on the
+      # arm64 runner and can't run its wheel; the windows cell is a different OS.
+      - name: Set up Python 3.14 for the pyarrow-coexistence canary
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: pyarrow-coexistence canary (macOS arm64)
+        # Install the wheel we just built (abi3-py310 → runs on 3.14) into a
+        # fresh venv alongside UNPINNED pyarrow. Unpinned BY DESIGN, mirroring
+        # ci.yml's Linux leg: we WANT the newest pyarrow/CPython allocator
+        # behaviour so a future change that reintroduces the clash trips here
+        # early. A nonzero exit (139 / SIGSEGV at teardown) fails the job.
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .canary-venv
+          ./.canary-venv/bin/python -m pip install --upgrade pip
+          ./.canary-venv/bin/python -m pip install wheels/*.whl pyarrow pytest
+          ./.canary-venv/bin/python -m pytest tests/test_pyarrow_coexistence.py -v
+
   # Linux builds inside the manylinux2014 container (glibc 2.17) via
   # maturin-action, NOT a bare `maturin build` on the runner — a bare
   # build tags the wheel with the runner's glibc (0.10.28 shipped
