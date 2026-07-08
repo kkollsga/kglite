@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.12] — 2026-07-08 — pyarrow coexistence + dataset-fetch standardization
+
 ### Changed
 
 - **MCP server: GitHub API calls now retry transient failures.** Bumped
