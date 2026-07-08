@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carry a one-line `— active graph: … · built …` footer; and the `set_root_dir`
   activation message names the live root + build age. An agent can now see which
   root (and how fresh) it is querying and spot a stale graph immediately.
+- **Lazy-discovery escape hatch in the activation message.** The workspace
+  activation/`repo_management` reply now tells a client that loads MCP tools
+  lazily (Codex / code-mode / tool-search) to search its registry for
+  `cypher`/`graph_overview` if they aren't loaded — the graph tools are always
+  registered, so a broad first-search miss shouldn't read as "graph
+  unavailable." Complements the existing `instructions`-block steer by putting
+  the hint in a tool-call result, which lazy clients read more reliably.
 
 ## [0.12.10] — 2026-07-02 — Agent-oriented CLI automation
 

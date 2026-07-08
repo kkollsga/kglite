@@ -310,7 +310,14 @@ impl GraphState {
     /// (the mcp-methods 0.3.46 activation-summary hook). Steers an agent's
     /// FIRST move toward the graph before it defaults to grep — the
     /// activation result is the one message read before any tool choice.
-    /// `None` when no graph is active (activation stays terse).
+    /// Also carries a lazy-discovery escape hatch: a client that loads MCP
+    /// tools lazily (Codex / code-mode / tool-search) can surface only
+    /// grep/read_source on a broad first search and miss the always-registered
+    /// graph tools, so the message tells it to search its registry for
+    /// `cypher`/`graph_overview` rather than conclude the graph is unavailable
+    /// (petekSuite report, 2026-07-08). The `instructions`-block `DISCOVERY_STEER`
+    /// says the same thing, but a tool-call *result* is read more reliably than
+    /// the handshake `instructions`. `None` when no graph is active.
     pub fn activation_summary(&self) -> Option<String> {
         let guard = self.inner.read().unwrap();
         let active = guard.as_ref()?;
@@ -343,7 +350,9 @@ impl GraphState {
         Some(format!(
             "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \
              \u{2192} cypher_query for structure (definitions, callers, types, counts, \
-             paths); use grep for literal text only.",
+             paths); use grep for literal text only. If graph_overview/cypher_query aren't \
+             in your loaded tools, search your tool registry for 'cypher' or 'graph_overview' \
+             and load them before falling back to grep — they are always registered.",
             overview.node_count,
             top.join(", "),
             overview.edge_count,
@@ -1221,6 +1230,10 @@ mod tests {
         assert!(
             summary.contains("graph_overview()"),
             "steers to the graph: {summary}"
+        );
+        assert!(
+            summary.contains("search your tool registry"),
+            "carries the lazy-discovery escape hatch: {summary}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
