@@ -102,7 +102,7 @@ sodir = [
 okf = ["dep:yaml-rust2"]
 wikidata = [
     "dep:thiserror",
-    "dep:reqwest",
+    "dep:ureq",
     # `wikidata` does NOT imply `parallel-bz2` even though Wikidata's
     # `latest-truthy.nt.bz2` is the canonical workload for the
     # parallel decoder. Reason: `parallel-bz2` depends on the

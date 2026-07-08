@@ -15,7 +15,7 @@ use crate::datasets::wikidata::layout::{Workdir, DUMP_URL};
 /// timestamp the caller should stamp into `wikidata_source.json`:
 /// the remote `Last-Modified` when freshly checked, or the local
 /// file's mtime when the dump was kept within cooldown.
-pub async fn ensure_dump(
+pub fn ensure_dump(
     workdir: &Workdir,
     cooldown_days: i64,
     verbose: bool,
@@ -26,11 +26,7 @@ pub async fn ensure_dump(
 
     let client = WikidataClient::new()?;
     // Remote unreachable → `None`; the caller falls back to the local copy.
-    let remote_mtime = client
-        .head(DUMP_URL)
-        .await
-        .ok()
-        .and_then(|m| m.last_modified);
+    let remote_mtime = client.head(DUMP_URL).ok().and_then(|m| m.last_modified);
 
     if let Some(local_mtime) = file_mtime_utc(&local) {
         let age = age_days(local_mtime);
@@ -77,26 +73,22 @@ pub async fn ensure_dump(
             }
             let _ = std::fs::remove_file(&part);
         } else {
-            client.download_resumable(DUMP_URL, &part, verbose).await?;
+            client.download_resumable(DUMP_URL, &part, verbose)?;
             std::fs::rename(&part, &local)?;
             return Ok((local, remote_mtime));
         }
     }
 
-    client.download_resumable(DUMP_URL, &part, verbose).await?;
+    client.download_resumable(DUMP_URL, &part, verbose)?;
     std::fs::rename(&part, &local)?;
     Ok((local, remote_mtime))
 }
 
 /// The remote dump's `Last-Modified`, or `None` if unreachable. Used
 /// for the disk-mode "is the cached graph still current?" check.
-pub async fn remote_last_modified() -> Option<DateTime<Utc>> {
+pub fn remote_last_modified() -> Option<DateTime<Utc>> {
     let client = WikidataClient::new().ok()?;
-    client
-        .head(DUMP_URL)
-        .await
-        .ok()
-        .and_then(|m| m.last_modified)
+    client.head(DUMP_URL).ok().and_then(|m| m.last_modified)
 }
 
 fn file_mtime_utc(path: &Path) -> Option<DateTime<Utc>> {

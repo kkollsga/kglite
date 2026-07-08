@@ -144,6 +144,17 @@ impl DatasetClient {
         }
     }
 
+    /// Borrow the underlying `ureq` agent. Exposed for loaders whose
+    /// request shape the shared `fetch_*` helpers don't cover — notably
+    /// the Wikidata resumable streaming download (`HEAD` probe + ranged
+    /// `GET` streamed straight to disk). Reusing the agent keeps the
+    /// construction (UA, connect timeout, deliberate no-read-timeout,
+    /// rustls TLS, gzip) in one place; the specialised request/stream
+    /// logic stays in the per-dataset client per the boundary principle.
+    pub(crate) fn agent(&self) -> &ureq::Agent {
+        &self.agent
+    }
+
     /// Block until at least `min_gap` has elapsed since the last
     /// request start, then stamp the clock. Holding the lock across the
     /// sleep is intentional: it serialises every clone against one

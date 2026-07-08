@@ -28,15 +28,13 @@ fn map_err(e: WikidataError) -> PyErr {
     }
 }
 
-fn runtime() -> PyResult<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))
-}
-
 /// Ensure the local Wikidata dump exists, downloading or resuming as
 /// needed. Returns `(dump_path, remote_last_modified_iso)`.
+///
+/// The core fetch is now synchronous (shared `DatasetClient`), so it
+/// runs directly on the calling thread — no tokio runtime. The GIL is
+/// held for the whole call, exactly as the previous `block_on` version;
+/// releasing it is a separate change (Phase 4b).
 #[pyfunction]
 #[pyo3(signature = (workdir, *, cooldown_days=31, verbose=true))]
 fn ensure_dump(
@@ -45,14 +43,9 @@ fn ensure_dump(
     verbose: bool,
 ) -> PyResult<(String, Option<String>)> {
     let wd = Workdir::new(workdir);
-    let rt = runtime()?;
-    let (path, mtime) = rt
-        .block_on(kglite_core::api::datasets::wikidata::ensure_dump(
-            &wd,
-            cooldown_days,
-            verbose,
-        ))
-        .map_err(map_err)?;
+    let (path, mtime) =
+        kglite_core::api::datasets::wikidata::ensure_dump(&wd, cooldown_days, verbose)
+            .map_err(map_err)?;
     Ok((
         path.to_string_lossy().into_owned(),
         mtime.map(|m| m.to_rfc3339()),
@@ -63,10 +56,7 @@ fn ensure_dump(
 /// the dump server is unreachable.
 #[pyfunction]
 fn remote_last_modified() -> PyResult<Option<String>> {
-    let rt = runtime()?;
-    Ok(rt
-        .block_on(kglite_core::api::datasets::wikidata::remote_last_modified())
-        .map(|m| m.to_rfc3339()))
+    Ok(kglite_core::api::datasets::wikidata::remote_last_modified().map(|m| m.to_rfc3339()))
 }
 
 /// Run the cache-freshness decision tree. Returns

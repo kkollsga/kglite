@@ -9,7 +9,7 @@ pub enum WikidataError {
     Io(#[from] std::io::Error),
 
     #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     #[error("bad response: {status} for {url}")]
     BadStatus { status: u16, url: String },

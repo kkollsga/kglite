@@ -10,14 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Rust-side dataset fetch is now synchronous.** The SEC EDGAR
-  (`kglite::api::datasets::sec`) and SODIR FactMaps
-  (`kglite::api::datasets::sodir`) loaders moved off async reqwest + tokio +
+  (`kglite::api::datasets::sec`), SODIR FactMaps
+  (`kglite::api::datasets::sodir`), and Wikidata dump
+  (`kglite::api::datasets::wikidata`) loaders moved off async reqwest + tokio +
   governor onto a shared blocking `DatasetClient` (ureq + a process-global rate
   gate + retry), matching the "core is sync" doctrine. The `fetch_*` entry
-  points, `SecClient`, and SODIR's `ArcGISClient` methods are now plain `fn`s —
-  no runtime needed to drive them; SODIR's concurrent refresh runs on a bounded
-  scoped-thread worker pool (per-completion index save preserved for Ctrl-C
-  resume). The Python API is unchanged. (Wikidata ports in follow-up work.)
+  points, `SecClient`, SODIR's `ArcGISClient` methods, and Wikidata's
+  `ensure_dump` / `remote_last_modified` are now plain `fn`s — no runtime needed
+  to drive them; SODIR's concurrent refresh runs on a bounded scoped-thread
+  worker pool (per-completion index save preserved for Ctrl-C resume), and the
+  Wikidata resumable dump download streams straight to disk with no read timeout
+  (10-20 GB stream) and its `Range`/206 resume path intact. The Python API is
+  unchanged.
 
 ## [0.12.11] — 2026-07-08 — MCP root-swap correctness + active-graph identity
 
