@@ -164,6 +164,19 @@ jobs:
       - name: Install dependencies
         run: pip install maturin pytest pytest-cov pandas hypothesis
 
+      - name: Install pyarrow for the coexistence canary (newest-python leg only)
+        # Only the newest-python leg installs pyarrow, so tests/test_pyarrow_coexistence.py
+        # actually runs somewhere in CI instead of skipping on every leg. It guards
+        # against the dual-allocator teardown SIGSEGV (kglite + pyarrow's bundled
+        # mimalloc), fixed by pinning our mimalloc to v2.
+        #
+        # UNPINNED BY DESIGN: this is a canary. We WANT the newest pyarrow release
+        # (and, on 3.14, the newest CPython allocator behaviour) so a future
+        # pyarrow/CPython change that reintroduces the clash trips this leg early.
+        # Do not pin it.
+        if: matrix.python-version == '3.14'
+        run: pip install pyarrow
+
       - name: Build and install extension (with [mcp] + [neo4j] extras)
         # 0.9.21+: install the [mcp] extras so the Python MCP server
         # integration tests in tests/test_mcp_server_python_entry.py

@@ -18,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   series (which coexists cleanly with the v3 copy) fixes the crash. Cost is
   ~3-4% on parse-heavy loads; core query benchmarks are flat-to-better (the 11
   tracked core benches stayed within +6.9% worst-case, most faster). No
-  Python-visible change.
+  Python-visible change. A permanent coexistence canary
+  (`tests/test_pyarrow_coexistence.py`, exercised on the newest-Python CI leg)
+  now guards this: pyarrow and kglite are asserted to import and tear down
+  cleanly in both orders, so the dual-allocator crash class cannot regress
+  silently.
 
 - **SODIR and Wikidata dataset fetches no longer hold the GIL.** The
   `_sodir_internal.refresh`, `_wikidata_internal.ensure_dump`, and
