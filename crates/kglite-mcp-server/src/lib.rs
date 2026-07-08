@@ -489,9 +489,26 @@ fn bind_mode(
             // message (mcp-methods 0.3.46). The post-activate hook above builds
             // the graph first, so counts are live when this runs. Chained before
             // the workspace is cloned into `options` (framework caveat).
+            //
+            // Reconcile-before-summarize: `repo_management` swaps the active
+            // repo through the same single-slot GraphState, so an A→B→A repo
+            // swap hits mcp-methods' rebuild-skip gate the same way local mode
+            // does — the build hook isn't re-fired and the slot still holds B.
+            // `ensure_root_loaded` rebuilds the requested repo here (no-op on a
+            // fresh build). See GraphState::ensure_root_loaded.
             let gs_sum = graph_state.clone();
-            let summary: workspace::ActivationSummaryHook =
-                Arc::new(move |_path, _name| gs_sum.activation_summary());
+            let summary: workspace::ActivationSummaryHook = Arc::new(move |path, name| {
+                if let Err(e) = gs_sum.ensure_root_loaded(path) {
+                    tracing::error!(
+                        repo = name,
+                        root = %path.display(),
+                        error = %e,
+                        "activation reconcile rebuild failed"
+                    );
+                    return None;
+                }
+                gs_sum.activation_summary()
+            });
             let ws = workspace::Workspace::open(canon, cli.stale_after_days, Some(hook))
                 .context("workspace init failed")?
                 .with_activation_summary(summary);
@@ -543,9 +560,35 @@ fn bind_mode(
             });
             // Opening steer: mini-map on the activation message (see the
             // github-workspace arm above). Chained before the clone into `options`.
+            //
+            // Reconcile-before-summarize: mcp-methods fires this hook on its
+            // rebuild-SKIP path too (repo at last-built SHA + hook already ran
+            // this process), where the post-activate build hook above is NOT
+            // called. With one active-graph slot, an intervening
+            // `set_root_dir(B)` leaves B in the slot; re-binding A hits the
+            // skip gate and would keep serving B under A. `ensure_root_loaded`
+            // rebuilds A here (no-op on a genuine fresh build, where the build
+            // hook already loaded it) so the summary — and every later tool
+            // read — reflects the requested root. See GraphState::ensure_root_loaded.
             let gs_sum = graph_state.clone();
-            let summary: workspace::ActivationSummaryHook =
-                Arc::new(move |_path, _name| gs_sum.activation_summary());
+            let active_root_for_summary = local_active_root.clone();
+            let summary: workspace::ActivationSummaryHook = Arc::new(move |path, name| {
+                if let Err(e) = gs_sum.ensure_root_loaded(path) {
+                    tracing::error!(
+                        repo = name,
+                        root = %path.display(),
+                        error = %e,
+                        "activation reconcile rebuild failed"
+                    );
+                    return None;
+                }
+                // Keep the watch-scoping active root current on the skip path
+                // too (the build hook, which normally sets it, didn't fire).
+                if let Ok(mut guard) = active_root_for_summary.write() {
+                    *guard = Some(path.to_path_buf());
+                }
+                gs_sum.activation_summary()
+            });
             let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
                 .context("local-workspace init failed")?
                 .with_activation_summary(summary);

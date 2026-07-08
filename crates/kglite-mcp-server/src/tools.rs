@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use kglite::api::cypher;
@@ -55,6 +56,73 @@ pub struct GraphState {
 struct ActiveGraph {
     kg: KnowledgeGraph,
     source_path: Option<std::path::PathBuf>,
+    /// The source root this graph was built/loaded from — a code-tree
+    /// directory or a `.kgl` file path. Two jobs: (a) let
+    /// [`GraphState::ensure_root_loaded`] detect a stale single slot after a
+    /// root swap (mcp-methods can skip our rebuild hook — see that method),
+    /// and (b) stamp the active-graph identity into agent-facing output so a
+    /// mismatched/stale graph is immediately visible. `None` for an in-memory
+    /// graph created without a path.
+    root: Option<std::path::PathBuf>,
+    /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
+    /// so an agent can tell how fresh the active graph is.
+    built_at: SystemTime,
+}
+
+/// Format a `SystemTime` as a second-precision UTC ISO-8601 timestamp.
+fn iso8601(t: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// Human-readable age of `t` relative to now (e.g. `3s`, `4m`, `2h 5m`,
+/// `1d 3h`). Saturates to `0s` if `t` is somehow in the future.
+fn humanize_age(t: SystemTime) -> String {
+    let secs = SystemTime::now()
+        .duration_since(t)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+    }
+}
+
+impl ActiveGraph {
+    /// `root="…" built_at="…" age="…"` attributes for the `<active_graph/>`
+    /// header injected above the `graph_overview` schema. Omits `root` when
+    /// no path is recorded.
+    fn identity_attrs(&self) -> String {
+        let time = format!(
+            " built_at=\"{}\" age=\"{}\"",
+            iso8601(self.built_at),
+            humanize_age(self.built_at)
+        );
+        match &self.root {
+            Some(r) => format!(" root={:?}{time}", r.display().to_string()),
+            None => time,
+        }
+    }
+
+    /// Compact one-line identity footer appended to `cypher_query` results so
+    /// every query self-identifies which graph (and how fresh) it ran against.
+    fn identity_footer(&self) -> String {
+        let root = match &self.root {
+            Some(r) => r.display().to_string(),
+            None => "(in-memory)".to_string(),
+        };
+        format!(
+            "\n\n— active graph: {root} · built {} ({} ago)",
+            iso8601(self.built_at),
+            humanize_age(self.built_at)
+        )
+    }
 }
 
 impl GraphState {
@@ -117,6 +185,8 @@ impl GraphState {
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
+            root: Some(path.to_path_buf()),
+            built_at: SystemTime::now(),
         });
         Ok(())
     }
@@ -133,6 +203,8 @@ impl GraphState {
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
+            root: Some(path.to_path_buf()),
+            built_at: SystemTime::now(),
         });
         Ok(())
     }
@@ -181,8 +253,40 @@ impl GraphState {
         *self.inner.write().unwrap() = Some(ActiveGraph {
             kg,
             source_path: None,
+            root: Some(dir.to_path_buf()),
+            built_at: SystemTime::now(),
         });
         Ok(())
+    }
+
+    /// Ensure the active slot holds the code-tree for `dir`, rebuilding only
+    /// if it doesn't. Called from the activation-summary hook, which
+    /// mcp-methods fires on **every** successful activate — including its
+    /// rebuild-skip path (`workspace.rs` `already_built`: the repo is at its
+    /// last-built SHA *and* its build hook already ran this process). On that
+    /// skip path our post-activate build hook is **not** called. With a single
+    /// active-graph slot, an intervening `set_root_dir(B)` leaves the slot
+    /// holding B; re-binding A then hits the skip gate and the slot would keep
+    /// serving B under A's name (the "stale graph after root change" bug).
+    /// Reconciling here restores the requested root before the activation
+    /// summary is computed. No-op when the slot already matches `dir`, so the
+    /// skip-gate's perf win for genuine same-root re-binds is preserved.
+    pub fn ensure_root_loaded(&self, dir: &Path) -> Result<()> {
+        let already = {
+            let guard = self.inner.read().unwrap();
+            guard
+                .as_ref()
+                .and_then(|a| a.root.as_deref())
+                .is_some_and(|r| r == dir)
+        };
+        if already {
+            return Ok(());
+        }
+        tracing::info!(
+            root = %dir.display(),
+            "activation reconcile: active graph root mismatch, rebuilding"
+        );
+        self.build_code_tree(dir)
     }
 
     pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
@@ -225,8 +329,19 @@ impl GraphState {
             .take(4)
             .map(|(n, c)| format!("{c} {n}"))
             .collect();
+        // Identity note so the activation message itself names the root now
+        // live (the message an agent trusts right after a swap) — makes a
+        // stale-slot mismatch visible without a follow-up graph_overview.
+        let root_note = match &active.root {
+            Some(r) => format!(
+                " · root {} · built {} ago.",
+                r.display(),
+                humanize_age(active.built_at)
+            ),
+            None => format!(" · built {} ago.", humanize_age(active.built_at)),
+        };
         Some(format!(
-            "Graph ready: {} nodes ({}) · {} edges. Start with graph_overview() \
+            "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \
              \u{2192} cypher_query for structure (definitions, callers, types, counts, \
              paths); use grep for literal text only.",
             overview.node_count,
@@ -840,7 +955,10 @@ fn run_cypher_tool(
         value_codecs,
         csv_http,
     ) {
-        Ok(s) => s,
+        // Compact identity footer so a query result self-identifies its
+        // graph (agents often go straight to cypher_query without a prior
+        // graph_overview, where a stale active root would otherwise hide).
+        Ok(s) => format!("{s}{}", graph.identity_footer()),
         Err(e) => format!("Cypher error: {e}"),
     }
 }
@@ -943,7 +1061,10 @@ fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
         None,
         None,
     ) {
-        Ok(s) => s,
+        // Prepend a server-level identity header so the active root + build
+        // time are the first thing an agent reads — staleness after a root
+        // swap is visible before any structural claim is trusted.
+        Ok(s) => format!("<active_graph{}/>\n{s}", graph.identity_attrs()),
         Err(e) => format!("graph_overview error: {e}"),
     }
 }
@@ -1025,7 +1146,57 @@ mod tests {
         ActiveGraph {
             kg: KnowledgeGraph::from_arc(Arc::new(dir)),
             source_path: None,
+            root: None,
+            built_at: SystemTime::now(),
         }
+    }
+
+    /// Write a distinct source tree with `n` free functions under `dir`.
+    fn write_code_tree(dir: &std::path::Path, n: usize) {
+        let _ = std::fs::create_dir_all(dir);
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&format!("def fn_{i}():\n    return {i}\n\n"));
+        }
+        std::fs::write(dir.join("m.py"), src).unwrap();
+    }
+
+    /// Regression: mcp-methods can skip our rebuild hook when a previously
+    /// built root is re-bound (A→B→A), leaving the single active-graph slot
+    /// holding B. `ensure_root_loaded` — invoked from the activation-summary
+    /// hook on that skip path — must restore A. Reproduces the "stale
+    /// code-review graph after root change" report (petekSuite, 2026-07-06).
+    #[test]
+    fn ensure_root_loaded_recovers_stale_slot_after_swap() {
+        let base = std::env::temp_dir().join(format!("kgl_reconcile_{}", std::process::id()));
+        let dir_a = base.join("projA");
+        let dir_b = base.join("projB");
+        write_code_tree(&dir_a, 2); // A: 2 functions
+        write_code_tree(&dir_b, 5); // B: 5 functions — distinct node count
+
+        let gs = GraphState::new(false);
+        // Activate A, then B — the single slot now holds B (as after set_root_dir(B)).
+        gs.build_code_tree(&dir_a).unwrap();
+        let (a_nodes, _) = gs.schema().unwrap();
+        gs.build_code_tree(&dir_b).unwrap();
+        let (b_nodes, _) = gs.schema().unwrap();
+        assert_ne!(a_nodes, b_nodes, "fixtures must differ in node count");
+
+        // Re-bind A on the skip path: our build hook wouldn't fire, so the
+        // reconcile must rebuild A rather than leave B in the slot.
+        gs.ensure_root_loaded(&dir_a).unwrap();
+        assert_eq!(
+            gs.schema().unwrap().0,
+            a_nodes,
+            "ensure_root_loaded must restore A's graph, not keep stale B"
+        );
+
+        // Idempotent: re-binding the already-active root is a no-op (perf win
+        // preserved — no needless rebuild).
+        gs.ensure_root_loaded(&dir_a).unwrap();
+        assert_eq!(gs.schema().unwrap().0, a_nodes);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

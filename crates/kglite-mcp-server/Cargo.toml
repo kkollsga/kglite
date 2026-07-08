@@ -60,6 +60,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 schemars = "1"
+# ISO-8601 formatting of the active-graph build timestamp surfaced in
+# graph_overview / cypher_query / set_root_dir output. Already in the
+# resolved dep graph via kglite core — direct dep, zero extra build cost.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Error handling + CLI
 anyhow = "1"

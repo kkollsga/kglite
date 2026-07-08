@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stale MCP graph after a root swap (code-review / open-source servers).**
+  `set_root_dir(A)` → `set_root_dir(B)` → `set_root_dir(A)` (and the equivalent
+  `repo_management` A→B→A) could leave the previous graph active while the tool
+  still reported "Graph ready". mcp-methods skips the rebuild hook when a root is
+  re-bound at its last-built SHA, but the server keeps a **single** active-graph
+  slot, so the intervening B swap left B loaded under A's name. The activation
+  hook now reconciles the slot against the requested root and rebuilds when they
+  differ (no-op — perf win preserved — when the slot already matches).
+
+### Added
+
+- **Active-graph identity in agent output.** `graph_overview` prepends an
+  `<active_graph root="…" built_at="…" age="…"/>` header; `cypher_query` results
+  carry a one-line `— active graph: … · built …` footer; and the `set_root_dir`
+  activation message names the live root + build age. An agent can now see which
+  root (and how fresh) it is querying and spot a stale graph immediately.
+
 ## [0.12.10] — 2026-07-02 — Agent-oriented CLI automation
 
 ### Added
