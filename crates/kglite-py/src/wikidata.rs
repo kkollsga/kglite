@@ -31,21 +31,26 @@ fn map_err(e: WikidataError) -> PyErr {
 /// Ensure the local Wikidata dump exists, downloading or resuming as
 /// needed. Returns `(dump_path, remote_last_modified_iso)`.
 ///
-/// The core fetch is now synchronous (shared `DatasetClient`), so it
-/// runs directly on the calling thread — no tokio runtime. The GIL is
-/// held for the whole call, exactly as the previous `block_on` version;
-/// releasing it is a separate change (Phase 4b).
+/// The core fetch is synchronous (shared `DatasetClient`) and runs
+/// directly on the calling thread — no tokio runtime. Because a full
+/// dump is multi-GB, the GIL is released for the entire download via
+/// `py.detach` (mirroring `sec::run_batch`'s Phase-2 treatment) so other
+/// Python threads keep running while it blocks. The Rust-side progress
+/// `eprintln!`s inside the wikidata client need no GIL, so they keep
+/// working. The closure returns the plain `Result`; the `PyErr` is built
+/// *after* `detach` returns, since error mapping may touch Python.
 #[pyfunction]
 #[pyo3(signature = (workdir, *, cooldown_days=31, verbose=true))]
 fn ensure_dump(
+    py: Python<'_>,
     workdir: String,
     cooldown_days: i64,
     verbose: bool,
 ) -> PyResult<(String, Option<String>)> {
     let wd = Workdir::new(workdir);
-    let (path, mtime) =
-        kglite_core::api::datasets::wikidata::ensure_dump(&wd, cooldown_days, verbose)
-            .map_err(map_err)?;
+    let (path, mtime) = py
+        .detach(|| kglite_core::api::datasets::wikidata::ensure_dump(&wd, cooldown_days, verbose))
+        .map_err(map_err)?;
     Ok((
         path.to_string_lossy().into_owned(),
         mtime.map(|m| m.to_rfc3339()),
@@ -53,10 +58,13 @@ fn ensure_dump(
 }
 
 /// The remote dump's `Last-Modified` as an ISO string, or `None` if
-/// the dump server is unreachable.
+/// the dump server is unreachable. A live HEAD against the dump server;
+/// the GIL is released for the round-trip (same rationale as
+/// `ensure_dump`).
 #[pyfunction]
-fn remote_last_modified() -> PyResult<Option<String>> {
-    Ok(kglite_core::api::datasets::wikidata::remote_last_modified().map(|m| m.to_rfc3339()))
+fn remote_last_modified(py: Python<'_>) -> PyResult<Option<String>> {
+    let mtime = py.detach(kglite_core::api::datasets::wikidata::remote_last_modified);
+    Ok(mtime.map(|m| m.to_rfc3339()))
 }
 
 /// Run the cache-freshness decision tree. Returns

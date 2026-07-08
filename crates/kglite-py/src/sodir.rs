@@ -56,17 +56,24 @@ fn refresh(
 
     // `fetch_all` is synchronous now (backed by the shared blocking
     // `DatasetClient`); its own scoped worker pool overlaps the network
-    // latency. The GIL is held across the call — unchanged from the
-    // prior tokio `block_on`, which also blocked the calling thread
-    // holding the GIL.
-    let report = fetch_all(
-        &wd,
-        &needed,
-        index_cooldown_days,
-        dataset_cooldown_days,
-        concurrency,
-    )
-    .map_err(map_err)?;
+    // latency. Release the GIL for the whole download so other Python
+    // threads (e.g. a Jupyter kernel's IOPub) can run while it blocks —
+    // same treatment `sec::run_batch` got in Phase 2. The closure returns
+    // the plain `Result`; we build the `PyErr` *after* `detach` returns,
+    // since error mapping may touch Python. Nothing captured crosses the
+    // `Ungil`/`Send` bound problematically — `Workdir` and `Vec<String>`
+    // are both `Send + Sync`.
+    let report = py
+        .detach(|| {
+            fetch_all(
+                &wd,
+                &needed,
+                index_cooldown_days,
+                dataset_cooldown_days,
+                concurrency,
+            )
+        })
+        .map_err(map_err)?;
 
     let d = PyDict::new(py);
     d.set_item("fetched", report.refresh.fetched)?;

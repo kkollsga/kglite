@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SODIR and Wikidata dataset fetches no longer hold the GIL.** The
+  `_sodir_internal.refresh`, `_wikidata_internal.ensure_dump`, and
+  `_wikidata_internal.remote_last_modified` bindings now release the GIL for the
+  duration of their network calls (via `py.detach`), so other Python threads —
+  e.g. a Jupyter kernel's IOPub thread — can run during a long download (a
+  Wikidata dump is multi-GB). Matches the treatment SEC's batch fetchers already
+  had. No Python-visible signature change.
+
 ### Changed
 
 - **Rust-side dataset fetch is now synchronous.** The SEC EDGAR
