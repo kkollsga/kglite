@@ -119,7 +119,7 @@ bincode = "1.3"
 chrono = { version = "0.4.43", features = ["serde"] }
 regex = "1"
 rayon = "1.10"
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 # Scoped SIGINT (Ctrl-C) handler so long Cypher queries are interruptible
 # from a REPL/notebook (src/util.rs::EnterKg). Unix-only; the handler just
 # flips an AtomicBool the engine polls.

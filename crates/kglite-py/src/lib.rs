@@ -27,6 +27,22 @@
 // allocator on small-object-heavy workloads (Strings, HashMaps, Vecs
 // in the parser hot loop). Pure Rust dependency — no system dep, just
 // a slightly larger build artifact.
+//
+// Pinned to the mimalloc v2 series (`features = ["v2"]` in Cargo.toml),
+// NOT the default v3. Why (2026-07-08): a process that co-loads
+// `pyarrow==24.0.0` and `kglite` SIGSEGVs at interpreter teardown when
+// BOTH ship mimalloc v3. A three-mimalloc census of the crashing wheel
+// found the culprit pair — kglite's own v3 (this `#[global_allocator]`,
+// statically linked) and the v3 copy CPython 3.14 vendors into libarrow;
+// their independent thread-heap teardowns
+// (`_mi_theap_collect_retired`, lldb-confirmed inside libarrow's copy)
+// collide. v2 coexists with the v3 copy cleanly (verified 0×5 both
+// import orders). Dropping mimalloc entirely also fixes the crash but
+// costs the allocator win outright, and swapping to jemalloc or the
+// system allocator measured a 30-62% in-memory regression on the tracked
+// core benchmarks (2026-07-08) — unacceptable per the in-memory-wins
+// protocol. v2 keeps nearly all the throughput (core query benches flat;
+// ~3-4% on parse-heavy loads) while resolving the teardown clash.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
