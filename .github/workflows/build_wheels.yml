@@ -193,7 +193,7 @@ jobs:
           python -m venv .canary-venv
           ./.canary-venv/bin/python -m pip install --upgrade pip
           ./.canary-venv/bin/python -m pip install wheels/*.whl pyarrow pytest
-          ./.canary-venv/bin/python -m pytest tests/test_pyarrow_coexistence.py -v
+          ./.canary-venv/bin/python -m pytest --noconftest tests/test_pyarrow_coexistence.py -v
 
   # Linux builds inside the manylinux2014 container (glibc 2.17) via
   # maturin-action, NOT a bare `maturin build` on the runner — a bare
