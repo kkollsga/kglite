@@ -88,8 +88,8 @@ impl ExtractReport {
     }
 }
 
-/// Single entry point. Pure Rust — no Python, no async. PyO3 layer
-/// in `src/sec.rs` calls this in `tokio::task::spawn_blocking`.
+/// Single entry point. Pure Rust — no Python, no async. The PyO3
+/// layer in `crates/kglite-py/src/sec.rs` calls this synchronously.
 ///
 /// Every phase is wall-clock timed; the durations land on the
 /// `ExtractReport` (`identity_ms`, each form's `duration_ms`,

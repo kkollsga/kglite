@@ -33,8 +33,8 @@ fn isolated_workdir(name: &str) -> PathBuf {
     dir
 }
 
-#[tokio::test]
-async fn fetches_one_quarter_master_idx() {
+#[test]
+fn fetches_one_quarter_master_idx() {
     if !live_tests_enabled() {
         eprintln!("skipping live test (set KGLITE_SEC_INTEGRATION_TEST=1 to run)");
         return;
@@ -47,16 +47,14 @@ async fn fetches_one_quarter_master_idx() {
     // 2023 Q4 is fully closed, so the fetch should hit the cache on
     // the second call.
     let range = YearRange::new(2023, 2023);
-    let (dl1, sk1) = fetch_quarterly_master_idx(&client, &workdir, range, 2025, 1)
-        .await
-        .expect("first fetch");
+    let (dl1, sk1) =
+        fetch_quarterly_master_idx(&client, &workdir, range, 2025, 1).expect("first fetch");
     assert!(dl1 >= 1, "should download at least one quarter");
     assert_eq!(sk1, 0);
 
     // Second call must skip — raw/ is immutable for closed quarters.
-    let (dl2, sk2) = fetch_quarterly_master_idx(&client, &workdir, range, 2025, 1)
-        .await
-        .expect("second fetch");
+    let (dl2, sk2) =
+        fetch_quarterly_master_idx(&client, &workdir, range, 2025, 1).expect("second fetch");
     assert_eq!(dl2, 0, "second call should fetch nothing");
     assert!(sk2 >= 1);
 
@@ -69,8 +67,8 @@ async fn fetches_one_quarter_master_idx() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-#[tokio::test]
-async fn fetches_company_tickers_json() {
+#[test]
+fn fetches_company_tickers_json() {
     if !live_tests_enabled() {
         return;
     }
@@ -79,23 +77,19 @@ async fn fetches_company_tickers_json() {
     let workdir = Workdir::new(&root);
     let client = SecClient::new(&user_agent()).expect("client");
 
-    let dl = fetch_company_tickers(&client, &workdir, false)
-        .await
-        .expect("fetch");
+    let dl = fetch_company_tickers(&client, &workdir, false).expect("fetch");
     assert!(dl);
     assert!(workdir.raw_company_tickers_json().is_file());
 
     // Re-fetch should skip
-    let dl = fetch_company_tickers(&client, &workdir, false)
-        .await
-        .expect("re-fetch");
+    let dl = fetch_company_tickers(&client, &workdir, false).expect("re-fetch");
     assert!(!dl);
 
     std::fs::remove_dir_all(&root).ok();
 }
 
-#[tokio::test]
-async fn rejects_missing_user_agent_on_construct() {
+#[test]
+fn rejects_missing_user_agent_on_construct() {
     if !live_tests_enabled() {
         return;
     }
@@ -103,8 +97,8 @@ async fn rejects_missing_user_agent_on_construct() {
     assert!(format!("{err}").contains("User-Agent"));
 }
 
-#[tokio::test]
-async fn handles_unrelated_assertion_about_fetch_mode_enum() {
+#[test]
+fn handles_unrelated_assertion_about_fetch_mode_enum() {
     if !live_tests_enabled() {
         return;
     }

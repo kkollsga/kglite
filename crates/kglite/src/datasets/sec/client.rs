@@ -1,42 +1,45 @@
-//! Async HTTP client for SEC EDGAR with mandatory User-Agent,
-//! 10 req/s token bucket, and retry-with-backoff on transient failures.
+//! Synchronous HTTP client for SEC EDGAR with mandatory User-Agent,
+//! 10 req/s rate gate, and retry-with-backoff on transient failures.
 //!
 //! SEC's fair-access policy requires the `User-Agent` header to
 //! identify the requester (e.g. `"Acme Corp contact@acme.com"`).
 //! Missing or generic UA → 403. The client enforces presence at
 //! construction time; SEC enforces semantic validity at request time.
+//!
+//! `SecClient` is a thin config wrapper over the shared
+//! [`DatasetClient`](crate::datasets::http::DatasetClient): it fixes
+//! SEC's timeouts / rate / retry constants, keeps the UA-validation
+//! rules, and maps [`HttpError`] into [`SecError`].
 
-use governor::{
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
-};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::datasets::http::{DatasetClient, DatasetClientConfig, HttpError};
 use crate::datasets::sec::catalog::RATE_LIMIT_PER_SEC;
 use crate::datasets::sec::error::{Result, SecError};
 
-/// Decides whether to overwrite an existing local file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchMode {
-    /// Always fetch and overwrite.
-    Always,
-    /// Skip if file exists; useful for the immutable raw/ tier.
-    OnlyIfMissing,
-}
+/// SEC connect timeout — TCP handshake ceiling.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// SEC overall per-request deadline.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Initial retry backoff; doubles each retry, capped at 30 s.
+const BASE_BACKOFF_MS: u64 = 1000;
 
-type SharedLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>;
+// Re-export the shared cache-overwrite policy so existing callers of
+// `sec::FetchMode` (and `crate::datasets::sec::client::FetchMode`)
+// keep compiling unchanged.
+pub use crate::datasets::http::FetchMode;
 
-/// Async HTTP client for SEC EDGAR. Cheap to `Clone`; shares a single
-/// reqwest connection pool and a single token bucket across clones.
+/// Synchronous HTTP client for SEC EDGAR. Cheap to `Clone`; shares a
+/// single connection pool and a single global rate gate across clones.
 #[derive(Clone)]
 pub struct SecClient {
-    http: reqwest::Client,
-    limiter: SharedLimiter,
+    inner: DatasetClient,
     user_agent: Arc<str>,
+    /// Retained so [`SecClient::map_http`] can report the retry count
+    /// on a rate-limit exhaustion.
     retry_count: usize,
 }
 
@@ -63,20 +66,20 @@ impl SecClient {
             );
         }
 
-        let http = reqwest::Client::builder()
-            .user_agent(ua)
-            .gzip(true)
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .build()?;
-
         let rate = NonZeroU32::new(rate_per_sec)
             .ok_or_else(|| SecError::Decode("rate_per_sec must be > 0".into()))?;
-        let limiter = Arc::new(RateLimiter::direct(Quota::per_second(rate)));
+
+        let inner = DatasetClient::new(DatasetClientConfig {
+            user_agent: ua.to_string(),
+            connect_timeout: CONNECT_TIMEOUT,
+            overall_timeout: Some(REQUEST_TIMEOUT),
+            rate_per_sec: Some(rate),
+            retry_count,
+            base_backoff_ms: BASE_BACKOFF_MS,
+        });
 
         Ok(SecClient {
-            http,
-            limiter,
+            inner,
             user_agent: ua.into(),
             retry_count,
         })
@@ -86,80 +89,41 @@ impl SecClient {
         &self.user_agent
     }
 
-    /// Wait for a token, then send the request once. Returns the
-    /// response body bytes. Retry is layered on top by `fetch_bytes`.
-    async fn fetch_once(&self, url: &str) -> Result<Vec<u8>> {
-        self.limiter.until_ready().await;
-        let resp = self.http.get(url).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(SecError::BadStatus {
-                status: status.as_u16(),
-                url: url.to_string(),
-            });
-        }
-        Ok(resp.bytes().await?.to_vec())
-    }
-
     /// Fetch a URL into memory with retry on transient failures
     /// (429 / 5xx / network errors). Non-transient (403, 404) bubble
-    /// up immediately.
-    pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let mut delay_ms = 1000u64;
-        for attempt in 0..=self.retry_count {
-            match self.fetch_once(url).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(SecError::BadStatus { status, .. })
-                    if status == 429 || (500..=599).contains(&status) =>
-                {
-                    if attempt == self.retry_count {
-                        return Err(SecError::RateLimited {
-                            retries: self.retry_count,
-                        });
-                    }
-                    eprintln!(
-                        "kglite-sec: {status} on {url} (attempt {}/{}); \
-                         backing off {}ms",
-                        attempt + 1,
-                        self.retry_count + 1,
-                        delay_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = (delay_ms * 2).min(30_000);
-                }
-                // Network/timeout — retry too
-                Err(SecError::Http(e)) if e.is_timeout() || e.is_connect() || e.is_request() => {
-                    if attempt == self.retry_count {
-                        return Err(SecError::Http(e));
-                    }
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = (delay_ms * 2).min(30_000);
-                }
-                // Anything else (403, 404, decode) — fatal
-                Err(other) => return Err(other),
-            }
-        }
-        unreachable!("loop returns or errors before completing")
+    /// up immediately as [`SecError::BadStatus`].
+    pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        self.inner.fetch_bytes(url).map_err(|e| self.map_http(e))
     }
 
     /// Fetch a URL and write it to `path`. `mode=OnlyIfMissing` honours
     /// the immutable raw/ contract — if the file already exists,
     /// nothing happens and Ok(false) is returned. `mode=Always`
     /// overwrites unconditionally.
-    pub async fn fetch_to_file(&self, url: &str, path: &Path, mode: FetchMode) -> Result<bool> {
-        if mode == FetchMode::OnlyIfMissing && path.is_file() {
-            return Ok(false);
+    pub fn fetch_to_file(&self, url: &str, path: &Path, mode: FetchMode) -> Result<bool> {
+        self.inner
+            .fetch_to_file(url, path, mode)
+            .map_err(|e| self.map_http(e))
+    }
+
+    /// Map a shared [`HttpError`] into SEC's error type. A 429 / 5xx
+    /// status here means the retry budget was already exhausted inside
+    /// [`DatasetClient::fetch_bytes`] (those are the only statuses it
+    /// retries), so it surfaces as [`SecError::RateLimited`] — matching
+    /// the pre-port behaviour. Every other status becomes
+    /// [`SecError::BadStatus`] so the 404-swallowing callers still see
+    /// the code.
+    fn map_http(&self, e: HttpError) -> SecError {
+        match e {
+            HttpError::Status { code, .. } if code == 429 || (500..=599).contains(&code) => {
+                SecError::RateLimited {
+                    retries: self.retry_count,
+                }
+            }
+            HttpError::Status { code, url } => SecError::BadStatus { status: code, url },
+            HttpError::Transport(msg) => SecError::Http(msg),
+            HttpError::Io(io) => SecError::Io(io),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let bytes = self.fetch_bytes(url).await?;
-        // Write atomically via a `.tmp` swap so a crash mid-write
-        // doesn't leave a corrupt cache file.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(true)
     }
 }
 

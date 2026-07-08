@@ -9,7 +9,7 @@ pub enum SecError {
     Io(#[from] std::io::Error),
 
     #[error("http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
 
     #[error("rate limited by SEC after {retries} retries; back off and try again later")]
     RateLimited { retries: usize },

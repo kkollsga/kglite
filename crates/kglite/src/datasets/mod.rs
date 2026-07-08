@@ -26,6 +26,13 @@
 #[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
 pub mod blocking;
 
+// Shared synchronous HTTP client (ureq + rate gate + retry). Gated the
+// same way as `blocking` — only compiled when a network-fetching
+// dataset loader is enabled. Loaders migrate onto this per phase
+// (SEC first); reqwest coexists until every loader has ported.
+#[cfg(any(feature = "sec", feature = "sodir", feature = "wikidata"))]
+pub mod http;
+
 #[cfg(feature = "sec")]
 pub mod sec;
 

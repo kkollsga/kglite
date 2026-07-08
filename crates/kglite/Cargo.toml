@@ -82,6 +82,7 @@ parallel-bz2 = ["dep:bzip2-rs"]
 # `kglite-{sec,sodir,wikidata}` sibling crates into here.
 sec = [
     "dep:thiserror",
+    "dep:ureq",
     "dep:reqwest",
     "dep:governor",
     "dep:zip",
@@ -187,6 +188,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util
 # in their dep tree.
 thiserror = { version = "1", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+# Shared synchronous HTTP client for the dataset loaders (SEC ported in
+# the fetch-standardization work; SODIR/Wikidata follow). Pinned to 2.x
+# — 3.x is also in the lockfile via mcp-methods but has a different API
+# and pulls native-tls. ureq 2's default features give rustls TLS +
+# automatic gzip; `json` adds serde_json body helpers.
+ureq = { version = "2", optional = true, features = ["json"] }
 governor = { version = "0.7", optional = true }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 quick-xml = { version = "0.36", optional = true }

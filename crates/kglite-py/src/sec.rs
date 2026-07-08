@@ -50,12 +50,6 @@ fn build_slice(
 
 // ─────────────────────────── fetch surface ───────────────────────────
 
-/// A per-item fetch future, yielding that item's
-/// `(downloaded, skipped)` delta. Boxed + `'static` (the closures own
-/// cloned `SecClient` / `Workdir` handles) so `run_batch` can stay a
-/// plain generic without lifetime gymnastics.
-type FetchDeltaFut = std::pin::Pin<Box<dyn std::future::Future<Output = (usize, usize)>>>;
-
 /// Fire one `kglite.progress`-schema event into the optional Python
 /// `progress` callback (`{"kind","phase","label","total","current",
 /// "unit","elapsed_s"}`). A pending SIGINT surfaces as `Err` so Ctrl+C
@@ -75,9 +69,9 @@ fn fire_event(
     Ok(())
 }
 
-/// Drive a sequential per-filing fetch loop under one `SecClient` +
-/// tokio runtime, emitting `start` / `update` / `complete` progress
-/// events. `fetch_one` runs one item and reports its
+/// Drive a sequential per-filing fetch loop under one `SecClient`,
+/// emitting `start` / `update` / `complete` progress events.
+/// `fetch_one` runs one item synchronously and reports its
 /// `(downloaded, skipped)` delta. Shared by every `fetch_*_batch`
 /// binding so the rate-limited loop + progress plumbing live once.
 #[allow(clippy::too_many_arguments)]
@@ -94,14 +88,14 @@ fn run_batch<T, F>(
 ) -> PyResult<(usize, usize)>
 where
     T: Send,
-    F: Fn(SecClient, Workdir, T) -> FetchDeltaFut + Send,
+    // `Sync` (not just `Send`): the loop calls `fetch_one` through a
+    // shared `&F` *inside* `py.detach`, whose `Ungil` bound requires
+    // that borrow be `Send` — i.e. `F: Sync`. The batch closures only
+    // capture `Copy` data (`force_refetch`), so this holds trivially.
+    F: Fn(SecClient, Workdir, T) -> (usize, usize) + Send + Sync,
 {
     let client = SecClient::new(user_agent).map_err(map_err)?;
     let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
 
     let total = batch.len();
     let started = std::time::Instant::now();
@@ -118,30 +112,30 @@ where
     // it only to fire each progress event. Without this the GIL stays
     // held for the whole batch, starving a Jupyter kernel's IOPub
     // thread — progress output can't flush until the call returns.
+    // `fire_event`'s `check_signals()` (called under the re-acquired
+    // GIL) is what turns a pending Ctrl-C into the interrupt below.
     let outcome: Result<(usize, usize), ()> = py.detach(|| {
-        rt.block_on(async move {
-            let mut downloaded = 0usize;
-            let mut skipped = 0usize;
-            for (i, item) in batch.into_iter().enumerate() {
-                let (dl, sk) = fetch_one(client.clone(), wd.clone(), item).await;
-                downloaded += dl;
-                skipped += sk;
-                let current = i + 1;
-                let fired = Python::attach(|py| {
-                    fire_event(py, progress, |ev| {
-                        ev.set_item("kind", "update")?;
-                        ev.set_item("phase", phase)?;
-                        ev.set_item("current", current)?;
-                        Ok(())
-                    })
-                    .is_ok()
-                });
-                if !fired {
-                    return Err(());
-                }
+        let mut downloaded = 0usize;
+        let mut skipped = 0usize;
+        for (i, item) in batch.into_iter().enumerate() {
+            let (dl, sk) = fetch_one(client.clone(), wd.clone(), item);
+            downloaded += dl;
+            skipped += sk;
+            let current = i + 1;
+            let fired = Python::attach(|py| {
+                fire_event(py, progress, |ev| {
+                    ev.set_item("kind", "update")?;
+                    ev.set_item("phase", phase)?;
+                    ev.set_item("current", current)?;
+                    Ok(())
+                })
+                .is_ok()
+            });
+            if !fired {
+                return Err(());
             }
-            Ok((downloaded, skipped))
-        })
+        }
+        Ok((downloaded, skipped))
     });
     let (downloaded, skipped) = match outcome {
         Ok(totals) => totals,
@@ -182,31 +176,20 @@ fn fetch_raw(
 ) -> PyResult<Py<PyDict>> {
     let client = SecClient::new(user_agent).map_err(map_err)?;
     let wd = Workdir::new(workdir);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("tokio runtime: {e}")))?;
 
-    let (idx_dl, idx_sk, submissions_dl, tickers_dl) = rt.block_on(async {
-        let mut idx_dl = 0;
-        let mut idx_sk = 0;
-        if years > 0 {
-            let start_year = current_year.saturating_sub(years - 1).max(1993);
-            let range = YearRange::new(start_year, current_year);
-            let r = fetch_quarterly_master_idx(&client, &wd, range, current_year, current_quarter)
-                .await
-                .map_err(map_err)?;
-            idx_dl = r.0;
-            idx_sk = r.1;
-        }
-        let submissions_dl = fetch_submissions_bulk(&client, &wd, staleness_hours, force_refetch)
-            .await
+    let mut idx_dl = 0;
+    let mut idx_sk = 0;
+    if years > 0 {
+        let start_year = current_year.saturating_sub(years - 1).max(1993);
+        let range = YearRange::new(start_year, current_year);
+        let r = fetch_quarterly_master_idx(&client, &wd, range, current_year, current_quarter)
             .map_err(map_err)?;
-        let tickers_dl = fetch_company_tickers(&client, &wd, force_refetch)
-            .await
-            .map_err(map_err)?;
-        Ok::<_, PyErr>((idx_dl, idx_sk, submissions_dl, tickers_dl))
-    })?;
+        idx_dl = r.0;
+        idx_sk = r.1;
+    }
+    let submissions_dl =
+        fetch_submissions_bulk(&client, &wd, staleness_hours, force_refetch).map_err(map_err)?;
+    let tickers_dl = fetch_company_tickers(&client, &wd, force_refetch).map_err(map_err)?;
 
     let d = PyDict::new(py);
     d.set_item("master_idx_downloaded", idx_dl)?;
@@ -236,13 +219,15 @@ fn fetch_form4_batch(
         "Form 3/4/5 ownership",
         "filing",
         progress.as_ref(),
-        |client, wd, (cik, accession, primary_doc)| {
-            Box::pin(async move {
-                match fetch_form4_filing(&client, &wd, cik, &accession, &primary_doc).await {
-                    Ok(true) => (1, 0),
-                    _ => (0, 1),
-                }
-            })
+        |client, wd, (cik, accession, primary_doc)| match fetch_form4_filing(
+            &client,
+            &wd,
+            cik,
+            &accession,
+            &primary_doc,
+        ) {
+            Ok(true) => (1, 0),
+            _ => (0, 1),
         },
     )
 }
@@ -267,13 +252,9 @@ fn fetch_13f_batch(
         "13F info tables",
         "filing",
         progress.as_ref(),
-        |client, wd, (cik, accession)| {
-            Box::pin(async move {
-                match fetch_13f_info_table(&client, &wd, cik, &accession).await {
-                    Ok(true) => (1, 0),
-                    _ => (0, 1),
-                }
-            })
+        |client, wd, (cik, accession)| match fetch_13f_info_table(&client, &wd, cik, &accession) {
+            Ok(true) => (1, 0),
+            _ => (0, 1),
         },
     )
 }
@@ -301,13 +282,15 @@ fn fetch_filing_batch(
         label,
         "filing",
         progress.as_ref(),
-        |client, wd, (cik, accession, primary_doc)| {
-            Box::pin(async move {
-                match fetch_filing_primary_doc(&client, &wd, cik, &accession, &primary_doc).await {
-                    Ok(true) => (1, 0),
-                    _ => (0, 1),
-                }
-            })
+        |client, wd, (cik, accession, primary_doc)| match fetch_filing_primary_doc(
+            &client,
+            &wd,
+            cik,
+            &accession,
+            &primary_doc,
+        ) {
+            Ok(true) => (1, 0),
+            _ => (0, 1),
         },
     )
 }
@@ -336,13 +319,9 @@ fn fetch_company_submissions_batch(
         "Company submissions",
         "company",
         progress.as_ref(),
-        move |client, wd, cik| {
-            Box::pin(async move {
-                match fetch_company_submission(&client, &wd, cik, force_refetch).await {
-                    Ok(true) => (1, 0),
-                    _ => (0, 1),
-                }
-            })
+        move |client, wd, cik| match fetch_company_submission(&client, &wd, cik, force_refetch) {
+            Ok(true) => (1, 0),
+            _ => (0, 1),
         },
     )
 }
@@ -370,13 +349,9 @@ fn fetch_company_facts_batch(
         "XBRL company facts",
         "company",
         progress.as_ref(),
-        move |client, wd, cik| {
-            Box::pin(async move {
-                match fetch_company_facts(&client, &wd, cik, force_refetch).await {
-                    Ok(true) => (1, 0),
-                    _ => (0, 1),
-                }
-            })
+        move |client, wd, cik| match fetch_company_facts(&client, &wd, cik, force_refetch) {
+            Ok(true) => (1, 0),
+            _ => (0, 1),
         },
     )
 }
@@ -401,13 +376,11 @@ fn fetch_exhibit21_batch(
         "Exhibit 21",
         "filing",
         progress.as_ref(),
-        |client, wd, (cik, accession)| {
-            Box::pin(async move {
-                match fetch_exhibit21_attachment(&client, &wd, cik, &accession).await {
-                    Ok(n) if n > 0 => (n, 0),
-                    _ => (0, 1),
-                }
-            })
+        |client, wd, (cik, accession)| match fetch_exhibit21_attachment(
+            &client, &wd, cik, &accession,
+        ) {
+            Ok(n) if n > 0 => (n, 0),
+            _ => (0, 1),
         },
     )
 }

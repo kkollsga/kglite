@@ -47,7 +47,7 @@ impl YearRange {
 /// because SEC updates it live.
 ///
 /// Returns `(downloaded, skipped)` counts.
-pub async fn fetch_quarterly_master_idx(
+pub fn fetch_quarterly_master_idx(
     client: &SecClient,
     workdir: &Workdir,
     range: YearRange,
@@ -68,7 +68,7 @@ pub async fn fetch_quarterly_master_idx(
         } else {
             FetchMode::OnlyIfMissing
         };
-        match client.fetch_to_file(&url, &path, mode).await {
+        match client.fetch_to_file(&url, &path, mode) {
             Ok(true) => downloaded += 1,
             Ok(false) => skipped += 1,
             Err(SecError::BadStatus { status: 404, .. }) => {
@@ -88,7 +88,7 @@ pub async fn fetch_quarterly_master_idx(
 /// night) — we use `Always` mode but only if `force_refetch=true` OR
 /// the local file is missing OR older than `staleness_hours`. This
 /// implements a poor man's cooldown without hashing the file.
-pub async fn fetch_submissions_bulk(
+pub fn fetch_submissions_bulk(
     client: &SecClient,
     workdir: &Workdir,
     staleness_hours: u64,
@@ -112,14 +112,14 @@ pub async fn fetch_submissions_bulk(
     }
 
     let url = catalog::submissions_bulk_url();
-    client.fetch_to_file(url, &path, FetchMode::Always).await?;
+    client.fetch_to_file(url, &path, FetchMode::Always)?;
     Ok(true)
 }
 
 /// Fetch the small `company_tickers.json` file (~1 MB) for ticker → CIK
 /// mapping. Cached forever; bump with `force_refetch=true` if SEC
 /// schema changes.
-pub async fn fetch_company_tickers(
+pub fn fetch_company_tickers(
     client: &SecClient,
     workdir: &Workdir,
     force_refetch: bool,
@@ -131,9 +131,7 @@ pub async fn fetch_company_tickers(
     } else {
         FetchMode::OnlyIfMissing
     };
-    client
-        .fetch_to_file(catalog::company_tickers_url(), &path, mode)
-        .await
+    client.fetch_to_file(catalog::company_tickers_url(), &path, mode)
 }
 
 /// Fetch one company's XBRL company-facts JSON from
@@ -148,7 +146,7 @@ pub async fn fetch_company_tickers(
 /// Returns `true` if newly downloaded, `false` if cached. A 404
 /// (company has no XBRL facts — common for funds / foreign issuers)
 /// is swallowed as `Ok(false)` rather than erroring.
-pub async fn fetch_company_facts(
+pub fn fetch_company_facts(
     client: &SecClient,
     workdir: &Workdir,
     cik: u64,
@@ -162,7 +160,7 @@ pub async fn fetch_company_facts(
         return Ok(false);
     }
     let url = catalog::companyfacts_url(cik);
-    match client.fetch_to_file(&url, &path, FetchMode::Always).await {
+    match client.fetch_to_file(&url, &path, FetchMode::Always) {
         Ok(v) => Ok(v),
         // Companies with no XBRL facts return 404 — not an error.
         Err(SecError::BadStatus { status: 404, .. }) => Ok(false),
@@ -181,7 +179,7 @@ pub async fn fetch_company_facts(
 /// the bulk zip when present.
 ///
 /// Returns `true` if newly downloaded, `false` if cached.
-pub async fn fetch_company_submission(
+pub fn fetch_company_submission(
     client: &SecClient,
     workdir: &Workdir,
     cik: u64,
@@ -195,7 +193,7 @@ pub async fn fetch_company_submission(
         return Ok(false);
     }
     let url = catalog::submissions_cik_url(cik);
-    match client.fetch_to_file(&url, &path, FetchMode::Always).await {
+    match client.fetch_to_file(&url, &path, FetchMode::Always) {
         Ok(v) => Ok(v),
         Err(SecError::BadStatus { status: 404, .. }) => Ok(false),
         Err(e) => Err(e),
@@ -207,7 +205,7 @@ pub async fn fetch_company_submission(
 /// whose type is `INFORMATION TABLE`. We discover its filename via
 /// the filing's `index.json` then download the XML into
 /// `raw/filings/{cik}/{accession_no_dashes}/13f-infotable.xml`.
-pub async fn fetch_13f_info_table(
+pub fn fetch_13f_info_table(
     client: &SecClient,
     workdir: &Workdir,
     issuer_cik: u64,
@@ -229,7 +227,7 @@ pub async fn fetch_13f_info_table(
         catalog::filing_index_url(issuer_cik, &accession_no_dashes),
         "index.json"
     );
-    let bytes = client.fetch_bytes(&index_url).await?;
+    let bytes = client.fetch_bytes(&index_url)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| SecError::Decode(format!("filing index.json: {e}")))?;
     let docs = v
@@ -278,9 +276,7 @@ pub async fn fetch_13f_info_table(
         catalog::filing_index_url(issuer_cik, &accession_no_dashes),
         fname
     );
-    client
-        .fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing)
-        .await
+    client.fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing)
 }
 
 /// Fetch a single Form 4 / 4/A XML payload by accession number into
@@ -289,7 +285,7 @@ pub async fn fetch_13f_info_table(
 /// SEC EDGAR has no bulk Form 4 dataset; each filing must be fetched
 /// individually. Caller drives the loop and respects the 10/s rate
 /// limit via the shared SecClient token bucket.
-pub async fn fetch_form4_filing(
+pub fn fetch_form4_filing(
     client: &SecClient,
     workdir: &Workdir,
     issuer_cik: u64,
@@ -321,9 +317,7 @@ pub async fn fetch_form4_filing(
         .join(issuer_cik.to_string())
         .join(&accession_no_dashes)
         .join("form4.xml");
-    client
-        .fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
-        .await
+    client.fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
 }
 
 /// Fetch any filing's `primary_document` into
@@ -337,7 +331,7 @@ pub async fn fetch_form4_filing(
 ///
 /// 0.9.46 — this is the missing piece that lets `detailed=N` actually
 /// produce non-zero rows for 8-K / SC 13D / DEF 14A.
-pub async fn fetch_filing_primary_doc(
+pub fn fetch_filing_primary_doc(
     client: &SecClient,
     workdir: &Workdir,
     issuer_cik: u64,
@@ -358,9 +352,7 @@ pub async fn fetch_filing_primary_doc(
         .join(issuer_cik.to_string())
         .join(&accession_no_dashes)
         .join(primary_document);
-    client
-        .fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
-        .await
+    client.fetch_to_file(&url, &path, FetchMode::OnlyIfMissing)
 }
 
 /// Fetch every Exhibit 21 attachment of a single 10-K / 10-K/A filing.
@@ -373,7 +365,7 @@ pub async fn fetch_filing_primary_doc(
 ///
 /// Returns the number of Exhibit 21 files downloaded (0 if none in
 /// the filing's `index.json`).
-pub async fn fetch_exhibit21_attachment(
+pub fn fetch_exhibit21_attachment(
     client: &SecClient,
     workdir: &Workdir,
     issuer_cik: u64,
@@ -385,7 +377,7 @@ pub async fn fetch_exhibit21_attachment(
         catalog::filing_index_url(issuer_cik, &accession_no_dashes),
         "index.json"
     );
-    let bytes = client.fetch_bytes(&index_url).await?;
+    let bytes = client.fetch_bytes(&index_url)?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| SecError::Decode(format!("filing index.json: {e}")))?;
     let docs = v
@@ -410,10 +402,7 @@ pub async fn fetch_exhibit21_attachment(
             .join(issuer_cik.to_string())
             .join(&accession_no_dashes)
             .join(name);
-        match client
-            .fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing)
-            .await
-        {
+        match client.fetch_to_file(&url, &dest, FetchMode::OnlyIfMissing) {
             Ok(true) => downloaded += 1,
             // OnlyIfMissing returning false = already on disk; not an error.
             Ok(false) => downloaded += 1,
@@ -486,20 +475,10 @@ mod tests {
         // Empty primary_document (missing from filing.csv) must be a
         // safe no-op — the wrapper still passes the tuple but we don't
         // want a 404 on an empty URL.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let wd = Workdir::new(tmp.path().to_path_buf());
         let client = SecClient::new("test agent test@example.com").unwrap();
-        let result = rt.block_on(fetch_filing_primary_doc(
-            &client,
-            &wd,
-            320193,
-            "0001-23-456",
-            "",
-        ));
+        let result = fetch_filing_primary_doc(&client, &wd, 320193, "0001-23-456", "");
         // No request should be issued; result is "skipped".
         assert!(matches!(result, Ok(false)));
     }

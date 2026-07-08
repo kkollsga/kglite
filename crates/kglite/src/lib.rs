@@ -497,8 +497,9 @@ pub mod api {
                 pick_storage_mode, predict_graph_size_gb, SecError, SliceSpec, StorageMode,
                 Workdir, YearRange,
             };
-            // HTTP client + per-form fetch entry points (all async; drive via
-            // `block_on` or your own runtime).
+            // HTTP client + per-form fetch entry points. Synchronous —
+            // call directly (no runtime needed); backed by the shared
+            // `DatasetClient` (ureq + rate gate + retry).
             pub use crate::datasets::sec::{
                 fetch_13f_info_table, fetch_company_facts, fetch_company_submission,
                 fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,

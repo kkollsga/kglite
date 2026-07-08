@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Rust-side dataset fetch is now synchronous.** The SEC EDGAR loader
+  (`kglite::api::datasets::sec`) moved off async reqwest + tokio + governor onto
+  a shared blocking `DatasetClient` (ureq + a process-global rate gate + retry),
+  matching the "core is sync" doctrine. The `fetch_*` entry points and
+  `SecClient` methods are now plain `fn`s — no runtime needed to drive them. The
+  Python API is unchanged. (SODIR and Wikidata port in follow-up work.)
+
 ## [0.12.11] — 2026-07-08 — MCP root-swap correctness + active-graph identity
 
 ### Fixed

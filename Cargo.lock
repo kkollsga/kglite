@@ -2020,6 +2020,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+ "ureq 2.12.1",
  "walkdir",
  "wkt",
  "yaml-rust2",
