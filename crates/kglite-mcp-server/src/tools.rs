@@ -286,11 +286,15 @@ impl GraphState {
     /// slot so the identity surfaces (`<active_graph …>` header, activation
     /// summary) name the loaded rev-set.
     pub fn build_code_tree_revs(&self, dir: &Path, revs: &[String]) -> Result<()> {
+        // Collapse duplicate rev labels up front (shared core helper) so the
+        // recorded `active.revs` — which feeds the header + activation banner —
+        // matches the canonical label set the core builder folds into the graph.
+        let revs = kglite::api::code_tree::dedup_revs(revs);
         // repo_root=None → auto-resolve the git root from `dir` (the activated
         // root is a work tree). include_docs mirrors build_code_tree.
         let dir_arc = kglite::api::code_tree::build_code_tree_revs(
             dir,
-            revs,
+            &revs,
             None,
             false,
             true,
@@ -304,7 +308,7 @@ impl GraphState {
             kg,
             source_path: None,
             root: Some(dir.to_path_buf()),
-            revs: Some(revs.to_vec()),
+            revs: Some(revs),
             built_at: SystemTime::now(),
         });
         Ok(())

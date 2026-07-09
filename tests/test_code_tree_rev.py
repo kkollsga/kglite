@@ -223,6 +223,13 @@ def test_single_item_revs_list_works(repo3: Path) -> None:
     assert _revs_of(g, "foo") == ["v1"]
 
 
+def test_duplicate_revs_labels_deduped(repo3: Path) -> None:
+    # Duplicate labels collapse (order-preserving) before folding: a node's
+    # `revs` list carries the label once, never ["v1", "v1"].
+    g = code_tree.build(str(repo3), revs=["v1", "v1"])
+    assert _revs_of(g, "foo") == ["v1"]
+
+
 # ─── B.2d — CALL rev_diff procedure ─────────────────────────────────────────
 
 

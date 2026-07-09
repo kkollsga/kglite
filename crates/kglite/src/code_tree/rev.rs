@@ -266,6 +266,19 @@ fn stamp_rev_provenance(
 // graph is ≈ base + deltas. See `dev-docs/plans/rev-aware-code-graphs.md`
 // "B.2 design" for the eight settled decisions.
 
+/// Collapse a requested rev-label list to its order-preserving unique form
+/// (first occurrence wins). A duplicate label resolves to the same tree, so
+/// re-folding it only inflates the per-entity `revs`/`rev_fp` lists and the
+/// provenance banner. Shared by the core builder and the MCP activation
+/// wrapper so both agree on the canonical label set.
+pub fn dedup_revs(revs: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    revs.iter()
+        .filter(|r| seen.insert(r.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Node provenance manifest: `(node_type, id)` → (revs the entity appears in,
 /// per-rev fingerprint hashes aligned positionally with those revs).
 type NodeRevManifest = HashMap<(String, String), (Vec<Value>, Vec<Value>)>;
@@ -362,6 +375,12 @@ pub fn build_code_tree_revs(
     if revs.is_empty() {
         return Err("build_code_tree_revs requires at least one revision".to_string());
     }
+    // Dedup the requested labels (order-preserving, first occurrence wins). A
+    // repeated label re-folds the identical tree — inflating every entity's
+    // `revs`/`rev_fp` list with a duplicate and adding a spurious column to the
+    // provenance banner — so collapse it to a single fold before any work.
+    let revs = dedup_revs(revs);
+    let revs = revs.as_slice();
     let repo_root = match repo_root {
         Some(r) => r.to_path_buf(),
         None => resolve_repo_root(src_dir)?,
@@ -1008,6 +1027,18 @@ mod tests {
             entity_sets(&b),
             "two builds of the same rev diverged — extraction is nondeterministic"
         );
+    }
+
+    /// Defect B regression: duplicate rev labels are collapsed (order-preserving,
+    /// first occurrence wins) before folding, so nodes carry the label once —
+    /// not `["HEAD", "HEAD"]`.
+    #[test]
+    fn duplicate_rev_labels_are_deduped() {
+        let (tmp, [_s1, _s2, s3]) = fixture();
+        let graph = build(tmp.path(), &[s3.clone(), s3.clone(), "HEAD".to_string()]);
+        // s3 == HEAD, so all three labels resolve to one commit; dedup keeps the
+        // first two DISTINCT labels (s3, HEAD) and drops the repeated s3.
+        assert_eq!(fn_revs(&graph, "foo"), vec![s3, "HEAD".to_string()]);
     }
 
     #[test]
