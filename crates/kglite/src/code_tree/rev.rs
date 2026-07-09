@@ -13,7 +13,13 @@
 //! Reuses the established git-shelling convention from `repo.rs`
 //! (`std::process::Command`, list args, no shell).
 
+use crate::datatypes::Value;
 use crate::graph::dir_graph::DirGraph;
+use crate::graph::mutation::extend::extend_graph;
+use crate::graph::storage::{GraphRead, GraphWrite};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -55,16 +61,12 @@ pub fn archive_and_build(
         .prefix("kglite-rev-")
         .tempdir()
         .map_err(|e| format!("could not create tempdir: {}", e))?;
-    archive_into(&repo_root, rev, tmp.path())?;
 
-    // Scope the build to the same relative subpath the caller pointed at, so
-    // `build("/repo/src", rev=…)` builds `src` of the snapshot, not the whole
-    // repo. Falls back to the snapshot root when `src_dir` is the repo root or
-    // does not resolve under it.
-    let build_input = rebase_input(src_dir, &repo_root, tmp.path());
-
-    let graph = crate::code_tree::builder::run_with_options(
-        &build_input,
+    let graph = archive_and_build_into(
+        &repo_root,
+        rev,
+        src_dir,
+        tmp.path(),
         verbose,
         include_tests,
         save_to,
@@ -73,6 +75,43 @@ pub fn archive_and_build(
     )?;
 
     stamp_rev_provenance(graph, rev, &sha, &repo_root)
+}
+
+/// Extract the tracked tree at `rev` into `snapshot_dir`, then build a code
+/// graph from the subpath of `snapshot_dir` matching `src_dir`'s position under
+/// `repo_root`. The shared archive→build core behind both the single-rev
+/// [`archive_and_build`] and the multi-rev [`build_code_tree_revs`] merge — the
+/// caller owns `snapshot_dir`'s lifecycle (a throwaway `TempDir` for one rev, or
+/// a reused fixed-basename subdir cleared between revs for a merge). Does no
+/// rev-provenance stamping — the caller stamps once it knows the full rev set.
+#[allow(clippy::too_many_arguments)]
+fn archive_and_build_into(
+    repo_root: &Path,
+    rev: &str,
+    src_dir: &Path,
+    snapshot_dir: &Path,
+    verbose: bool,
+    include_tests: bool,
+    save_to: Option<&Path>,
+    max_loc_per_file: Option<usize>,
+    include_docs: bool,
+) -> Result<Arc<DirGraph>, String> {
+    archive_into(repo_root, rev, snapshot_dir)?;
+
+    // Scope the build to the same relative subpath the caller pointed at, so
+    // `build("/repo/src", rev=…)` builds `src` of the snapshot, not the whole
+    // repo. Falls back to the snapshot root when `src_dir` is the repo root or
+    // does not resolve under it.
+    let build_input = rebase_input(src_dir, repo_root, snapshot_dir);
+
+    crate::code_tree::builder::run_with_options(
+        &build_input,
+        verbose,
+        include_tests,
+        save_to,
+        max_loc_per_file,
+        include_docs,
+    )
 }
 
 /// `git -C <src_dir> rev-parse --show-toplevel` → the repo's work-tree root.
@@ -217,4 +256,612 @@ fn stamp_rev_provenance(
         .ok_or_else(|| "graph not uniquely owned when stamping rev provenance".to_string())?;
     g.set_instructions(&text, None);
     Ok(graph)
+}
+
+// ─── Multi-rev merge (B.2b) ─────────────────────────────────────────────────
+//
+// One graph holding N revisions via shared identity + rev-sets: one node per
+// entity, native list props `revs: [str]` / `rev_fp: [int]` on nodes and
+// `revs: [str]` on edges. Unchanged entities are stored once, so the merged
+// graph is ≈ base + deltas. See `dev-docs/plans/rev-aware-code-graphs.md`
+// "B.2 design" for the eight settled decisions.
+
+/// Node provenance manifest: `(node_type, id)` → (revs the entity appears in,
+/// per-rev fingerprint hashes aligned positionally with those revs).
+type NodeRevManifest = HashMap<(String, String), (Vec<Value>, Vec<Value>)>;
+
+/// Edge provenance manifest: `(connection_type, src_id, dst_id)` → the revs the
+/// edge appears in (edges carry no fingerprint — existence-per-rev is the signal).
+type EdgeRevManifest = HashMap<(String, String, String), Vec<Value>>;
+
+/// Fingerprint field sets per code-entity type — mirrors `_FINGERPRINT` in
+/// `kglite/code_tree/_diff.py` so multi-rev change-detection agrees with the
+/// two-graph `diff`. `loc_span` is synthetic (`end_line - line_number`), a
+/// position-independent body-size proxy: it flags a body edit that grew/shrank
+/// an entity without a false positive on every symbol below an unrelated edit.
+/// Types absent here (File / Module / Project / markup) have no defined
+/// fingerprint and hash to 0 — a `rev_diff` reports them present across revs but
+/// never "changed", matching `diff`'s compared-type set.
+fn fingerprint_fields(node_type: &str) -> &'static [&'static str] {
+    match node_type {
+        "Function" => &["signature", "visibility", "loc_span"],
+        "Class" | "Mixin" | "Trait" | "Protocol" | "Interface" => &["visibility", "loc_span"],
+        "Struct" => &["visibility", "fields", "loc_span"],
+        "Enum" => &["visibility", "variants", "loc_span"],
+        "Constant" => &["visibility", "value_preview"],
+        _ => &[],
+    }
+}
+
+/// A single `i64` capturing an entity's *shape* at one rev — the hash of its
+/// per-type fingerprint fields. `rev_fp[i] != rev_fp[j]` ⇒ the entity changed
+/// between `revs[i]` and `revs[j]`. Hashed inputs are the Display form of each
+/// [`fingerprint_fields`] value (with `loc_span` derived from `end_line -
+/// line_number`); the field *name* is folded in too so a value moving between
+/// fields still perturbs the hash. Stability is only required *within one
+/// merged graph* (rev_fp is compared to sibling rev_fp entries on the same
+/// node, and persisted verbatim on save), so `DefaultHasher` is sufficient.
+fn node_fingerprint(node_type: &str, props: &HashMap<String, Value>) -> i64 {
+    let fields = fingerprint_fields(node_type);
+    if fields.is_empty() {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    for field in fields {
+        field.hash(&mut hasher);
+        if *field == "loc_span" {
+            let span = match (props.get("end_line"), props.get("line_number")) {
+                (Some(Value::Int64(end)), Some(Value::Int64(line))) => Some(end - line),
+                _ => None,
+            };
+            span.hash(&mut hasher);
+        } else {
+            match props.get(*field) {
+                Some(v) => v.to_string().hash(&mut hasher),
+                None => 0u8.hash(&mut hasher),
+            }
+        }
+    }
+    hasher.finish() as i64
+}
+
+/// Build one merged code graph spanning `revs` (git revspecs — tags, SHAs,
+/// `HEAD`), oldest → newest in list order.
+///
+/// Each rev is archived-and-built independently (reusing [`archive_and_build`]'s
+/// machinery via a shared **fixed snapshot basename**, so qualified_names / ids
+/// align natively across revs), then folded into an accumulator by
+/// `(node_type, id)` node identity + `(connection_type, src, tgt)` edge identity
+/// — the exact identity [`extend_graph`] already uses. The newest rev an entity
+/// appears in wins its ordinary property columns (so plain Cypher reports HEAD's
+/// values), and every node/edge carries the rev-set it belongs to:
+///
+/// - nodes: `revs: [str]` (revs present in, oldest → newest) + `rev_fp: [int]`
+///   (aligned per-rev [`node_fingerprint`]s),
+/// - edges: `revs: [str]` (edges have no body — existence-per-rev is the whole
+///   signal).
+///
+/// Scope queries with `WHERE '<rev>' IN n.revs`; unscoped queries span *all*
+/// revs (an over-count trap the provenance instructions warn about). Peak memory
+/// is ≈ two graphs (each rev graph is dropped after folding). In-memory only —
+/// `archive_and_build` produces the `Default` backend [`extend_graph`] requires.
+///
+/// A single-element `revs` yields the same graph shape as [`archive_and_build`]
+/// plus the (single-element) `revs` / `rev_fp` tags.
+#[allow(clippy::too_many_arguments)]
+pub fn build_code_tree_revs(
+    src_dir: &Path,
+    revs: &[String],
+    repo_root: Option<&Path>,
+    verbose: bool,
+    include_tests: bool,
+    save_to: Option<&Path>,
+    max_loc_per_file: Option<usize>,
+    include_docs: bool,
+) -> Result<Arc<DirGraph>, String> {
+    if revs.is_empty() {
+        return Err("build_code_tree_revs requires at least one revision".to_string());
+    }
+    let repo_root = match repo_root {
+        Some(r) => r.to_path_buf(),
+        None => resolve_repo_root(src_dir)?,
+    };
+
+    // Fixed snapshot basename (Decision 4): every rev extracts into
+    // `<tmp>/snapshot`, so all revs share one build-root prefix and their
+    // qualified_names / ids align natively across revs — the empirical
+    // `_root_alias` heuristic that `_diff.py` needs is unnecessary here.
+    let tmp = tempfile::Builder::new()
+        .prefix("kglite-revs-")
+        .tempdir()
+        .map_err(|e| format!("could not create tempdir: {}", e))?;
+    let snapshot = tmp.path().join("snapshot");
+
+    // Per-rev provenance manifests, keyed by cross-rev identity. Small (a few
+    // strings + ints per entity), independent of per-rev graph size — this is
+    // what lets us keep peak memory at ≈ two graphs while still knowing every
+    // entity's full rev-set after all folds.
+    let mut node_revs: NodeRevManifest = HashMap::new();
+    let mut edge_revs: EdgeRevManifest = HashMap::new();
+
+    let mut sha_of_rev: Vec<(String, String)> = Vec::with_capacity(revs.len());
+    let mut accumulator: Option<Arc<DirGraph>> = None;
+
+    for rev in revs {
+        let sha = verify_rev(&repo_root, rev)?;
+        sha_of_rev.push((rev.clone(), sha));
+
+        // Fresh extraction into the fixed snapshot dir.
+        if snapshot.exists() {
+            std::fs::remove_dir_all(&snapshot)
+                .map_err(|e| format!("could not clear snapshot dir: {}", e))?;
+        }
+        std::fs::create_dir_all(&snapshot)
+            .map_err(|e| format!("could not create snapshot dir: {}", e))?;
+
+        let rev_graph = archive_and_build_into(
+            &repo_root,
+            rev,
+            src_dir,
+            &snapshot,
+            verbose,
+            include_tests,
+            None, // never save a pre-merge rev graph — we save the merged one
+            max_loc_per_file,
+            include_docs,
+        )?;
+
+        // Record this rev's manifest before folding (both read `rev_graph`).
+        record_rev_manifest(&rev_graph, rev, &mut node_revs, &mut edge_revs);
+
+        match accumulator.as_mut() {
+            None => accumulator = Some(rev_graph), // oldest = base, full structure kept
+            Some(acc) => {
+                let target = Arc::get_mut(acc)
+                    .ok_or_else(|| "accumulator not uniquely owned during merge".to_string())?;
+                extend_graph(target, &rev_graph, Some("update".to_string()))?;
+                // `rev_graph` dropped here → peak memory ≈ two graphs.
+            }
+        }
+    }
+
+    let mut graph = accumulator.expect("revs is non-empty");
+    {
+        let g = Arc::get_mut(&mut graph)
+            .ok_or_else(|| "merged graph not uniquely owned when stamping revs".to_string())?;
+        stamp_node_revs(g, &node_revs)?;
+        stamp_edge_revs(g, &edge_revs);
+    }
+
+    if let Some(dest) = save_to {
+        // Mirror the builder's save prep so property column stores materialise
+        // (including the new `revs` / `rev_fp` list columns) before write.
+        crate::graph::io::file::prepare_save(&mut graph);
+        Arc::make_mut(&mut graph).enable_columnar();
+        let dest_str = dest.to_string_lossy();
+        crate::graph::io::file::write_kgl(&graph, &dest_str).map_err(|e| e.to_string())?;
+    }
+
+    stamp_rev_provenance_multi(graph, &sha_of_rev, &repo_root)
+}
+
+/// Read a freshly-built rev graph and fold its nodes/edges into the running
+/// provenance manifests, keyed by cross-rev identity. Read-only over `rev_graph`.
+fn record_rev_manifest(
+    rev_graph: &DirGraph,
+    rev: &str,
+    node_revs: &mut NodeRevManifest,
+    edge_revs: &mut EdgeRevManifest,
+) {
+    let rev_val = Value::String(rev.to_string());
+
+    for idx in rev_graph.graph.node_indices() {
+        let Some(node) = rev_graph.graph.node_weight(idx) else {
+            continue;
+        };
+        let node_type = node.node_type_str(&rev_graph.interner).to_string();
+        let id = node.id().to_string();
+        let props = node.properties_cloned(&rev_graph.interner);
+        let fp = node_fingerprint(&node_type, &props);
+        let entry = node_revs.entry((node_type, id)).or_default();
+        entry.0.push(rev_val.clone());
+        entry.1.push(Value::Int64(fp));
+    }
+
+    for eidx in rev_graph.graph.edge_indices() {
+        let Some(edge) = rev_graph.graph.edge_weight(eidx) else {
+            continue;
+        };
+        let Some((s, t)) = rev_graph.graph.edge_endpoints(eidx) else {
+            continue;
+        };
+        let (Some(sn), Some(tn)) = (
+            rev_graph.graph.node_weight(s),
+            rev_graph.graph.node_weight(t),
+        ) else {
+            continue;
+        };
+        let conn = edge.connection_type_str(&rev_graph.interner).to_string();
+        let key = (conn, sn.id().to_string(), tn.id().to_string());
+        let revs = edge_revs.entry(key).or_default();
+        // A code_tree graph dedups edges by (conn, src, tgt), so an edge appears
+        // once per rev — guard the append anyway (idempotent within a rev).
+        if revs.last() != Some(&rev_val) {
+            revs.push(rev_val.clone());
+        }
+    }
+}
+
+/// Stamp `revs` / `rev_fp` list props onto every merged node, in place. Each
+/// node's other properties are preserved (`PropertyStorage::insert` extends the
+/// node's own compact schema for the new key), and the two keys are registered
+/// in the graph's `type_schemas` + `node_type_metadata` so `enable_columnar()`
+/// materialises them as columns on `.kgl` save.
+///
+/// Direct insertion — not `add_nodes` — because `add_nodes` with a 3-column
+/// (`id`/`revs`/`rev_fp`) update DataFrame rebuilds each matched node from just
+/// those columns, dropping `name`/`qualified_name`/`signature`/…; the whole
+/// point of the merge is to *keep* the newest rev's full property set.
+fn stamp_node_revs(graph: &mut DirGraph, node_revs: &NodeRevManifest) -> Result<(), String> {
+    let revs_key = graph.interner.get_or_intern("revs");
+    let fp_key = graph.interner.get_or_intern("rev_fp");
+
+    // Phase 1: resolve each node's identity (read-only), gather its list values
+    // + the set of node types touched (for schema registration).
+    let mut updates: Vec<(_, Value, Value)> = Vec::new();
+    let mut types_touched: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for idx in graph.graph.node_indices() {
+        let Some(node) = graph.graph.node_weight(idx) else {
+            continue;
+        };
+        let node_type = node.node_type_str(&graph.interner).to_string();
+        let id = node.id().to_string();
+        if let Some((revs, fps)) = node_revs.get(&(node_type.clone(), id)) {
+            updates.push((idx, Value::List(revs.clone()), Value::List(fps.clone())));
+            types_touched.insert(node_type);
+        }
+    }
+
+    // Register the two list columns in every touched type's schema + metadata so
+    // the columnar-save path emits them (mirrors what `add_nodes` does for lists).
+    for node_type in &types_touched {
+        if let Some(existing) = graph.type_schemas.get(node_type).cloned() {
+            let mut merged = (*existing).clone();
+            merged.add_key(revs_key);
+            merged.add_key(fp_key);
+            graph
+                .type_schemas
+                .insert(node_type.clone(), Arc::new(merged));
+        }
+        let mut meta = HashMap::new();
+        meta.insert("revs".to_string(), "List".to_string());
+        meta.insert("rev_fp".to_string(), "List".to_string());
+        graph.upsert_node_type_metadata(node_type, meta);
+    }
+
+    // Phase 2: apply (mutable). Pre-interned keys → no interner borrow needed.
+    for (idx, revs_val, fp_val) in updates {
+        if let Some(node) = graph.graph.node_weight_mut(idx) {
+            node.properties.insert(revs_key, revs_val);
+            node.properties.insert(fp_key, fp_val);
+        }
+    }
+    Ok(())
+}
+
+/// Stamp `revs` directly onto each merged edge's property vector. The DataFrame
+/// edge path (`add_connections`) drops list props to null, but `EdgeData`
+/// serializes its `Vec<(InternedKey, Value)>` verbatim, so a directly-set list
+/// round-trips through `.kgl` (guarded by `test_edge_list_properties.py`).
+fn stamp_edge_revs(graph: &mut DirGraph, edge_revs: &EdgeRevManifest) {
+    let revs_key = graph.interner.get_or_intern("revs");
+
+    // Phase 1: resolve each edge's identity (read-only), collect the updates.
+    let mut updates = Vec::new();
+    for eidx in graph.graph.edge_indices() {
+        let Some(edge) = graph.graph.edge_weight(eidx) else {
+            continue;
+        };
+        let Some((s, t)) = graph.graph.edge_endpoints(eidx) else {
+            continue;
+        };
+        let (Some(sn), Some(tn)) = (graph.graph.node_weight(s), graph.graph.node_weight(t)) else {
+            continue;
+        };
+        let conn = edge.connection_type_str(&graph.interner).to_string();
+        let key = (conn, sn.id().to_string(), tn.id().to_string());
+        if let Some(revs) = edge_revs.get(&key) {
+            updates.push((eidx, Value::List(revs.clone())));
+        }
+    }
+
+    // Phase 2: apply (mutable) — upsert the `revs` slot on each edge.
+    for (eidx, revs_val) in updates {
+        if let Some(edge) = graph.graph.edge_weight_mut(eidx) {
+            match edge.properties.iter_mut().find(|(k, _)| *k == revs_key) {
+                Some(slot) => slot.1 = revs_val,
+                None => edge.properties.push((revs_key, revs_val)),
+            }
+        }
+    }
+}
+
+/// Record which revs a multi-rev graph spans + teach the rev-scoping idiom, in
+/// the instructions channel `describe()` renders verbatim. Mirrors
+/// [`stamp_rev_provenance`] for the single-rev case; the newest rev is surfaced
+/// so an agent can scope "head only" (Decision 7).
+fn stamp_rev_provenance_multi(
+    mut graph: Arc<DirGraph>,
+    revs: &[(String, String)],
+    repo_root: &Path,
+) -> Result<Arc<DirGraph>, String> {
+    let labels: Vec<String> = revs
+        .iter()
+        .map(|(rev, sha)| format!("{} ({})", rev, &sha[..sha.len().min(12)]))
+        .collect();
+    let newest = revs.last().map(|(rev, _)| rev.as_str()).unwrap_or("");
+    let text = format!(
+        "Multi-rev code graph of {}, spanning {} revision(s) (oldest → newest): \
+         {}. One node per entity across revs; every node carries `revs: [str]` \
+         (revs it appears in) + `rev_fp: [int]` (per-rev shape hash), every edge \
+         carries `revs: [str]`. Ordinary properties (signature, value_preview, …) \
+         report the NEWEST rev ('{newest}') an entity appears in. UNSCOPED queries \
+         span ALL revs (e.g. `MATCH (n:Function) RETURN count(n)` over-counts) — \
+         scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE '{newest}' IN \
+         n.revs`).",
+        repo_root.display(),
+        revs.len(),
+        labels.join(", "),
+    );
+    let g = Arc::get_mut(&mut graph)
+        .ok_or_else(|| "graph not uniquely owned when stamping multi-rev provenance".to_string())?;
+    g.set_instructions(&text, None);
+    Ok(graph)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::storage::interner::InternedKey;
+    use std::process::Command;
+
+    /// Run a git subcommand in `dir`, panicking on failure.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Write `m.py`, stage, commit (with deterministic identity), return the SHA.
+    fn commit(dir: &Path, body: &str) -> String {
+        std::fs::write(dir.join("m.py"), body).unwrap();
+        git(dir, &["add", "-A"]);
+        git(
+            dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "c",
+            ],
+        );
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// A 3-commit fixture repo. Returns (tempdir guard, [sha1, sha2, sha3]).
+    /// r1: foo(a) + gone(); r2: gone removed, bar added, foo now CALLS bar;
+    /// r3: foo signature widened to (a, b).
+    fn fixture() -> (tempfile::TempDir, [String; 3]) {
+        let tmp = tempfile::Builder::new()
+            .prefix("kglite-revtest-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        let s1 = commit(
+            dir,
+            "def foo(a):\n    return a + 1\n\n\ndef gone():\n    return 0\n",
+        );
+        let s2 = commit(
+            dir,
+            "def foo(a):\n    return bar(a)\n\n\ndef bar(x):\n    return x + 1\n",
+        );
+        let s3 = commit(
+            dir,
+            "def foo(a, b):\n    return bar(a) + b\n\n\ndef bar(x):\n    return x + 1\n",
+        );
+        (tmp, [s1, s2, s3])
+    }
+
+    fn build(dir: &Path, revs: &[String]) -> Arc<DirGraph> {
+        build_code_tree_revs(dir, revs, Some(dir), false, false, None, None, false)
+            .expect("build_code_tree_revs")
+    }
+
+    /// The `revs` list of the single Function named `name`, as strings.
+    fn fn_revs(graph: &DirGraph, name: &str) -> Vec<String> {
+        list_prop(graph, "Function", name, "revs")
+    }
+
+    /// True when the node's title (where code_tree stores the simple `name`;
+    /// `qualified_name` is the node `id`, so neither is a plain property) equals
+    /// `name`.
+    fn title_is(node: &crate::graph::schema::NodeData, name: &str) -> bool {
+        node.title().as_ref() == &Value::String(name.to_string())
+    }
+
+    /// A node's list property, resolved to `Vec<String>` (Display per element).
+    /// Asserts exactly one node of that type+name exists (no cross-rev dup).
+    fn list_prop(graph: &DirGraph, node_type: &str, name: &str, prop: &str) -> Vec<String> {
+        let mut found: Vec<Vec<String>> = Vec::new();
+        for idx in graph.graph.node_indices() {
+            let Some(node) = graph.graph.node_weight(idx) else {
+                continue;
+            };
+            if node.node_type_str(&graph.interner) != node_type {
+                continue;
+            }
+            if !title_is(node, name) {
+                continue;
+            }
+            let list = match node.get_property_value(prop) {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|v| v.as_string().unwrap_or_else(|| v.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            found.push(list);
+        }
+        assert_eq!(found.len(), 1, "expected exactly one {node_type} {name}");
+        found.into_iter().next().unwrap()
+    }
+
+    /// The `revs` of the CALLS edge `caller` → `callee`, as strings.
+    fn calls_edge_revs(graph: &DirGraph, caller: &str, callee: &str) -> Vec<String> {
+        let revs_key = InternedKey::from_str("revs");
+        for eidx in graph.graph.edge_indices() {
+            let Some(edge) = graph.graph.edge_weight(eidx) else {
+                continue;
+            };
+            if edge.connection_type_str(&graph.interner) != "CALLS" {
+                continue;
+            }
+            let Some((s, t)) = graph.graph.edge_endpoints(eidx) else {
+                continue;
+            };
+            let (Some(sn), Some(tn)) = (graph.graph.node_weight(s), graph.graph.node_weight(t))
+            else {
+                continue;
+            };
+            if title_is(sn, caller) && title_is(tn, callee) {
+                return match edge.properties.iter().find(|(k, _)| *k == revs_key) {
+                    Some((_, Value::List(items))) => items
+                        .iter()
+                        .map(|v| v.as_string().unwrap_or_else(|| v.to_string()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+            }
+        }
+        panic!("no CALLS edge {caller} -> {callee}");
+    }
+
+    #[test]
+    fn multi_rev_merge_tracks_presence_change_and_edges() {
+        let (tmp, [s1, s2, s3]) = fixture();
+        let revs = vec![s1.clone(), s2.clone(), s3.clone()];
+        let graph = build(tmp.path(), &revs);
+
+        // Presence across revs, one node per entity.
+        assert_eq!(
+            fn_revs(&graph, "foo"),
+            vec![s1.clone(), s2.clone(), s3.clone()]
+        );
+        assert_eq!(fn_revs(&graph, "bar"), vec![s2.clone(), s3.clone()]); // added in rev2
+        assert_eq!(fn_revs(&graph, "gone"), vec![s1.clone()]); // removed after rev1
+
+        // Fingerprint: foo's signature widened only in rev3, so rev_fp[2] diverges
+        // from the (equal) earlier revs. A whole-hash equality is all we assert —
+        // body-only edits (r1→r2) are intentionally invisible (matches `diff`).
+        let fp = match graph
+            .graph
+            .node_indices()
+            .filter_map(|i| graph.graph.node_weight(i))
+            .find(|n| n.node_type_str(&graph.interner) == "Function" && title_is(n, "foo"))
+            .and_then(|n| n.get_property_value("rev_fp"))
+        {
+            Some(Value::List(items)) => items,
+            other => panic!("foo rev_fp missing/not a list: {other:?}"),
+        };
+        assert_eq!(fp.len(), 3, "one fingerprint per rev");
+        assert_eq!(fp[0], fp[1], "signature unchanged rev1→rev2");
+        assert_ne!(fp[1], fp[2], "signature widened in rev3");
+
+        // Edge appearing in rev2+: foo CALLS bar exists only once foo calls it.
+        assert_eq!(calls_edge_revs(&graph, "foo", "bar"), vec![s2, s3]);
+
+        // Newest-wins property columns: foo's signature is rev3's widened one.
+        let sig = graph
+            .graph
+            .node_indices()
+            .filter_map(|i| graph.graph.node_weight(i))
+            .find(|n| n.node_type_str(&graph.interner) == "Function" && title_is(n, "foo"))
+            .and_then(|n| n.get_property_value("signature"))
+            .and_then(|v| v.as_string())
+            .unwrap();
+        assert!(
+            sig.contains('b'),
+            "newest-wins signature (a, b), got {sig:?}"
+        );
+    }
+
+    #[test]
+    fn single_rev_matches_a1_shape_plus_rev_tags() {
+        let (tmp, [_s1, _s2, s3]) = fixture();
+        let revs = vec![s3.clone()];
+        let merged = build(tmp.path(), &revs);
+
+        // Same entity shape as a plain rev build: foo + bar present, gone absent.
+        assert_eq!(fn_revs(&merged, "foo"), vec![s3.clone()]);
+        assert_eq!(fn_revs(&merged, "bar"), vec![s3.clone()]);
+        let names: Vec<String> = merged
+            .graph
+            .node_indices()
+            .filter_map(|i| merged.graph.node_weight(i))
+            .filter(|n| n.node_type_str(&merged.interner) == "Function")
+            .map(|n| n.title().into_owned())
+            .filter_map(|v| v.as_string())
+            .collect();
+        assert!(names.contains(&"foo".to_string()) && names.contains(&"bar".to_string()));
+        assert!(!names.contains(&"gone".to_string()), "gone not in rev3");
+
+        // Single-rev edge is tagged with just that rev.
+        assert_eq!(calls_edge_revs(&merged, "foo", "bar"), vec![s3]);
+    }
+
+    #[test]
+    fn merged_graph_revs_survive_save_reload() {
+        let (tmp, [s1, s2, s3]) = fixture();
+        let revs = vec![s1.clone(), s2.clone(), s3.clone()];
+        let out = tmp.path().join("merged.kgl");
+        let built = build_code_tree_revs(
+            tmp.path(),
+            &revs,
+            Some(tmp.path()),
+            false,
+            false,
+            Some(&out),
+            None,
+            false,
+        )
+        .expect("build+save");
+        // Sanity on the in-memory graph before reload.
+        assert_eq!(fn_revs(&built, "bar"), vec![s2.clone(), s3.clone()]);
+
+        let reloaded = crate::graph::io::file::load_file(out.to_str().unwrap()).expect("reload");
+        assert_eq!(
+            fn_revs(&reloaded, "foo"),
+            vec![s1.clone(), s2.clone(), s3.clone()]
+        );
+        assert_eq!(fn_revs(&reloaded, "bar"), vec![s2.clone(), s3.clone()]);
+        // rev_fp list persists too.
+        assert_eq!(list_prop(&reloaded, "Function", "gone", "revs"), vec![s1]);
+        // Edge revs survive the round-trip (EdgeData property vector).
+        assert_eq!(calls_edge_revs(&reloaded, "foo", "bar"), vec![s2, s3]);
+    }
 }

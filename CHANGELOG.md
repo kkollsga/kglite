@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-rev code graphs — `kglite::api::code_tree::build_code_tree_revs`
+  (Rust api).** Merge N git revisions of a codebase into one graph via shared
+  identity + rev-sets: one node per entity (keyed by `(node_type, id)`, aligned
+  across revs by a fixed snapshot basename), carrying native list props
+  `revs: [str]` (revisions it appears in) + `rev_fp: [int]` (per-rev fingerprint
+  hash, so a signature/value change is detectable between any two revs), and one
+  `revs: [str]` on every edge. Unchanged entities are stored once, so the graph
+  is ≈ base + deltas; ordinary property columns report the newest rev an entity
+  appears in, and unscoped queries span all revs (scope with
+  `WHERE '<rev>' IN n.revs`). Each rev is archived-and-built independently
+  (reusing `archive_and_build`) then folded oldest→newest through `extend_graph`,
+  at ≈ two graphs' peak memory. Rust-only for now — the Python
+  `code_tree.build(revs=[…])` surface and the `CALL rev_diff` procedure follow.
 - **`code_tree.build(rev=…)` — build a code graph from a git revision.** Pass a
   tag, branch, or SHA as `rev` to `kglite.code_tree.build` /
   `kglite.build_code_tree` to graph a codebase as it existed at that revision.

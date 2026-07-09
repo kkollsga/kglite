@@ -388,6 +388,11 @@ pub mod api {
     pub mod code_tree {
         pub use crate::code_tree::builder::run_with_options as build_code_tree;
         pub use crate::code_tree::parsers::language_for_path;
+        /// Multi-rev merge — one graph spanning N git revisions via shared
+        /// identity + `revs` / `rev_fp` list props (B.2b). The wheel's
+        /// `code_tree.build(revs=[...])` and the MCP server's rev-aware
+        /// activation hook are its two bindings.
+        pub use crate::code_tree::rev::build_code_tree_revs;
         pub use crate::graph::handle::{resolve_code_entity, source_location, CODE_TYPES};
         pub use crate::graph::{SourceLocation, SourceLookup};
     }
