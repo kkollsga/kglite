@@ -221,3 +221,92 @@ def test_single_item_revs_list_works(repo3: Path) -> None:
     names = {r["n"] for r in g.cypher("MATCH (f:Function) RETURN f.name AS n")}
     assert names == {"foo", "gone"}
     assert _revs_of(g, "foo") == ["v1"]
+
+
+# ─── B.2d — CALL rev_diff procedure ─────────────────────────────────────────
+
+
+def _rev_diff(g, frm: str, to: str, **extra) -> dict[str, set[str]]:
+    """Run rev_diff and bucket qualified_names by bucket. CALL takes an inline
+    map literal (not a $param), so build the map text."""
+    pairs = [f"from: '{frm}'", f"to: '{to}'"] + [f"{k}: '{v}'" for k, v in extra.items()]
+    rows = g.cypher(
+        "CALL rev_diff({" + ", ".join(pairs) + "}) YIELD bucket, qualified_name RETURN bucket, qualified_name"
+    )
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        out.setdefault(r["bucket"], set()).add(r["qualified_name"])
+    return out
+
+
+def test_rev_diff_added_and_removed_forward(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    d = _rev_diff(g, "v1", "v2")
+    # bar added in v2; gone removed after v1.
+    assert any(qn.endswith("bar") for qn in d.get("added", set())), d
+    assert any(qn.endswith("gone") for qn in d.get("removed", set())), d
+
+
+def test_rev_diff_direction_reverses_added_removed(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    d = _rev_diff(g, "v2", "v1")
+    # Reversing from/to flips added<->removed.
+    assert any(qn.endswith("gone") for qn in d.get("added", set())), d
+    assert any(qn.endswith("bar") for qn in d.get("removed", set())), d
+
+
+def test_rev_diff_changed_via_fingerprint(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    # foo's signature widened v2->v3 → changed; body-only v1->v2 is NOT changed.
+    d23 = _rev_diff(g, "v2", "v3")
+    assert any(qn.endswith("foo") for qn in d23.get("changed", set())), d23
+    d12 = _rev_diff(g, "v1", "v2")
+    assert not any(qn.endswith("foo") for qn in d12.get("changed", set())), d12
+
+
+def test_rev_diff_full_columns(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    rows = g.cypher(
+        "CALL rev_diff({from: 'v2', to: 'v3'}) "
+        "YIELD bucket, type, qualified_name, name, file, line "
+        "WHERE name = 'foo' RETURN bucket, type, name, file, line"
+    )
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["bucket"] == "changed"
+    assert r["type"] == "Function"
+    assert r["name"] == "foo"
+    assert r["file"] == "mod.py"
+    assert isinstance(r["line"], int)
+
+
+def test_rev_diff_node_type_scoping(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    # Scoping to Function only still finds the function-level changes.
+    rows = g.cypher(
+        "CALL rev_diff({from: 'v1', to: 'v2', node_type: 'Function'}) YIELD bucket, type RETURN DISTINCT type"
+    )
+    types = {r["type"] for r in rows}
+    assert types == {"Function"}
+
+
+def test_rev_diff_unknown_rev_errors(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2"])
+    with pytest.raises(Exception) as exc:
+        g.cypher("CALL rev_diff({from: 'v1', to: 'nope'}) YIELD bucket RETURN bucket")
+    msg = str(exc.value)
+    assert "nope" in msg
+    assert "v1" in msg and "v2" in msg  # lists available revs
+
+
+def test_rev_diff_not_multirev_errors(repo3: Path) -> None:
+    g = code_tree.build(str(repo3))  # plain working-tree build, no revs props
+    with pytest.raises(Exception) as exc:
+        g.cypher("CALL rev_diff({from: 'v1', to: 'v2'}) YIELD bucket RETURN bucket")
+    assert "not a multi-rev graph" in str(exc.value).lower()
+
+
+def test_rev_diff_steered_in_describe(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    # The multi-rev provenance teaches CALL rev_diff for deltas.
+    assert "rev_diff" in g.describe()

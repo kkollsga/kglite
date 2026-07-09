@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CALL rev_diff({from, to})` — Cypher delta over a multi-rev code graph.**
+  Reports the code entities `added`, `removed`, or `changed` between two revs of
+  a graph built by `code_tree.build(revs=[…])`, by anti-joining the per-node
+  `revs` list and comparing the aligned `rev_fp` fingerprints — no source
+  re-parse. Yields `bucket, type, qualified_name, name, file, line`; optional
+  `{node_type}` scoping. Errors clearly on a non-multi-rev graph or an unknown
+  rev (listing the available revs). E.g.
+  `CALL rev_diff({from: 'v1', to: 'HEAD'}) YIELD bucket, qualified_name RETURN *`.
 - **`code_tree.build(revs=[…])` — multi-rev code graphs from Python.** Pass a
   list of git revspecs (oldest → newest, mutually exclusive with `rev=`) to
   `kglite.code_tree.build` / `kglite.build_code_tree` to merge N revisions into

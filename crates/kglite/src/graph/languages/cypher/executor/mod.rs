@@ -1348,6 +1348,7 @@ pub mod match_clause;
 pub mod refresh_stats;
 pub mod regex_cache;
 pub mod return_clause;
+pub mod rev_procedures;
 pub mod rule_procedures;
 pub mod scalar_functions;
 pub mod shortest_path;

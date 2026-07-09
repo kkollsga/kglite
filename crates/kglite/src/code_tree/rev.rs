@@ -608,7 +608,9 @@ fn stamp_rev_provenance_multi(
          report the NEWEST rev ('{newest}') an entity appears in. UNSCOPED queries \
          span ALL revs (e.g. `MATCH (n:Function) RETURN count(n)` over-counts) — \
          scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE '{newest}' IN \
-         n.revs`).",
+         n.revs`). For deltas between two revs use \
+         `CALL rev_diff({{from: '<rev>', to: '<rev>'}}) YIELD bucket, type, \
+         qualified_name, name, file, line` (added / removed / changed).",
         repo_root.display(),
         revs.len(),
         labels.join(", "),
