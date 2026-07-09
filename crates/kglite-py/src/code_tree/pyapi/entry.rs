@@ -23,8 +23,16 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
 /// nodes and link them to the code they describe
 /// (``(:Doc)-[:MENTIONS]->(:Function|:Class|…)`` and
 /// ``(:Doc)-[:DOCUMENTS]->(:Doc|:File)``). Off by default (code-only graph).
+///
+/// Pass ``rev`` (a git tag / branch / SHA) to build the codebase as it existed
+/// at that revision instead of the working tree. The revision's tracked files
+/// are materialized into a tempdir via ``git archive`` — ``HEAD`` and the
+/// working tree are never touched, and uncommitted changes are excluded. The
+/// git root is auto-resolved from ``src_dir`` (override with ``repo_root``);
+/// a bad rev or non-git directory raises a clear error. The built graph's
+/// ``describe()`` records the revision it represents.
 #[pyfunction]
-#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None, include_docs=false))]
+#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None, include_docs=false, rev=None, repo_root=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     py: Python<'_>,
@@ -34,16 +42,28 @@ pub fn build(
     include_tests: bool,
     max_loc_per_file: Option<usize>,
     include_docs: bool,
+    rev: Option<String>,
+    repo_root: Option<PathBuf>,
 ) -> PyResult<KnowledgeGraph> {
-    py.detach(|| {
-        crate::code_tree::builder::run_with_options(
+    py.detach(|| match rev {
+        Some(rev) => crate::code_tree::rev::archive_and_build(
+            &src_dir,
+            &rev,
+            repo_root.as_deref(),
+            verbose,
+            include_tests,
+            save_to.as_deref(),
+            max_loc_per_file,
+            include_docs,
+        ),
+        None => crate::code_tree::builder::run_with_options(
             &src_dir,
             verbose,
             include_tests,
             save_to.as_deref(),
             max_loc_per_file,
             include_docs,
-        )
+        ),
     })
     .map(KnowledgeGraph::from_arc)
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`code_tree.build(rev=…)` — build a code graph from a git revision.** Pass a
+  tag, branch, or SHA as `rev` to `kglite.code_tree.build` /
+  `kglite.build_code_tree` to graph a codebase as it existed at that revision.
+  The revision's tracked files are materialized via `git archive` into a
+  tempdir and built with the normal pipeline — `HEAD` and the working tree are
+  never touched, uncommitted changes are excluded, and `.gitignore`d/untracked
+  files never appear. The git root is auto-resolved from the given path
+  (override with `repo_root=`); a bad rev or non-git directory raises a clear
+  error. The built graph's `describe()` records which revision it represents.
+  Composes into a "what changed between two revs" workflow. `rev=None`
+  (default) is exactly the previous working-tree behavior.
+
 ### Fixed
 
 - **C/C++ `#define` constants are now captured, including ALL-CAPS names and

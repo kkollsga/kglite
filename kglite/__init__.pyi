@@ -567,8 +567,11 @@ def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
     ``kglite._kglite_code_tree`` module, which may change without notice.
 
     Pass ``include_docs=True`` to also ingest markdown as ``:Doc`` nodes linked
-    to the code they mention. See ``kglite.code_tree.build`` for the full
-    keyword set.
+    to the code they mention. Pass ``rev=<tag|branch|sha>`` to build the codebase
+    as it existed at that git revision (via ``git archive`` into a tempdir — the
+    working tree is untouched and uncommitted changes are excluded); the built
+    graph's ``describe()`` records the revision. See ``kglite.code_tree.build``
+    for the full keyword set.
     """
     ...
 

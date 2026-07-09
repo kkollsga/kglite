@@ -38,3 +38,6 @@ pub mod manifest;
 pub mod models;
 pub mod parsers;
 pub mod repo;
+/// Build a code graph from a git revision (git-archive → tempdir → build),
+/// without disturbing the working tree. Exposed as `code_tree.build(rev=…)`.
+pub mod rev;
