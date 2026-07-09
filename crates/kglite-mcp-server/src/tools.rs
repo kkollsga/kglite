@@ -525,7 +525,7 @@ impl GraphState {
         // through ExecuteOptions, not by rewriting the template text).
         match run_cypher_inner(&active.kg, template, params, self.value_codecs(), csv_http) {
             Ok(body) => body,
-            Err(e) => format!("Cypher error: {e}"),
+            Err(e) => cypher_tool_error(&e),
         }
     }
 }
@@ -538,6 +538,19 @@ impl GraphState {
 /// which any REST/gRPC binding can call directly.
 fn json_to_value(v: &serde_json::Value) -> Value {
     kglite::api::param::json_value_to_kglite_value(v)
+}
+
+/// Attach the tool-level `Cypher error:` prefix to a surfaced error — unless
+/// the message already self-identifies as a Cypher error (`KgError`'s Display
+/// emits `Cypher execution error: …` / `Cypher syntax error: …`). Prefixing
+/// those again stutters (`Cypher error: Cypher execution error: …`); this keeps
+/// every surfaced Cypher error reading once, whichever layer produced it.
+fn cypher_tool_error(e: &str) -> String {
+    if e.starts_with("Cypher ") {
+        e.to_string()
+    } else {
+        format!("Cypher error: {e}")
+    }
 }
 
 /// Run a Cypher query against the given KnowledgeGraph snapshot. Picks
@@ -580,8 +593,10 @@ fn run_cypher_inner(
     // extensions.value_codecs: decode query-side literals bound to a codec'd
     // property + encode result columns. None/empty → no transform.
     opts.value_codecs = value_codecs;
-    let outcome = kglite::api::session::execute_read(kg.dir(), query, &opts)
-        .map_err(|e| format!("Cypher execution error: {e}"))?;
+    // `KgError`'s Display already prefixes `Cypher execution error: …`; take it
+    // verbatim (a second `Cypher execution error:` here is the reported stutter).
+    let outcome =
+        kglite::api::session::execute_read(kg.dir(), query, &opts).map_err(|e| e.to_string())?;
     render_cypher_output(&outcome.result, output_csv, csv_http)
 }
 
@@ -863,7 +878,7 @@ pub fn register(
                     codecs,
                     csv.as_deref(),
                 )
-                .unwrap_or_else(|e| format!("Cypher error: {e}"))
+                .unwrap_or_else(|e| cypher_tool_error(&e))
             })
             .unwrap_or_else(|| NO_GRAPH.to_string())
         } else {
@@ -1009,7 +1024,7 @@ fn run_cypher_tool(
         // graph (agents often go straight to cypher_query without a prior
         // graph_overview, where a stale active root would otherwise hide).
         Ok(s) => format!("{s}{}", graph.identity_footer()),
-        Err(e) => format!("Cypher error: {e}"),
+        Err(e) => cypher_tool_error(&e),
     }
 }
 
@@ -1054,8 +1069,10 @@ fn run_cypher_write(
     opts.write_scope = scope.as_ref();
     opts.git_sha = git_sha;
     opts.modified_by = modified_by;
-    let outcome = kglite::api::session::execute_mut(dir, query, &opts)
-        .map_err(|e| format!("Cypher execution error: {e}"))?;
+    // `KgError`'s Display already prefixes `Cypher execution error: …` — pass it
+    // through verbatim rather than re-prefixing (which produced the triple wrap).
+    let outcome =
+        kglite::api::session::execute_mut(dir, query, &opts).map_err(|e| e.to_string())?;
     // A mutation with no RETURN yields no rows — acknowledge with a write
     // summary (nodes/edges/props changed) instead of the bare "No results."
     // that a *read* matching nothing returns, so an agent can tell a
@@ -1349,6 +1366,27 @@ mod tests {
             "no multi-rev steer for single-rev: {summary}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cypher_tool_error_reads_once() {
+        // A KgError-derived message already self-identifies (`Cypher execution
+        // error: …` / `Cypher syntax error: …`); the tool prefix must not stutter
+        // it — the reported triple `Cypher error: Cypher execution error: Cypher
+        // execution error: …` collapses to the engine message read once.
+        assert_eq!(
+            cypher_tool_error("Cypher execution error: CALL rev_diff: boom"),
+            "Cypher execution error: CALL rev_diff: boom"
+        );
+        assert_eq!(
+            cypher_tool_error("Cypher syntax error: bad token"),
+            "Cypher syntax error: bad token"
+        );
+        // A message that does NOT self-identify still gets the single tool prefix.
+        assert_eq!(
+            cypher_tool_error("mutation Cypher is not allowed"),
+            "Cypher error: mutation Cypher is not allowed"
+        );
     }
 
     fn tmp_kgl(tag: &str) -> std::path::PathBuf {
