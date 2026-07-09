@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.13] — 2026-07-09 — multi-rev code graphs + ingestion integrity
+
 ### Added
 
 - **Multi-rev code graphs from the MCP server — `set_root_dir(revs=…)` /
