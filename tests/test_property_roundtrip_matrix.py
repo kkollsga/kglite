@@ -41,13 +41,17 @@ Reachable silent-degradation cells that remain (each a strict xfail below):
   ``ExprPropertyAccess`` has no ``Value::Map`` arm
   (`executor/expression.rs`). Documented as Fact #2 in
   ``dev-docs/plans/rev-aware-code-graphs.md`` (B.2 design).
-* **`add_connections` without an explicit ``columns=`` whitelist silently
-  drops every non-id/title column** (lists *and* scalars), asymmetric with
-  ``add_nodes`` which keeps them. This is the reachable form of the reported
-  "add_connections drops list edge columns" bug — see
-  ``test_add_connections_without_columns_silently_drops_list``. When the list
-  column *is* whitelisted, it round-trips correctly on this build (companion
-  passing test).
+Loud-not-silent (acceptable half of the contract):
+
+* **`add_connections` without an explicit ``columns=`` whitelist drops every
+  non-id/title column** (lists *and* scalars), asymmetric with ``add_nodes``
+  which keeps them. This now emits a ``UserWarning`` naming the dropped columns
+  (once per call) — the drop is no longer silent, so it satisfies the "loud at
+  write time" half of the contract. See
+  ``test_add_connections_without_columns_warns_on_dropped_columns``. When the
+  column *is* whitelisted it round-trips (companion passing test). Changing the
+  whitelist *semantics* (keeping columns by default) is a separate behaviour
+  change, deliberately out of scope.
 
 Notes on the two "known" bugs this suite was seeded from:
 
@@ -81,10 +85,6 @@ R_CHAINED_DOT_MAP = (
     "silent-loss: chained-dot n.m.k returns None (no Value::Map arm in "
     "ExprPropertyAccess, executor/expression.rs); bracket n.m['k'] works — "
     "Fact #2, dev-docs/plans/rev-aware-code-graphs.md"
-)
-R_ADD_CONN_WHITELIST = (
-    "silent-loss: add_connections without columns= drops every non-id/title "
-    "column (asymmetric with add_nodes) — maintain.rs enforce_columns=true"
 )
 
 # ── Value kinds ─────────────────────────────────────────────────────────────
@@ -391,22 +391,27 @@ def test_map_survives_kgl_all_storage_modes(tmp_path):
         assert got == {"k": "v", "n": 7}, f"{mode}: map lost on .kgl reload → {got!r}"
 
 
-# ── Known bug: add_connections column-whitelist silently drops props ────────
-@pytest.mark.xfail(strict=True, reason=R_ADD_CONN_WHITELIST)
-def test_add_connections_without_columns_silently_drops_list():
-    """add_connections with no ``columns=`` drops a list edge column to None.
+# ── add_connections column-whitelist now warns instead of dropping silently ──
+def test_add_connections_without_columns_warns_on_dropped_columns():
+    """add_connections with no ``columns=`` drops non-id/title edge columns —
+    now **loudly**, via a ``UserWarning`` naming them, not silently.
 
-    Asymmetric with ``add_nodes``, which keeps the same column. This is the
-    reachable form of the reported "add_connections drops list edge columns"
-    bug. Strict-xfail: the write succeeds but the value reads back None.
+    Per this suite's contract a write must either round-trip the value *or* be
+    loud at write time. The whitelist still drops the column (changing the
+    whitelist semantics is a separate behaviour change, out of scope), but the
+    warning satisfies the "loud" half — so this is a passing test, not a
+    strict-xfail. Asymmetry with ``add_nodes`` (which keeps the column) is
+    documented by the companion tests below.
     """
     kg = kglite.KnowledgeGraph()
     kg.cypher("CREATE (:N {id:1}) CREATE (:N {id:2})")
     df = pd.DataFrame({"s": [1], "t": [2]})
     df["tags"] = _one_col_series(["a", "b"])
-    kg.add_connections(df, "R", "N", "s", "N", "t")  # no columns= whitelist
+    with pytest.warns(UserWarning, match="tags"):
+        kg.add_connections(df, "R", "N", "s", "N", "t")  # no columns= whitelist
     got = kg.cypher("MATCH ()-[r:R]->() RETURN r.tags AS tags").to_dicts()[0]["tags"]
-    assert got == ["a", "b"], f"list edge column silently dropped: {got!r}"
+    # Still dropped by the whitelist — but the warning above made it visible.
+    assert got is None
 
 
 def test_add_connections_with_columns_preserves_list():

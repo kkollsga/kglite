@@ -69,6 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`add_connections` warns when it drops columns absent from `columns=`.**
+  Unlike `add_nodes`, `add_connections` keeps only id/title columns unless an
+  explicit `columns=` whitelist is given — so a plain
+  `add_connections(df, ...)` with edge-property columns silently dropped them.
+  It now emits a `UserWarning` naming the dropped columns (once per call), so
+  the asymmetry is visible. The whitelist behaviour itself is unchanged: pass
+  `columns=[...]` to keep the columns.
 - **`from_records` keeps dict field values as maps.** A JSON object in a
   `from_records` record (e.g. `{"id": 1, "meta": {"k": 1}}`) was silently
   dropped to `None`: `json_to_value` built a `Value::Map`, but the records→

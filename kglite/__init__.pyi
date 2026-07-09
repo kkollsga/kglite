@@ -1254,6 +1254,11 @@ class KnowledgeGraph:
             source_title_field: Optional title column for source nodes.
             target_title_field: Optional title column for target nodes.
             columns: Whitelist of property columns to include (data mode only).
+                Unlike :meth:`add_nodes`, edge ingestion keeps **only** id/title
+                columns unless this whitelist is given — so any other edge
+                property column is dropped when ``columns`` is omitted. That drop
+                now emits a ``UserWarning`` naming the dropped columns; pass
+                ``columns=[...]`` to keep them.
             skip_columns: Columns to exclude (data mode only).
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``. ``'sum'`` adds numeric edge properties

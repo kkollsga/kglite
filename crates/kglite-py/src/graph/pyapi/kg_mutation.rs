@@ -83,6 +83,45 @@ fn build_connection_df_from_pandas(
         Some(true),
     )?;
 
+    // Footgun mitigation: with no explicit `columns=`, the whitelist keeps only
+    // id/title (+ column_types) columns and silently drops every other edge
+    // property — asymmetric with `add_nodes`, which keeps them. Warn once,
+    // naming the dropped columns, so the drop is visible. Columns the caller
+    // explicitly listed in `skip_columns` are intentional and not reported.
+    if columns.is_none() {
+        let skip_set: Vec<String> = match skip_columns {
+            Some(list) => list
+                .iter()
+                .map(|item| item.extract::<String>())
+                .collect::<PyResult<_>>()?,
+            None => Vec::new(),
+        };
+        let dropped: Vec<&str> = all_columns
+            .iter()
+            .filter(|c| !column_list.contains(c) && !skip_set.contains(c))
+            .map(|c| c.as_str())
+            .collect();
+        if !dropped.is_empty() {
+            let msg = format!(
+                "add_connections: {} edge column(s) dropped because no columns= \
+                 whitelist was given: [{}]. Pass columns=[...] to keep them \
+                 (unlike add_nodes, add_connections keeps only id/title columns \
+                 by default).",
+                dropped.len(),
+                dropped.join(", "),
+            );
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+            let _ = PyErr::warn(
+                data.py(),
+                data.py()
+                    .get_type::<pyo3::exceptions::PyUserWarning>()
+                    .as_any(),
+                cmsg.as_c_str(),
+                1,
+            );
+        }
+    }
+
     // Parse temporal column_types (validFrom/validTo → datetime)
     let py = data.py();
     let (temporal_cfg, cleaned_types) = if let Some(type_dict) = column_types {
