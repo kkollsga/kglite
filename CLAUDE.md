@@ -142,6 +142,33 @@ inbox (e.g. `../mcp-servers/inbox/`, `../mcp-methods/inbox/`) if it carries an
 *actionable* task for them. If there's nothing for them to do, don't file it —
 their `unread/` should hold only things that need their action.
 
+## Outward-facing posts — never publish on the user's behalf without explicit approval
+
+**Never post anything publicly under the user's identity — GitHub issues,
+issue/PR comments on external repos, discussions, forum posts, emails,
+anything that leaves this machine as them — without an explicit,
+in-the-moment approval whose object is the posting itself.**
+
+- **Show the final text first.** Approval means the user saw the actual
+  content that will be posted (or a faithful draft with only mechanical
+  edits) and said "post it" (or equivalent) about *that* text.
+- **Indirect consent does not count.** A plan approval, a skill invocation,
+  a checklist item, or a menu-option selection whose description merely
+  mentions filing/posting is NOT posting approval — the user must knowingly
+  authorize the publication step itself.
+- **Approval is per-post and one-shot.** A green light for one issue does
+  not cover a second issue, a follow-up comment, or an edit later — each
+  outward-facing post gets its own ask. (Replying in a thread the user just
+  discussed and told you to answer — e.g. "provide the crash report" after
+  reviewing the draft — is in-the-moment approval for that reply.)
+- Routine dev flow in this project's own repo (branch pushes, PR
+  descriptions/checklists on our own PRs) is governed by the push rules
+  below, not this section. Local inbox notes to sibling projects are local
+  files, not posts.
+
+When in doubt, draft it, show it, and ask. The cost of one extra prompt is
+trivial; an unauthorized public post under the user's name is not.
+
 ## Commits & releases
 
 Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
