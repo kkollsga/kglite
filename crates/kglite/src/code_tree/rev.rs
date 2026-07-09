@@ -618,22 +618,38 @@ fn stamp_rev_provenance_multi(
         .iter()
         .map(|(rev, sha)| format!("{} ({})", rev, &sha[..sha.len().min(12)]))
         .collect();
-    let newest = revs.last().map(|(rev, _)| rev.as_str()).unwrap_or("");
-    let text = format!(
-        "Multi-rev code graph of {}, spanning {} revision(s) (oldest → newest): \
-         {}. One node per entity across revs; every node carries `revs: [str]` \
-         (revs it appears in) + `rev_fp: [int]` (per-rev shape hash), every edge \
-         carries `revs: [str]`. Ordinary properties (signature, value_preview, …) \
-         report the NEWEST rev ('{newest}') an entity appears in. UNSCOPED queries \
-         span ALL revs (e.g. `MATCH (n:Function) RETURN count(n)` over-counts) — \
-         scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE '{newest}' IN \
-         n.revs`). For deltas between two revs use \
-         `CALL rev_diff({{from: '<rev>', to: '<rev>'}}) YIELD bucket, type, \
-         qualified_name, name, file, line` (added / removed / changed).",
-        repo_root.display(),
-        revs.len(),
-        labels.join(", "),
-    );
+    // A single-rev graph is a point-in-time snapshot: nothing over-counts and
+    // there is no second rev to diff, so it reads plainly — no scoping/over-count
+    // warning, no `CALL rev_diff` (which needs two revs). Only ≥2 revs get the
+    // full multi-rev steering. It still carries `revs`/`rev_fp` list props.
+    let text = if revs.len() == 1 {
+        let (rev, sha) = &revs[0];
+        format!(
+            "Code graph of {} at revision '{}' ({}). Reflects committed content at \
+             that revision, not the current working tree. Every entity carries \
+             `revs: [str]` (this single rev) + `rev_fp: [int]` (per-rev shape hash).",
+            repo_root.display(),
+            rev,
+            &sha[..sha.len().min(12)],
+        )
+    } else {
+        let newest = revs.last().map(|(rev, _)| rev.as_str()).unwrap_or("");
+        format!(
+            "Multi-rev code graph of {}, spanning {} revisions (oldest → newest): \
+             {}. One node per entity across revs; every node carries `revs: [str]` \
+             (revs it appears in) + `rev_fp: [int]` (per-rev shape hash), every edge \
+             carries `revs: [str]`. Ordinary properties (signature, value_preview, …) \
+             report the NEWEST rev ('{newest}') an entity appears in. UNSCOPED queries \
+             span ALL revs (e.g. `MATCH (n:Function) RETURN count(n)` over-counts) — \
+             scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE '{newest}' IN \
+             n.revs`). For deltas between two revs use \
+             `CALL rev_diff({{from: '<rev>', to: '<rev>'}}) YIELD bucket, type, \
+             qualified_name, name, file, line` (added / removed / changed).",
+            repo_root.display(),
+            revs.len(),
+            labels.join(", "),
+        )
+    };
     let g = Arc::get_mut(&mut graph)
         .ok_or_else(|| "graph not uniquely owned when stamping multi-rev provenance".to_string())?;
     g.set_instructions(&text, None);

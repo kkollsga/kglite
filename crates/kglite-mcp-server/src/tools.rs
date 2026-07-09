@@ -382,20 +382,28 @@ impl GraphState {
             top.join(", "),
             overview.edge_count,
         );
-        // Multi-rev steer: name the loaded revs and teach the scoping idiom so
-        // an agent doesn't over-count across all revs on an unscoped query.
-        // Mirrors the graph-over-grep steering style and the provenance
-        // instructions `build_code_tree_revs` stamps into describe().
+        // Rev steer. A single-rev graph is just a point-in-time snapshot —
+        // nothing over-counts and there is no delta to diff, so it reads plainly.
+        // A multi-rev graph names the loaded revs and teaches the scoping idiom
+        // (unscoped queries span ALL revs) + `CALL rev_diff` for deltas. Mirrors
+        // the provenance instructions `build_code_tree_revs` stamps into describe().
         if let Some(revs) = active.revs.as_ref().filter(|r| !r.is_empty()) {
-            let newest = revs.last().map(String::as_str).unwrap_or("");
-            msg.push_str(&format!(
-                " Multi-rev graph spanning {}: {}. UNSCOPED queries span ALL revs (they \
-                 over-count) — scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE \
-                 '{newest}' IN n.revs`); for deltas use `CALL rev_diff({{from: '<rev>', \
-                 to: '<rev>'}})`.",
-                revs.len(),
-                revs.join(", "),
-            ));
+            if revs.len() == 1 {
+                msg.push_str(&format!(
+                    " Code graph at revision '{}' (a committed snapshot, not the working tree).",
+                    revs[0],
+                ));
+            } else {
+                let newest = revs.last().map(String::as_str).unwrap_or("");
+                msg.push_str(&format!(
+                    " Multi-rev graph spanning {} revisions: {}. UNSCOPED queries span ALL revs \
+                     (they over-count) — scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE \
+                     '{newest}' IN n.revs`); for deltas use `CALL rev_diff({{from: '<rev>', \
+                     to: '<rev>'}})`.",
+                    revs.len(),
+                    revs.join(", "),
+                ));
+            }
         }
         Some(msg)
     }
@@ -1387,6 +1395,39 @@ mod tests {
             cypher_tool_error("mutation Cypher is not allowed"),
             "Cypher error: mutation Cypher is not allowed"
         );
+    }
+
+    #[test]
+    fn single_rev_via_revs_reads_as_snapshot_and_dedups() {
+        let Some((dir, [_s1, s2])) = git_two_commit_repo("singlerev") else {
+            return; // git unavailable
+        };
+        let gs = GraphState::new(false);
+        // Duplicate labels for one commit → deduped to a single rev (defect B).
+        gs.build_code_tree_revs(&dir, &[s2.clone(), s2.clone()])
+            .expect("single-rev-via-revs build");
+        // Header carries the rev once, not "s2,s2".
+        let attrs = gs.with_active(|a| a.identity_attrs());
+        assert!(
+            attrs.contains(&format!("revs=\"{s2}\"")) && !attrs.contains(&format!("{s2},{s2}")),
+            "duplicate labels collapse to one in the header: {attrs}"
+        );
+        // Summary reads as a plain snapshot: no over-count warning, no rev_diff,
+        // and NOT "Multi-rev … spanning 1" (defect E).
+        let summary = gs.activation_summary().expect("summary");
+        assert!(
+            !summary.contains("Multi-rev graph"),
+            "a single rev is not a multi-rev graph: {summary}"
+        );
+        assert!(
+            !summary.contains("over-count") && !summary.contains("rev_diff"),
+            "a single rev has nothing to over-count or diff: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("revision '{s2}'")),
+            "reads as a committed snapshot at the rev: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmp_kgl(tag: &str) -> std::path::PathBuf {

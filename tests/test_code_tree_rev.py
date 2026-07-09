@@ -230,6 +230,19 @@ def test_duplicate_revs_labels_deduped(repo3: Path) -> None:
     assert _revs_of(g, "foo") == ["v1"]
 
 
+def test_single_item_revs_reads_as_snapshot(repo3: Path) -> None:
+    # A 1-element revs list is a point-in-time snapshot: the provenance reads
+    # plainly and must NOT claim to be multi-rev, warn about over-counting, or
+    # teach CALL rev_diff (which needs two revs to be meaningful).
+    g = code_tree.build(str(repo3), revs=["v1"])
+    desc = g.describe()
+    assert "v1" in desc
+    assert "revision" in desc.lower()
+    assert "Multi-rev" not in desc
+    assert "over-count" not in desc
+    assert "rev_diff" not in desc
+
+
 # ─── B.2d — CALL rev_diff procedure ─────────────────────────────────────────
 
 

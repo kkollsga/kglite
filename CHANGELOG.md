@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Multi-rev code-graph builds are now deterministic and idempotent.** Inline
+  `<script>` blocks in HTML files were sub-parsed through a temp file whose path
+  (`{pid}-{per-file-counter}`) collided whenever two HTML files' first scripts
+  parsed concurrently (files parse in parallel), so the two threads clobbered
+  each other's `block.js` and the extracted function set — hence
+  qualified_names/ids — varied between builds. Merging the identical tree twice
+  (e.g. `revs=[<HEAD-sha>, "HEAD"]`) could therefore mint phantom entities and
+  inject spurious `added`/`removed` noise into `CALL rev_diff`. Each inline
+  script now sub-parses in its own unique temp dir, so a rev built twice yields
+  a byte-identical entity set and re-folding an unchanged tree only appends the
+  rev label to existing nodes.
+- **Duplicate `revs` labels are collapsed** (order-preserving, first occurrence
+  wins) in `build_code_tree_revs`, so `revs=["HEAD", "HEAD"]` no longer folds
+  the tree twice or leaves nodes carrying `revs: ["HEAD", "HEAD"]`. The MCP
+  activation banner/header reflect the deduped set.
+- **`graph_overview` / `properties()` no longer present sampled property stats
+  as exhaustive.** Types at or below ~200k nodes are now scanned in full so
+  `unique` / `vals` are exact (previously 200-node sampling could report a
+  `unique` count and value list that silently omitted values — acute for the
+  `revs` property agents scope on). When sampling still applies (larger types)
+  the output is marked honestly: `unique="N+"` plus an `approx="true"` attribute
+  in the schema XML, and an `approx` key in the Python `properties()` dict.
+- **Cypher errors from the MCP server no longer stutter their prefix.** A failing
+  query surfaced as `Cypher error: Cypher execution error: Cypher execution
+  error: …` (three wrappers); the redundant re-prefixing is removed so a
+  self-identifying engine error reads once.
+- **Single-rev graphs read as a point-in-time snapshot, not a degenerate
+  multi-rev graph.** Building with a one-element `revs` list (or duplicate labels
+  that dedup to one) no longer prints "Multi-rev graph spanning 1", the
+  unscoped-over-count warning, or `CALL rev_diff` steering (none of which apply
+  to a single rev) in either the graph-embedded provenance or the MCP activation
+  summary.
+
 ## [0.12.13] — 2026-07-09 — multi-rev code graphs + ingestion integrity
 
 ### Added
