@@ -780,7 +780,12 @@ pub fn compute_property_stats(
         unique: 1,
         values: Some(vec![Value::String(node_type.to_string())]),
         sample: None,
+        approx: false, // every node has exactly this type — always exact
     });
+
+    // Whether we scanned only a subset: `unique`/`values` are then observations
+    // over the sample, never a proven exhaustive count.
+    let sampled = sample_count < total_nodes;
 
     // Canonical order for remaining: title, id first, then sorted discovered
     let builtins = ["title", "id"];
@@ -807,6 +812,11 @@ pub fn compute_property_stats(
                 .unwrap_or_else(|| pa.first_type.unwrap_or("unknown").to_string());
 
             let unique = pa.value_set.len();
+            // The distinct-value set is capped at `value_cap`; hitting it means
+            // `unique` is a lower bound (there may be more distinct values we
+            // stopped counting). Either that or a subset scan makes stats approx.
+            let capped = pa.value_cap != usize::MAX && unique >= pa.value_cap;
+            let approx = sampled || capped;
             let non_null = (pa.non_null as f64 * scale_factor).round() as usize;
             let (values, sample) = if max_values > 0 && unique <= max_values && unique > 0 {
                 let mut vals: Vec<Value> = pa.value_set.into_iter().collect();
@@ -837,6 +847,7 @@ pub fn compute_property_stats(
                 unique,
                 values,
                 sample,
+                approx,
             });
         }
     }

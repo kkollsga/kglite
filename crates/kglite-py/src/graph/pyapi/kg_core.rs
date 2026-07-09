@@ -283,14 +283,20 @@ impl KnowledgeGraph {
     /// Return property statistics for a node type.
     #[pyo3(signature = (node_type, max_values=20))]
     fn properties(&self, node_type: &str, max_values: usize) -> PyResult<Py<PyAny>> {
-        // Sample large types for faster response; exact stats for small types
+        // Full scan → exact distinct-value stats for ordinary types; only
+        // Wikidata-scale types sample (and are then flagged `approx`), so a
+        // sampled `unique` is never mistaken for an exact count.
         let count = self
             .inner
             .type_indices
             .get(node_type)
             .map(|v| v.len())
             .unwrap_or(0);
-        let sample = if count > 1000 { Some(500) } else { None };
+        let sample = if count <= introspection::EXACT_PROPERTY_STATS_MAX_NODES {
+            None
+        } else {
+            Some(500)
+        };
         let stats =
             introspection::compute_property_stats(&self.inner, node_type, max_values, sample)
                 .map_err(PyErr::new::<pyo3::exceptions::PyKeyError, _>)?;
@@ -301,6 +307,9 @@ impl KnowledgeGraph {
                 prop_dict.set_item("type", prop.type_string.as_str())?;
                 prop_dict.set_item("non_null", prop.non_null)?;
                 prop_dict.set_item("unique", prop.unique)?;
+                // `approx=True` ⇒ `unique`/`values` are lower bounds (the type
+                // was sampled or the distinct set hit its cap), not exact.
+                prop_dict.set_item("approx", prop.approx)?;
                 if let Some(ref vals) = prop.values {
                     let py_vals = PyList::empty(py);
                     for v in vals {

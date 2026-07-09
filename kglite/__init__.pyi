@@ -2914,8 +2914,13 @@ class KnowledgeGraph:
             Dict mapping property name to stats dict with keys:
                 - ``type``: type string (e.g. ``'str'``, ``'int'``, ``'float'``)
                 - ``non_null``: count of non-null values
-                - ``unique``: count of distinct values
+                - ``unique``: count of distinct values (a lower bound when
+                  ``approx`` is True)
                 - ``values``: (optional) sorted list of values when unique count <= max_values
+                - ``approx``: True when ``unique``/``values`` are not exhaustive —
+                  the type was sampled (only huge, Wikidata-scale types) or the
+                  distinct-value set hit its cap. Types at or below ~200k nodes
+                  are scanned in full and report exact stats (``approx`` False).
 
         Raises:
             KeyError: If node_type does not exist.

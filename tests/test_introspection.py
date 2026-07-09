@@ -183,6 +183,28 @@ class TestProperties:
         assert "values" not in props["city"]  # 2 unique > 1
         assert "values" in props["type"]  # 1 unique <= 1
 
+    def test_exact_stats_for_large_type_not_sampled(self):
+        """Regression: a type below the exact-scan threshold reports EXACT
+        unique/values, never sampled observations presented as exhaustive.
+
+        Before the fix, types over ~1000 nodes were sampled (500 nodes) and the
+        raw sample `unique`/`values` were surfaced as if complete — a rare value
+        could be silently omitted. 5000 nodes with a `bucket` property taking 7
+        distinct values (one of them rare: a single node) must report unique=7
+        with all 7 values, and approx=False.
+        """
+        n = 5000
+        buckets = [f"b{i % 6}" for i in range(n)]
+        buckets[1] = "rare"  # a single-node value at an off-stride index
+        rows = pd.DataFrame({"id": list(range(n)), "name": [f"n{i}" for i in range(n)], "bucket": buckets})
+        g = KnowledgeGraph()
+        g.add_nodes(rows, "Item", "id", "name")
+        props = g.properties("Item")
+        assert props["bucket"]["unique"] == 7
+        assert props["bucket"]["approx"] is False
+        assert "rare" in props["bucket"]["values"]
+        assert set(props["bucket"]["values"]) == {"b0", "b1", "b2", "b3", "b4", "b5", "rare"}
+
 
 # ── neighbors_schema() ──────────────────────────────────────────────────────
 

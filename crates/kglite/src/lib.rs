@@ -317,6 +317,7 @@ pub mod api {
         pub use crate::graph::introspection::{
             compute_type_connectivity, derive_edge_counts_from_triples, schema_overview_to_json,
             ConnectionDetail, ConnectionTypeStats, CypherDetail, FluentDetail, SchemaOverview,
+            EXACT_PROPERTY_STATS_MAX_NODES,
         };
     }
 

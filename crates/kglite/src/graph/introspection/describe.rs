@@ -869,7 +869,19 @@ fn write_type_detail(
                 ));
             }
         }
-    } else if let Ok(stats) = compute_property_stats(graph, node_type, 15, Some(200)) {
+    } else if let Ok(stats) = compute_property_stats(
+        graph,
+        node_type,
+        15,
+        // Full scan → exact distinct-value stats for ordinary types; only
+        // Wikidata-scale types (200k–1M nodes) sample, and those are marked
+        // `approx` so an agent never reads a sampled `unique`/`vals` as complete.
+        if count <= crate::graph::introspection::EXACT_PROPERTY_STATS_MAX_NODES {
+            None
+        } else {
+            Some(200)
+        },
+    ) {
         let filtered: Vec<&PropertyStatInfo> = stats
             .iter()
             .filter(|p| !matches!(p.property_name.as_str(), "type" | "title" | "id"))
@@ -897,12 +909,23 @@ fn write_type_detail(
                 } else {
                     truncate_at
                 };
+                // When stats are approximate (sampled or the distinct set hit
+                // its cap), `unique` is a lower bound — render `N+` and flag
+                // `approx="true"` so any listed `vals` reads as non-exhaustive.
+                let unique_str = if prop.approx {
+                    format!("{}+", prop.unique)
+                } else {
+                    prop.unique.to_string()
+                };
                 let mut attrs = format!(
                     "name=\"{}\" type=\"{}\" unique=\"{}\"",
                     xml_escape(&prop.property_name),
                     xml_escape(&prop.type_string),
-                    prop.unique
+                    unique_str
                 );
+                if prop.approx {
+                    attrs.push_str(" approx=\"true\"");
+                }
                 if graph.has_any_index(node_type, &prop.property_name) {
                     // All string indexes are sorted-array layouts and
                     // support both equality and prefix (STARTS WITH)

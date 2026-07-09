@@ -104,7 +104,18 @@ pub struct PropertyStatInfo {
     /// operator-reported friction where the agent had to guess the value
     /// shape of properties like `file_path` from the name alone.
     pub sample: Option<Value>,
+    /// `true` when `unique` / `values` are NOT exhaustive — the population was
+    /// sampled (only some nodes scanned) or the distinct-value set hit its cap.
+    /// Consumers must present these as lower bounds (`unique="5+"`), never as
+    /// exact counts. `false` means a full scan enumerated every distinct value.
+    pub approx: bool,
 }
+
+/// Node-count ceiling for exact property stats. At or below this, a full scan
+/// enumerates every distinct value cheaply (the value set is capped, so memory
+/// stays bounded); above it, sampling kicks in and stats are marked `approx`.
+/// Sampling exists for Wikidata-scale types, not ordinary code/data graphs.
+pub const EXACT_PROPERTY_STATS_MAX_NODES: usize = 200_000;
 
 /// A single neighbor connection: edge type, connected node type, and count.
 #[derive(Clone)]
