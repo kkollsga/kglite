@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import datetime
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -168,10 +169,16 @@ def _one_col_series(val: object) -> pd.Series:
 
     Used for list/map columns, which must be object-dtype with the collection
     placed per-cell so pandas doesn't try to broaden it into a typed column.
+
+    Built via a numpy object array rather than ``s.iloc[0] = val`` — on pandas
+    3.x the latter *broadcasts* a dict into a ``pd.Series`` cell (label
+    alignment), so a ``{'k': 1}`` value would never reach ingestion as a dict.
+    A numpy object array stores the value verbatim, matching what a real user
+    gets from ``pd.DataFrame({'p': [{'k': 1}]})`` or ``df['p'] = [{'k': 1}]``.
     """
-    s = pd.Series([None], dtype=object)
-    s.iloc[0] = val
-    return s
+    arr = np.empty(1, dtype=object)
+    arr[0] = val
+    return pd.Series(arr)
 
 
 def _prop_series(kind: str, val: object) -> pd.Series:
@@ -280,10 +287,6 @@ def _node_outcome(kind: str, path: str):
         return ("skip", "Point has no Python literal; only creatable via cypher point()")
     if path == "from_records" and kind in _JSON_UNSERIALISABLE:
         return _RAISES_JSON
-    if path == "add_nodes" and kind in ("map", "list_in_dict"):
-        return _XFAIL_DF_MAP
-    if path == "add_nodes" and kind == "datetime":
-        return ("xfail", R_DF_DATETIME_TRUNC)
     if path == "from_records" and kind in ("map", "list_in_dict"):
         return _XFAIL_FR_MAP
     return "ok"
@@ -294,10 +297,6 @@ def _edge_outcome(kind: str, path: str):
         return ("skip", "Point has no Python literal; only creatable via cypher point()")
     if path == "from_records" and kind in _JSON_UNSERIALISABLE:
         return _RAISES_JSON
-    if path == "add_connections" and kind in ("map", "list_in_dict"):
-        return _XFAIL_DF_MAP
-    if path == "add_connections" and kind == "datetime":
-        return ("xfail", R_DF_DATETIME_TRUNC)
     if path == "from_records" and kind in ("map", "list_in_dict"):
         return _XFAIL_FR_MAP
     return "ok"

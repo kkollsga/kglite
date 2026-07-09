@@ -441,9 +441,18 @@ pub enum ColumnType {
     String,
     Boolean,
     DateTime,
+    /// A full date+time column — each cell is a `Value::Timestamp`
+    /// (`NaiveDateTime`). Distinct from `DateTime` (date-only `NaiveDate`) so
+    /// a `datetime64` column carrying a time-of-day round-trips without
+    /// truncation.
+    Timestamp,
     /// A list-valued column — each cell is a `Value::List`. Heterogeneous
     /// inner values (matches `Value::List(Vec<Value>)`), so no inner type tag.
     List,
+    /// A map-valued column — each cell is a `Value::Map`. Lets a pandas
+    /// object-dtype column of dicts (or a JSON-records object field) reach the
+    /// graph as a native `Value::Map` instead of a stringified/None value.
+    Map,
 }
 
 impl fmt::Display for ColumnType {
@@ -455,7 +464,9 @@ impl fmt::Display for ColumnType {
             ColumnType::String => "String",
             ColumnType::Boolean => "Boolean",
             ColumnType::DateTime => "DateTime",
+            ColumnType::Timestamp => "Timestamp",
             ColumnType::List => "List",
+            ColumnType::Map => "Map",
         };
         write!(f, "{}", type_str)
     }
@@ -476,9 +487,14 @@ pub enum ColumnData {
     String(Vec<Option<String>>),
     Boolean(Vec<Option<bool>>),
     DateTime(Vec<Option<NaiveDate>>),
+    /// One `NaiveDateTime` per cell (None = null) — full date+time precision,
+    /// materialised as `Value::Timestamp`.
+    Timestamp(Vec<Option<NaiveDateTime>>),
     /// One `Value::List` payload per cell (None = null). The inner `Vec<Value>`
     /// is the list; values are heterogeneous, mirroring `Value::List`.
     List(Vec<Option<Vec<Value>>>),
+    /// One `Value::Map` payload per cell (None = null / non-map cell).
+    Map(Vec<Option<BTreeMap<String, Value>>>),
 }
 
 #[derive(Debug)]
@@ -496,7 +512,9 @@ impl Column {
             ColumnData::String(vec) => vec.get(row_idx)?.as_ref().map(|s| Value::String(s.clone())),
             ColumnData::Boolean(vec) => vec.get(row_idx)?.map(Value::Boolean),
             ColumnData::DateTime(vec) => vec.get(row_idx)?.map(Value::DateTime),
+            ColumnData::Timestamp(vec) => vec.get(row_idx)?.map(Value::Timestamp),
             ColumnData::List(vec) => vec.get(row_idx)?.as_ref().map(|v| Value::List(v.clone())),
+            ColumnData::Map(vec) => vec.get(row_idx)?.as_ref().map(|m| Value::Map(m.clone())),
         }
     }
 
@@ -508,7 +526,9 @@ impl Column {
             ColumnData::String(vec) => vec.len(),
             ColumnData::Boolean(vec) => vec.len(),
             ColumnData::DateTime(vec) => vec.len(),
+            ColumnData::Timestamp(vec) => vec.len(),
             ColumnData::List(vec) => vec.len(),
+            ColumnData::Map(vec) => vec.len(),
         }
     }
 }
@@ -527,7 +547,9 @@ impl DataFrame {
                     ColumnType::String => ColumnData::String(Vec::new()),
                     ColumnType::Boolean => ColumnData::Boolean(Vec::new()),
                     ColumnType::DateTime => ColumnData::DateTime(Vec::new()),
+                    ColumnType::Timestamp => ColumnData::Timestamp(Vec::new()),
                     ColumnType::List => ColumnData::List(Vec::new()),
+                    ColumnType::Map => ColumnData::Map(Vec::new()),
                 };
                 column_indices.insert(name.clone(), idx);
                 Column {
@@ -603,7 +625,9 @@ impl DataFrame {
             | (ColumnType::String, ColumnData::String(_))
             | (ColumnType::Boolean, ColumnData::Boolean(_))
             | (ColumnType::DateTime, ColumnData::DateTime(_))
-            | (ColumnType::List, ColumnData::List(_)) => (),
+            | (ColumnType::Timestamp, ColumnData::Timestamp(_))
+            | (ColumnType::List, ColumnData::List(_))
+            | (ColumnType::Map, ColumnData::Map(_)) => (),
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
@@ -703,7 +727,9 @@ impl DataFrame {
                 ColumnType::String => ColumnData::String(Vec::with_capacity(num_rows)),
                 ColumnType::Boolean => ColumnData::Boolean(Vec::with_capacity(num_rows)),
                 ColumnType::DateTime => ColumnData::DateTime(Vec::with_capacity(num_rows)),
+                ColumnType::Timestamp => ColumnData::Timestamp(Vec::with_capacity(num_rows)),
                 ColumnType::List => ColumnData::List(Vec::with_capacity(num_rows)),
+                ColumnType::Map => ColumnData::Map(Vec::with_capacity(num_rows)),
             })
             .collect();
 
@@ -753,6 +779,11 @@ impl DataFrame {
                         Value::Null => vec.push(None),
                         _ => vec.push(None),
                     },
+                    ColumnData::Timestamp(vec) => match val {
+                        Value::Timestamp(v) => vec.push(Some(v)),
+                        Value::Null => vec.push(None),
+                        _ => vec.push(None),
+                    },
                     ColumnData::List(vec) => match val {
                         Value::List(v) => vec.push(Some(v)),
                         Value::Null => vec.push(None),
@@ -760,6 +791,13 @@ impl DataFrame {
                         // heterogeneous mix; store it as a 1-element list so it
                         // isn't silently dropped.
                         other => vec.push(Some(vec![other])),
+                    },
+                    ColumnData::Map(vec) => match val {
+                        Value::Map(m) => vec.push(Some(m)),
+                        Value::Null => vec.push(None),
+                        // A non-map value in an inferred-map column: no faithful
+                        // map form. Null rather than a stringified surprise.
+                        _ => vec.push(None),
                     },
                 }
             }
@@ -1035,7 +1073,9 @@ fn format_col_type(col_type: &ColumnType) -> String {
         ColumnType::String => "str",
         ColumnType::Boolean => "bool",
         ColumnType::DateTime => "datetime",
+        ColumnType::Timestamp => "timestamp",
         ColumnType::List => "list",
+        ColumnType::Map => "map",
     }
     .to_string()
 }

@@ -375,6 +375,12 @@ fn build_column_data(
             }
             Ok(ColumnData::List(out))
         }
+        // CSV never infers or declares Timestamp / Map (`map_blueprint_type`
+        // has no keyword for them, and `infer_type` never yields them), so
+        // these arms are unreachable in practice. Return an all-null column of
+        // the right shape to keep the match exhaustive without a panic.
+        ColumnType::Timestamp => Ok(ColumnData::Timestamp(vec![None; n])),
+        ColumnType::Map => Ok(ColumnData::Map(vec![None; n])),
     }
 }
 

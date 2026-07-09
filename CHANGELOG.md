@@ -69,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **DataFrame ingestion preserves `datetime` time-of-day and `dict` values.**
+  `add_nodes` / `add_connections` previously truncated a pandas `datetime64`
+  column to date-only (dropping `03:04:05`) and stringified a column of Python
+  dicts (`{'k': 1}` → the text `"{'k': 1}"`). A `datetime64` column carrying any
+  nonzero time-of-day is now ingested as a full `Timestamp` (pure-midnight
+  columns stay date-only for back-compat), and a column of dicts is ingested as
+  a native `Map` — `n.meta['k']` reads the value back instead of `None`. Nested
+  lists/dicts inside the map keep their structure. Matches what the
+  `params`/Cypher paths already did.
 - **C# `Constant` nodes now carry a `value_preview`.** C# `const` / `static
   readonly` fields emitted a `Constant` node with `value_preview = null`, so a
   constant's value edit (e.g. `const int Timeout = 30` → `60`) was invisible to

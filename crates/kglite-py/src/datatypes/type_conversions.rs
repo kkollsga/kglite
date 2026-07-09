@@ -1,5 +1,5 @@
 // src/datatypes/type_conversions.rs
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use pyo3::prelude::*;
 use pyo3::Bound;
 
@@ -117,6 +117,72 @@ pub fn to_datetime(value: &Bound<'_, PyAny>) -> Option<NaiveDate> {
             // Try MM/DD/YYYY
             if let Ok(date) = NaiveDate::parse_from_str(&s, "%m/%d/%Y") {
                 return Some(date);
+            }
+        }
+
+        None
+    })
+}
+
+/// Convert a Python/pandas datetime-like value to a full-precision
+/// `NaiveDateTime` (date + time-of-day). Used by the `Timestamp` column path so
+/// a `datetime64` cell with a nonzero time isn't truncated to date-only.
+pub fn to_timestamp(value: &Bound<'_, PyAny>) -> Option<NaiveDateTime> {
+    if value.is_none() {
+        return None;
+    }
+
+    // pandas.Timestamp / datetime.datetime subclass datetime, so pyo3's chrono
+    // conversion handles them directly.
+    if let Ok(dt) = value.extract::<NaiveDateTime>() {
+        return Some(dt);
+    }
+
+    Python::attach(|_py| {
+        // Attribute-based fallback (abi3-safe: no PyDateAccess).
+        if let (Ok(y), Ok(mo), Ok(d)) = (
+            value.getattr("year").and_then(|v| v.extract::<i32>()),
+            value.getattr("month").and_then(|v| v.extract::<u32>()),
+            value.getattr("day").and_then(|v| v.extract::<u32>()),
+        ) {
+            let h = value
+                .getattr("hour")
+                .and_then(|v| v.extract::<u32>())
+                .unwrap_or(0);
+            let mi = value
+                .getattr("minute")
+                .and_then(|v| v.extract::<u32>())
+                .unwrap_or(0);
+            let s = value
+                .getattr("second")
+                .and_then(|v| v.extract::<u32>())
+                .unwrap_or(0);
+            let us = value
+                .getattr("microsecond")
+                .and_then(|v| v.extract::<u32>())
+                .unwrap_or(0);
+            if let Some(date) = NaiveDate::from_ymd_opt(y, mo, d) {
+                if let Some(dt) = date.and_hms_micro_opt(h, mi, s, us) {
+                    return Some(dt);
+                }
+            }
+        }
+
+        // ISO string fallback (with and without fractional seconds / 'T').
+        if let Ok(st) = value.extract::<String>() {
+            for fmt in [
+                "%Y-%m-%dT%H:%M:%S%.f",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S%.f",
+                "%Y-%m-%d %H:%M:%S",
+            ] {
+                if let Ok(dt) = NaiveDateTime::parse_from_str(&st, fmt) {
+                    return Some(dt);
+                }
+            }
+            // Date-only string → midnight.
+            if let Ok(date) = NaiveDate::parse_from_str(&st, "%Y-%m-%d") {
+                return date.and_hms_opt(0, 0, 0);
             }
         }
 

@@ -1133,11 +1133,21 @@ class KnowledgeGraph:
                 (not ``'update'``) when the source data is the single source of
                 truth and you want field *deletions* to propagate on rebuild.
             skip_columns: Columns to exclude.
-            column_types: Override column dtypes ``{'col': 'string'|'integer'|'float'|'datetime'|'uniqueid'|'list'}``.
+            column_types: Override column dtypes, e.g. ``{'col': 'string'}``.
+                Supported: ``'string'``, ``'integer'``, ``'float'``,
+                ``'datetime'``, ``'timestamp'``, ``'uniqueid'``, ``'list'``,
+                ``'map'``.
                 A column of Python lists/tuples is auto-detected as a native
                 ``'list'`` property (stored structurally, not stringified), so
                 ``'y' IN n.aliases`` tests membership and ``UNWIND n.aliases``
-                yields the elements; pass ``'list'`` explicitly to force it.
+                yields the elements; pass ``'list'`` explicitly to force it. A
+                column of Python dicts is auto-detected as a native ``'map'``
+                property (``n.meta['k']`` / ``n.meta.k`` read back the value)
+                rather than being stringified. A ``datetime64`` column keeps its
+                full time-of-day when any value has a nonzero time (stored as a
+                ``Timestamp``); a pure-midnight column stays date-only
+                (``'datetime'``). Pass ``'timestamp'`` to force full date+time,
+                ``'datetime'`` to force date-only.
                 Also supports spatial types: ``'location.lat'``, ``'location.lon'``,
                 ``'geometry'``, ``'point.<name>.lat'``, ``'point.<name>.lon'``,
                 ``'shape.<name>'``.

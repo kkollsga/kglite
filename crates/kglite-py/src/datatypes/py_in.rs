@@ -1,10 +1,10 @@
 // src/datatypes/py_in.rs
-use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_u32};
+use super::type_conversions::{to_bool, to_datetime, to_f64, to_i64, to_timestamp, to_u32};
 use super::values::{ColumnData, ColumnType, DataFrame, FilterCondition, Value};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::Bound;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub fn pydict_to_filter_conditions(
     dict: &Bound<'_, PyDict>,
@@ -275,6 +275,21 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
             }
             Ok(ColumnData::DateTime(vec))
         }
+        ColumnType::Timestamp => {
+            // datetime64 (or explicit "timestamp") column → full date+time,
+            // preserving the time-of-day that the date-only DateTime path drops.
+            let py_list = py_list.cast::<PyList>()?;
+            let mut vec = Vec::with_capacity(length);
+            for (i, &is_null) in null_mask.iter().enumerate() {
+                if is_null {
+                    vec.push(None);
+                } else {
+                    let item = py_list.get_item(i)?;
+                    vec.push(to_timestamp(&item));
+                }
+            }
+            Ok(ColumnData::Timestamp(vec))
+        }
         ColumnType::List => {
             // Object column of Python lists/tuples → native List property.
             let py_list = py_list.cast::<PyList>()?;
@@ -288,6 +303,28 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
                 }
             }
             Ok(ColumnData::List(vec))
+        }
+        ColumnType::Map => {
+            // Object column of Python dicts → native Map property. Reuses the
+            // recursive `py_value_to_value` (the params path), so nested lists /
+            // dicts inside the map keep their structure instead of stringifying.
+            let py_list = py_list.cast::<PyList>()?;
+            let mut vec: Vec<Option<BTreeMap<String, Value>>> = Vec::with_capacity(length);
+            for (i, &is_null) in null_mask.iter().enumerate() {
+                if is_null {
+                    vec.push(None);
+                } else {
+                    let item = py_list.get_item(i)?;
+                    match py_value_to_value(&item)? {
+                        Value::Map(m) => vec.push(Some(m)),
+                        // A non-dict cell in a dict-first object column: no
+                        // faithful map form (a pandas mixed-type footgun).
+                        // Null rather than a stringified surprise.
+                        _ => vec.push(None),
+                    }
+                }
+            }
+            Ok(ColumnData::Map(vec))
         }
     }
 }
@@ -371,8 +408,12 @@ pub fn pandas_to_dataframe_with_options(
                         "float" | "float64" | "double" => ColumnType::Float64,
                         "str" | "string" | "text" => ColumnType::String,
                         "bool" | "boolean" => ColumnType::Boolean,
-                        "date" | "datetime" | "timestamp" => ColumnType::DateTime,
+                        "date" | "datetime" => ColumnType::DateTime,
+                        // Explicit full date+time (keeps time-of-day). "date"/
+                        // "datetime" stay date-only for back-compat.
+                        "timestamp" => ColumnType::Timestamp,
                         "list" | "array" => ColumnType::List,
+                        "map" | "dict" => ColumnType::Map,
                         _ => {
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                 "Unsupported column type '{}' specified for column '{}'",
@@ -470,12 +511,13 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
         }
         "float64" | "float32" | "Float64" | "Float32" => Ok(ColumnType::Float64),
         "bool" | "boolean" => Ok(ColumnType::Boolean),
-        s if s.starts_with("datetime64") => Ok(ColumnType::DateTime),
+        s if s.starts_with("datetime64") => datetime64_column_type(series),
         "object" => {
-            // A column of Python lists/tuples → native List property (so
-            // `IN`/UNWIND see real elements, not a stringified list).
-            if first_non_null_is_list(series)? {
-                return Ok(ColumnType::List);
+            // A column of Python lists/tuples → native List; a column of dicts
+            // → native Map (so collections round-trip structurally instead of
+            // being str()-ed). One materialisation of the column covers both.
+            if let Some(ct) = first_non_null_collection_type(series)? {
+                return Ok(ct);
             }
             // Object dtype may contain booleans mixed with None (common in code_tree
             // metadata like is_test, is_abstract).  Use pandas' own type inference
@@ -500,18 +542,54 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
     }
 }
 
-/// True when the first non-null value of an object-dtype series is a Python
-/// list or tuple — the signal for inferring a native `List` column.
-fn first_non_null_is_list(series: &Bound<'_, PyAny>) -> PyResult<bool> {
+/// Inspect the first non-null value of an object-dtype series once and route
+/// list/tuple cells to a native `List` column and dict cells to a `Map`
+/// column. Returns `None` for any other object payload (falls through to the
+/// scalar-inference path). A single `dropna().tolist()` covers both checks so
+/// object columns aren't materialised twice.
+fn first_non_null_collection_type(series: &Bound<'_, PyAny>) -> PyResult<Option<ColumnType>> {
     let non_null = series.call_method0("dropna")?;
     if non_null.len()? == 0 {
-        return Ok(false);
+        return Ok(None);
     }
     let first = non_null
         .call_method0("tolist")?
         .cast::<PyList>()?
         .get_item(0)?;
-    Ok(first.cast::<PyList>().is_ok() || first.cast::<PyTuple>().is_ok())
+    if first.cast::<PyList>().is_ok() || first.cast::<PyTuple>().is_ok() {
+        return Ok(Some(ColumnType::List));
+    }
+    if first.cast::<PyDict>().is_ok() {
+        return Ok(Some(ColumnType::Map));
+    }
+    Ok(None)
+}
+
+/// Choose the column type for a `datetime64` series.
+///
+/// Rule: a `datetime64` column is typed `Timestamp` (full time-of-day
+/// preserved) when any non-null value has a nonzero time-of-day; a pure-
+/// midnight (date-only) column stays `DateTime` so date-only data keeps its
+/// backward-compatible `NaiveDate` semantics. This is the least-surprising
+/// split — date columns still read back as dates, time-bearing columns keep
+/// their time instead of being silently truncated.
+fn datetime64_column_type(series: &Bound<'_, PyAny>) -> PyResult<ColumnType> {
+    let non_null = series.call_method0("dropna")?;
+    if non_null.len()? == 0 {
+        // All-null datetime column: no time signal — default to DateTime.
+        return Ok(ColumnType::DateTime);
+    }
+    // `series.dt.normalize()` zeroes the time-of-day; any element that then
+    // differs from the original carried a nonzero time.
+    let dt = non_null.getattr("dt")?;
+    let normalized = dt.call_method0("normalize")?;
+    let differs = non_null.call_method1("ne", (normalized,))?;
+    let has_time: bool = differs.call_method0("any")?.extract()?;
+    Ok(if has_time {
+        ColumnType::Timestamp
+    } else {
+        ColumnType::DateTime
+    })
 }
 
 pub fn ensure_columns(
