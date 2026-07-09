@@ -174,6 +174,12 @@ fn run(
         grep_context,
         max_matches: None,
         max_chars,
+        // read_code_source resolves a qualified name against the active
+        // (in-memory, possibly multi-rev) graph and reads the matched file from
+        // the working-tree source root — not a git checkout. `rev: None` reads
+        // the working tree (mcp-methods 0.3.49 added this field for its own
+        // read-a-file-at-rev path, which this tool does not use).
+        rev: None,
     };
 
     let body = read_source(&lookup.file_path, &roots, &opts);

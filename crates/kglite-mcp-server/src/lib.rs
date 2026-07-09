@@ -39,8 +39,8 @@ use mcp_methods::server::manifest::{
 };
 use mcp_methods::server::{
     init_tracing, load_env_for_mode, maybe_watch, resolve_source_roots, serve_prompts, watch,
-    workspace, BundledSkill, Manifest, McpServer, PredicateClause, ResultCtx, ServerOptions,
-    SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
+    workspace, BundledSkill, Manifest, McpServer, PostActivateRevsHook, PredicateClause, ResultCtx,
+    ServerOptions, SkillPredicateEvaluator, SkillRegistry, WorkspaceKind,
 };
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
@@ -485,6 +485,17 @@ fn bind_mode(
                 tracing::info!(repo = name, "code_tree::build on activate");
                 gs.build_code_tree(path)
             });
+            // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
+            // fired instead of the plain hook when `repo_management(revs=…)` is
+            // called, with the resolved revspecs (oldest→newest, HEAD last).
+            // Builds ONE multi-rev graph via `build_code_tree_revs` (B.2b). The
+            // plain hook above stays the HEAD-only default; only a `revs`
+            // request reaches this path.
+            let gs_revs = graph_state.clone();
+            let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
+                tracing::info!(repo = name, revs = ?revs, "code_tree::build_revs on activate");
+                gs_revs.build_code_tree_revs(path, revs)
+            });
             // Opening steer: append the graph mini-map to the activation
             // message. The post-activate hook above builds the graph first, so
             // counts are live when this runs. Chained before the workspace is
@@ -497,6 +508,7 @@ fn bind_mode(
                 Arc::new(move |_path, _name| gs_sum.activation_summary());
             let ws = workspace::Workspace::open(canon, cli.stale_after_days, Some(hook))
                 .context("workspace init failed")?
+                .with_post_activate_revs(revs_hook)
                 .with_activation_summary(summary);
             options = options.with_workspace(ws);
         }
@@ -544,6 +556,35 @@ fn bind_mode(
                 }
                 Ok(())
             });
+            // Revs-aware hook (mcp-methods 0.3.49): fired instead of the plain
+            // hook when `set_root_dir(revs=…)` is called, with the resolved
+            // revspecs (oldest→newest, HEAD last). Builds ONE multi-rev graph
+            // via `build_code_tree_revs` (B.2b) and updates the shared active
+            // root the same way the plain hook does, so the watch callback can
+            // still scope its rebuilds. The plain hook stays the single-rev
+            // default; only a `revs` request reaches this path.
+            let gs_revs = graph_state.clone();
+            let active_root_for_revs_hook = local_active_root.clone();
+            let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
+                if let Ok(mut guard) = active_root_for_revs_hook.write() {
+                    *guard = Some(path.to_path_buf());
+                }
+                tracing::info!(
+                    repo = name,
+                    revs = ?revs,
+                    "code_tree::build_revs on local-workspace activate"
+                );
+                if let Err(e) = gs_revs.build_code_tree_revs(path, revs) {
+                    tracing::error!(
+                        repo = name,
+                        root = %path.display(),
+                        error = %e,
+                        "local-workspace multi-rev code_tree build failed"
+                    );
+                    return Err(e);
+                }
+                Ok(())
+            });
             // Opening steer: mini-map on the activation message (see the
             // github-workspace arm above). Chained before the clone into
             // `options`. Correctness of the single active-graph slot across
@@ -556,6 +597,7 @@ fn bind_mode(
                 Arc::new(move |_path, _name| gs_sum.activation_summary());
             let ws = workspace::Workspace::open_local(root.clone(), Some(hook))
                 .context("local-workspace init failed")?
+                .with_post_activate_revs(revs_hook)
                 .with_activation_summary(summary);
             options = options.with_workspace(ws);
         }

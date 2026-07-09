@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-rev code graphs from the MCP server — `set_root_dir(revs=…)` /
+  `repo_management(revs=…)`.** The workspace activation tools gained a `revs`
+  argument (an integer N = the last N release tags + HEAD, or an explicit list
+  of git revspecs). When revs are requested the server builds ONE multi-rev
+  graph via `build_code_tree_revs` (instead of the HEAD-only build), and the
+  agent-facing identity surfaces name the loaded rev-set: the
+  `<active_graph … revs="v1,v2,…"/>` header attribute, the activation message
+  (which also teaches `WHERE '<rev>' IN n.revs` scoping + `CALL rev_diff`), and
+  the `graph_overview` provenance instructions. Unscoped queries span all revs
+  (an over-count trap the steering warns about). Requires mcp-methods ≥ 0.3.49
+  (the `revs` activation arg + revs-aware post-activate hook).
 - **`CALL rev_diff({from, to})` — Cypher delta over a multi-rev code graph.**
   Reports the code entities `added`, `removed`, or `changed` between two revs of
   a graph built by `code_tree.build(revs=[…])`, by anti-joining the per-node

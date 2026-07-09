@@ -63,6 +63,13 @@ struct ActiveGraph {
     /// spot a stale graph. `None` for an in-memory graph created without a
     /// path.
     root: Option<std::path::PathBuf>,
+    /// The resolved git revisions this graph spans, when it was built as a
+    /// multi-rev code graph (`build_code_tree_revs`) — oldest → newest, HEAD
+    /// last. `None` for a plain single-rev / loaded graph. Surfaced in the
+    /// `<active_graph …>` header (`revs="…"`) and the activation summary so an
+    /// agent knows unscoped queries span all these revs (the over-count trap)
+    /// and can scope with `WHERE '<rev>' IN n.revs`.
+    revs: Option<Vec<String>>,
     /// Wall-clock time this graph was built/loaded. Surfaced next to `root`
     /// so an agent can tell how fresh the active graph is.
     built_at: SystemTime,
@@ -103,9 +110,15 @@ impl ActiveGraph {
             iso8601(self.built_at),
             humanize_age(self.built_at)
         );
+        // A multi-rev graph names the loaded rev-set on the header so an agent
+        // sees at a glance that unscoped queries span all these revs.
+        let revs = match &self.revs {
+            Some(revs) if !revs.is_empty() => format!(" revs=\"{}\"", revs.join(",")),
+            _ => String::new(),
+        };
         match &self.root {
-            Some(r) => format!(" root={:?}{time}", r.display().to_string()),
-            None => time,
+            Some(r) => format!(" root={:?}{time}{revs}", r.display().to_string()),
+            None => format!("{time}{revs}"),
         }
     }
 
@@ -185,6 +198,7 @@ impl GraphState {
             kg,
             source_path: Some(path.to_path_buf()),
             root: Some(path.to_path_buf()),
+            revs: None,
             built_at: SystemTime::now(),
         });
         Ok(())
@@ -203,6 +217,7 @@ impl GraphState {
             kg,
             source_path: Some(path.to_path_buf()),
             root: Some(path.to_path_buf()),
+            revs: None,
             built_at: SystemTime::now(),
         });
         Ok(())
@@ -253,6 +268,43 @@ impl GraphState {
             kg,
             source_path: None,
             root: Some(dir.to_path_buf()),
+            revs: None,
+            built_at: SystemTime::now(),
+        });
+        Ok(())
+    }
+
+    /// Build a **multi-rev** code-tree graph spanning `revs` (resolved git
+    /// revspecs, oldest → newest with HEAD last — as delivered by the
+    /// mcp-methods revs-aware activation hook) and swap it into the active
+    /// slot. The rev counterpart of [`Self::build_code_tree`]: routes through
+    /// the shared core merge (`kglite::api::code_tree::build_code_tree_revs`,
+    /// B.2b), which folds one node per entity across revs and stamps native
+    /// list props (`revs` / `rev_fp` on nodes, `revs` on edges) plus the
+    /// rev-scoping provenance instructions that `describe()` / `graph_overview`
+    /// render. Records `root` + the resolved `revs` + `built_at` on the active
+    /// slot so the identity surfaces (`<active_graph …>` header, activation
+    /// summary) name the loaded rev-set.
+    pub fn build_code_tree_revs(&self, dir: &Path, revs: &[String]) -> Result<()> {
+        // repo_root=None → auto-resolve the git root from `dir` (the activated
+        // root is a work tree). include_docs mirrors build_code_tree.
+        let dir_arc = kglite::api::code_tree::build_code_tree_revs(
+            dir,
+            revs,
+            None,
+            false,
+            true,
+            None,
+            None,
+            self.include_docs,
+        )
+        .map_err(|e| anyhow::anyhow!("kglite::build_code_tree_revs failed: {}", e))?;
+        let kg = KnowledgeGraph::from_arc(dir_arc);
+        *self.inner.write().unwrap() = Some(ActiveGraph {
+            kg,
+            source_path: None,
+            root: Some(dir.to_path_buf()),
+            revs: Some(revs.to_vec()),
             built_at: SystemTime::now(),
         });
         Ok(())
@@ -316,7 +368,7 @@ impl GraphState {
             ),
             None => format!(" · built {} ago.", humanize_age(active.built_at)),
         };
-        Some(format!(
+        let mut msg = format!(
             "Graph ready: {} nodes ({}) · {} edges.{root_note} Start with graph_overview() \
              \u{2192} cypher_query for structure (definitions, callers, types, counts, \
              paths); use grep for literal text only. If graph_overview/cypher_query aren't \
@@ -325,7 +377,23 @@ impl GraphState {
             overview.node_count,
             top.join(", "),
             overview.edge_count,
-        ))
+        );
+        // Multi-rev steer: name the loaded revs and teach the scoping idiom so
+        // an agent doesn't over-count across all revs on an unscoped query.
+        // Mirrors the graph-over-grep steering style and the provenance
+        // instructions `build_code_tree_revs` stamps into describe().
+        if let Some(revs) = active.revs.as_ref().filter(|r| !r.is_empty()) {
+            let newest = revs.last().map(String::as_str).unwrap_or("");
+            msg.push_str(&format!(
+                " Multi-rev graph spanning {}: {}. UNSCOPED queries span ALL revs (they \
+                 over-count) — scope with `WHERE '<rev>' IN n.revs` (head only: `WHERE \
+                 '{newest}' IN n.revs`); for deltas use `CALL rev_diff({{from: '<rev>', \
+                 to: '<rev>'}})`.",
+                revs.len(),
+                revs.join(", "),
+            ));
+        }
+        Some(msg)
     }
 
     /// Whether the active graph has at least one node of the named
@@ -1125,6 +1193,7 @@ mod tests {
             kg: KnowledgeGraph::from_arc(Arc::new(dir)),
             source_path: None,
             root: None,
+            revs: None,
             built_at: SystemTime::now(),
         }
     }
@@ -1155,6 +1224,125 @@ mod tests {
         assert!(
             summary.contains("search your tool registry"),
             "carries the lazy-discovery escape hatch: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stand up a git repo with two commits touching one function, so a
+    /// multi-rev build has a real divergence to merge. Returns the repo dir +
+    /// the two SHAs (oldest first), or `None` if git is unavailable (the test
+    /// then skips). The caller removes the dir when done.
+    fn git_two_commit_repo(tag: &str) -> Option<(std::path::PathBuf, [String; 2])> {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("kglmcp_revs_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&dir).args(args).output();
+        if !git(&["init", "-q"]).ok()?.status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return None; // git unavailable → caller skips.
+        }
+        let _ = git(&["config", "user.email", "t@t"]);
+        let _ = git(&["config", "user.name", "t"]);
+        let _ = git(&["config", "commit.gpgsign", "false"]);
+        let mut shas = Vec::new();
+        for body in [
+            "def foo(a):\n    return a + 1\n",
+            "def foo(a, b):\n    return a + b\n\n\ndef bar(x):\n    return x\n",
+        ] {
+            std::fs::write(dir.join("m.py"), body).unwrap();
+            let _ = git(&["add", "-A"]);
+            if !git(&["commit", "-q", "-m", "c"]).unwrap().status.success() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return None;
+            }
+            let out = git(&["rev-parse", "HEAD"]).unwrap();
+            shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+        Some((dir, [shas[0].clone(), shas[1].clone()]))
+    }
+
+    #[test]
+    fn build_code_tree_revs_swaps_slot_and_records_revs() {
+        let Some((dir, [s1, s2])) = git_two_commit_repo("slot") else {
+            return; // git unavailable
+        };
+        let gs = GraphState::new(false);
+        let revs = vec![s1.clone(), s2.clone()];
+        gs.build_code_tree_revs(&dir, &revs)
+            .expect("multi-rev build");
+        // The slot is active with nodes.
+        let (nodes, _edges) = gs.schema().expect("schema after multi-rev build");
+        assert!(nodes > 0, "multi-rev graph should have nodes");
+        // `bar` exists only in the second rev → its `revs` list is a subset.
+        // `foo` exists in both. Assert the rev list props landed on the merged
+        // graph (the B.2b merge stamps `revs` on every node).
+        let has_revs_prop = gs.has_property("Function", "revs");
+        assert!(
+            has_revs_prop,
+            "merged multi-rev Function nodes should carry a `revs` list prop"
+        );
+        // The active slot records the resolved rev-set for the identity surfaces.
+        let attrs = gs.with_active(|a| a.identity_attrs());
+        assert!(
+            attrs.contains(&format!("revs=\"{},{}\"", s1, s2)),
+            "identity header should name the loaded revs; got: {attrs}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn activation_summary_teaches_rev_scoping_for_multi_rev() {
+        let Some((dir, [s1, s2])) = git_two_commit_repo("actsum") else {
+            return; // git unavailable
+        };
+        let gs = GraphState::new(false);
+        gs.build_code_tree_revs(&dir, &[s1.clone(), s2.clone()])
+            .expect("multi-rev build");
+        let summary = gs.activation_summary().expect("summary present");
+        // Still carries the base mini-map + discovery hatch.
+        assert!(summary.contains("Function"), "names node types: {summary}");
+        // Multi-rev steer: names the revs, warns about over-count, teaches the
+        // scoping idiom + rev_diff (matching the describe() provenance text).
+        assert!(
+            summary.contains("Multi-rev graph spanning 2"),
+            "names the rev span: {summary}"
+        );
+        assert!(
+            summary.contains("IN n.revs"),
+            "teaches the `WHERE '<rev>' IN n.revs` scoping idiom: {summary}"
+        );
+        assert!(
+            summary.contains("rev_diff"),
+            "points at CALL rev_diff for deltas: {summary}"
+        );
+        // The newest rev (HEAD-equivalent, last in the list) is surfaced for
+        // head-only scoping.
+        assert!(
+            summary.contains(&format!("'{s2}' IN n.revs")),
+            "surfaces the newest rev for head-only scoping: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_rev_build_carries_no_revs_attr_or_steer() {
+        // The plain build path leaves `revs = None`, so neither the header attr
+        // nor the multi-rev steer appears (no regression for single-rev graphs).
+        let gs = GraphState::new(false);
+        let dir = std::env::temp_dir().join(format!("kgl_single_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("m.py"), "def foo():\n    return 1\n").unwrap();
+        gs.build_code_tree(&dir).expect("single-rev build");
+        let attrs = gs.with_active(|a| a.identity_attrs());
+        assert!(
+            !attrs.contains("revs="),
+            "no revs attr for single-rev: {attrs}"
+        );
+        let summary = gs.activation_summary().expect("summary");
+        assert!(
+            !summary.contains("Multi-rev graph"),
+            "no multi-rev steer for single-rev: {summary}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
