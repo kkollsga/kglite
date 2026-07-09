@@ -87,7 +87,9 @@ parsed codebase.
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
 - 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 13
   languages into Function / Class / Module / Route nodes with
-  web-framework route detection (Flask, FastAPI, Django). See the
+  web-framework route detection (Flask, FastAPI, Django). Build from
+  any git revision, or merge several into one multi-revision graph for
+  structural diffs (`rev=` / `revs=[…]`, `code_tree.diff`). See the
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
   [Code analysis guide](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html).**

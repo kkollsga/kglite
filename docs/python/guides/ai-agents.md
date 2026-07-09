@@ -114,6 +114,21 @@ A few attributes worth knowing when you paste `describe()` into a prompt:
   which one Cypher will accept. Both forms work in `MATCH` /
   `WHERE`. Result rows always come back keyed under the canonical
   `id` / `title`.
+- **`revs="…"`** on the `<active_graph …/>` header (MCP code-graph
+  sessions). Present only when the server built a **multi-revision**
+  code graph — `repo_management(name, revs=N|[list])` (github) or
+  `set_root_dir(path, revs=…)` (local) — and names the loaded rev-set,
+  e.g. `revs="v1.0,v2.0,HEAD"`. It is the signal that one graph holds
+  every listed revision, so an **unscoped** query counts the union
+  across revs and **over-counts** — `MATCH (n:Function) RETURN count(n)`
+  is not "functions at HEAD" but "functions across all revs". Scope a
+  query to a single rev with list membership on the per-node `revs`
+  property (`MATCH (n:Function) WHERE 'v2.0' IN n.revs RETURN n`), and
+  reach for `CALL rev_diff({from, to})` for added / removed / changed
+  deltas between two revs. When `revs` is absent the graph is
+  single-revision and plain unscoped queries are exact. `describe()`
+  also lists the loaded revs and teaches the same `WHERE '<rev>' IN
+  n.revs` idiom.
 - **`sample_truncate`** (call-site knob). Sample values, sample
   node titles, and sample edge attributes get truncated at 40
   chars by default to keep prompts compact. Pass

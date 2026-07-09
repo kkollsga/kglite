@@ -561,6 +561,55 @@ The `[kglite-mode]` marker identifies the segment for downstream
 tooling. Operator-declared `instructions:` / `overview_prefix:` text
 follows the banner unchanged.
 
+### Multi-revision code graphs
+
+Both activation paths take an optional `revs` argument that builds the
+code graph across several git revisions instead of just the latest:
+
+- **github mode:** `repo_management('org/repo', revs=5)` (last 5 release
+  tags + `HEAD`) or `repo_management('org/repo', revs=['v1.0', 'v2.0', 'HEAD'])`.
+- **local mode:** `set_root_dir('/path', revs=5)` or `set_root_dir('/path', revs=[…])`.
+
+An integer means "the last N release tags (`git tag --sort=-v:refname`)
+plus `HEAD`"; a list is passed through as explicit revspecs, oldest →
+newest. Omitting `revs` is the unchanged single-revision build.
+
+The result is **one merged graph**, not N graphs: each entity is stored
+once, carrying a `revs: [str]` list (the revisions it appears in) and a
+`rev_fp: [int]` shape fingerprint (positionally aligned with `revs`).
+Ordinary properties report the newest rev an entity appears in
+(newest-wins), so plain Cypher reads `HEAD`'s value. The active-graph
+header names the loaded set — `<active_graph … revs="v1.0,v2.0,HEAD"/>` —
+and the activation message teaches the scoping idiom below.
+
+Because the graph spans every rev, an **unscoped** query counts the
+union across revs (an over-count trap). Scope to a single rev with list
+membership, and use `CALL rev_diff` for deltas:
+
+```cypher
+-- Everything present in v2.0 (scoped — no over-count)
+MATCH (n:Function) WHERE 'v2.0' IN n.revs RETURN n.name
+
+-- What changed between two revs (added / removed / changed)
+CALL rev_diff({from: 'v1.0', to: 'HEAD'})
+YIELD bucket, type, qualified_name, name, file, line
+RETURN bucket, type, qualified_name, file, line
+```
+
+See the [Cypher reference](../../../CYPHER.md) `rev_diff` entry and the
+[code-tree guide](code-tree.md) for the full semantics.
+
+**Two operator caveats:**
+
+- **Older clones may lack tags.** Pre-0.3.49 mcp-methods cloned
+  depth-1/tag-less, so `revs=N` (tag-based) finds nothing to resolve.
+  `repo_management('org/repo', update=True)` fetches tags; a full
+  re-clone restores complete history. Fresh clones under 0.3.49+ bring
+  tags automatically.
+- **Activation cost scales with rev count.** Each rev is a full parse,
+  so a `revs=N` build costs ≈ N × a single build. On a large repo,
+  start small (`revs=2`–`3`) before loading a deep history.
+
 ### Mutable graphs
 
 `save_graph` is built in: when the manifest sets `builtins.save_graph: true`
