@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **C# `Constant` nodes now carry a `value_preview`.** C# `const` / `static
+  readonly` fields emitted a `Constant` node with `value_preview = null`, so a
+  constant's value edit (e.g. `const int Timeout = 30` → `60`) was invisible to
+  `code_tree.diff`. tree-sitter-c-sharp flattens the initializer directly under
+  `variable_declarator` (no `equals_value_clause` wrapper), and the extractor
+  looked only for the wrapper; it now reads the initializer directly, mirroring
+  the Java parser. C# constant value changes now surface in the diff's
+  `changed` bucket.
 - **`code_tree.diff` now normalizes backslash-joined build-root prefixes.** A
   PHP file without a `namespace` gets a synthetic
   `<build-root-basename>\<rel-path>\<symbol>` qualified_name (backslash-joined),

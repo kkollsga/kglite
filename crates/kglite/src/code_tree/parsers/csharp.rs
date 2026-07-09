@@ -767,23 +767,24 @@ impl CSharpParser {
                     continue;
                 };
                 let name = name.to_string();
+                // The initializer value: tree-sitter-c-sharp (0.23) flattens
+                // it directly under `variable_declarator` as the first named
+                // child after the name `identifier` (the `=` token is
+                // anonymous) — there is no `equals_value_clause` wrapper.
+                // Mirror java.rs's `parse_field`: take the first named
+                // non-name child as the value_preview so C# `const`/`static
+                // readonly` value edits are visible to `code_tree.diff`.
                 let mut val_text: Option<String> = None;
                 let mut ic = sub.walk();
                 for inner in sub.children(&mut ic) {
-                    if inner.kind() == "equals_value_clause" {
-                        let mut cc = inner.walk();
-                        for v in inner.children(&mut cc) {
-                            if v.is_named() {
-                                let text = node_text(v, source);
-                                let take = text
-                                    .char_indices()
-                                    .nth(100)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(text.len());
-                                val_text = Some(text[..take].to_string());
-                                break;
-                            }
-                        }
+                    if inner.is_named() && inner.kind() != "identifier" {
+                        let text = node_text(inner, source);
+                        let take = text
+                            .char_indices()
+                            .nth(100)
+                            .map(|(i, _)| i)
+                            .unwrap_or(text.len());
+                        val_text = Some(text[..take].to_string());
                         break;
                     }
                 }

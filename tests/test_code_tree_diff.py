@@ -148,6 +148,49 @@ def test_changed_constant_value(delta: dict) -> None:
     assert ch["changes"]["value_preview"]["new"] == "20"
 
 
+def test_csharp_const_value_change_detected(tmp_path: Path) -> None:
+    """A C# ``const`` value edit must surface in the ``changed`` bucket with a
+    ``value_preview`` delta — the extractor now populates ``value_preview`` for
+    C# constants (tree-sitter-c-sharp flattens the initializer directly under
+    ``variable_declarator``, no ``equals_value_clause`` wrapper), so const value
+    edits are no longer invisible to the diff."""
+    root = tmp_path / "cs"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@e.com")
+    _git(root, "config", "user.name", "T")
+    f = root / "Core.cs"
+    f.write_text(
+        "namespace N {\n"
+        "  public class Core {\n"
+        "    public const int ChgC = 10;\n"
+        '    public const string Tag = "a";\n'
+        "  }\n"
+        "}\n"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "c1")
+    _git(root, "tag", "v1")
+    f.write_text(
+        "namespace N {\n"
+        "  public class Core {\n"
+        "    public const int ChgC = 20;\n"
+        '    public const string Tag = "a";\n'
+        "  }\n"
+        "}\n"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "c2")
+
+    d = code_tree.diff(code_tree.build(str(root), rev="v1"), code_tree.build(str(root)))
+    ch = next(it for it in d["changed"] if it["name"] == "ChgC")
+    assert ch["type"] == "Constant"
+    assert ch["changes"]["value_preview"]["old"] == "10"
+    assert ch["changes"]["value_preview"]["new"] == "20"
+    # The unchanged const must not be flagged.
+    assert "Tag" not in _names(d["changed"])
+
+
 def test_unchanged_in_no_bucket(delta: dict) -> None:
     touched = (
         _names(delta["added"])
