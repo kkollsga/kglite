@@ -98,17 +98,32 @@ def _fetch(graph: Any, node_type: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _leading(qualified_name: Any) -> str | None:
-    """The first dotted segment of a qualified_name, or ``None``.
+# Build-root separators: code_tree prepends the build-directory basename to a
+# module path joined with ``.`` (Python/TS/Dart/… dotted languages) OR ``\``
+# (PHP without a ``namespace`` — the synthetic module path is
+# ``<build-root>\<rel-path>``, backslash-joined per PHP convention). Both leads
+# carry the throwaway-tempdir basename and must be neutralised. ``::`` is
+# deliberately excluded: Rust (``crate::…``) and C++ (``::``) leads never embed
+# the build-root basename and are already stable across builds.
+_ROOT_SEPARATORS: tuple[str, ...] = (".", "\\")
 
-    Only dotted names participate: the build-root basename that code_tree
-    prepends to a module path is joined with ``.`` (Python/dotted languages),
-    so it is always a dotted leading segment. Rust (``crate::…``), external
-    stubs (bare ``HashMap``), and rel-path languages produce non-dotted or
-    path-style leads that are *already stable* across builds — they must never
-    be treated as a strippable root.
+
+def _leading(qualified_name: Any) -> str | None:
+    """The first build-root segment of a qualified_name, or ``None``.
+
+    A qualified_name participates only when it starts with a segment delimited
+    by ``.`` or ``\\`` — the two separators code_tree uses to join the
+    build-root basename onto a module path (dotted languages and unnamespaced
+    PHP respectively). The leading segment is everything up to the *first* such
+    delimiter. Rust (``crate::…``), external stubs (bare ``HashMap``), and
+    rel-path languages produce ``::``-style or delimiter-free leads that are
+    *already stable* across builds — they return ``None`` and are never treated
+    as a strippable root.
     """
-    return qualified_name.split(".", 1)[0] if isinstance(qualified_name, str) and "." in qualified_name else None
+    if not isinstance(qualified_name, str):
+        return None
+    cuts = [i for i in (qualified_name.find(sep) for sep in _ROOT_SEPARATORS) if i != -1]
+    return qualified_name[: min(cuts)] if cuts else None
 
 
 def _root_alias(own: list[dict[str, Any]], other: list[dict[str, Any]]) -> str | None:
@@ -137,8 +152,10 @@ def _root_alias(own: list[dict[str, Any]], other: list[dict[str, Any]]) -> str |
 
 
 def _strip_root(qualified_name: Any, root: str | None) -> Any:
-    if root and isinstance(qualified_name, str) and qualified_name.startswith(root + "."):
-        return qualified_name[len(root) + 1 :]
+    if root and isinstance(qualified_name, str):
+        for sep in _ROOT_SEPARATORS:
+            if qualified_name.startswith(root + sep):
+                return qualified_name[len(root) + len(sep) :]
     return qualified_name
 
 

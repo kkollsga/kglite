@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`code_tree.diff` now normalizes backslash-joined build-root prefixes.** A
+  PHP file without a `namespace` gets a synthetic
+  `<build-root-basename>\<rel-path>\<symbol>` qualified_name (backslash-joined),
+  but the diff's root normalization stripped only dot-joined prefixes — so the
+  throwaway-tempdir basename of a `rev=` build survived and every class, method,
+  and constant was mis-reported as removed + added against a working-tree build.
+  The build-root detection/stripping now treats `\` as a namespace separator
+  alongside `.`; Rust `crate::`/C++ `::` leads (which never embed the basename)
+  are untouched. Rev-vs-worktree parity now holds for unnamespaced PHP.
 - **C/C++ `#define` constants are now captured, including ALL-CAPS names and
   defines inside preprocessor conditionals.** The `#define` → `:Constant`
   pipeline existed end to end but was dead for the common case. Two defects:

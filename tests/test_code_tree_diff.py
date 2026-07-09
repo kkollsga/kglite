@@ -258,6 +258,40 @@ def test_match_entities_partitions_by_qualified_name() -> None:
     assert [r["qualified_name"] for r in only_b] == ["m.b"]
 
 
+def test_normalize_strips_backslash_joined_build_root() -> None:
+    """Unnamespaced PHP gets a synthetic ``<build-root>\\<rel-path>\\<symbol>``
+    qualified_name (backslash-joined). Two builds of the same tree differ only
+    in that leading build-root basename, so root normalization must strip the
+    ``\\``-joined lead just as it strips a ``.``-joined one — otherwise every
+    entity mis-reports as removed+added. Exercised at the normalize/match seam,
+    no PHP build required."""
+    from kglite.code_tree._diff import _normalize_roots
+
+    # Same tree, two throwaway build roots (rev tempdir vs worktree dir).
+    a_by_type = {"Class": [{"qualified_name": "tmpAAAA\\m\\Foo", "name": "Foo"}]}
+    b_by_type = {"Class": [{"qualified_name": "repo\\m\\Foo", "name": "Foo"}]}
+    _normalize_roots(a_by_type, b_by_type)
+    # Both leading roots stripped -> identical rel-path-relative qn.
+    assert a_by_type["Class"][0]["qualified_name"] == "m\\Foo"
+    assert b_by_type["Class"][0]["qualified_name"] == "m\\Foo"
+    matched, only_a, only_b = code_tree.match_entities(a_by_type["Class"], b_by_type["Class"])
+    assert len(matched) == 1
+    assert only_a == [] and only_b == []
+
+
+def test_normalize_leaves_stable_backslash_namespace_alone() -> None:
+    """A real PHP ``namespace`` lead (``App\\…``) appears in *both* builds, so it
+    is stable and must NOT be stripped as a build root — only the differing
+    build-root basename is."""
+    from kglite.code_tree._diff import _normalize_roots
+
+    a_by_type = {"Class": [{"qualified_name": "App\\Foo", "name": "Foo"}]}
+    b_by_type = {"Class": [{"qualified_name": "App\\Foo", "name": "Foo"}]}
+    _normalize_roots(a_by_type, b_by_type)
+    assert a_by_type["Class"][0]["qualified_name"] == "App\\Foo"
+    assert b_by_type["Class"][0]["qualified_name"] == "App\\Foo"
+
+
 def test_match_entities_skips_missing_keys() -> None:
     a = [{"qualified_name": None, "v": 1}, {"qualified_name": "m.x"}]
     b = [{"qualified_name": "m.x"}]
