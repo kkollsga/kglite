@@ -28,8 +28,15 @@ materialized via ``git archive`` into a tempdir and built there::
 
     old = build("/path/to/repo", rev="v1.0")   # committed content at v1.0
     now = build("/path/to/repo")               # current working tree
+
+Compare two such graphs structurally (what functions/classes/constants were
+added, removed, moved, or changed between two revisions) with ``diff``::
+
+    delta = diff(old, now)
+    print(delta["summary"])
 """
 
 from kglite._kglite_code_tree import build, read_manifest, repo_tree
+from kglite.code_tree._diff import diff, match_entities
 
-__all__ = ["build", "read_manifest", "repo_tree"]
+__all__ = ["build", "diff", "match_entities", "read_manifest", "repo_tree"]

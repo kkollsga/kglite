@@ -20,6 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error. The built graph's `describe()` records which revision it represents.
   Composes into a "what changed between two revs" workflow. `rev=None`
   (default) is exactly the previous working-tree behavior.
+- **`code_tree.diff(graph_a, graph_b)` — structural diff of two code graphs.**
+  Compares the code-entity nodes (`Function`, `Class`, `Struct`, `Mixin`,
+  `Enum`, `Trait`, `Protocol`, `Interface`, `Constant`) of two graphs built by
+  `kglite.code_tree.build` — typically two revisions of one repo, via
+  `build(rev=…)` — and returns `{"added", "removed", "moved", "changed",
+  "summary"}`, each entry carrying `qualified_name`, `type`, `file`, and `line`.
+  Identity is `qualified_name` (build-root prefix stripped so it is stable
+  across builds/revs, including tempdir `rev=` builds). `moved` is the honest
+  same-simple-name-different-file signal only — a genuine rename shows as
+  remove + add. `changed` fires on a cheap already-stored fingerprint
+  (signature / visibility / constant value / enum variants / struct fields /
+  line span) without reparsing source; a same-line-count body edit is not
+  detected. Pure-Python (`kglite/code_tree/_diff.py`), one bulk query per type
+  per graph — no per-node round trips. Raises a clear error on an empty or
+  non-code_tree graph.
 
 ### Fixed
 
