@@ -69,6 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`from_records` keeps dict field values as maps.** A JSON object in a
+  `from_records` record (e.g. `{"id": 1, "meta": {"k": 1}}`) was silently
+  dropped to `None`: `json_to_value` built a `Value::Map`, but the records→
+  DataFrame type inference (`from_cypher_rows`) had no `Map` column type and
+  coerced it through `String` to null. It now infers `ColumnType::Map`, so the
+  dict round-trips as a native map (`n.meta['k']` reads it back). Nested lists
+  inside the object are preserved too.
 - **DataFrame ingestion preserves `datetime` time-of-day and `dict` values.**
   `add_nodes` / `add_connections` previously truncated a pandas `datetime64`
   column to date-only (dropping `03:04:05`) and stringified a column of Python

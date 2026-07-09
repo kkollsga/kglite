@@ -695,12 +695,16 @@ impl DataFrame {
                     // Durations are query-time-only — never persisted as
                     // a column (Cluster 2). Serialize via the String column.
                     Value::Duration { .. } => Some(ColumnType::String),
-                    // Lists get a dedicated columnar shape so they round-trip
-                    // structurally (UNWIND/IN), not as stringified JSON.
+                    // Lists and maps get a dedicated columnar shape so they
+                    // round-trip structurally (UNWIND/IN, `m['k']`/`m.k`), not
+                    // as stringified JSON. This carries `from_records` dict
+                    // fields — `json_to_value` already builds `Value::Map`, and
+                    // this keeps it a map instead of dropping it to null.
                     Value::List(_) => Some(ColumnType::List),
-                    // The remaining collection / graph-entity variants don't fit
-                    // columnar; serialise via the String column (JSON-ish).
-                    Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
+                    Value::Map(_) => Some(ColumnType::Map),
+                    // The remaining graph-entity variants don't fit columnar;
+                    // serialise via the String column (JSON-ish).
+                    Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
                         Some(ColumnType::String)
                     }
                     Value::Null | Value::NodeRef(_) => None,

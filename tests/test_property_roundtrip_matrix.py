@@ -18,28 +18,24 @@ Strict xfails are deliberate: the day a fix lands, the xfail turns into an
 XPASS and *fails the suite*, forcing the reason string (and this file) to be
 updated in the same change. That is how the matrix stays honest.
 
-## Findings captured here (2026-07-09, current build)
+## Findings (2026-07-09, updated as fixes landed)
 
-Reachable silent-degradation cells (each a strict xfail below):
+Fixed (the cells below now round-trip and pass — kept as passing rows):
 
-* **Top-level dict/map via `add_nodes` / `add_connections`** → silently
-  **stringified** (``{'k': 1}`` becomes the string ``"{'k': 1}"``). A pandas
-  object column of dicts is type-inferred as ``String`` and ``str()``-ed;
-  there is no ``Map`` column type. (`kglite-py/.../datatypes/py_in.rs`
-  ``determine_column_type`` / ``convert_pandas_series`` — object→String).
-  Note: a *list* of dicts (``[{...}]``) round-trips fine — only a **bare
-  top-level dict** degrades.
-* **Top-level dict/map via `from_records`** → silently **``None``**. The JSON
-  records blueprint infers a ``List`` for arrays but has no map inference, so a
-  dict value is dropped. (`kglite-py/.../graph/pyapi/blueprint.rs` /
-  ``from_records`` type inference.)
-* **Python ``datetime`` via `add_nodes` / `add_connections`** → silently
-  **truncated to date-only** (the time-of-day ``03:04:05`` is dropped; reads
-  back ``'2020-01-02'``). The DataFrame ingestion path has no ``Timestamp``
-  column type — a ``datetime64`` column is coerced to ``Value::DateTime``
-  (``NaiveDate``). The ``params`` / Cypher paths keep the full ``Timestamp``.
-  (`kglite-py/.../datatypes/py_in.rs` ``determine_column_type`` →
-  ``datetime64→DateTime`` + ``to_datetime``.)
+* **Top-level dict/map via `add_nodes` / `add_connections`** — was silently
+  **stringified** (``{'k': 1}`` → ``"{'k': 1}"``). Fixed: an object column
+  whose first cell is a dict is typed ``Map`` and each cell converts via the
+  recursive ``py_value_to_value``. (`datatypes/py_in.rs`.)
+* **Top-level dict/map via `from_records`** — was silently **``None``**. Fixed:
+  ``DataFrame::from_cypher_rows`` type inference now maps ``Value::Map`` →
+  ``ColumnType::Map`` (``json_to_value`` already builds the map). (`values.rs`.)
+* **Python ``datetime`` via `add_nodes` / `add_connections`** — was silently
+  **truncated to date-only**. Fixed: a ``datetime64`` column with any nonzero
+  time-of-day is typed ``Timestamp`` (full precision); a pure-midnight column
+  stays date-only ``DateTime``. (`datatypes/py_in.rs`.)
+
+Reachable silent-degradation cells that remain (each a strict xfail below):
+
 * **Chained-dot into a map — ``n.m.k`` — returns ``None``** while bracket
   subscript ``n.m['k']`` works (node and edge). Read-channel degradation:
   ``ExprPropertyAccess`` has no ``Value::Map`` arm
@@ -80,15 +76,7 @@ import pytest
 
 import kglite
 
-# ── Reason strings (paired with the strict xfails) ──────────────────────────
-R_DF_MAP_STRINGIFY = (
-    "silent-loss: a top-level dict in a pandas column is type-inferred as "
-    "String and str()-ed (no Map column type) — py_in.rs determine_column_type"
-)
-R_FROM_RECORDS_MAP = (
-    "silent-loss: from_records JSON blueprint has no map inference; a dict "
-    "record value is dropped to None (blueprint.rs from_records)"
-)
+# ── Reason strings (paired with the remaining strict xfails) ────────────────
 R_CHAINED_DOT_MAP = (
     "silent-loss: chained-dot n.m.k returns None (no Value::Map arm in "
     "ExprPropertyAccess, executor/expression.rs); bracket n.m['k'] works — "
@@ -97,12 +85,6 @@ R_CHAINED_DOT_MAP = (
 R_ADD_CONN_WHITELIST = (
     "silent-loss: add_connections without columns= drops every non-id/title "
     "column (asymmetric with add_nodes) — maintain.rs enforce_columns=true"
-)
-R_DF_DATETIME_TRUNC = (
-    "silent-loss: DataFrame ingestion has no Timestamp column type — a "
-    "datetime64 column is coerced to date-only Value::DateTime, dropping the "
-    "time-of-day (py_in.rs determine_column_type datetime64→DateTime + "
-    "to_datetime). The params/cypher paths keep the full Timestamp."
 )
 
 # ── Value kinds ─────────────────────────────────────────────────────────────
@@ -274,8 +256,6 @@ def read_edge(kg: kglite.KnowledgeGraph) -> object:
 
 # ── Outcome tables ──────────────────────────────────────────────────────────
 # (kind, path) -> "ok" | ("xfail", reason) | ("skip", reason) | ("raises", Exc)
-_XFAIL_DF_MAP = ("xfail", R_DF_MAP_STRINGIFY)
-_XFAIL_FR_MAP = ("xfail", R_FROM_RECORDS_MAP)
 _RAISES_JSON = ("raises", TypeError)
 
 NODE_PATHS = ["add_nodes", "from_records", "cypher_literal", "cypher_set", "params_create"]
@@ -287,8 +267,6 @@ def _node_outcome(kind: str, path: str):
         return ("skip", "Point has no Python literal; only creatable via cypher point()")
     if path == "from_records" and kind in _JSON_UNSERIALISABLE:
         return _RAISES_JSON
-    if path == "from_records" and kind in ("map", "list_in_dict"):
-        return _XFAIL_FR_MAP
     return "ok"
 
 
@@ -297,8 +275,6 @@ def _edge_outcome(kind: str, path: str):
         return ("skip", "Point has no Python literal; only creatable via cypher point()")
     if path == "from_records" and kind in _JSON_UNSERIALISABLE:
         return _RAISES_JSON
-    if path == "from_records" and kind in ("map", "list_in_dict"):
-        return _XFAIL_FR_MAP
     return "ok"
 
 
