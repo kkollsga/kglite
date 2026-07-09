@@ -295,20 +295,28 @@ impl HtmlParser {
         // to be predictable, so use a fixed stem "block" — every
         // produced qname will start with `block.` regardless of
         // counter, and the strip is a one-shot match.
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "kglite-html-script-{}-{}",
-            std::process::id(),
-            script_counter
-        ));
-        let _ = std::fs::create_dir_all(&tmp_dir);
-        let tmp_path = tmp_dir.join("block.js");
+        //
+        // The temp dir MUST be unique per script block. `script_counter`
+        // resets to 0 for every file, so a `{pid}-{counter}` name collided
+        // whenever two HTML files' first inline scripts were parsed
+        // concurrently (files parse in parallel via rayon): both threads
+        // wrote/removed the same `block.js`, corrupting each other's parse and
+        // making the extracted function set — hence qualified_names/ids —
+        // nondeterministic across builds (the multi-rev idempotency bug).
+        // `tempfile` mints a process-unique dir and removes it on drop.
+        let Ok(tmp_dir) = tempfile::Builder::new()
+            .prefix("kglite-html-script-")
+            .tempdir()
+        else {
+            return;
+        };
+        let tmp_path = tmp_dir.path().join("block.js");
         if std::fs::write(&tmp_path, &body).is_err() {
             return;
         }
         let sub = JstsParser::javascript();
-        let sub_result = sub.parse_file(&tmp_path, &tmp_dir);
-        let _ = std::fs::remove_file(&tmp_path);
-        let _ = std::fs::remove_dir(&tmp_dir);
+        let sub_result = sub.parse_file(&tmp_path, tmp_dir.path());
+        // `tmp_dir` drops at end of scope → `block.js` + the dir are removed.
 
         // Rescope every extracted entity into the script-block
         // namespace. The JS sub-parser produced qnames of shape

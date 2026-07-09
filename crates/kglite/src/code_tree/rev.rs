@@ -836,6 +836,180 @@ mod tests {
         assert_eq!(calls_edge_revs(&merged, "foo", "bar"), vec![s3]);
     }
 
+    /// Commit `files` (relative path → contents) to a fresh git repo and
+    /// return (tempdir guard, HEAD sha). Used to exercise the parallel-parse
+    /// determinism of the multi-rev merge with many HTML inline scripts.
+    fn commit_files(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::Builder::new()
+            .prefix("kglite-revhtml-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        for (rel, body) in files {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, body).unwrap();
+        }
+        git(dir, &["add", "-A"]);
+        git(
+            dir,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "c",
+            ],
+        );
+        let sha = git(dir, &["rev-parse", "HEAD"]);
+        (tmp, sha)
+    }
+
+    /// A repo with many HTML files, each carrying a first inline `<script>`
+    /// block. The scripts define a shared-named `gtag` plus a per-file helper —
+    /// the exact shape (`layout.html:script_1.gtag`) that surfaced the
+    /// non-idempotency: every file's first script mapped to the same
+    /// `{pid}-{counter}` temp path, so parallel parses raced and corrupted each
+    /// other's extraction.
+    fn html_script_fixture() -> (tempfile::TempDir, String) {
+        let mut files: Vec<(String, String)> = Vec::new();
+        for i in 0..24 {
+            let rel = format!("page_{i}.html");
+            let body = format!(
+                "<!doctype html>\n<html><head>\n<script>\n\
+                 function gtag(){{ window.dataLayer.push(arguments); }}\n\
+                 function helper_{i}(x){{ return x + {i}; }}\n\
+                 </script>\n</head><body><h1>Page {i}</h1></body></html>\n"
+            );
+            files.push((rel, body));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        commit_files(&refs)
+    }
+
+    /// Sorted node (type, id) + edge (conn, src_id, dst_id) identity sets.
+    type EntitySets = (Vec<(String, String)>, Vec<(String, String, String)>);
+
+    /// Sorted (node_type, id) + (conn, src_id, dst_id) identity sets — the exact
+    /// cross-rev merge keys. Two builds of the same tree must produce equal sets.
+    fn entity_sets(graph: &DirGraph) -> EntitySets {
+        let mut nodes: Vec<(String, String)> = graph
+            .graph
+            .node_indices()
+            .filter_map(|i| graph.graph.node_weight(i))
+            .map(|n| {
+                (
+                    n.node_type_str(&graph.interner).to_string(),
+                    n.id().to_string(),
+                )
+            })
+            .collect();
+        nodes.sort();
+        let mut edges: Vec<(String, String, String)> = graph
+            .graph
+            .edge_indices()
+            .filter_map(|e| {
+                let edge = graph.graph.edge_weight(e)?;
+                let (s, t) = graph.graph.edge_endpoints(e)?;
+                let sn = graph.graph.node_weight(s)?;
+                let tn = graph.graph.node_weight(t)?;
+                Some((
+                    edge.connection_type_str(&graph.interner).to_string(),
+                    sn.id().to_string(),
+                    tn.id().to_string(),
+                ))
+            })
+            .collect();
+        edges.sort();
+        (nodes, edges)
+    }
+
+    /// Every node's `revs` list (as strings) must equal `expect` — the merge is
+    /// idempotent only if re-folding the identical tree adds a label to each
+    /// existing node without minting a new one.
+    fn assert_all_nodes_have_revs(graph: &DirGraph, expect: &[String]) {
+        for idx in graph.graph.node_indices() {
+            let Some(node) = graph.graph.node_weight(idx) else {
+                continue;
+            };
+            let revs: Vec<String> = match node.get_property_value("revs") {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|v| v.as_string().unwrap_or_else(|| v.to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            assert_eq!(
+                revs,
+                expect,
+                "node {:?} carries revs {:?}, expected {:?}",
+                node.id(),
+                revs,
+                expect
+            );
+        }
+    }
+
+    /// Defect A regression: merging the IDENTICAL tree under two distinct labels
+    /// (a SHA + `HEAD` that resolve to the same commit) must yield exactly the
+    /// single-rev entity set — no phantom nodes/edges — with every entity
+    /// carrying both labels. Exercises the HTML inline-script parallel-parse
+    /// path that was nondeterministic (`{pid}-{counter}` temp-dir collisions).
+    #[test]
+    fn multi_rev_identical_tree_is_idempotent() {
+        let (tmp, sha) = html_script_fixture();
+
+        // Baseline: the single-rev build.
+        let single = build(tmp.path(), std::slice::from_ref(&sha));
+        let (single_nodes, single_edges) = entity_sets(&single);
+        // Sanity: the inline scripts really produced Function nodes.
+        assert!(
+            single_nodes
+                .iter()
+                .any(|(t, id)| t == "Function" && id.contains("gtag")),
+            "fixture should extract gtag functions from inline scripts"
+        );
+
+        // Two labels for the same commit → identical tree folded twice.
+        let dual = build(tmp.path(), &[sha.clone(), "HEAD".to_string()]);
+        let (dual_nodes, dual_edges) = entity_sets(&dual);
+
+        assert_eq!(
+            single_nodes, dual_nodes,
+            "folding the identical tree twice must not change the node set"
+        );
+        assert_eq!(
+            single_edges, dual_edges,
+            "folding the identical tree twice must not change the edge set"
+        );
+        // Every node carries BOTH labels (order-preserving: sha then HEAD).
+        assert_all_nodes_have_revs(&dual, &[sha, "HEAD".to_string()]);
+    }
+
+    /// Defect A regression: two independent builds of the SAME single rev must
+    /// produce byte-identical entity sets — the fingerprint / extraction path
+    /// must not depend on parse ordering or parallelism.
+    #[test]
+    fn single_rev_build_is_deterministic() {
+        let (tmp, sha) = html_script_fixture();
+        let a = build(tmp.path(), std::slice::from_ref(&sha));
+        let b = build(tmp.path(), std::slice::from_ref(&sha));
+        assert_eq!(
+            entity_sets(&a),
+            entity_sets(&b),
+            "two builds of the same rev diverged — extraction is nondeterministic"
+        );
+    }
+
     #[test]
     fn merged_graph_revs_survive_save_reload() {
         let (tmp, [s1, s2, s3]) = fixture();
