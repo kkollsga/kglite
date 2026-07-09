@@ -570,8 +570,24 @@ def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
     to the code they mention. Pass ``rev=<tag|branch|sha>`` to build the codebase
     as it existed at that git revision (via ``git archive`` into a tempdir — the
     working tree is untouched and uncommitted changes are excluded); the built
-    graph's ``describe()`` records the revision. See ``kglite.code_tree.build``
-    for the full keyword set.
+    graph's ``describe()`` records the revision.
+
+    Pass ``revs=[<rev>, ...]`` (oldest → newest, mutually exclusive with ``rev``)
+    to merge N revisions into one multi-rev graph: one node per entity across
+    revs, each node carrying native list props ``revs: [str]`` (revisions it
+    appears in) + ``rev_fp: [int]`` (a per-rev shape fingerprint), and each edge
+    carrying ``revs: [str]``. Unchanged entities are stored once, so the graph is
+    ≈ base + deltas. Ordinary properties (``signature``, ``value_preview``, …)
+    report the NEWEST rev an entity appears in (newest-wins). Because one graph
+    holds every rev, an **unscoped** ``MATCH (n:Function) RETURN count(n)``
+    over-counts across revs — scope a query to one rev with membership::
+
+        MATCH (n:Function) WHERE 'v2' IN n.revs RETURN n.name
+
+    and use ``CALL rev_diff({from: 'v1', to: 'v2'})`` for added / removed /
+    changed deltas between two revs. ``describe()`` lists the loaded revs and
+    teaches this scoping idiom. See ``kglite.code_tree.build`` for the full
+    keyword set.
     """
     ...
 

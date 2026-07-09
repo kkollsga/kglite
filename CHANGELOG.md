@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`code_tree.build(revs=[…])` — multi-rev code graphs from Python.** Pass a
+  list of git revspecs (oldest → newest, mutually exclusive with `rev=`) to
+  `kglite.code_tree.build` / `kglite.build_code_tree` to merge N revisions into
+  one graph. Every node carries `revs: [str]` (revisions it appears in) +
+  `rev_fp: [int]` (per-rev shape fingerprint) and every edge carries
+  `revs: [str]`; ordinary properties report the newest rev (newest-wins).
+  Because one graph holds all revs, an unscoped `MATCH (n:Function) RETURN
+  count(n)` over-counts — scope with `WHERE 'v2' IN n.revs`. `describe()` lists
+  the loaded revs and teaches the scoping idiom. Wraps the Rust
+  `build_code_tree_revs`.
 - **Multi-rev code graphs — `kglite::api::code_tree::build_code_tree_revs`
   (Rust api).** Merge N git revisions of a codebase into one graph via shared
   identity + rev-sets: one node per entity (keyed by `(node_type, id)`, aligned

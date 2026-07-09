@@ -128,3 +128,96 @@ def test_non_git_dir_with_rev_raises_clear_error(tmp_path: Path) -> None:
     with pytest.raises(Exception) as exc:
         code_tree.build(str(plain), rev="v1")
     assert "not a git repository" in str(exc.value).lower()
+
+
+# ─── B.2c — multi-rev graphs via build(revs=[...]) ──────────────────────────
+
+
+@pytest.fixture()
+def repo3(tmp_path: Path) -> Path:
+    """A git repo with three tagged commits touching one module.
+
+    v1: mod.py defines `foo(a)` and `gone()`.
+    v2: `gone` removed, `bar(x)` added, `foo` now calls bar.
+    v3: `foo` signature widened to `(a, b)`.
+    """
+    root = tmp_path / "repo3"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    mod = root / "mod.py"
+
+    def _commit(body: str, tag: str) -> None:
+        mod.write_text(body)
+        _git(root, "add", "mod.py")
+        _git(root, "commit", "-q", "-m", tag)
+        _git(root, "tag", tag)
+
+    _commit("def foo(a):\n    return a + 1\n\n\ndef gone():\n    return 0\n", "v1")
+    _commit("def foo(a):\n    return bar(a)\n\n\ndef bar(x):\n    return x + 1\n", "v2")
+    _commit("def foo(a, b):\n    return bar(a) + b\n\n\ndef bar(x):\n    return x + 1\n", "v3")
+    return root
+
+
+def _revs_of(g, name: str) -> list[str]:
+    """The `revs` list of the single Function `name`, via Cypher membership."""
+    rows = g.cypher("MATCH (f:Function) WHERE f.name = $n RETURN f.revs AS revs", params={"n": name})
+    assert len(rows) == 1, f"expected exactly one Function {name}, got {len(rows)}"
+    return list(rows[0]["revs"])
+
+
+def test_multirev_revs_queryable_from_python(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    # One node per entity across revs; revs list reflects presence.
+    assert _revs_of(g, "foo") == ["v1", "v2", "v3"]
+    assert _revs_of(g, "bar") == ["v2", "v3"]  # added in v2
+    assert _revs_of(g, "gone") == ["v1"]  # removed after v1
+
+
+def test_multirev_in_scoping_selects_one_rev(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    # `WHERE 'vX' IN n.revs` scopes to the functions present in that rev.
+    v1 = {r["n"] for r in g.cypher("MATCH (f:Function) WHERE 'v1' IN f.revs RETURN f.name AS n")}
+    v3 = {r["n"] for r in g.cypher("MATCH (f:Function) WHERE 'v3' IN f.revs RETURN f.name AS n")}
+    assert v1 == {"foo", "gone"}
+    assert v3 == {"foo", "bar"}
+
+
+def test_multirev_rev_fp_detects_signature_change(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    rows = g.cypher("MATCH (f:Function) WHERE f.name = 'foo' RETURN f.rev_fp AS fp")
+    fp = list(rows[0]["fp"])
+    assert len(fp) == 3, "one fingerprint per rev"
+    assert fp[0] == fp[1], "foo body-only edit v1->v2 doesn't change its fingerprint"
+    assert fp[1] != fp[2], "foo signature widened v2->v3"
+
+
+def test_multirev_newest_wins_property_columns(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    rows = g.cypher("MATCH (f:Function) WHERE f.name = 'foo' RETURN f.signature AS sig")
+    # Plain (unscoped) property read reports the newest rev's value.
+    assert "b" in rows[0]["sig"]
+
+
+def test_multirev_provenance_lists_revs_in_describe(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1", "v2", "v3"])
+    desc = g.describe()
+    for tag in ("v1", "v2", "v3"):
+        assert tag in desc
+    # Teaches the scoping idiom + names the multi-rev nature.
+    assert "IN n.revs" in desc or "IN\nn.revs" in desc
+
+
+def test_rev_and_revs_mutually_exclusive(repo3: Path) -> None:
+    with pytest.raises(Exception) as exc:
+        code_tree.build(str(repo3), rev="v1", revs=["v1", "v2"])
+    assert "mutually exclusive" in str(exc.value).lower()
+
+
+def test_single_item_revs_list_works(repo3: Path) -> None:
+    g = code_tree.build(str(repo3), revs=["v1"])
+    # Same entity set as a plain v1 build, plus the (single-element) rev tag.
+    names = {r["n"] for r in g.cypher("MATCH (f:Function) RETURN f.name AS n")}
+    assert names == {"foo", "gone"}
+    assert _revs_of(g, "foo") == ["v1"]

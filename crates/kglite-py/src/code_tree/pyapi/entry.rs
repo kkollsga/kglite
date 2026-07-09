@@ -31,8 +31,18 @@ pub fn language_for_path(path: &str) -> Option<&'static str> {
 /// git root is auto-resolved from ``src_dir`` (override with ``repo_root``);
 /// a bad rev or non-git directory raises a clear error. The built graph's
 /// ``describe()`` records the revision it represents.
+///
+/// Pass ``revs`` (a list of git revspecs, oldest → newest) to merge N
+/// revisions into ONE multi-rev graph: one node per entity across revs, each
+/// node carrying native list props ``revs: [str]`` (revisions it appears in) +
+/// ``rev_fp: [int]`` (per-rev shape fingerprint), and each edge carrying
+/// ``revs: [str]``. Ordinary properties report the newest rev an entity appears
+/// in (newest-wins). Unscoped queries span ALL revs (an over-count trap) — scope
+/// with ``WHERE 'v1' IN n.revs``; use ``CALL rev_diff({from:'v1', to:'v2'})``
+/// for deltas. ``describe()`` lists the loaded revs and teaches the scoping
+/// idiom. ``rev`` and ``revs`` are mutually exclusive.
 #[pyfunction]
-#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None, include_docs=false, rev=None, repo_root=None))]
+#[pyo3(signature = (src_dir, *, save_to=None, verbose=false, include_tests=true, max_loc_per_file=None, include_docs=false, rev=None, revs=None, repo_root=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     py: Python<'_>,
@@ -43,10 +53,28 @@ pub fn build(
     max_loc_per_file: Option<usize>,
     include_docs: bool,
     rev: Option<String>,
+    revs: Option<Vec<String>>,
     repo_root: Option<PathBuf>,
 ) -> PyResult<KnowledgeGraph> {
-    py.detach(|| match rev {
-        Some(rev) => crate::code_tree::rev::archive_and_build(
+    if rev.is_some() && revs.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "build(): `rev` and `revs` are mutually exclusive — pass one git \
+             revision as `rev=`, or a list of revisions as `revs=[...]` to merge \
+             into a multi-rev graph.",
+        ));
+    }
+    py.detach(|| match (rev, revs) {
+        (_, Some(revs)) => crate::code_tree::rev::build_code_tree_revs(
+            &src_dir,
+            &revs,
+            repo_root.as_deref(),
+            verbose,
+            include_tests,
+            save_to.as_deref(),
+            max_loc_per_file,
+            include_docs,
+        ),
+        (Some(rev), None) => crate::code_tree::rev::archive_and_build(
             &src_dir,
             &rev,
             repo_root.as_deref(),
@@ -56,7 +84,7 @@ pub fn build(
             max_loc_per_file,
             include_docs,
         ),
-        None => crate::code_tree::builder::run_with_options(
+        (None, None) => crate::code_tree::builder::run_with_options(
             &src_dir,
             verbose,
             include_tests,

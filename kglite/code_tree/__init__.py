@@ -34,6 +34,20 @@ added, removed, moved, or changed between two revisions) with ``diff``::
 
     delta = diff(old, now)
     print(delta["summary"])
+
+Alternatively, pass ``revs=[...]`` (oldest → newest, mutually exclusive with
+``rev``) to merge N revisions into a single **multi-rev graph** — one node per
+entity across revs, each node carrying native list props ``revs: [str]``
+(revisions it appears in) + ``rev_fp: [int]`` (per-rev shape fingerprint), and
+each edge carrying ``revs: [str]``. Ordinary properties report the newest rev
+(newest-wins). Scope a query to one rev with ``WHERE 'v2' IN n.revs`` (an
+unscoped query spans all revs), and use ``CALL rev_diff({from, to})`` for
+deltas::
+
+    g = build("/path/to/repo", revs=["v1.0", "v2.0", "HEAD"])
+    g.cypher("MATCH (n:Function) WHERE 'v2.0' IN n.revs RETURN n.name")
+    g.cypher("CALL rev_diff({from: 'v1.0', to: 'HEAD'}) "
+             "YIELD bucket, type, qualified_name RETURN *")
 """
 
 from kglite._kglite_code_tree import build, read_manifest, repo_tree
