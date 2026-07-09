@@ -169,6 +169,16 @@ in-the-moment approval whose object is the posting itself.**
 When in doubt, draft it, show it, and ask. The cost of one extra prompt is
 trivial; an unauthorized public post under the user's name is not.
 
+**Posted technical claims: measured vs inferred.** In any outward-facing
+technical post, never present an inference as a measurement. Every actionable
+claim carries the epistemic status it actually has — and a claim of
+*impossibility* ("X cannot be done", "there is no way to…") requires an
+attempted-and-failed reproduction, not source reading. Lesson from
+mimalloc#1327 (2026-07-09): an agent's untested "requires a source patch"
+inference was relayed under "caveats from the same runs" and was wrong in
+practice — the cheap `-D` experiment that settled it took three minutes and
+should have run before posting.
+
 ## Commits & releases
 
 Commit format: `type: short description` (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`). Update `CHANGELOG.md` `[Unreleased]` for user-visible changes; skip for internal refactors, CI, test-only, formatting.
