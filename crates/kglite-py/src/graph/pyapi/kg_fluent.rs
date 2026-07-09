@@ -453,7 +453,7 @@ impl KnowledgeGraph {
         // Filter in-place using temporal validity (handles NULL as unbounded)
         let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
-            for (_parent, children) in level.selections.iter_mut() {
+            for children in level.selections.values_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
                         kglite_core::api::fluent::node_is_temporally_valid(node, &config, &ref_date)
@@ -539,7 +539,7 @@ impl KnowledgeGraph {
         // Filter in-place using temporal overlap (handles NULL as unbounded)
         let current_level = new_kg.cursor.selection.get_level_count().saturating_sub(1);
         if let Some(level) = new_kg.cursor.selection.get_level_mut(current_level) {
-            for (_parent, children) in level.selections.iter_mut() {
+            for children in level.selections.values_mut() {
                 children.retain(|&idx| {
                     if let Some(node) = self.inner.graph.node_weight(idx) {
                         kglite_core::api::fluent::node_overlaps_range(

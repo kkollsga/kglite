@@ -148,7 +148,7 @@ pub fn get_selection_string(graph: &DirGraph, selection: &CurrentSelection) -> S
                         let parent_title = parent_node.title();
                         let title_str = match &*parent_title {
                             Value::String(s) => s.clone(),
-                            _ => format!("{:?}", &*parent_title),
+                            _ => format!("{:?}", *parent_title),
                         };
                         output.push_str(&format!(
                             "        Parent [{}]: {} - {}\n",

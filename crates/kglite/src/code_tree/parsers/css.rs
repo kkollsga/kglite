@@ -156,7 +156,7 @@ impl CssParser {
             // custom properties are global to the document, but
             // scoping them by file is enough for uniqueness in
             // single-file fixtures.
-            let qname = format!("{rel_path}:custom_property:{}", &prop_name);
+            let qname = format!("{rel_path}:custom_property:{}", prop_name);
             result.constants.push(ConstantInfo {
                 qualified_name: qname,
                 visibility: "public".to_string(),

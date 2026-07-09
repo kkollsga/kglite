@@ -1425,7 +1425,7 @@ pub fn get_node_info(graph: &DirGraph, node_idx: NodeIndex) -> Option<PathNodeIn
     let node_title = node.title();
     let title_str = match &*node_title {
         Value::String(s) => s.clone(),
-        _ => format!("{:?}", &*node_title),
+        _ => format!("{:?}", *node_title),
     };
     Some(PathNodeInfo {
         node_type: node.node_type_str(&graph.interner).to_string(),

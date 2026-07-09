@@ -70,7 +70,7 @@ fn validate_single_node(
     let node_title = node.title();
     let title = match &*node_title {
         Value::String(s) => s.clone(),
-        _ => format!("{:?}", &*node_title),
+        _ => format!("{:?}", *node_title),
     };
     // Check required fields
     for required_field in &schema.required_fields {
@@ -192,7 +192,7 @@ fn get_node_info(graph: &DirGraph, node_idx: petgraph::graph::NodeIndex) -> (Str
             let node_title = node.title();
             let title_str = match &*node_title {
                 Value::String(s) => s.clone(),
-                _ => format!("{:?}", &*node_title),
+                _ => format!("{:?}", *node_title),
             };
             (node.node_type_str(&graph.interner).to_string(), title_str)
         }

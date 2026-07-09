@@ -1334,7 +1334,7 @@ pub fn update_node_properties(
         .map(|t| t.to_string())
         .unwrap_or_else(|| "Calculated".to_string());
 
-    for (node_type, _count) in node_types.iter() {
+    for node_type in node_types.keys() {
         // Check for type mismatch with existing metadata
         if let Some(existing_meta) = graph.get_node_type_metadata(node_type) {
             if let Some(existing_type) = existing_meta.get(&property_string) {

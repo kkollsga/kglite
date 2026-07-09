@@ -1407,7 +1407,7 @@ fn add_id_column(
         }
         _ => ColumnData::String(
             vals.into_iter()
-                .map(|v| v.and_then(|s| if s.is_empty() { None } else { Some(s) }))
+                .map(|v| v.filter(|s| !s.is_empty()))
                 .collect(),
         ),
     };

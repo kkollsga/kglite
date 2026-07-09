@@ -290,6 +290,7 @@ impl core::fmt::Debug for kglite::api::code_tree::SourceLocation
 pub fn kglite::api::code_tree::SourceLocation::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const kglite::api::code_tree::CODE_TYPES: &[&str]
 pub fn kglite::api::code_tree::build_code_tree(input: &std::path::Path, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub fn kglite::api::code_tree::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::api::code_tree::language_for_path(path: &std::path::Path) -> core::option::Option<&'static str>
 pub fn kglite::api::code_tree::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
 pub fn kglite::api::code_tree::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_tree::SourceLookup
@@ -3099,6 +3100,9 @@ pub fn kglite::code_tree::parsers::get_parsers_for_directory(src_root: &std::pat
 pub fn kglite::code_tree::parsers::language_for_path(path: &std::path::Path) -> core::option::Option<&'static str>
 pub mod kglite::code_tree::repo
 pub fn kglite::code_tree::repo::clone_and_build(repo: &str, save_to: core::option::Option<&std::path::Path>, clone_to: core::option::Option<&std::path::Path>, branch: core::option::Option<&str>, token: core::option::Option<&str>, verbose: bool, include_tests: bool, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub mod kglite::code_tree::rev
+pub fn kglite::code_tree::rev::archive_and_build(src_dir: &std::path::Path, rev: &str, repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub fn kglite::code_tree::rev::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub mod kglite::datatypes
 pub mod kglite::datatypes::values
 pub enum kglite::datatypes::values::BorrowedValue<'a>
@@ -3123,7 +3127,9 @@ pub kglite::datatypes::values::ColumnData::DateTime(alloc::vec::Vec<core::option
 pub kglite::datatypes::values::ColumnData::Float64(alloc::vec::Vec<core::option::Option<f64>>)
 pub kglite::datatypes::values::ColumnData::Int64(alloc::vec::Vec<core::option::Option<i64>>)
 pub kglite::datatypes::values::ColumnData::List(alloc::vec::Vec<core::option::Option<alloc::vec::Vec<kglite::datatypes::values::Value>>>)
+pub kglite::datatypes::values::ColumnData::Map(alloc::vec::Vec<core::option::Option<alloc::collections::btree::map::BTreeMap<alloc::string::String, kglite::datatypes::values::Value>>>)
 pub kglite::datatypes::values::ColumnData::String(alloc::vec::Vec<core::option::Option<alloc::string::String>>)
+pub kglite::datatypes::values::ColumnData::Timestamp(alloc::vec::Vec<core::option::Option<chrono::naive::datetime::NaiveDateTime>>)
 pub kglite::datatypes::values::ColumnData::UniqueId(alloc::vec::Vec<core::option::Option<u32>>)
 impl core::fmt::Debug for kglite::datatypes::values::ColumnData
 pub fn kglite::datatypes::values::ColumnData::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -3133,7 +3139,9 @@ pub kglite::datatypes::values::ColumnType::DateTime
 pub kglite::datatypes::values::ColumnType::Float64
 pub kglite::datatypes::values::ColumnType::Int64
 pub kglite::datatypes::values::ColumnType::List
+pub kglite::datatypes::values::ColumnType::Map
 pub kglite::datatypes::values::ColumnType::String
+pub kglite::datatypes::values::ColumnType::Timestamp
 pub kglite::datatypes::values::ColumnType::UniqueId
 impl core::clone::Clone for kglite::datatypes::values::ColumnType
 pub fn kglite::datatypes::values::ColumnType::clone(&self) -> kglite::datatypes::values::ColumnType

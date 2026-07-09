@@ -2048,7 +2048,7 @@ impl<'a> PatternExecutor<'a> {
                 Value::Int64(i) => i.to_string(),
                 Value::Float64(f) => f.to_string(),
                 Value::UniqueId(u) => u.to_string(),
-                _ => format!("{:?}", &*node_title),
+                _ => format!("{:?}", *node_title),
             };
             MatchBinding::Node {
                 index: idx,
