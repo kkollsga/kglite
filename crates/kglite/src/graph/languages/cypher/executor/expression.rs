@@ -609,6 +609,12 @@ impl<'a> CypherExecutor<'a> {
                             .cloned()
                             .unwrap_or(Value::Null),
                     }),
+                    // Chained-dot into a map: `n.m.k` where `n.m` resolves to a
+                    // Value::Map. Same semantics as bracket subscript
+                    // `n.m['k']` (see `map_subscript`) — a missing key is NULL,
+                    // never an error. Without this arm `n.m.k` fell through to
+                    // Null while `n.m['k']` worked.
+                    Value::Map(map) => Ok(map.get(property).cloned().unwrap_or(Value::Null)),
                     _ => Ok(Value::Null),
                 }
             }

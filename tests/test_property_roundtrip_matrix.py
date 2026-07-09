@@ -34,14 +34,14 @@ Fixed (the cells below now round-trip and pass — kept as passing rows):
   time-of-day is typed ``Timestamp`` (full precision); a pure-midnight column
   stays date-only ``DateTime``. (`datatypes/py_in.rs`.)
 
-Reachable silent-degradation cells that remain (each a strict xfail below):
-
-* **Chained-dot into a map — ``n.m.k`` — returns ``None``** while bracket
-  subscript ``n.m['k']`` works (node and edge). Read-channel degradation:
-  ``ExprPropertyAccess`` has no ``Value::Map`` arm
-  (`executor/expression.rs`). Documented as Fact #2 in
+* **Chained-dot into a map — ``n.m.k``** — was returning ``None`` while bracket
+  subscript ``n.m['k']`` worked (node and edge). Fixed: ``ExprPropertyAccess``
+  now has a ``Value::Map`` arm mirroring ``map_subscript``
+  (`executor/expression.rs`). Was Fact #2 in
   ``dev-docs/plans/rev-aware-code-graphs.md`` (B.2 design).
-Loud-not-silent (acceptable half of the contract):
+
+No reachable *silent*-degradation cells remain. Loud-not-silent (acceptable
+half of the contract):
 
 * **`add_connections` without an explicit ``columns=`` whitelist drops every
   non-id/title column** (lists *and* scalars), asymmetric with ``add_nodes``
@@ -79,13 +79,6 @@ import pandas as pd
 import pytest
 
 import kglite
-
-# ── Reason strings (paired with the remaining strict xfails) ────────────────
-R_CHAINED_DOT_MAP = (
-    "silent-loss: chained-dot n.m.k returns None (no Value::Map arm in "
-    "ExprPropertyAccess, executor/expression.rs); bracket n.m['k'] works — "
-    "Fact #2, dev-docs/plans/rev-aware-code-graphs.md"
-)
 
 # ── Value kinds ─────────────────────────────────────────────────────────────
 _DATE = datetime.date(2020, 1, 2)
@@ -442,17 +435,15 @@ def test_add_nodes_keeps_list_column_without_whitelist():
     assert got == ["a", "b"]
 
 
-# ── Known bug: chained-dot into a map returns NULL (Fact #2) ────────────────
-@pytest.mark.xfail(strict=True, reason=R_CHAINED_DOT_MAP)
-def test_chained_dot_into_node_map_returns_null():
+# ── Chained-dot into a map now works (was Fact #2 silent-loss) ──────────────
+def test_chained_dot_into_node_map_works():
     kg = kglite.KnowledgeGraph()
     kg.cypher("CREATE (n:N {id:1, m:$m})", params={"m": {"k": "v"}})
     got = kg.cypher("MATCH (n:N) RETURN n.m.k AS x").to_dicts()[0]["x"]
     assert got == "v", f"chained-dot n.m.k degraded to {got!r}"
 
 
-@pytest.mark.xfail(strict=True, reason=R_CHAINED_DOT_MAP)
-def test_chained_dot_into_edge_map_returns_null():
+def test_chained_dot_into_edge_map_works():
     kg = kglite.KnowledgeGraph()
     kg.cypher("CREATE (:N {id:1}) CREATE (:N {id:2})")
     kg.cypher("MATCH (a:N {id:1}),(b:N {id:2}) CREATE (a)-[r:R {m:{k:'v'}}]->(b)")

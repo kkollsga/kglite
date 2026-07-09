@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Chained-dot access into a map property — `n.m.k` — now resolves.** Reading
+  a map-valued property with chained dots (`RETURN n.m.k`) returned `null`,
+  while the equivalent bracket subscript (`n.m['k']`) worked. The Cypher
+  executor's expression-property-access path had no map arm; it now mirrors the
+  bracket path (`n.m.k` == `n.m['k']`, a missing key is `null`). Works for both
+  node and edge map properties, across storage modes.
 - **`add_connections` warns when it drops columns absent from `columns=`.**
   Unlike `add_nodes`, `add_connections` keeps only id/title columns unless an
   explicit `columns=` whitelist is given — so a plain
