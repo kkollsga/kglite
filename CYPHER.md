@@ -1275,6 +1275,41 @@ methods (`__x__`), and `main`. Options:
 | `include_tests` | `false` | also report test functions |
 | `exclude_public` | `false` | also drop `pub`/`public`/`export`/`exported` visibility (useful for Rust-style codebases; off by default because in Python every non-underscore name is nominally public) |
 
+### `CALL rev_diff({from, to})` — what changed between two revisions
+
+For a **multi-rev code graph** built with
+`code_tree.build(path, revs=['v1', 'v2', ...])` (one graph holding N git
+revisions — see the Python guide), `rev_diff` reports the code entities
+`added`, `removed`, or `changed` between any two loaded revs:
+
+```cypher
+CALL rev_diff({from: 'v1', to: 'v2'})
+YIELD bucket, type, qualified_name, name, file, line
+RETURN bucket, type, qualified_name, file, line
+ORDER BY bucket, qualified_name
+```
+
+Each merged node carries `revs: [str]` (the revisions it appears in) and
+`rev_fp: [int]` (a per-rev shape fingerprint, positionally aligned with `revs`).
+`rev_diff` reads those straight off each node: present at `from` only → `removed`;
+at `to` only → `added`; present at both with a divergent `rev_fp` → `changed`. It
+is a pure set-and-fingerprint membership check — it reports *that* an entity
+changed (and its current/newest value via the ordinary property columns), never
+re-parsing source, matching the two-graph `code_tree.diff` contract.
+
+| Param | Required | Effect |
+|---|---|---|
+| `from` | yes | the baseline rev label (as passed to `build(revs=[...])`) |
+| `to` | yes | the comparison rev label |
+| `node_type` | no | scope to one node type (string) or several (list) |
+
+Yields `bucket` (`"added"`/`"removed"`/`"changed"`), `type`, `qualified_name`,
+`name`, `file`, `line`. Errors clearly on a graph that isn't multi-rev (no `revs`
+property) or an unknown rev (listing the available revs). Nodes-only in v1; edge
+add/remove is a documented deferral. To scope an ordinary query to a single rev,
+use list membership directly: `MATCH (n:Function) WHERE 'v2' IN n.revs RETURN n`
+— an *unscoped* query spans all revs (an over-count trap).
+
 ### Recipe queries (no procedure needed — the data is already there)
 
 ```cypher

@@ -279,6 +279,50 @@ graph = build(".", save_to="code.kgl", verbose=True)
 
 When a manifest is detected, `build()` reads project metadata (name, version, dependencies) and only scans declared source directories — avoiding `.venv/`, `target/`, `node_modules/`, etc.
 
+## Building from git revisions (`rev` / `revs`)
+
+Pass `rev=<tag|branch|sha>` to build a codebase **as it existed at a git revision** without disturbing the working tree. The revision's tracked files are materialized via `git archive` into a tempdir and built there — `HEAD` and the working tree are never touched, uncommitted changes are excluded, and `.gitignore`d/untracked files never appear. The git root is auto-resolved from the path (override with `repo_root=`); a bad rev or non-git directory raises a clear error, and the built graph's `describe()` records the revision.
+
+```python
+old = build("/path/to/repo", rev="v1.0")   # committed content at v1.0
+now = build("/path/to/repo")               # current working tree
+
+# Structural diff of two such graphs (added / removed / moved / changed)
+delta = diff(old, now)
+print(delta["summary"])
+```
+
+### Multi-rev graphs (`revs=[...]`)
+
+Pass `revs=[...]` (a list of git revspecs, oldest → newest, **mutually exclusive with `rev`**) to merge N revisions into **one** graph:
+
+```python
+g = build("/path/to/repo", revs=["v1.0", "v2.0", "HEAD"])
+```
+
+- **One node per entity** across all revs. Each node carries two native list props: `revs: [str]` (the revisions it appears in) and `rev_fp: [int]` (a per-rev *shape fingerprint*, positionally aligned with `revs`, so a signature/value/body change is detectable between any two revs). Each edge carries `revs: [str]`.
+- **Unchanged entities are stored once**, so the graph is ≈ base + deltas.
+- **Ordinary properties report the newest rev** an entity appears in (newest-wins), so plain Cypher (`RETURN n.signature`) reads HEAD's value.
+
+Because one graph holds every rev, an **unscoped** query counts the union across revs — `MATCH (n:Function) RETURN count(n)` over-counts. Scope a query to a single rev with list membership, and reach for `CALL rev_diff` for deltas:
+
+```python
+# Everything present in v2.0 (scoped — no over-count)
+g.cypher("MATCH (n:Function) WHERE 'v2.0' IN n.revs RETURN n.name")
+
+# What changed between two revs (added / removed / changed)
+g.cypher("""
+    CALL rev_diff({from: 'v1.0', to: 'HEAD'})
+    YIELD bucket, type, qualified_name, name, file, line
+    RETURN bucket, type, qualified_name, file, line
+    ORDER BY bucket, qualified_name
+""")
+```
+
+`rev_diff` classifies each entity between the two revs by anti-joining `revs` and comparing the aligned `rev_fp` (present at `from` only → `removed`; at `to` only → `added`; both with a divergent fingerprint → `changed`). It reports *that* an entity changed plus its current value — never re-parsing source — matching the `diff` contract. Optional `{node_type}` scoping; it errors clearly on a non-multi-rev graph or an unknown rev. `describe()` lists the loaded revs and teaches the `WHERE '<rev>' IN n.revs` scoping idiom. (See the [Cypher reference](../../../CYPHER.md) for the full `rev_diff` semantics.)
+
+Each rev is a full parse, so a merged build costs ≈ N × a single build; the working (uncommitted) tree is not a rev — to include it, `diff` a plain `build(path)` graph against a rev build.
+
 ## Documentation nodes (`include_docs`)
 
 A repo's prose — its `README`, `docs/`, design notes, ADRs — is part of its intelligence, but a plain code graph discards every doc. Pass `include_docs=True` to `build()` (or `repo_tree()`) to ingest the repo's documentation alongside the code and **link the two**. Both **Markdown** (`.md`) and **reStructuredText** (`.rst`, the Sphinx format used across scientific-Python — numpy / pandas / xarray / scipy) are understood:
