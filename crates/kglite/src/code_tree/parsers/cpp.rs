@@ -923,10 +923,16 @@ impl CppParser {
         rel_path: &str,
         result: &mut ParseResult,
     ) {
-        let Some(name) = Self::get_name(node, source, "identifier") else {
+        // Read the `#define` name straight off the `name` field — NOT via
+        // `get_name`, whose `looks_like_macro_decorator` filter would drop
+        // every SCREAMING_SNAKE_CASE macro (the common case: `MI_TLS_MODEL`,
+        // `ALLCAPS_CONST`). That filter is load-bearing for the *function*-name
+        // slot (skips export macros like `KUZU_API`), so it stays there; the
+        // preproc-def name is a bare identifier and must be taken verbatim.
+        let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        let name = name.to_string();
+        let name = node_text(name_node, source).to_string();
         let mut val_text: Option<String> = None;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -1396,6 +1402,21 @@ impl CppParser {
             "type_definition" => self.parse_typedef(node, source, module_path, rel_path, result),
             "preproc_include" => Self::parse_preproc_include(node, source, file_info),
             "preproc_def" => self.parse_preproc_def(node, source, module_path, rel_path, result),
+            // Preprocessor conditionals (`#if` / `#ifdef` / `#ifndef` / `#elif`
+            // / `#else`) are container nodes: their body declarations — and any
+            // `#define` — are *children* of the conditional, not of the
+            // translation unit, so the top-level loop never reached them. Recurse
+            // each child back through this router so guarded `#define`s (e.g.
+            // mimalloc's `MI_TLS_MODEL` under `#if defined(__APPLE__)`) and any
+            // functions/types declared inside the block are captured. The trailing
+            // `preproc_else`/`preproc_elif` alternative is itself a child here, so
+            // this single loop also descends into nested branches.
+            "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_else" => {
+                let mut cursor = node.walk();
+                for sub in node.children(&mut cursor) {
+                    self.parse_cpp_top_level(sub, source, module_path, rel_path, result, file_info);
+                }
+            }
             "linkage_specification" => {
                 let n_funcs = result.functions.len();
                 let mut cursor = node.walk();
@@ -1496,6 +1517,14 @@ impl CppParser {
             "type_definition" => self.parse_typedef(node, source, module_path, rel_path, result),
             "preproc_include" => Self::parse_preproc_include(node, source, file_info),
             "preproc_def" => self.parse_preproc_def(node, source, module_path, rel_path, result),
+            // See `parse_cpp_top_level`: recurse into preprocessor conditionals so
+            // guarded `#define`s and block-local declarations are reached.
+            "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_else" => {
+                let mut cursor = node.walk();
+                for sub in node.children(&mut cursor) {
+                    self.parse_c_top_level(sub, source, module_path, rel_path, result, file_info);
+                }
+            }
             _ => {}
         }
     }
@@ -1992,6 +2021,72 @@ mod export_macro_tests {
         assert!(
             !r.functions.iter().any(|f| f.name == "unknown"),
             "degenerate unknown function present"
+        );
+    }
+
+    fn parse_c(src: &str) -> ParseResult {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hdr.h");
+        std::fs::write(&file, src).unwrap();
+        CppParser::c().parse_file(&file, dir.path())
+    }
+
+    fn const_named<'a>(
+        r: &'a ParseResult,
+        name: &str,
+    ) -> Option<&'a crate::code_tree::models::ConstantInfo> {
+        r.constants.iter().find(|c| c.name == name)
+    }
+
+    #[test]
+    fn allcaps_and_mixedcase_object_defines_captured() {
+        // Regression: `looks_like_macro_decorator` used to drop every ALL-CAPS
+        // `#define` name (it survives only for the function-name slot now).
+        let r = parse_c("#define ALLCAPS_CONST 7\n#define MixedCase 42\n");
+        let allcaps = const_named(&r, "ALLCAPS_CONST").expect("ALLCAPS define dropped");
+        assert_eq!(allcaps.value_preview.as_deref(), Some("7"));
+        assert_eq!(allcaps.line_number, 1);
+        let mixed = const_named(&r, "MixedCase").expect("MixedCase define dropped");
+        assert_eq!(mixed.value_preview.as_deref(), Some("42"));
+        assert_eq!(mixed.line_number, 2);
+    }
+
+    #[test]
+    fn defines_inside_preproc_conditionals_captured() {
+        // The define lives inside `#if defined(__APPLE__)`, i.e. as a child of a
+        // `preproc_if`, which the top-level loop never descended into.
+        let src = "#if defined(__APPLE__)\n#define GUARDED_SLOT 108\n#else\n#define GUARDED_SLOT 0\n#endif\n";
+        let r = parse_c(src);
+        assert!(
+            const_named(&r, "GUARDED_SLOT").is_some(),
+            "guarded #define not captured: {:?}",
+            r.constants.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        // Both the `#if` body and the `#else` alternative are reached.
+        let vals: Vec<&str> = r
+            .constants
+            .iter()
+            .filter(|c| c.name == "GUARDED_SLOT")
+            .filter_map(|c| c.value_preview.as_deref())
+            .collect();
+        assert!(vals.contains(&"108"), "if-branch value missing: {vals:?}");
+        assert!(vals.contains(&"0"), "else-branch value missing: {vals:?}");
+    }
+
+    #[test]
+    fn nested_ifdef_defines_captured() {
+        let src = "#ifdef A\n#ifdef B\n#define NESTED_MACRO 5\n#endif\n#endif\n";
+        let r = parse_c(src);
+        let nested = const_named(&r, "NESTED_MACRO").expect("nested #define dropped");
+        assert_eq!(nested.value_preview.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn cpp_guarded_define_captured() {
+        let r = parse_cpp("#ifdef _WIN32\n#define PLATFORM_TAG 1\n#endif\n");
+        assert_eq!(
+            const_named(&r, "PLATFORM_TAG").and_then(|c| c.value_preview.as_deref()),
+            Some("1")
         );
     }
 }

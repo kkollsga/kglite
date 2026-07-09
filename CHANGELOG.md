@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **C/C++ `#define` constants are now captured, including ALL-CAPS names and
+  defines inside preprocessor conditionals.** The `#define` → `:Constant`
+  pipeline existed end to end but was dead for the common case. Two defects:
+  (1) the shared macro-decorator filter — which correctly protects the
+  *function-name* slot from export macros like `KUZU_API` — also dropped every
+  `SCREAMING_SNAKE_CASE` `#define` name (e.g. `MI_TLS_MODEL`), so the constant
+  never materialized; the preprocessor-definition name is now read verbatim off
+  its `name` field, leaving function/class extraction filtering intact.
+  (2) The extractor visited only direct translation-unit children, so `#define`s
+  guarded by `#if` / `#ifdef` / `#ifndef` / `#elif` / `#else` were never reached;
+  the extractor now recurses into those conditional blocks (also picking up
+  functions/types declared inside them). A `#define NAME value` in a C/C++ file
+  is now queryable as `MATCH (c:Constant {name:'NAME'}) RETURN c.value_preview,
+  c.line_number`.
+
 ## [0.12.12] — 2026-07-08 — pyarrow coexistence + dataset-fetch standardization
 
 ### Changed
