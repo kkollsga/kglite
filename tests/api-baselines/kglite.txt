@@ -291,6 +291,7 @@ pub fn kglite::api::code_tree::SourceLocation::fmt(&self, f: &mut core::fmt::For
 pub const kglite::api::code_tree::CODE_TYPES: &[&str]
 pub fn kglite::api::code_tree::build_code_tree(input: &std::path::Path, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::api::code_tree::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub fn kglite::api::code_tree::dedup_revs(revs: &[alloc::string::String]) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::code_tree::language_for_path(path: &std::path::Path) -> core::option::Option<&'static str>
 pub fn kglite::api::code_tree::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
 pub fn kglite::api::code_tree::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_tree::SourceLookup
@@ -856,6 +857,7 @@ pub kglite::api::introspection::SchemaOverview::edge_count: usize
 pub kglite::api::introspection::SchemaOverview::indexes: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::introspection::SchemaOverview::node_count: usize
 pub kglite::api::introspection::SchemaOverview::node_types: alloc::vec::Vec<(alloc::string::String, kglite::graph::introspection::NodeTypeOverview)>
+pub const kglite::api::introspection::EXACT_PROPERTY_STATS_MAX_NODES: usize
 pub fn kglite::api::introspection::compute_connection_type_stats(graph: &kglite::api::DirGraph) -> alloc::vec::Vec<kglite::api::introspection::ConnectionTypeStats>
 pub fn kglite::api::introspection::compute_description(graph: &kglite::api::DirGraph, types: core::option::Option<&[alloc::string::String]>, connections: &kglite::api::introspection::ConnectionDetail, cypher: &kglite::api::introspection::CypherDetail, fluent: &kglite::api::introspection::FluentDetail, type_search: core::option::Option<&str>, max_pairs: core::option::Option<usize>, sample_truncate: core::option::Option<usize>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::introspection::compute_neighbors_schema(graph: &kglite::api::DirGraph, node_type: &str) -> core::result::Result<kglite::graph::introspection::NeighborsSchema, alloc::string::String>
@@ -3103,6 +3105,7 @@ pub fn kglite::code_tree::repo::clone_and_build(repo: &str, save_to: core::optio
 pub mod kglite::code_tree::rev
 pub fn kglite::code_tree::rev::archive_and_build(src_dir: &std::path::Path, rev: &str, repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::code_tree::rev::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub fn kglite::code_tree::rev::dedup_revs(revs: &[alloc::string::String]) -> alloc::vec::Vec<alloc::string::String>
 pub mod kglite::datatypes
 pub mod kglite::datatypes::values
 pub enum kglite::datatypes::values::BorrowedValue<'a>
