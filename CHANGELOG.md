@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`kglite-mcp-server` now requires mcp-methods >= 0.3.50**, picking up the
+  upstream multi-rev activation hardening: `revs=N` selects the dominant
+  stable release-tag family and skips prereleases (on multi-family repos like
+  apache/arrow it previously grabbed whichever family version-sorted highest);
+  `update=True` re-applies a previously requested rev-set instead of silently
+  collapsing the graph to HEAD-only; resolved rev labels are deduplicated
+  upstream as well.
+
 ### Fixed
 
 - **Multi-rev code-graph builds are now deterministic and idempotent.** Inline
