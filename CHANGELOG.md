@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and intentionally divergent behavior; public docs and agent introspection no
   longer imply complete openCypher or Neo4j compatibility. KGLite functions and
   procedures also accept canonical `kglite.*` names while existing flat names
-  remain equivalent.
+  remain equivalent. The compatibility surface is locked by independently
+  authored MIT-licensed behavioral cases and an artifact-provenance gate.
 
 ## [0.12.15] - 2026-07-11
 

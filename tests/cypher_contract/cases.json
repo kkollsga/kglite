@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "license": "MIT",
+  "authorship": {
+    "method": "independent_behavioral_design",
+    "upstream_artifacts_used": false,
+    "artifact_policy": "Cases are written from neutral behavioral requirements. No external conformance fixtures, scenario text, or test implementations are used."
+  },
+  "cases": [
+    {"id": "scalar.integer_addition", "category": "expression", "requirement": "Integer addition returns the arithmetic sum.", "query": "RETURN 1 + 2 AS value", "expected": [{"value": 3}]},
+    {"id": "scalar.precedence", "category": "expression", "requirement": "Multiplication binds more tightly than addition.", "query": "RETURN 2 + 3 * 4 AS value", "expected": [{"value": 14}]},
+    {"id": "scalar.parameter", "category": "expression", "requirement": "A named parameter contributes its typed value to an expression.", "query": "RETURN $left + $right AS value", "params": {"left": 4, "right": 5}, "expected": [{"value": 9}]},
+    {"id": "scalar.coalesce", "category": "null", "requirement": "Coalesce returns the first non-null input.", "query": "RETURN coalesce(null, null, 'ready') AS value", "expected": [{"value": "ready"}]},
+    {"id": "scalar.null_check", "category": "null", "requirement": "IS NULL identifies a null value.", "query": "RETURN null IS NULL AS value", "expected": [{"value": true}]},
+    {"id": "case.generic", "category": "expression", "requirement": "A generic CASE selects the first true branch.", "query": "RETURN CASE WHEN 2 > 1 THEN 'yes' ELSE 'no' END AS value", "expected": [{"value": "yes"}]},
+    {"id": "case.simple", "category": "expression", "requirement": "A simple CASE compares its operand with each branch value.", "query": "RETURN CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END AS value", "expected": [{"value": "two"}]},
+    {"id": "list.literal", "category": "list", "requirement": "A list literal preserves value order and types.", "query": "RETURN [1, 'two', true, null] AS value", "expected": [{"value": [1, "two", true, null]}]},
+    {"id": "list.index", "category": "list", "requirement": "A zero-based list index returns the selected item.", "query": "RETURN [10, 20, 30][1] AS value", "expected": [{"value": 20}]},
+    {"id": "list.slice", "category": "list", "requirement": "An open-ended list slice returns the requested suffix.", "query": "RETURN [10, 20, 30][1..] AS value", "expected": [{"value": [20, 30]}]},
+    {"id": "unwind.order", "category": "clause", "requirement": "UNWIND emits one row per list item and ORDER BY controls result order.", "query": "UNWIND [3, 1, 2] AS value RETURN value ORDER BY value", "expected": [{"value": 1}, {"value": 2}, {"value": 3}]},
+    {"id": "union.distinct", "category": "clause", "requirement": "UNION removes duplicate rows across branches.", "query": "RETURN 1 AS value UNION RETURN 1 AS value UNION RETURN 2 AS value", "expected": [{"value": 1}, {"value": 2}]},
+    {"id": "create.node", "category": "mutation", "requirement": "A created node can be matched by label and property.", "setup": ["CREATE (:Person {id: 1, name: 'Ada'})"], "query": "MATCH (n:Person {id: 1}) RETURN n.name AS name", "expected": [{"name": "Ada"}]},
+    {"id": "match.optional_missing", "category": "pattern", "requirement": "A missing OPTIONAL MATCH extends the input row with null.", "setup": ["CREATE (:Person {id: 1})"], "query": "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q) RETURN p.id AS id, q AS missing", "expected": [{"id": 1, "missing": null}]},
+    {"id": "create.relationship", "category": "mutation", "requirement": "A created directed relationship retains its type and properties.", "setup": ["CREATE (:Person {id: 1})", "CREATE (:Person {id: 2})", "MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:KNOWS {since: 2020}]->(b)"], "query": "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.id AS source, b.id AS target, type(r) AS kind, r.since AS since", "expected": [{"source": 1, "target": 2, "kind": "KNOWS", "since": 2020}]},
+    {"id": "match.undirected", "category": "pattern", "requirement": "An undirected relationship pattern can match an incoming stored relationship.", "setup": ["CREATE (:Person {id: 1})", "CREATE (:Person {id: 2})", "MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:KNOWS]->(b)"], "query": "MATCH (a:Person {id: 2})-[:KNOWS]-(b:Person) RETURN b.id AS id", "expected": [{"id": 1}]},
+    {"id": "set.property", "category": "mutation", "requirement": "SET assigns a property on a bound node.", "setup": ["CREATE (:Person {id: 1})", "MATCH (n:Person) SET n.name = 'Ada'"], "query": "MATCH (n:Person) RETURN n.name AS name", "expected": [{"name": "Ada"}]},
+    {"id": "remove.property", "category": "mutation", "requirement": "REMOVE deletes a property and subsequent access yields null.", "setup": ["CREATE (:Person {id: 1, obsolete: true})", "MATCH (n:Person) REMOVE n.obsolete"], "query": "MATCH (n:Person) RETURN n.obsolete AS value", "expected": [{"value": null}]},
+    {"id": "merge.idempotent", "category": "mutation", "requirement": "Repeating the same node MERGE does not create a duplicate.", "setup": ["MERGE (:Person {id: 1})", "MERGE (:Person {id: 1})"], "query": "MATCH (n:Person) RETURN count(n) AS count", "expected": [{"count": 1}]},
+    {"id": "foreach.update", "category": "mutation", "requirement": "FOREACH applies its updating body once per list item.", "setup": ["FOREACH (id IN [1, 2] | CREATE (:Item {id: id}))"], "query": "MATCH (n:Item) RETURN n.id AS id ORDER BY id", "expected": [{"id": 1}, {"id": 2}]},
+    {"id": "delete.node", "category": "mutation", "requirement": "DELETE removes a bound node with no relationships.", "setup": ["CREATE (:Item {id: 1})", "MATCH (n:Item) DELETE n"], "query": "MATCH (n:Item) RETURN count(n) AS count", "expected": [{"count": 0}]},
+    {"id": "quantifier.any", "category": "list", "requirement": "any returns true when at least one item satisfies its predicate.", "query": "RETURN any(x IN [1, 2, 3] WHERE x = 2) AS value", "expected": [{"value": true}]},
+    {"id": "path.decomposition", "category": "path", "requirement": "A one-edge path decomposes into two nodes and one relationship.", "setup": ["CREATE (:Item {id: 1})", "CREATE (:Item {id: 2})", "MATCH (a:Item {id: 1}), (b:Item {id: 2}) CREATE (a)-[:NEXT]->(b)"], "query": "MATCH path = (a:Item {id: 1})-[:NEXT]->(b:Item) RETURN size(nodes(path)) AS nodes, size(relationships(path)) AS relationships", "expected": [{"nodes": 2, "relationships": 1}]}
+  ]
+}
