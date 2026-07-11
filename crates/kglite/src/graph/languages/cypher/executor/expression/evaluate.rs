@@ -276,14 +276,29 @@ impl<'a> CypherExecutor<'a> {
                 // lists stay first-class and incur no extra branching).
                 let idx = match &idx_val {
                     Value::Int64(i) => *i,
-                    Value::Float64(f) => *f as i64,
                     // String key → map / node / relationship subscript
                     // (`{x:1}['x']`, `properties(n)['title']`, `n['title']`).
                     // Missing key is NULL, never an error (Neo4j semantics).
-                    Value::String(key) => return Ok(map_subscript(&container, key)),
+                    Value::String(key) => {
+                        return match container {
+                            Value::Map(_) | Value::Node(_) | Value::Relationship(_) => {
+                                Ok(map_subscript(&container, key))
+                            }
+                            Value::Null => Ok(Value::Null),
+                            _ => Err(format!(
+                                "String index requires a map, node, or relationship; got {:?}",
+                                container
+                            )),
+                        };
+                    }
                     // NULL key (or NULL container) → NULL, per openCypher.
                     Value::Null => return Ok(Value::Null),
-                    _ => return Err(format!("Index must be an integer, got {:?}", idx_val)),
+                    _ => {
+                        return Err(format!(
+                            "List index must be an integer, got {:?}",
+                            idx_val
+                        ));
+                    }
                 };
 
                 // Parse the list (JSON-formatted string like "[\"Person\"]" or "[1, 2, 3]")
@@ -312,11 +327,6 @@ impl<'a> CypherExecutor<'a> {
                             let i = if i < 0 { len + i } else { i };
                             i.clamp(0, len) as usize
                         }
-                        Value::Float64(f) => {
-                            let i = f as i64;
-                            let i = if i < 0 { len + i } else { i };
-                            i.clamp(0, len) as usize
-                        }
                         _ => return Err(format!("Slice start must be integer, got {:?}", v)),
                     }
                 } else {
@@ -328,11 +338,6 @@ impl<'a> CypherExecutor<'a> {
                     let v = self.evaluate_expression(ee, row)?;
                     match v {
                         Value::Int64(i) => {
-                            let i = if i < 0 { len + i } else { i };
-                            i.clamp(0, len) as usize
-                        }
-                        Value::Float64(f) => {
-                            let i = f as i64;
                             let i = if i < 0 { len + i } else { i };
                             i.clamp(0, len) as usize
                         }
@@ -364,61 +369,76 @@ impl<'a> CypherExecutor<'a> {
                 filter,
             } => {
                 let list_val = self.evaluate_expression(list_expr, row)?;
+                if matches!(list_val, Value::Null) {
+                    return Ok(Value::Null);
+                }
                 let items = parse_list_value(&list_val);
 
-                let result = match quantifier {
+                let result: Option<bool> = match quantifier {
                     ListQuantifier::Any => {
-                        let mut found = false;
+                        let mut saw_unknown = false;
                         for item in items {
                             let mut temp_row = row.clone();
                             temp_row.projected.insert(variable.clone(), item);
-                            if self.evaluate_predicate(filter, &temp_row)? {
-                                found = true;
-                                break;
+                            match self.evaluate_predicate_tristate(filter, &temp_row)? {
+                                Some(true) => return Ok(Value::Boolean(true)),
+                                None => saw_unknown = true,
+                                Some(false) => {}
                             }
                         }
-                        found
+                        if saw_unknown { None } else { Some(false) }
                     }
                     ListQuantifier::All => {
-                        let mut all_pass = true;
+                        let mut saw_unknown = false;
                         for item in items {
                             let mut temp_row = row.clone();
                             temp_row.projected.insert(variable.clone(), item);
-                            if !self.evaluate_predicate(filter, &temp_row)? {
-                                all_pass = false;
-                                break;
+                            match self.evaluate_predicate_tristate(filter, &temp_row)? {
+                                Some(false) => return Ok(Value::Boolean(false)),
+                                None => saw_unknown = true,
+                                Some(true) => {}
                             }
                         }
-                        all_pass
+                        if saw_unknown { None } else { Some(true) }
                     }
                     ListQuantifier::None => {
-                        let mut none_pass = true;
+                        let mut saw_unknown = false;
                         for item in items {
                             let mut temp_row = row.clone();
                             temp_row.projected.insert(variable.clone(), item);
-                            if self.evaluate_predicate(filter, &temp_row)? {
-                                none_pass = false;
-                                break;
+                            match self.evaluate_predicate_tristate(filter, &temp_row)? {
+                                Some(true) => return Ok(Value::Boolean(false)),
+                                None => saw_unknown = true,
+                                Some(false) => {}
                             }
                         }
-                        none_pass
+                        if saw_unknown { None } else { Some(true) }
                     }
                     ListQuantifier::Single => {
-                        let mut count = 0;
+                        let mut true_count = 0;
+                        let mut saw_unknown = false;
                         for item in items {
                             let mut temp_row = row.clone();
                             temp_row.projected.insert(variable.clone(), item);
-                            if self.evaluate_predicate(filter, &temp_row)? {
-                                count += 1;
-                                if count > 1 {
-                                    break;
+                            match self.evaluate_predicate_tristate(filter, &temp_row)? {
+                                Some(true) => {
+                                    true_count += 1;
+                                    if true_count > 1 {
+                                        return Ok(Value::Boolean(false));
+                                    }
                                 }
+                                None => saw_unknown = true,
+                                Some(false) => {}
                             }
                         }
-                        count == 1
+                        if saw_unknown {
+                            None
+                        } else {
+                            Some(true_count == 1)
+                        }
                     }
                 };
-                Ok(Value::Boolean(result))
+                Ok(result.map_or(Value::Null, Value::Boolean))
             }
             Expression::Reduce {
                 accumulator,
@@ -444,31 +464,11 @@ impl<'a> CypherExecutor<'a> {
                 Err("Window function must appear in RETURN/WITH clause".into())
             }
             Expression::PredicateExpr(pred) => {
-                // Evaluate predicate as an expression (e.g. RETURN n.name STARTS WITH 'A').
-                // For comparisons, implement three-valued logic: if either operand
-                // is null, return Null instead of false.
-                match pred.as_ref() {
-                    Predicate::Comparison {
-                        left,
-                        operator,
-                        right,
-                    } => {
-                        let left_val = self.evaluate_expression(left, row)?;
-                        let right_val = self.evaluate_expression(right, row)?;
-                        if matches!(left_val, Value::Null) || matches!(right_val, Value::Null) {
-                            Ok(Value::Null)
-                        } else {
-                            match evaluate_comparison(&left_val, operator, &right_val) {
-                                Ok(b) => Ok(Value::Boolean(b)),
-                                Err(_) => Ok(Value::Null),
-                            }
-                        }
-                    }
-                    _ => match self.evaluate_predicate(pred, row) {
-                        Ok(b) => Ok(Value::Boolean(b)),
-                        Err(_) => Ok(Value::Null),
-                    },
-                }
+                // Predicate expressions retain Kleene unknown instead of using
+                // the WHERE boundary's deliberate unknown-to-false collapse.
+                Ok(self
+                    .evaluate_predicate_tristate(pred, row)?
+                    .map_or(Value::Null, Value::Boolean))
             }
             Expression::ExprPropertyAccess { expr, property } => {
                 let val = self.evaluate_expression(expr, row)?;

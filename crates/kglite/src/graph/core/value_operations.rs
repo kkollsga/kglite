@@ -127,6 +127,24 @@ pub fn arithmetic_negate(a: &Value) -> Value {
 /// Duration component overflow is a query error rather than silent aliasing.
 pub fn arithmetic_add_checked(a: &Value, b: &Value) -> Result<Value, String> {
     match (a, b) {
+        (Value::List(left), Value::List(right)) => {
+            let mut values = Vec::with_capacity(left.len() + right.len());
+            values.extend(left.iter().cloned());
+            values.extend(right.iter().cloned());
+            Ok(Value::List(values))
+        }
+        (Value::List(left), right) => {
+            let mut values = Vec::with_capacity(left.len() + 1);
+            values.extend(left.iter().cloned());
+            values.push(right.clone());
+            Ok(Value::List(values))
+        }
+        (left, Value::List(right)) => {
+            let mut values = Vec::with_capacity(right.len() + 1);
+            values.push(left.clone());
+            values.extend(right.iter().cloned());
+            Ok(Value::List(values))
+        }
         (Value::DateTime(date), Value::Int64(days))
         | (Value::Int64(days), Value::DateTime(date)) => Ok(checked_days(*days)
             .and_then(|delta| date.checked_add_signed(delta))

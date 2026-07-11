@@ -1896,19 +1896,19 @@ claimed openCypher-compatible subset.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Arithmetic (`+`, `-`, `*`, `/`) | Partial | Numeric arithmetic is covered; list `+` is tracked |
+| Arithmetic (`+`, `-`, `*`, `/`) | Covered | Numeric arithmetic plus list/list and element/list composition |
 | String concat (`\|\|`) | Extension | Auto-converts non-strings |
 | Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core comparisons are covered; remaining unknown cases are tracked |
-| Boolean (`AND`, `OR`, `XOR`, `NOT`) | Partial | Complete expression placement and unknown propagation are tracked |
+| Boolean (`AND`, `OR`, `XOR`, `NOT`) | Covered | Predicate and expression positions preserve three-valued results |
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
-| `IN [list]` | Partial | Null-containing list semantics are tracked |
+| `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown |
 | `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Covered | |
 | `=~` regex | Covered | Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
 | `CASE WHEN...THEN...ELSE...END` | Covered | Simple and generic forms |
 | Parameter references (`$param`) | Covered | In WHERE, pattern properties, and expressions |
 | List comprehensions (`[x IN list WHERE ... \| expr]`) | Covered | |
 | List slicing (`expr[start..end]`) | Covered | Open-ended, negative indices |
-| List quantifiers (`any/all/none/single(x IN list WHERE ...)`) | Partial | Unknown propagation is tracked |
+| List quantifiers (`any/all/none/single(x IN list WHERE ...)`) | Covered | Decisive results short-circuit; otherwise unknown propagates |
 | `EXISTS { pattern WHERE ... }` | Covered | Brace `{}`, parenthesis `(( ))`, inline pattern, with WHERE |
 | Map projections (`n {.prop1, .prop2}`) | Covered | |
 | Map literals (`{key: expr}`) | Covered | |

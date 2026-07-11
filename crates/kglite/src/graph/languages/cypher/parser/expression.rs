@@ -7,6 +7,73 @@ use crate::datatypes::values::Value;
 
 impl CypherParser {
     pub(super) fn parse_expression_with_predicates(&mut self) -> Result<Expression, String> {
+        self.parse_boolean_or_expression()
+    }
+
+    fn parse_boolean_or_expression(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_boolean_xor_expression()?;
+        while self.check(&CypherToken::Or) {
+            self.advance();
+            let right = self.parse_boolean_xor_expression()?;
+            left = Expression::PredicateExpr(Box::new(Predicate::Or(
+                Box::new(Self::expression_as_predicate(left)),
+                Box::new(Self::expression_as_predicate(right)),
+            )));
+        }
+        Ok(left)
+    }
+
+    fn parse_boolean_xor_expression(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_boolean_and_expression()?;
+        while self.check(&CypherToken::Xor) {
+            self.advance();
+            let right = self.parse_boolean_and_expression()?;
+            left = Expression::PredicateExpr(Box::new(Predicate::Xor(
+                Box::new(Self::expression_as_predicate(left)),
+                Box::new(Self::expression_as_predicate(right)),
+            )));
+        }
+        Ok(left)
+    }
+
+    fn parse_boolean_and_expression(&mut self) -> Result<Expression, String> {
+        let mut left = self.parse_boolean_not_expression()?;
+        while self.check(&CypherToken::And) {
+            self.advance();
+            let right = self.parse_boolean_not_expression()?;
+            left = Expression::PredicateExpr(Box::new(Predicate::And(
+                Box::new(Self::expression_as_predicate(left)),
+                Box::new(Self::expression_as_predicate(right)),
+            )));
+        }
+        Ok(left)
+    }
+
+    fn parse_boolean_not_expression(&mut self) -> Result<Expression, String> {
+        if self.check(&CypherToken::Not) {
+            self.advance();
+            let inner = self.parse_boolean_not_expression()?;
+            return Ok(Expression::PredicateExpr(Box::new(Predicate::Not(
+                Box::new(Self::expression_as_predicate(inner)),
+            ))));
+        }
+        self.parse_comparison_expression()
+    }
+
+    fn expression_as_predicate(expr: Expression) -> Predicate {
+        match expr {
+            Expression::PredicateExpr(predicate) => *predicate,
+            Expression::IsNull(inner) => Predicate::IsNull(*inner),
+            Expression::IsNotNull(inner) => Predicate::IsNotNull(*inner),
+            expression => Predicate::Comparison {
+                left: expression,
+                operator: ComparisonOp::NotEquals,
+                right: Expression::Literal(Value::Boolean(false)),
+            },
+        }
+    }
+
+    fn parse_comparison_expression(&mut self) -> Result<Expression, String> {
         let expr = self.parse_expression()?;
         // Check for trailing comparison/predicate operators
         match self.peek() {
@@ -277,7 +344,7 @@ impl CypherParser {
             // Parenthesized expression
             Some(CypherToken::LParen) => {
                 self.advance();
-                let expr = self.parse_expression()?;
+                let expr = self.parse_expression_with_predicates()?;
                 self.expect(&CypherToken::RParen)?;
                 Ok(expr)
             }

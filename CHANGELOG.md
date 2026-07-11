@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remain equivalent. The compatibility surface is locked by independently
   authored MIT-licensed behavioral cases and an artifact-provenance gate.
 
+### Fixed
+
+- **Boolean, membership, quantifier, and list expressions now preserve Cypher
+  semantics outside `WHERE`.** `AND`/`OR`/`XOR`/`NOT` parse in projection
+  expressions with the expected precedence, unknown values remain null,
+  `IN` and list quantifiers use three-valued results, `+` composes lists and
+  elements, and list indexes/slice bounds reject non-integer types instead of
+  truncating or silently returning null.
+
 ## [0.12.15] - 2026-07-11
 
 ### Added

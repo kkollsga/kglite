@@ -455,13 +455,7 @@ impl<'a> CypherExecutor<'a> {
     /// - `XOR` is `None` if either side is `None`.
     /// - `NOT None` is `None`; `NOT Some(b)` is `Some(!b)`.
     ///
-    /// `IN`/`InExpression`/`InLiteralSet` keep their current boolean
-    /// behaviour for now. Strict openCypher says they should return
-    /// `None` when the LHS is NULL or when the list contains NULL and no
-    /// match is found — both are deferred (no concrete consumer broken
-    /// today, and the fix is symmetric to this one but lives in three
-    /// arms).
-    fn evaluate_predicate_tristate(
+    pub(super) fn evaluate_predicate_tristate(
         &self,
         pred: &Predicate,
         row: &ResultRow,

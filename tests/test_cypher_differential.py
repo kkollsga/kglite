@@ -84,6 +84,30 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WITH duration({months: 2, days: 3}) * 3 AS d RETURN d.months AS m, d.days AS days",
         None,
     ),
+    (
+        "boolean_expression_unknown_shape",
+        "small_graph",
+        "RETURN true OR false AND null AS value",
+        None,
+    ),
+    (
+        "membership_unknown_shape",
+        "small_graph",
+        "RETURN 2 IN [1, null] AS value",
+        None,
+    ),
+    (
+        "quantifier_unknown_shape",
+        "small_graph",
+        "RETURN single(x IN [true, null] WHERE x) AS value",
+        None,
+    ),
+    (
+        "list_addition_shape",
+        "small_graph",
+        "RETURN 0 + [1, 2] + 3 AS value",
+        None,
+    ),
     # Machine-verified trigger shapes for passes whose older comment-only
     # corpus entries did not actually make the pass fire.
     (
