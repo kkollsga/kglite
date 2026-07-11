@@ -1848,10 +1848,10 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | **Temporal** | `date(str)`/`datetime(str)`, `localdatetime()`/`localtime()`/`time()` (ISO strings), `date_diff(d1, d2)`, `date ± N` (days), `date - date` → int, `d.year`/`d.month`/`d.day`, `valid_at(...)`, `valid_during(...)` |
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
-| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
+| **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
 | **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code-tree graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
-| **Schema** | `CALL db.labels() YIELD name`, `CALL db.relationshipTypes() YIELD name`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` (0.10.0+, Bolt-compatible) |
+| **Schema** | `CALL db.labels() YIELD label`, `CALL db.relationshipTypes() YIELD relationshipType`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` |
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
@@ -1874,16 +1874,16 @@ claimed openCypher-compatible subset.
 | `OPTIONAL MATCH` | Covered | Null-extending optional patterns |
 | `WHERE` | Partial | Broad predicate support; remaining expression-level unknown propagation is tracked |
 | `RETURN` | Covered | Aliases, `DISTINCT`, expressions, and map projections |
-| `WITH` | Partial | Projection and grouping; strict scope validation is tracked |
+| `WITH` | Covered | Projection, grouping, wildcard preservation, and strict post-projection scope |
 | `ORDER BY` | Covered | Multi-column, `ASC`/`DESC`, fused top-k optimization |
 | `SKIP` / `LIMIT` | Covered | |
 | `UNWIND` | Covered | List expansion, works with `collect()` round-trips |
 | `UNION` / `UNION ALL` | Covered | |
 | `CREATE` | Covered | Nodes, relationships, inline properties |
-| `SET` | Partial | Property and label assignment; complete map replacement/merge forms are tracked |
+| `SET` | Covered | Property/label assignment plus `n += map` merge and `n = map` replacement |
 | `DELETE` / `DETACH DELETE` | Covered | |
 | `REMOVE` | Covered | Property and secondary-label removal |
-| `MERGE` | Partial | `ON CREATE SET`, `ON MATCH SET`; null-property rejection is tracked |
+| `MERGE` | Covered | `ON CREATE SET`, `ON MATCH SET`, and pre-mutation null-property rejection |
 | `EXPLAIN` | Extension | KGLite-specific structured plan output |
 | `PROFILE` | Extension | KGLite-specific per-clause execution statistics |
 | `HAVING` | Extension | Post-aggregation filter on `RETURN`/`WITH` |
@@ -1927,7 +1927,7 @@ claimed openCypher-compatible subset.
 | `toInteger`, `toFloat` | Covered | |
 | `size`, `length` | Covered | Strings, lists, and paths |
 | `type(r)` | Covered | Returns relationship type |
-| `id(entity)` | Partial | Node identity is covered; relationship identity is tracked |
+| `id(entity)` | Covered | KGLite logical node identity and stable relationship identity |
 | `labels(n)` | Intentional divergence | Primary type first, then secondary labels |
 | `keys(n)` / `keys(r)` | Covered | Returns property names |
 | `date(str)` / `datetime(str)` | Partial | KGLite's temporal value model and documented arithmetic subset |

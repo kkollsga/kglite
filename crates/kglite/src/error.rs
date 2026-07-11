@@ -262,8 +262,8 @@ pub enum KgError {
     Cancelled,
 
     // ── Schema / validation ──────────────────────────────────────────
-    /// Schema check failure (unknown property, type mismatch at
-    /// pattern literal). Bridged from
+    /// Query validation failure (unknown property or undefined variable).
+    /// Bridged from
     /// [`SchemaError`](crate::graph::languages::cypher::planner::schema_check::SchemaError)
     /// via `From`.
     Schema {
@@ -352,6 +352,7 @@ pub enum KgError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaErrorKindRepr {
     UnknownProperty,
+    UndefinedVariable,
 }
 
 impl From<crate::graph::languages::cypher::planner::schema_check::SchemaErrorKind>
@@ -363,6 +364,7 @@ impl From<crate::graph::languages::cypher::planner::schema_check::SchemaErrorKin
         use crate::graph::languages::cypher::planner::schema_check::SchemaErrorKind;
         match value {
             SchemaErrorKind::UnknownProperty => SchemaErrorKindRepr::UnknownProperty,
+            SchemaErrorKind::UndefinedVariable => SchemaErrorKindRepr::UndefinedVariable,
         }
     }
 }

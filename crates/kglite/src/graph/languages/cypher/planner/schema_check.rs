@@ -6,6 +6,7 @@
 //! column or computed alias, so rejecting produces zero false positives.
 //!
 //! Covers:
+//! - Variable scope across projections, subqueries, expressions, and updates.
 //! - `MATCH (n:T {prop: v})` and `OPTIONAL MATCH` (read patterns).
 //! - `EXISTS { MATCH (n:T {prop: v}) }` inside WHERE / AND / OR / NOT
 //!   subqueries.
@@ -58,6 +59,7 @@ const BUILTIN_FIELDS: &[&str] = &["id", "title", "name", "type"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaErrorKind {
     UnknownProperty,
+    UndefinedVariable,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,8 @@ impl std::error::Error for SchemaError {}
 /// types (`node_type_metadata`) nor live nodes (`type_indices`) — that
 /// state appears in tests and during initial construction.
 pub fn validate_schema(query: &CypherQuery, graph: &DirGraph) -> Result<(), SchemaError> {
+    validate_scope(query, &HashSet::new())?;
+
     // If the graph has no declared node types at all, there is nothing to
     // validate against — skip. This covers fresh graphs and construction
     // before any nodes/edges exist.
@@ -93,6 +97,450 @@ pub fn validate_schema(query: &CypherQuery, graph: &DirGraph) -> Result<(), Sche
 
     let mut var_types: HashMap<String, String> = HashMap::new();
     validate_query(query, graph, &mut var_types)
+}
+
+fn undefined_variable(name: &str) -> SchemaError {
+    SchemaError {
+        kind: SchemaErrorKind::UndefinedVariable,
+        message: format!("Undefined variable '{}'", name),
+    }
+}
+
+fn require_variable(name: &str, scope: &HashSet<String>) -> Result<(), SchemaError> {
+    if scope.contains(name) {
+        Ok(())
+    } else {
+        Err(undefined_variable(name))
+    }
+}
+
+fn bind_pattern(pattern: &Pattern, scope: &mut HashSet<String>) {
+    for element in &pattern.elements {
+        match element {
+            PatternElement::Node(node) => scope.extend(node.variable.iter().cloned()),
+            PatternElement::Edge(edge) => scope.extend(edge.variable.iter().cloned()),
+        }
+    }
+}
+
+fn bind_create_pattern(pattern: &CreatePattern, scope: &mut HashSet<String>) {
+    for element in &pattern.elements {
+        match element {
+            CreateElement::Node(node) => scope.extend(node.variable.iter().cloned()),
+            CreateElement::Edge(edge) => scope.extend(edge.variable.iter().cloned()),
+        }
+    }
+}
+
+fn validate_scope(query: &CypherQuery, initial: &HashSet<String>) -> Result<(), SchemaError> {
+    let mut scope = initial.clone();
+    for clause in &query.clauses {
+        match clause {
+            Clause::Match(m) | Clause::OptionalMatch(m) => {
+                for pattern in &m.patterns {
+                    bind_pattern(pattern, &mut scope);
+                }
+                scope.extend(m.path_assignments.iter().map(|path| path.variable.clone()));
+            }
+            Clause::Where(where_clause) => {
+                validate_predicate_scope(&where_clause.predicate, &scope)?
+            }
+            Clause::Return(return_clause) => {
+                for item in &return_clause.items {
+                    validate_expression_scope(&item.expression, &scope)?;
+                }
+                let mut having_scope = scope.clone();
+                having_scope.extend(
+                    return_clause
+                        .items
+                        .iter()
+                        .filter_map(|item| item.alias.clone()),
+                );
+                if let Some(having) = &return_clause.having {
+                    validate_predicate_scope(having, &having_scope)?;
+                }
+                scope = having_scope;
+            }
+            Clause::With(with_clause) => {
+                for item in &with_clause.items {
+                    validate_expression_scope(&item.expression, &scope)?;
+                }
+                let preserves_all = with_clause
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.expression, Expression::Star));
+                let mut projected = if preserves_all {
+                    scope.clone()
+                } else {
+                    HashSet::new()
+                };
+                for item in &with_clause.items {
+                    if let Some(alias) = &item.alias {
+                        projected.insert(alias.clone());
+                    } else if let Expression::Variable(name) = &item.expression {
+                        projected.insert(name.clone());
+                    }
+                }
+                if let Some(where_clause) = &with_clause.where_clause {
+                    validate_predicate_scope(&where_clause.predicate, &projected)?;
+                }
+                scope = projected;
+            }
+            Clause::OrderBy(order) => {
+                for item in &order.items {
+                    validate_expression_scope(&item.expression, &scope)?;
+                }
+            }
+            Clause::Skip(skip) => validate_expression_scope(&skip.count, &scope)?,
+            Clause::Limit(limit) => validate_expression_scope(&limit.count, &scope)?,
+            Clause::Unwind(unwind) => {
+                validate_expression_scope(&unwind.expression, &scope)?;
+                scope.insert(unwind.alias.clone());
+            }
+            Clause::Union(union) => validate_scope(&union.query, initial)?,
+            Clause::Create(create) => {
+                for pattern in &create.patterns {
+                    bind_create_pattern(pattern, &mut scope);
+                    for element in &pattern.elements {
+                        let properties = match element {
+                            CreateElement::Node(node) => &node.properties,
+                            CreateElement::Edge(edge) => &edge.properties,
+                        };
+                        for (_, expression) in properties {
+                            validate_expression_scope(expression, &scope)?;
+                        }
+                    }
+                }
+            }
+            Clause::Set(set) => {
+                for item in &set.items {
+                    match item {
+                        SetItem::Property {
+                            variable,
+                            expression,
+                            ..
+                        }
+                        | SetItem::Map {
+                            variable,
+                            expression,
+                            ..
+                        } => {
+                            require_variable(variable, &scope)?;
+                            validate_expression_scope(expression, &scope)?;
+                        }
+                        SetItem::Label { variable, .. } => require_variable(variable, &scope)?,
+                    }
+                }
+            }
+            Clause::Delete(delete) => {
+                for expression in &delete.expressions {
+                    validate_expression_scope(expression, &scope)?;
+                }
+            }
+            Clause::Remove(remove) => {
+                for item in &remove.items {
+                    let variable = match item {
+                        RemoveItem::Property { variable, .. }
+                        | RemoveItem::Label { variable, .. } => variable,
+                    };
+                    require_variable(variable, &scope)?;
+                }
+            }
+            Clause::Merge(merge) => {
+                bind_create_pattern(&merge.pattern, &mut scope);
+                for element in &merge.pattern.elements {
+                    let properties = match element {
+                        CreateElement::Node(node) => &node.properties,
+                        CreateElement::Edge(edge) => &edge.properties,
+                    };
+                    for (_, expression) in properties {
+                        validate_expression_scope(expression, &scope)?;
+                    }
+                }
+                for items in [&merge.on_create, &merge.on_match].into_iter().flatten() {
+                    for item in items {
+                        match item {
+                            SetItem::Property {
+                                variable,
+                                expression,
+                                ..
+                            }
+                            | SetItem::Map {
+                                variable,
+                                expression,
+                                ..
+                            } => {
+                                require_variable(variable, &scope)?;
+                                validate_expression_scope(expression, &scope)?;
+                            }
+                            SetItem::Label { variable, .. } => require_variable(variable, &scope)?,
+                        }
+                    }
+                }
+            }
+            Clause::Foreach {
+                variable,
+                list,
+                body,
+            } => {
+                validate_expression_scope(list, &scope)?;
+                let mut inner = scope.clone();
+                inner.insert(variable.clone());
+                validate_scope(
+                    &CypherQuery {
+                        clauses: body.clone(),
+                        explain: false,
+                        profile: false,
+                        output_format: OutputFormat::Default,
+                        optimizer_tags: Vec::new(),
+                    },
+                    &inner,
+                )?;
+            }
+            Clause::Call(call) => {
+                for (_, expression) in &call.parameters {
+                    validate_expression_scope(expression, &scope)?;
+                }
+                scope.extend(
+                    call.yield_items
+                        .iter()
+                        .map(|item| item.alias.as_ref().unwrap_or(&item.name).clone()),
+                );
+            }
+            Clause::CallSubquery { import, body } => {
+                for name in import {
+                    require_variable(name, &scope)?;
+                }
+                let imported: HashSet<String> = import.iter().cloned().collect();
+                validate_scope(body, &imported)?;
+                if let Some(Clause::Return(return_clause)) = body
+                    .clauses
+                    .iter()
+                    .rev()
+                    .find(|clause| matches!(clause, Clause::Return(_)))
+                {
+                    for item in &return_clause.items {
+                        if let Some(alias) = &item.alias {
+                            scope.insert(alias.clone());
+                        } else if let Expression::Variable(name) = &item.expression {
+                            scope.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            // Physical clauses exist only after validation.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_predicate_scope(
+    predicate: &Predicate,
+    scope: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    match predicate {
+        Predicate::And(left, right) | Predicate::Or(left, right) | Predicate::Xor(left, right) => {
+            validate_predicate_scope(left, scope)?;
+            validate_predicate_scope(right, scope)
+        }
+        Predicate::Not(inner) => validate_predicate_scope(inner, scope),
+        Predicate::Comparison { left, right, .. } => {
+            validate_expression_scope(left, scope)?;
+            validate_expression_scope(right, scope)
+        }
+        Predicate::IsNull(expression)
+        | Predicate::IsNotNull(expression)
+        | Predicate::InLiteralSet {
+            expr: expression, ..
+        } => validate_expression_scope(expression, scope),
+        Predicate::In { expr, list } => {
+            validate_expression_scope(expr, scope)?;
+            for item in list {
+                validate_expression_scope(item, scope)?;
+            }
+            Ok(())
+        }
+        Predicate::InExpression { expr, list_expr } => {
+            validate_expression_scope(expr, scope)?;
+            validate_expression_scope(list_expr, scope)
+        }
+        Predicate::StartsWith { expr, pattern }
+        | Predicate::EndsWith { expr, pattern }
+        | Predicate::Contains { expr, pattern } => {
+            validate_expression_scope(expr, scope)?;
+            validate_expression_scope(pattern, scope)
+        }
+        Predicate::LabelCheck { variable, .. } => require_variable(variable, scope),
+        Predicate::Exists {
+            patterns,
+            where_clause,
+        } => {
+            let mut inner = scope.clone();
+            for pattern in patterns {
+                bind_pattern(pattern, &mut inner);
+            }
+            if let Some(where_clause) = where_clause {
+                validate_predicate_scope(where_clause, &inner)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_expression_scope(
+    expression: &Expression,
+    scope: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    match expression {
+        Expression::Variable(name) | Expression::PropertyAccess { variable: name, .. } => {
+            require_variable(name, scope)
+        }
+        Expression::FunctionCall { args, .. } | Expression::ListLiteral(args) => {
+            for argument in args {
+                validate_expression_scope(argument, scope)?;
+            }
+            Ok(())
+        }
+        Expression::Add(left, right)
+        | Expression::Subtract(left, right)
+        | Expression::Multiply(left, right)
+        | Expression::Divide(left, right)
+        | Expression::Modulo(left, right)
+        | Expression::Concat(left, right)
+        | Expression::IndexAccess {
+            expr: left,
+            index: right,
+        } => {
+            validate_expression_scope(left, scope)?;
+            validate_expression_scope(right, scope)
+        }
+        Expression::Negate(inner)
+        | Expression::IsNull(inner)
+        | Expression::IsNotNull(inner)
+        | Expression::ExprPropertyAccess { expr: inner, .. } => {
+            validate_expression_scope(inner, scope)
+        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_expr,
+        } => {
+            if let Some(operand) = operand {
+                validate_expression_scope(operand, scope)?;
+            }
+            for (condition, result) in when_clauses {
+                match condition {
+                    CaseCondition::Predicate(predicate) => {
+                        validate_predicate_scope(predicate, scope)?
+                    }
+                    CaseCondition::Expression(expression) => {
+                        validate_expression_scope(expression, scope)?
+                    }
+                }
+                validate_expression_scope(result, scope)?;
+            }
+            if let Some(else_expr) = else_expr {
+                validate_expression_scope(else_expr, scope)?;
+            }
+            Ok(())
+        }
+        Expression::ListComprehension {
+            variable,
+            list_expr,
+            filter,
+            map_expr,
+        } => {
+            validate_expression_scope(list_expr, scope)?;
+            let mut inner = scope.clone();
+            inner.insert(variable.clone());
+            if let Some(filter) = filter {
+                validate_predicate_scope(filter, &inner)?;
+            }
+            if let Some(map_expr) = map_expr {
+                validate_expression_scope(map_expr, &inner)?;
+            }
+            Ok(())
+        }
+        Expression::ListSlice { expr, start, end } => {
+            validate_expression_scope(expr, scope)?;
+            if let Some(start) = start {
+                validate_expression_scope(start, scope)?;
+            }
+            if let Some(end) = end {
+                validate_expression_scope(end, scope)?;
+            }
+            Ok(())
+        }
+        Expression::MapProjection { variable, items } => {
+            require_variable(variable, scope)?;
+            for item in items {
+                if let MapProjectionItem::Alias { expr, .. } = item {
+                    validate_expression_scope(expr, scope)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::MapLiteral(entries) => {
+            for (_, expression) in entries {
+                validate_expression_scope(expression, scope)?;
+            }
+            Ok(())
+        }
+        Expression::QuantifiedList {
+            variable,
+            list_expr,
+            filter,
+            ..
+        } => {
+            validate_expression_scope(list_expr, scope)?;
+            let mut inner = scope.clone();
+            inner.insert(variable.clone());
+            validate_predicate_scope(filter, &inner)
+        }
+        Expression::Reduce {
+            accumulator,
+            init,
+            variable,
+            list_expr,
+            body,
+        } => {
+            validate_expression_scope(init, scope)?;
+            validate_expression_scope(list_expr, scope)?;
+            let mut inner = scope.clone();
+            inner.insert(accumulator.clone());
+            inner.insert(variable.clone());
+            validate_expression_scope(body, &inner)
+        }
+        Expression::PredicateExpr(predicate) => validate_predicate_scope(predicate, scope),
+        Expression::WindowFunction {
+            partition_by,
+            order_by,
+            ..
+        } => {
+            for expression in partition_by {
+                validate_expression_scope(expression, scope)?;
+            }
+            for item in order_by {
+                validate_expression_scope(&item.expression, scope)?;
+            }
+            Ok(())
+        }
+        Expression::CountSubquery {
+            patterns,
+            where_clause,
+        } => {
+            let mut inner = scope.clone();
+            for pattern in patterns {
+                bind_pattern(pattern, &mut inner);
+            }
+            if let Some(where_clause) = where_clause {
+                validate_predicate_scope(where_clause, &inner)?;
+            }
+            Ok(())
+        }
+        Expression::Literal(_) | Expression::Parameter(_) | Expression::Star => Ok(()),
+    }
 }
 
 /// Best-effort, NON-FATAL warnings for `WHERE var.prop …` where `prop` exists

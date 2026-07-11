@@ -1226,7 +1226,7 @@ class TestMapStringFieldAccess:
             hub_graph.cypher("""
                 MATCH (h:Hub)
                 WITH {h: h.name, k: h.km} AS m
-                RETURN m.missing AS x ORDER BY h.name
+                RETURN m.missing AS x
             """)
         )
         assert len(result) == 3

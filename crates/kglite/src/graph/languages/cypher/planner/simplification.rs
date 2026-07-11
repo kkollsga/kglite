@@ -601,11 +601,11 @@ pub fn rewrite_text_score(
             }
             Clause::Set(s) => {
                 for item in &mut s.items {
-                    if let SetItem::Property {
-                        ref mut expression, ..
-                    } = item
-                    {
-                        collector.rewrite_expr(expression, params)?;
+                    match item {
+                        SetItem::Property { expression, .. } | SetItem::Map { expression, .. } => {
+                            collector.rewrite_expr(expression, params)?;
+                        }
+                        SetItem::Label { .. } => {}
                     }
                 }
             }
@@ -644,21 +644,23 @@ pub fn rewrite_text_score(
                 }
                 if let Some(ref mut items) = m.on_create {
                     for item in items {
-                        if let SetItem::Property {
-                            ref mut expression, ..
-                        } = item
-                        {
-                            collector.rewrite_expr(expression, params)?;
+                        match item {
+                            SetItem::Property { expression, .. }
+                            | SetItem::Map { expression, .. } => {
+                                collector.rewrite_expr(expression, params)?;
+                            }
+                            SetItem::Label { .. } => {}
                         }
                     }
                 }
                 if let Some(ref mut items) = m.on_match {
                     for item in items {
-                        if let SetItem::Property {
-                            ref mut expression, ..
-                        } = item
-                        {
-                            collector.rewrite_expr(expression, params)?;
+                        match item {
+                            SetItem::Property { expression, .. }
+                            | SetItem::Map { expression, .. } => {
+                                collector.rewrite_expr(expression, params)?;
+                            }
+                            SetItem::Label { .. } => {}
                         }
                     }
                 }

@@ -1110,19 +1110,19 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "db_labels_basic",
         "social_graph",
-        "CALL db.labels() YIELD label RETURN label ORDER BY name",
+        "CALL db.labels() YIELD label RETURN label ORDER BY label",
         None,
     ),
     (
         "db_relationship_types_basic",
         "social_graph",
-        "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY name",
+        "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType",
         None,
     ),
     (
         "db_labels_with_where_postfilter",
         "social_graph",
-        "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'C' RETURN label ORDER BY name",
+        "CALL db.labels() YIELD label WITH label WHERE label STARTS WITH 'C' RETURN label ORDER BY label",
         None,
     ),
     (
@@ -1506,6 +1506,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
 MUTATION_QUERIES: list[tuple[str, str]] = [
     ("create_node", "CREATE (p:Person {person_id: 99, name: 'X', age: 50}) RETURN p.person_id AS pid"),
     ("set_property", "MATCH (p:Person {person_id: 1}) SET p.age = 99 RETURN p.age AS age"),
+    (
+        "set_map_merge",
+        "MATCH (p:Person {person_id: 1}) SET p += {age: 99, active: true} RETURN p.age AS age, p.active AS active",
+    ),
+    (
+        "set_map_replace",
+        "MATCH (p:Person {person_id: 1}) SET p = {name: 'A', age: 99} RETURN p.name AS name, p.age AS age",
+    ),
     ("set_with_filter", "MATCH (p:Person) WHERE p.age > 30 SET p.bucket = 'old' RETURN count(p) AS n"),
     ("detach_delete", "MATCH (p:Person {person_id: 3}) DETACH DELETE p"),
     ("remove_property", "MATCH (p:Person {person_id: 1}) REMOVE p.name RETURN p.person_id AS pid"),
@@ -1526,6 +1534,10 @@ MUTATION_QUERIES: list[tuple[str, str]] = [
     (
         "set_rel_property",
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) SET r.since = 2099 RETURN count(r) AS n",
+    ),
+    (
+        "set_rel_map",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) SET r += {since: 2099, active: true} RETURN count(r) AS n",
     ),
     (
         "remove_rel_property",

@@ -442,7 +442,24 @@ impl CypherParser {
                 }
             };
 
-            if self.check(&CypherToken::Dot) {
+            if self.check(&CypherToken::Plus) {
+                // Map merge: SET n += expression
+                self.advance();
+                self.expect(&CypherToken::Equals)?;
+                items.push(SetItem::Map {
+                    variable: var_name,
+                    expression: self.parse_expression()?,
+                    replace: false,
+                });
+            } else if self.check(&CypherToken::Equals) {
+                // Map replacement: SET n = expression
+                self.advance();
+                items.push(SetItem::Map {
+                    variable: var_name,
+                    expression: self.parse_expression()?,
+                    replace: true,
+                });
+            } else if self.check(&CypherToken::Dot) {
                 // Property assignment: var.prop = expr
                 self.advance(); // consume .
                 let prop_name = self.expect_name("property name after '.'")?;
@@ -469,7 +486,9 @@ impl CypherParser {
                     }
                 }
             } else {
-                return Err("Expected '.' or ':' after variable name in SET".to_string());
+                return Err(
+                    "Expected '.', ':', '=', or '+=' after variable name in SET".to_string()
+                );
             }
 
             if self.check(&CypherToken::Comma) {

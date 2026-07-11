@@ -277,9 +277,9 @@ class TestPropertiesFunction:
         assert p["type"] == "KNOWS"
         assert p["weight"] == 1.5
 
-    def test_properties_unbound_returns_null(self, stats_graph):
-        rows = list(stats_graph.cypher("RETURN properties(x) AS p"))
-        assert rows[0]["p"] is None
+    def test_properties_unbound_is_scope_error(self, stats_graph):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'x'"):
+            stats_graph.cypher("RETURN properties(x) AS p")
 
 
 class TestStartEndNode:

@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IN` and list quantifiers use three-valued results, `+` composes lists and
   elements, and list indexes/slice bounds reject non-integer types instead of
   truncating or silently returning null.
+- **Scope, map mutation, and relationship identity now have explicit
+  contracts.** Undefined variables fail during validation (including names
+  projected out by `WITH`), `MERGE` rejects null property keys before any
+  mutation, `SET entity += map` and `SET entity = map` work for nodes and
+  relationships, and `id(r)` returns the stable relationship identity.
 
 ## [0.12.15] - 2026-07-11
 

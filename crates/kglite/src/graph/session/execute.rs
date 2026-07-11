@@ -423,6 +423,7 @@ fn collect_set_names<'a>(items: &'a [SetItem], out: &mut Vec<&'a str>) {
         match item {
             SetItem::Property { property, .. } => out.push(property),
             SetItem::Label { label, .. } => out.push(label),
+            SetItem::Map { .. } => {}
         }
     }
 }

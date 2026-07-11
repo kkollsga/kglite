@@ -271,7 +271,7 @@ class TestCorrelatedCallSubquery:
     def test_import_not_in_scope_errors(self, friends):
         """Importing a variable not bound in the outer scope errors at
         execution start (deferred Phase-2 check that needs the outer scope)."""
-        with pytest.raises(kglite.CypherExecutionError, match="not bound in the outer scope"):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'zzz'"):
             friends.cypher("MATCH (p:Person) CALL { WITH zzz MATCH (zzz)-[:KNOWS]->(f) RETURN count(f) AS c } RETURN c")
 
     def test_re_returning_imported_name_collides(self, friends):
@@ -401,7 +401,7 @@ class TestCorrelatedCallAfterOptionalMatch:
         """A name never declared by any preceding clause is a typo → error,
         even though no row carries it (same absence as a missed OPTIONAL
         MATCH). Static declaredness, not row-probing, distinguishes them."""
-        with pytest.raises(kglite.CypherExecutionError, match="not bound in the outer scope"):
+        with pytest.raises(kglite.SchemaError, match="Undefined variable 'zzz'"):
             likes.cypher(
                 "MATCH (p:P {nid:'c'}) "
                 "OPTIONAL MATCH (p)-[:LIKES]->(x:T) "

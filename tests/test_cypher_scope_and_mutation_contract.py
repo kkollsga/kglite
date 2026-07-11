@@ -1,0 +1,97 @@
+"""Independent scope, map-mutation, and relationship identity contracts."""
+
+from __future__ import annotations
+
+import pytest
+
+import kglite
+
+
+def _graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Person {id: 1, name: 'Ada', old: true})").to_list()
+    graph.cypher("CREATE (:Person {id: 2, name: 'Bob'})").to_list()
+    graph.cypher(
+        "MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:KNOWS {since: 2020, old: true}]->(b)"
+    ).to_list()
+    return graph
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "RETURN missing AS value",
+        "MATCH (n:Person) RETURN missing.name AS value",
+        "MATCH (n:Person) WITH n.name AS name RETURN n",
+        "MATCH (n:Person) SET missing.value = 1",
+    ),
+)
+def test_undefined_variables_are_rejected_before_execution(query):
+    with pytest.raises(kglite.SchemaError, match="Undefined variable"):
+        _graph().cypher(query).to_list()
+
+
+def test_merge_rejects_null_property_without_mutating():
+    graph = _graph()
+    before = graph.cypher("MATCH (n:Person) RETURN count(n) AS count").to_list()
+    with pytest.raises(kglite.CypherExecutionError, match="MERGE.*null.*id"):
+        graph.cypher("MERGE (:Person {id: null})").to_list()
+    assert graph.cypher("MATCH (n:Person) RETURN count(n) AS count").to_list() == before
+
+
+def test_set_map_merge_preserves_unspecified_node_properties():
+    graph = _graph()
+    graph.cypher("MATCH (n:Person {id: 1}) SET n += {city: 'Oslo', active: true}").to_list()
+    assert graph.cypher(
+        "MATCH (n:Person {id: 1}) RETURN n.name AS name, n.old AS old, n.city AS city, n.active AS active"
+    ).to_list() == [{"name": "Ada", "old": True, "city": "Oslo", "active": True}]
+
+
+def test_set_map_replace_removes_unspecified_mutable_node_properties():
+    graph = _graph()
+    graph.cypher("MATCH (n:Person {id: 1}) SET n = {name: 'Ada Lovelace', city: 'London'}").to_list()
+    assert graph.cypher(
+        "MATCH (n:Person {id: 1}) RETURN n.id AS id, n.name AS name, n.old AS old, n.city AS city"
+    ).to_list() == [{"id": 1, "name": "Ada Lovelace", "old": None, "city": "London"}]
+
+
+def test_set_map_replace_clears_unspecified_title_alias():
+    graph = _graph()
+    graph.cypher("MATCH (n:Person {id: 1}) SET n = {city: 'Oslo'}").to_list()
+    assert graph.cypher("MATCH (n:Person {id: 1}) RETURN n.name AS name, n.city AS city").to_list() == [
+        {"name": None, "city": "Oslo"}
+    ]
+
+
+def test_set_map_forms_apply_to_relationships():
+    graph = _graph()
+    graph.cypher("MATCH ()-[r:KNOWS]->() SET r += {weight: 2}").to_list()
+    graph.cypher("MATCH ()-[r:KNOWS]->() SET r = {since: 2024}").to_list()
+    assert graph.cypher(
+        "MATCH ()-[r:KNOWS]->() RETURN r.since AS since, r.old AS old, r.weight AS weight"
+    ).to_list() == [{"since": 2024, "old": None, "weight": None}]
+
+
+@pytest.mark.parametrize("mode", ("memory", "mapped", "disk"))
+def test_set_map_forms_are_storage_mode_independent(tmp_path, mode):
+    if mode == "memory":
+        graph = kglite.KnowledgeGraph()
+    elif mode == "mapped":
+        graph = kglite.KnowledgeGraph(storage="mapped")
+    else:
+        graph = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "disk-graph"))
+
+    graph.cypher("CREATE (:Item {id: 1, old: true})").to_list()
+    graph.cypher("MATCH (n:Item) SET n += {added: 2}").to_list()
+    graph.cypher("MATCH (n:Item) SET n = {kept: 3}").to_list()
+    assert graph.cypher(
+        "MATCH (n:Item) RETURN n.id AS id, n.old AS old, n.added AS added, n.kept AS kept"
+    ).to_list() == [{"id": 1, "old": None, "added": None, "kept": 3}]
+
+
+def test_relationship_id_is_stable_across_variable_and_materialized_value():
+    graph = _graph()
+    rows = graph.cypher("MATCH ()-[r:KNOWS]->() WITH r, id(r) AS direct RETURN direct, id(r) AS carried").to_list()
+    assert len(rows) == 1
+    assert isinstance(rows[0]["direct"], int)
+    assert rows[0]["direct"] == rows[0]["carried"]

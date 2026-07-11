@@ -1100,6 +1100,112 @@ fn execute_set(
                         nodes_to_stamp.insert(*node_idx, node_type_str.clone());
                     }
                 }
+                SetItem::Map {
+                    variable,
+                    expression,
+                    replace,
+                } => {
+                    let value = {
+                        let executor = CypherExecutor::with_params(graph, params, None);
+                        executor.evaluate_expression(expression, row)?
+                    };
+                    let Value::Map(map) = value else {
+                        return Err(format!(
+                            "SET {} {} expects a map expression",
+                            variable,
+                            if *replace { "=" } else { "+=" }
+                        ));
+                    };
+                    if !row.node_bindings.contains_key(variable)
+                        && !row.edge_bindings.contains_key(variable)
+                    {
+                        return Err(format!("Variable '{}' is not bound in SET", variable));
+                    }
+
+                    let one_row = ResultSet {
+                        rows: vec![row.clone()],
+                        columns: Vec::new(),
+                        lazy_return_items: None,
+                    };
+
+                    if *replace {
+                        let existing_keys: Vec<String> =
+                            if let Some(node_idx) = row.node_bindings.get(variable) {
+                                let mut keys: Vec<String> = graph
+                                    .graph
+                                    .node_weight(*node_idx)
+                                    .map(|node| {
+                                        node.properties_cloned(&graph.interner)
+                                            .into_keys()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                if graph
+                                    .graph
+                                    .node_weight(*node_idx)
+                                    .is_some_and(|node| !matches!(node.title, Value::Null))
+                                    && !keys.iter().any(|key| key == "name" || key == "title")
+                                {
+                                    keys.push("name".to_string());
+                                }
+                                keys
+                            } else if let Some(edge) = row.edge_bindings.get(variable) {
+                                graph
+                                    .graph
+                                    .edge_weight(edge.edge_index)
+                                    .map(|edge| {
+                                        edge.properties_cloned(&graph.interner)
+                                            .into_keys()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                        let removals: Vec<RemoveItem> = existing_keys
+                            .into_iter()
+                            .filter(|key| {
+                                if key == "name" || key == "title" {
+                                    !map.contains_key("name") && !map.contains_key("title")
+                                } else {
+                                    !map.contains_key(key)
+                                }
+                            })
+                            .map(|property| RemoveItem::Property {
+                                variable: variable.clone(),
+                                property,
+                            })
+                            .collect();
+                        if !removals.is_empty() {
+                            execute_remove(
+                                graph,
+                                &RemoveClause { items: removals },
+                                &one_row,
+                                stats,
+                                interrupt,
+                            )?;
+                        }
+                    }
+
+                    let properties: Vec<SetItem> = map
+                        .into_iter()
+                        .map(|(property, value)| SetItem::Property {
+                            variable: variable.clone(),
+                            property,
+                            expression: Expression::Literal(value),
+                        })
+                        .collect();
+                    if !properties.is_empty() {
+                        execute_set(
+                            graph,
+                            &SetClause { items: properties },
+                            &one_row,
+                            params,
+                            stats,
+                            interrupt,
+                        )?;
+                    }
+                }
                 SetItem::Label { variable, label } => {
                     let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
                         format!("Variable '{}' not bound to a node in SET", variable)
@@ -1415,7 +1521,11 @@ fn execute_remove(
                     // (verified working on disk).
                     let is_disk = graph.graph.is_disk();
                     let removed_value = if let Some(node) = graph.get_node_mut(*node_idx) {
-                        if is_disk {
+                        if property == "name" || property == "title" {
+                            let old = std::mem::replace(&mut node.title, Value::Null);
+                            node.remove_property("name");
+                            (!matches!(old, Value::Null)).then_some(old)
+                        } else if is_disk {
                             node.clear_property(property)
                         } else {
                             node.remove_property(property)
@@ -1474,6 +1584,23 @@ fn execute_merge(
     // Use into_iter to own rows — avoids cloning each row upfront
     for (row_idx, mut new_row) in source_rows.into_iter().enumerate() {
         check_interrupt_periodic(interrupt, row_idx)?;
+        // Equality against null is undefined, so a null-bearing MERGE key
+        // cannot identify either a match or a safe entity to create.
+        let executor = CypherExecutor::with_params(graph, params, None);
+        for element in &merge.pattern.elements {
+            let properties = match element {
+                CreateElement::Node(node) => &node.properties,
+                CreateElement::Edge(edge) => &edge.properties,
+            };
+            for (name, expression) in properties {
+                if matches!(
+                    executor.evaluate_expression(expression, &new_row)?,
+                    Value::Null
+                ) {
+                    return Err(format!("MERGE cannot use null for property '{}'", name));
+                }
+            }
+        }
         // Try to match the MERGE pattern
         let matched = try_match_merge_pattern(graph, &merge.pattern, &new_row, params)?;
 

@@ -748,6 +748,12 @@ pub enum SetItem {
         variable: String,
         label: String,
     },
+    /// `SET n += map` merges keys; `SET n = map` replaces mutable keys.
+    Map {
+        variable: String,
+        expression: Expression,
+        replace: bool,
+    },
 }
 
 /// DELETE clause

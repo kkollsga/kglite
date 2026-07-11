@@ -85,9 +85,20 @@ impl<'a> CypherExecutor<'a> {
                 Ok(Value::Null)
             }
             "id" => {
-                // id(n) returns the node id. Accepts a bound variable, a
-                // NodeRef, or a materialised node value (collect()[0] etc.).
+                // Relationship identity is the stable edge slot used by every
+                // binding and by materialised RelValue results.
                 if let Some(arg) = args.first() {
+                    if let Expression::Variable(var) = arg {
+                        if let Some(edge) = row.edge_bindings.get(var) {
+                            return Ok(Some(Value::Int64(edge.edge_index.index() as i64)));
+                        }
+                    }
+                    if let Ok(Value::Relationship(rel)) = self.evaluate_expression(arg, row) {
+                        return Ok(Some(Value::Int64(rel.id as i64)));
+                    }
+
+                    // id(n) returns KGLite's logical node id. Accept a bound
+                    // variable, NodeRef, or materialised node value.
                     if let Some(idx) = self.node_arg_index(arg, row) {
                         if let Some(node) = self.graph.graph.node_weight(idx) {
                             return Ok(Some(resolve_node_property(node, "id", self.graph)));
