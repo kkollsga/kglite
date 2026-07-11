@@ -194,8 +194,7 @@ def small_graph():
     return build_small_graph()
 
 
-@pytest.fixture
-def file_imports_graph():
+def build_file_imports_graph() -> KnowledgeGraph:
     """Synthetic code-tree-shaped graph for testing File→File IMPORTS edges
     and the `affected_tests` Cypher procedure.
 
@@ -253,6 +252,11 @@ def file_imports_graph():
         columns=["import_count"],
     )
     return graph
+
+
+@pytest.fixture
+def file_imports_graph():
+    return build_file_imports_graph()
 
 
 def build_social_graph() -> KnowledgeGraph:
@@ -313,8 +317,7 @@ def social_graph():
     return build_social_graph()
 
 
-@pytest.fixture
-def multi_label_graph():
+def build_multi_label_graph() -> KnowledgeGraph:
     """Small multi-label graph for secondary-label correctness.
 
     Person P1..P8 (age 21..28). Secondary labels: P2,P3,P5 are :VIP;
@@ -341,6 +344,11 @@ def multi_label_graph():
     knows = pd.DataFrame({"src": ["P1", "P1", "P4", "P5", "P2"], "dst": ["P2", "P3", "P2", "P3", "P5"]})
     g.add_connections(knows, "KNOWS", "Person", "src", "Person", "dst")
     return g
+
+
+@pytest.fixture
+def multi_label_graph():
+    return build_multi_label_graph()
 
 
 @pytest.fixture

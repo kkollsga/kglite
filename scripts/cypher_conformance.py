@@ -1,275 +1,409 @@
 #!/usr/bin/env python3
-"""On-demand openCypher conformance check vs Neo4j.
+"""On-demand, independently authored Cypher differential check vs Neo4j.
 
-Runs every query in ``tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES``
-against KGLite *and* a Neo4j instance and reports row-level divergences.
-The Neo4j side is populated from the same fixture builder KGLite uses,
-via the existing ``kglite.to_neo4j()`` export, so both engines see
-identical input data.
+The regular test suite remains Docker-free.  This command exports KGLite's own
+fixtures to an explicitly selected Neo4j database and compares query results.
+It is an empirical compatibility oracle, not an openCypher TCK runner: it does
+not consume, translate, vendor, or depend on upstream conformance artifacts.
 
-This script is deliberately **not** wired into the pytest suite or CI:
-
-  - No external service dependency for the regular test run.
-  - No per-PR latency / flakiness from Docker / network.
-  - The user opts in when they want a correctness oracle (e.g. when
-    investigating a NULL-semantics or aggregate question).
-
-Workflow:
-
-  1. ``make neo4j-up`` — starts a fresh Neo4j 5 container on bolt://localhost:7687.
-  2. ``make neo4j-conformance`` — runs this script. Output is a summary
-     plus per-failure detail (query text, KGLite rows, Neo4j rows, diff).
-  3. ``make neo4j-down`` — tears the container down.
-
-Deliberate divergences (places where KGLite ships a different
-behaviour than Neo4j *on purpose*) go in ``INTENTIONAL_DIVERGENCES``
-below — each entry carries a one-line rationale.
-
-Exit code: 0 if all unregistered divergences are absent; 1 otherwise.
+Run ``make neo4j-up``, then ``make neo4j-conformance``.  Exit status is zero
+only when every non-skipped case agrees.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+import datetime as dt
+import math
 from pathlib import Path
 import sys
+from typing import Any, Callable, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
-# Reuse the test fixtures and corpus — single source of truth for both
-# the conformance check and the per-PR differential gate.
-from conftest import build_small_graph, build_social_graph  # type: ignore  # noqa: E402
+from conftest import (  # type: ignore  # noqa: E402
+    build_file_imports_graph,
+    build_multi_label_graph,
+    build_small_graph,
+    build_social_graph,
+)
 from test_cypher_differential import DIFFERENTIAL_QUERIES  # type: ignore  # noqa: E402
 
 import kglite  # noqa: E402
 
-# Map fixture-name → builder. The corpus references fixtures by name;
-# this dict resolves them.
-FIXTURE_BUILDERS = {
+FIXTURE_BUILDERS: dict[str, Callable[[], Any]] = {
     "small_graph": build_small_graph,
     "social_graph": build_social_graph,
+    "file_imports_graph": build_file_imports_graph,
+    "multi_label_graph": build_multi_label_graph,
 }
 
-
-# ──────────────────────────────────────────────────────────────────────
-# Intentional divergences
-#
-# Each entry: query name → one-line rationale. These are queries where
-# KGLite ships a behaviour that deliberately differs from Neo4j —
-# either because the spec ambiguous and KGLite's choice is documented
-# (e.g. `int / int → int` per 0.9.0 §5), or because KGLite has a
-# narrower domain. Entries should be the exception, not the rule —
-# anything not in this list is expected to row-match Neo4j.
-#
-# When adding a divergence:
-#   1. Investigate whether it's a real KGLite bug. Most "Neo4j differs"
-#      findings are bugs to fix, not divergences to register.
-#   2. If the divergence is intentional, link to the
-#      CHANGELOG entry or doc that explains it.
-# ──────────────────────────────────────────────────────────────────────
-
-INTENTIONAL_DIVERGENCES: dict[str, str] = {
-    # No entries yet. Populate as the first conformance run surfaces
-    # spec-defensible KGLite choices (e.g. division-by-zero → NULL
-    # instead of Neo4j's Infinity/NaN — see CHANGELOG 0.9.52).
-}
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Query filter — some corpus queries call KGLite-only procs / functions
-# that have no Neo4j equivalent. Skip them rather than failing.
-# ──────────────────────────────────────────────────────────────────────
+INTENTIONAL_DIVERGENCES: dict[str, str] = {}
 
 KGLITE_ONLY_MARKERS = (
-    "kglite.",  # `CALL kglite.affected_tests(...)` etc.
-    "refresh_stats",  # KGLite-only procedure
-    "text_score",  # KGLite-only semantic search function
-    "vector_score",  # KGLite-only vector similarity function
-    "FORMAT CSV",  # KGLite-only result-set materialiser
+    "kglite.",
+    "refresh_stats",
+    "text_score",
+    "vector_score",
+    "FORMAT CSV",
+    "affected_tests",
 )
 
 
+@dataclass(frozen=True)
+class QueryCase:
+    """A comparison case with an explicit result and error contract."""
+
+    name: str
+    fixture: str
+    query: str
+    params: dict[str, Any] | None = None
+    ordered: bool | None = None
+    expected_error: str | None = None
+    side_effect_query: str | None = None
+    isolated: bool = False
+
+    @classmethod
+    def from_entry(cls, entry: QueryCase | tuple[str, str, str, dict[str, Any] | None]) -> QueryCase:
+        if isinstance(entry, cls):
+            return entry
+        name, fixture, query, params = entry
+        return cls(name, fixture, query, params)
+
+    @property
+    def order_sensitive(self) -> bool:
+        if self.ordered is not None:
+            return self.ordered
+        return "ORDER BY" in self.query.upper()
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    columns: tuple[str, ...]
+    rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class Failure:
+    case: QueryCase
+    reason: str
+    kglite: Any = None
+    neo4j: Any = None
+
+
+@dataclass
+class RunReport:
+    counters: Counter[str] = field(default_factory=Counter)
+    failures: list[Failure] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures and not self.counters["execution_error"]
+
+
 def _is_kglite_only(query: str) -> bool:
-    return any(marker in query for marker in KGLITE_ONLY_MARKERS)
+    lowered = query.lower()
+    return any(marker.lower() in lowered for marker in KGLITE_ONLY_MARKERS)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Result normalisation. Both engines need to produce the same row set
-# modulo ordering (unless the query has ORDER BY, in which case order
-# matters). We normalise by sorting rows by their repr.
-# ──────────────────────────────────────────────────────────────────────
+def _class_name(value: Any) -> str:
+    return type(value).__name__.lower()
 
 
-def _canonical(value) -> str:
-    """Recursively canonicalise a value for comparison. Map key order is
-    not part of Cypher map semantics (the direct path emits BTreeMap-
-    sorted keys while Bolt PackStream preserves a different order), so
-    nested dicts render with sorted keys. List order IS semantic and is
-    preserved. Scalars stringify via repr to dodge type-mismatch noise
-    (e.g. Neo4j's `int` vs KGLite's `int64`)."""
-    if isinstance(value, dict):
-        return "{" + ", ".join(f"{k!r}: {_canonical(value[k])}" for k in sorted(value)) + "}"
-    if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(_canonical(v) for v in value) + "]"
-    return repr(value)
+def _properties(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    try:
+        return dict(value)
+    except (TypeError, ValueError):
+        return {}
 
 
-def _normalise_row(row: dict) -> tuple:
-    """Stable, hashable representation of a single row. Keys sorted;
-    values canonicalised recursively (see `_canonical`)."""
-    return tuple((k, _canonical(row[k])) for k in sorted(row.keys()))
+def _canonical_map(value: Mapping[Any, Any]) -> tuple[Any, ...]:
+    items = [(_canonical(k), _canonical(v)) for k, v in value.items()]
+    return tuple(sorted(items, key=repr))
 
 
-def _normalise(rows: list[dict], order_sensitive: bool) -> list[tuple]:
-    out = [_normalise_row(r) for r in rows]
-    return out if order_sensitive else sorted(out)
+def _canonical(value: Any) -> Any:
+    """Return a typed, immutable representation without importing Neo4j.
+
+    Neo4j graph/time/spatial values are recognized by their public attributes,
+    which keeps this module importable in the Docker-free test environment.
+    KGLite's documented node/relationship/path dictionaries are normalized to
+    the same shapes.  Engine-local element IDs are intentionally excluded.
+    """
+
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("integer", value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ("float", "nan")
+        if math.isinf(value):
+            return ("float", "inf" if value > 0 else "-inf")
+        return ("float", value.hex())
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return ("bytes", bytes(value))
+
+    if isinstance(value, dt.datetime):
+        return ("datetime", value.isoformat())
+    if isinstance(value, dt.date):
+        return ("date", value.isoformat())
+    if isinstance(value, dt.time):
+        return ("time", value.isoformat())
+    if isinstance(value, dt.timedelta):
+        return ("duration", 0, value.days, value.seconds, value.microseconds * 1000)
+
+    cls = _class_name(value)
+    if cls in {"date", "time", "datetime", "localdate", "localtime", "localdatetime"}:
+        iso = value.iso_format() if hasattr(value, "iso_format") else value.isoformat()
+        return (cls.replace("local", "local_"), iso)
+    if cls == "duration" and all(hasattr(value, attr) for attr in ("months", "days", "seconds")):
+        return ("duration", value.months, value.days, value.seconds, getattr(value, "nanoseconds", 0))
+    if cls == "point" or (hasattr(value, "srid") and hasattr(value, "x") and hasattr(value, "y")):
+        coords = (value.x, value.y) + ((value.z,) if getattr(value, "z", None) is not None else ())
+        return ("point", int(value.srid), tuple(_canonical(v) for v in coords))
+
+    # Neo4j Node and Relationship implement Mapping, so their public graph
+    # attributes must be checked before the generic map branch.
+    if hasattr(value, "labels"):
+        return ("node", tuple(sorted(str(label) for label in value.labels)), _canonical_map(_properties(value)))
+    if hasattr(value, "start_node") and hasattr(value, "end_node"):
+        relationship_type = getattr(value, "type", type(value).__name__)
+        return ("relationship", str(relationship_type), _canonical_map(_properties(value)))
+
+    if isinstance(value, Mapping):
+        keys = set(value)
+        if {"nodes", "relationships"} <= keys:
+            return (
+                "path",
+                tuple(_canonical(v) for v in value["nodes"]),
+                tuple(_canonical(v) for v in value["relationships"]),
+            )
+        if {"labels", "properties"} <= keys:
+            return (
+                "node",
+                tuple(sorted(str(label) for label in value["labels"])),
+                _canonical_map(value["properties"]),
+            )
+        if {"type", "properties"} <= keys and ({"start", "end"} <= keys or "id" in keys):
+            return ("relationship", str(value["type"]), _canonical_map(value["properties"]))
+        return ("map", _canonical_map(value))
+
+    if cls == "path" and hasattr(value, "nodes") and hasattr(value, "relationships"):
+        return (
+            "path",
+            tuple(_canonical(v) for v in value.nodes),
+            tuple(_canonical(v) for v in value.relationships),
+        )
+    if cls == "relationship" or (hasattr(value, "start_node") and hasattr(value, "end_node")):
+        relationship_type = getattr(value, "type", type(value).__name__)
+        return ("relationship", str(relationship_type), _canonical_map(_properties(value)))
+    if cls == "node" or hasattr(value, "labels"):
+        return ("node", tuple(sorted(str(label) for label in value.labels)), _canonical_map(_properties(value)))
+
+    if isinstance(value, set | frozenset):
+        return ("set", tuple(sorted((_canonical(v) for v in value), key=repr)))
+    if isinstance(value, Sequence):
+        return ("list", tuple(_canonical(v) for v in value))
+
+    raise TypeError(f"unsupported result value {type(value).__module__}.{type(value).__qualname__}")
 
 
-def _is_order_sensitive(query: str) -> bool:
-    """Treat ORDER BY as the signal that row order is part of the
-    contract. LIMIT without ORDER BY is non-deterministic by spec, so
-    we still sort and compare as sets."""
-    return "ORDER BY" in query.upper()
+def _normalise(result: QueryResult, order_sensitive: bool) -> tuple[tuple[str, ...], list[tuple[Any, ...]]]:
+    rows = [tuple(_canonical(row[column]) for column in result.columns) for row in result.rows]
+    if not order_sensitive:
+        rows.sort(key=repr)
+    return result.columns, rows
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Neo4j-side query runner.
-# ──────────────────────────────────────────────────────────────────────
+def _run_kglite(graph: Any, query: str, params: dict[str, Any] | None) -> QueryResult:
+    result = graph.cypher(query, params=params)
+    return QueryResult(tuple(result.columns), result.to_list())
 
 
-def _run_neo4j(driver, query: str, params: dict | None) -> list[dict]:
-    with driver.session() as session:
+def _run_neo4j(driver: Any, database: str, query: str, params: dict[str, Any] | None) -> QueryResult:
+    with driver.session(database=database) as session:
         result = session.run(query, **(params or {}))
-        # Convert Neo4j Records to plain dicts.
-        return [dict(record) for record in result]
+        columns = tuple(result.keys())
+        return QueryResult(columns, [dict(record) for record in result])
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Main loop.
-# ──────────────────────────────────────────────────────────────────────
+def _error_category(error: Exception) -> str:
+    text = " ".join(
+        str(part) for part in (getattr(error, "code", ""), type(error).__name__, str(error)) if part
+    ).lower()
+    for category, markers in (
+        ("syntax", ("syntax", "parse")),
+        ("semantic", ("semantic", "undefined variable", "unknown variable")),
+        ("constraint", ("constraint", "already exists")),
+        ("type", ("typeerror", "type error", "typemismatch", "invalid type")),
+        ("timeout", ("timeout", "timed out")),
+        ("cancelled", ("cancel",)),
+    ):
+        if any(marker in text for marker in markers):
+            return category
+    return "runtime"
+
+
+def _capture(call: Callable[[], QueryResult]) -> tuple[QueryResult | None, Exception | None]:
+    try:
+        return call(), None
+    except Exception as error:  # comparison harness must record both engines
+        return None, error
+
+
+def run_conformance(
+    entries: Iterable[QueryCase | tuple[str, str, str, dict[str, Any] | None]],
+    *,
+    builders: Mapping[str, Callable[[], Any]],
+    driver: Any,
+    database: str,
+    export_graph: Callable[[Any], None],
+    intentional_divergences: Mapping[str, str] | None = None,
+    filter_text: str | None = None,
+    verbose: bool = False,
+) -> RunReport:
+    """Compare cases, reactivating a fixture whenever the fixture changes."""
+
+    report = RunReport()
+    active_fixture: str | None = None
+    graph: Any = None
+    divergences = intentional_divergences or {}
+
+    for entry in entries:
+        case = QueryCase.from_entry(entry)
+        if filter_text and filter_text not in case.name:
+            continue
+        if case.name in divergences:
+            report.counters["skip_intentional_divergence"] += 1
+            continue
+        if _is_kglite_only(case.query):
+            report.counters["skip_kglite_extension"] += 1
+            continue
+        builder = builders.get(case.fixture)
+        if builder is None:
+            report.counters["skip_missing_fixture"] += 1
+            continue
+
+        if case.fixture != active_fixture or case.isolated:
+            graph = builder()
+            export_graph(graph)
+            active_fixture = case.fixture
+            report.counters["fixture_activation"] += 1
+
+        kg_result, kg_error = _capture(lambda: _run_kglite(graph, case.query, case.params))
+        neo_result, neo_error = _capture(lambda: _run_neo4j(driver, database, case.query, case.params))
+
+        if case.expected_error:
+            kg_category = _error_category(kg_error) if kg_error else None
+            neo_category = _error_category(neo_error) if neo_error else None
+            if kg_category == neo_category == case.expected_error:
+                report.counters["pass_expected_error"] += 1
+            else:
+                report.counters["fail_error_contract"] += 1
+                report.failures.append(Failure(case, "expected error category differs", kg_category, neo_category))
+        elif kg_error or neo_error:
+            report.counters["execution_error"] += 1
+            report.failures.append(
+                Failure(
+                    case,
+                    "unexpected execution error",
+                    _error_category(kg_error) if kg_error else None,
+                    _error_category(neo_error) if neo_error else None,
+                )
+            )
+        else:
+            assert kg_result is not None and neo_result is not None
+            kg_normal = _normalise(kg_result, case.order_sensitive)
+            neo_normal = _normalise(neo_result, case.order_sensitive)
+            if kg_normal == neo_normal:
+                report.counters["pass_result"] += 1
+            else:
+                report.counters["fail_result"] += 1
+                report.failures.append(Failure(case, "columns or rows differ", kg_normal, neo_normal))
+
+        if case.side_effect_query:
+            kg_side, kg_side_error = _capture(lambda: _run_kglite(graph, case.side_effect_query or "", None))
+            neo_side, neo_side_error = _capture(
+                lambda: _run_neo4j(driver, database, case.side_effect_query or "", None)
+            )
+            if kg_side_error or neo_side_error:
+                report.counters["execution_error"] += 1
+                report.failures.append(Failure(case, "side-effect probe failed", kg_side_error, neo_side_error))
+            else:
+                assert kg_side is not None and neo_side is not None
+                if _normalise(kg_side, False) == _normalise(neo_side, False):
+                    report.counters["pass_side_effect"] += 1
+                else:
+                    report.counters["fail_side_effect"] += 1
+                    report.failures.append(Failure(case, "mutation side effects differ", kg_side, neo_side))
+
+        if verbose:
+            print(f"  checked {case.name}")
+
+    return report
+
+
+def _print_report(report: RunReport) -> None:
+    checked = sum(count for name, count in report.counters.items() if name.startswith(("pass_", "fail_", "execution_")))
+    detail = ", ".join(f"{name}={count}" for name, count in sorted(report.counters.items()))
+    print(f"summary: {checked} checked — {detail}")
+    for failure in report.failures:
+        print(f"\nFAIL {failure.case.name}: {failure.reason}")
+        print(f"  query: {failure.case.query}")
+        print(f"  kglite: {failure.kglite!r}")
+        print(f"  neo4j:  {failure.neo4j!r}")
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--uri", default="bolt://localhost:7687", help="Neo4j bolt URI.")
-    p.add_argument("--user", default="neo4j", help="Neo4j username.")
-    p.add_argument("--password", default="conformance", help="Neo4j password.")
-    p.add_argument("--database", default="neo4j", help="Neo4j database name.")
-    p.add_argument("--filter", help="Only run queries whose name contains this substring.")
-    p.add_argument("--verbose", action="store_true", help="Print every query result, not just failures.")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--uri", default="bolt://localhost:7687")
+    parser.add_argument("--user", default="neo4j")
+    parser.add_argument("--password", default="conformance")
+    parser.add_argument("--database", default="neo4j")
+    parser.add_argument("--filter")
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
 
     try:
         from neo4j import GraphDatabase
     except ImportError:
-        print("This script requires the neo4j Python driver. Install with:", file=sys.stderr)
-        print("    pip install -e '.[neo4j]'", file=sys.stderr)
+        print("Install the optional Neo4j driver with: pip install -e '.[neo4j]'", file=sys.stderr)
         return 2
 
-    print(f"connecting to {args.uri} as {args.user}…")
     driver = GraphDatabase.driver(args.uri, auth=(args.user, args.password))
-
-    # Per-fixture KGLite cache. Each fixture is built once and pushed
-    # to Neo4j once (with clear=True) — subsequent queries reuse both.
-    kglite_graphs: dict[str, "kglite.KnowledgeGraph"] = {}
-    pushed_to_neo4j: set[str] = set()
-
-    stats = {"pass": 0, "fail": 0, "skip_kglite_only": 0, "skip_divergence": 0, "error": 0}
-    failures: list[tuple[str, str, list[dict], list[dict]]] = []
-
     try:
-        for entry in DIFFERENTIAL_QUERIES:
-            name, fixture, query, params = entry
-
-            if args.filter and args.filter not in name:
-                continue
-
-            if name in INTENTIONAL_DIVERGENCES:
-                print(f"  SKIP   {name:<40}  (intentional: {INTENTIONAL_DIVERGENCES[name]})")
-                stats["skip_divergence"] += 1
-                continue
-
-            if _is_kglite_only(query):
-                print(f"  SKIP   {name:<40}  (KGLite-only feature)")
-                stats["skip_kglite_only"] += 1
-                continue
-
-            builder = FIXTURE_BUILDERS.get(fixture)
-            if builder is None:
-                print(f"  SKIP   {name:<40}  (no builder for fixture '{fixture}')")
-                stats["skip_kglite_only"] += 1
-                continue
-
-            # Build KGLite graph + push to Neo4j (once per fixture).
-            if fixture not in kglite_graphs:
-                kglite_graphs[fixture] = builder()
-            kg = kglite_graphs[fixture]
-
-            if fixture not in pushed_to_neo4j:
-                # `clear=True` wipes Neo4j first so each fixture is
-                # exported into a clean target.
-                kglite.to_neo4j(
-                    kg, args.uri, auth=(args.user, args.password), database=args.database, clear=True, verbose=False
-                )
-                pushed_to_neo4j.add(fixture)
-
-            try:
-                kg_rows = kg.cypher(query, params=params).to_list()
-                neo4j_rows = _run_neo4j(driver, query, params)
-            except Exception as e:
-                print(f"  ERROR  {name:<40}  {type(e).__name__}: {str(e)[:80]}")
-                stats["error"] += 1
-                continue
-
-            order_sensitive = _is_order_sensitive(query)
-            kg_norm = _normalise(kg_rows, order_sensitive)
-            neo4j_norm = _normalise(neo4j_rows, order_sensitive)
-
-            if kg_norm == neo4j_norm:
-                stats["pass"] += 1
-                if args.verbose:
-                    print(f"  PASS   {name:<40}  ({len(kg_rows)} rows)")
-            else:
-                stats["fail"] += 1
-                print(f"  FAIL   {name:<40}  kglite={len(kg_rows)} rows, neo4j={len(neo4j_rows)} rows")
-                failures.append((name, query, kg_rows, neo4j_rows))
-
+        report = run_conformance(
+            DIFFERENTIAL_QUERIES,
+            builders=FIXTURE_BUILDERS,
+            driver=driver,
+            database=args.database,
+            export_graph=lambda graph: kglite.to_neo4j(
+                graph,
+                args.uri,
+                auth=(args.user, args.password),
+                database=args.database,
+                clear=True,
+                verbose=False,
+            ),
+            intentional_divergences=INTENTIONAL_DIVERGENCES,
+            filter_text=args.filter,
+            verbose=args.verbose,
+        )
     finally:
         driver.close()
-
-    # Summary.
-    total = sum(stats.values())
-    print()
-    print(
-        f"summary: {total} queries — "
-        f"{stats['pass']} pass, "
-        f"{stats['fail']} fail, "
-        f"{stats['skip_kglite_only']} skipped (kglite-only), "
-        f"{stats['skip_divergence']} skipped (intentional divergence), "
-        f"{stats['error']} errors."
-    )
-
-    if failures:
-        print()
-        print("=" * 72)
-        print("FAILURES")
-        print("=" * 72)
-        for name, query, kg_rows, neo4j_rows in failures:
-            print(f"\n--- {name} ---")
-            print(f"  query: {query}")
-            print(f"  kglite rows ({len(kg_rows)}):  {kg_rows[:5]}{' …' if len(kg_rows) > 5 else ''}")
-            print(f"  neo4j rows  ({len(neo4j_rows)}): {neo4j_rows[:5]}{' …' if len(neo4j_rows) > 5 else ''}")
-            kg_set = {repr(_normalise_row(r)) for r in kg_rows}
-            neo_set = {repr(_normalise_row(r)) for r in neo4j_rows}
-            only_kg = kg_set - neo_set
-            only_neo = neo_set - kg_set
-            if only_kg:
-                print(f"  only in kglite ({len(only_kg)}): {sorted(only_kg)[:3]}")
-            if only_neo:
-                print(f"  only in neo4j  ({len(only_neo)}): {sorted(only_neo)[:3]}")
-
-    return 0 if (stats["fail"] == 0 and stats["error"] == 0) else 1
+    _print_report(report)
+    return 0 if report.ok else 1
 
 
 if __name__ == "__main__":
