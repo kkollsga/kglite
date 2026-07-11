@@ -3,6 +3,8 @@
 
 use crate::datatypes::values::Value;
 use petgraph::graph::{EdgeIndex, NodeIndex};
+
+use crate::graph::core::pattern_matching::PathHop;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -141,7 +143,7 @@ pub struct EdgeBinding {
 pub struct PathBinding {
     pub source: NodeIndex,
     pub hops: usize,
-    pub path: Vec<(NodeIndex, String)>,
+    pub path: Vec<PathHop>,
 }
 
 impl ResultRow {

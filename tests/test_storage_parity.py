@@ -137,6 +137,11 @@ ORACLE_QUERIES = [
         "WHERE t.domain = 'domain_2' RETURN count(DISTINCT a) AS c",
     ),
     (
+        "exact_path_relationship_ids",
+        "MATCH p=(a:Entity {eid: 0})-[:RELATED*1..2]->(b:Entity) "
+        "RETURN [r IN relationships(p) | id(r)] AS ids ORDER BY ids",
+    ),
+    (
         "order_by_limit",
         "MATCH (n:Entity) RETURN n.eid AS id, n.score AS s ORDER BY s DESC LIMIT 5",
     ),

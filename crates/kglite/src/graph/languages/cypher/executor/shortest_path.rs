@@ -7,8 +7,90 @@
 //! between two anchor points rather than the usual pattern-walk).
 
 use super::*;
-use crate::graph::core::pattern_matching::PatternExecutor;
+use crate::graph::core::pattern_matching::{PathHop, PatternExecutor};
+use crate::graph::schema::{DirGraph, InternedKey};
+use crate::graph::storage::GraphRead;
 use petgraph::graph::NodeIndex;
+
+/// Expand one shortest node sequence into exact relationship sequences.
+/// Parallel edges create distinct paths; repeated edges are rejected.
+fn exact_shortest_hops(
+    graph: &DirGraph,
+    nodes: &[NodeIndex],
+    edge_direction: EdgeDirection,
+    connection_types: Option<&[String]>,
+    max_paths: usize,
+) -> Vec<Vec<PathHop>> {
+    let allowed: Option<Vec<InternedKey>> =
+        connection_types.map(|types| types.iter().map(|t| InternedKey::from_str(t)).collect());
+    let single_type = allowed.as_ref().and_then(|types| {
+        if types.len() == 1 {
+            Some(types[0])
+        } else {
+            None
+        }
+    });
+    let mut paths: Vec<Vec<PathHop>> = vec![Vec::with_capacity(nodes.len().saturating_sub(1))];
+
+    for pair in nodes.windows(2) {
+        let from = pair[0];
+        let to = pair[1];
+        let directions: &[petgraph::Direction] = match edge_direction {
+            EdgeDirection::Outgoing => &[petgraph::Direction::Outgoing],
+            EdgeDirection::Incoming => &[petgraph::Direction::Incoming],
+            EdgeDirection::Both => &[petgraph::Direction::Outgoing, petgraph::Direction::Incoming],
+        };
+        let mut candidates = Vec::new();
+        for &direction in directions {
+            for edge in graph
+                .graph
+                .edges_directed_filtered(from, direction, single_type)
+            {
+                let peer = match direction {
+                    petgraph::Direction::Outgoing => edge.target(),
+                    petgraph::Direction::Incoming => edge.source(),
+                };
+                if peer != to
+                    || allowed
+                        .as_ref()
+                        .is_some_and(|types| !types.contains(&edge.connection_type()))
+                    || candidates.iter().any(|hop: &PathHop| hop.edge == edge.id())
+                {
+                    continue;
+                }
+                candidates.push(PathHop {
+                    node: to,
+                    edge: edge.id(),
+                    connection_type: edge.connection_type(),
+                });
+            }
+        }
+
+        let mut expanded = Vec::new();
+        for path in &paths {
+            for &hop in &candidates {
+                if path.iter().any(|used| used.edge == hop.edge) {
+                    continue;
+                }
+                let mut next = path.clone();
+                next.push(hop);
+                expanded.push(next);
+                if expanded.len() >= max_paths {
+                    break;
+                }
+            }
+            if expanded.len() >= max_paths {
+                break;
+            }
+        }
+        paths = expanded;
+        if paths.is_empty() {
+            break;
+        }
+    }
+
+    paths
+}
 
 impl<'a> CypherExecutor<'a> {
     /// Execute a shortestPath MATCH: find shortest path between anchored endpoints
@@ -40,18 +122,21 @@ impl<'a> CypherExecutor<'a> {
         };
 
         // Extract edge direction and connection type from the pattern
-        let (edge_direction, edge_connection_type) = elements
+        let (edge_direction, connection_types_vec) = elements
             .iter()
             .find_map(|elem| {
                 if let PatternElement::Edge(ep) = elem {
-                    Some((ep.direction, ep.connection_type.clone()))
+                    let types = ep
+                        .connection_types
+                        .clone()
+                        .or_else(|| ep.connection_type.clone().map(|name| vec![name]));
+                    Some((ep.direction, types))
                 } else {
                     None
                 }
             })
             .unwrap_or((EdgeDirection::Both, None));
 
-        let connection_types_vec: Option<Vec<String>> = edge_connection_type.map(|ct| vec![ct]);
         let connection_types: Option<&[String]> = connection_types_vec.as_deref();
 
         // Build the (source_idx, target_idx, prior_row) work-list.
@@ -194,7 +279,35 @@ impl<'a> CypherExecutor<'a> {
                     single.into_iter().collect()
                 };
 
+                let mut exact_paths = Vec::new();
+                let mut seen_node_paths = std::collections::HashSet::new();
                 for path_result in path_results {
+                    // The graph algorithm is node-oriented and may surface the
+                    // same node sequence once per parallel edge. Expand that
+                    // sequence exactly once into relationship combinations.
+                    if !seen_node_paths.insert(path_result.path.clone()) {
+                        continue;
+                    }
+                    let remaining = if path_assignment.all_shortest {
+                        MAX_ALL_SHORTEST.saturating_sub(exact_paths.len())
+                    } else {
+                        1
+                    };
+                    for hops in exact_shortest_hops(
+                        self.graph,
+                        &path_result.path,
+                        edge_direction,
+                        connection_types,
+                        remaining,
+                    ) {
+                        exact_paths.push((path_result.cost, hops));
+                    }
+                    if exact_paths.len() >= MAX_ALL_SHORTEST {
+                        break;
+                    }
+                }
+
+                for (path_cost, path_nodes) in exact_paths {
                     // Start from the prior row's bindings (if any) so
                     // downstream RETURN can see fields the prior MATCH
                     // exposed (e.g. `RETURN start.foo`).
@@ -213,35 +326,12 @@ impl<'a> CypherExecutor<'a> {
                         row.node_bindings.insert(var.clone(), target_idx);
                     }
 
-                    // Build path with connection types.
-                    // Format: [(node, conn_type_leading_to_node), ...] — excludes source.
-                    // Source is stored separately in PathBinding.source.
-                    let connections =
-                        crate::graph::algorithms::graph_algorithms::get_path_connections(
-                            self.graph,
-                            &path_result.path,
-                        );
-                    let path_nodes: Vec<(NodeIndex, String)> = path_result
-                        .path
-                        .iter()
-                        .skip(1) // Skip source — it's in PathBinding.source
-                        .enumerate()
-                        .map(|(i, &idx)| {
-                            let conn_type = if i < connections.len() {
-                                connections[i].clone().unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            (idx, conn_type)
-                        })
-                        .collect();
-
                     // Store path binding
                     row.path_bindings.insert(
                         path_assignment.variable.clone(),
                         PathBinding {
                             source: source_idx,
-                            hops: path_result.cost,
+                            hops: path_cost,
                             path: path_nodes,
                         },
                     );

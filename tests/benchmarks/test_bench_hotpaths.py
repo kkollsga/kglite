@@ -196,3 +196,22 @@ def test_bench_two_hop_global_count(benchmark, hot_graph):
         hot_graph.cypher,
         "MATCH (a:Item)-[:LINKS]->(b:Item)-[:LINKS]->(c:Item) RETURN count(*) AS paths",
     )
+
+
+@pytest.mark.benchmark
+def test_bench_fixed_path_relationship_materialization(benchmark, hot_graph):
+    """Exact relationship lookup for an anchored fixed-length path."""
+    benchmark(
+        hot_graph.cypher,
+        "MATCH p=(a:Item {nid: 1})-[:LINKS]->(b:Item)-[:LINKS]->(c:Item) "
+        "RETURN sum(size(relationships(p))) AS relationships",
+    )
+
+
+@pytest.mark.benchmark
+def test_bench_variable_path_relationship_materialization(benchmark, hot_graph):
+    """Relationship-unique trail tracking for an anchored variable path."""
+    benchmark(
+        hot_graph.cypher,
+        "MATCH p=(a:Item {nid: 1})-[:LINKS*1..3]->(b:Item) RETURN sum(size(relationships(p))) AS relationships",
+    )

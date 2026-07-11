@@ -326,6 +326,22 @@ pub enum PropertyMatcher {
 #[derive(Debug, Clone)]
 pub struct PatternMatch {
     pub bindings: Vec<(String, MatchBinding)>,
+    /// Exact fixed-length trail, stored outside named bindings so anonymous
+    /// hops do not allocate synthetic variable names.
+    #[doc(hidden)]
+    pub exact_path: Option<(NodeIndex, Vec<PathHop>)>,
+}
+
+/// One exact hop in a matched path.
+///
+/// Node identity alone is insufficient because a graph may contain parallel
+/// relationships between the same endpoints.  Keeping the edge slot here also
+/// lets path consumers preserve relationship properties and orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathHop {
+    pub node: NodeIndex,
+    pub edge: EdgeIndex,
+    pub connection_type: InternedKey,
 }
 
 /// A bound value (either node, edge, or variable-length path)
@@ -353,7 +369,7 @@ pub enum MatchBinding {
         source: NodeIndex,
         target: NodeIndex,
         hops: usize,
-        /// Path as list of (node_index, connection_type) pairs
-        path: Vec<(NodeIndex, InternedKey)>,
+        /// Exact hops, excluding `source` and including `target`.
+        path: Vec<PathHop>,
     },
 }

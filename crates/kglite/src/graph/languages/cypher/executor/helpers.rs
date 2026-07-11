@@ -597,11 +597,8 @@ pub(crate) fn materialize_rel_value(
 /// Phase A.1 / C2 — materialise a variable-length [`PathBinding`]
 /// into an owned [`PathValue`] suitable for `Value::Path`.
 ///
-/// The path stores `(NodeIndex, connection_type_string)` per hop
-/// rather than `EdgeIndex`, so we look up each edge via
-/// `petgraph::find_edge(prev, curr)` to recover its properties. If
-/// multiple parallel edges exist between two nodes, we pick the first
-/// — same indeterminacy as the rest of the variable-length matcher.
+/// Every hop carries its exact edge slot, so parallel relationships and
+/// incoming/undirected traversal retain the relationship actually matched.
 pub(crate) fn materialize_path_value(
     path: &super::PathBinding,
     graph: &crate::graph::DirGraph,
@@ -613,17 +610,13 @@ pub(crate) fn materialize_path_value(
     if let Some(src_node) = materialize_node_value(path.source, graph) {
         nodes.push(src_node);
     }
-    let mut prev_idx = path.source;
-    for (node_idx, _conn_type) in &path.path {
-        if let Some(edge_idx) = graph.graph.find_edge(prev_idx, *node_idx) {
-            if let Some(rel) = materialize_rel_value(edge_idx, graph) {
-                rels.push(rel);
-            }
+    for hop in &path.path {
+        if let Some(rel) = materialize_rel_value(hop.edge, graph) {
+            rels.push(rel);
         }
-        if let Some(node) = materialize_node_value(*node_idx, graph) {
+        if let Some(node) = materialize_node_value(hop.node, graph) {
             nodes.push(node);
         }
-        prev_idx = *node_idx;
     }
     PathValue { nodes, rels }
 }

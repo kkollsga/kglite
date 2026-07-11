@@ -59,10 +59,25 @@ fn substitute_count_with_value(expr: &Expression, value: i64) -> Expression {
 
 impl<'a> CypherExecutor<'a> {
     pub(super) fn pattern_match_to_row(&self, m: PatternMatch) -> ResultRow {
-        let binding_count = m.bindings.len();
+        let PatternMatch {
+            bindings,
+            exact_path,
+        } = m;
+        let binding_count = bindings.len();
         let mut row = ResultRow::with_capacity(binding_count, binding_count / 2, 0);
 
-        for (var, binding) in m.bindings {
+        if let Some((source, path)) = exact_path {
+            row.path_bindings.insert(
+                "__fixed_path".to_string(),
+                PathBinding {
+                    source,
+                    hops: path.len(),
+                    path,
+                },
+            );
+        }
+
+        for (var, binding) in bindings {
             match binding {
                 MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
                     row.node_bindings.insert(var, index);
@@ -85,18 +100,8 @@ impl<'a> CypherExecutor<'a> {
                 MatchBinding::VariableLengthPath {
                     source, hops, path, ..
                 } => {
-                    let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
-                        .iter()
-                        .map(|(idx, ik)| (*idx, self.graph.interner.resolve(*ik).to_string()))
-                        .collect();
-                    row.path_bindings.insert(
-                        var,
-                        PathBinding {
-                            source,
-                            hops,
-                            path: string_path,
-                        },
-                    );
+                    row.path_bindings
+                        .insert(var, PathBinding { source, hops, path });
                 }
             }
         }
@@ -147,6 +152,16 @@ impl<'a> CypherExecutor<'a> {
 
     /// Merge a PatternMatch's bindings into an existing ResultRow
     pub(super) fn merge_match_into_row(&self, row: &mut ResultRow, m: &PatternMatch) {
+        if let Some((source, path)) = &m.exact_path {
+            row.path_bindings.insert(
+                "__fixed_path".to_string(),
+                PathBinding {
+                    source: *source,
+                    hops: path.len(),
+                    path: path.clone(),
+                },
+            );
+        }
         for (var, binding) in &m.bindings {
             match binding {
                 MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) => {
@@ -170,16 +185,12 @@ impl<'a> CypherExecutor<'a> {
                 MatchBinding::VariableLengthPath {
                     source, hops, path, ..
                 } => {
-                    let string_path: Vec<(petgraph::graph::NodeIndex, String)> = path
-                        .iter()
-                        .map(|(idx, ik)| (*idx, self.graph.interner.resolve(*ik).to_string()))
-                        .collect();
                     row.path_bindings.insert(
                         var.clone(),
                         PathBinding {
                             source: *source,
                             hops: *hops,
-                            path: string_path,
+                            path: path.clone(),
                         },
                     );
                 }
@@ -195,8 +206,9 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Option<PathBinding> {
         let mut node_vars: Vec<&str> = Vec::new();
-        let mut edge_types: Vec<&str> = Vec::new();
-        for elem in &pattern.elements {
+        let mut edge_vars: Vec<Option<&str>> = Vec::new();
+        let mut edge_element_indices: Vec<usize> = Vec::new();
+        for (element_index, elem) in pattern.elements.iter().enumerate() {
             match elem {
                 PatternElement::Node(np) => {
                     if let Some(ref v) = np.variable {
@@ -204,25 +216,40 @@ impl<'a> CypherExecutor<'a> {
                     }
                 }
                 PatternElement::Edge(ep) => {
-                    edge_types.push(ep.connection_type.as_deref().unwrap_or(""));
+                    edge_vars.push(ep.variable.as_deref());
+                    edge_element_indices.push(element_index);
                 }
             }
         }
-        if node_vars.len() < 2 || edge_types.is_empty() {
+        if node_vars.len() < 2 || edge_vars.is_empty() {
             return None;
         }
         let source_idx = row.node_bindings.get(node_vars[0])?;
 
         // Build full path: for each edge, record the target node and edge type
-        let mut path = Vec::with_capacity(edge_types.len());
-        for (i, edge_type) in edge_types.iter().enumerate() {
+        let mut path = Vec::with_capacity(edge_vars.len());
+        for (i, edge_var) in edge_vars.iter().enumerate() {
             let node_idx = row.node_bindings.get(node_vars[i + 1])?;
-            path.push((*node_idx, edge_type.to_string()));
+            let binding_name = edge_var
+                .map(str::to_string)
+                // PatternExecutor names internal fixed-edge bindings with
+                // the following node element's index.
+                .unwrap_or_else(|| format!("__anon_edge_{}", edge_element_indices[i] + 1));
+            let edge = row.edge_bindings.get(&binding_name)?;
+            path.push(crate::graph::core::pattern_matching::PathHop {
+                node: *node_idx,
+                edge: edge.edge_index,
+                connection_type: self
+                    .graph
+                    .graph
+                    .edge_weight(edge.edge_index)?
+                    .connection_type,
+            });
         }
 
         Some(PathBinding {
             source: *source_idx,
-            hops: edge_types.len(),
+            hops: edge_vars.len(),
             path,
         })
     }
@@ -961,6 +988,9 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     }
                 }
+                if e2_ref.id() == e1_ref.id() {
+                    continue;
+                }
                 let last_idx = if dir2 == Direction::Outgoing {
                     e2_ref.target()
                 } else {
@@ -1071,6 +1101,9 @@ impl<'a> CypherExecutor<'a> {
                     if e1_ref.weight().connection_type != ik {
                         continue;
                     }
+                }
+                if e1_ref.id() == e2_ref.id() {
+                    continue;
                 }
                 let first_idx = if dir1 == Direction::Outgoing {
                     e1_ref.target()

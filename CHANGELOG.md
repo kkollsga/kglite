@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   projected out by `WITH`), `MERGE` rejects null property keys before any
   mutation, `SET entity += map` and `SET entity = map` work for nodes and
   relationships, and `id(r)` returns the stable relationship identity.
+- **Cypher paths now retain exact relationship identity.** Fixed,
+  variable-length, shortest, and all-shortest path bindings preserve parallel
+  and incoming relationships, `relationships(p)` returns the edges actually
+  matched, and a relationship cannot be reused within one path while nodes may
+  repeat. Fused two-hop counts enforce the same trail rule.
 
 ## [0.12.15] - 2026-07-11
 

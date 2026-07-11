@@ -28,8 +28,8 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<Value, String> {
         let mut node_indices = vec![path.source];
-        for (node_idx, _) in &path.path {
-            node_indices.push(*node_idx);
+        for hop in &path.path {
+            node_indices.push(hop.node);
         }
 
         let mut results: Vec<Value> = Vec::new();
@@ -64,8 +64,7 @@ impl<'a> CypherExecutor<'a> {
     /// List comprehension over relationships(p): bind each relationship as a projected value.
     ///
     /// Phase A.1 / C4 — emits native Value::List of Value::Relationship.
-    /// Recovers EdgeIndex via find_edge between consecutive nodes
-    /// (PathBinding doesn't carry EdgeIndex directly).
+    /// Uses the exact edge recorded by the matcher for every hop.
     pub(super) fn list_comp_relationships(
         &self,
         variable: &str,
@@ -75,20 +74,12 @@ impl<'a> CypherExecutor<'a> {
         row: &ResultRow,
     ) -> Result<Value, String> {
         let mut results: Vec<Value> = Vec::new();
-        let mut prev_idx = path.source;
-        for (node_idx, conn_type) in &path.path {
-            let rel_value = self
-                .graph
-                .graph
-                .find_edge(prev_idx, *node_idx)
-                .and_then(|eidx| materialize_rel_value(eidx, self.graph));
+        for hop in &path.path {
+            let rel_value = materialize_rel_value(hop.edge, self.graph);
 
             let projected_for_var = match &rel_value {
                 Some(rv) => Value::Relationship(Box::new(rv.clone())),
-                // Fallback: at least carry the type string so simple
-                // filters like `r = "KNOWS"` keep working in legacy
-                // path shapes.
-                None => Value::String(conn_type.clone()),
+                None => Value::Null,
             };
 
             let mut temp_row = row.clone();
@@ -98,7 +89,6 @@ impl<'a> CypherExecutor<'a> {
 
             if let Some(ref pred) = filter {
                 if !self.evaluate_predicate(pred, &temp_row)? {
-                    prev_idx = *node_idx;
                     continue;
                 }
             }
@@ -110,7 +100,6 @@ impl<'a> CypherExecutor<'a> {
             };
 
             results.push(result);
-            prev_idx = *node_idx;
         }
         Ok(Value::List(results))
     }

@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use super::pattern::{
-    AnchorSide, EdgeDirection, EdgePattern, MatchBinding, NodePattern, Pattern, PatternElement,
-    PatternMatch, PropertyMatcher,
+    AnchorSide, EdgeDirection, EdgePattern, MatchBinding, NodePattern, PathHop, Pattern,
+    PatternElement, PatternMatch, PropertyMatcher,
 };
 
 /// Minimum match count to use parallel expansion via rayon.
@@ -28,6 +28,70 @@ use super::pattern::{
 /// so rayon overhead only pays off for very large match sets. Also avoids
 /// contention when multiple queries run concurrently (shared thread pool).
 const EXPANSION_RAYON_THRESHOLD: usize = 8192;
+
+/// Whether adding `candidate` would reuse a relationship already consumed by
+/// this pattern match. Cypher paths are trails: nodes may repeat, edges may not.
+fn reuses_bound_relationship(current: &PatternMatch, candidate: &MatchBinding) -> bool {
+    let fixed_path_uses = |edge| {
+        current
+            .exact_path
+            .as_ref()
+            .is_some_and(|(_, path)| path.iter().any(|hop| hop.edge == edge))
+    };
+    let candidate_edges = match candidate {
+        MatchBinding::Edge { edge_index, .. } => std::slice::from_ref(edge_index),
+        MatchBinding::VariableLengthPath { path, .. } => {
+            return path.iter().any(|hop| {
+                fixed_path_uses(hop.edge)
+                    || current.bindings.iter().any(|(_, binding)| match binding {
+                        MatchBinding::Edge { edge_index, .. } => *edge_index == hop.edge,
+                        MatchBinding::VariableLengthPath { path, .. } => {
+                            path.iter().any(|bound| bound.edge == hop.edge)
+                        }
+                        _ => false,
+                    })
+            });
+        }
+        _ => return false,
+    };
+
+    candidate_edges.iter().any(|candidate_edge| {
+        fixed_path_uses(*candidate_edge)
+            || current.bindings.iter().any(|(_, binding)| match binding {
+                MatchBinding::Edge { edge_index, .. } => *edge_index == *candidate_edge,
+                MatchBinding::VariableLengthPath { path, .. } => {
+                    path.iter().any(|hop| hop.edge == *candidate_edge)
+                }
+                _ => false,
+            })
+    })
+}
+
+/// Append a fixed-length edge to the match's compact internal trail.
+fn extend_fixed_trail(current: &mut PatternMatch, candidate: &MatchBinding) {
+    let MatchBinding::Edge {
+        source,
+        target,
+        edge_index,
+        connection_type,
+        ..
+    } = candidate
+    else {
+        return;
+    };
+    let hop = PathHop {
+        node: *target,
+        edge: *edge_index,
+        connection_type: *connection_type,
+    };
+
+    if let Some((_, path)) = &mut current.exact_path {
+        path.push(hop);
+        return;
+    }
+
+    current.exact_path = Some((*source, vec![hop]));
+}
 
 /// Return the ordered list of index-name candidates to try when the
 /// cross-type fast path sees a query for `prop`. The first entry is
@@ -302,6 +366,7 @@ impl<'a> PatternExecutor<'a> {
             .map(|&idx| {
                 let mut pm = PatternMatch {
                     bindings: Vec::new(),
+                    exact_path: None,
                 };
                 if let Some(ref var) = first_node.variable {
                     pm.bindings.push((var.clone(), self.node_to_binding(idx)));
@@ -344,6 +409,16 @@ impl<'a> PatternExecutor<'a> {
                 PatternElement::Node(np) => np,
                 _ => return Err("Expected node pattern after edge. Complete the pattern with a node: ()-[:EDGE]->(node)".to_string()),
             };
+
+            // Internal binding names are invariant for the whole hop. Build
+            // them once rather than formatting a fresh String for every
+            // matched relationship on the expansion hot path.
+            let anonymous_var_path_binding = (edge_pattern.variable.is_none()
+                && edge_pattern.needs_path_info
+                && edge_pattern.var_length.is_some())
+            .then(|| format!("__anon_vlpath_{i}"));
+            let track_fixed_trail =
+                edge_pattern.var_length.is_none() && (edge_pattern.needs_path_info || !is_last_hop);
 
             // Expand each current match
             let (mut new_matches, mut new_indices) = if matches.len() >= EXPANSION_RAYON_THRESHOLD
@@ -388,6 +463,9 @@ impl<'a> PatternExecutor<'a> {
                         expansions
                             .into_iter()
                             .filter_map(|(target_idx, edge_binding)| {
+                                if reuses_bound_relationship(current_match, &edge_binding) {
+                                    return None;
+                                }
                                 if let Some(ref var) = node_pattern.variable {
                                     if let Some(&bound_idx) = self.pre_bindings.get(var) {
                                         if target_idx != bound_idx {
@@ -415,17 +493,15 @@ impl<'a> PatternExecutor<'a> {
                                     }
                                 }
                                 let mut new_match = current_match.clone();
+                                if track_fixed_trail {
+                                    extend_fixed_trail(&mut new_match, &edge_binding);
+                                }
                                 if let Some(ref var) = edge_pattern.variable {
                                     new_match.bindings.push((var.clone(), edge_binding));
-                                } else if edge_pattern.needs_path_info
-                                    && matches!(
-                                        edge_binding,
-                                        MatchBinding::VariableLengthPath { .. }
-                                    )
-                                {
+                                } else if let Some(ref internal_var) = anonymous_var_path_binding {
                                     new_match
                                         .bindings
-                                        .push((format!("__anon_vlpath_{}", i), edge_binding));
+                                        .push((internal_var.clone(), edge_binding));
                                 }
                                 if let Some(ref var) = node_pattern.variable {
                                     new_match
@@ -490,6 +566,9 @@ impl<'a> PatternExecutor<'a> {
                         hint,
                     )?;
                     for (target_idx, edge_binding) in expansions {
+                        if reuses_bound_relationship(current_match, &edge_binding) {
+                            continue;
+                        }
                         expand_count += 1;
                         if expand_count.is_multiple_of(1024) {
                             if let Some(msg) = self.interrupt_reason() {
@@ -537,14 +616,15 @@ impl<'a> PatternExecutor<'a> {
                             }
                         }
                         let mut new_match = current_match.clone();
+                        if track_fixed_trail {
+                            extend_fixed_trail(&mut new_match, &edge_binding);
+                        }
                         if let Some(ref var) = edge_pattern.variable {
                             new_match.bindings.push((var.clone(), edge_binding));
-                        } else if edge_pattern.needs_path_info
-                            && matches!(edge_binding, MatchBinding::VariableLengthPath { .. })
-                        {
+                        } else if let Some(ref internal_var) = anonymous_var_path_binding {
                             new_match
                                 .bindings
-                                .push((format!("__anon_vlpath_{}", i), edge_binding));
+                                .push((internal_var.clone(), edge_binding));
                         }
                         if let Some(ref var) = node_pattern.variable {
                             new_match
@@ -1654,7 +1734,7 @@ impl<'a> PatternExecutor<'a> {
                         source,
                         target,
                         edge_index: edge.id(),
-                        connection_type: InternedKey::default(),
+                        connection_type: conn_type,
                         properties: HashMap::new(),
                     }
                 };
@@ -1889,11 +1969,11 @@ impl<'a> PatternExecutor<'a> {
             None
         };
 
-        // BFS state: (current_node, depth, path_info)
-        // path_info stores the path taken for creating variable-length edge binding
-        type PathInfo = Vec<(NodeIndex, InternedKey)>;
+        // BFS state: (current_node, depth, exact trail).  Edge identity is
+        // required both for parallel-edge cardinality and for the Cypher rule
+        // that a relationship occurs at most once in a path.
+        type PathInfo = Vec<PathHop>;
         let mut queue: VecDeque<(NodeIndex, usize, PathInfo)> = VecDeque::new();
-        let mut visited_at_depth: HashMap<(NodeIndex, usize), bool> = HashMap::new();
 
         queue.push_back((source, 0, Vec::new()));
 
@@ -1935,7 +2015,7 @@ impl<'a> PatternExecutor<'a> {
 
             // First pass: collect all valid targets to know how many branches we'll have
             // This avoids cloning paths unnecessarily when only one target exists
-            let mut valid_targets: Vec<(NodeIndex, InternedKey)> = Vec::new();
+            let mut valid_targets: Vec<PathHop> = Vec::new();
 
             for &direction in directions {
                 let edges = self
@@ -1976,25 +2056,36 @@ impl<'a> PatternExecutor<'a> {
                         Direction::Incoming => edge.source(),
                     };
 
-                    // Skip if we've visited this node at this depth (prevent cycles at same depth)
-                    let visit_key = (target, depth + 1);
-                    if visited_at_depth.contains_key(&visit_key) {
+                    let edge_index = edge.id();
+                    // Paths are relationship-unique trails. Repeated nodes are
+                    // valid, but traversing the same edge again (including in
+                    // reverse for an undirected pattern) is not.
+                    if path.iter().any(|hop| hop.edge == edge_index) {
                         continue;
                     }
-                    visited_at_depth.insert(visit_key, true);
+                    // A self-loop appears in both directional iterators for an
+                    // undirected edge. It is still one candidate relationship.
+                    if valid_targets.iter().any(|hop| hop.edge == edge_index) {
+                        continue;
+                    }
 
-                    valid_targets.push((target, conn_type));
+                    valid_targets.push(PathHop {
+                        node: target,
+                        edge: edge_index,
+                        connection_type: conn_type,
+                    });
                 }
             }
 
             // Second pass: process valid targets with smart path management
             let new_depth = depth + 1;
 
-            for (target, conn_type) in valid_targets {
+            for hop in valid_targets {
+                let target = hop.node;
                 let needs_queue = new_depth < max_hops;
 
                 let mut new_path = path.clone();
-                new_path.push((target, conn_type));
+                new_path.push(hop);
 
                 // If we're within the valid hop range and target matches node pattern, add to results
                 if new_depth >= min_hops {

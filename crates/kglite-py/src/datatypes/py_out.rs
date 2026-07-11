@@ -729,12 +729,15 @@ pub fn pattern_matches_to_pylist(
                     binding_dict.set_item("target_idx", target.index())?;
                     binding_dict.set_item("hops", *hops)?;
 
-                    // Add path as list of (node_idx, connection_type) tuples
+                    // Add exact path hops while retaining the established
+                    // node/type fields exposed by the fluent API.
                     let path_list = PyList::empty(py);
-                    for (node_idx, conn_type) in path {
+                    for hop in path {
                         let step_dict = PyDict::new(py);
-                        step_dict.set_item("node_idx", node_idx.index())?;
-                        step_dict.set_item("connection_type", interner.resolve(*conn_type))?;
+                        step_dict.set_item("node_idx", hop.node.index())?;
+                        step_dict.set_item("edge_index", hop.edge.index())?;
+                        step_dict
+                            .set_item("connection_type", interner.resolve(hop.connection_type))?;
                         path_list.append(step_dict)?;
                     }
                     binding_dict.set_item("path", path_list)?;

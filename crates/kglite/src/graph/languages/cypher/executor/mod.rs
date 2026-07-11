@@ -1167,43 +1167,11 @@ impl<'a> CypherExecutor<'a> {
                 if let Some(pb) = path_binding {
                     row.path_bindings.insert(pa.variable.clone(), pb);
                 } else {
-                    // No var-length path found — synthesize from edge binding
-                    // for single-hop patterns like p = (a)-[:REL]->(b)
+                    // No variable-length path found: synthesize the exact
+                    // fixed-length trail from its named/internal edge bindings.
                     if let Some(pattern) = clause.patterns.get(pa.pattern_index) {
-                        // Find first edge binding from this pattern
-                        for elem in &pattern.elements {
-                            if let PatternElement::Edge(ep) = elem {
-                                if let Some(ref var) = ep.variable {
-                                    if let Some(eb) = row.edge_bindings.get(var) {
-                                        let conn_type = self
-                                            .graph
-                                            .graph
-                                            .edge_weight(eb.edge_index)
-                                            .map(|ed| {
-                                                ed.connection_type_str(&self.graph.interner)
-                                                    .to_string()
-                                            })
-                                            .unwrap_or_default();
-                                        row.path_bindings.insert(
-                                            pa.variable.clone(),
-                                            crate::graph::languages::cypher::result::PathBinding {
-                                                source: eb.source,
-                                                hops: 1,
-                                                path: vec![(eb.target, conn_type)],
-                                            },
-                                        );
-                                        break;
-                                    }
-                                } else {
-                                    // Anonymous edge — find it in edge_bindings by
-                                    // matching the pattern's connection_type
-                                    let synth = self.synthesize_path_from_pattern(pattern, row);
-                                    if let Some(pb) = synth {
-                                        row.path_bindings.insert(pa.variable.clone(), pb);
-                                    }
-                                    break;
-                                }
-                            }
+                        if let Some(pb) = self.synthesize_path_from_pattern(pattern, row) {
+                            row.path_bindings.insert(pa.variable.clone(), pb);
                         }
                     }
                 }

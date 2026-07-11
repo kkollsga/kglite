@@ -681,7 +681,7 @@ pub kglite::api::fluent::MatchBinding::Node::title: alloc::string::String
 pub kglite::api::fluent::MatchBinding::NodeRef(petgraph::graph_impl::NodeIndex)
 pub kglite::api::fluent::MatchBinding::VariableLengthPath
 pub kglite::api::fluent::MatchBinding::VariableLengthPath::hops: usize
-pub kglite::api::fluent::MatchBinding::VariableLengthPath::path: alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::InternedKey)>
+pub kglite::api::fluent::MatchBinding::VariableLengthPath::path: alloc::vec::Vec<kglite::graph::core::pattern_matching::pattern::PathHop>
 pub kglite::api::fluent::MatchBinding::VariableLengthPath::source: petgraph::graph_impl::NodeIndex
 pub kglite::api::fluent::MatchBinding::VariableLengthPath::target: petgraph::graph_impl::NodeIndex
 impl core::clone::Clone for kglite::api::fluent::MatchBinding

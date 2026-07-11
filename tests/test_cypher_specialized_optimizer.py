@@ -308,5 +308,7 @@ def test_global_two_hop_count_fusion_matches_naive_with_self_loop():
     optimized = graph.cypher(query).to_list()
     naive = graph.cypher(query, disabled_passes=["fuse_match_return_aggregate"]).to_list()
 
-    assert optimized == naive == [{"paths": 4}]
+    # Four node walks exist, but the self-loop/self-loop walk reuses one
+    # relationship and therefore is not a valid Cypher path.
+    assert optimized == naive == [{"paths": 3}]
     assert "FusedMatchReturnAggregate" in _plan(graph, query, params={})

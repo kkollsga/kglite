@@ -23,17 +23,16 @@ import sys
 from typing import Any, Callable, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "tests"))
+sys.path.insert(0, str(REPO_ROOT))
 
-from conftest import (  # type: ignore  # noqa: E402
+import kglite  # noqa: E402
+from tests.conftest import (  # noqa: E402
     build_file_imports_graph,
     build_multi_label_graph,
     build_small_graph,
     build_social_graph,
 )
-from test_cypher_differential import DIFFERENTIAL_QUERIES  # type: ignore  # noqa: E402
-
-import kglite  # noqa: E402
+from tests.test_cypher_differential import DIFFERENTIAL_QUERIES  # noqa: E402
 
 FIXTURE_BUILDERS: dict[str, Callable[[], Any]] = {
     "small_graph": build_small_graph,

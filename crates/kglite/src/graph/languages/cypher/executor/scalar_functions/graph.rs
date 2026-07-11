@@ -29,8 +29,8 @@ impl<'a> CypherExecutor<'a> {
                         if let Some(src) = materialize_node_value(path.source, self.graph) {
                             items.push(Value::Node(Box::new(src)));
                         }
-                        for (node_idx, _conn_type) in &path.path {
-                            if let Some(node) = materialize_node_value(*node_idx, self.graph) {
+                        for hop in &path.path {
+                            if let Some(node) = materialize_node_value(hop.node, self.graph) {
                                 items.push(Value::Node(Box::new(node)));
                             }
                         }
@@ -44,22 +44,14 @@ impl<'a> CypherExecutor<'a> {
                 //
                 // Phase A.1 / C2 — native `Value::List(Vec<Value::Relationship>)`.
                 // Each element is a full RelValue (id, start, end, type,
-                // properties), recovered by walking the path's
-                // (node_idx, _) pairs and looking up the connecting
-                // edge between consecutive nodes (mirrors
-                // materialize_path_value's hop-recovery).
+                // properties), using the exact edge recorded for each hop.
                 if let Some(Expression::Variable(var)) = args.first() {
                     if let Some(path) = row.path_bindings.get(var) {
                         let mut items: Vec<Value> = Vec::with_capacity(path.path.len());
-                        let mut prev_idx = path.source;
-                        for (node_idx, _conn_type) in &path.path {
-                            if let Some(edge_idx) = self.graph.graph.find_edge(prev_idx, *node_idx)
-                            {
-                                if let Some(rel) = materialize_rel_value(edge_idx, self.graph) {
-                                    items.push(Value::Relationship(Box::new(rel)));
-                                }
+                        for hop in &path.path {
+                            if let Some(rel) = materialize_rel_value(hop.edge, self.graph) {
+                                items.push(Value::Relationship(Box::new(rel)));
                             }
-                            prev_idx = *node_idx;
                         }
                         return Ok(Some(Value::List(items)));
                     }

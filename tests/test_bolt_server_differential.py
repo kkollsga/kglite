@@ -49,6 +49,26 @@ def _canonical_cell(value):
     IS semantic and is preserved (tuples recurse element-wise). Scalars
     pass through raw so existing equality/sort semantics for plain
     columns are untouched."""
+    # The Neo4j driver hydrates graph/temporal PackStream values into
+    # dedicated objects while the direct Python API returns plain dicts and
+    # ISO strings. Normalize those transport-specific wrappers first.
+    if isinstance(value, neo4j.graph.Node):
+        value = {
+            "id": int(value.element_id),
+            "labels": sorted(value.labels),
+            "properties": dict(value),
+        }
+    elif isinstance(value, neo4j.graph.Relationship):
+        value = {
+            "id": int(value.element_id),
+            "start": int(value.start_node.element_id),
+            "end": int(value.end_node.element_id),
+            "type": value.type,
+            "properties": dict(value),
+        }
+    elif isinstance(value, (neo4j.time.Date, neo4j.time.Time, neo4j.time.DateTime)):
+        return value.iso_format()
+
     if isinstance(value, dict):
         return "{" + ", ".join(f"{k!r}: {_canonical_cell(value[k])!r}" for k in sorted(value)) + "}"
     if isinstance(value, (list, tuple)):
