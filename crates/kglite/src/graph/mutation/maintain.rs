@@ -33,6 +33,17 @@ fn get_column_types(df_data: &DataFrame) -> HashMap<String, String> {
     types
 }
 
+fn preflight_interner_names<'a>(
+    graph: &DirGraph,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    graph
+        .interner
+        .validate_names(names)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 pub fn add_nodes(
     graph: &mut DirGraph,
     df_data: DataFrame,
@@ -41,6 +52,13 @@ pub fn add_nodes(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<NodeOperationReport, String> {
+    let mut interned_names = vec![node_type.as_str(), PROVISIONAL_KEY, "updated_at"];
+    let column_names = df_data.get_column_names();
+    interned_names.extend(column_names.iter().map(String::as_str));
+    preflight_interner_names(graph, interned_names)?;
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     // Parse conflict handling option
     let conflict_mode = match conflict_handling.as_deref() {
         Some("replace") => ConflictHandling::Replace,
@@ -432,6 +450,19 @@ pub fn add_connections(
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<ConnectionOperationReport, String> {
+    let column_names = df_data.get_column_names();
+    let mut interned_names = vec![
+        connection_type.as_str(),
+        source_type.as_str(),
+        target_type.as_str(),
+        PROVISIONAL_KEY,
+        "updated_at",
+    ];
+    interned_names.extend(column_names.iter().map(String::as_str));
+    preflight_interner_names(graph, interned_names)?;
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     // Parse conflict handling option
     let conflict_mode = match conflict_handling.as_deref() {
         Some("replace") => ConflictHandling::Replace,
@@ -873,6 +904,19 @@ pub fn replace_connections(
     target_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> Result<ConnectionOperationReport, String> {
+    let column_names = df_data.get_column_names();
+    let mut interned_names = vec![
+        connection_type.as_str(),
+        source_type.as_str(),
+        target_type.as_str(),
+        PROVISIONAL_KEY,
+        "updated_at",
+    ];
+    interned_names.extend(column_names.iter().map(String::as_str));
+    preflight_interner_names(graph, interned_names)?;
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     // --- Validate column presence BEFORE deleting (atomicity-by-validation) ---
     let available_cols: Vec<_> = df_data.get_column_names();
     if !df_data.verify_column(&source_id_field) {
@@ -1033,6 +1077,9 @@ pub fn create_connections(
     source_type_filter: Option<String>,                    // override source level by node type
     target_type_filter: Option<String>,                    // override target level by node type
 ) -> Result<ConnectionOperationReport, String> {
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let conflict_mode = match conflict_handling.as_deref() {
         Some("replace") => ConflictHandling::Replace,
         Some("skip") => ConflictHandling::Skip,
@@ -1287,6 +1334,9 @@ pub fn update_node_properties(
     if nodes.is_empty() {
         return Err("No nodes to update".to_string());
     }
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
 
     // Track start time for the report
     let start_time = std::time::Instant::now();
@@ -1444,6 +1494,9 @@ pub fn add_properties(
     selection: &CurrentSelection,
     property_spec: HashMap<String, PropertySpec>,
 ) -> Result<AddPropertiesReport, String> {
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let level_count = selection.get_level_count();
     if level_count == 0 {
         return Ok(AddPropertiesReport {
@@ -2014,6 +2067,45 @@ mod id_index_tests {
         assert!(g
             .lookup_by_id_readonly("Person", &Value::Int64(999))
             .is_some());
+    }
+
+    #[test]
+    fn add_nodes_collision_preflight_leaves_graph_unchanged() {
+        let mut g = DirGraph::new();
+        let incoming = "CollisionType";
+        g.interner
+            .try_register(
+                crate::graph::schema::InternedKey::from_str(incoming),
+                "conflicting-existing",
+            )
+            .unwrap();
+        let before_interner: Vec<_> = g
+            .interner
+            .iter()
+            .map(|(key, value)| (key, value.to_string()))
+            .collect();
+        let df = DataFrame::from_cypher_rows(vec!["id".to_string()], vec![vec![Value::Int64(1)]])
+            .unwrap();
+        let err = add_nodes(
+            &mut g,
+            df,
+            incoming.to_string(),
+            "id".to_string(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("hash collision"));
+        assert_eq!(g.graph.node_count(), 0);
+        assert!(g.node_type_metadata.is_empty());
+        assert!(g.type_indices.is_empty());
+        assert_eq!(
+            g.interner
+                .iter()
+                .map(|(key, value)| (key, value.to_string()))
+                .collect::<Vec<_>>(),
+            before_interner
+        );
     }
 
     /// A declared-PRIMARY-KEY type rejects a within-batch duplicate id; a

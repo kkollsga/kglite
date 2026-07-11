@@ -211,7 +211,13 @@ impl BatchProcessor {
                 }
                 // Extract the store from Arc (now refcount=1, so try_unwrap succeeds)
                 if let Some(arc_store) = graph.column_stores.remove(node_type) {
-                    let store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
+                    let mut store = Arc::try_unwrap(arc_store).unwrap_or_else(|a| (*a).clone());
+                    let meta = graph
+                        .node_type_metadata
+                        .get(node_type)
+                        .cloned()
+                        .unwrap_or_default();
+                    store.materialize_for_append(&meta, &graph.interner);
                     owned_stores.insert(node_type.clone(), store);
                 }
             }

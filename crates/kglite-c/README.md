@@ -122,6 +122,11 @@ pools, each wrapping the sync C calls. Async dataset fetchers
 (`kglite::api::datasets::*`) are exposed via their `*_blocking`
 companions in Phase H.3.
 
+Fallible calls initialize every non-null output slot before validation. Rust
+panics caused by valid calls are contained at the boundary and reported as
+`KGLITE_STATUS_CODE_INTERNAL`; invalid or dangling caller pointers remain
+outside the ABI contract.
+
 ## Versioning
 
 `kglite-c` versions track `kglite`'s minor version. The

@@ -46,80 +46,9 @@ pub fn to_float(val: &Value) -> Value {
 /// Add two Values. Returns Null for incompatible types.
 /// When one operand is a String, the other is coerced to string and concatenated
 /// (unless the other is Null, which propagates).
-pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
+fn arithmetic_add_fallback(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_add(*y)),
-        // DateTime + Int → DateTime (add days)
-        (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d + chrono::Duration::days(*n)),
-        (Value::Int64(n), Value::DateTime(d)) => Value::DateTime(*d + chrono::Duration::days(*n)),
-        // 0.9.0 Cluster 2 — DateTime + Duration. Months: chrono crate
-        // doesn't have a "checked add months" helper on NaiveDate, so
-        // approximate with `* 30` — the same approximation
-        // duration({months: 1}) used pre-§3-v2 as a single fold step.
-        // Seconds component is dropped (Value::DateTime is NaiveDate;
-        // sub-day precision deferred to Cluster 1).
-        (
-            Value::DateTime(d),
-            Value::Duration {
-                months,
-                days,
-                seconds: _,
-            },
-        )
-        | (
-            Value::Duration {
-                months,
-                days,
-                seconds: _,
-            },
-            Value::DateTime(d),
-        ) => {
-            let total_days = (*months as i64) * 30 + (*days as i64);
-            Value::DateTime(*d + chrono::Duration::days(total_days))
-        }
-        // Timestamp + Int → Timestamp (add days).
-        (Value::Timestamp(d), Value::Int64(n)) | (Value::Int64(n), Value::Timestamp(d)) => {
-            Value::Timestamp(*d + chrono::Duration::days(*n))
-        }
-        // Timestamp + Duration → Timestamp. Unlike DateTime, the seconds
-        // component IS applied (Timestamp carries sub-day precision).
-        // Months approximated as 30 days (matches the DateTime convention).
-        (
-            Value::Timestamp(d),
-            Value::Duration {
-                months,
-                days,
-                seconds,
-            },
-        )
-        | (
-            Value::Duration {
-                months,
-                days,
-                seconds,
-            },
-            Value::Timestamp(d),
-        ) => Value::Timestamp(
-            *d + chrono::Duration::days((*months as i64) * 30 + (*days as i64))
-                + chrono::Duration::seconds(*seconds),
-        ),
-        // Duration + Duration — component-wise sum.
-        (
-            Value::Duration {
-                months: am,
-                days: ad,
-                seconds: as_,
-            },
-            Value::Duration {
-                months: bm,
-                days: bd,
-                seconds: bs,
-            },
-        ) => Value::Duration {
-            months: am.wrapping_add(*bm),
-            days: ad.wrapping_add(*bd),
-            seconds: as_.wrapping_add(*bs),
-        },
         (Value::String(x), Value::String(y)) => Value::String(format!("{}{}", x, y)),
         // Null propagation for string ops
         (Value::String(_), Value::Null) | (Value::Null, Value::String(_)) => Value::Null,
@@ -134,66 +63,9 @@ pub fn arithmetic_add(a: &Value, b: &Value) -> Value {
 }
 
 /// Subtract two Values. Returns Null for incompatible types.
-pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
+fn arithmetic_sub_fallback(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_sub(*y)),
-        // DateTime - Int → DateTime (subtract days)
-        (Value::DateTime(d), Value::Int64(n)) => Value::DateTime(*d - chrono::Duration::days(*n)),
-        // DateTime - DateTime → Duration (0.9.0 Cluster 2 — was Int64 days).
-        (Value::DateTime(a), Value::DateTime(b)) => Value::Duration {
-            months: 0,
-            days: (*a - *b).num_days() as i32,
-            seconds: 0,
-        },
-        // DateTime - Duration → DateTime (component-wise subtraction).
-        (
-            Value::DateTime(d),
-            Value::Duration {
-                months,
-                days,
-                seconds: _,
-            },
-        ) => {
-            let total_days = (*months as i64) * 30 + (*days as i64);
-            Value::DateTime(*d - chrono::Duration::days(total_days))
-        }
-        // Timestamp - Int → Timestamp (subtract days).
-        (Value::Timestamp(d), Value::Int64(n)) => Value::Timestamp(*d - chrono::Duration::days(*n)),
-        // Timestamp - Timestamp → Duration at full second precision.
-        (Value::Timestamp(a), Value::Timestamp(b)) => Value::Duration {
-            months: 0,
-            days: 0,
-            seconds: (*a - *b).num_seconds(),
-        },
-        // Timestamp - Duration → Timestamp (seconds applied).
-        (
-            Value::Timestamp(d),
-            Value::Duration {
-                months,
-                days,
-                seconds,
-            },
-        ) => Value::Timestamp(
-            *d - chrono::Duration::days((*months as i64) * 30 + (*days as i64))
-                - chrono::Duration::seconds(*seconds),
-        ),
-        // Duration - Duration → Duration.
-        (
-            Value::Duration {
-                months: am,
-                days: ad,
-                seconds: as_,
-            },
-            Value::Duration {
-                months: bm,
-                days: bd,
-                seconds: bs,
-            },
-        ) => Value::Duration {
-            months: am.wrapping_sub(*bm),
-            days: ad.wrapping_sub(*bd),
-            seconds: as_.wrapping_sub(*bs),
-        },
         _ => match (value_to_f64(a), value_to_f64(b)) {
             (Some(x), Some(y)) => Value::Float64(x - y),
             _ => Value::Null,
@@ -202,7 +74,7 @@ pub fn arithmetic_sub(a: &Value, b: &Value) -> Value {
 }
 
 /// Multiply two Values. Returns Null for incompatible types.
-pub fn arithmetic_mul(a: &Value, b: &Value) -> Value {
+fn arithmetic_mul_fallback(a: &Value, b: &Value) -> Value {
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => Value::Int64(x.wrapping_mul(*y)),
         _ => match (value_to_f64(a), value_to_f64(b)) {
@@ -247,6 +119,220 @@ pub fn arithmetic_negate(a: &Value) -> Value {
         Value::Float64(x) => Value::Float64(-x),
         _ => Value::Null,
     }
+}
+
+/// Cypher-facing addition with checked temporal/duration arithmetic.
+/// Numeric arithmetic retains the established wrapping semantics; temporal
+/// magnitudes outside chrono's representable range return `Null`, while a
+/// Duration component overflow is a query error rather than silent aliasing.
+pub fn arithmetic_add_checked(a: &Value, b: &Value) -> Result<Value, String> {
+    match (a, b) {
+        (Value::DateTime(date), Value::Int64(days))
+        | (Value::Int64(days), Value::DateTime(date)) => Ok(checked_days(*days)
+            .and_then(|delta| date.checked_add_signed(delta))
+            .map_or(Value::Null, Value::DateTime)),
+        (Value::Timestamp(timestamp), Value::Int64(days))
+        | (Value::Int64(days), Value::Timestamp(timestamp)) => Ok(checked_days(*days)
+            .and_then(|delta| timestamp.checked_add_signed(delta))
+            .map_or(Value::Null, Value::Timestamp)),
+        (
+            Value::DateTime(date),
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+        )
+        | (
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+            Value::DateTime(date),
+        ) => Ok(checked_duration_days(*months, *days)
+            .and_then(checked_days)
+            .and_then(|delta| date.checked_add_signed(delta))
+            .map_or(Value::Null, Value::DateTime)),
+        (
+            Value::Timestamp(timestamp),
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+        )
+        | (
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+            Value::Timestamp(timestamp),
+        ) => Ok(checked_duration_days(*months, *days)
+            .and_then(checked_days)
+            .and_then(|delta| timestamp.checked_add_signed(delta))
+            .and_then(|shifted| {
+                chrono::TimeDelta::try_seconds(*seconds)
+                    .and_then(|delta| shifted.checked_add_signed(delta))
+            })
+            .map_or(Value::Null, Value::Timestamp)),
+        (
+            Value::Duration {
+                months: am,
+                days: ad,
+                seconds: as_,
+            },
+            Value::Duration {
+                months: bm,
+                days: bd,
+                seconds: bs,
+            },
+        ) => Ok(Value::Duration {
+            months: am
+                .checked_add(*bm)
+                .ok_or("Duration month component overflow during addition")?,
+            days: ad
+                .checked_add(*bd)
+                .ok_or("Duration day component overflow during addition")?,
+            seconds: as_
+                .checked_add(*bs)
+                .ok_or("Duration second component overflow during addition")?,
+        }),
+        _ => Ok(arithmetic_add_fallback(a, b)),
+    }
+}
+
+/// Cypher-facing subtraction with checked temporal/duration arithmetic.
+pub fn arithmetic_sub_checked(a: &Value, b: &Value) -> Result<Value, String> {
+    match (a, b) {
+        (Value::DateTime(left), Value::DateTime(right)) => Ok(Value::Duration {
+            months: 0,
+            days: i32::try_from((*left - *right).num_days())
+                .map_err(|_| "Date difference exceeds the supported Duration day range")?,
+            seconds: 0,
+        }),
+        (Value::Timestamp(left), Value::Timestamp(right)) => Ok(Value::Duration {
+            months: 0,
+            days: 0,
+            seconds: (*left - *right).num_seconds(),
+        }),
+        (Value::DateTime(date), Value::Int64(days)) => Ok(checked_days(*days)
+            .and_then(|delta| date.checked_sub_signed(delta))
+            .map_or(Value::Null, Value::DateTime)),
+        (Value::Timestamp(timestamp), Value::Int64(days)) => Ok(checked_days(*days)
+            .and_then(|delta| timestamp.checked_sub_signed(delta))
+            .map_or(Value::Null, Value::Timestamp)),
+        (
+            Value::DateTime(date),
+            Value::Duration {
+                months,
+                days,
+                seconds: _,
+            },
+        ) => Ok(checked_duration_days(*months, *days)
+            .and_then(checked_days)
+            .and_then(|delta| date.checked_sub_signed(delta))
+            .map_or(Value::Null, Value::DateTime)),
+        (
+            Value::Timestamp(timestamp),
+            Value::Duration {
+                months,
+                days,
+                seconds,
+            },
+        ) => Ok(checked_duration_days(*months, *days)
+            .and_then(checked_days)
+            .and_then(|delta| timestamp.checked_sub_signed(delta))
+            .and_then(|shifted| {
+                chrono::TimeDelta::try_seconds(*seconds)
+                    .and_then(|delta| shifted.checked_sub_signed(delta))
+            })
+            .map_or(Value::Null, Value::Timestamp)),
+        (
+            Value::Duration {
+                months: am,
+                days: ad,
+                seconds: as_,
+            },
+            Value::Duration {
+                months: bm,
+                days: bd,
+                seconds: bs,
+            },
+        ) => Ok(Value::Duration {
+            months: am
+                .checked_sub(*bm)
+                .ok_or("Duration month component overflow during subtraction")?,
+            days: ad
+                .checked_sub(*bd)
+                .ok_or("Duration day component overflow during subtraction")?,
+            seconds: as_
+                .checked_sub(*bs)
+                .ok_or("Duration second component overflow during subtraction")?,
+        }),
+        _ => Ok(arithmetic_sub_fallback(a, b)),
+    }
+}
+
+/// Cypher-facing multiplication adds integer scaling for Duration and rejects
+/// component overflow. Other operand combinations retain existing semantics.
+pub fn arithmetic_mul_checked(a: &Value, b: &Value) -> Result<Value, String> {
+    let (duration, factor) = match (a, b) {
+        (duration @ Value::Duration { .. }, Value::Int64(factor))
+        | (Value::Int64(factor), duration @ Value::Duration { .. }) => (duration, *factor),
+        _ => return Ok(arithmetic_mul_fallback(a, b)),
+    };
+    let Value::Duration {
+        months,
+        days,
+        seconds,
+    } = duration
+    else {
+        unreachable!()
+    };
+    Ok(Value::Duration {
+        months: i64::from(*months)
+            .checked_mul(factor)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or("Duration month component overflow during multiplication")?,
+        days: i64::from(*days)
+            .checked_mul(factor)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or("Duration day component overflow during multiplication")?,
+        seconds: seconds
+            .checked_mul(factor)
+            .ok_or("Duration second component overflow during multiplication")?,
+    })
+}
+
+#[inline]
+fn checked_days(days: i64) -> Option<chrono::TimeDelta> {
+    chrono::TimeDelta::try_days(days)
+}
+
+#[inline]
+fn checked_duration_days(months: i32, days: i32) -> Option<i64> {
+    i64::from(months)
+        .checked_mul(30)
+        .and_then(|month_days| month_days.checked_add(i64::from(days)))
+}
+
+// Test-only value-returning adapters keep the long-standing numeric helper
+// assertions compact without leaving an unchecked temporal API in production.
+#[cfg(test)]
+pub(crate) fn arithmetic_add(a: &Value, b: &Value) -> Value {
+    arithmetic_add_checked(a, b).expect("test arithmetic addition should succeed")
+}
+
+#[cfg(test)]
+pub(crate) fn arithmetic_sub(a: &Value, b: &Value) -> Value {
+    arithmetic_sub_checked(a, b).expect("test arithmetic subtraction should succeed")
+}
+
+#[cfg(test)]
+pub(crate) fn arithmetic_mul(a: &Value, b: &Value) -> Value {
+    arithmetic_mul_checked(a, b).expect("test arithmetic multiplication should succeed")
 }
 
 // ============================================================================
@@ -464,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duration_component_overflow_wraps() {
+    fn test_duration_component_overflow_is_rejected() {
         let max = Value::Duration {
             months: i32::MAX,
             days: i32::MAX,
@@ -475,27 +561,13 @@ mod tests {
             days: 1,
             seconds: 1,
         };
-        assert_eq!(
-            arithmetic_add(&max, &one),
-            Value::Duration {
-                months: i32::MIN,
-                days: i32::MIN,
-                seconds: i64::MIN,
-            }
-        );
+        assert!(arithmetic_add_checked(&max, &one).is_err());
         let min = Value::Duration {
             months: i32::MIN,
             days: i32::MIN,
             seconds: i64::MIN,
         };
-        assert_eq!(
-            arithmetic_sub(&min, &one),
-            Value::Duration {
-                months: i32::MAX,
-                days: i32::MAX,
-                seconds: i64::MAX,
-            }
-        );
+        assert!(arithmetic_sub_checked(&min, &one).is_err());
     }
 
     // -- Type coercion --

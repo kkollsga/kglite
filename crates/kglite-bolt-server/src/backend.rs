@@ -33,9 +33,9 @@ use crate::value_adapter;
 /// connections via `Arc` inside `BoltServer::serve`.
 ///
 /// **State model** (Phase C.5 + robustness pass RA-1):
-/// - `graph` holds the canonical shared `Arc<DirGraph>` behind a
-///   `Mutex`. Auto-commit reads briefly lock, `Arc::clone` the inner,
-///   release. Commits lock + replace the inner Arc.
+/// - `session` holds the canonical shared `Arc<DirGraph>`. Auto-commit
+///   reads take an immutable snapshot; commits atomically replace the
+///   current Arc.
 /// - `transactions` holds per-transaction working state. The outer
 ///   `Mutex<HashMap<...>>` is acquired only to look up / insert /
 ///   remove the per-tx entry; the actual tx work happens inside the
@@ -52,13 +52,9 @@ use crate::value_adapter;
 /// - Mutations inside an explicit transaction run against the tx's
 ///   working copy under the per-tx mutex — no contention with other
 ///   sessions until commit.
-/// - Commit takes a brief mutex on `graph` to swap the inner Arc.
-/// - **OCC version checking is deferred** — the `DirGraph::version`
-///   field is `pub(crate)` and not exposed via `kglite::api`. The
-///   Python `Transaction` class has it; bolt-server gets it when the
-///   accessor is added. For Phase C.5 the test scenarios are
-///   sequential so no conflict is possible; concurrent-writer
-///   stress is the next pass's concern.
+/// - Commit takes the session mutex briefly to validate the transaction's
+///   base version and swap its working graph. Concurrent writers use
+///   optimistic concurrency control, so a stale transaction conflicts.
 ///
 /// **`--readonly`**: rejects `begin_transaction` outright, and the
 /// auto-commit mutation gate in `execute` is unchanged. A read-only
@@ -742,5 +738,78 @@ impl KgliteBackend {
                 kglite::api::session::execute_read(graph, query, &opts).map_err(kg_to_bolt)?;
             Ok((outcome.result, "r"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_disk_path() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "kglite-bolt-disk-tx-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    async fn mutate_and_finish(
+        backend: &KgliteBackend,
+        session: &SessionHandle,
+        query: &str,
+        commit: bool,
+    ) {
+        let tx = backend
+            .begin_transaction(session, &BoltDict::new())
+            .await
+            .expect("begin disk transaction");
+        backend
+            .execute_in_tx(&tx.0, query, HashMap::new())
+            .expect("execute disk transaction mutation");
+        if commit {
+            backend
+                .commit(session, &tx)
+                .await
+                .expect("commit disk transaction");
+        } else {
+            backend
+                .rollback(session, &tx)
+                .await
+                .expect("rollback disk transaction");
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_transactions_reuse_writer_lineage_after_prior_commit() {
+        let path = unique_disk_path();
+        let graph = new_dir_graph_in_mode(StorageMode::Disk, Some(&path))
+            .expect("create disk-backed graph");
+        let backend = KgliteBackend::new(graph, false, "127.0.0.1:0".into());
+        let session = SessionHandle("disk-session".into());
+
+        mutate_and_finish(&backend, &session, "CREATE (:Person {id: 1})", true).await;
+        mutate_and_finish(&backend, &session, "CREATE (:Person {id: 2})", true).await;
+        mutate_and_finish(&backend, &session, "CREATE (:Person {id: 3})", false).await;
+
+        let snapshot = backend.session.snapshot();
+        let params = HashMap::new();
+        let opts = backend.execute_opts(&params);
+        let result = kglite::api::session::execute_read(
+            &snapshot,
+            "MATCH (n:Person) RETURN count(n) AS count",
+            &opts,
+        )
+        .expect("count committed disk nodes")
+        .result;
+        assert_eq!(result.rows, vec![vec![Value::Int64(2)]]);
+
+        drop(snapshot);
+        drop(backend);
+        std::fs::remove_dir_all(path).expect("remove disk transaction fixture");
     }
 }

@@ -27,6 +27,7 @@ Run: pytest tests/test_disk_mutation_roundtrip.py
 
 from __future__ import annotations
 
+import multiprocessing
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +37,32 @@ import kglite
 from kglite import KnowledgeGraph
 
 STORAGE_MODES = ("memory", "mapped", "disk")
+
+
+def _child_add_and_save(path: str, node_id: int, result_queue) -> None:
+    try:
+        graph = kglite.load(path)
+        graph.add_nodes(
+            pd.DataFrame({"id": [node_id], "title": [f"doc-{node_id}"]}),
+            "Doc",
+            "id",
+            "title",
+        )
+        graph.save(path)
+        result_queue.put(("ok", ""))
+    except Exception as exc:  # pragma: no cover - asserted in parent process
+        result_queue.put(("error", str(exc)))
+
+
+def _run_child_add(path: str, node_id: int) -> tuple[str, str]:
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    process = context.Process(target=_child_add_and_save, args=(path, node_id, result_queue))
+    process.start()
+    process.join(timeout=20)
+    assert not process.is_alive(), "disk writer subprocess did not terminate"
+    assert process.exitcode == 0
+    return result_queue.get(timeout=2)
 
 
 def _new_kg(mode: str, path: str | None = None) -> KnowledgeGraph:
@@ -60,6 +87,23 @@ def _save_and_reload(kg: KnowledgeGraph, save_path: str, mode: str) -> Knowledge
 
 def _rows(rv) -> list[dict]:
     return rv.to_list() if hasattr(rv, "to_list") else list(rv)
+
+
+def test_disk_writer_lease_is_enforced_across_processes(tmp_path):
+    graph_path = str(tmp_path / "writer_lease")
+    writer = KnowledgeGraph(storage="disk", path=graph_path)
+    writer.add_nodes(pd.DataFrame({"id": [1], "title": ["doc-1"]}), "Doc", "id", "title")
+    writer.save(graph_path)
+
+    status, message = _run_child_add(graph_path, 2)
+    assert status == "error"
+    assert "active writer" in message
+
+    del writer
+    status, message = _run_child_add(graph_path, 2)
+    assert (status, message) == ("ok", "")
+    reloaded = kglite.load(graph_path)
+    assert _rows(reloaded.cypher("MATCH (n:Doc) RETURN count(n) AS n")) == [{"n": 2}]
 
 
 @pytest.mark.parametrize("mode", STORAGE_MODES)
@@ -611,6 +655,7 @@ def test_register_new_conn_type_preserves_existing_type_lookups(tmp_path):
         "tgt",
     )
     kg.save(graph_path)
+    del kg  # release the exclusive disk-writer lease before opening another writer
     reloaded = kglite.load(graph_path)
 
     # Sanity: existing edge type findable on a fresh load.

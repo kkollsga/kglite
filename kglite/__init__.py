@@ -19,6 +19,7 @@ from .kglite import (  # explicit re-exports — names listed in __all__ below
     FileIoError,
     FrozenGraph,
     InternalError,
+    InternerCollisionError,
     KgError,
     KnowledgeGraph,
     MissingArgumentError,
@@ -454,6 +455,7 @@ __all__ = [
     "FileIoError",
     "ArgumentError",
     "MissingArgumentError",
+    "InternerCollisionError",
     "InternalError",
 ]
 

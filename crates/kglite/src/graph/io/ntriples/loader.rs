@@ -39,6 +39,103 @@ macro_rules! eplog {
 /// `ProgressSink` requests cancellation. The pyapi layer maps this to
 /// `PyKeyboardInterrupt` so users see the right exception type.
 const CANCELLED_TOKEN: &str = "<cancelled>";
+const READER_BATCH_SIZE: usize = 200_000;
+const READER_TARGET_BATCH_BYTES: usize = 16 * 1024 * 1024;
+
+type ReaderBatch = Result<super::parser::LineBuffer, String>;
+
+fn spawn_reader(
+    reader: Box<dyn Read + Send>,
+) -> (
+    std::sync::mpsc::Receiver<ReaderBatch>,
+    std::thread::JoinHandle<Result<(), String>>,
+) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<ReaderBatch>(32);
+    let handle = std::thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
+        let mut raw = Vec::with_capacity(512);
+        let mut batch =
+            super::parser::LineBuffer::with_capacity(READER_BATCH_SIZE, READER_TARGET_BATCH_BYTES);
+        let prefix: &[u8] = b"<http://www.wikidata.org/entity/Q";
+
+        loop {
+            raw.clear();
+            let bytes_read = match reader.read_until(b'\n', &mut raw) {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    let message = format!("N-Triples reader error: {error}");
+                    if !batch.is_empty() {
+                        let next = super::parser::LineBuffer::with_capacity(
+                            READER_BATCH_SIZE,
+                            READER_TARGET_BATCH_BYTES,
+                        );
+                        let full = std::mem::replace(&mut batch, next);
+                        if tx.send(Ok(full)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    if tx.send(Err(message.clone())).is_err() {
+                        return Ok(());
+                    }
+                    return Err(message);
+                }
+            };
+            if bytes_read == 0 {
+                if !batch.is_empty() && tx.send(Ok(batch)).is_err() {
+                    return Ok(());
+                }
+                return Ok(());
+            }
+
+            // Byte-level fast reject stays ahead of UTF-8 validation. Only
+            // accepted entity lines enter the batch and pay validation cost.
+            if !raw.starts_with(prefix) {
+                continue;
+            }
+
+            batch.push_line(&raw);
+            if batch.offsets.len() >= READER_BATCH_SIZE
+                || batch.data.len() >= READER_TARGET_BATCH_BYTES
+            {
+                let next = super::parser::LineBuffer::with_capacity(
+                    READER_BATCH_SIZE,
+                    READER_TARGET_BATCH_BYTES,
+                );
+                let full = std::mem::replace(&mut batch, next);
+                if tx.send(Ok(full)).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+    });
+    (rx, handle)
+}
+
+fn join_reader(handle: std::thread::JoinHandle<Result<(), String>>) -> Result<(), String> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            Err(format!("N-Triples reader thread panicked: {detail}"))
+        }
+    }
+}
+
+#[inline]
+fn validated_line(bytes: &[u8]) -> Result<&str, std::str::Utf8Error> {
+    if bytes.is_ascii() {
+        // SAFETY: every ASCII byte is a one-byte UTF-8 code point. `is_ascii`
+        // is the validation step and is substantially cheaper on the common
+        // Wikidata URI/numeric fast path than the general UTF-8 state machine.
+        Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
+    } else {
+        std::str::from_utf8(bytes)
+    }
+}
 
 /// Forward an event to the configured sink, if any. The sink may
 /// request cancellation by returning `Err(Cancelled)`; the loader
@@ -89,40 +186,7 @@ pub fn load_ntriples(
     // transports one buffer at a time. Channel capacity 32 × ~16 MB =
     // ~512 MB ceiling on in-flight bytes — well within memory budget,
     // smooths out short loader stalls.
-    const BATCH_SIZE: usize = 200_000;
-    const TARGET_BATCH_BYTES: usize = 16 * 1024 * 1024;
-    let (tx, rx) = std::sync::mpsc::sync_channel::<super::parser::LineBuffer>(32);
-    let reader_handle = std::thread::spawn(move || {
-        let mut reader = BufReader::with_capacity(8 * 1024 * 1024, reader);
-        let mut raw = Vec::with_capacity(512);
-        let mut batch = super::parser::LineBuffer::with_capacity(BATCH_SIZE, TARGET_BATCH_BYTES);
-        let prefix: &[u8] = b"<http://www.wikidata.org/entity/Q";
-
-        loop {
-            raw.clear();
-            if reader.read_until(b'\n', &mut raw).unwrap_or(0) == 0 {
-                if !batch.is_empty() {
-                    let _ = tx.send(batch);
-                }
-                break;
-            }
-
-            // Fast reject at byte level — skip non-entity lines.
-            if !raw.starts_with(prefix) {
-                continue;
-            }
-
-            // Append raw bytes to the current batch; no `String` allocation.
-            batch.push_line(&raw);
-            if batch.offsets.len() >= BATCH_SIZE || batch.data.len() >= TARGET_BATCH_BYTES {
-                let next = super::parser::LineBuffer::with_capacity(BATCH_SIZE, TARGET_BATCH_BYTES);
-                let full = std::mem::replace(&mut batch, next);
-                if tx.send(full).is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    let (rx, reader_handle) = spawn_reader(reader);
 
     let mut stats = NTriplesStats {
         triples_scanned: 0,
@@ -241,7 +305,8 @@ pub fn load_ntriples(
         let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
         });
-        let _ = std::fs::create_dir_all(&spill_dir);
+        std::fs::create_dir_all(&spill_dir)
+            .map_err(|e| format!("Failed to create label spill directory: {e}"))?;
         Some(
             super::label_spill::LabelSpillWriter::new(&spill_dir.join("labels.bin"))
                 .map_err(|e| format!("Failed to create label journal: {}", e))?,
@@ -260,7 +325,8 @@ pub fn load_ntriples(
         let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
         });
-        let _ = std::fs::create_dir_all(&spill_dir);
+        std::fs::create_dir_all(&spill_dir)
+            .map_err(|e| format!("Failed to create id spill directory: {e}"))?;
         // 150M covers all Wikidata Q-numbers. OS allocates pages lazily.
         Some(
             MmapOrVec::mapped_prefilled(&spill_dir.join("qnum_to_idx.bin"), 150_000_000)
@@ -309,14 +375,29 @@ pub fn load_ntriples(
         },
     )?;
 
-    'outer: for batch in &rx {
+    let mut reader_error = None;
+    'outer: while let Ok(message) = rx.recv() {
+        let batch = match message {
+            Ok(batch) => batch,
+            Err(error) => {
+                reader_error = Some(error);
+                break;
+            }
+        };
         let n_lines = batch.offsets.len();
         for i in 0..n_lines {
             // Slice into the batch's contiguous buffer — pointer math,
-            // no per-line heap dereference. SAFETY: bytes originated
-            // from a UTF-8 input stream; `parse_line` re-validates the
-            // sub-slices it actually returns.
-            let line = unsafe { std::str::from_utf8_unchecked(batch.line(i)) };
+            // no per-line heap dereference. Validation happens only after
+            // the reader's byte-level entity-prefix filter accepted the line.
+            let line = match validated_line(batch.line(i)) {
+                Ok(line) => line,
+                Err(error) => {
+                    reader_error = Some(format!(
+                        "N-Triples input contains invalid UTF-8 in an accepted entity line: {error}"
+                    ));
+                    break 'outer;
+                }
+            };
             if entity_limit_reached && current.is_none() {
                 break 'outer;
             }
@@ -398,7 +479,7 @@ pub fn load_ntriples(
                         &mut type_meta,
                         &mut qnum_to_idx,
                         &mut scratch_props,
-                    );
+                    )?;
                 }
                 if entity_limit_reached {
                     break;
@@ -481,7 +562,11 @@ pub fn load_ntriples(
       // `max_triples` cap) leaves the reader thread blocked on a full
       // bounded channel that nobody is draining → `join()` deadlocks.
     drop(rx);
-    let _ = reader_handle.join();
+    let join_result = join_reader(reader_handle);
+    if let Some(error) = reader_error {
+        return Err(error);
+    }
+    join_result?;
 
     // Flush last entity
     if let Some(acc) = current.take() {
@@ -497,7 +582,7 @@ pub fn load_ntriples(
             &mut type_meta,
             &mut qnum_to_idx,
             &mut scratch_props,
-        );
+        )?;
     }
 
     // Post-Phase-1: resolve Q-code type names using the label journal.
@@ -515,7 +600,9 @@ pub fn load_ntriples(
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
         });
         let path = spill_dir.join("labels.bin");
-        let journal_size = writer.finish().unwrap_or(0);
+        let journal_size = writer
+            .finish()
+            .map_err(|e| format!("Failed to finish label journal: {e}"))?;
         if build_debug() {
             eplog!(
                 "  Label journal: {} bytes on disk",
@@ -565,6 +652,14 @@ pub fn load_ntriples(
                     renames.len()
                 );
             }
+            graph
+                .interner
+                .validate_names(
+                    renames
+                        .iter()
+                        .flat_map(|(old, new)| [old.as_str(), new.as_str()]),
+                )
+                .map_err(|e| e.to_string())?;
             let old_key_to_new_key: Vec<(InternedKey, InternedKey)> = renames
                 .iter()
                 .map(|(old, new)| {
@@ -624,14 +719,14 @@ pub fn load_ntriples(
                 .collect();
             match &mut graph.graph {
                 crate::graph::schema::GraphBackend::Disk(ref mut dg) => {
-                    let n = dg.node_slots.len();
+                    let n = dg.node_slot_len();
                     for i in 0..n {
-                        let slot = dg.node_slots.get(i);
+                        let slot = dg.node_slot(i);
                         if slot.is_alive() {
                             if let Some(&new_type) = rename_map.get(&slot.node_type) {
                                 let mut new_slot = slot;
                                 new_slot.node_type = new_type;
-                                dg.node_slots.set(i, new_slot);
+                                dg.set_node_slot(i, new_slot);
                             }
                         }
                     }
@@ -864,7 +959,8 @@ pub fn load_ntriples(
             },
         )?;
         let csr_start = Instant::now();
-        dg.build_csr_from_pending();
+        dg.build_csr_from_pending()
+            .map_err(|e| format!("Failed to build disk CSR: {e}"))?;
         let phase3_elapsed = csr_start.elapsed().as_secs_f64();
         if config.verbose {
             eplog!("[Phase 3] Complete in {}", fmt_dur(phase3_elapsed));
@@ -922,8 +1018,8 @@ pub fn load_ntriples(
     if graph.graph.is_disk() {
         let rebuild_start = Instant::now();
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-            for i in 0..dg.node_slots.len() {
-                let slot = dg.node_slots.get(i);
+            for i in 0..dg.node_slot_len() {
+                let slot = dg.node_slot(i);
                 if slot.is_alive() {
                     let type_key = InternedKey::from_u64(slot.node_type);
                     let type_name = graph.interner.resolve(type_key).to_string();
@@ -1070,9 +1166,10 @@ pub fn load_ntriples(
                 .iter()
                 .map(|(k, v)| (k.as_u64().to_string(), v.to_string()))
                 .collect();
-            if let Ok(json) = serde_json::to_string(&interner_map) {
-                let _ = std::fs::write(data_dir.join("interner.json"), json);
-            }
+            let json = serde_json::to_string(&interner_map)
+                .map_err(|e| format!("Failed to serialize interner: {e}"))?;
+            std::fs::write(data_dir.join("interner.json"), json)
+                .map_err(|e| format!("Failed to write interner: {e}"))?;
             if build_debug() {
                 eplog!(
                     "  interner.json ({} entries): {}",
@@ -1085,13 +1182,14 @@ pub fn load_ntriples(
             // fields as separate binary sidecars and strips them from the
             // JSON; the remaining JSON is tiny and parses in ms.
             let save_step = Instant::now();
-            let _ = crate::graph::io::file::write_node_type_metadata_bin(&data_dir, graph);
-            let _ = crate::graph::io::file::write_connection_type_metadata_bin(&data_dir, graph);
+            crate::graph::io::file::write_node_type_metadata_bin(&data_dir, graph)
+                .map_err(|e| format!("Failed to write node-type metadata: {e}"))?;
+            crate::graph::io::file::write_connection_type_metadata_bin(&data_dir, graph)
+                .map_err(|e| format!("Failed to write connection-type metadata: {e}"))?;
             let mut meta = crate::graph::io::file::build_disk_metadata(graph);
             crate::graph::io::file::strip_heavy_metadata(&mut meta);
-            if let Ok(json) = serde_json::to_string_pretty(&meta) {
-                let _ = std::fs::write(data_dir.join("metadata.json"), json);
-            }
+            let json = serde_json::to_string_pretty(&meta)
+                .map_err(|e| format!("Failed to serialize graph metadata: {e}"))?;
             if build_debug() {
                 eplog!("  metadata: {}", fmt_dur(save_step.elapsed().as_secs_f64()));
             }
@@ -1099,11 +1197,12 @@ pub fn load_ntriples(
             // Save id_indices as raw mmap-friendly `.bin` (0.8.28+).
             let save_step = Instant::now();
             if !graph.id_indices.is_empty() {
-                let _ = crate::graph::storage::disk::id_index::write_id_indices_bin(
+                crate::graph::storage::disk::id_index::write_id_indices_bin(
                     &data_dir,
                     &graph.id_indices,
                     &graph.interner,
-                );
+                )
+                .map_err(|e| format!("Failed to write id indexes: {e}"))?;
             }
             if build_debug() {
                 eplog!(
@@ -1116,11 +1215,12 @@ pub fn load_ntriples(
             // Save type_indices as raw mmap-friendly `.bin` (0.8.28+).
             let save_step = Instant::now();
             if !graph.type_indices.is_empty() {
-                let _ = crate::graph::storage::disk::type_index::write_type_indices_bin(
+                crate::graph::storage::disk::type_index::write_type_indices_bin(
                     &data_dir,
                     &graph.type_indices,
                     &graph.interner,
-                );
+                )
+                .map_err(|e| format!("Failed to write type indexes: {e}"))?;
             }
             if build_debug() {
                 eplog!(
@@ -1129,6 +1229,11 @@ pub fn load_ntriples(
                     fmt_dur(save_step.elapsed().as_secs_f64())
                 );
             }
+
+            // Publish root metadata last: readers must never observe a new
+            // completion marker before its required sidecars exist.
+            std::fs::write(data_dir.join("metadata.json"), json)
+                .map_err(|e| format!("Failed to publish graph metadata: {e}"))?;
         }
 
         let finalising_elapsed = finalising_start.elapsed().as_secs_f64();
@@ -1169,7 +1274,7 @@ fn flush_entity(
     // of this function so the alloc cost is paid once instead of per
     // entity (showed up at ~2% of loader CPU under samply).
     scratch_props: &mut Vec<(InternedKey, Value)>,
-) {
+) -> Result<(), String> {
     // Disk/mapped mode requires a `u32` Q-number. A `Value::String` id
     // would flip `id_is_string=true` on the type's columnar metadata,
     // and `flush_type_entries` would then leave the *other* (UniqueId)
@@ -1180,7 +1285,7 @@ fn flush_entity(
     // filter). They're not legitimate data — drop them.
     let use_compact_ids = mapped || graph.graph.is_disk();
     if use_compact_ids && parse_qcode_number(&acc.id).is_none() {
-        return;
+        return Ok(());
     }
 
     let title = acc.label.unwrap_or_else(|| acc.id.clone());
@@ -1191,7 +1296,8 @@ fn flush_entity(
     // Wikidata scale and caused swap thrash on 16 GB machines.
     if let Some(ref mut w) = label_writer {
         if let Some(qnum) = parse_qcode_number(&acc.id) {
-            let _ = w.append(qnum, &title);
+            w.append(qnum, &title)
+                .map_err(|e| format!("Failed to append label journal: {e}"))?;
         }
     }
 
@@ -1211,6 +1317,18 @@ fn flush_entity(
     } else {
         "Entity".to_string()
     };
+
+    let mut names = vec![node_type.as_str(), "nid", "description", "P31"];
+    names.extend(acc.properties.keys().map(String::as_str));
+    names.extend(
+        acc.outgoing_edges
+            .iter()
+            .map(|(predicate, _)| predicate.as_str()),
+    );
+    graph
+        .interner
+        .validate_names(names)
+        .map_err(|e| e.to_string())?;
 
     let mut properties = acc.properties;
     // Store nid as a queryable string property (e.g., "Q42") so Cypher {nid: 'Q42'} works
@@ -1291,7 +1409,7 @@ fn flush_entity(
             &saved_title,
             scratch_props,
         )
-        .expect("Property log write failed");
+        .map_err(|e| format!("Property log write failed: {e}"))?;
 
         // Collect per-type metadata for Phase 1b pre-allocation
         type_meta
@@ -1346,6 +1464,7 @@ fn flush_entity(
             }
         }
     }
+    Ok(())
 }
 
 /// Create edges from the buffer. Looks up source/target by Q-code across all types.
@@ -1470,5 +1589,187 @@ mod tests {
         );
         // String tuple is at least 72 bytes on stack (3 × 24 for String)
         assert!(std::mem::size_of::<(String, String, String)>() >= 72);
+    }
+
+    const VALID_TRIPLE: &[u8] = b"<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n";
+
+    fn test_config() -> NTriplesConfig {
+        NTriplesConfig {
+            predicates: None,
+            languages: None,
+            node_types: HashMap::new(),
+            predicate_labels: HashMap::new(),
+            max_entities: None,
+            max_triples: None,
+            verbose: false,
+            auto_type: true,
+            progress: None,
+        }
+    }
+
+    fn load_error(graph: &mut DirGraph, path: &Path) -> String {
+        match load_ntriples(graph, path.to_str().unwrap(), &test_config()) {
+            Ok(_) => panic!("malformed N-Triples input loaded successfully"),
+            Err(error) => error,
+        }
+    }
+
+    struct ErrorAfterData {
+        data: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for ErrorAfterData {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.data.read(buf)?;
+            if read == 0 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "injected reader failure",
+                ))
+            } else {
+                Ok(read)
+            }
+        }
+    }
+
+    struct PanicReader;
+
+    impl Read for PanicReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!("injected reader panic")
+        }
+    }
+
+    struct PoisonFinalisationSink {
+        data_dir: std::path::PathBuf,
+        completed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ProgressSink for PoisonFinalisationSink {
+        fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled> {
+            match event {
+                ProgressEvent::Start {
+                    phase: "finalising",
+                    ..
+                } => {
+                    std::fs::create_dir(self.data_dir.join("interner.json")).unwrap();
+                }
+                ProgressEvent::Complete { phase, .. } => {
+                    self.completed.lock().unwrap().push(phase.to_string());
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn finalisation_write_failure_is_reported_before_complete_or_metadata_publish() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), VALID_TRIPLE).unwrap();
+        let mut graph = DirGraph::new();
+        graph.enable_disk_mode().unwrap();
+        let data_dir = match &graph.graph {
+            crate::graph::schema::GraphBackend::Disk(disk) => disk.data_dir.clone(),
+            _ => unreachable!(),
+        };
+        let completed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut config = test_config();
+        config.progress = Some(Box::new(PoisonFinalisationSink {
+            data_dir: data_dir.clone(),
+            completed: std::sync::Arc::clone(&completed),
+        }));
+
+        let error = match load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config) {
+            Ok(_) => panic!("poisoned interner output must fail finalisation"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Failed to write interner"), "{error}");
+        assert!(!completed.lock().unwrap().iter().any(|p| p == "finalising"));
+        assert!(
+            !data_dir.join("metadata.json").exists(),
+            "root completion metadata must be withheld on finalisation failure"
+        );
+    }
+
+    #[test]
+    fn reader_error_is_ordered_after_prior_batches_and_propagated() {
+        let reader = ErrorAfterData {
+            data: std::io::Cursor::new(VALID_TRIPLE.to_vec()),
+        };
+        let (rx, handle) = spawn_reader(Box::new(reader));
+        let messages: Vec<_> = rx.into_iter().collect();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0]
+            .as_ref()
+            .is_ok_and(|batch| batch.offsets.len() == 1));
+        assert!(messages[1]
+            .as_ref()
+            .is_err_and(|error| error.contains("injected reader failure")));
+        assert!(join_reader(handle)
+            .unwrap_err()
+            .contains("injected reader failure"));
+    }
+
+    #[test]
+    fn reader_thread_panic_is_propagated() {
+        let (rx, handle) = spawn_reader(Box::new(PanicReader));
+        drop(rx);
+        assert!(join_reader(handle)
+            .unwrap_err()
+            .contains("injected reader panic"));
+    }
+
+    #[test]
+    fn accepted_line_with_invalid_utf8_is_rejected() {
+        let subject = VALID_TRIPLE.iter().position(|byte| *byte == b'Q').unwrap() + 1;
+        let predicate = VALID_TRIPLE
+            .windows(2)
+            .position(|window| window == b"P3")
+            .unwrap()
+            + 1;
+        let object = VALID_TRIPLE.iter().rposition(|byte| *byte == b'Q').unwrap() + 1;
+
+        for corrupt_at in [subject, predicate, object] {
+            let temp = tempfile::NamedTempFile::new().unwrap();
+            let mut line = VALID_TRIPLE.to_vec();
+            line.insert(corrupt_at, 0xff);
+            std::fs::write(temp.path(), line).unwrap();
+            let mut graph = DirGraph::new();
+            let error = load_error(&mut graph, temp.path());
+            assert!(error.contains("invalid UTF-8"));
+        }
+    }
+
+    #[test]
+    fn truncated_gzip_after_valid_triple_is_not_clean_eof() {
+        use std::io::Write as _;
+
+        let temp = tempfile::Builder::new().suffix(".gz").tempfile().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(VALID_TRIPLE).unwrap();
+        let mut compressed = encoder.finish().unwrap();
+        compressed.truncate(compressed.len() - 6);
+        std::fs::write(temp.path(), compressed).unwrap();
+
+        let mut graph = DirGraph::new();
+        let error = load_error(&mut graph, temp.path());
+        assert!(error.contains("reader error"), "{error}");
+    }
+
+    #[test]
+    fn truncated_bzip2_after_valid_triple_is_not_clean_eof() {
+        use std::io::Write as _;
+
+        let temp = tempfile::Builder::new().suffix(".bz2").tempfile().unwrap();
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        encoder.write_all(VALID_TRIPLE).unwrap();
+        let mut compressed = encoder.finish().unwrap();
+        compressed.truncate(compressed.len() - 6);
+        std::fs::write(temp.path(), compressed).unwrap();
+
+        let mut graph = DirGraph::new();
+        let error = load_error(&mut graph, temp.path());
+        assert!(error.contains("reader error"), "{error}");
     }
 }

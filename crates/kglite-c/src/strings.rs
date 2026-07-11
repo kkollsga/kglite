@@ -40,10 +40,12 @@ pub(crate) fn alloc_c_string(s: &str) -> *const c_char {
 /// ```
 #[no_mangle]
 pub unsafe extern "C" fn kglite_free_string(s: *const c_char) {
-    if s.is_null() {
-        return;
-    }
-    // Safety: we're consuming a pointer we allocated via
-    // `CString::into_raw`. Dropping the `CString` frees the memory.
-    let _ = unsafe { CString::from_raw(s.cast_mut()) };
+    crate::ffi::void_boundary(|| {
+        if s.is_null() {
+            return;
+        }
+        // Safety: we're consuming a pointer we allocated via
+        // `CString::into_raw`. Dropping the `CString` frees the memory.
+        let _ = unsafe { CString::from_raw(s.cast_mut()) };
+    });
 }

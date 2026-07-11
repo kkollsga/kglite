@@ -214,7 +214,8 @@ impl<'a> CypherExecutor<'a> {
         let mut new_rows = Vec::new();
 
         // Use into_iter to own rows — enables move-on-last optimization
-        for mut row in result_set.rows {
+        for (row_idx, mut row) in result_set.rows.into_iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
             let val = self.evaluate_expression(&clause.expression, &row)?;
             match val {
                 // Phase A.1 / C4 — native Value::List fast path.
@@ -222,7 +223,10 @@ impl<'a> CypherExecutor<'a> {
                 // fired when collect() / list-literals emitted strings.
                 Value::List(items) => {
                     let total = items.len();
+                    self.budget.check_work(total, "UNWIND collection")?;
+                    self.budget.reserve_rows(new_rows.len(), total, "UNWIND")?;
                     for (i, item_val) in items.into_iter().enumerate() {
+                        self.check_interrupt_periodic(i)?;
                         if i + 1 == total {
                             // Last item: move row instead of cloning
                             row.projected.insert(clause.alias.clone(), item_val);
@@ -239,7 +243,10 @@ impl<'a> CypherExecutor<'a> {
                     // producers). Kept as fallback.
                     let items = split_list_top_level(&s);
                     let total = items.len();
+                    self.budget.check_work(total, "UNWIND collection")?;
+                    self.budget.reserve_rows(new_rows.len(), total, "UNWIND")?;
                     for (i, item_str) in items.into_iter().enumerate() {
+                        self.check_interrupt_periodic(i)?;
                         let parsed_val = parse_value_string(item_str.trim());
                         if i + 1 == total {
                             row.projected.insert(clause.alias.clone(), parsed_val);
@@ -256,6 +263,7 @@ impl<'a> CypherExecutor<'a> {
                 }
                 _ => {
                     // Single value: move directly (no clone needed)
+                    self.budget.reserve_rows(new_rows.len(), 1, "UNWIND")?;
                     row.projected.insert(clause.alias.clone(), val);
                     new_rows.push(row);
                 }
@@ -462,110 +470,25 @@ impl<'a> CypherExecutor<'a> {
 
         // Dispatch to algorithm
         let rows = match proc_name.as_str() {
-            "pagerank" => {
-                let damping = call_param_f64(&params, "damping_factor", 0.85);
-                let max_iter = call_param_usize(&params, "max_iterations", 100);
-                let tolerance = call_param_f64(&params, "tolerance", 1e-6);
-                let conn = call_param_string_list(&params, "connection_types");
-                let results = crate::graph::algorithms::graph_algorithms::pagerank(
-                    self.graph,
-                    damping,
-                    max_iter,
-                    tolerance,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    self.interrupt(),
-                )?;
-                self.centrality_to_rows(&results, &clause.yield_items)?
-            }
-            "betweenness" | "betweenness_centrality" => {
-                let normalized = call_param_bool(&params, "normalized", true);
-                let sample_size = call_param_opt_usize(&params, "sample_size");
-                let conn = call_param_string_list(&params, "connection_types");
-                let results = crate::graph::algorithms::graph_algorithms::betweenness_centrality(
-                    self.graph,
-                    normalized,
-                    sample_size,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    self.interrupt(),
-                )?;
-                self.centrality_to_rows(&results, &clause.yield_items)?
-            }
-            "degree" | "degree_centrality" => {
-                let normalized = call_param_bool(&params, "normalized", true);
-                let conn = call_param_string_list(&params, "connection_types");
-                let results = crate::graph::algorithms::graph_algorithms::degree_centrality(
-                    self.graph,
-                    normalized,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    self.interrupt(),
-                )?;
-                self.centrality_to_rows(&results, &clause.yield_items)?
-            }
-            "closeness" | "closeness_centrality" => {
-                let normalized = call_param_bool(&params, "normalized", true);
-                let sample_size = call_param_opt_usize(&params, "sample_size");
-                let conn = call_param_string_list(&params, "connection_types");
-                let results = crate::graph::algorithms::graph_algorithms::closeness_centrality(
-                    self.graph,
-                    normalized,
-                    sample_size,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    self.interrupt(),
-                )?;
-                self.centrality_to_rows(&results, &clause.yield_items)?
-            }
-            "louvain" | "louvain_communities" => {
-                let resolution = call_param_f64(&params, "resolution", 1.0);
-                let weight_prop = call_param_opt_string(&params, "weight_property");
-                let conn = call_param_string_list(&params, "connection_types");
-                let result = crate::graph::algorithms::graph_algorithms::louvain_communities(
-                    self.graph,
-                    weight_prop.as_deref(),
-                    resolution,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    if streaming_community {
-                        crate::graph::algorithms::Interrupt::default()
-                    } else {
-                        self.interrupt()
-                    },
-                )?;
-                self.community_result_to_rows(&result, &clause.yield_items)?
-            }
-            "leiden" | "leiden_communities" => {
-                let resolution = call_param_f64(&params, "resolution", 1.0);
-                let weight_prop = call_param_opt_string(&params, "weight_property");
-                let conn = call_param_string_list(&params, "connection_types");
-                let result = crate::graph::algorithms::graph_algorithms::leiden_communities(
-                    self.graph,
-                    weight_prop.as_deref(),
-                    resolution,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    if streaming_community {
-                        crate::graph::algorithms::Interrupt::default()
-                    } else {
-                        self.interrupt()
-                    },
-                )?;
-                self.community_result_to_rows(&result, &clause.yield_items)?
-            }
-            "label_propagation" => {
-                let max_iter = call_param_usize(&params, "max_iterations", 100);
-                let conn = call_param_string_list(&params, "connection_types");
-                let result = crate::graph::algorithms::graph_algorithms::label_propagation(
-                    self.graph,
-                    max_iter,
-                    conn.as_deref(),
-                    scope.as_ref(),
-                    self.interrupt(),
-                )?;
-                self.community_result_to_rows(&result, &clause.yield_items)?
-            }
+            "pagerank"
+            | "betweenness"
+            | "betweenness_centrality"
+            | "degree"
+            | "degree_centrality"
+            | "closeness"
+            | "closeness_centrality"
+            | "louvain"
+            | "louvain_communities"
+            | "leiden"
+            | "leiden_communities"
+            | "label_propagation" => super::centrality_procedures::execute_centrality_procedure(
+                self,
+                &proc_name,
+                &params,
+                scope.as_ref(),
+                streaming_community,
+                &clause.yield_items,
+            )?,
             "connected_components" | "weakly_connected_components" => {
                 // Optional scoping: `CALL connected_components({node_type: 'Person',
                 // relationship: 'KNOWS'})`. Each accepts a string or a list of
@@ -802,96 +725,35 @@ impl<'a> CypherExecutor<'a> {
                 vec![row]
             }
             "cluster" => self.execute_call_cluster(&params, &clause.yield_items, &existing)?,
-            "orphan_node" => super::rule_procedures::execute_orphan_node(
+            "orphan_node"
+            | "self_loop"
+            | "cycle_2step"
+            | "missing_required_edge"
+            | "missing_inbound_edge"
+            | "duplicate_title"
+            | "duplicate_id"
+            | "outline"
+            | "null_property"
+            | "inverse_violation"
+            | "transitivity_violation"
+            | "cardinality_violation"
+            | "type_domain_violation"
+            | "type_range_violation"
+            | "parallel_edges"
+            | "kg_knn" => super::rule_procedures::execute_rule_procedure(
+                &proc_name,
                 self.graph,
                 &params,
                 &clause.yield_items,
             )?,
-            "self_loop" => {
-                super::rule_procedures::execute_self_loop(self.graph, &params, &clause.yield_items)?
+            "affected_tests" | "rev_diff" | "dead_code" | "refresh_stats" => {
+                super::analysis_procedures::execute_analysis_procedure(
+                    &proc_name,
+                    self.graph,
+                    &params,
+                    &clause.yield_items,
+                )?
             }
-            "cycle_2step" => super::rule_procedures::execute_cycle_2step(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "missing_required_edge" => super::rule_procedures::execute_missing_required_edge(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "missing_inbound_edge" => super::rule_procedures::execute_missing_inbound_edge(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "duplicate_title" => super::rule_procedures::execute_duplicate_title(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "duplicate_id" => super::rule_procedures::execute_duplicate_id(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "outline" => {
-                super::rule_procedures::execute_outline(self.graph, &params, &clause.yield_items)?
-            }
-            "null_property" => super::rule_procedures::execute_null_property(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "inverse_violation" => super::rule_procedures::execute_inverse_violation(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "transitivity_violation" => super::rule_procedures::execute_transitivity_violation(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "cardinality_violation" => super::rule_procedures::execute_cardinality_violation(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "type_domain_violation" => super::rule_procedures::execute_type_domain_violation(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "type_range_violation" => super::rule_procedures::execute_type_range_violation(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "parallel_edges" => super::rule_procedures::execute_parallel_edges(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "kg_knn" => {
-                super::rule_procedures::execute_kg_knn(self.graph, &params, &clause.yield_items)?
-            }
-            "affected_tests" => super::affected_tests::execute_affected_tests(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
-            "rev_diff" => {
-                super::rev_procedures::execute_rev_diff(self.graph, &params, &clause.yield_items)?
-            }
-            "dead_code" => {
-                super::dead_code::execute_dead_code(self.graph, &params, &clause.yield_items)?
-            }
-            "refresh_stats" => super::refresh_stats::execute_refresh_stats(
-                self.graph,
-                &params,
-                &clause.yield_items,
-            )?,
             "list_procedures" => {
                 let procedures = [
                     (
@@ -1116,142 +978,81 @@ impl<'a> CypherExecutor<'a> {
             // a single `name` column; the underlying helpers in
             // `introspection::schema_overview` are the single source of
             // truth and are also consumed by `describe()` to prevent drift.
-            "db.labels" => {
-                let labels =
-                    crate::graph::introspection::schema_overview::collect_labels(self.graph);
-                names_to_rows(&labels, &clause.yield_items)
-            }
-            "db.relationshiptypes" => {
-                let rel_types =
-                    crate::graph::introspection::schema_overview::collect_relationship_types(
-                        self.graph,
-                    );
-                names_to_rows(&rel_types, &clause.yield_items)
-            }
-            "db.indexes" => {
-                let infos =
-                    crate::graph::introspection::schema_overview::collect_indexes_structured(
-                        self.graph,
-                    );
-                indexes_to_rows(&infos, &clause.yield_items)
-            }
+            "db.labels" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
+            "db.relationshiptypes" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
+            "db.indexes" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             // db.propertyKeys() — every declared property name, one per row.
-            "db.propertykeys" => {
-                let keys =
-                    crate::graph::introspection::schema_overview::collect_property_keys(self.graph);
-                names_to_rows(&keys, &clause.yield_items)
-            }
+            "db.propertykeys" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             // db.schema() — one row per node type: its name + the sorted list
             // of its property names. The in-language counterpart of describe(),
             // reusing compute_schema() so the two never drift.
-            "db.schema" => {
-                let schema =
-                    crate::graph::introspection::schema_overview::compute_schema(self.graph);
-                let mut rows = Vec::with_capacity(schema.node_types.len());
-                for (node_type, overview) in &schema.node_types {
-                    let mut props: Vec<String> = overview.properties.keys().cloned().collect();
-                    props.sort();
-                    let mut row = ResultRow::new();
-                    for item in &clause.yield_items {
-                        let alias = item.alias.as_deref().unwrap_or(&item.name);
-                        let value = match item.name.as_str() {
-                            "nodeType" => Value::String(node_type.clone()),
-                            "properties" => {
-                                Value::List(props.iter().cloned().map(Value::String).collect())
-                            }
-                            _ => continue,
-                        };
-                        row.projected.insert(alias.to_string(), value);
-                    }
-                    rows.push(row);
-                }
-                rows
-            }
+            "db.schema" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             // 2026-05-25 Batch 6 — graph + property introspection.
             //
             // db.graph_stats() yields one row with the top-level
             // counts (node_count, edge_count, label_count,
             // relationship_type_count). Useful for an agent's first
             // "what's in this graph?" query.
-            "db.graph_stats" => {
-                let node_count = self.graph.graph.node_count() as i64;
-                let edge_count = self.graph.graph.edge_count() as i64;
-                let label_count =
-                    crate::graph::introspection::schema_overview::collect_labels(self.graph).len()
-                        as i64;
-                let rel_type_count =
-                    crate::graph::introspection::schema_overview::collect_relationship_types(
-                        self.graph,
-                    )
-                    .len() as i64;
-                let mut row = ResultRow::new();
-                for item in &clause.yield_items {
-                    let alias = item.alias.as_deref().unwrap_or(&item.name);
-                    let value = match item.name.as_str() {
-                        "node_count" => Value::Int64(node_count),
-                        "edge_count" => Value::Int64(edge_count),
-                        "label_count" => Value::Int64(label_count),
-                        "relationship_type_count" => Value::Int64(rel_type_count),
-                        _ => continue,
-                    };
-                    row.projected.insert(alias.to_string(), value);
-                }
-                vec![row]
-            }
+            "db.graph_stats" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             // db.property_stats(node_type, property) → one row with
             // value_count (non-null occurrences), null_count, and
             // distinct_count. Helps agents understand cardinality
             // before writing GROUP BY or selectivity-sensitive queries.
-            "db.property_stats" => {
-                let node_type = call_param_string(&params, "node_type")
-                    .ok_or("db.property_stats() requires a `node_type` string param")?;
-                let prop_name = call_param_string(&params, "property")
-                    .ok_or("db.property_stats() requires a `property` string param")?;
-                let (value_count, null_count, distinct_count) =
-                    compute_property_stats(self.graph, &node_type, &prop_name);
-                let mut row = ResultRow::new();
-                for item in &clause.yield_items {
-                    let alias = item.alias.as_deref().unwrap_or(&item.name);
-                    let value = match item.name.as_str() {
-                        "value_count" => Value::Int64(value_count),
-                        "null_count" => Value::Int64(null_count),
-                        "distinct_count" => Value::Int64(distinct_count),
-                        _ => continue,
-                    };
-                    row.projected.insert(alias.to_string(), value);
-                }
-                vec![row]
-            }
+            "db.property_stats" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             // db.property_uniqueness(node_type, property) → is the
             // property a candidate unique-index column? Yields
             // is_unique (true ⟺ distinct_count == value_count),
             // violation_count (value_count − distinct_count), and
             // distinct_count. Common pre-flight before declaring a
             // constraint.
-            "db.property_uniqueness" => {
-                let node_type = call_param_string(&params, "node_type")
-                    .ok_or("db.property_uniqueness() requires a `node_type` string param")?;
-                let prop_name = call_param_string(&params, "property")
-                    .ok_or("db.property_uniqueness() requires a `property` string param")?;
-                let (value_count, _null_count, distinct_count) =
-                    compute_property_stats(self.graph, &node_type, &prop_name);
-                let violation_count = value_count.saturating_sub(distinct_count);
-                let is_unique = violation_count == 0 && value_count > 0;
-                let mut row = ResultRow::new();
-                for item in &clause.yield_items {
-                    let alias = item.alias.as_deref().unwrap_or(&item.name);
-                    let value = match item.name.as_str() {
-                        "is_unique" => Value::Boolean(is_unique),
-                        "violation_count" => Value::Int64(violation_count),
-                        "distinct_count" => Value::Int64(distinct_count),
-                        _ => continue,
-                    };
-                    row.projected.insert(alias.to_string(), value);
-                }
-                vec![row]
-            }
+            "db.property_uniqueness" => super::schema_procedures::execute_schema_procedure(
+                self,
+                &proc_name,
+                &params,
+                &clause.yield_items,
+            )?,
             _ => unreachable!(),
         };
+
+        self.budget
+            .check_work(rows.len(), &format!("CALL {proc_name}"))?;
+        self.budget
+            .check_rows(rows.len(), &format!("CALL {proc_name}"))?;
 
         Ok(ResultSet {
             rows,
@@ -1316,7 +1117,8 @@ impl<'a> CypherExecutor<'a> {
         // Collect unique node indices from the existing result set
         let mut node_indices: Vec<NodeIndex> = Vec::new();
         let mut seen: HashSet<NodeIndex> = HashSet::new();
-        for row in &existing.rows {
+        for (row_idx, row) in existing.rows.iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
             for (_, &idx) in row.node_bindings.iter() {
                 if seen.insert(idx) {
                     node_indices.push(idx);
@@ -1344,6 +1146,7 @@ impl<'a> CypherExecutor<'a> {
             let mut valid_indices: Vec<usize> = Vec::new(); // indices into node_indices
 
             for (i, &idx) in node_indices.iter().enumerate() {
+                self.check_interrupt_periodic(i)?;
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     let mut vals = Vec::with_capacity(prop_names.len());
                     let mut all_present = true;
@@ -1380,13 +1183,24 @@ impl<'a> CypherExecutor<'a> {
 
             let cluster_assignments = match method.as_str() {
                 "dbscan" => {
-                    let dm =
-                        crate::graph::algorithms::clustering::euclidean_distance_matrix(&features);
-                    crate::graph::algorithms::clustering::dbscan(&dm, eps, min_points)
+                    let dm = crate::graph::algorithms::clustering::euclidean_distance_matrix(
+                        &features,
+                        self.interrupt(),
+                    );
+                    self.check_deadline()?;
+                    crate::graph::algorithms::clustering::dbscan(
+                        &dm,
+                        eps,
+                        min_points,
+                        self.interrupt(),
+                    )
                 }
-                "kmeans" => {
-                    crate::graph::algorithms::clustering::kmeans(&features, k, max_iterations)
-                }
+                "kmeans" => crate::graph::algorithms::clustering::kmeans(
+                    &features,
+                    k,
+                    max_iterations,
+                    self.interrupt(),
+                ),
                 _ => unreachable!(),
             };
 
@@ -1402,6 +1216,7 @@ impl<'a> CypherExecutor<'a> {
             let mut valid_indices: Vec<usize> = Vec::new();
 
             for (i, &idx) in node_indices.iter().enumerate() {
+                self.check_interrupt_periodic(i)?;
                 if let Some(node) = self.graph.graph.node_weight(idx) {
                     // Try spatial config for this node type
                     if let Some(config) = self
@@ -1438,15 +1253,28 @@ impl<'a> CypherExecutor<'a> {
 
             let cluster_assignments = match method.as_str() {
                 "dbscan" => {
-                    let dm =
-                        crate::graph::algorithms::clustering::haversine_distance_matrix(&points);
-                    crate::graph::algorithms::clustering::dbscan(&dm, eps, min_points)
+                    let dm = crate::graph::algorithms::clustering::haversine_distance_matrix(
+                        &points,
+                        self.interrupt(),
+                    );
+                    self.check_deadline()?;
+                    crate::graph::algorithms::clustering::dbscan(
+                        &dm,
+                        eps,
+                        min_points,
+                        self.interrupt(),
+                    )
                 }
                 "kmeans" => {
                     // For spatial k-means, convert to feature vectors [lat, lon]
                     let features: Vec<Vec<f64>> =
                         points.iter().map(|(lat, lon)| vec![*lat, *lon]).collect();
-                    crate::graph::algorithms::clustering::kmeans(&features, k, max_iterations)
+                    crate::graph::algorithms::clustering::kmeans(
+                        &features,
+                        k,
+                        max_iterations,
+                        self.interrupt(),
+                    )
                 }
                 _ => unreachable!(),
             };
@@ -1459,7 +1287,9 @@ impl<'a> CypherExecutor<'a> {
 
         // Build result rows
         let mut rows = Vec::with_capacity(assignments.len());
-        for (node_idx, cluster_id) in &assignments {
+        self.check_deadline()?;
+        for (row_idx, (node_idx, cluster_id)) in assignments.iter().enumerate() {
+            self.check_interrupt_periodic(row_idx)?;
             let mut row = ResultRow::new();
             for item in yield_items {
                 let alias = item.alias.as_deref().unwrap_or(&item.name);
@@ -1490,9 +1320,7 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<Vec<ResultRow>, String> {
         let mut rows = Vec::with_capacity(results.len());
         for (i, cr) in results.iter().enumerate() {
-            if i & 0xFFFFF == 0 {
-                self.check_deadline()?;
-            }
+            self.check_interrupt_periodic(i)?;
             let mut row = ResultRow::new();
             for item in yield_items {
                 let alias = item.alias.as_deref().unwrap_or(&item.name);
@@ -1536,10 +1364,8 @@ impl<'a> CypherExecutor<'a> {
         let mut counter = 0usize;
         for (lvl, assignments) in levels.iter().enumerate() {
             for ca in assignments.iter() {
-                counter += 1;
-                if counter & 0xFFFFF == 0 {
-                    self.check_deadline()?;
-                }
+                self.check_interrupt_periodic(counter)?;
+                counter = counter.saturating_add(1);
                 let mut row = ResultRow::new();
                 for item in yield_items {
                     let alias = item.alias.as_deref().unwrap_or(&item.name);
@@ -1619,7 +1445,10 @@ impl<'a> CypherExecutor<'a> {
         match clause.kind {
             SetOpKind::Union => {
                 let mut combined_rows = result_set.rows;
-                for row_values in right_result.rows {
+                self.budget
+                    .reserve_rows(combined_rows.len(), right_result.rows.len(), "UNION")?;
+                for (row_idx, row_values) in right_result.rows.into_iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
                     let mut projected = Bindings::with_capacity(right_result.columns.len());
                     for (i, col) in right_result.columns.iter().enumerate() {
                         if let Some(val) = row_values.get(i) {
@@ -1630,7 +1459,14 @@ impl<'a> CypherExecutor<'a> {
                 }
                 if !clause.all {
                     let mut seen = HashSet::new();
-                    combined_rows.retain(|row| seen.insert(row_hash(row, &columns)));
+                    let mut deduplicated = Vec::with_capacity(combined_rows.len());
+                    for (row_idx, row) in combined_rows.into_iter().enumerate() {
+                        self.check_interrupt_periodic(row_idx)?;
+                        if seen.insert(row_hash(&row, &columns)) {
+                            deduplicated.push(row);
+                        }
+                    }
+                    combined_rows = deduplicated;
                 }
                 Ok(ResultSet {
                     rows: combined_rows,
@@ -1640,39 +1476,37 @@ impl<'a> CypherExecutor<'a> {
             }
             SetOpKind::Intersect => {
                 // Build the right-side hash set first.
+                self.budget
+                    .consume_collection(right_result.rows.len(), "INTERSECT right-side hash set")?;
                 let right_columns = right_result.columns.clone();
-                let right_hashes: HashSet<u64> = right_result
-                    .rows
-                    .iter()
-                    .map(|row_values| {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        for (i, col) in columns.iter().enumerate() {
-                            // Use the right-side column at the same positional index;
-                            // fall back to lookup-by-name if positional shapes differ.
-                            let val = right_columns
-                                .iter()
-                                .position(|rc| rc == col)
-                                .and_then(|pos| row_values.get(pos))
-                                .or_else(|| row_values.get(i));
-                            match val {
-                                Some(v) => v.hash(&mut hasher),
-                                None => Value::Null.hash(&mut hasher),
-                            }
+                let mut right_hashes = HashSet::with_capacity(right_result.rows.len());
+                for (row_idx, row_values) in right_result.rows.iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    for (i, col) in columns.iter().enumerate() {
+                        let val = right_columns
+                            .iter()
+                            .position(|rc| rc == col)
+                            .and_then(|pos| row_values.get(pos))
+                            .or_else(|| row_values.get(i));
+                        match val {
+                            Some(v) => v.hash(&mut hasher),
+                            None => Value::Null.hash(&mut hasher),
                         }
-                        hasher.finish()
-                    })
-                    .collect();
+                    }
+                    right_hashes.insert(hasher.finish());
+                }
                 // Keep left rows whose hash appears in right; then dedup left.
                 let mut seen = HashSet::new();
-                let kept: Vec<ResultRow> = result_set
-                    .rows
-                    .into_iter()
-                    .filter(|row| {
-                        let h = row_hash(row, &columns);
-                        right_hashes.contains(&h) && seen.insert(h)
-                    })
-                    .collect();
+                let mut kept = Vec::new();
+                for (row_idx, row) in result_set.rows.into_iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    let h = row_hash(&row, &columns);
+                    if right_hashes.contains(&h) && seen.insert(h) {
+                        kept.push(row);
+                    }
+                }
                 Ok(ResultSet {
                     rows: kept,
                     columns,
@@ -1680,36 +1514,36 @@ impl<'a> CypherExecutor<'a> {
                 })
             }
             SetOpKind::Except => {
+                self.budget
+                    .consume_collection(right_result.rows.len(), "EXCEPT right-side hash set")?;
                 let right_columns = right_result.columns.clone();
-                let right_hashes: HashSet<u64> = right_result
-                    .rows
-                    .iter()
-                    .map(|row_values| {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        for (i, col) in columns.iter().enumerate() {
-                            let val = right_columns
-                                .iter()
-                                .position(|rc| rc == col)
-                                .and_then(|pos| row_values.get(pos))
-                                .or_else(|| row_values.get(i));
-                            match val {
-                                Some(v) => v.hash(&mut hasher),
-                                None => Value::Null.hash(&mut hasher),
-                            }
+                let mut right_hashes = HashSet::with_capacity(right_result.rows.len());
+                for (row_idx, row_values) in right_result.rows.iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    for (i, col) in columns.iter().enumerate() {
+                        let val = right_columns
+                            .iter()
+                            .position(|rc| rc == col)
+                            .and_then(|pos| row_values.get(pos))
+                            .or_else(|| row_values.get(i));
+                        match val {
+                            Some(v) => v.hash(&mut hasher),
+                            None => Value::Null.hash(&mut hasher),
                         }
-                        hasher.finish()
-                    })
-                    .collect();
+                    }
+                    right_hashes.insert(hasher.finish());
+                }
                 let mut seen = HashSet::new();
-                let kept: Vec<ResultRow> = result_set
-                    .rows
-                    .into_iter()
-                    .filter(|row| {
-                        let h = row_hash(row, &columns);
-                        !right_hashes.contains(&h) && seen.insert(h)
-                    })
-                    .collect();
+                let mut kept = Vec::new();
+                for (row_idx, row) in result_set.rows.into_iter().enumerate() {
+                    self.check_interrupt_periodic(row_idx)?;
+                    let h = row_hash(&row, &columns);
+                    if !right_hashes.contains(&h) && seen.insert(h) {
+                        kept.push(row);
+                    }
+                }
                 Ok(ResultSet {
                     rows: kept,
                     columns,
@@ -1844,7 +1678,7 @@ impl<'a> CypherExecutor<'a> {
 /// per the Neo4j convention. The YIELD validator already enforced the
 /// only-valid-yield-item rule, so we accept whatever name reaches us
 /// and project it under the YIELD alias.
-fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<ResultRow> {
+pub(super) fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<ResultRow> {
     let mut rows = Vec::with_capacity(names.len());
     for name in names {
         let mut row = ResultRow::new();
@@ -1867,7 +1701,7 @@ fn names_to_rows(names: &[String], yield_items: &[YieldItem]) -> Vec<ResultRow> 
 /// pre-filtered to the known set so any unknown column would have been
 /// rejected at validate time. We still ignore unknowns defensively in case
 /// the validator's whitelist drifts.
-fn indexes_to_rows(
+pub(super) fn indexes_to_rows(
     infos: &[crate::graph::introspection::schema_overview::IndexInfo],
     yield_items: &[YieldItem],
 ) -> Vec<ResultRow> {
@@ -1910,19 +1744,21 @@ fn indexes_to_rows(
 ///   repr as the dedup key — same convention as `mode()`).
 ///
 /// Returns (0, 0, 0) if the node type is unknown.
-fn compute_property_stats(
-    graph: &crate::graph::dir_graph::DirGraph,
+pub(super) fn compute_property_stats(
+    executor: &CypherExecutor<'_>,
     node_type: &str,
     prop_name: &str,
-) -> (i64, i64, i64) {
+) -> Result<(i64, i64, i64), String> {
     use std::collections::HashSet;
+    let graph = executor.graph;
     let Some(indices) = graph.type_indices.get(node_type) else {
-        return (0, 0, 0);
+        return Ok((0, 0, 0));
     };
     let mut value_count: i64 = 0;
     let mut null_count: i64 = 0;
     let mut seen = HashSet::new();
-    for node_idx in indices.iter() {
+    for (node_count, node_idx) in indices.iter().enumerate() {
+        executor.check_interrupt_periodic(node_count)?;
         let Some(node) = graph.graph.node_weight(node_idx) else {
             continue;
         };
@@ -1936,5 +1772,5 @@ fn compute_property_stats(
             }
         }
     }
-    (value_count, null_count, seen.len() as i64)
+    Ok((value_count, null_count, seen.len() as i64))
 }

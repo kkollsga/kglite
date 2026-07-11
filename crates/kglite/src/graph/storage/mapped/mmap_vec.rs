@@ -493,6 +493,38 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         matches!(self, MmapOrVec::Mapped { .. })
     }
 
+    /// Clone the backing for an immutable transaction snapshot. Heap buffers
+    /// still copy, but mapped buffers create a second mapping of the same
+    /// file so disk transactions do not materialize CSR arrays on the heap.
+    /// Callers must keep the shared mapped bytes immutable and layer writes in
+    /// private overlays; DiskGraph enforces that transaction-fork contract.
+    pub(crate) fn clone_snapshot(&self) -> io::Result<Self> {
+        match self {
+            MmapOrVec::Heap { data } => Ok(MmapOrVec::Heap { data: data.clone() }),
+            MmapOrVec::Mapped {
+                len,
+                capacity,
+                file,
+                path,
+                ..
+            } => {
+                let file = file.try_clone()?;
+                let byte_len = *capacity * std::mem::size_of::<T>();
+                // SAFETY: this is a second mapping of the already-validated
+                // file and uses the same element length/capacity invariants.
+                let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
+                Ok(MmapOrVec::Mapped {
+                    mmap,
+                    len: *len,
+                    capacity: *capacity,
+                    file,
+                    path: path.clone(),
+                    _phantom: std::marker::PhantomData,
+                })
+            }
+        }
+    }
+
     /// Heap-resident bytes (0 if file-backed).
     pub fn heap_bytes(&self) -> usize {
         match self {

@@ -65,7 +65,12 @@ impl Workdir {
     /// `graph/disk_graph_meta.json` — its mtime drives the disk-mode
     /// "reopen → load, don't rebuild" cooldown short-circuit.
     pub fn disk_graph_meta(&self) -> PathBuf {
-        self.graph_dir().join("disk_graph_meta.json")
+        let current = self.graph_dir().join("CURRENT");
+        if current.is_file() {
+            current
+        } else {
+            self.graph_dir().join("disk_graph_meta.json")
+        }
     }
 
     /// `graph/sodir_source.json` — build-time dataset snapshot.

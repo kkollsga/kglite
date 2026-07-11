@@ -14,7 +14,7 @@ use kglite_c::{
     kglite_cypher_result_row_count, kglite_cypher_result_rows_json, kglite_free_bytes,
     kglite_free_string, kglite_graph_free, kglite_graph_from_bytes, kglite_graph_new,
     kglite_graph_to_bytes, kglite_load_file, kglite_save_graph_durable, kglite_session_execute_mut,
-    kglite_session_execute_mut_batch, kglite_session_execute_read,
+    kglite_session_execute_mut_batch, kglite_session_execute_mut_opts, kglite_session_execute_read,
     kglite_session_execute_read_batch, kglite_session_execute_read_opts, kglite_session_free,
     kglite_session_new, KgliteCypherResult, KgliteGraph, KgliteSession, KgliteStatusCode,
 };
@@ -239,6 +239,87 @@ fn create_empty_graph_then_mutate_and_read() {
     unsafe { kglite_free_string(rows_ptr) };
     unsafe { kglite_cypher_result_free(result) };
     unsafe { kglite_session_free(session) };
+}
+
+#[test]
+fn concurrent_auto_commit_mutations_compose() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(graph, &mut session) },
+        KgliteStatusCode::Ok
+    );
+    let seed = CString::new("CREATE (:Counter {id: 1, n: 0})").unwrap();
+    let mut result = std::ptr::null_mut();
+    let mut error = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_mut(
+                session,
+                seed.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut error,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_cypher_result_free(result) };
+
+    let raw_session = session as usize;
+    let workers: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let session = raw_session as *mut KgliteSession;
+                let query = CString::new("MATCH (n:Counter {id: 1}) SET n.n = n.n + 1").unwrap();
+                for _ in 0..50 {
+                    let mut result = std::ptr::null_mut();
+                    let mut error = std::ptr::null();
+                    let status = unsafe {
+                        kglite_session_execute_mut(
+                            session,
+                            query.as_ptr(),
+                            std::ptr::null(),
+                            &mut result,
+                            &mut error,
+                        )
+                    };
+                    assert_eq!(status, KgliteStatusCode::Ok);
+                    assert!(error.is_null());
+                    unsafe { kglite_cypher_result_free(result) };
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let query = CString::new("MATCH (n:Counter {id: 1}) RETURN n.n AS n").unwrap();
+    let mut result = std::ptr::null_mut();
+    let mut error = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_read(
+                session,
+                query.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut error,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    let rows = unsafe { kglite_cypher_result_rows_json(result) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(rows).to_str().unwrap() },
+        r#"[{"n":200}]"#
+    );
+    unsafe {
+        kglite_free_string(rows);
+        kglite_cypher_result_free(result);
+        kglite_session_free(session);
+    }
 }
 
 #[test]
@@ -475,6 +556,77 @@ fn execute_read_opts_caps_rows() {
 }
 
 #[test]
+fn execute_mut_opts_caps_rows_and_rolls_back_statement() {
+    let graph = kglite_graph_new();
+    let mut session: *mut KgliteSession = std::ptr::null_mut();
+    unsafe { kglite_session_new(graph, &mut session as *mut _) };
+
+    let seed = CString::new("CREATE (:T {id: 'seed', flag: false})").unwrap();
+    let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+    let mut err: *const c_char = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_mut(
+                session,
+                seed.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut err,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    unsafe { kglite_cypher_result_free(result) };
+
+    let mutation = CString::new(
+        "MATCH (n:T {id: 'seed'}) SET n.flag = true \
+         WITH [1,2,3] AS xs UNWIND xs AS x RETURN x",
+    )
+    .unwrap();
+    let mut result = std::ptr::dangling_mut::<KgliteCypherResult>();
+    let mut err: *const c_char = std::ptr::null();
+    let rc = unsafe {
+        kglite_session_execute_mut_opts(
+            session,
+            mutation.as_ptr(),
+            std::ptr::null(),
+            0,
+            2,
+            &mut result,
+            &mut err,
+        )
+    };
+    assert_ne!(rc, KgliteStatusCode::Ok);
+    assert!(result.is_null());
+    assert!(!err.is_null());
+    unsafe { kglite_free_string(err) };
+
+    let verify = CString::new("MATCH (n:T {id: 'seed'}) RETURN n.flag AS flag").unwrap();
+    let mut result = std::ptr::null_mut();
+    let mut err = std::ptr::null();
+    assert_eq!(
+        unsafe {
+            kglite_session_execute_read(
+                session,
+                verify.as_ptr(),
+                std::ptr::null(),
+                &mut result,
+                &mut err,
+            )
+        },
+        KgliteStatusCode::Ok
+    );
+    let rows_ptr = unsafe { kglite_cypher_result_rows_json(result) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(rows_ptr).to_str().unwrap() },
+        r#"[{"flag":false}]"#
+    );
+    unsafe { kglite_free_string(rows_ptr) };
+    unsafe { kglite_cypher_result_free(result) };
+    unsafe { kglite_session_free(session) };
+}
+
+#[test]
 fn graph_bytes_round_trip() {
     // Load fixture → serialize to bytes → free original → load from bytes
     // → query: the round-tripped graph must hold the same nodes.
@@ -697,4 +849,407 @@ fn blueprint_build_error_clears_out_report_json() {
     if !err_msg.is_null() {
         unsafe { kglite_free_string(err_msg) };
     }
+}
+
+#[test]
+fn fallible_exports_clear_all_outputs_before_validation() {
+    let sentinel_ptr = std::ptr::NonNull::<u8>::dangling().as_ptr();
+    let sentinel_cstr: *const c_char = std::ptr::NonNull::<c_char>::dangling().as_ptr();
+    let mut error = sentinel_cstr;
+
+    let mut graph = sentinel_ptr.cast::<KgliteGraph>();
+    let rc = unsafe {
+        kglite_c::kglite_graph_new_in_mode(
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut graph,
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(graph.is_null() && error.is_null());
+
+    graph = sentinel_ptr.cast();
+    error = sentinel_cstr;
+    let rc = unsafe { kglite_load_file(std::ptr::null(), &mut graph, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(graph.is_null() && error.is_null());
+
+    let mut rdf_graph: *mut KgliteGraph = sentinel_ptr.cast();
+    let mut rdf_stats = sentinel_cstr;
+    error = sentinel_cstr;
+    #[cfg(feature = "rdf")]
+    {
+        let rc = unsafe {
+            kglite_c::kglite_load_rdf(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                -1,
+                &mut rdf_graph,
+                &mut rdf_stats,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(rdf_graph.is_null() && rdf_stats.is_null() && error.is_null());
+    }
+    #[cfg(not(feature = "rdf"))]
+    let _ = (&mut rdf_graph, &mut rdf_stats, &mut error);
+
+    let mut session = sentinel_ptr.cast::<KgliteSession>();
+    let rc = unsafe { kglite_session_new(std::ptr::null_mut(), &mut session) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(session.is_null());
+
+    macro_rules! assert_query_output_reset {
+        ($call:expr) => {{
+            let mut result = sentinel_ptr.cast::<KgliteCypherResult>();
+            error = sentinel_cstr;
+            let rc = unsafe { $call(&mut result, &mut error) };
+            assert_eq!(rc, KgliteStatusCode::NullPointer);
+            assert!(result.is_null() && error.is_null());
+        }};
+    }
+    assert_query_output_reset!(|result, err| kglite_session_execute_read(
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        result,
+        err,
+    ));
+    assert_query_output_reset!(|result, err| kglite_session_execute_read_opts(
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        0,
+        0,
+        result,
+        err,
+    ));
+    assert_query_output_reset!(|result, err| kglite_session_execute_mut(
+        std::ptr::null_mut(),
+        std::ptr::null(),
+        std::ptr::null(),
+        result,
+        err,
+    ));
+    assert_query_output_reset!(|result, err| kglite_session_execute_mut_opts(
+        std::ptr::null_mut(),
+        std::ptr::null(),
+        std::ptr::null(),
+        0,
+        0,
+        result,
+        err,
+    ));
+
+    let mut json = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc = unsafe {
+        kglite_session_execute_read_batch(std::ptr::null(), std::ptr::null(), &mut json, &mut error)
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(json.is_null() && error.is_null());
+
+    json = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc = unsafe {
+        kglite_c::kglite_graphgen_to_dir(1, 1, 1, 0, 1.0, std::ptr::null(), &mut json, &mut error)
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(json.is_null() && error.is_null());
+
+    graph = sentinel_ptr.cast();
+    json = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc = unsafe {
+        kglite_blueprint_build(
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut graph,
+            &mut json,
+            &mut error,
+        )
+    };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(graph.is_null() && json.is_null() && error.is_null());
+
+    for call in [kglite_session_execute_mut_batch, kglite_create_edges_batch] {
+        json = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            call(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut json,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(json.is_null() && error.is_null());
+    }
+
+    let mut bytes = sentinel_ptr;
+    let mut len = usize::MAX;
+    error = sentinel_cstr;
+    let rc =
+        unsafe { kglite_graph_to_bytes(std::ptr::null_mut(), &mut bytes, &mut len, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(bytes.is_null() && len == 0 && error.is_null());
+
+    graph = sentinel_ptr.cast();
+    error = sentinel_cstr;
+    let rc = unsafe { kglite_graph_from_bytes(std::ptr::null(), 0, &mut graph, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(graph.is_null() && error.is_null());
+
+    json = sentinel_cstr;
+    error = sentinel_cstr;
+    let rc = unsafe { kglite_compute_schema_json(std::ptr::null_mut(), &mut json, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(json.is_null() && error.is_null());
+
+    error = sentinel_cstr;
+    let rc =
+        unsafe { kglite_c::kglite_save_graph(std::ptr::null_mut(), std::ptr::null(), &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(error.is_null());
+
+    error = sentinel_cstr;
+    let rc =
+        unsafe { kglite_save_graph_durable(std::ptr::null_mut(), std::ptr::null(), 0, &mut error) };
+    assert_eq!(rc, KgliteStatusCode::NullPointer);
+    assert!(error.is_null());
+
+    #[cfg(feature = "sec")]
+    {
+        let mut client = sentinel_ptr.cast::<kglite_c::KgliteSecClient>();
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_client_new(std::ptr::null(), &mut client, &mut error)
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(client.is_null() && error.is_null());
+
+        let mut text = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_fetch_quarterly_master_idx(
+                std::ptr::null(),
+                std::ptr::null(),
+                2020,
+                2021,
+                2021,
+                1,
+                &mut text,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(text.is_null() && error.is_null());
+
+        let mut fetched = u8::MAX;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_fetch_company_tickers(
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &mut fetched,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert_eq!(fetched, 0);
+        assert!(error.is_null());
+
+        fetched = u8::MAX;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_fetch_company_facts(
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                &mut fetched,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert_eq!(fetched, 0);
+        assert!(error.is_null());
+
+        fetched = u8::MAX;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_fetch_submissions_bulk(
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                0,
+                &mut fetched,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert_eq!(fetched, 0);
+        assert!(error.is_null());
+
+        let mut first = sentinel_cstr;
+        let mut second = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_resolve_fetch_buckets(
+                std::ptr::null(),
+                &mut first,
+                &mut second,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(first.is_null() && second.is_null() && error.is_null());
+
+        text = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_parse_tickers_json(
+                std::ptr::null(),
+                &mut text,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(text.is_null() && error.is_null());
+
+        text = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sec_run_all(
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &mut text,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(text.is_null() && error.is_null());
+    }
+
+    #[cfg(feature = "sodir")]
+    {
+        let mut report = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_sodir_fetch_all(
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                1,
+                1,
+                &mut report,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(report.is_null() && error.is_null());
+    }
+
+    #[cfg(feature = "wikidata")]
+    {
+        let mut first = sentinel_cstr;
+        let mut second = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_wikidata_ensure_dump(
+                std::ptr::null(),
+                1,
+                0,
+                &mut first,
+                &mut second,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(first.is_null() && second.is_null() && error.is_null());
+
+        let rc = unsafe {
+            kglite_c::kglite_datasets_wikidata_remote_last_modified(std::ptr::null_mut())
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+
+        first = sentinel_cstr;
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_c::kglite_datasets_wikidata_decide_cache(
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                std::ptr::null(),
+                &mut first,
+                &mut error,
+            )
+        };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(first.is_null() && error.is_null());
+    }
+
+    #[cfg(feature = "fastembed")]
+    {
+        let mut embedder = sentinel_ptr.cast::<KgliteEmbedder>();
+        error = sentinel_cstr;
+        let rc =
+            unsafe { kglite_embedder_fastembed_new(std::ptr::null(), &mut embedder, &mut error) };
+        assert_eq!(rc, KgliteStatusCode::NullPointer);
+        assert!(embedder.is_null() && error.is_null());
+    }
+
+    // Validation failures after all required pointers are accepted must keep
+    // the same deterministic output contract.
+    let owned_graph = kglite_graph_new();
+    let mut owned_session = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { kglite_session_new(owned_graph, &mut owned_session) },
+        KgliteStatusCode::Ok
+    );
+    let invalid_utf8 = [0xff_u8, 0];
+    let valid_query = CString::new("RETURN 1 AS n").unwrap();
+    let malformed_json = CString::new("[").unwrap();
+    let invalid_query = CString::new("THIS IS NOT CYPHER").unwrap();
+    for (query, params, expected) in [
+        (
+            invalid_utf8.as_ptr().cast(),
+            std::ptr::null(),
+            KgliteStatusCode::InvalidUtf8,
+        ),
+        (
+            valid_query.as_ptr(),
+            malformed_json.as_ptr(),
+            KgliteStatusCode::InvalidArgument,
+        ),
+        (
+            invalid_query.as_ptr(),
+            std::ptr::null(),
+            KgliteStatusCode::CypherSyntax,
+        ),
+    ] {
+        let mut result = sentinel_ptr.cast::<KgliteCypherResult>();
+        error = sentinel_cstr;
+        let rc = unsafe {
+            kglite_session_execute_read(owned_session, query, params, &mut result, &mut error)
+        };
+        assert_eq!(rc, expected);
+        assert!(result.is_null());
+        if expected == KgliteStatusCode::CypherSyntax {
+            assert!(!error.is_null());
+            unsafe { kglite_free_string(error) };
+        } else {
+            assert!(error.is_null());
+        }
+    }
+    unsafe { kglite_session_free(owned_session) };
 }

@@ -32,8 +32,7 @@ from kglite import KnowledgeGraph
 N = 50_000
 
 
-@pytest.fixture
-def cc_graph():
+def _build_cc_graph():
     """50k nodes / 100k edges — large enough that a full deep-clone is
     clearly visible against a single-node mutation."""
     graph = KnowledgeGraph()
@@ -54,6 +53,19 @@ def cc_graph():
     )
     graph.add_connections(edges, "LINKS", "Item", "from_id", "Item", "to_id")
     return graph
+
+
+@pytest.fixture
+def cc_graph():
+    return _build_cc_graph()
+
+
+@pytest.fixture
+def cc_session():
+    graph = _build_cc_graph()
+    session = graph.session()
+    del graph
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +112,38 @@ def test_write_under_snapshot(benchmark, cc_graph):
         del snapshot
 
     benchmark(mutate_under_snapshot)
+
+
+@pytest.mark.benchmark
+def test_session_write_unique(benchmark, cc_session):
+    """Serialized Session write with no reader snapshot (unique Arc)."""
+    counter = {"n": 0}
+
+    def mutate():
+        counter["n"] += 1
+        cc_session.execute(
+            "MATCH (n:Item {nid: 0}) SET n.touched = $v",
+            params={"v": counter["n"]},
+        )
+
+    benchmark(mutate)
+
+
+@pytest.mark.benchmark
+def test_session_write_with_held_snapshot(benchmark, cc_session):
+    """Held reader forces one working fork and preserves its old view."""
+    counter = {"n": 0}
+
+    def mutate():
+        counter["n"] += 1
+        snapshot = cc_session.snapshot()
+        cc_session.execute(
+            "MATCH (n:Item {nid: 0}) SET n.touched = $v",
+            params={"v": counter["n"]},
+        )
+        del snapshot
+
+    benchmark(mutate)
 
 
 # ---------------------------------------------------------------------------

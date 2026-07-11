@@ -58,7 +58,7 @@ impl KnowledgeGraph {
         // route there to the persistent mmap-backed PropertyIndex instead.
         let mut persistent_disk = false;
         let mut disk_count = 0usize;
-        if let kglite_core::api::storage::GraphBackend::Disk(dg) = &graph.graph {
+        if let kglite_core::api::storage::GraphBackend::Disk(dg) = &mut graph.graph {
             match dg.build_property_index(node_type, property) {
                 Ok(n) => {
                     persistent_disk = true;
@@ -100,7 +100,9 @@ impl KnowledgeGraph {
     /// Returns:
     ///     True if index existed and was removed, False otherwise
     fn drop_index(&mut self, node_type: &str, property: &str) -> PyResult<bool> {
-        let removed = get_graph_mut(&mut self.inner).drop_index(node_type, property);
+        let removed = get_graph_mut(&mut self.inner)
+            .drop_index(node_type, property)
+            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
         Ok(removed)
     }
 
@@ -127,7 +129,7 @@ impl KnowledgeGraph {
     ///     and ``created``.
     fn create_global_index(&mut self, py: Python<'_>, property: &str) -> PyResult<Py<PyAny>> {
         let graph = get_graph_mut(&mut self.inner);
-        let count = match &graph.graph {
+        let count = match &mut graph.graph {
             kglite_core::api::storage::GraphBackend::Disk(dg) => {
                 dg.build_global_property_index(property).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(

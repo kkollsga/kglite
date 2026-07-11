@@ -9,7 +9,8 @@ use crate::graph::schema::InternedKey;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use serde::{Deserialize, Serialize};
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use super::csr::TOMBSTONE_EDGE;
@@ -79,14 +80,150 @@ fn default_has_tombstones() -> bool {
 }
 
 impl DiskGraph {
+    fn save_logical_node_slots(&mut self, path: &Path) -> std::io::Result<()> {
+        let logical_len = self.node_slot_len();
+        let replace_mapped = self.node_slots.file_path() == Some(path);
+        let output = if replace_mapped {
+            path.with_extension(format!("bin.stage-{}", std::process::id()))
+        } else {
+            path.to_path_buf()
+        };
+        let file = std::fs::File::create(&output)?;
+        let mut writer = BufWriter::new(file);
+        let mut chunk = Vec::with_capacity(8192);
+        for start in (0..self.node_slot_len()).step_by(8192) {
+            chunk.clear();
+            let end = (start + 8192).min(self.node_slot_len());
+            chunk.extend((start..end).map(|index| self.node_slot(index)));
+            // SAFETY: DiskNodeSlot is Copy + repr(C), and the persisted disk
+            // format is the exact contiguous in-memory representation used by
+            // MmapOrVec's existing writer.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    chunk.as_ptr() as *const u8,
+                    std::mem::size_of_val(chunk.as_slice()),
+                )
+            };
+            writer.write_all(bytes)?;
+        }
+        writer.flush()?;
+        drop(writer);
+        if replace_mapped {
+            self.node_slots = MmapOrVec::new();
+            std::fs::remove_file(path)?;
+            std::fs::rename(&output, path)?;
+            self.node_slots = MmapOrVec::load_mapped(path, logical_len)?;
+            self.node_slot_updates.clear();
+            self.appended_node_slots.clear();
+        }
+        Ok(())
+    }
+
+    fn save_logical_edge_endpoints(&mut self, path: &Path) -> std::io::Result<()> {
+        let logical_len = self.edge_endpoint_len();
+        let replace_mapped = self.edge_endpoints.file_path() == Some(path);
+        let output = if replace_mapped {
+            path.with_extension(format!("bin.stage-{}", std::process::id()))
+        } else {
+            path.to_path_buf()
+        };
+        let file = std::fs::File::create(&output)?;
+        let mut writer = BufWriter::new(file);
+        let mut chunk = Vec::with_capacity(8192);
+        for start in (0..self.edge_endpoint_len()).step_by(8192) {
+            chunk.clear();
+            let end = (start + 8192).min(self.edge_endpoint_len());
+            chunk.extend((start..end).map(|index| self.edge_endpoint(index)));
+            // SAFETY: EdgeEndpoints is Copy + repr(C), matching MmapOrVec's
+            // existing raw persisted representation.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    chunk.as_ptr() as *const u8,
+                    std::mem::size_of_val(chunk.as_slice()),
+                )
+            };
+            writer.write_all(bytes)?;
+        }
+        writer.flush()?;
+        drop(writer);
+        if replace_mapped {
+            self.edge_endpoints = MmapOrVec::new();
+            std::fs::remove_file(path)?;
+            std::fs::rename(&output, path)?;
+            self.edge_endpoints = MmapOrVec::load_mapped(path, logical_len)?;
+            self.appended_edge_endpoints.clear();
+            self.removed_edges.clear();
+        }
+        Ok(())
+    }
+
+    fn copy_persisted_indexes(&self, target: &Path) -> std::io::Result<()> {
+        let excluded_names: HashSet<_> = self
+            .removed_property_indexes
+            .iter()
+            .flat_map(|(node_type, property)| {
+                property_index::removal_paths(target, node_type, property)
+                    .into_iter()
+                    .filter_map(|path| path.file_name().map(|name| name.to_owned()))
+            })
+            .collect();
+        let mut sources = vec![self.data_dir.as_path()];
+        if let Some(workspace) = &self.mutation_workspace {
+            sources.push(workspace.segment_dir());
+        }
+        for source in sources {
+            if !source.is_dir() || source == target {
+                continue;
+            }
+            for entry in std::fs::read_dir(source)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let name = entry.file_name();
+                if excluded_names.contains(&name) {
+                    continue;
+                }
+                let name_str = name.to_string_lossy();
+                let keep = name_str.starts_with("conn_type_index_")
+                    || name_str.starts_with("peer_count_")
+                    || name_str.starts_with("property_index_")
+                    || name_str.starts_with("global_index_");
+                if keep {
+                    std::fs::copy(entry.path(), target.join(name))?;
+                }
+            }
+        }
+        property_index::validate_v2_bundles(target)
+    }
+
+    /// Mark the graph as having persistence work in flight. Callers leave
+    /// this set on every failure path and clear it only after the complete
+    /// graph-level save (including sidecars) succeeds.
+    pub(crate) fn begin_persist(&mut self) {
+        self.metadata_dirty = true;
+    }
+
+    /// Record completion of the full graph-level persistence transaction.
+    pub(crate) fn mark_persisted(&mut self) {
+        self.metadata_dirty = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persistence_is_dirty(&self) -> bool {
+        self.metadata_dirty
+    }
+
     /// Write metadata JSON to the graph directory.
     /// Called automatically after CSR build and after mutations. Reads
     /// the edge-property file metadata from the current data_dir so the
     /// JSON reflects whatever was last persisted there; mutations since
     /// then live in the overlay until the next explicit `save_to_dir`.
     pub(crate) fn write_metadata(&self) -> std::io::Result<()> {
-        let edge_props_meta = EdgePropertyStore::meta_for(&self.data_dir);
-        self.write_metadata_to(&self.data_dir, edge_props_meta)
+        let segment_dir = self.active_write_dir();
+        let root = segment_dir.parent().unwrap_or(segment_dir);
+        let edge_props_meta = EdgePropertyStore::meta_for(segment_dir);
+        self.write_metadata_to(root, edge_props_meta)
     }
 
     fn write_metadata_to(
@@ -96,14 +233,14 @@ impl DiskGraph {
     ) -> std::io::Result<()> {
         let meta = DiskGraphMeta {
             node_count: self.node_count,
-            node_slots_len: self.node_slots.len(),
+            node_slots_len: self.node_slot_len(),
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
             out_offsets_len: self.out_offsets.len(),
             out_edges_len: self.out_edges.len(),
             in_offsets_len: self.in_offsets.len(),
             in_edges_len: self.in_edges.len(),
-            edge_endpoints_len: self.edge_endpoints.len(),
+            edge_endpoints_len: self.edge_endpoint_len(),
             free_node_slots: self.free_node_slots.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
             csr_sorted_by_type: self.csr_sorted_by_type,
@@ -141,7 +278,10 @@ impl DiskGraph {
     /// — a conservative placeholder that never prunes, but registers the
     /// `(type_hash, prop_hash)` pair so phase 6+ can upgrade to real
     /// bloom filters without changing the manifest schema.
-    fn build_single_segment_manifest(&self) -> super::segment_summary::SegmentManifest {
+    fn build_single_segment_manifest(
+        &self,
+        index_dir: &Path,
+    ) -> std::io::Result<super::segment_summary::SegmentManifest> {
         use super::segment_summary::{PropRange, SegmentManifest, SegmentSummary};
         use std::collections::HashSet;
         let mut summary = SegmentSummary::new(0, 0);
@@ -159,7 +299,7 @@ impl DiskGraph {
                 if e.edge_idx == TOMBSTONE_EDGE {
                     continue;
                 }
-                let ct = self.edge_endpoints.get(e.edge_idx as usize).connection_type;
+                let ct = self.edge_endpoint(e.edge_idx as usize).connection_type;
                 summary.conn_types.insert(ct);
             }
         }
@@ -199,7 +339,7 @@ impl DiskGraph {
                 }
             }
         }
-        for (t_hash, p_hash) in property_index::scan_segment_hashes(&self.data_dir) {
+        for (t_hash, p_hash) in property_index::scan_segment_hashes(index_dir)? {
             if seen.insert((t_hash, p_hash)) {
                 summary.indexed_prop_ranges.push((
                     t_hash,
@@ -211,7 +351,7 @@ impl DiskGraph {
 
         let mut manifest = SegmentManifest::new();
         manifest.append(summary);
-        manifest
+        Ok(manifest)
     }
 
     /// Save disk graph state. For disk mode, binary arrays are already on disk
@@ -225,6 +365,7 @@ impl DiskGraph {
         target_dir: &Path,
         _interner: &crate::graph::schema::StringInterner,
     ) -> std::io::Result<()> {
+        self.begin_persist();
         // Drain mutation caches before writing:
         //   - `edge_mut_cache` → `edge_properties` (existing behavior,
         //     edge props have been persisting correctly because
@@ -269,10 +410,14 @@ impl DiskGraph {
         if csr_target == self.data_dir {
             for (seg_id, seg_path) in enumerate_segment_dirs(target_dir) {
                 if seg_id > 0 {
-                    let _ = std::fs::remove_dir_all(&seg_path);
+                    std::fs::remove_dir_all(&seg_path)?;
                 }
             }
         }
+
+        // Immutable generations inherit base indexes, then overlay rebuilt
+        // workspace indexes so the latter win without touching the snapshot.
+        self.copy_persisted_indexes(&csr_target)?;
 
         // Always persist the core CSR arrays, regardless of mmap vs
         // heap backing. Previously this path skipped writes when
@@ -284,8 +429,7 @@ impl DiskGraph {
         // the meta → file-length mismatch fails loudly. `save_to_file`
         // handles both backings: Heap writes bytes; Mapped-same-path
         // truncates to logical length.
-        self.node_slots
-            .save_to_file(&csr_target.join("node_slots.bin"))?;
+        self.save_logical_node_slots(&csr_target.join("node_slots.bin"))?;
         self.out_offsets
             .save_to_file(&csr_target.join("out_offsets.bin"))?;
         self.out_edges
@@ -294,8 +438,7 @@ impl DiskGraph {
             .save_to_file(&csr_target.join("in_offsets.bin"))?;
         self.in_edges
             .save_to_file(&csr_target.join("in_edges.bin"))?;
-        self.edge_endpoints
-            .save_to_file(&csr_target.join("edge_endpoints.bin"))?;
+        self.save_logical_edge_endpoints(&csr_target.join("edge_endpoints.bin"))?;
 
         // Save overflow edges (bincode + zstd)
         if !self.overflow_out.is_empty() || !self.overflow_in.is_empty() {
@@ -326,11 +469,11 @@ impl DiskGraph {
             &self.conn_type_index_offsets,
         ] {
             if let Some(path) = field.file_path().map(PathBuf::from) {
-                let _ = field.save_to_file(&path);
+                field.save_to_file(&path)?;
             }
         }
         if let Some(path) = self.conn_type_index_sources.file_path().map(PathBuf::from) {
-            let _ = self.conn_type_index_sources.save_to_file(&path);
+            self.conn_type_index_sources.save_to_file(&path)?;
         }
 
         // PR1 phase 8: trim the core CSR mmap files to their logical
@@ -348,41 +491,22 @@ impl DiskGraph {
         // mmap spanning past the new EOF and SIGBUSes on the next
         // push — caught in the 0.8.11 ingest benchmark.
         if csr_target == self.data_dir {
-            let _ = self.node_slots.trim_to_logical_length();
-            let _ = self.out_offsets.trim_to_logical_length();
-            let _ = self.out_edges.trim_to_logical_length();
-            let _ = self.in_offsets.trim_to_logical_length();
-            let _ = self.in_edges.trim_to_logical_length();
-            let _ = self.edge_endpoints.trim_to_logical_length();
+            self.out_offsets.trim_to_logical_length()?;
+            self.out_edges.trim_to_logical_length()?;
+            self.in_offsets.trim_to_logical_length()?;
+            self.in_edges.trim_to_logical_length()?;
         }
 
         // PR1 phase 2: compute and persist a single-segment manifest.
         // Subsequent phases split saves into multiple segments; today the
         // manifest describes the whole graph as one segment so the planner
         // hook can be wired up without changing read-path behaviour.
-        let manifest = self.build_single_segment_manifest();
+        let manifest = self.build_single_segment_manifest(&csr_target)?;
         manifest.save_to(target_dir)?;
         self.segment_manifest = manifest;
 
         // Save metadata to target_dir (not data_dir)
         self.write_metadata_to(target_dir, edge_props_meta)?;
-
-        // Also save optional persisted-cache files if present and csr_target differs from data_dir
-        if csr_target != self.data_dir {
-            for fname in [
-                "conn_type_index_types.bin",
-                "conn_type_index_offsets.bin",
-                "conn_type_index_sources.bin",
-                "peer_count_types.bin",
-                "peer_count_offsets.bin",
-                "peer_count_entries.bin",
-            ] {
-                let src = self.data_dir.join(fname);
-                if src.exists() {
-                    let _ = std::fs::copy(&src, csr_target.join(fname));
-                }
-            }
-        }
 
         // PR1 phase 8: after a full save, everything up to node_count
         // is accounted for in the (single-segment) on-disk state. Bump
@@ -454,7 +578,7 @@ impl DiskGraph {
                 if e.edge_idx == TOMBSTONE_EDGE {
                     continue;
                 }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                let ep = self.edge_endpoint(e.edge_idx as usize);
                 if ep.source < tail_lo || ep.target < tail_lo {
                     has_cross_segment = true;
                     break;
@@ -492,7 +616,7 @@ impl DiskGraph {
                 if e.edge_idx == TOMBSTONE_EDGE {
                     continue;
                 }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                let ep = self.edge_endpoint(e.edge_idx as usize);
                 seal_edges.push(SealEdge {
                     src_global,
                     tgt_global: ep.target,
@@ -517,7 +641,7 @@ impl DiskGraph {
         // ─── node_slots — unchanged: tail only. ───
         let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(tail_len);
         for i in 0..tail_len {
-            node_slots.push(self.node_slots.get(tail_lo as usize + i));
+            node_slots.push(self.node_slot(tail_lo as usize + i));
         }
 
         // ─── edge_endpoints: global source/target, segment-local
@@ -611,21 +735,15 @@ impl DiskGraph {
         // in segment-local mode, global in full-range mode). The
         // builder's `node_bound` argument must match the offsets
         // indexing so it walks the full offset range.
-        let _ = super::builder::write_conn_type_index(
+        super::builder::write_conn_type_index(
             &out_offsets,
             &out_edges,
             &edge_endpoints,
             offsets_len - 1,
             &seg_dir,
             false,
-        );
-        let _ = super::builder::write_peer_count_histogram(
-            &edge_endpoints,
-            0,
-            n_edges,
-            &seg_dir,
-            false,
-        );
+        )?;
+        super::builder::write_peer_count_histogram(&edge_endpoints, 0, n_edges, &seg_dir, false)?;
 
         // Flush the edge_properties overlay to seg_0's base store. The
         // overlay currently holds props for the sealed edges (keyed by
@@ -647,7 +765,7 @@ impl DiskGraph {
         }
         // Node-type counts from the tail's slots.
         for i in 0..tail_len {
-            let ns = self.node_slots.get(tail_lo as usize + i);
+            let ns = self.node_slot(tail_lo as usize + i);
             if !ns.is_alive() {
                 continue;
             }
@@ -929,15 +1047,20 @@ impl DiskGraph {
         Ok((
             DiskGraph {
                 node_slots,
+                node_slot_updates: HashMap::new(),
+                appended_node_slots: Vec::new(),
                 node_count: meta.node_count,
                 free_node_slots: meta.free_node_slots,
                 node_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
+                active_queries: std::sync::Mutex::new(0),
                 column_stores: HashMap::new(),
                 out_offsets,
                 out_edges,
                 in_offsets,
                 in_edges,
                 edge_endpoints,
+                appended_edge_endpoints: Vec::new(),
+                removed_edges: std::collections::HashSet::new(),
                 edge_count: meta.edge_count,
                 next_edge_idx: meta.next_edge_idx,
                 edge_properties,
@@ -949,6 +1072,10 @@ impl DiskGraph {
                 overflow_in,
                 free_edge_slots: meta.free_edge_slots,
                 data_dir: csr_dir.clone(),
+                logical_root: dir.to_path_buf(),
+                writer_lock: None,
+                mutation_workspace: None,
+                parent_workspaces: Vec::new(),
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,
@@ -966,6 +1093,7 @@ impl DiskGraph {
                 peer_count_entries,
                 has_tombstones: meta.has_tombstones,
                 property_indexes: std::sync::RwLock::new(HashMap::new()),
+                removed_property_indexes: HashSet::new(),
                 global_indexes: std::sync::RwLock::new(HashMap::new()),
                 // Legacy .kgl directories have no seg_manifest.json;
                 // load_from returns an empty manifest which subsequent

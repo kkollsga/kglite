@@ -75,6 +75,9 @@ pub fn apply_frames(
     frames: &[WalFrame],
     after_lsn: u64,
 ) -> Result<u64, String> {
+    graph
+        .prepare_disk_mutation()
+        .map_err(|e| format!("disk mutation lease failed: {e}"))?;
     let mut nodes: HashMap<NodeKey, NodeNet> = HashMap::new();
     let mut edges: HashMap<EdgeKey, EdgeNet> = HashMap::new();
     let mut max_lsn = after_lsn;

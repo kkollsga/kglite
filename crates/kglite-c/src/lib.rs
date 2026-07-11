@@ -39,6 +39,7 @@ pub mod abi;
 pub mod alloc;
 pub mod datasets;
 pub mod embedder;
+mod ffi;
 pub mod graph;
 pub mod result;
 pub mod session;

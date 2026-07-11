@@ -409,3 +409,25 @@ pub(super) fn extract_lang_text(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod miri_tests {
+    use super::*;
+
+    #[test]
+    fn parse_line_borrowed_uri_boundaries_are_valid() {
+        let line = "<http://www.wikidata.org/entity/Q42> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .";
+        let (subject, predicate, object) = parse_line(line).expect("valid N-Triples line");
+        assert!(matches!(subject, Subject::Entity("Q42")));
+        assert!(matches!(predicate, Predicate::WikidataDirect("P31")));
+        assert!(matches!(object, Object::Entity("Q5")));
+    }
+
+    #[test]
+    fn parse_line_preserves_utf8_literal_boundaries() {
+        let line = "<http://www.wikidata.org/entity/Q42> <http://www.w3.org/2000/01/rdf-schema#label> \"München\"@de .";
+        let (_, predicate, object) = parse_line(line).expect("valid UTF-8 literal");
+        assert!(matches!(predicate, Predicate::Label));
+        assert!(matches!(object, Object::LangLiteral(value, "de") if value == "München"));
+    }
+}

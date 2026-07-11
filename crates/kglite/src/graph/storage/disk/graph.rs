@@ -19,7 +19,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
@@ -97,6 +97,9 @@ pub(crate) const CURRENT_CSR_LAYOUT_VERSION: u8 = 1;
 pub struct DiskGraph {
     // ── Node storage (mmap'd on disk) ──
     pub(crate) node_slots: MmapOrVec<DiskNodeSlot>,
+    /// Copy-on-write changes layered over an immutable published snapshot.
+    pub(super) node_slot_updates: HashMap<u32, DiskNodeSlot>,
+    pub(super) appended_node_slots: Vec<DiskNodeSlot>,
     pub(super) node_count: usize,
     pub(super) free_node_slots: Vec<u32>,
 
@@ -123,6 +126,11 @@ pub struct DiskGraph {
     // race back. Same exemption applies to `edge_arena` below.
     #[allow(clippy::vec_box)]
     pub(super) node_arena: std::sync::Mutex<Vec<Box<NodeData>>>,
+    /// Number of overlapping top-level/nested read queries using the
+    /// materialization arenas. Arena reclamation is allowed only when this
+    /// count is zero; otherwise references returned to another query may still
+    /// be live. See [`DiskQueryGuard`].
+    pub(super) active_queries: std::sync::Mutex<usize>,
 
     // ── Column stores for node properties (Arc refs, data mmap'd) ──
     pub(crate) column_stores:
@@ -136,6 +144,10 @@ pub struct DiskGraph {
 
     // ── Edge metadata ──
     pub(crate) edge_endpoints: MmapOrVec<EdgeEndpoints>,
+    /// Endpoints appended after the immutable base snapshot and logical
+    /// removals of base/overflow edges. CSR arrays themselves stay frozen.
+    pub(super) appended_edge_endpoints: Vec<EdgeEndpoints>,
+    pub(super) removed_edges: HashSet<u32>,
     pub(crate) edge_count: usize,
     pub(crate) next_edge_idx: u32,
 
@@ -177,6 +189,11 @@ pub struct DiskGraph {
 
     // ── Storage directory (the graph lives here) ──
     pub(crate) data_dir: PathBuf,
+    /// User-visible graph root and retained cross-process writer lease.
+    pub(crate) logical_root: PathBuf,
+    pub(crate) writer_lock: Option<Arc<super::generation::GraphDirectoryLock>>,
+    pub(super) mutation_workspace: Option<Arc<super::generation::MutationWorkspace>>,
+    pub(super) parent_workspaces: Vec<Arc<super::generation::MutationWorkspace>>,
     // ── Dirty flag: flushed on Drop or next query ──
     pub(super) metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
@@ -224,6 +241,10 @@ pub struct DiskGraph {
     // repeat misses don't stat the filesystem. `Arc` so concurrent reads
     // of the same index don't hold the outer RwLock.
     pub(crate) property_indexes: PropertyIndexCache,
+    /// Exact typed indexes removed in the current writer workspace. Save
+    /// excludes their base-generation bundles instead of mutating the
+    /// immutable snapshot in place.
+    pub(super) removed_property_indexes: HashSet<(String, String)>,
     // ── Persistent cross-type global property indexes (lazy-loaded).
     //
     // Keyed by property name only. Built by `build_global_property_index(prop)`
@@ -296,6 +317,13 @@ use std::sync::Arc;
 // 2. `edge_arena: Mutex<Vec<Box<EdgeData>>>` — thread-safe for Rayon
 //    parallel queries (same pattern, predates 0.9.3).
 //
+// `active_queries` supplies the lifetime side of that synchronization:
+// `begin_query` clears the prior generation only while the count is zero,
+// then increments it before any materialization can occur. `reset_arenas`
+// takes the same lock and refuses to clear while a query is active. Arena
+// locks are always acquired after `active_queries`, so the ordering is
+// consistent. A `DiskQueryGuard` decrement never needs an arena lock.
+//
 // 3. `pending_edges: UnsafeCell<MmapOrVec<…>>` — only accessed via
 //    `get_mut()` in `&mut self` contexts (`add_edge` with `defer_csr`,
 //    `build_csr_from_pending`, `compact`). `UnsafeCell` is retained here
@@ -304,6 +332,27 @@ use std::sync::Arc;
 //    Rust's standard borrow checker.
 unsafe impl Send for DiskGraph {}
 unsafe impl Sync for DiskGraph {}
+
+/// Query-lifetime token for DiskGraph materialization arenas.
+///
+/// The token is intentionally small and non-cloneable. Its borrow ties it to
+/// the graph snapshot used by the executor; dropping the last overlapping token
+/// makes the previous arena generation reclaimable by the next query.
+pub(crate) struct DiskQueryGuard<'a> {
+    graph: &'a DiskGraph,
+}
+
+impl Drop for DiskQueryGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .graph
+            .active_queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(*active > 0, "DiskQueryGuard active count underflow");
+        *active = active.saturating_sub(1);
+    }
+}
 
 impl std::fmt::Debug for DiskGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -317,253 +366,9 @@ impl std::fmt::Debug for DiskGraph {
     }
 }
 
+include!("graph/bootstrap.rs");
+
 impl DiskGraph {
-    // ====================================================================
-    // Construction
-    // ====================================================================
-
-    /// Create an empty DiskGraph at the given directory path.
-    /// All data is written directly to disk via mmap.
-    ///
-    /// Fresh graphs use the segmented layout (PR1 phase 4): CSR / column
-    /// binaries live at `root/seg_000/*.bin`, top-level `disk_graph_meta.json`
-    /// and `seg_manifest.json` stay at `root/`. Legacy .kgl directories with
-    /// the flat (pre-phase-4) layout continue to load — see `load_from_dir`.
-    pub fn new_at_path(root_dir: &Path) -> std::io::Result<Self> {
-        std::fs::create_dir_all(root_dir)?;
-        let data_dir = root_dir.join(segment_subdir(0));
-        std::fs::create_dir_all(&data_dir)?;
-        let data_dir = data_dir.as_path();
-
-        Ok(DiskGraph {
-            node_slots: MmapOrVec::mapped(&data_dir.join("node_slots.bin"), 1024)?,
-            node_count: 0,
-            free_node_slots: Vec::new(),
-            node_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
-            column_stores: HashMap::new(),
-            out_offsets: MmapOrVec::mapped(&data_dir.join("out_offsets.bin"), 1025)?,
-            out_edges: MmapOrVec::new(),
-            in_offsets: MmapOrVec::mapped(&data_dir.join("in_offsets.bin"), 1025)?,
-            in_edges: MmapOrVec::new(),
-            edge_endpoints: MmapOrVec::new(),
-            edge_count: 0,
-            next_edge_idx: 0,
-            edge_properties: EdgePropertyStore::new(),
-            edge_arena: std::sync::Mutex::new(Vec::with_capacity(256)),
-            edge_mut_cache: HashMap::new(),
-            node_mut_cache: HashMap::new(),
-            pending_edges: UnsafeCell::new(
-                MmapOrVec::mapped(&data_dir.join("_pending_edges.bin"), 1 << 20)
-                    .unwrap_or_else(|_| MmapOrVec::new()),
-            ),
-            overflow_out: HashMap::new(),
-            overflow_in: HashMap::new(),
-            free_edge_slots: Vec::new(),
-            data_dir: data_dir.to_path_buf(),
-            metadata_dirty: false,
-            csr_sorted_by_type: false,
-            // Phase 5: `defer_csr = false` by default so one-off Cypher
-            // CREATE / MERGE inserts route directly to overflow_out /
-            // overflow_in + edge_endpoints, where `edges_directed` reads
-            // them immediately. Bulk loaders that want to batch edges in
-            // `pending_edges` and rebuild the CSR at the end (ntriples)
-            // flip this to `true` on the freshly-constructed DiskGraph.
-            // Previously the default-`true` path silently dropped
-            // Cypher-created edges from subsequent MATCH queries — the
-            // pending buffer was written but `edges_directed_filtered_iter`
-            // only reads CSR + overflow, not pending.
-            defer_csr: false,
-            edge_type_counts_raw: None,
-            conn_type_index_types: MmapOrVec::new(),
-            conn_type_index_offsets: MmapOrVec::new(),
-            conn_type_index_sources: MmapOrVec::new(),
-            peer_count_types: MmapOrVec::new(),
-            peer_count_offsets: MmapOrVec::new(),
-            peer_count_entries: MmapOrVec::new(),
-            has_tombstones: false,
-            property_indexes: std::sync::RwLock::new(HashMap::new()),
-            global_indexes: std::sync::RwLock::new(HashMap::new()),
-            segment_manifest: super::segment_summary::SegmentManifest::new(),
-            // Freshly-created graph has no sealed segments yet; the
-            // first save seals everything up to node_count into seg_000
-            // and advances this watermark accordingly.
-            sealed_nodes_bound: 0,
-        })
-    }
-
-    /// Build a DiskGraph from a petgraph StableDiGraph.
-    /// Converts nodes to DiskNodeSlots on disk, builds CSR arrays.
-    ///
-    /// `root_dir` is the graph root; CSR binaries land in `root_dir/seg_000/`
-    /// per the PR1 phase-4 segment layout.
-    pub fn from_stable_digraph(
-        graph: &mut petgraph::stable_graph::StableDiGraph<NodeData, EdgeData>,
-        root_dir: &Path,
-    ) -> std::io::Result<Self> {
-        use petgraph::visit::{EdgeRef, IntoEdgeReferences, NodeIndexable};
-
-        std::fs::create_dir_all(root_dir)?;
-        let data_dir_buf = root_dir.join(segment_subdir(0));
-        std::fs::create_dir_all(&data_dir_buf)?;
-        let data_dir = data_dir_buf.as_path();
-
-        let node_bound = graph.node_bound();
-        let edge_count = graph.edge_count();
-
-        // ── Build node slots on disk ──
-        let mut node_slots = MmapOrVec::mapped(&data_dir.join("node_slots.bin"), node_bound)?;
-        let mut node_count = 0usize;
-        for i in 0..node_bound {
-            let idx = NodeIndex::new(i);
-            if let Some(node) = graph.node_weight(idx) {
-                let row_id = match &node.properties {
-                    crate::graph::schema::PropertyStorage::Columnar { row_id, .. } => *row_id,
-                    _ => i as u32,
-                };
-                node_slots.push(DiskNodeSlot {
-                    node_type: node.node_type.as_u64(),
-                    row_id,
-                    flags: DiskNodeSlot::ALIVE_BIT,
-                });
-                node_count += 1;
-            } else {
-                node_slots.push(DiskNodeSlot::default()); // dead slot
-            }
-        }
-
-        // ── Count outgoing/incoming edges per node ──
-        let mut out_counts = vec![0u64; node_bound];
-        let mut in_counts = vec![0u64; node_bound];
-        for edge in graph.edge_references() {
-            let s = edge.source().index();
-            let t = edge.target().index();
-            out_counts[s] += 1;
-            in_counts[t] += 1;
-        }
-
-        // ── Build offset arrays (prefix sums) ──
-        let mut out_offsets = MmapOrVec::mapped(&data_dir.join("out_offsets.bin"), node_bound + 1)?;
-        let mut in_offsets = MmapOrVec::mapped(&data_dir.join("in_offsets.bin"), node_bound + 1)?;
-
-        let mut out_acc = 0u64;
-        let mut in_acc = 0u64;
-        for i in 0..node_bound {
-            out_offsets.push(out_acc);
-            in_offsets.push(in_acc);
-            out_acc += out_counts[i];
-            in_acc += in_counts[i];
-        }
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
-
-        // ── Build CSR edge arrays ──
-        let mut out_edges = MmapOrVec::mapped(&data_dir.join("out_edges.bin"), edge_count)?;
-        let mut in_edges = MmapOrVec::mapped(&data_dir.join("in_edges.bin"), edge_count)?;
-        let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&data_dir.join("edge_endpoints.bin"), edge_count)?;
-        let mut edge_properties: HashMap<u32, Vec<(InternedKey, Value)>> = HashMap::new();
-
-        // Initialize edge arrays with enough space
-        for _ in 0..edge_count {
-            out_edges.push(CsrEdge::default());
-            in_edges.push(CsrEdge::default());
-            edge_endpoints_vec.push(EdgeEndpoints::default());
-        }
-
-        // Fill positions: use write cursors per node
-        let mut out_cursors = vec![0u64; node_bound];
-        let mut in_cursors = vec![0u64; node_bound];
-
-        let mut edge_idx = 0u32;
-        for edge in graph.edge_references() {
-            let s = edge.source().index();
-            let t = edge.target().index();
-            let ct = edge.weight().connection_type;
-
-            let csr_out = CsrEdge {
-                peer: t as u32,
-                edge_idx,
-            };
-            let out_pos = out_offsets.get(s) + out_cursors[s];
-            out_edges.set(out_pos as usize, csr_out);
-            out_cursors[s] += 1;
-
-            let csr_in = CsrEdge {
-                peer: s as u32,
-                edge_idx,
-            };
-            let in_pos = in_offsets.get(t) + in_cursors[t];
-            in_edges.set(in_pos as usize, csr_in);
-            in_cursors[t] += 1;
-
-            edge_endpoints_vec.set(
-                edge_idx as usize,
-                EdgeEndpoints {
-                    source: s as u32,
-                    target: t as u32,
-                    connection_type: ct.as_u64(),
-                },
-            );
-
-            if !edge.weight().properties.is_empty() {
-                edge_properties.insert(edge_idx, edge.weight().properties.clone());
-            }
-
-            edge_idx += 1;
-        }
-
-        Ok(DiskGraph {
-            node_slots,
-            node_count,
-            free_node_slots: Vec::new(),
-            node_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
-            column_stores: HashMap::new(), // filled by caller via set_column_stores()
-            out_offsets,
-            out_edges,
-            in_offsets,
-            in_edges,
-            edge_endpoints: edge_endpoints_vec,
-            edge_count,
-            next_edge_idx: edge_idx,
-            edge_properties: EdgePropertyStore::from_overlay(edge_properties),
-            edge_arena: std::sync::Mutex::new(Vec::with_capacity(1024)),
-            edge_mut_cache: HashMap::new(),
-            node_mut_cache: HashMap::new(),
-            pending_edges: UnsafeCell::new(MmapOrVec::new()),
-            overflow_out: HashMap::new(),
-            overflow_in: HashMap::new(),
-            free_edge_slots: Vec::new(),
-            data_dir: data_dir.to_path_buf(),
-            metadata_dirty: false,
-            csr_sorted_by_type: false,
-            // Phase 5: `defer_csr = false` by default so one-off Cypher
-            // CREATE / MERGE inserts route directly to overflow_out /
-            // overflow_in + edge_endpoints, where `edges_directed` reads
-            // them immediately. Bulk loaders that want to batch edges in
-            // `pending_edges` and rebuild the CSR at the end (ntriples)
-            // flip this to `true` on the freshly-constructed DiskGraph.
-            // Previously the default-`true` path silently dropped
-            // Cypher-created edges from subsequent MATCH queries — the
-            // pending buffer was written but `edges_directed_filtered_iter`
-            // only reads CSR + overflow, not pending.
-            defer_csr: false,
-            edge_type_counts_raw: None,
-            conn_type_index_types: MmapOrVec::new(),
-            conn_type_index_offsets: MmapOrVec::new(),
-            conn_type_index_sources: MmapOrVec::new(),
-            peer_count_types: MmapOrVec::new(),
-            peer_count_offsets: MmapOrVec::new(),
-            peer_count_entries: MmapOrVec::new(),
-            has_tombstones: false,
-            global_indexes: std::sync::RwLock::new(HashMap::new()),
-            property_indexes: std::sync::RwLock::new(HashMap::new()),
-            segment_manifest: super::segment_summary::SegmentManifest::new(),
-            // Fresh build from a petgraph: no sealed segments yet.
-            // First save seals the whole graph into seg_000.
-            sealed_nodes_bound: 0,
-        })
-    }
-
     // ====================================================================
     // Node methods
     // ====================================================================
@@ -596,10 +401,10 @@ impl DiskGraph {
     #[inline]
     pub fn node_type_of(&self, idx: NodeIndex) -> Option<InternedKey> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -611,10 +416,10 @@ impl DiskGraph {
     #[inline]
     pub fn get_node_property(&self, idx: NodeIndex, key: InternedKey) -> Option<Value> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -640,10 +445,10 @@ impl DiskGraph {
     #[inline]
     pub fn get_node_id(&self, idx: NodeIndex) -> Option<Value> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -656,10 +461,10 @@ impl DiskGraph {
     #[inline]
     pub fn get_node_title(&self, idx: NodeIndex) -> Option<Value> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -672,7 +477,12 @@ impl DiskGraph {
     #[inline]
     pub fn node_slot(&self, i: usize) -> DiskNodeSlot {
         if i < self.node_slots.len() {
-            self.node_slots.get(i)
+            self.node_slot_updates
+                .get(&(i as u32))
+                .copied()
+                .unwrap_or_else(|| self.node_slots.get(i))
+        } else if i < self.node_slot_len() {
+            self.appended_node_slots[i - self.node_slots.len()]
         } else {
             DiskNodeSlot::default()
         }
@@ -686,10 +496,10 @@ impl DiskGraph {
     #[inline]
     pub fn node_weight(&self, idx: NodeIndex) -> Option<&NodeData> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -771,10 +581,10 @@ impl DiskGraph {
 
     pub fn node_weight_mut(&mut self, idx: NodeIndex) -> Option<&mut NodeData> {
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -831,8 +641,49 @@ impl DiskGraph {
     }
 
     #[inline]
+    pub(crate) fn node_slot_len(&self) -> usize {
+        self.node_slots.len() + self.appended_node_slots.len()
+    }
+
+    #[inline]
+    pub(crate) fn set_node_slot(&mut self, index: usize, slot: DiskNodeSlot) {
+        if index < self.node_slots.len() {
+            self.node_slot_updates.insert(index as u32, slot);
+        } else {
+            self.appended_node_slots[index - self.node_slots.len()] = slot;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn edge_endpoint_len(&self) -> usize {
+        self.edge_endpoints.len() + self.appended_edge_endpoints.len()
+    }
+
+    #[inline]
+    pub(crate) fn edge_endpoint(&self, index: usize) -> EdgeEndpoints {
+        if self.removed_edges.contains(&(index as u32)) {
+            return EdgeEndpoints {
+                source: TOMBSTONE_EDGE,
+                target: TOMBSTONE_EDGE,
+                connection_type: 0,
+            };
+        }
+        if index < self.edge_endpoints.len() {
+            self.edge_endpoints.get(index)
+        } else {
+            self.appended_edge_endpoints[index - self.edge_endpoints.len()]
+        }
+    }
+
+    #[inline]
+    pub(crate) fn edge_is_alive(&self, index: u32) -> bool {
+        (index as usize) < self.edge_endpoint_len()
+            && self.edge_endpoint(index as usize).source != TOMBSTONE_EDGE
+    }
+
+    #[inline]
     pub fn node_bound(&self) -> usize {
-        self.node_slots.len()
+        self.node_slot_len()
     }
 
     pub fn add_node(&mut self, data: NodeData) -> NodeIndex {
@@ -842,7 +693,7 @@ impl DiskGraph {
         // Extract row_id from property storage if columnar, else use slot index
         let row_id = match &data.properties {
             crate::graph::schema::PropertyStorage::Columnar { row_id, .. } => *row_id,
-            _ => self.node_slots.len() as u32,
+            _ => self.node_slot_len() as u32,
         };
 
         let slot = DiskNodeSlot {
@@ -853,25 +704,12 @@ impl DiskGraph {
 
         if let Some(recycled) = self.free_node_slots.pop() {
             let idx = recycled as usize;
-            self.node_slots.set(idx, slot);
+            self.set_node_slot(idx, slot);
             self.node_count += 1;
             NodeIndex::new(idx)
         } else {
-            let idx = self.node_slots.len();
-            self.node_slots.push(slot);
-            // Extend CSR offset arrays
-            let last_out = if !self.out_offsets.is_empty() {
-                self.out_offsets.get(self.out_offsets.len() - 1)
-            } else {
-                0
-            };
-            self.out_offsets.push(last_out);
-            let last_in = if !self.in_offsets.is_empty() {
-                self.in_offsets.get(self.in_offsets.len() - 1)
-            } else {
-                0
-            };
-            self.in_offsets.push(last_in);
+            let idx = self.node_slot_len();
+            self.appended_node_slots.push(slot);
             self.node_count += 1;
             NodeIndex::new(idx)
         }
@@ -881,10 +719,10 @@ impl DiskGraph {
         self.metadata_dirty = true;
         self.clear_arenas();
         let i = idx.index();
-        if i >= self.node_slots.len() {
+        if i >= self.node_slot_len() {
             return None;
         }
-        let slot = self.node_slots.get(i);
+        let slot = self.node_slot(i);
         if !slot.is_alive() {
             return None;
         }
@@ -917,7 +755,7 @@ impl DiskGraph {
         // Mark slot as dead
         let mut dead_slot = slot;
         dead_slot.flags = 0;
-        self.node_slots.set(i, dead_slot);
+        self.set_node_slot(i, dead_slot);
         self.node_count -= 1;
         self.free_node_slots.push(i as u32);
         self.has_tombstones = true;
@@ -932,15 +770,15 @@ impl DiskGraph {
     /// Used after BuildColumnStore conversion to fix per-type row_id mapping.
     pub fn update_row_id(&mut self, node_idx: NodeIndex, row_id: u32) {
         let i = node_idx.index();
-        if i < self.node_slots.len() {
-            let mut slot = self.node_slots.get(i);
+        if i < self.node_slot_len() {
+            let mut slot = self.node_slot(i);
             slot.row_id = row_id;
-            self.node_slots.set(i, slot);
+            self.set_node_slot(i, slot);
         }
     }
 
     pub fn node_indices_iter(&self) -> DiskNodeIndices<'_> {
-        DiskNodeIndices::new(&self.node_slots)
+        DiskNodeIndices::new(self)
     }
 
     // ====================================================================
@@ -951,7 +789,7 @@ impl DiskGraph {
     /// (O(1) lookup) and properties from edge_properties HashMap.
     #[inline]
     pub(crate) fn materialize_edge(&self, edge_idx: u32) -> &EdgeData {
-        let ep = self.edge_endpoints.get(edge_idx as usize);
+        let ep = self.edge_endpoint(edge_idx as usize);
         let ct = InternedKey::from_u64(ep.connection_type);
         let props = if self.edge_properties.is_empty() {
             Vec::new()
@@ -1006,11 +844,7 @@ impl DiskGraph {
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
                 let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
-                    edges,
-                    &self.edge_endpoints,
-                    start,
-                    end,
-                    ct,
+                    edges, self, start, end, ct,
                 );
                 start = lo;
                 end = hi;
@@ -1034,7 +868,7 @@ impl DiskGraph {
             if let Some(list) = overflow {
                 for e in list {
                     if let Some(ct) = conn_type {
-                        if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                        if self.edge_endpoint(e.edge_idx as usize).connection_type != ct {
                             continue;
                         }
                     }
@@ -1062,7 +896,7 @@ impl DiskGraph {
             // Check connection type (only needed if CSR is NOT sorted)
             if let Some(ct) = conn_type {
                 if !self.csr_sorted_by_type
-                    && self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct
+                    && self.edge_endpoint(e.edge_idx as usize).connection_type != ct
                 {
                     continue;
                 }
@@ -1092,7 +926,7 @@ impl DiskGraph {
                     continue;
                 }
                 if let Some(ct) = conn_type {
-                    if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                    if self.edge_endpoint(e.edge_idx as usize).connection_type != ct {
                         continue;
                     }
                 }
@@ -1143,11 +977,7 @@ impl DiskGraph {
         if let Some(ct) = conn_type {
             if self.csr_sorted_by_type {
                 let (lo, hi) = crate::graph::core::iterators::binary_search_conn_type(
-                    edges,
-                    &self.edge_endpoints,
-                    start,
-                    end,
-                    ct,
+                    edges, self, start, end, ct,
                 );
                 start = lo;
                 end = hi;
@@ -1163,7 +993,7 @@ impl DiskGraph {
             // When CSR is NOT sorted, must check type via edge_endpoints
             if let Some(ct) = conn_type {
                 if !self.csr_sorted_by_type
-                    && self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct
+                    && self.edge_endpoint(e.edge_idx as usize).connection_type != ct
                 {
                     continue;
                 }
@@ -1182,7 +1012,7 @@ impl DiskGraph {
                     continue;
                 }
                 if let Some(ct) = conn_type {
-                    if self.edge_endpoints.get(e.edge_idx as usize).connection_type != ct {
+                    if self.edge_endpoint(e.edge_idx as usize).connection_type != ct {
                         continue;
                     }
                 }
@@ -1227,7 +1057,7 @@ impl DiskGraph {
                     }
                 }
             }
-            let ep = self.edge_endpoints.get(i);
+            let ep = self.edge_endpoint(i);
             if ep.source == TOMBSTONE_EDGE {
                 continue;
             }
@@ -1307,7 +1137,7 @@ impl DiskGraph {
             for (&node_id, edges) in &self.overflow_out {
                 for e in edges {
                     if e.edge_idx != TOMBSTONE_EDGE {
-                        let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                        let ep = self.edge_endpoint(e.edge_idx as usize);
                         if ep.connection_type == conn_type {
                             sources.push(node_id);
                             break; // One matching edge is enough
@@ -1380,7 +1210,7 @@ impl DiskGraph {
                     if self.csr_sorted_by_type {
                         let (lo_p, hi_p) = crate::graph::core::iterators::binary_search_conn_type(
                             &self.out_edges,
-                            &self.edge_endpoints,
+                            self,
                             csr_start,
                             csr_end,
                             conn_type,
@@ -1404,7 +1234,7 @@ impl DiskGraph {
                             if e.edge_idx == TOMBSTONE_EDGE {
                                 continue;
                             }
-                            let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                            let ep = self.edge_endpoint(e.edge_idx as usize);
                             if ep.connection_type == conn_type
                                 && !f(
                                     NodeIndex::new(src_u32 as usize),
@@ -1426,7 +1256,7 @@ impl DiskGraph {
                 if e.edge_idx == TOMBSTONE_EDGE {
                     continue;
                 }
-                let ep = self.edge_endpoints.get(e.edge_idx as usize);
+                let ep = self.edge_endpoint(e.edge_idx as usize);
                 if ep.connection_type == conn_type
                     && !f(
                         NodeIndex::new(src_u32 as usize),
@@ -1478,7 +1308,7 @@ impl DiskGraph {
     {
         let n = self.next_edge_idx as usize;
         for edge_idx in 0..n {
-            let ep = self.edge_endpoints.get(edge_idx);
+            let ep = self.edge_endpoint(edge_idx);
             if ep.source == TOMBSTONE_EDGE {
                 continue;
             }
@@ -1554,10 +1384,10 @@ impl DiskGraph {
         let drained: Vec<(u32, NodeData)> = self.node_mut_cache.drain().collect();
         let mut by_type: HashMap<InternedKey, Vec<(u32, NodeData)>> = HashMap::new();
         for (i, nd) in drained {
-            if (i as usize) >= self.node_slots.len() {
+            if (i as usize) >= self.node_slot_len() {
                 continue;
             }
-            let slot = self.node_slots.get(i as usize);
+            let slot = self.node_slot(i as usize);
             let type_key = InternedKey::from_u64(slot.node_type);
             by_type.entry(type_key).or_default().push((i, nd));
         }
@@ -1574,7 +1404,7 @@ impl DiskGraph {
             // work. Entries with Map-form properties or a non-null
             // title also contribute.
             let any_writes_needed = updates.iter().any(|(i, nd)| {
-                let slot = self.node_slots.get(*i as usize);
+                let slot = self.node_slot(*i as usize);
                 if !slot.is_alive() {
                     return true;
                 }
@@ -1605,7 +1435,7 @@ impl DiskGraph {
             let mut new_store: crate::graph::storage::column_store::ColumnStore =
                 (**current_arc).clone();
             for (i, nd) in updates {
-                let slot = self.node_slots.get(i as usize);
+                let slot = self.node_slot(i as usize);
                 let row_id = slot.row_id;
                 if !slot.is_alive() {
                     // Tombstoned by `remove_node` — mark the row dead
@@ -1647,16 +1477,45 @@ impl DiskGraph {
         }
     }
 
-    /// Reset materialization arenas between queries to prevent unbounded growth.
-    /// Only call when no references from prior `node_weight()` /
-    /// `materialize_edge()` calls are alive — i.e. between top-level queries.
+    /// Enter a read query that may materialize disk-backed nodes or edges.
+    ///
+    /// The first query after an idle period reclaims values retained by the
+    /// previous query generation. Overlapping and nested queries merely bump
+    /// the active count, so neither can invalidate references held by another.
+    pub(crate) fn begin_query(&self) -> DiskQueryGuard<'_> {
+        let mut active = self
+            .active_queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *active == 0 {
+            self.clear_read_arenas();
+        }
+        *active += 1;
+        DiskQueryGuard { graph: self }
+    }
+
+    fn clear_read_arenas(&self) {
+        self.node_arena
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.edge_arena
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    /// Reclaim materialization arenas when no guarded read query is active.
+    /// Mutation execution calls this while holding exclusive graph ownership;
+    /// the active-count check also makes accidental concurrent resets safe.
     pub fn reset_arenas(&self) {
-        // The doc contract (no live materialization refs) is satisfied
-        // by KGLite's single-threaded query loop calling this between
-        // top-level queries. The two Mutex'd arenas are independent —
-        // edge_arena uses the same pattern.
-        self.node_arena.lock().unwrap().clear();
-        self.edge_arena.lock().unwrap().clear();
+        let active = self
+            .active_queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *active == 0 {
+            self.clear_read_arenas();
+        }
     }
 
     pub fn edges_directed_iter(&self, a: NodeIndex, dir: Direction) -> DiskEdges<'_> {
@@ -1705,7 +1564,7 @@ impl DiskGraph {
 
     pub fn edge_indices_iter(&self) -> DiskEdgeIndices<'_> {
         self.ensure_csr();
-        DiskEdgeIndices::new(self.next_edge_idx, &self.edge_endpoints)
+        DiskEdgeIndices::new(self.next_edge_idx, self)
     }
 
     #[inline]
@@ -1719,7 +1578,7 @@ impl DiskGraph {
         if ei >= self.next_edge_idx as usize {
             return None;
         }
-        let ep = self.edge_endpoints.get(ei);
+        let ep = self.edge_endpoint(ei);
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
@@ -1732,7 +1591,7 @@ impl DiskGraph {
         if ei >= self.next_edge_idx as usize {
             return None;
         }
-        let ep = self.edge_endpoints.get(ei);
+        let ep = self.edge_endpoint(ei);
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
@@ -1759,7 +1618,7 @@ impl DiskGraph {
         if ei >= self.next_edge_idx as usize {
             return None;
         }
-        let ep = self.edge_endpoints.get(ei);
+        let ep = self.edge_endpoint(ei);
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
@@ -1795,7 +1654,7 @@ impl DiskGraph {
             // Post-CSR mode: go directly to overflow + edge_endpoints.
             // This makes new edges immediately visible to queries via
             // the DiskEdges iterator which merges CSR + overflow.
-            self.edge_endpoints.push(EdgeEndpoints {
+            self.appended_edge_endpoints.push(EdgeEndpoints {
                 source: src,
                 target: tgt,
                 connection_type: ct_u64,
@@ -1821,7 +1680,7 @@ impl DiskGraph {
         if ei >= self.next_edge_idx as usize {
             return None;
         }
-        let ep = self.edge_endpoints.get(ei);
+        let ep = self.edge_endpoint(ei);
         if ep.source == TOMBSTONE_EDGE {
             return None;
         }
@@ -1837,11 +1696,6 @@ impl DiskGraph {
         let tgt = ep.target as usize;
         let ei32 = ei as u32;
 
-        // Tombstone in outgoing CSR
-        Self::tombstone_in_array(&self.out_offsets, &mut self.out_edges, src, ei32);
-        // Tombstone in incoming CSR
-        Self::tombstone_in_array(&self.in_offsets, &mut self.in_edges, tgt, ei32);
-
         // Tombstone in overflow lists
         if let Some(list) = self.overflow_out.get_mut(&(src as u32)) {
             list.retain(|e| e.edge_idx != ei32);
@@ -1850,19 +1704,14 @@ impl DiskGraph {
             list.retain(|e| e.edge_idx != ei32);
         }
 
-        // Tombstone in endpoints
-        self.edge_endpoints.set(
-            ei,
-            EdgeEndpoints {
-                source: TOMBSTONE_EDGE,
-                target: TOMBSTONE_EDGE,
-                connection_type: 0,
-            },
-        );
+        // Logical tombstone only: the published endpoint/CSR files are an
+        // immutable reader snapshot. Iterators consult this overlay.
+        self.removed_edges.insert(ei32);
 
         self.edge_count -= 1;
         self.free_edge_slots.push(ei32);
         self.has_tombstones = true;
+        self.csr_sorted_by_type = false;
         Some(result)
     }
 
@@ -1903,7 +1752,7 @@ impl DiskGraph {
     pub fn edge_weights_iter(&self) -> Box<dyn Iterator<Item = &EdgeData> + '_> {
         self.ensure_csr();
         Box::new((0..self.next_edge_idx).filter_map(move |i| {
-            let ep = self.edge_endpoints.get(i as usize);
+            let ep = self.edge_endpoint(i as usize);
             if ep.source == TOMBSTONE_EDGE {
                 return None;
             }
@@ -2002,33 +1851,34 @@ impl DiskGraph {
             || self.overflow_in.values().any(|v| !v.is_empty())
     }
 
-    pub fn build_csr_from_pending(&mut self) {
+    pub fn build_csr_from_pending(&mut self) -> std::io::Result<()> {
+        let node_bound = self.node_slot_len();
         let pending = self.pending_edges.get_mut();
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
 
-        let node_bound = self.node_slots.len();
         let edge_count = pending.len();
         let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
         let use_merge_sort = std::env::var("KGLITE_CSR_ALGO").is_ok_and(|v| v == "merge_sort");
         if use_merge_sort {
-            self.build_csr_merge_sort(node_bound, edge_count, verbose);
+            self.build_csr_merge_sort(node_bound, edge_count, verbose)?;
         } else {
-            self.build_csr_partitioned(node_bound, edge_count, verbose);
+            self.build_csr_partitioned(node_bound, edge_count, verbose)?;
         }
         // After CSR is built, subsequent add_edge calls should route to overflow
         self.defer_csr = false;
+        Ok(())
     }
 
     /// Merge overflow edges back into the CSR arrays via full rebuild.
     /// Collects all live edges (CSR + overflow, excluding tombstones),
     /// writes to pending_edges, clears overflow, and rebuilds CSR.
     /// Returns the number of overflow edges that were merged.
-    pub fn compact(&mut self) -> usize {
+    pub fn compact(&mut self) -> std::io::Result<usize> {
         let overflow_count: usize = self.overflow_out.values().map(|v| v.len()).sum();
         if overflow_count == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
@@ -2040,7 +1890,7 @@ impl DiskGraph {
             );
         }
 
-        let node_bound = self.node_slots.len();
+        let node_bound = self.node_slot_len();
 
         // Collect all live edges into a fresh pending_edges buffer.
         // Source: edge_endpoints (covers both CSR and post-CSR overflow edges).
@@ -2048,17 +1898,16 @@ impl DiskGraph {
         let mut live_count = 0usize;
         let total_endpoints = self.next_edge_idx as usize;
 
-        let pending_path = self.data_dir.join("_compact_pending.bin");
+        let pending_path = self.active_write_dir().join("_compact_pending.bin");
         let mut new_pending: MmapOrVec<(u32, u32, u64)> =
-            MmapOrVec::mapped(&pending_path, total_endpoints)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(total_endpoints));
+            MmapOrVec::mapped(&pending_path, total_endpoints)?;
 
         // Edge index remapping: old_idx → new_idx
         // Needed because compaction produces a dense edge array.
         let mut idx_remap: Vec<u32> = vec![TOMBSTONE_EDGE; total_endpoints];
 
         for (old_idx, remap_slot) in idx_remap.iter_mut().enumerate().take(total_endpoints) {
-            let ep = self.edge_endpoints.get(old_idx);
+            let ep = self.edge_endpoint(old_idx);
             if ep.source != TOMBSTONE_EDGE
                 && (ep.source as usize) < node_bound
                 && (ep.target as usize) < node_bound
@@ -2106,7 +1955,7 @@ impl DiskGraph {
             let _ = std::fs::remove_file(path);
         }
 
-        self.build_csr_from_pending();
+        self.build_csr_from_pending()?;
 
         // Clean up compact temp file
         let _ = std::fs::remove_file(&pending_path);
@@ -2119,7 +1968,7 @@ impl DiskGraph {
             );
         }
 
-        overflow_count
+        Ok(overflow_count)
     }
 
     /// [DEV] External merge sort variant — zero random reads.
@@ -2164,231 +2013,143 @@ impl DiskGraph {
     // ====================================================================
 
     fn tombstone_edges_for_node(&mut self, node: usize) {
-        // Tombstone outgoing CSR edges
+        let mut incident = HashSet::new();
         if node < self.out_offsets.len().saturating_sub(1) {
             let start = self.out_offsets.get(node) as usize;
             let end = self.out_offsets.get(node + 1) as usize;
             for i in start..end {
-                let mut e = self.out_edges.get(i);
-                if e.edge_idx != TOMBSTONE_EDGE {
-                    let ei = e.edge_idx;
-                    e.edge_idx = TOMBSTONE_EDGE;
-                    self.out_edges.set(i, e);
-                    // Tombstone the corresponding incoming edge
-                    self.tombstone_in_edge_for(e.peer as usize, ei);
-                    // Tombstone endpoints
-                    self.edge_endpoints.set(
-                        ei as usize,
-                        EdgeEndpoints {
-                            source: TOMBSTONE_EDGE,
-                            target: TOMBSTONE_EDGE,
-                            connection_type: 0,
-                        },
-                    );
-                    self.edge_properties.remove(ei);
-                    self.edge_count -= 1;
-                    self.free_edge_slots.push(ei);
+                let edge = self.out_edges.get(i);
+                if edge.edge_idx != TOMBSTONE_EDGE && self.edge_is_alive(edge.edge_idx) {
+                    incident.insert(edge.edge_idx);
                 }
             }
         }
-
-        // Tombstone incoming CSR edges
         if node < self.in_offsets.len().saturating_sub(1) {
             let start = self.in_offsets.get(node) as usize;
             let end = self.in_offsets.get(node + 1) as usize;
             for i in start..end {
-                let mut e = self.in_edges.get(i);
-                if e.edge_idx != TOMBSTONE_EDGE {
-                    let ei = e.edge_idx;
-                    e.edge_idx = TOMBSTONE_EDGE;
-                    self.in_edges.set(i, e);
-                    self.tombstone_out_edge_for(e.peer as usize, ei);
-                    self.edge_endpoints.set(
-                        ei as usize,
-                        EdgeEndpoints {
-                            source: TOMBSTONE_EDGE,
-                            target: TOMBSTONE_EDGE,
-                            connection_type: 0,
-                        },
-                    );
-                    self.edge_properties.remove(ei);
-                    self.edge_count -= 1;
-                    self.free_edge_slots.push(ei);
+                let edge = self.in_edges.get(i);
+                if edge.edge_idx != TOMBSTONE_EDGE && self.edge_is_alive(edge.edge_idx) {
+                    incident.insert(edge.edge_idx);
+                }
+            }
+        }
+        if let Some(list) = self.overflow_out.get(&(node as u32)) {
+            for edge in list {
+                if self.edge_is_alive(edge.edge_idx) {
+                    incident.insert(edge.edge_idx);
+                }
+            }
+        }
+        if let Some(list) = self.overflow_in.get(&(node as u32)) {
+            for edge in list {
+                if self.edge_is_alive(edge.edge_idx) {
+                    incident.insert(edge.edge_idx);
                 }
             }
         }
 
-        // Tombstone overflow edges
-        if let Some(list) = self.overflow_out.remove(&(node as u32)) {
-            for e in &list {
-                if e.edge_idx != TOMBSTONE_EDGE {
-                    self.tombstone_in_edge_for(e.peer as usize, e.edge_idx);
-                    self.edge_endpoints.set(
-                        e.edge_idx as usize,
-                        EdgeEndpoints {
-                            source: TOMBSTONE_EDGE,
-                            target: TOMBSTONE_EDGE,
-                            connection_type: 0,
-                        },
-                    );
-                    self.edge_properties.remove(e.edge_idx);
-                    self.edge_count -= 1;
-                    self.free_edge_slots.push(e.edge_idx);
-                }
+        for edge_idx in incident {
+            let endpoint = self.edge_endpoint(edge_idx as usize);
+            if let Some(list) = self.overflow_out.get_mut(&endpoint.source) {
+                list.retain(|edge| edge.edge_idx != edge_idx);
             }
-        }
-        if let Some(list) = self.overflow_in.remove(&(node as u32)) {
-            for e in &list {
-                if e.edge_idx != TOMBSTONE_EDGE {
-                    self.tombstone_out_edge_for(e.peer as usize, e.edge_idx);
-                    self.edge_endpoints.set(
-                        e.edge_idx as usize,
-                        EdgeEndpoints {
-                            source: TOMBSTONE_EDGE,
-                            target: TOMBSTONE_EDGE,
-                            connection_type: 0,
-                        },
-                    );
-                    self.edge_properties.remove(e.edge_idx);
-                    self.edge_count -= 1;
-                    self.free_edge_slots.push(e.edge_idx);
-                }
+            if let Some(list) = self.overflow_in.get_mut(&endpoint.target) {
+                list.retain(|edge| edge.edge_idx != edge_idx);
             }
+            self.removed_edges.insert(edge_idx);
+            self.edge_properties.remove(edge_idx);
+            self.edge_count -= 1;
+            self.free_edge_slots.push(edge_idx);
         }
-    }
-
-    fn tombstone_in_edge_for(&mut self, node: usize, edge_idx: u32) {
-        if node < self.in_offsets.len().saturating_sub(1) {
-            let start = self.in_offsets.get(node) as usize;
-            let end = self.in_offsets.get(node + 1) as usize;
-            for i in start..end {
-                let mut e = self.in_edges.get(i);
-                if e.edge_idx == edge_idx {
-                    e.edge_idx = TOMBSTONE_EDGE;
-                    self.in_edges.set(i, e);
-                    return;
-                }
-            }
-        }
-        if let Some(list) = self.overflow_in.get_mut(&(node as u32)) {
-            list.retain(|e| e.edge_idx != edge_idx);
-        }
-    }
-
-    fn tombstone_out_edge_for(&mut self, node: usize, edge_idx: u32) {
-        if node < self.out_offsets.len().saturating_sub(1) {
-            let start = self.out_offsets.get(node) as usize;
-            let end = self.out_offsets.get(node + 1) as usize;
-            for i in start..end {
-                let mut e = self.out_edges.get(i);
-                if e.edge_idx == edge_idx {
-                    e.edge_idx = TOMBSTONE_EDGE;
-                    self.out_edges.set(i, e);
-                    return;
-                }
-            }
-        }
-        if let Some(list) = self.overflow_out.get_mut(&(node as u32)) {
-            list.retain(|e| e.edge_idx != edge_idx);
-        }
-    }
-
-    fn tombstone_in_array(
-        offsets: &MmapOrVec<u64>,
-        edges: &mut MmapOrVec<CsrEdge>,
-        node: usize,
-        edge_idx: u32,
-    ) {
-        if node < offsets.len().saturating_sub(1) {
-            let start = offsets.get(node) as usize;
-            let end = offsets.get(node + 1) as usize;
-            for i in start..end {
-                let mut e = edges.get(i);
-                if e.edge_idx == edge_idx {
-                    e.edge_idx = TOMBSTONE_EDGE;
-                    edges.set(i, e);
-                    return;
-                }
-            }
-        }
+        self.csr_sorted_by_type = false;
     }
 }
 
 impl Clone for DiskGraph {
     fn clone(&self) -> Self {
-        // Clone into heap copies (clone is expensive for disk graphs)
-        let mut node_slots = MmapOrVec::with_capacity(self.node_slots.len());
-        for i in 0..self.node_slots.len() {
-            node_slots.push(self.node_slots.get(i));
-        }
-        let mut out_offsets = MmapOrVec::with_capacity(self.out_offsets.len());
-        for i in 0..self.out_offsets.len() {
-            out_offsets.push(self.out_offsets.get(i));
-        }
-        let mut out_edges = MmapOrVec::with_capacity(self.out_edges.len());
-        for i in 0..self.out_edges.len() {
-            out_edges.push(self.out_edges.get(i));
-        }
-        let mut in_offsets = MmapOrVec::with_capacity(self.in_offsets.len());
-        for i in 0..self.in_offsets.len() {
-            in_offsets.push(self.in_offsets.get(i));
-        }
-        let mut in_edges = MmapOrVec::with_capacity(self.in_edges.len());
-        for i in 0..self.in_edges.len() {
-            in_edges.push(self.in_edges.get(i));
-        }
-        let mut edge_endpoints = MmapOrVec::with_capacity(self.edge_endpoints.len());
-        for i in 0..self.edge_endpoints.len() {
-            edge_endpoints.push(self.edge_endpoints.get(i));
+        // Published disk arrays are immutable; a transaction remaps their
+        // files and copies only mutation-sized overlays. This is O(number of
+        // changed rows), not O(nodes + edges), and keeps reader snapshots on
+        // the prior generation. Heap-backed arrays still clone normally.
+        fn snapshot<T: Copy + Default + 'static>(name: &str, value: &MmapOrVec<T>) -> MmapOrVec<T> {
+            value
+                .clone_snapshot()
+                .unwrap_or_else(|error| panic!("failed to clone disk {name} snapshot: {error}"))
         }
 
         DiskGraph {
-            node_slots,
+            node_slots: snapshot("node slots", &self.node_slots),
+            node_slot_updates: self.node_slot_updates.clone(),
+            appended_node_slots: self.appended_node_slots.clone(),
             node_count: self.node_count,
             free_node_slots: self.free_node_slots.clone(),
             node_arena: std::sync::Mutex::new(Vec::new()),
+            active_queries: std::sync::Mutex::new(0),
             column_stores: self.column_stores.clone(),
-            out_offsets,
-            out_edges,
-            in_offsets,
-            in_edges,
-            edge_endpoints,
+            out_offsets: snapshot("out offsets", &self.out_offsets),
+            out_edges: snapshot("out edges", &self.out_edges),
+            in_offsets: snapshot("in offsets", &self.in_offsets),
+            in_edges: snapshot("in edges", &self.in_edges),
+            edge_endpoints: snapshot("edge endpoints", &self.edge_endpoints),
+            appended_edge_endpoints: self.appended_edge_endpoints.clone(),
+            removed_edges: self.removed_edges.clone(),
             edge_count: self.edge_count,
             next_edge_idx: self.next_edge_idx,
-            edge_properties: self.edge_properties.deep_clone(),
+            edge_properties: self.edge_properties.fork_overlay(),
             edge_arena: std::sync::Mutex::new(Vec::new()),
             edge_mut_cache: HashMap::new(),
             node_mut_cache: HashMap::new(),
-            pending_edges: UnsafeCell::new(MmapOrVec::new()),
+            // SAFETY: cloning takes `&self`; every mutation of pending_edges is
+            // gated by `&mut self`, so no writer can overlap this read.
+            pending_edges: UnsafeCell::new(unsafe { &*self.pending_edges.get() }.clone()),
             overflow_out: self.overflow_out.clone(),
             overflow_in: self.overflow_in.clone(),
             free_edge_slots: self.free_edge_slots.clone(),
             data_dir: self.data_dir.clone(),
-            metadata_dirty: false,
+            logical_root: self.logical_root.clone(),
+            writer_lock: None,
+            mutation_workspace: None,
+            parent_workspaces: self.parent_workspaces.clone(),
+            metadata_dirty: self.metadata_dirty,
             csr_sorted_by_type: self.csr_sorted_by_type,
-            defer_csr: false,
-            edge_type_counts_raw: None,
-            conn_type_index_types: MmapOrVec::new(),
-            conn_type_index_offsets: MmapOrVec::new(),
-            conn_type_index_sources: MmapOrVec::new(),
-            peer_count_types: MmapOrVec::new(),
-            peer_count_offsets: MmapOrVec::new(),
-            peer_count_entries: MmapOrVec::new(),
+            defer_csr: self.defer_csr,
+            edge_type_counts_raw: self.edge_type_counts_raw.clone(),
+            conn_type_index_types: snapshot(
+                "connection type index types",
+                &self.conn_type_index_types,
+            ),
+            conn_type_index_offsets: snapshot(
+                "connection type index offsets",
+                &self.conn_type_index_offsets,
+            ),
+            conn_type_index_sources: snapshot(
+                "connection type index sources",
+                &self.conn_type_index_sources,
+            ),
+            peer_count_types: snapshot("peer count types", &self.peer_count_types),
+            peer_count_offsets: snapshot("peer count offsets", &self.peer_count_offsets),
+            peer_count_entries: snapshot("peer count entries", &self.peer_count_entries),
             global_indexes: std::sync::RwLock::new(HashMap::new()),
             has_tombstones: self.has_tombstones,
             property_indexes: std::sync::RwLock::new(HashMap::new()),
+            removed_property_indexes: self.removed_property_indexes.clone(),
             segment_manifest: self.segment_manifest.clone(),
             sealed_nodes_bound: self.sealed_nodes_bound,
         }
     }
 }
 
-impl Drop for DiskGraph {
-    fn drop(&mut self) {
-        // Flush metadata only if mutations happened since last write
-        if self.metadata_dirty {
-            let _ = self.write_metadata();
+impl DiskGraph {
+    /// Adopt the retained writer lease from a serialized transaction parent.
+    /// Generic clones intentionally remain independent and do not call this.
+    pub(crate) fn adopt_writer_lineage(&mut self, parent: &Self) {
+        self.writer_lock = parent.writer_lock.clone();
+        self.parent_workspaces = parent.parent_workspaces.clone();
+        if let Some(workspace) = &parent.mutation_workspace {
+            self.parent_workspaces.push(Arc::clone(workspace));
         }
+        self.mutation_workspace = None;
     }
 }
 

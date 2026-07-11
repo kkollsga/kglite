@@ -34,6 +34,7 @@ Exception
     ├── kglite.FileIoError                    — permission, mid-read EOF
     ├── kglite.ArgumentError                  — bad arg precondition
     ├── kglite.MissingArgumentError           — required arg not passed
+    ├── kglite.InternerCollisionError         — persisted name-key collision; write rejected
     └── kglite.InternalError                  — invariant violation (bug)
 ```
 

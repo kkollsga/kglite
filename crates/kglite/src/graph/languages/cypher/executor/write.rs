@@ -40,7 +40,7 @@ pub fn is_mutation_query(query: &CypherQuery) -> bool {
 /// future `FOREACH (x IN list | <updates>)` — must add an arm here that
 /// recurses into its body. Miss it and the query is mis-routed to the
 /// read engine, where its writes are silently rejected.
-fn clause_is_mutation(clause: &Clause) -> bool {
+pub(crate) fn clause_is_mutation(clause: &Clause) -> bool {
     match clause {
         Clause::Create(_)
         | Clause::Set(_)
@@ -68,7 +68,30 @@ pub fn execute_mutable(
     params: HashMap<String, Value>,
     interrupt: Interrupt,
 ) -> Result<CypherResult, String> {
+    execute_mutable_bounded(graph, query, params, interrupt, None)
+}
+
+#[inline]
+fn check_interrupt_periodic(interrupt: &Interrupt, iteration: usize) -> Result<(), String> {
+    if iteration & (super::INTERRUPT_POLL_INTERVAL - 1) == 0 && interrupt.exceeded() {
+        return Err("Query interrupted".to_string());
+    }
+    Ok(())
+}
+
+/// Mutable execution with the same row/collection budget used by reads.
+/// Session/binding entry points use this; the low-level unbounded primitive
+/// above remains useful to Rust callers that do not request a cap.
+pub(crate) fn execute_mutable_bounded(
+    graph: &mut DirGraph,
+    query: &CypherQuery,
+    params: HashMap<String, Value>,
+    interrupt: Interrupt,
+    max_rows: Option<usize>,
+) -> Result<CypherResult, String> {
     GraphRead::reset_arenas(&graph.graph);
+
+    let budget = super::budget::ExecutionBudget::new(max_rows);
 
     let mut result_set = ResultSet::new();
     let mut stats = MutationStats::default();
@@ -117,10 +140,11 @@ pub fn execute_mutable(
         match clause {
             // Write clauses: mutate graph directly
             Clause::Create(create) => {
-                result_set = execute_create(graph, create, result_set, &params, &mut stats)?;
+                result_set =
+                    execute_create(graph, create, result_set, &params, &mut stats, &interrupt)?;
             }
             Clause::Set(set) => {
-                execute_set(graph, set, &result_set, &params, &mut stats)?;
+                execute_set(graph, set, &result_set, &params, &mut stats, &interrupt)?;
                 // Flush staged writes so any subsequent clause's reads
                 // (including a trailing RETURN's property projection)
                 // observe the SET. SET routes through node_weight_mut →
@@ -138,17 +162,18 @@ pub fn execute_mutable(
                 graph.sync_column_stores_from_disk();
             }
             Clause::Delete(del) => {
-                execute_delete(graph, del, &result_set, &mut stats)?;
+                execute_delete(graph, del, &result_set, &mut stats, &interrupt)?;
             }
             Clause::Remove(rem) => {
-                execute_remove(graph, rem, &result_set, &mut stats)?;
+                execute_remove(graph, rem, &result_set, &mut stats, &interrupt)?;
                 // Same rationale as SET — REMOVE goes through
                 // node_weight_mut on disk.
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
             }
             Clause::Merge(merge) => {
-                result_set = execute_merge(graph, merge, result_set, &params, &mut stats)?;
+                result_set =
+                    execute_merge(graph, merge, result_set, &params, &mut stats, &interrupt)?;
                 // MERGE may invoke ON MATCH SET / ON CREATE SET via
                 // `execute_set`; flush so any following clause sees the
                 // mutations.
@@ -172,6 +197,7 @@ pub fn execute_mutable(
                     &params,
                     &mut stats,
                     &interrupt,
+                    &budget,
                 )?;
                 GraphWrite::flush_pending_writes(&mut graph.graph);
                 graph.sync_column_stores_from_disk();
@@ -181,7 +207,8 @@ pub fn execute_mutable(
             // bindings present in any single row.
             Clause::CallSubquery { import, body } => {
                 let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
-                    .with_cancel(interrupt.cancel);
+                    .with_cancel(interrupt.cancel)
+                    .with_budget(budget.clone());
                 let declared =
                     crate::graph::languages::cypher::planner::simplification::declared_variables(
                         &query.clauses[..i],
@@ -191,10 +218,22 @@ pub fn execute_mutable(
             // Read clauses: create temporary immutable executor
             _ => {
                 let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
-                    .with_cancel(interrupt.cancel);
+                    .with_cancel(interrupt.cancel)
+                    .with_budget(budget.clone());
                 result_set = executor.execute_single_clause(clause, result_set)?;
             }
         }
+
+        budget.check_rows(result_set.rows.len(), &clause_display_name(clause))?;
+        let mutation_units = stats
+            .nodes_created
+            .checked_add(stats.relationships_created)
+            .and_then(|n| n.checked_add(stats.properties_set))
+            .and_then(|n| n.checked_add(stats.nodes_deleted))
+            .and_then(|n| n.checked_add(stats.relationships_deleted))
+            .and_then(|n| n.checked_add(stats.properties_removed))
+            .ok_or_else(|| "Mutation work counter overflow".to_string())?;
+        budget.check_work(mutation_units, "mutation clauses")?;
 
         if let Some(s) = start {
             profile_stats.push(ClauseStats {
@@ -225,7 +264,8 @@ pub fn execute_mutable(
 
     if has_return || !result_set.columns.is_empty() {
         let executor = CypherExecutor::with_params(graph, &params, interrupt.deadline)
-            .with_cancel(interrupt.cancel);
+            .with_cancel(interrupt.cancel)
+            .with_budget(budget);
         let mut result = executor.finalize_result(result_set)?;
         result.stats = Some(stats);
         result.profile = profile;
@@ -260,6 +300,7 @@ fn execute_foreach(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
     interrupt: &Interrupt,
+    budget: &super::budget::ExecutionBudget,
 ) -> Result<(), String> {
     // A FOREACH at the start of a query has no incoming rows; run it once
     // over a single empty binding row so standalone loops work.
@@ -270,10 +311,8 @@ fn execute_foreach(
         &outer.rows
     };
 
-    for row in rows {
-        if interrupt.exceeded() {
-            return Err("Query interrupted".to_string());
-        }
+    for (row_idx, row) in rows.iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         // Evaluate the list in this row's context (read-only borrow of the
         // graph, dropped before the per-element mutations below).
         let list_val = {
@@ -290,7 +329,10 @@ fn execute_foreach(
             }
         };
 
-        for item in items {
+        budget.check_work(items.len(), "FOREACH")?;
+
+        for (item_idx, item) in items.into_iter().enumerate() {
+            check_interrupt_periodic(interrupt, item_idx)?;
             let mut elem_row = row.clone();
             elem_row.projected.insert(variable.to_string(), item);
             let mut elem_set = ResultSet {
@@ -299,8 +341,9 @@ fn execute_foreach(
                 lazy_return_items: None,
             };
             for bclause in body {
-                elem_set =
-                    apply_foreach_body_clause(graph, bclause, elem_set, params, stats, interrupt)?;
+                elem_set = apply_foreach_body_clause(
+                    graph, bclause, elem_set, params, stats, interrupt, budget,
+                )?;
             }
         }
     }
@@ -318,6 +361,7 @@ fn apply_foreach_body_clause(
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
     interrupt: &Interrupt,
+    budget: &super::budget::ExecutionBudget,
 ) -> Result<ResultSet, String> {
     // Per-element flush+sync is REQUIRED on disk, not just for add_nodes: disk
     // property reads (e.g. `coalesce(n.hits, 0)` in a same/later iteration)
@@ -327,27 +371,29 @@ fn apply_foreach_body_clause(
     // Reducing this safely needs the disk read path to consult the mut-cache,
     // a deeper storage change out of scope here. (Memory mode pays ~nothing.)
     match clause {
-        Clause::Create(create) => execute_create(graph, create, result_set, params, stats),
+        Clause::Create(create) => {
+            execute_create(graph, create, result_set, params, stats, interrupt)
+        }
         Clause::Set(set) => {
-            execute_set(graph, set, &result_set, params, stats)?;
+            execute_set(graph, set, &result_set, params, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
             graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Delete(del) => {
-            execute_delete(graph, del, &result_set, stats)?;
+            execute_delete(graph, del, &result_set, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
             graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Remove(rem) => {
-            execute_remove(graph, rem, &result_set, stats)?;
+            execute_remove(graph, rem, &result_set, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
             graph.sync_column_stores_from_disk();
             Ok(result_set)
         }
         Clause::Merge(merge) => {
-            let rs = execute_merge(graph, merge, result_set, params, stats)?;
+            let rs = execute_merge(graph, merge, result_set, params, stats, interrupt)?;
             GraphWrite::flush_pending_writes(&mut graph.graph);
             graph.sync_column_stores_from_disk();
             Ok(rs)
@@ -366,6 +412,7 @@ fn apply_foreach_body_clause(
                 params,
                 stats,
                 interrupt,
+                budget,
             )?;
             Ok(result_set)
         }
@@ -405,6 +452,7 @@ fn execute_create(
     existing: ResultSet,
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<ResultSet, String> {
     // CREATE works on every storage mode. On disk, node properties are routed
     // through the per-type ColumnStore by `DirGraph::insert_node_routed` (the
@@ -420,7 +468,8 @@ fn execute_create(
 
     let mut new_rows = Vec::with_capacity(source_rows.len());
 
-    for row in &source_rows {
+    for (row_idx, row) in source_rows.iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         let mut new_row = row.clone();
 
         for pattern in &create.patterns {
@@ -574,7 +623,7 @@ fn execute_create(
         // pending set (no-op on memory/mapped and when nothing is pending —
         // individual Cypher edges normally go straight to disk overflow and are
         // already visible).
-        graph.ensure_disk_edges_built();
+        graph.ensure_disk_edges_built()?;
     }
 
     // Disk: push the column stores we wrote into (via insert_node_routed) to the
@@ -791,6 +840,7 @@ fn execute_set(
     result_set: &ResultSet,
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<(), String> {
     // Track which Columnar node types we wrote into so we can refresh
     // per-node Arc<ColumnStore> handles in one O(N-per-type) sweep at
@@ -811,7 +861,8 @@ fn execute_set(
     let mut edges_to_stamp: std::collections::HashSet<petgraph::graph::EdgeIndex> =
         std::collections::HashSet::new();
 
-    for row in &result_set.rows {
+    for (row_idx, row) in result_set.rows.iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         for item in &set.items {
             match item {
                 SetItem::Property {
@@ -1183,6 +1234,7 @@ fn execute_delete(
     delete: &DeleteClause,
     result_set: &ResultSet,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<(), String> {
     use std::collections::HashSet;
 
@@ -1191,7 +1243,8 @@ fn execute_delete(
     let mut edge_vars_to_delete: Vec<(String, petgraph::graph::EdgeIndex)> = Vec::new();
 
     // Phase 1: collect all nodes and edges to delete across all rows
-    for row in &result_set.rows {
+    for (row_idx, row) in result_set.rows.iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         for expr in &delete.expressions {
             let var_name = match expr {
                 Expression::Variable(name) => name,
@@ -1234,7 +1287,8 @@ fn execute_delete(
 
     // Phase 2: for plain DELETE (not DETACH), verify no node has edges
     if !delete.detach {
-        for &node_idx in &nodes_to_delete {
+        for (node_count, &node_idx) in nodes_to_delete.iter().enumerate() {
+            check_interrupt_periodic(interrupt, node_count)?;
             let has_edges = graph
                 .graph
                 .edges_directed(node_idx, petgraph::Direction::Outgoing)
@@ -1264,13 +1318,20 @@ fn execute_delete(
         }
     }
 
-    // Phase 3: delete explicitly-requested edges (from edge variable bindings)
+    // Phase 3a: finish interruption checks and deduplicate every explicit edge
+    // before the first write. The following commit phase is deliberately
+    // non-interruptible: once deletion begins, completing it preserves atomic
+    // statement semantics without an O(graph) rollback checkpoint.
     let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
-    for (_var, edge_index) in &edge_vars_to_delete {
-        if deleted_edges.insert(*edge_index) {
-            GraphWrite::remove_edge(&mut graph.graph, *edge_index);
-            stats.relationships_deleted += 1;
-        }
+    for (edge_count, (_var, edge_index)) in edge_vars_to_delete.iter().enumerate() {
+        check_interrupt_periodic(interrupt, edge_count)?;
+        deleted_edges.insert(*edge_index);
+    }
+
+    // Phase 3b: infallible commit of the preflighted edge set.
+    for edge_index in deleted_edges.iter().copied() {
+        GraphWrite::remove_edge(&mut graph.graph, edge_index);
+        stats.relationships_deleted += 1;
     }
 
     // Phase 3's explicit edge-variable deletes still need cache
@@ -1298,8 +1359,10 @@ fn execute_remove(
     remove: &RemoveClause,
     result_set: &ResultSet,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<(), String> {
-    for row in &result_set.rows {
+    for (row_idx, row) in result_set.rows.iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         for item in &remove.items {
             match item {
                 RemoveItem::Property { variable, property } => {
@@ -1394,6 +1457,7 @@ fn execute_merge(
     existing: ResultSet,
     params: &HashMap<String, Value>,
     stats: &mut MutationStats,
+    interrupt: &Interrupt,
 ) -> Result<ResultSet, String> {
     // MERGE works on every storage mode. Its match branch is a read; its create
     // branch routes through `execute_create` (disk-capable via
@@ -1408,7 +1472,8 @@ fn execute_merge(
     let mut new_rows = Vec::with_capacity(source_rows.len());
 
     // Use into_iter to own rows — avoids cloning each row upfront
-    for mut new_row in source_rows {
+    for (row_idx, mut new_row) in source_rows.into_iter().enumerate() {
+        check_interrupt_periodic(interrupt, row_idx)?;
         // Try to match the MERGE pattern
         let matched = try_match_merge_pattern(graph, &merge.pattern, &new_row, params)?;
 
@@ -1431,7 +1496,7 @@ fn execute_merge(
                     columns: Vec::new(),
                     lazy_return_items: None,
                 };
-                execute_set(graph, &set_clause, &temp_rs, params, stats)?;
+                execute_set(graph, &set_clause, &temp_rs, params, stats, interrupt)?;
             }
         } else {
             // No match — CREATE the pattern
@@ -1443,7 +1508,7 @@ fn execute_merge(
                 columns: existing.columns.clone(),
                 lazy_return_items: None,
             };
-            let created = execute_create(graph, &create_clause, temp_rs, params, stats)?;
+            let created = execute_create(graph, &create_clause, temp_rs, params, stats, interrupt)?;
 
             // Merge newly created bindings into our row
             if let Some(created_row) = created.rows.into_iter().next() {
@@ -1465,7 +1530,7 @@ fn execute_merge(
                     columns: Vec::new(),
                     lazy_return_items: None,
                 };
-                execute_set(graph, &set_clause, &temp_rs, params, stats)?;
+                execute_set(graph, &set_clause, &temp_rs, params, stats, interrupt)?;
             }
         }
 
@@ -1696,6 +1761,7 @@ mod is_mutation_query_tests {
             explain: false,
             profile: false,
             output_format: OutputFormat::Default,
+            optimizer_tags: Vec::new(),
         }
     }
 

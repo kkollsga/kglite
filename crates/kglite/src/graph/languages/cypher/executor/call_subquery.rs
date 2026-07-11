@@ -117,7 +117,9 @@ impl<'a> CypherExecutor<'a> {
         // away per row. The deadline is inherited so a long correlated CALL
         // honours the outer timeout.
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
-            .with_streaming(self.streaming);
+            .with_streaming(self.streaming)
+            .with_cancel(self.cancel)
+            .with_budget(self.budget.clone());
 
         // Run the body once for the first outer row to learn the subquery's
         // RETURN columns, then check those columns for an outer-scope
@@ -178,7 +180,10 @@ impl<'a> CypherExecutor<'a> {
             if s == 0 {
                 continue;
             }
-            for sub_row in &body_result.rows[..s - 1] {
+            self.budget
+                .reserve_rows(combined_rows.len(), s, "correlated CALL subquery join")?;
+            for (sub_idx, sub_row) in body_result.rows[..s - 1].iter().enumerate() {
+                self.check_interrupt_periodic(sub_idx)?;
                 let mut row = outer_row.clone();
                 splice_subquery_columns(&mut row, sub_row, cols);
                 combined_rows.push(row);
@@ -302,7 +307,9 @@ impl<'a> CypherExecutor<'a> {
         // which disables that recursion, leaves the body naive too (the
         // differential corpus relies on this for body-level coverage).
         let sub = CypherExecutor::with_params(self.graph, self.params, self.deadline)
-            .with_streaming(self.streaming);
+            .with_streaming(self.streaming)
+            .with_cancel(self.cancel)
+            .with_budget(self.budget.clone());
         let sub_result = sub.execute(body)?;
 
         // The body must terminate in RETURN (parser-enforced, §1.4), so a
@@ -346,8 +353,11 @@ impl<'a> CypherExecutor<'a> {
             // executor has not seeded an empty row for a CallSubquery
             // first-clause, so the result is simply the S subquery rows.
             // R = 1 implicit empty outer row × S subquery rows = S rows.
+            self.budget
+                .check_work(sub_rows.len(), "uncorrelated CALL subquery join")?;
             combined_rows.reserve(sub_rows.len());
-            for sub_row in &sub_rows {
+            for (sub_idx, sub_row) in sub_rows.iter().enumerate() {
+                self.check_interrupt_periodic(sub_idx)?;
                 combined_rows.push(subquery_row_to_result_row(sub_row, &sub_columns));
             }
         } else {
@@ -358,16 +368,27 @@ impl<'a> CypherExecutor<'a> {
             // When S == 0 the outer row is dropped entirely (cartesian with
             // an empty subquery result → zero rows, §1.3 / inner join).
             let s = sub_rows.len();
-            combined_rows.reserve(outer_rows.len().saturating_mul(s));
+            let total = outer_rows.len().checked_mul(s).ok_or_else(|| {
+                "Query row count overflow while executing uncorrelated CALL subquery join"
+                    .to_string()
+            })?;
+            self.budget
+                .check_work(total, "uncorrelated CALL subquery join")?;
+            combined_rows.reserve(total);
+            let mut join_work = 0usize;
             for outer_row in outer_rows {
                 if s == 0 {
                     continue;
                 }
                 for sub_row in &sub_rows[..s - 1] {
+                    self.check_interrupt_periodic(join_work)?;
+                    join_work = join_work.saturating_add(1);
                     let mut row = outer_row.clone();
                     splice_subquery_columns(&mut row, sub_row, &sub_columns);
                     combined_rows.push(row);
                 }
+                self.check_interrupt_periodic(join_work)?;
+                join_work = join_work.saturating_add(1);
                 // Last subquery row: move the outer row in (no clone).
                 let mut row = outer_row;
                 splice_subquery_columns(&mut row, &sub_rows[s - 1], &sub_columns);

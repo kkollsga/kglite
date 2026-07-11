@@ -24,7 +24,14 @@ impl DiskGraph {
     /// must exist on the type's ColumnStore as a string column. Non-string
     /// or missing properties are a no-op that returns `Ok(())`; the index
     /// will simply contain zero entries and all lookups will miss.
-    pub fn build_property_index(&self, node_type: &str, property: &str) -> std::io::Result<usize> {
+    pub fn build_property_index(
+        &mut self,
+        node_type: &str,
+        property: &str,
+    ) -> std::io::Result<usize> {
+        self.prepare_mutation()?;
+        self.removed_property_indexes
+            .remove(&(node_type.to_string(), property.to_string()));
         let type_key = InternedKey::from_str(node_type);
         let type_u64 = type_key.as_u64();
         let prop_key = InternedKey::from_str(property);
@@ -44,10 +51,10 @@ impl DiskGraph {
         // correctly. Everything else reads directly from the column.
         let use_slot_path = schema_slot.is_some();
 
-        let node_bound = self.node_slots.len();
+        let node_bound = self.node_slot_len();
         let mut entries: Vec<(String, u32)> = Vec::with_capacity(node_bound);
         for i in 0..node_bound {
-            let nslot = self.node_slots.get(i);
+            let nslot = self.node_slot(i);
             if !nslot.is_alive() || nslot.node_type != type_u64 {
                 continue;
             }
@@ -86,13 +93,39 @@ impl DiskGraph {
         }
 
         let count = entries.len();
-        let idx =
-            property_index::PropertyIndex::build(&self.data_dir, node_type, property, entries)?;
+        let idx = property_index::PropertyIndex::build(
+            self.active_write_dir(),
+            node_type,
+            property,
+            entries,
+        )?;
         self.property_indexes.write().unwrap().insert(
             (node_type.to_string(), property.to_string()),
             Some(Arc::new(idx)),
         );
         Ok(count)
+    }
+
+    /// Drop a typed persistent index in the writer overlay. The selected
+    /// generation remains immutable; the next save omits its bundle.
+    pub fn drop_property_index(
+        &mut self,
+        node_type: &str,
+        property: &str,
+    ) -> std::io::Result<bool> {
+        self.prepare_mutation()?;
+        let existed = self.has_property_index(node_type, property);
+        if !existed {
+            return Ok(false);
+        }
+        self.removed_property_indexes
+            .insert((node_type.to_string(), property.to_string()));
+        self.property_indexes
+            .write()
+            .unwrap()
+            .insert((node_type.to_string(), property.to_string()), None);
+        property_index::PropertyIndex::remove_files(self.active_write_dir(), node_type, property)?;
+        Ok(true)
     }
 
     /// Exact-match lookup. Returns `None` when no index has been built
@@ -163,8 +196,10 @@ impl DiskGraph {
         if let Some(slot) = self.property_indexes.read().unwrap().get(&key) {
             return slot.is_some();
         }
-        let (meta, _, _, _) = property_index::file_paths(&self.data_dir, node_type, property);
-        meta.exists()
+        property_index::PropertyIndex::open(&self.data_dir, node_type, property)
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Build a cross-type global index for `property`. Scans every
@@ -175,9 +210,10 @@ impl DiskGraph {
     ///
     /// Powers untyped patterns like `MATCH (n {label: 'X'})` and the
     /// `search(text)` helper. Re-run whenever the graph is rebuilt.
-    pub fn build_global_property_index(&self, property: &str) -> std::io::Result<usize> {
+    pub fn build_global_property_index(&mut self, property: &str) -> std::io::Result<usize> {
+        self.prepare_mutation()?;
         let prop_key = InternedKey::from_str(property);
-        let node_bound = self.node_slots.len();
+        let node_bound = self.node_slot_len();
         let mut entries: Vec<(String, u32)> = Vec::with_capacity(node_bound / 2);
 
         // Cache per-type (column_store, schema_slot) lookups so every
@@ -187,7 +223,7 @@ impl DiskGraph {
         let mut type_cache: HashMap<u64, TypeCacheEntry> = HashMap::new();
 
         for i in 0..node_bound {
-            let nslot = self.node_slots.get(i);
+            let nslot = self.node_slot(i);
             if !nslot.is_alive() {
                 continue;
             }
@@ -225,7 +261,11 @@ impl DiskGraph {
         }
 
         let count = entries.len();
-        let idx = property_index::PropertyIndex::build_global(&self.data_dir, property, entries)?;
+        let idx = property_index::PropertyIndex::build_global(
+            self.active_write_dir(),
+            property,
+            entries,
+        )?;
         self.global_indexes
             .write()
             .unwrap()

@@ -12,7 +12,22 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::graph::storage::disk::graph::DiskGraph;
+use crate::graph::storage::disk::graph::{DiskGraph, DiskQueryGuard};
+
+#[cfg(test)]
+thread_local! {
+    static BACKEND_CLONE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_backend_clone_count() {
+    BACKEND_CLONE_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn backend_clone_count() -> usize {
+    BACKEND_CLONE_COUNT.get()
+}
 
 // ============================================================================
 // Graph Backend Abstraction
@@ -53,6 +68,33 @@ impl GraphBackend {
     #[inline]
     pub fn new() -> Self {
         GraphBackend::Memory(MemoryGraph::new())
+    }
+
+    /// Whether a proven-infallible mutation may commit without a full rollback
+    /// checkpoint. Recording/durable wrappers deliberately return false even
+    /// when their inner backend is memory: their post-write WAL lifecycle is a
+    /// distinct boundary and keeps the conservative checkpoint path.
+    #[inline]
+    pub(crate) fn supports_checkpoint_free_mutation(&self) -> bool {
+        matches!(self, GraphBackend::Memory(_))
+    }
+
+    /// Transfer writer-lineage authority to an already-cloned transaction
+    /// backend. Generic `Clone` never transfers that authority.
+    pub(crate) fn adopt_transaction_lineage(&mut self, parent: &Self) {
+        if let (GraphBackend::Disk(child), GraphBackend::Disk(parent)) = (self, parent) {
+            child.adopt_writer_lineage(parent);
+        }
+    }
+
+    /// Hold the disk materialization arenas for one read-query lifetime.
+    /// Heap/mapped backends do not materialize through shared arenas.
+    pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard<'_>> {
+        match self {
+            GraphBackend::Disk(graph) => Some(graph.begin_query()),
+            GraphBackend::Recording(graph) => graph.inner().begin_query(),
+            GraphBackend::Memory(_) | GraphBackend::Mapped(_) => None,
+        }
     }
 
     /// Record that node `idx` was upserted, for the WAL capture wrapper.
@@ -118,7 +160,7 @@ impl GraphBackend {
             GraphBackend::Disk(g) => {
                 let dg = g.as_ref();
                 for i in 0..dg.next_edge_idx {
-                    let ep = dg.edge_endpoints.get(i as usize);
+                    let ep = dg.edge_endpoint(i as usize);
                     if ep.source == crate::graph::storage::disk::csr::TOMBSTONE_EDGE {
                         continue;
                     }
@@ -243,6 +285,8 @@ impl std::ops::Index<EdgeIndex> for GraphBackend {
 
 impl Clone for GraphBackend {
     fn clone(&self) -> Self {
+        #[cfg(test)]
+        BACKEND_CLONE_COUNT.set(BACKEND_CLONE_COUNT.get() + 1);
         match self {
             GraphBackend::Memory(g) => GraphBackend::Memory(g.clone()),
             GraphBackend::Mapped(g) => GraphBackend::Mapped(g.clone()),

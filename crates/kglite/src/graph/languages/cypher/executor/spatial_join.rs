@@ -110,6 +110,7 @@ impl<'a> CypherExecutor<'a> {
             for cand in tree.locate_in_envelope_intersecting(&env) {
                 let pt = geo::Point::new(lon, lat);
                 if crate::graph::features::spatial::geometry_contains_point(&cand.geom, &pt) {
+                    self.budget.reserve_rows(rows.len(), 1, "spatial join")?;
                     let mut row = ResultRow::with_capacity(2, 0, 0);
                     row.node_bindings
                         .insert(container_var.to_string(), cand.node_idx);

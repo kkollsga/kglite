@@ -79,18 +79,16 @@ def test_session_mutation_cancel_is_atomic():
         os.kill(os.getpid(), signal.SIGINT)
 
     threading.Thread(target=fire, daemon=True).start()
-    cancelled = False
     try:
         s.execute(flag_all, timeout_ms=0)
     except KeyboardInterrupt:
-        cancelled = True
+        pass
+    else:
+        pytest.fail("SIGINT did not interrupt the long-running mutation")
 
     flagged = s.cypher("MATCH (a:N) WHERE a.flag = 1 RETURN count(a) AS c").to_list()[0]["c"]
     total = s.cypher("MATCH (a:N) RETURN count(a) AS c").to_list()[0]["c"]
-    if cancelled:
-        assert flagged == 0, f"cancelled mutation left partial state: {flagged} flagged"
-    else:
-        assert flagged == total, f"completed mutation only flagged {flagged}/{total}"
+    assert flagged == 0, f"cancelled mutation left partial state: {flagged}/{total} flagged"
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGINT"), reason="POSIX SIGINT only")

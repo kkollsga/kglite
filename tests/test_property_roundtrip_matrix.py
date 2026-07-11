@@ -43,15 +43,10 @@ Fixed (the cells below now round-trip and pass — kept as passing rows):
 No reachable *silent*-degradation cells remain. Loud-not-silent (acceptable
 half of the contract):
 
-* **`add_connections` without an explicit ``columns=`` whitelist drops every
-  non-id/title column** (lists *and* scalars), asymmetric with ``add_nodes``
-  which keeps them. This now emits a ``UserWarning`` naming the dropped columns
-  (once per call) — the drop is no longer silent, so it satisfies the "loud at
-  write time" half of the contract. See
-  ``test_add_connections_without_columns_warns_on_dropped_columns``. When the
-  column *is* whitelisted it round-trips (companion passing test). Changing the
-  whitelist *semantics* (keeping columns by default) is a separate behaviour
-  change, deliberately out of scope.
+* **`add_connections` now matches `add_nodes` default property semantics.**
+  Omitting ``columns=`` preserves every non-skipped DataFrame column; an
+  explicit ``columns=[...]`` remains a whitelist and ``skip_columns=[...]``
+  remains an exclusion filter.
 
 Notes on the two "known" bugs this suite was seeded from:
 
@@ -65,14 +60,15 @@ Notes on the two "known" bugs this suite was seeded from:
    real in code, dormant for the common Python surface. If a future change
    routes user maps through that encoder, the passing guard here becomes the
    canary.
-2. *"`add_connections` drops list edge columns"* reproduces only via the
-   missing-``columns=`` whitelist path described above; with ``columns=`` it
-   round-trips on this build.
+2. *"`add_connections` drops list edge columns"* is fixed: default,
+   whitelist, and exclusion semantics are covered below and through all
+   storage modes.
 """
 
 from __future__ import annotations
 
 import datetime
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -384,27 +380,19 @@ def test_map_survives_kgl_all_storage_modes(tmp_path):
         assert got == {"k": "v", "n": 7}, f"{mode}: map lost on .kgl reload → {got!r}"
 
 
-# ── add_connections column-whitelist now warns instead of dropping silently ──
-def test_add_connections_without_columns_warns_on_dropped_columns():
-    """add_connections with no ``columns=`` drops non-id/title edge columns —
-    now **loudly**, via a ``UserWarning`` naming them, not silently.
-
-    Per this suite's contract a write must either round-trip the value *or* be
-    loud at write time. The whitelist still drops the column (changing the
-    whitelist semantics is a separate behaviour change, out of scope), but the
-    warning satisfies the "loud" half — so this is a passing test, not a
-    strict-xfail. Asymmetry with ``add_nodes`` (which keeps the column) is
-    documented by the companion tests below.
-    """
+# ── add_connections property-selection semantics ───────────────────────────
+def test_add_connections_without_columns_preserves_list():
+    """The default edge ingest preserves properties, matching add_nodes."""
     kg = kglite.KnowledgeGraph()
     kg.cypher("CREATE (:N {id:1}) CREATE (:N {id:2})")
     df = pd.DataFrame({"s": [1], "t": [2]})
     df["tags"] = _one_col_series(["a", "b"])
-    with pytest.warns(UserWarning, match="tags"):
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
         kg.add_connections(df, "R", "N", "s", "N", "t")  # no columns= whitelist
     got = kg.cypher("MATCH ()-[r:R]->() RETURN r.tags AS tags").to_dicts()[0]["tags"]
-    # Still dropped by the whitelist — but the warning above made it visible.
-    assert got is None
+    assert got == ["a", "b"]
+    assert not [w for w in captured if issubclass(w.category, UserWarning)]
 
 
 def test_add_connections_with_columns_preserves_list():
@@ -422,11 +410,53 @@ def test_add_connections_with_columns_preserves_list():
     assert got == ["a", "b"]
 
 
-def test_add_nodes_keeps_list_column_without_whitelist():
-    """add_nodes (unlike add_connections) keeps a non-whitelisted list column.
+def test_add_connections_columns_and_skip_columns_filter_exactly():
+    kg = kglite.KnowledgeGraph()
+    kg.cypher("CREATE (:N {id:1}) CREATE (:N {id:2}) CREATE (:N {id:3}) CREATE (:N {id:4})")
+    df = pd.DataFrame({"s": [1], "t": [2], "keep": [10], "drop": [20]})
+    kg.add_connections(df, "WHITELIST", "N", "s", "N", "t", columns=["keep"])
+    kg.add_connections(df.assign(t=3), "EXCLUDE", "N", "s", "N", "t", skip_columns=["drop"])
+    kg.add_connections(
+        df.assign(t=4),
+        "COMBINED",
+        "N",
+        "s",
+        "N",
+        "t",
+        columns=["keep", "drop"],
+        skip_columns=["drop"],
+    )
 
-    Documents the asymmetry that makes the add_connections drop a surprise.
-    """
+    rows = kg.cypher("MATCH ()-[r]->() RETURN type(r) AS type, r.keep AS keep, r.drop AS drop ORDER BY type").to_dicts()
+    assert rows == [
+        {"type": "COMBINED", "keep": 10, "drop": None},
+        {"type": "EXCLUDE", "keep": 10, "drop": None},
+        {"type": "WHITELIST", "keep": 10, "drop": None},
+    ]
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+def test_default_edge_properties_survive_storage_and_reload(mode, tmp_path):
+    sub = tmp_path / mode
+    sub.mkdir()
+    kg = _new_kg(mode, sub)
+    kg.cypher("CREATE (:N {id:1}) CREATE (:N {id:2})")
+    df = pd.DataFrame({"s": [1], "t": [2], "weight": [3.5]})
+    df["tags"] = _one_col_series(["a", "b"])
+    df["meta"] = _one_col_series({"rank": 7, "flags": [True, False]})
+    kg.add_connections(df, "R", "N", "s", "N", "t")
+
+    query = "MATCH ()-[r:R]->() RETURN r.weight AS weight, r.tags AS tags, r.meta AS meta"
+    expected = {"weight": 3.5, "tags": ["a", "b"], "meta": {"rank": 7, "flags": [True, False]}}
+    assert kg.cypher(query).to_dicts() == [expected]
+
+    saved = str(sub / "roundtrip.kgl")
+    kg.save(saved)
+    assert kglite.load(saved).cypher(query).to_dicts() == [expected]
+
+
+def test_add_nodes_keeps_list_column_without_whitelist():
+    """add_nodes and add_connections both keep default property columns."""
     kg = kglite.KnowledgeGraph()
     df = pd.DataFrame({"id": [1]})
     df["tags"] = _one_col_series(["a", "b"])

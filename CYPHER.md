@@ -255,7 +255,7 @@ graph.cypher("""
 | `date(str)` / `datetime(str)` | Parse date string to DateTime (`date('2020-01-15')`) |
 | `date_diff(d1, d2)` | Days between two dates (`d1 - d2`); also supports `date - date` arithmetic |
 | `coalesce(a, b, ...)` | First non-null argument |
-| `range(start, end [, step])` | Generate integer list (inclusive); default step = 1 |
+| `range(start, end [, step])` | Generate a checked inclusive integer list; default step = 1. Cardinality, `max_rows`, and a 256 MiB materialization ceiling are validated before allocation |
 | `head(list)` / `last(list)` | First / last element of a list (returns `null` on empty) |
 | `length(p)` | Path hop count |
 | `nodes(p)` | Nodes in a path |
@@ -469,7 +469,10 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `n.d.dayOfWeek`, `n.d.dayOfYear`, `n.d.epochSeconds` | Other temporal field accessors |
 | `duration({days: N, months: M, ...})` | Build a Duration value (see [Duration semantics](#duration-semantics) below) |
 | `duration.between(d1, d2)` | Day-delta between two DateTime values, returned as a Duration |
+| `add_days(date, n)` / `add_months(date, n)` / `add_years(date, n)` | Checked calendar shift; returns NULL when the requested date is outside the representable range |
+| `date_truncate(date, unit)` | Start of `year`, `month`, `week`, or `day` |
 | `date + duration({days: N})` | Add a duration to a date |
+| `duration * integer` / `integer * duration` | Scale all duration components with checked arithmetic |
 | `date_diff(d1, d2)` | Days between two dates (legacy; same as `d2 - d1` returning Int64 directly) |
 | `date + N` / `date - N` | Add/subtract N days (Int64 form, kept for backward compat) |
 | `date - date` | Returns a Duration (was Int64 days pre-0.9.0) |
@@ -477,6 +480,13 @@ Date-range filtering on nodes and relationships with explicit field names.
 | `valid_during(entity, start, end, 'from_field', 'to_field')` | True if entity's range overlaps the given interval |
 
 **NULL semantics:** NULL `from` = valid since beginning. NULL `to` = still valid. Both NULL = always valid.
+
+**Magnitude/error policy:** a well-typed date/calendar shift that lands outside
+the representable chrono range returns NULL. Invalid types, a zero range step,
+range allocation/budget overflow, and Duration construction or arithmetic that
+would overflow a stored component raise `CypherExecutionError`; values are
+never narrowed, wrapped, or silently truncated. Fractional/non-finite Duration
+constructor components are rejected.
 
 **`localdatetime()` / `localtime()` / `time()` return strings, not a temporal Value.** KGLite's `Value::DateTime` is date-only (`NaiveDate`), so there is no time-of-day Value variant to carry sub-day precision. Rather than silently dropping the time component, these functions emit ISO-8601 strings (`localdatetime()` → `YYYY-MM-DDTHH:MM:SS`, `localtime()`/`time()` → `HH:MM:SS`). The single-string-argument form validates and normalises its input, returning NULL on unparseable input (same contract as `datetime(str)`).
 
@@ -1557,9 +1567,13 @@ for row in plan:
 # {'step': 1, 'operation': 'Match :Person', 'estimated_rows': 500}
 # {'step': 2, 'operation': 'FusedOptionalMatchAggregate', 'estimated_rows': 1}
 # {'step': 3, 'operation': 'Projection (RETURN)', 'estimated_rows': None}
+# {'step': 4, 'operation': 'OptimizerPass fuse_optional_match_count', 'estimated_rows': None}
 ```
 
 Cardinality estimates use `type_indices` counts when available, `None` otherwise.
+After the physical plan rows, `EXPLAIN` appends an `OptimizerPass <name>` row
+for every optimizer pass that changed the plan. These rows make it possible to
+verify a particular rewrite directly; disabling that pass removes its tag.
 
 ## PROFILE
 
@@ -1603,7 +1617,7 @@ Keys:
 - `timed_out` — `True` when the deadline fired (rows reflect the partial set).
 - `timeout_ms` — the deadline that was in effect, or `None` when no deadline applied.
 
-`timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` > `kg.set_default_timeout(ms)` > backend-aware default (Disk 10_000, Mapped 60_000, Memory none). Pass `timeout_ms=0` to disable the deadline entirely for one call.
+`timeout_ms` resolution: explicit `cypher(..., timeout_ms=N)` > `kg.set_default_timeout(ms)` > backend-aware default (Disk 10_000, Mapped 60_000, Memory none). Pass `timeout_ms=0` to disable the deadline entirely for one call. Expanding, aggregation, set-operation, subquery-join, procedure, and mutation loops poll cooperatively at least every 4,096 work units; an interrupted session mutation is rolled back as one statement.
 
 ## Indexes
 
@@ -1615,7 +1629,7 @@ graph.create_index('Country', 'label')
 #  'unique_values': 5, 'persistent': true, 'created': true}
 ```
 
-On a `storage='disk'` graph the index is **persistent** — written as four mmap'd files next to the CSR (`property_index_{type}_{property}_{meta,keys,offsets,ids}.bin`) and lazy-loaded on first query after reopen. No heap HashMap rebuild on `load()`. On in-memory graphs the existing `property_indices` HashMap is used (no change).
+On a `storage='disk'` graph the index is **persistent** — written as four mmap'd, SHA-256-addressed files next to the CSR (`property_index_v2_{digest}_{meta,keys,offsets,ids}.bin`). Versioned metadata stores and validates the exact type/property identity, so punctuation, Unicode, underscores, and case-distinct names cannot overwrite one another. Indexes are lazy-loaded on first query after reopen; legacy filename-based bundles remain readable by exact request. No heap HashMap rebuild occurs on `load()`. On in-memory graphs the existing `property_indices` HashMap is used (no change).
 
 `describe()` annotates indexed properties so agents can see which columns hit the fast path before writing a query. String indexes support both equality and prefix; numeric indexes support equality only:
 
@@ -1880,7 +1894,7 @@ Clause-by-clause comparison with the openCypher specification.
 | `IS NULL` / `IS NOT NULL` | Full | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Full | |
 | `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Full | |
-| `=~` regex | Full | Compiled and cached per query |
+| `=~` regex | Full | Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
 | `CASE WHEN...THEN...ELSE...END` | Full | Simple and generic forms |
 | Parameter references (`$param`) | Full | In WHERE, pattern properties, and expressions |
 | List comprehensions (`[x IN list WHERE ... \| expr]`) | Full | |

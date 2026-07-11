@@ -217,7 +217,7 @@ pub struct PassAResult {
 /// `edge_prop_offsets.bin` + `edge_prop_heap.bin` for the destination
 /// graph, all in lockstep with the same sequential scan.
 pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
-    let n_nodes = source.node_slots.len();
+    let n_nodes = source.node_slot_len();
     let mut kept_nodes = Bitset::with_len(n_nodes);
 
     // Convert edge-type filter to a hash set keyed on the raw u64 hash —
@@ -235,7 +235,7 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
     let n_edges = source.next_edge_idx as usize;
     let mut kept_edge_count: u64 = 0;
     for edge_idx in 0..n_edges {
-        let ep = source.edge_endpoints.get(edge_idx);
+        let ep = source.edge_endpoint(edge_idx);
         if ep.source == TOMBSTONE_EDGE {
             continue;
         }
@@ -310,7 +310,7 @@ pub fn pass_a_scan_to_file(
     spec: &SubsetSpec,
     kept_edges_path: &Path,
 ) -> Result<PassAFileResult, String> {
-    let n_nodes = source.node_slots.len();
+    let n_nodes = source.node_slot_len();
     let n_edges = source.next_edge_idx as usize;
     let mut kept_nodes = Bitset::with_len(n_nodes);
 
@@ -338,7 +338,7 @@ pub fn pass_a_scan_to_file(
     let scan_start = std::time::Instant::now();
     let mut kept_edge_count: u64 = 0;
     for edge_idx in 0..n_edges {
-        let ep = source.edge_endpoints.get(edge_idx);
+        let ep = source.edge_endpoint(edge_idx);
         if ep.source == TOMBSTONE_EDGE {
             continue;
         }
@@ -730,7 +730,7 @@ pub fn save_subset_streaming_disk(
             if !rank.contains(old_id) {
                 continue;
             }
-            let slot = sdg.node_slots.get(old_id as usize);
+            let slot = sdg.node_slot(old_id as usize);
             if !slot.is_alive() {
                 continue;
             }
@@ -937,7 +937,7 @@ pub fn save_subset_streaming_disk(
         sdg.node_slots.fadvise_dontneed();
         let n_edges = sdg.next_edge_idx as usize;
         for edge_idx in 0..n_edges {
-            let ep = sdg.edge_endpoints.get(edge_idx);
+            let ep = sdg.edge_endpoint(edge_idx);
             if ep.source == crate::graph::storage::disk::csr::TOMBSTONE_EDGE {
                 continue;
             }

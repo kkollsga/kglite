@@ -61,53 +61,62 @@ pub unsafe extern "C" fn kglite_datasets_wikidata_ensure_dump(
     out_remote_mtime_iso: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if workdir_path.is_null() || out_dump_path.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let workdir = Workdir::new(workdir_str);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {
+            crate::ffi::init_out(out_dump_path, std::ptr::null());
+            crate::ffi::init_out(out_remote_mtime_iso, std::ptr::null());
+        },
+        || {
+            if workdir_path.is_null() || out_dump_path.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let workdir = Workdir::new(workdir_str);
 
-    match ensure_dump(&workdir, cooldown_days, verbose != 0) {
-        Ok((dump_path, remote_mtime)) => {
-            let path_str = dump_path.to_string_lossy().to_string();
-            unsafe {
-                *out_dump_path = alloc_c_string(&path_str);
-            }
-            if !out_remote_mtime_iso.is_null() {
-                unsafe {
-                    *out_remote_mtime_iso = match remote_mtime {
-                        Some(dt) => alloc_c_string(&dt.to_rfc3339()),
-                        None => std::ptr::null(),
-                    };
+            match ensure_dump(&workdir, cooldown_days, verbose != 0) {
+                Ok((dump_path, remote_mtime)) => {
+                    let path_str = dump_path.to_string_lossy().to_string();
+                    unsafe {
+                        *out_dump_path = alloc_c_string(&path_str);
+                    }
+                    if !out_remote_mtime_iso.is_null() {
+                        unsafe {
+                            *out_remote_mtime_iso = match remote_mtime {
+                                Some(dt) => alloc_c_string(&dt.to_rfc3339()),
+                                None => std::ptr::null(),
+                            };
+                        }
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_dump_path = std::ptr::null();
+                    }
+                    if !out_remote_mtime_iso.is_null() {
+                        unsafe {
+                            *out_remote_mtime_iso = std::ptr::null();
+                        }
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
-                }
-            }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_dump_path = std::ptr::null();
-            }
-            if !out_remote_mtime_iso.is_null() {
-                unsafe {
-                    *out_remote_mtime_iso = std::ptr::null();
-                }
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Sync HEAD-request probe for the dump's `Last-Modified` header.
@@ -128,18 +137,24 @@ pub unsafe extern "C" fn kglite_datasets_wikidata_ensure_dump(
 pub unsafe extern "C" fn kglite_datasets_wikidata_remote_last_modified(
     out_iso: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if out_iso.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    match remote_last_modified() {
-        Some(dt) => unsafe {
-            *out_iso = alloc_c_string(&dt.to_rfc3339());
+    crate::ffi::status_boundary(
+        std::ptr::null_mut(),
+        || crate::ffi::init_out(out_iso, std::ptr::null()),
+        || {
+            if out_iso.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            match remote_last_modified() {
+                Some(dt) => unsafe {
+                    *out_iso = alloc_c_string(&dt.to_rfc3339());
+                },
+                None => unsafe {
+                    *out_iso = std::ptr::null();
+                },
+            }
+            KgliteStatusCode::Ok
         },
-        None => unsafe {
-            *out_iso = std::ptr::null();
-        },
-    }
-    KgliteStatusCode::Ok
+    )
 }
 
 /// Run the cache-freshness decision tree. Pure-CPU; the only I/O
@@ -182,50 +197,59 @@ pub unsafe extern "C" fn kglite_datasets_wikidata_decide_cache(
     out_decision_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if graph_meta_path.is_null() || source_meta_path.is_null() || out_decision_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let graph_meta_str = match unsafe { CStr::from_ptr(graph_meta_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let source_meta_str = match unsafe { CStr::from_ptr(source_meta_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_decision_json, std::ptr::null()),
+        || {
+            if graph_meta_path.is_null()
+                || source_meta_path.is_null()
+                || out_decision_json.is_null()
+            {
+                return KgliteStatusCode::NullPointer;
+            }
+            let graph_meta_str = match unsafe { CStr::from_ptr(graph_meta_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let source_meta_str = match unsafe { CStr::from_ptr(source_meta_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
 
-    // Optional remote mtime — parse the RFC 3339 string if given.
-    let remote_mtime = if remote_mtime_iso.is_null() {
-        None
-    } else {
-        let s = match unsafe { CStr::from_ptr(remote_mtime_iso) }.to_str() {
-            Ok(s) => s,
-            Err(_) => return KgliteStatusCode::InvalidUtf8,
-        };
-        match chrono::DateTime::parse_from_rfc3339(s) {
-            Ok(dt) => Some(dt.with_timezone(&chrono::Utc)),
-            Err(_) => return KgliteStatusCode::InvalidArgument,
-        }
-    };
+            // Optional remote mtime — parse the RFC 3339 string if given.
+            let remote_mtime = if remote_mtime_iso.is_null() {
+                None
+            } else {
+                let s = match unsafe { CStr::from_ptr(remote_mtime_iso) }.to_str() {
+                    Ok(s) => s,
+                    Err(_) => return KgliteStatusCode::InvalidUtf8,
+                };
+                match chrono::DateTime::parse_from_rfc3339(s) {
+                    Ok(dt) => Some(dt.with_timezone(&chrono::Utc)),
+                    Err(_) => return KgliteStatusCode::InvalidArgument,
+                }
+            };
 
-    let inputs = FreshnessInputs {
-        force_rebuild: force_rebuild != 0,
-        graph_meta_path: Path::new(graph_meta_str),
-        source_meta_path: Path::new(source_meta_str),
-        cooldown_days,
-        remote_mtime,
-    };
-    let decision = decide(inputs);
-    let json = serialize_decision(&decision);
-    unsafe {
-        *out_decision_json = alloc_c_string(&json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+            let inputs = FreshnessInputs {
+                force_rebuild: force_rebuild != 0,
+                graph_meta_path: Path::new(graph_meta_str),
+                source_meta_path: Path::new(source_meta_str),
+                cooldown_days,
+                remote_mtime,
+            };
+            let decision = decide(inputs);
+            let json = serialize_decision(&decision);
+            unsafe {
+                *out_decision_json = alloc_c_string(&json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 fn serialize_decision(decision: &CacheDecision) -> String {

@@ -10,10 +10,12 @@
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
 use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+use crate::graph::storage::packed_codec::{write_packed_values, PackedElement};
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // ─── TypedColumn ─────────────────────────────────────────────────────────────
@@ -67,6 +69,7 @@ pub enum TypedColumn {
 /// Column data smaller than this threshold is loaded into heap Vec instead of
 /// being written to a temp file and mmap'd. Avoids file I/O overhead for small columns.
 const MMAP_THRESHOLD: usize = 262_144; // 256 KB
+static NEXT_TEMP_COLUMN_FILE: AtomicU64 = AtomicU64::new(0);
 
 const UNIX_EPOCH_DATE: NaiveDate = match NaiveDate::from_ymd_opt(1970, 1, 1) {
     Some(d) => d,
@@ -610,24 +613,24 @@ impl TypedColumn {
     pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
         match self {
             TypedColumn::Int64 { data, nulls } => {
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                write_packed_values(data, writer)?;
+                write_packed_values(nulls, writer)?;
             }
             TypedColumn::Float64 { data, nulls } => {
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                write_packed_values(data, writer)?;
+                write_packed_values(nulls, writer)?;
             }
             TypedColumn::UniqueId { data, nulls } => {
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                write_packed_values(data, writer)?;
+                write_packed_values(nulls, writer)?;
             }
             TypedColumn::Bool { data, nulls } => {
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                write_packed_values(data, writer)?;
+                write_packed_values(nulls, writer)?;
             }
             TypedColumn::Date { data, nulls } => {
-                data.write_to(writer)?;
-                nulls.write_to(writer)?;
+                write_packed_values(data, writer)?;
+                write_packed_values(nulls, writer)?;
             }
             TypedColumn::Str {
                 offsets,
@@ -637,9 +640,9 @@ impl TypedColumn {
             } => {
                 if relocated.is_empty() {
                     // Fast path: no overlay, write raw buffers.
-                    offsets.write_to(writer)?;
+                    write_packed_values(offsets, writer)?;
                     data.write_to(writer)?;
-                    nulls.write_to(writer)?;
+                    write_packed_values(nulls, writer)?;
                 } else {
                     // Fold the relocated overlay back into a fresh
                     // offsets+data layout. The on-disk format expects
@@ -665,7 +668,7 @@ impl TypedColumn {
                         writer.write_all(&off.to_le_bytes())?;
                     }
                     writer.write_all(&new_data)?;
-                    nulls.write_to(writer)?;
+                    write_packed_values(nulls, writer)?;
                 }
             }
             TypedColumn::Mixed { data } => {
@@ -1280,6 +1283,37 @@ impl ColumnStore {
         self.row_count
     }
 
+    /// Convert an mmap-backed store into a fully owned store before rows are
+    /// appended. Append overlays start at row zero, so keeping the mmap base
+    /// alongside them would misalign id/title/property columns and make a
+    /// subsequent packed save advertise more rows than it serialized.
+    pub(crate) fn materialize_for_append(
+        &mut self,
+        type_meta: &HashMap<String, String>,
+        interner: &StringInterner,
+    ) {
+        if self.mmap_store.is_none() {
+            return;
+        }
+
+        let mut owned = Self::new(self.schema.clone(), type_meta, interner);
+        for row_id in 0..self.row_count {
+            owned.push_id(&self.get_id(row_id).unwrap_or(Value::Null));
+            owned.push_title(&self.get_title(row_id).unwrap_or(Value::Null));
+            let properties = self.row_properties(row_id);
+            let new_row = owned.push_row(&properties);
+            if self
+                .tombstones
+                .get(row_id as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                owned.tombstone(new_row);
+            }
+        }
+        *self = owned;
+    }
+
     /// Number of live (non-tombstoned) rows.
     #[allow(dead_code)] // Test-only.
     pub fn live_count(&self) -> u32 {
@@ -1832,12 +1866,14 @@ impl ColumnStore {
         for (slot, ik) in self.schema.iter() {
             let col_name = interner.resolve(ik);
             let col = &self.columns[slot as usize];
-            if col.len() == 0 && self.row_count > 0 {
-                // Column is in schema but has no data. Write it as all-null
-                // with the correct row_count so load_packed can deserialize it.
-                let mut padded = TypedColumn::Mixed { data: Vec::new() };
-                for _ in 0..self.row_count {
-                    let _ = padded.push(&Value::Null);
+            if col.len() < self.row_count as usize {
+                // Schema growth and mmap-to-owned mutation can leave a typed
+                // column shorter than the store. Persist a dense, null-padded
+                // view; otherwise the framed row_count makes reload over-read
+                // the shorter blob and reject the newly published generation.
+                let mut padded = col.clone();
+                while padded.len() < self.row_count as usize {
+                    padded.push_null();
                 }
                 Self::write_packed_column(&mut buf, col_name, &padded)?;
             } else {
@@ -1847,10 +1883,18 @@ impl ColumnStore {
 
         // Write id/title columns with reserved names
         if let Some(ref col) = self.id_column {
-            Self::write_packed_column(&mut buf, "__id__", col)?;
+            let mut padded = col.clone();
+            while padded.len() < self.row_count as usize {
+                padded.push_null();
+            }
+            Self::write_packed_column(&mut buf, "__id__", &padded)?;
         }
         if let Some(ref col) = self.title_column {
-            Self::write_packed_column(&mut buf, "__title__", col)?;
+            let mut padded = col.clone();
+            while padded.len() < self.row_count as usize {
+                padded.push_null();
+            }
+            Self::write_packed_column(&mut buf, "__title__", &padded)?;
         }
 
         // Write overflow bag as two pseudo-columns
@@ -2013,6 +2057,28 @@ impl ColumnStore {
         row_count: u32,
         temp_dir: Option<&Path>,
     ) -> io::Result<Self> {
+        Self::load_packed_inner(schema, type_meta, interner, packed, row_count, temp_dir).map_err(
+            |error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    error
+                } else {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid packed column store: {error}"),
+                    )
+                }
+            },
+        )
+    }
+
+    fn load_packed_inner(
+        schema: Arc<TypeSchema>,
+        type_meta: &HashMap<String, String>,
+        interner: &StringInterner,
+        packed: &[u8],
+        row_count: u32,
+        temp_dir: Option<&Path>,
+    ) -> io::Result<Self> {
         use std::io::Read;
 
         let mut store = ColumnStore::new(Arc::clone(&schema), type_meta, interner);
@@ -2025,6 +2091,12 @@ impl ColumnStore {
         let mut u32_buf = [0u8; 4];
         cursor.read_exact(&mut u32_buf)?;
         let num_cols = u32::from_le_bytes(u32_buf);
+        if num_cols > 1_000_000 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "packed column store declares too many columns",
+            ));
+        }
 
         for _ in 0..num_cols {
             // Column name
@@ -2033,34 +2105,58 @@ impl ColumnStore {
             let name_len = u16::from_le_bytes(u16_buf) as usize;
             let mut name_bytes = vec![0u8; name_len];
             cursor.read_exact(&mut name_bytes)?;
-            let col_name = String::from_utf8(name_bytes)
-                .map_err(|e| io::Error::other(format!("invalid column name: {}", e)))?;
+            let col_name = String::from_utf8(name_bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid column name: {e}"),
+                )
+            })?;
 
             // Type tag
             cursor.read_exact(&mut u16_buf)?;
             let tag_len = u16::from_le_bytes(u16_buf) as usize;
             let mut tag_bytes = vec![0u8; tag_len];
             cursor.read_exact(&mut tag_bytes)?;
-            let type_tag = String::from_utf8(tag_bytes)
-                .map_err(|e| io::Error::other(format!("invalid type tag: {}", e)))?;
+            let type_tag = String::from_utf8(tag_bytes).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid type tag: {e}"))
+            })?;
 
             // Data blob
             let mut u64_buf = [0u8; 8];
             cursor.read_exact(&mut u64_buf)?;
-            let data_len = u64::from_le_bytes(u64_buf) as usize;
-            let mut data_blob = vec![0u8; data_len];
-            cursor.read_exact(&mut data_blob)?;
+            let data_len = usize::try_from(u64::from_le_bytes(u64_buf)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packed column length exceeds usize",
+                )
+            })?;
+            let data_start = usize::try_from(cursor.position()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packed column offset exceeds usize",
+                )
+            })?;
+            let data_end = data_start.checked_add(data_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "packed column offset overflow")
+            })?;
+            let data_blob = packed.get(data_start..data_end).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("packed column '{col_name}' is truncated"),
+                )
+            })?;
+            cursor.set_position(data_end as u64);
 
             // Check for special id/title columns first
             if col_name == "__id__" {
                 let col =
-                    Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+                    Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
                 store.id_column = Some(col);
                 continue;
             }
             if col_name == "__title__" {
                 let col =
-                    Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+                    Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
                 store.title_column = Some(col);
                 continue;
             }
@@ -2069,7 +2165,7 @@ impl ColumnStore {
             if col_name == "__overflow_offsets__" {
                 let num_offsets = data_blob.len() / std::mem::size_of::<u64>();
                 let offsets = Self::load_typed_vec::<u64>(
-                    &data_blob,
+                    data_blob,
                     num_offsets,
                     temp_dir,
                     &col_name,
@@ -2079,7 +2175,7 @@ impl ColumnStore {
                 continue;
             }
             if col_name == "__overflow_data__" {
-                let data = Self::load_bytes(&data_blob, temp_dir, &col_name, "dat")?;
+                let data = Self::load_bytes(data_blob, temp_dir, &col_name, "dat")?;
                 store.overflow_data = Some(data);
                 continue;
             }
@@ -2092,7 +2188,7 @@ impl ColumnStore {
             };
 
             // Build the TypedColumn from the data blob
-            let col = Self::unpack_column(&type_tag, &data_blob, row_count, temp_dir, &col_name)?;
+            let col = Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
 
             if slot < store.columns.len() {
                 store.columns[slot] = col;
@@ -2214,34 +2310,75 @@ impl ColumnStore {
             }
             "string" => {
                 // offsets: (rc+1) * u64, then str_data, then nulls: rc * u8
-                let offsets_size = (rc + 1) * std::mem::size_of::<u64>();
+                let offsets_size = rc
+                    .checked_add(1)
+                    .and_then(|count| count.checked_mul(std::mem::size_of::<u64>()))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "string offset size overflow")
+                    })?;
                 if data_blob.len() < offsets_size {
-                    return Err(io::Error::other(format!(
-                        "column '{}' (string): blob too small for offsets ({} < {})",
-                        col_name,
-                        data_blob.len(),
-                        offsets_size
-                    )));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "column '{}' (string): blob too small for offsets ({} < {})",
+                            col_name,
+                            data_blob.len(),
+                            offsets_size
+                        ),
+                    ));
                 }
                 let offsets_bytes = &data_blob[..offsets_size];
                 let rest = &data_blob[offsets_size..];
 
                 // Determine string data length from last offset
-                let last_offset = u64::from_le_bytes(
+                let last_offset_u64 = u64::from_le_bytes(
                     offsets_bytes[offsets_size - 8..offsets_size]
                         .try_into()
                         .unwrap(),
-                ) as usize;
+                );
+                let last_offset = usize::try_from(last_offset_u64).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("column '{col_name}' string data length exceeds usize"),
+                    )
+                })?;
                 let null_size = rc;
 
-                if rest.len() < last_offset + null_size {
-                    return Err(io::Error::other(format!(
-                        "column '{}' (string): blob too small for data+nulls",
-                        col_name
-                    )));
+                let expected_rest = last_offset.checked_add(null_size).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "string data size overflow")
+                })?;
+                if rest.len() != expected_rest {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "column '{col_name}' (string): data+nulls has {} bytes; expected {expected_rest}",
+                            rest.len()
+                        ),
+                    ));
                 }
                 let str_bytes = &rest[..last_offset];
                 let null_bytes = &rest[last_offset..last_offset + null_size];
+
+                let mut previous = 0u64;
+                for (index, chunk) in offsets_bytes.chunks_exact(8).enumerate() {
+                    let offset = u64::from_le_bytes(chunk.try_into().unwrap());
+                    if (index == 0 && offset != 0) || offset < previous || offset > last_offset_u64
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "column '{col_name}' has invalid string offset at index {index}"
+                            ),
+                        ));
+                    }
+                    previous = offset;
+                }
+                std::str::from_utf8(str_bytes).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("column '{col_name}' contains invalid UTF-8: {e}"),
+                    )
+                })?;
 
                 let offsets =
                     Self::load_typed_vec::<u64>(offsets_bytes, rc + 1, temp_dir, col_name, "off")?;
@@ -2265,34 +2402,45 @@ impl ColumnStore {
     }
 
     /// Load raw bytes into a MmapOrVec<T>, optionally via temp file + mmap.
-    fn load_typed_vec<T: Copy + Default + 'static>(
+    fn load_typed_vec<T: PackedElement>(
         bytes: &[u8],
         len: usize,
         temp_dir: Option<&Path>,
         col_name: &str,
         ext: &str,
     ) -> io::Result<MmapOrVec<T>> {
-        // Skip mmap for small columns — file I/O overhead exceeds memory savings
+        let expected = len.checked_mul(T::WIDTH).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("packed column '{col_name}.{ext}' size overflows usize"),
+            )
+        })?;
+        if bytes.len() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "packed column '{col_name}.{ext}' has {} bytes; expected {expected}",
+                    bytes.len()
+                ),
+            ));
+        }
+
+        // Skip mmap for small columns — file I/O overhead exceeds memory savings.
         if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
-            let path = dir.join(format!("{col_name}.{ext}"));
-            std::fs::write(&path, bytes)?;
-            MmapOrVec::load_mapped(&path, len)
+            let file_id = NEXT_TEMP_COLUMN_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("column_{file_id}.{ext}"));
+            if cfg!(target_endian = "little") {
+                std::fs::write(&path, bytes)?;
+                MmapOrVec::load_mapped(&path, len)
+            } else {
+                let mut data = MmapOrVec::mapped_prefilled(&path, len)?;
+                for (index, chunk) in bytes.chunks_exact(T::WIDTH).enumerate() {
+                    data.set(index, T::decode_le(chunk));
+                }
+                Ok(data)
+            }
         } else {
-            // Load into heap
-            let elem_size = std::mem::size_of::<T>();
-            if elem_size == 0 {
-                return Ok(MmapOrVec::new());
-            }
-            let mut data = Vec::with_capacity(len);
-            for i in 0..len {
-                let offset = i * elem_size;
-                // SAFETY: `bytes.len() >= len * elem_size` (caller contract
-                // in the .kgl v3 packed-column reader); `T: Copy+Default`
-                // has no drop glue and no alignment requirement stronger
-                // than the natural `elem_size` offset.
-                let val = unsafe { std::ptr::read(bytes.as_ptr().add(offset) as *const T) };
-                data.push(val);
-            }
+            let data = bytes.chunks_exact(T::WIDTH).map(T::decode_le).collect();
             Ok(MmapOrVec::Heap { data })
         }
     }
@@ -2301,12 +2449,13 @@ impl ColumnStore {
     fn load_bytes(
         bytes: &[u8],
         temp_dir: Option<&Path>,
-        col_name: &str,
+        _col_name: &str,
         ext: &str,
     ) -> io::Result<MmapBytes> {
         // Skip mmap for small data — file I/O overhead exceeds memory savings
         if let Some(dir) = temp_dir.filter(|_| bytes.len() >= MMAP_THRESHOLD) {
-            let path = dir.join(format!("{col_name}.{ext}"));
+            let file_id = NEXT_TEMP_COLUMN_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("column_{file_id}.{ext}"));
             std::fs::write(&path, bytes)?;
             MmapBytes::load_mapped(&path, bytes.len())
         } else {
@@ -2323,13 +2472,16 @@ impl ColumnStore {
         col_name: &str,
     ) -> io::Result<()> {
         if blob.len() < expected {
-            Err(io::Error::other(format!(
-                "column '{}' ({}): blob too small ({} < {})",
-                col_name,
-                type_tag,
-                blob.len(),
-                expected
-            )))
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "column '{}' ({}): blob too small ({} < {})",
+                    col_name,
+                    type_tag,
+                    blob.len(),
+                    expected
+                ),
+            ))
         } else {
             Ok(())
         }

@@ -191,6 +191,44 @@ pub fn extend_graph(
         }
     }
 
+    // Validate the complete merge vocabulary before the first routed write.
+    // Per-group validation inside add_nodes/add_connections is too late here:
+    // a collision in a later node/edge group would otherwise leave earlier
+    // groups committed to the target.
+    let mut incoming_names = vec![
+        "id".to_string(),
+        "title".to_string(),
+        "src_id".to_string(),
+        "tgt_id".to_string(),
+        "__provisional__".to_string(),
+        "updated_at".to_string(),
+    ];
+    for (node_type, group) in &node_groups {
+        incoming_names.push(node_type.clone());
+        incoming_names.extend(group.columns.iter().cloned());
+    }
+    for (_, _, labels) in &label_carriers {
+        incoming_names.extend(labels.iter().cloned());
+    }
+    for edge_idx in source.graph.edge_indices() {
+        let Some(edge) = source.graph.edge_weight(edge_idx) else {
+            continue;
+        };
+        incoming_names.push(edge.connection_type_str(&source.interner).to_string());
+        incoming_names.extend(edge.properties_cloned(&source.interner).into_keys());
+        if let Some((src_idx, tgt_idx)) = source.graph.edge_endpoints(edge_idx) {
+            for idx in [src_idx, tgt_idx] {
+                if let Some(node) = source.graph.node_weight(idx) {
+                    incoming_names.push(node.node_type_str(&source.interner).to_string());
+                }
+            }
+        }
+    }
+    target
+        .interner
+        .validate_names(incoming_names.iter().map(String::as_str))
+        .map_err(|err| err.to_string())?;
+
     // ---- Pass 2: route each node group through add_nodes ----
     let mut report = ExtendReport {
         nodes_created: 0,
@@ -377,4 +415,62 @@ fn build_edge_dataframe(group: &EdgeGroup) -> Result<DataFrame, String> {
         .collect();
 
     DataFrame::from_cypher_rows(columns, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::schema::InternedKey;
+
+    #[test]
+    fn collision_preflight_keeps_extend_target_unchanged() {
+        let mut source = DirGraph::new();
+        let frame = DataFrame::from_cypher_rows(
+            vec!["id".into(), "title".into(), "late_collision".into()],
+            vec![vec![
+                Value::Int64(1),
+                Value::String("one".into()),
+                Value::Int64(7),
+            ]],
+        )
+        .unwrap();
+        add_nodes(
+            &mut source,
+            frame,
+            "SourceNode".into(),
+            "id".into(),
+            Some("title".into()),
+            None,
+        )
+        .unwrap();
+
+        let mut target = DirGraph::new();
+        target
+            .interner
+            .try_register(
+                InternedKey::from_str("late_collision"),
+                "conflicting-existing-name",
+            )
+            .unwrap();
+        let version_before = target.version;
+        let interner_before: Vec<_> = target
+            .interner
+            .iter()
+            .map(|(key, name)| (key, name.to_string()))
+            .collect();
+
+        let error = extend_graph(&mut target, &source, None).unwrap_err();
+        assert!(error.contains("hash collision"));
+        assert_eq!(target.graph.node_count(), 0);
+        assert_eq!(target.version, version_before);
+        assert!(target.type_indices.is_empty());
+        assert_eq!(
+            target
+                .interner
+                .iter()
+                .map(|(key, name)| (key, name.to_string()))
+                .collect::<Vec<_>>(),
+            interner_before
+        );
+    }
 }

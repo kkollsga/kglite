@@ -129,7 +129,7 @@ pub mod api {
     /// doing low-level direct graph access bridge string keys ↔ interned
     /// ids via `InternedKey::from_str(..)` / `.as_u64()`. Lifted in roadmap
     /// Piece 2 / Piece 3 cleanup.
-    pub use crate::graph::storage::interner::{InternedKey, StringInterner};
+    pub use crate::graph::storage::interner::{InternedKey, InternerCollision, StringInterner};
     /// The canonical graph read trait — node/edge/property accessors
     /// shared by every storage backend. Non-object-safe (GATs on the
     /// iterator-returning methods), so consumers take `&impl GraphRead`,

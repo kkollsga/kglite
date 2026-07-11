@@ -11,6 +11,7 @@ pub mod builder;
 pub mod csr;
 pub mod csr_build;
 pub mod edge_properties;
+pub mod generation;
 pub mod graph;
 pub mod graph_persist;
 pub mod graph_property_index;

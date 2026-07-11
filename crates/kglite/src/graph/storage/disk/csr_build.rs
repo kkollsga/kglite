@@ -89,11 +89,10 @@ pub(super) fn build_csr_files(
     tmp_dir: &Path,
     config: &BuilderConfig,
     verbose: bool,
-) -> CsrArtifacts {
+) -> std::io::Result<CsrArtifacts> {
     // ── Step 1: edge_endpoints + degree counts (single sequential scan) ──
     let step = std::time::Instant::now();
-    let mut edge_endpoints = MmapOrVec::mapped(&build_dir.join("edge_endpoints.bin"), edge_count)
-        .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+    let mut edge_endpoints = MmapOrVec::mapped(&build_dir.join("edge_endpoints.bin"), edge_count)?;
     let mut out_counts = vec![0u64; node_bound];
     let mut in_counts = vec![0u64; node_bound];
     let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
@@ -122,11 +121,9 @@ pub(super) fn build_csr_files(
     // ── Step 2: prefix-sum offsets (mmap-backed, ~2 GB heap savings at scale) ──
     let step = std::time::Instant::now();
     let mut out_offsets: MmapOrVec<u64> =
-        MmapOrVec::mapped(&build_dir.join("out_offsets.bin"), node_bound + 1)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+        MmapOrVec::mapped(&build_dir.join("out_offsets.bin"), node_bound + 1)?;
     let mut in_offsets: MmapOrVec<u64> =
-        MmapOrVec::mapped(&build_dir.join("in_offsets.bin"), node_bound + 1)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+        MmapOrVec::mapped(&build_dir.join("in_offsets.bin"), node_bound + 1)?;
     let mut out_acc = 0u64;
     let mut in_acc = 0u64;
     for i in 0..node_bound {
@@ -150,7 +147,7 @@ pub(super) fn build_csr_files(
     let step = std::time::Instant::now();
     let out_edges = merge_sort_build(
         pending, edge_count, true, tmp_dir, build_dir, "out", config, verbose,
-    );
+    )?;
     if verbose {
         eprintln!(
             "    CSR step 3/4: out_edges merge sort ({:.1}s)",
@@ -162,7 +159,7 @@ pub(super) fn build_csr_files(
     let step = std::time::Instant::now();
     let in_edges = merge_sort_build(
         pending, edge_count, false, tmp_dir, build_dir, "in", config, verbose,
-    );
+    )?;
     if verbose {
         eprintln!(
             "    CSR step 4/4: in_edges merge sort ({:.1}s)",
@@ -170,14 +167,14 @@ pub(super) fn build_csr_files(
         );
     }
 
-    CsrArtifacts {
+    Ok(CsrArtifacts {
         edge_endpoints,
         out_offsets,
         in_offsets,
         out_edges,
         in_edges,
         edge_type_counts,
-    }
+    })
 }
 
 /// External merge sort: read `pending` in chunks, sort each chunk in
@@ -195,7 +192,7 @@ fn merge_sort_build(
     label: &str,
     config: &BuilderConfig,
     verbose: bool,
-) -> MmapOrVec<CsrEdge> {
+) -> std::io::Result<MmapOrVec<CsrEdge>> {
     // Resolve chunking. `force_chunks` wins; otherwise `chunk_mb_override`
     // determines max bytes per chunk; otherwise 12 GB (matches the existing
     // env-var default so behaviour-when-unset is byte-equal).
@@ -234,8 +231,7 @@ fn merge_sort_build(
         entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
         let mut output =
-            MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+            MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)?;
         for entry in &entries {
             output.push(CsrEdge {
                 peer: entry.peer,
@@ -249,7 +245,7 @@ fn merge_sort_build(
                 step.elapsed().as_secs_f64()
             );
         }
-        return output;
+        return Ok(output);
     }
 
     // ── Multi-chunk path: external merge sort ──
@@ -277,8 +273,7 @@ fn merge_sort_build(
         chunk.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
         let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
-        let mut mmap: MmapOrVec<MergeSortEntry> =
-            MmapOrVec::mapped(&path, len).unwrap_or_else(|_| MmapOrVec::with_capacity(len));
+        let mut mmap: MmapOrVec<MergeSortEntry> = MmapOrVec::mapped(&path, len)?;
         for entry in &chunk {
             mmap.push(*entry);
         }
@@ -297,8 +292,7 @@ fn merge_sort_build(
     let merge_start = std::time::Instant::now();
     let mut positions: Vec<usize> = vec![0; num_chunks];
     let mut output =
-        MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)?;
 
     use std::cmp::Reverse;
     let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
@@ -337,5 +331,5 @@ fn merge_sort_build(
             merge_start.elapsed().as_secs_f64()
         );
     }
-    output
+    Ok(output)
 }

@@ -204,7 +204,6 @@ typedef enum KgliteStatusCode {
     // 100+: C-ABI-specific errors not in KgErrorCode
     KGLITE_ERR_INVALID_UTF8 = 100,
     KGLITE_ERR_NULL_POINTER = 101,
-    KGLITE_ERR_OUT_OF_MEMORY = 102,
 } KgliteStatusCode;
 ```
 
@@ -239,8 +238,24 @@ if (rc != KGLITE_OK) {
 kglite_cypher_result_free(result);
 ```
 
-The `out_error_msg` is set only on failure; `out_result` is set
-only on success.
+Every writable output slot is initialized before input validation: owned
+handles/strings become `NULL`, lengths/counts become zero, and the optional
+`out_error_msg` becomes `NULL`. On success, result slots receive their owned
+values. Engine failures normally set owned error text; boundary-only validation
+codes such as invalid UTF-8 may leave the initialized error slot null.
+
+All exports contain Rust panics raised by otherwise valid calls. A panic in a
+status-returning function becomes `KGLITE_STATUS_CODE_INTERNAL` and, when the
+function has an `out_error_msg` slot, an owned diagnostic string. Direct value
+accessors return their documented null/zero fallback and destructor-style
+functions return without unwinding into the host. This does not make invalid,
+dangling, or incorrectly typed caller pointers safe; those remain outside the
+C ABI contract.
+
+The three `kglite_status_code_*` accessors likewise require a declared
+`KgliteStatusCode` value, not an arbitrary integer cast to the enum. Supplying
+an invalid enum discriminant is an invalid C call and cannot be repaired by a
+Rust panic guard without changing the ABI signature.
 
 Status codes 1-16 match `KgErrorCode` variants 1:1 (in declaration
 order). Helper for bindings that want to map status code back to

@@ -852,7 +852,7 @@ impl GraphRead for DiskGraph {
         &'a self,
     ) -> Box<dyn Iterator<Item = (NodeIndex, NodeIndex, InternedKey)> + 'a> {
         Box::new((0..self.next_edge_idx).filter_map(move |i| {
-            let ep = self.edge_endpoints.get(i as usize);
+            let ep = self.edge_endpoint(i as usize);
             if ep.source == TOMBSTONE_EDGE {
                 return None;
             }

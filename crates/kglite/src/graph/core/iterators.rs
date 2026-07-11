@@ -7,7 +7,7 @@
 // that trait can call .source(), .target(), .weight(), .id() unchanged.
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
-use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
+use crate::graph::storage::disk::csr::{CsrEdge, TOMBSTONE_EDGE};
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -21,7 +21,7 @@ use petgraph::Direction;
 /// Skips tombstoned edges during the search.
 pub(crate) fn binary_search_conn_type(
     edges: &MmapOrVec<CsrEdge>,
-    endpoints: &MmapOrVec<EdgeEndpoints>,
+    graph: &DiskGraph,
     start: usize,
     end: usize,
     target_ct: u64,
@@ -33,10 +33,10 @@ pub(crate) fn binary_search_conn_type(
     // Helper: get connection_type for edge at position i
     let ct_at = |i: usize| -> u64 {
         let e = edges.get(i);
-        if e.edge_idx == TOMBSTONE_EDGE {
+        if e.edge_idx == TOMBSTONE_EDGE || !graph.edge_is_alive(e.edge_idx) {
             return u64::MAX; // tombstones sort to end
         }
-        endpoints.get(e.edge_idx as usize).connection_type
+        graph.edge_endpoint(e.edge_idx as usize).connection_type
     };
 
     // Lower bound: first edge with ct >= target_ct
@@ -209,19 +209,15 @@ pub enum GraphNodeIndices<'a> {
 
 /// Iterates alive node slots in the DiskGraph's mmap'd node_slots array.
 pub struct DiskNodeIndices<'a> {
-    node_slots: &'a MmapOrVec<DiskNodeSlot>,
+    graph: &'a DiskGraph,
     pos: usize,
     len: usize,
 }
 
 impl<'a> DiskNodeIndices<'a> {
-    pub fn new(node_slots: &'a MmapOrVec<DiskNodeSlot>) -> Self {
-        let len = node_slots.len();
-        DiskNodeIndices {
-            node_slots,
-            pos: 0,
-            len,
-        }
+    pub fn new(graph: &'a DiskGraph) -> Self {
+        let len = graph.node_slot_len();
+        DiskNodeIndices { graph, pos: 0, len }
     }
 }
 
@@ -231,7 +227,7 @@ impl<'a> Iterator for DiskNodeIndices<'a> {
         while self.pos < self.len {
             let i = self.pos;
             self.pos += 1;
-            if self.node_slots.get(i).is_alive() {
+            if self.graph.node_slot(i).is_alive() {
                 return Some(NodeIndex::new(i));
             }
         }
@@ -325,13 +321,8 @@ impl<'a> DiskEdges<'a> {
         // Binary search to narrow range when CSR edges are sorted by type
         if self.graph.csr_sorted_by_type {
             if let Some(edges) = self.csr_edges {
-                let (lo, hi) = binary_search_conn_type(
-                    edges,
-                    &self.graph.edge_endpoints,
-                    self.csr_start,
-                    self.csr_end,
-                    ct,
-                );
+                let (lo, hi) =
+                    binary_search_conn_type(edges, self.graph, self.csr_start, self.csr_end, ct);
                 self.csr_start = lo;
                 self.csr_end = hi;
                 self.csr_pos = lo;
@@ -349,8 +340,7 @@ impl<'a> DiskEdges<'a> {
         // property clone + arena lock) until a caller calls `weight()`.
         let conn_type = InternedKey::from_u64(
             self.graph
-                .edge_endpoints
-                .get(csr.edge_idx as usize)
+                .edge_endpoint(csr.edge_idx as usize)
                 .connection_type,
         );
         let (src, tgt) = match self.direction {
@@ -376,13 +366,12 @@ impl<'a> Iterator for DiskEdges<'a> {
             while self.csr_pos < self.csr_end {
                 let e = edges.get(self.csr_pos);
                 self.csr_pos += 1;
-                if e.edge_idx != TOMBSTONE_EDGE {
+                if e.edge_idx != TOMBSTONE_EDGE && self.graph.edge_is_alive(e.edge_idx) {
                     // Pre-filter by connection type before materializing
                     if let Some(ct) = self.conn_type_filter {
                         if self
                             .graph
-                            .edge_endpoints
-                            .get(e.edge_idx as usize)
+                            .edge_endpoint(e.edge_idx as usize)
                             .connection_type
                             != ct
                         {
@@ -398,12 +387,11 @@ impl<'a> Iterator for DiskEdges<'a> {
             while self.overflow_pos < overflow.len() {
                 let e = &overflow[self.overflow_pos];
                 self.overflow_pos += 1;
-                if e.edge_idx != TOMBSTONE_EDGE {
+                if e.edge_idx != TOMBSTONE_EDGE && self.graph.edge_is_alive(e.edge_idx) {
                     if let Some(ct) = self.conn_type_filter {
                         if self
                             .graph
-                            .edge_endpoints
-                            .get(e.edge_idx as usize)
+                            .edge_endpoint(e.edge_idx as usize)
                             .connection_type
                             != ct
                         {
@@ -481,7 +469,7 @@ impl<'a> Iterator for DiskEdgeReferences<'a> {
         while self.pos < self.total {
             let i = self.pos;
             self.pos += 1;
-            let ep = self.graph.edge_endpoints.get(i as usize);
+            let ep = self.graph.edge_endpoint(i as usize);
             if ep.source != TOMBSTONE_EDGE {
                 // Lazy: carry the cheap connection type from the endpoint table;
                 // defer EdgeData materialisation until `weight()` is called.
@@ -523,18 +511,15 @@ pub enum GraphEdgeIndices<'a> {
 
 /// Iterates valid edge indices by scanning edge_endpoints for non-tombstones.
 pub struct DiskEdgeIndices<'a> {
-    endpoints: &'a MmapOrVec<crate::graph::storage::disk::csr::EdgeEndpoints>,
+    graph: &'a DiskGraph,
     pos: u32,
     total: u32,
 }
 
 impl<'a> DiskEdgeIndices<'a> {
-    pub fn new(
-        total: u32,
-        endpoints: &'a MmapOrVec<crate::graph::storage::disk::csr::EdgeEndpoints>,
-    ) -> Self {
+    pub fn new(total: u32, graph: &'a DiskGraph) -> Self {
         DiskEdgeIndices {
-            endpoints,
+            graph,
             pos: 0,
             total,
         }
@@ -547,7 +532,7 @@ impl<'a> Iterator for DiskEdgeIndices<'a> {
         while self.pos < self.total {
             let i = self.pos;
             self.pos += 1;
-            let ep = self.endpoints.get(i as usize);
+            let ep = self.graph.edge_endpoint(i as usize);
             if ep.source != TOMBSTONE_EDGE {
                 return Some(EdgeIndex::new(i as usize));
             }

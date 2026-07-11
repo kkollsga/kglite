@@ -804,6 +804,7 @@ impl CypherParser {
             explain: false,
             profile: false,
             output_format: OutputFormat::Default,
+            optimizer_tags: Vec::new(),
         });
 
         Ok(Clause::CallSubquery { import, body })

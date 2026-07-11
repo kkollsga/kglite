@@ -151,7 +151,7 @@ target_id_field`), the keyword surface:
 
 | Parameter | Purpose |
 |---|---|
-| `columns=[...]` | Whitelist DataFrame columns to attach as edge properties. |
+| `columns=[...]` | Optional whitelist of edge-property columns; omitted keeps all non-skipped columns. |
 | `skip_columns=[...]` | Inverse: drop these columns. |
 | `conflict_handling='update'` | What to do when an edge with the same endpoints already exists. Same modes as `add_nodes`. |
 | `query=...` | Alternative to `data=df`: a Cypher query whose `RETURN` columns supply the source/target ids. Lets you stamp edges from results of a query. |

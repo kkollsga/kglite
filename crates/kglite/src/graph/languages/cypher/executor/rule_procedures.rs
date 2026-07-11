@@ -9,8 +9,9 @@
 //! does for `pagerank`.
 //!
 //! Naming follows the existing flat-name convention (`pagerank`,
-//! `cluster`, `connected_components`); rule procedures are dispatched
-//! by the `match` statement in `call_clause::execute_call`.
+//! `cluster`, `connected_components`); this module owns their family
+//! dispatcher while `call_clause::execute_call` remains the shared CALL
+//! validation and budget choke point.
 
 use std::collections::HashMap;
 
@@ -23,6 +24,35 @@ use crate::datatypes::values::Value;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
+
+/// Dispatch a structural-rule procedure after the CALL clause has completed
+/// shared name/YIELD/parameter validation.
+pub(super) fn execute_rule_procedure(
+    proc_name: &str,
+    graph: &DirGraph,
+    params: &HashMap<String, Value>,
+    yield_items: &[YieldItem],
+) -> Result<Vec<ResultRow>, String> {
+    match proc_name {
+        "orphan_node" => execute_orphan_node(graph, params, yield_items),
+        "self_loop" => execute_self_loop(graph, params, yield_items),
+        "cycle_2step" => execute_cycle_2step(graph, params, yield_items),
+        "missing_required_edge" => execute_missing_required_edge(graph, params, yield_items),
+        "missing_inbound_edge" => execute_missing_inbound_edge(graph, params, yield_items),
+        "duplicate_title" => execute_duplicate_title(graph, params, yield_items),
+        "duplicate_id" => execute_duplicate_id(graph, params, yield_items),
+        "outline" => execute_outline(graph, params, yield_items),
+        "null_property" => execute_null_property(graph, params, yield_items),
+        "inverse_violation" => execute_inverse_violation(graph, params, yield_items),
+        "transitivity_violation" => execute_transitivity_violation(graph, params, yield_items),
+        "cardinality_violation" => execute_cardinality_violation(graph, params, yield_items),
+        "type_domain_violation" => execute_type_domain_violation(graph, params, yield_items),
+        "type_range_violation" => execute_type_range_violation(graph, params, yield_items),
+        "parallel_edges" => execute_parallel_edges(graph, params, yield_items),
+        "kg_knn" => execute_kg_knn(graph, params, yield_items),
+        _ => unreachable!("non-rule procedure routed to rule dispatcher: {proc_name}"),
+    }
+}
 
 /// `CALL orphan_node({type, link_type?, direction?}) YIELD node`
 ///

@@ -13,6 +13,9 @@ on:
       - '**.md'
       - 'LICENSE'
       - 'docs/**'
+  schedule:
+    # Heavy race/stress verification stays off the per-PR critical path.
+    - cron: '23 3 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
@@ -401,6 +404,118 @@ jobs:
             exit 1
           fi
 
+  storage-parity:
+    name: Cross-storage parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: storage-parity
+          workspaces: ". -> target"
+      - name: Build test extension
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          .venv/bin/pip install maturin pytest pandas
+          .venv/bin/maturin develop --release
+      - name: Run bounded memory/mapped/disk parity matrix
+        run: |
+          .venv/bin/pytest -m parity -v --tb=short \
+            tests/test_storage_parity.py \
+            tests/test_phase1_parity.py tests/test_phase2_parity.py \
+            tests/test_phase3_parity.py tests/test_phase4_parity.py
+
+  disk-concurrency:
+    name: Disk concurrency regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: disk-concurrency
+          workspaces: ". -> target"
+      - name: Build test extension
+        run: |
+          python -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          .venv/bin/pip install maturin pytest pandas
+          .venv/bin/maturin develop --release
+      - name: Run bounded disk ownership and arena regressions
+        run: |
+          .venv/bin/pytest -v --tb=short \
+            tests/test_concurrency.py::TestConcurrentReads::test_concurrent_disk_reads_keep_materialized_nodes_alive \
+            tests/test_disk_mutation_roundtrip.py::test_disk_writer_lease_is_enforced_across_processes \
+            tests/test_disk_mutation_roundtrip.py::test_disk_parallel_projection_node_weight_is_race_free \
+            tests/test_disk_mutation_roundtrip.py::test_disk_parallel_projection_no_interner_corruption \
+            tests/test_session.py::test_disk_session_reuses_writer_lineage_and_composes
+
+  loom-session:
+    name: Loom Session model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: loom-session
+          workspaces: ". -> target"
+      - name: Explore Session lock interleavings
+        run: RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session
+
+  miri-loaders:
+    name: Miri unsafe loader checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Prepare Miri
+        run: cargo miri setup
+      - name: Check packed decoding and N-Triples parsing
+        run: |
+          cargo miri test -p kglite --lib packed_primitives_decode_from_misaligned_little_endian_bytes
+          cargo miri test -p kglite --lib parse_line_borrowed_uri_boundaries_are_valid
+          cargo miri test -p kglite --lib parse_line_preserves_utf8_literal_boundaries
+
+  address-sanitizer:
+    name: AddressSanitizer disk arenas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Check packed decoding and arena lifetimes
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+        run: |
+          cargo test -p kglite --lib --target x86_64-unknown-linux-gnu packed_primitives_decode_from_misaligned_little_endian_bytes
+          cargo test -p kglite --lib --target x86_64-unknown-linux-gnu overlapping_query_guards_keep_materializations_alive
+
+  scheduled-thread-sanitizer:
+    name: Scheduled ThreadSanitizer Session checks
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Run Session and disk concurrency models under TSan
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+        run: cargo test -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+
   ci-success:
     name: CI success
     # Single aggregate gate the publish workflows wait on. It fails if ANY CI
@@ -419,6 +534,12 @@ jobs:
       - free-threading
       - perf-regression
       - public-api
+      - storage-parity
+      - disk-concurrency
+      - loom-session
+      - miri-loaders
+      - address-sanitizer
+      - scheduled-thread-sanitizer
     if: always()
     runs-on: ubuntu-latest
     steps:

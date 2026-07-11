@@ -92,7 +92,9 @@ impl GraphState {
 /// ownership. Returns null only on allocation failure.
 #[no_mangle]
 pub extern "C" fn kglite_graph_new() -> *mut KgliteGraph {
-    GraphState::into_handle(Arc::new(DirGraph::new()))
+    crate::ffi::value_boundary(std::ptr::null_mut(), || {
+        GraphState::into_handle(Arc::new(DirGraph::new()))
+    })
 }
 
 /// Create a fresh, empty knowledge graph in an explicit storage mode.
@@ -139,53 +141,56 @@ pub unsafe extern "C" fn kglite_graph_new_in_mode(
     out_graph: *mut *mut KgliteGraph,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if mode.is_null() || out_graph.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    unsafe {
-        *out_graph = std::ptr::null_mut();
-    }
-    let mode_str = match unsafe { CStr::from_ptr(mode) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let path_opt: Option<&str> = if path.is_null() {
-        None
-    } else {
-        match unsafe { CStr::from_ptr(path) }.to_str() {
-            Ok(s) => Some(s),
-            Err(_) => return KgliteStatusCode::InvalidUtf8,
-        }
-    };
-
-    // Parse the mode separately so an unknown mode / missing disk path maps
-    // to InvalidArgument, while a genuine disk-create failure below is FileIo.
-    let sm = match StorageMode::parse(mode_str) {
-        Ok(m) => m,
-        Err(msg) => {
-            return fail_new_in_mode(KgliteStatusCode::InvalidArgument, &msg, out_error_msg)
-        }
-    };
-    if matches!(sm, StorageMode::Disk) && path_opt.is_none() {
-        return fail_new_in_mode(
-            KgliteStatusCode::InvalidArgument,
-            "storage mode 'disk' requires a directory path",
-            out_error_msg,
-        );
-    }
-
-    match new_dir_graph_in_mode(sm, path_opt.map(Path::new)) {
-        Ok(graph) => {
-            unsafe {
-                *out_graph = GraphState::into_handle(Arc::new(graph));
-                if !out_error_msg.is_null() {
-                    *out_error_msg = std::ptr::null();
-                }
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_graph, std::ptr::null_mut()),
+        || {
+            if mode.is_null() || out_graph.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => fail_new_in_mode(KgliteStatusCode::FileIo, &msg, out_error_msg),
-    }
+            let mode_str = match unsafe { CStr::from_ptr(mode) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let path_opt: Option<&str> = if path.is_null() {
+                None
+            } else {
+                match unsafe { CStr::from_ptr(path) }.to_str() {
+                    Ok(s) => Some(s),
+                    Err(_) => return KgliteStatusCode::InvalidUtf8,
+                }
+            };
+
+            // Parse the mode separately so an unknown mode / missing disk path maps
+            // to InvalidArgument, while a genuine disk-create failure below is FileIo.
+            let sm = match StorageMode::parse(mode_str) {
+                Ok(m) => m,
+                Err(msg) => {
+                    return fail_new_in_mode(KgliteStatusCode::InvalidArgument, &msg, out_error_msg)
+                }
+            };
+            if matches!(sm, StorageMode::Disk) && path_opt.is_none() {
+                return fail_new_in_mode(
+                    KgliteStatusCode::InvalidArgument,
+                    "storage mode 'disk' requires a directory path",
+                    out_error_msg,
+                );
+            }
+
+            match new_dir_graph_in_mode(sm, path_opt.map(Path::new)) {
+                Ok(graph) => {
+                    unsafe {
+                        *out_graph = GraphState::into_handle(Arc::new(graph));
+                        if !out_error_msg.is_null() {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => fail_new_in_mode(KgliteStatusCode::FileIo, &msg, out_error_msg),
+            }
+        },
+    )
 }
 
 /// Set the out-error string (when the slot is non-null) and return `code`.
@@ -241,38 +246,44 @@ pub unsafe extern "C" fn kglite_load_file(
     out_graph: *mut *mut KgliteGraph,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if path.is_null() || out_graph.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    match load_file(path_str) {
-        Ok(arc) => {
-            unsafe {
-                *out_graph = GraphState::into_handle(arc);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_graph, std::ptr::null_mut()),
+        || {
+            if path.is_null() || out_graph.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            match load_file(path_str) {
+                Ok(arc) => {
+                    unsafe {
+                        *out_graph = GraphState::into_handle(arc);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(io_err) => {
+                    unsafe {
+                        *out_graph = std::ptr::null_mut();
+                    }
+                    let (code, message) = classify_io_error(&io_err);
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&message);
+                        }
+                    }
+                    code
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(io_err) => {
-            unsafe {
-                *out_graph = std::ptr::null_mut();
-            }
-            let (code, message) = classify_io_error(&io_err);
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&message);
-                }
-            }
-            code
-        }
-    }
+        },
+    )
 }
 
 /// Map a `std::io::Error` from `load_file` to a `KgliteStatusCode`
@@ -347,120 +358,123 @@ pub unsafe extern "C" fn kglite_load_rdf(
     out_stats_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    use std::collections::HashSet;
-
-    if path.is_null() || out_graph.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    unsafe {
-        *out_graph = std::ptr::null_mut();
-        if !out_stats_json.is_null() {
-            *out_stats_json = std::ptr::null();
-        }
-    }
-
-    let set_err = |msg: &str| {
-        if !out_error_msg.is_null() {
-            unsafe {
-                *out_error_msg = alloc_c_string(msg);
-            }
-        }
-    };
-
-    // Borrow an optional, null-terminated UTF-8 argument. Returns
-    // `Err(())` on invalid UTF-8 so the caller can map to InvalidUtf8.
-    let cstr_opt = |p: *const c_char| -> Result<Option<&str>, ()> {
-        if p.is_null() {
-            Ok(None)
-        } else {
-            unsafe { CStr::from_ptr(p) }
-                .to_str()
-                .map(Some)
-                .map_err(|_| ())
-        }
-    };
-
-    let path_str = match cstr_opt(path) {
-        Ok(Some(s)) => s,
-        Ok(None) => unreachable!("path null-checked above"),
-        Err(()) => return KgliteStatusCode::InvalidUtf8,
-    };
-
-    // JSON-array args (the §7 JSON-at-boundary convention for nested shapes).
-    let languages = match cstr_opt(languages_json) {
-        Ok(None) => None,
-        Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
-            Ok(v) => Some(v.into_iter().collect::<HashSet<_>>()),
-            Err(e) => {
-                set_err(&format!(
-                    "languages_json must be a JSON array of strings: {e}"
-                ));
-                return KgliteStatusCode::InvalidArgument;
-            }
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {
+            crate::ffi::init_out(out_graph, std::ptr::null_mut());
+            crate::ffi::init_out(out_stats_json, std::ptr::null());
         },
-        Err(()) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let label_predicates = match cstr_opt(label_predicates_json) {
-        Ok(None) => vec!["http://www.w3.org/2000/01/rdf-schema#label".to_string()],
-        Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
-            Ok(v) => v,
-            Err(e) => {
-                set_err(&format!(
-                    "label_predicates_json must be a JSON array of strings: {e}"
-                ));
-                return KgliteStatusCode::InvalidArgument;
-            }
-        },
-        Err(()) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let default_type = match cstr_opt(default_type) {
-        Ok(Some(s)) => s.to_string(),
-        Ok(None) => "Resource".to_string(),
-        Err(()) => return KgliteStatusCode::InvalidUtf8,
-    };
+        || {
+            use std::collections::HashSet;
 
-    let config = RdfConfig {
-        languages,
-        label_predicates,
-        keep_full_iris: keep_full_iris != 0,
-        default_type,
-        max_triples: if max_triples < 0 {
-            None
-        } else {
-            Some(max_triples as u64)
-        },
-    };
-
-    let mut graph = DirGraph::new();
-    match core_load_rdf(&mut graph, path_str, &config) {
-        Ok(stats) => {
-            unsafe {
-                *out_graph = GraphState::into_handle(Arc::new(graph));
+            if path.is_null() || out_graph.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_stats_json.is_null() {
-                let json = serde_json::json!({
-                    "nodes": stats.nodes_created,
-                    "edges": stats.edges_created,
-                    "triples": stats.triples_processed,
-                })
-                .to_string();
-                unsafe {
-                    *out_stats_json = alloc_c_string(&json);
+
+            let set_err = |msg: &str| {
+                if !out_error_msg.is_null() {
+                    unsafe {
+                        *out_error_msg = alloc_c_string(msg);
+                    }
+                }
+            };
+
+            // Borrow an optional, null-terminated UTF-8 argument. Returns
+            // `Err(())` on invalid UTF-8 so the caller can map to InvalidUtf8.
+            let cstr_opt = |p: *const c_char| -> Result<Option<&str>, ()> {
+                if p.is_null() {
+                    Ok(None)
+                } else {
+                    unsafe { CStr::from_ptr(p) }
+                        .to_str()
+                        .map(Some)
+                        .map_err(|_| ())
+                }
+            };
+
+            let path_str = match cstr_opt(path) {
+                Ok(Some(s)) => s,
+                Ok(None) => unreachable!("path null-checked above"),
+                Err(()) => return KgliteStatusCode::InvalidUtf8,
+            };
+
+            // JSON-array args (the §7 JSON-at-boundary convention for nested shapes).
+            let languages = match cstr_opt(languages_json) {
+                Ok(None) => None,
+                Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
+                    Ok(v) => Some(v.into_iter().collect::<HashSet<_>>()),
+                    Err(e) => {
+                        set_err(&format!(
+                            "languages_json must be a JSON array of strings: {e}"
+                        ));
+                        return KgliteStatusCode::InvalidArgument;
+                    }
+                },
+                Err(()) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let label_predicates = match cstr_opt(label_predicates_json) {
+                Ok(None) => vec!["http://www.w3.org/2000/01/rdf-schema#label".to_string()],
+                Ok(Some(s)) => match serde_json::from_str::<Vec<String>>(s) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        set_err(&format!(
+                            "label_predicates_json must be a JSON array of strings: {e}"
+                        ));
+                        return KgliteStatusCode::InvalidArgument;
+                    }
+                },
+                Err(()) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let default_type = match cstr_opt(default_type) {
+                Ok(Some(s)) => s.to_string(),
+                Ok(None) => "Resource".to_string(),
+                Err(()) => return KgliteStatusCode::InvalidUtf8,
+            };
+
+            let config = RdfConfig {
+                languages,
+                label_predicates,
+                keep_full_iris: keep_full_iris != 0,
+                default_type,
+                max_triples: if max_triples < 0 {
+                    None
+                } else {
+                    Some(max_triples as u64)
+                },
+            };
+
+            let mut graph = DirGraph::new();
+            match core_load_rdf(&mut graph, path_str, &config) {
+                Ok(stats) => {
+                    unsafe {
+                        *out_graph = GraphState::into_handle(Arc::new(graph));
+                    }
+                    if !out_stats_json.is_null() {
+                        let json = serde_json::json!({
+                            "nodes": stats.nodes_created,
+                            "edges": stats.edges_created,
+                            "triples": stats.triples_processed,
+                        })
+                        .to_string();
+                        unsafe {
+                            *out_stats_json = alloc_c_string(&json);
+                        }
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => {
+                    let code = classify_rdf_error(&msg);
+                    set_err(&msg);
+                    code
                 }
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
-                }
-            }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => {
-            let code = classify_rdf_error(&msg);
-            set_err(&msg);
-            code
-        }
-    }
+        },
+    )
 }
 
 /// Map a `load_rdf` error string to a `KgliteStatusCode`. `load_rdf`
@@ -516,35 +530,41 @@ pub unsafe extern "C" fn kglite_save_graph(
     path: *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if graph.is_null() || path.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    // Safety: caller's responsibility per the function's safety
-    // doc — graph must be a valid handle. We take a transient
-    // &mut to its inner Arc (save_graph needs &mut Arc).
-    let state = unsafe { GraphState::from_handle_mut(graph) };
-    match save_graph(&mut state.inner, path_str) {
-        Ok(()) => {
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {},
+        || {
+            if graph.is_null() || path.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            // Safety: caller's responsibility per the function's safety
+            // doc — graph must be a valid handle. We take a transient
+            // &mut to its inner Arc (save_graph needs &mut Arc).
+            let state = unsafe { GraphState::from_handle_mut(graph) };
+            match save_graph(&mut state.inner, path_str) {
+                Ok(()) => {
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => {
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&msg);
+                        }
+                    }
+                    KgliteStatusCode::FileIo
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => {
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&msg);
-                }
-            }
-            KgliteStatusCode::FileIo
-        }
-    }
+        },
+    )
 }
 
 /// Free a graph handle. Idempotent on null (no-op).
@@ -561,8 +581,10 @@ pub unsafe extern "C" fn kglite_save_graph(
 /// takes ownership and frees on its own teardown.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_graph_free(graph: *mut KgliteGraph) {
-    // Safety: caller's responsibility per the function's safety doc.
-    unsafe { GraphState::free_handle(graph) };
+    crate::ffi::void_boundary(|| {
+        // Safety: caller's responsibility per the function's safety doc.
+        unsafe { GraphState::free_handle(graph) };
+    });
 }
 
 /// Generate a synthetic benchmark/demo graph as CSVs + a manifest under
@@ -591,45 +613,52 @@ pub unsafe extern "C" fn kglite_graphgen_to_dir(
     out_stats_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if out_dir.is_null() || out_stats_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let dir = match unsafe { CStr::from_ptr(out_dir) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let cfg = GraphGenConfig {
-        persons,
-        knows_per,
-        seed,
-        zipf: zipf != 0,
-        zipf_exp,
-    };
-    match graphgen(&cfg, Path::new(dir)) {
-        Ok(stats) => {
-            let json = serde_json::json!({"nodes": stats.nodes, "edges": stats.edges}).to_string();
-            unsafe {
-                *out_stats_json = alloc_c_string(&json);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_stats_json, std::ptr::null()),
+        || {
+            if out_dir.is_null() || out_stats_json.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let dir = match unsafe { CStr::from_ptr(out_dir) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let cfg = GraphGenConfig {
+                persons,
+                knows_per,
+                seed,
+                zipf: zipf != 0,
+                zipf_exp,
+            };
+            match graphgen(&cfg, Path::new(dir)) {
+                Ok(stats) => {
+                    let json =
+                        serde_json::json!({"nodes": stats.nodes, "edges": stats.edges}).to_string();
+                    unsafe {
+                        *out_stats_json = alloc_c_string(&json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(e) => {
+                    unsafe {
+                        *out_stats_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&e.to_string());
+                        }
+                    }
+                    KgliteStatusCode::FileIo
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(e) => {
-            unsafe {
-                *out_stats_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&e.to_string());
-                }
-            }
-            KgliteStatusCode::FileIo
-        }
-    }
+        },
+    )
 }
 
 /// Build a graph declaratively from a blueprint file + a directory of
@@ -656,78 +685,87 @@ pub unsafe extern "C" fn kglite_blueprint_build(
     out_report_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if blueprint_path.is_null()
-        || csv_dir.is_null()
-        || out_graph.is_null()
-        || out_report_json.is_null()
-    {
-        return KgliteStatusCode::NullPointer;
-    }
-    let bp_path = match unsafe { CStr::from_ptr(blueprint_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let dir = match unsafe { CStr::from_ptr(csv_dir) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-
-    let set_err = |out_error_msg: *mut *const c_char, msg: &str| {
-        if !out_error_msg.is_null() {
-            unsafe {
-                *out_error_msg = alloc_c_string(msg);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {
+            crate::ffi::init_out(out_graph, std::ptr::null_mut());
+            crate::ffi::init_out(out_report_json, std::ptr::null());
+        },
+        || {
+            if blueprint_path.is_null()
+                || csv_dir.is_null()
+                || out_graph.is_null()
+                || out_report_json.is_null()
+            {
+                return KgliteStatusCode::NullPointer;
             }
-        }
-    };
+            let bp_path = match unsafe { CStr::from_ptr(blueprint_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let dir = match unsafe { CStr::from_ptr(csv_dir) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
 
-    let blueprint = match load_blueprint_file(Path::new(bp_path)) {
-        Ok(b) => b,
-        Err(e) => {
-            unsafe {
-                *out_graph = std::ptr::null_mut();
-                // Clear the out-report too, so a caller that frees both
-                // out-params on failure doesn't free an uninitialized pointer.
-                *out_report_json = std::ptr::null();
-            }
-            set_err(out_error_msg, &e);
-            return KgliteStatusCode::FileFormat;
-        }
-    };
-    let mut graph = DirGraph::new();
-    let report = match blueprint_build(&mut graph, blueprint, Path::new(dir)) {
-        Ok(r) => r,
-        Err(e) => {
-            unsafe {
-                *out_graph = std::ptr::null_mut();
-                // Clear the out-report too, so a caller that frees both
-                // out-params on failure doesn't free an uninitialized pointer.
-                *out_report_json = std::ptr::null();
-            }
-            set_err(out_error_msg, &e);
-            return KgliteStatusCode::InvalidArgument;
-        }
-    };
+            let set_err = |out_error_msg: *mut *const c_char, msg: &str| {
+                if !out_error_msg.is_null() {
+                    unsafe {
+                        *out_error_msg = alloc_c_string(msg);
+                    }
+                }
+            };
 
-    unsafe {
-        *out_graph = GraphState::into_handle(Arc::new(graph));
-    }
-    let report_json = serde_json::json!({
-        "nodes_by_type": report.nodes_by_type,
-        "edges_by_type": report.edges_by_type,
-        "warnings": report.warnings,
-        "errors": report.errors,
-        "provisional_purged": report.provisional_purged,
-    })
-    .to_string();
-    unsafe {
-        *out_report_json = alloc_c_string(&report_json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+            let blueprint = match load_blueprint_file(Path::new(bp_path)) {
+                Ok(b) => b,
+                Err(e) => {
+                    unsafe {
+                        *out_graph = std::ptr::null_mut();
+                        // Clear the out-report too, so a caller that frees both
+                        // out-params on failure doesn't free an uninitialized pointer.
+                        *out_report_json = std::ptr::null();
+                    }
+                    set_err(out_error_msg, &e);
+                    return KgliteStatusCode::FileFormat;
+                }
+            };
+            let mut graph = DirGraph::new();
+            let report = match blueprint_build(&mut graph, blueprint, Path::new(dir)) {
+                Ok(r) => r,
+                Err(e) => {
+                    unsafe {
+                        *out_graph = std::ptr::null_mut();
+                        // Clear the out-report too, so a caller that frees both
+                        // out-params on failure doesn't free an uninitialized pointer.
+                        *out_report_json = std::ptr::null();
+                    }
+                    set_err(out_error_msg, &e);
+                    return KgliteStatusCode::InvalidArgument;
+                }
+            };
+
+            unsafe {
+                *out_graph = GraphState::into_handle(Arc::new(graph));
+            }
+            let report_json = serde_json::json!({
+                "nodes_by_type": report.nodes_by_type,
+                "edges_by_type": report.edges_by_type,
+                "warnings": report.warnings,
+                "errors": report.errors,
+                "provisional_purged": report.provisional_purged,
+            })
+            .to_string();
+            unsafe {
+                *out_report_json = alloc_c_string(&report_json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Save a graph to a `.kgl` file with an explicit durability choice.
@@ -753,35 +791,41 @@ pub unsafe extern "C" fn kglite_save_graph_durable(
     fsync: u8,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if graph.is_null() || path.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let state = unsafe { GraphState::from_handle_mut(graph) };
-    // Route through the shared mode-aware dispatch so disk-backed graphs and
-    // columnar consolidation are handled identically to `kglite_save_graph`;
-    // only the fsync barrier differs.
-    match save_graph_with(&mut state.inner, path_str, fsync != 0) {
-        Ok(()) => {
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {},
+        || {
+            if graph.is_null() || path.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let state = unsafe { GraphState::from_handle_mut(graph) };
+            // Route through the shared mode-aware dispatch so disk-backed graphs and
+            // columnar consolidation are handled identically to `kglite_save_graph`;
+            // only the fsync barrier differs.
+            match save_graph_with(&mut state.inner, path_str, fsync != 0) {
+                Ok(()) => {
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => {
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&msg);
+                        }
+                    }
+                    KgliteStatusCode::FileIo
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => {
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&msg);
-                }
-            }
-            KgliteStatusCode::FileIo
-        }
-    }
+        },
+    )
 }
 
 /// Serialize a graph to an in-memory `.kgl` byte buffer (no file). On
@@ -801,40 +845,49 @@ pub unsafe extern "C" fn kglite_graph_to_bytes(
     out_len: *mut usize,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if graph.is_null() || out_buf.is_null() || out_len.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let state = unsafe { GraphState::from_handle_mut(graph) };
-    let mut buf: Vec<u8> = Vec::new();
-    match write_kgl_to(state.inner.as_ref(), &mut buf) {
-        Ok(()) => {
-            let boxed: Box<[u8]> = buf.into_boxed_slice();
-            let len = boxed.len();
-            let ptr = Box::into_raw(boxed) as *mut u8;
-            unsafe {
-                *out_buf = ptr;
-                *out_len = len;
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {
+            crate::ffi::init_out(out_buf, std::ptr::null_mut());
+            crate::ffi::init_out(out_len, 0);
+        },
+        || {
+            if graph.is_null() || out_buf.is_null() || out_len.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let state = unsafe { GraphState::from_handle_mut(graph) };
+            let mut buf: Vec<u8> = Vec::new();
+            match write_kgl_to(state.inner.as_ref(), &mut buf) {
+                Ok(()) => {
+                    let boxed: Box<[u8]> = buf.into_boxed_slice();
+                    let len = boxed.len();
+                    let ptr = Box::into_raw(boxed) as *mut u8;
+                    unsafe {
+                        *out_buf = ptr;
+                        *out_len = len;
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(e) => {
+                    unsafe {
+                        *out_buf = std::ptr::null_mut();
+                        *out_len = 0;
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&e.to_string());
+                        }
+                    }
+                    KgliteStatusCode::FileIo
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(e) => {
-            unsafe {
-                *out_buf = std::ptr::null_mut();
-                *out_len = 0;
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&e.to_string());
-                }
-            }
-            KgliteStatusCode::FileIo
-        }
-    }
+        },
+    )
 }
 
 /// Free a byte buffer returned by [`kglite_graph_to_bytes`]. Pass the
@@ -846,10 +899,12 @@ pub unsafe extern "C" fn kglite_graph_to_bytes(
 /// [`kglite_graph_to_bytes`] and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_free_bytes(buf: *mut u8, len: usize) {
-    if buf.is_null() {
-        return;
-    }
-    let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(buf, len)) };
+    crate::ffi::void_boundary(|| {
+        if buf.is_null() {
+            return;
+        }
+        let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(buf, len)) };
+    });
 }
 
 /// Load a graph from an in-memory `.kgl` byte buffer — the inverse of
@@ -866,34 +921,40 @@ pub unsafe extern "C" fn kglite_graph_from_bytes(
     out_graph: *mut *mut KgliteGraph,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if data.is_null() || out_graph.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
-    match load_kgl_bytes(slice) {
-        Ok(arc) => {
-            unsafe {
-                *out_graph = GraphState::into_handle(arc);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_graph, std::ptr::null_mut()),
+        || {
+            if data.is_null() || out_graph.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let slice = unsafe { std::slice::from_raw_parts(data, len) };
+            match load_kgl_bytes(slice) {
+                Ok(arc) => {
+                    unsafe {
+                        *out_graph = GraphState::into_handle(arc);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(e) => {
+                    unsafe {
+                        *out_graph = std::ptr::null_mut();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&e.to_string());
+                        }
+                    }
+                    KgliteStatusCode::FileFormat
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(e) => {
-            unsafe {
-                *out_graph = std::ptr::null_mut();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&e.to_string());
-                }
-            }
-            KgliteStatusCode::FileFormat
-        }
-    }
+        },
+    )
 }
 
 /// Compute a JSON schema overview of a graph: node types (count +
@@ -916,23 +977,29 @@ pub unsafe extern "C" fn kglite_compute_schema_json(
     out_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if graph.is_null() || out_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let state = unsafe { GraphState::from_handle_mut(graph) };
-    let schema = compute_schema(state.inner.as_ref());
-    // Single source of truth for the schema JSON shape (kglite::api) — no
-    // per-binding hand-walk, so the document can't drift between bindings.
-    let json = schema_overview_to_json(&schema).to_string();
-    unsafe {
-        *out_json = alloc_c_string(&json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_json, std::ptr::null()),
+        || {
+            if graph.is_null() || out_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let state = unsafe { GraphState::from_handle_mut(graph) };
+            let schema = compute_schema(state.inner.as_ref());
+            // Single source of truth for the schema JSON shape (kglite::api) — no
+            // per-binding hand-walk, so the document can't drift between bindings.
+            let json = schema_overview_to_json(&schema).to_string();
+            unsafe {
+                *out_json = alloc_c_string(&json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 #[cfg(test)]

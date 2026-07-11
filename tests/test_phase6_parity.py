@@ -44,42 +44,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # `recording.rs` uses GraphRead / GraphWrite traits (no variant
 # matching).
 ENUM_MATCH_WHITELIST = {
-    # Trait / enum declarations + the 4-arm dispatcher — required.
-    "storage/mod.rs": "GraphRead / GraphWrite trait surface",
-    # Phase 9 moved the GraphBackend enum + dispatcher from schema.rs into
-    # its own file under storage/.
-    "storage/backend.rs": "GraphBackend enum + dispatcher impls",
-    # Phase 9 extracted DirGraph from schema.rs into graph/dir_graph.rs.
-    "dir_graph.rs": "DirGraph index maintenance (petgraph-only fast paths)",
-    # PyO3 boundary — Phase 9 split kg_methods.rs into 4 per-concern files.
-    "pyapi/kg_core.rs": "PyO3 boundary (KnowledgeGraph storage-mode toggles)",
-    "pyapi/kg_mutation.rs": "PyO3 boundary (KnowledgeGraph mutation + storage swap)",
-    "pyapi/kg_introspection.rs": "PyO3 boundary (KnowledgeGraph introspection)",
-    "pyapi/kg_fluent.rs": "PyO3 boundary (KnowledgeGraph fluent chain)",
-    # Hot-path Rayon fast-path: compute_type_connectivity matches on the
-    # backend enum to bypass the boxed-iterator trait path on 800M+ edge
-    # scans. See the function-level doc comment for the Wikidata win.
+    "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
     "introspection/connectivity.rs": "compute_type_connectivity disk-mode Rayon fast path",
-    # Disk-internal boundary.
-    "io/ntriples/loader.rs": "disk-internal bulk-build (ntriples loader)",
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
-    "io/file.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch.rs": "disk-internal update-path row_id lookup",
-    # Disk-to-disk streaming subgraph filter (save_subset_streaming_disk).
-    # Mirrors Phase 5 entry; same justification — bulk-path sequential
-    # I/O over DiskGraph internals.
     "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter (Pass A/B)",
-    # 0.9.0 entries: same set as Phase 5 audit. Pre-existing leaks
-    # confirmed not regressed by 0.9.0 work.
+    "storage/mode.rs": "explicit storage-mode transition constructor",
     "io/ntriples/column_builder.rs": "ntriples columnar-build hot path",
-    "languages/cypher/executor/match_clause.rs": (
+    "languages/cypher/executor/match_clause/fused_match.rs": (
         "MATCH executor inspects backend variant to pick storage-mode-specific traversal primitives"
     ),
-    "pyapi/blueprint.rs": "PyO3 boundary (blueprint storage-mode dispatch)",
-    "pyapi/indexes.rs": "PyO3 boundary (index-build storage-mode dispatch)",
-    # Disk-only PyO3 entry points (bridges into subgraph_streaming).
-    # Mirrors Phase 5 entry.
-    "pyapi/algorithms.rs": "PyO3 boundary (disk-only subgraph streaming entry points)",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")
@@ -97,15 +72,21 @@ def _strip_test_modules(src: str) -> str:
 
     marker = "#[cfg(test)]"
     idx = src.find(marker)
-    return src if idx < 0 else src[:idx]
+    production = src if idx < 0 else src[:idx]
+    return "\n".join(line for line in production.splitlines() if not line.lstrip().startswith("//"))
 
 
 def test_enum_match_audit_still_holds():
     """`GraphBackend::<Variant>` matches only appear in whitelisted files."""
 
-    src_graph = REPO_ROOT / "src" / "graph"
+    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
+    assert src_graph.is_dir(), f"structural audit root is missing: {src_graph}"
+    rs_files = _list_rs_files(src_graph)
+    assert rs_files, f"structural audit found no Rust sources under {src_graph}"
     offenders: dict[Path, int] = {}
-    for rs in _list_rs_files(src_graph):
+    for rs in rs_files:
+        if rs.name.endswith("_tests.rs"):
+            continue
         rel = rs.relative_to(src_graph).as_posix()
         if rel in ENUM_MATCH_WHITELIST:
             continue
@@ -123,6 +104,18 @@ def test_enum_match_audit_still_holds():
         + "\n\nAdd the file to ENUM_MATCH_WHITELIST (with a written justification) "
         + "or route the call through GraphRead / GraphWrite."
     )
+
+
+def test_enum_match_whitelist_is_not_stale():
+    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
+    stale = []
+    for rel in ENUM_MATCH_WHITELIST:
+        path = src_graph / rel
+        if not path.is_file():
+            stale.append(f"{rel}: file no longer exists")
+        elif not ENUM_MATCH_PATTERN.search(_strip_test_modules(path.read_text())):
+            stale.append(f"{rel}: no production GraphBackend variant match remains")
+    assert not stale, "Stale enum-match whitelist entries:\n  " + "\n  ".join(stale)
 
 
 def test_recording_graph_symbol_exported():

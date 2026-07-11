@@ -16,6 +16,27 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
 
+/// Two distinct strings attempted to claim the same persisted u64 identity.
+/// The first mapping remains unchanged when this error is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternerCollision {
+    pub key: u64,
+    pub existing: String,
+    pub conflicting: String,
+}
+
+impl std::fmt::Display for InternerCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InternedKey hash collision at {}: '{}' conflicts with '{}'",
+            self.key, self.conflicting, self.existing
+        )
+    }
+}
+
+impl std::error::Error for InternerCollision {}
+
 /// A compact property key backed by a hash of the original string.
 /// Lookups via `get_property(key)` compute the hash inline — no interner needed.
 /// Only methods that output string keys (e.g. `property_iter`) require the interner.
@@ -31,8 +52,8 @@ impl InternedKey {
     ///
     /// Uses FNV-1a 64-bit. Fast, zero-alloc, dependency-free, deterministic.
     /// Our corpus (property names, type names) is at most a few thousand
-    /// short strings, so collision risk is negligible; debug builds also
-    /// assert non-collision in `StringInterner::register`.
+    /// short strings, so collision risk is negligible; `StringInterner`
+    /// nevertheless detects and rejects conflicting strings in every build.
     #[inline]
     pub fn from_str(s: &str) -> Self {
         const FNV_OFFSET: u64 = 0xcbf29ce484222325;
@@ -101,16 +122,17 @@ impl<'de> Deserialize<'de> for InternedKey {
             /// Fast path: hash borrowed &str directly, no String allocation.
             fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
                 let key = InternedKey::from_str(v);
-                DESERIALIZE_INTERNER.with(|cell| {
+                DESERIALIZE_INTERNER.with(|cell| -> Result<(), E> {
                     if let Some(ptr) = cell.get() {
                         // SAFETY: ptr is set by SerdeInternerGuard which
                         // ensures the &mut reference outlives the
                         // deserialize call (the guard lives on the
                         // caller's stack, same pattern as Serialize above).
                         let interner = unsafe { &mut *ptr };
-                        interner.register(key, v);
+                        interner.try_register(key, v).map_err(E::custom)?;
                     }
-                });
+                    Ok(())
+                })?;
                 Ok(key)
             }
             /// Fallback for formats that provide owned Strings (e.g. JSON).
@@ -138,28 +160,77 @@ impl StringInterner {
         Self::default()
     }
 
-    /// Register a key-string mapping. If the key already exists, this is a no-op.
-    /// Panics in debug mode if the same hash maps to a different string (collision).
+    /// Register a key-string mapping without changing the first mapping on a
+    /// collision. Detection is active in debug and release builds.
     #[inline]
-    pub fn register(&mut self, key: InternedKey, s: &str) {
-        self.strings.entry(key).or_insert_with(|| s.to_string());
-        #[cfg(debug_assertions)]
-        {
-            let existing = &self.strings[&key];
-            debug_assert_eq!(
-                existing, s,
-                "InternedKey hash collision: '{}' and '{}' have the same hash",
-                existing, s
-            );
+    pub fn try_register(&mut self, key: InternedKey, s: &str) -> Result<(), InternerCollision> {
+        if let Some(existing) = self.strings.get(&key) {
+            if existing != s {
+                return Err(InternerCollision {
+                    key: key.as_u64(),
+                    existing: existing.clone(),
+                    conflicting: s.to_string(),
+                });
+            }
+            return Ok(());
         }
+        self.strings.insert(key, s.to_string());
+        Ok(())
     }
 
-    /// Intern a string: compute its key and register the reverse mapping.
+    /// Fallible public interning path for user- or file-derived names.
     #[inline]
-    pub fn get_or_intern(&mut self, s: &str) -> InternedKey {
+    pub fn try_get_or_intern(&mut self, s: &str) -> Result<InternedKey, InternerCollision> {
         let key = InternedKey::from_str(s);
-        self.register(key, s);
-        key
+        self.try_register(key, s)?;
+        Ok(key)
+    }
+
+    /// Internal infallible path. Callers must have prevalidated user/file names
+    /// or use fixed literals. A missed collision panics in every build rather
+    /// than silently aliasing data in release.
+    #[inline]
+    pub(crate) fn get_or_intern(&mut self, s: &str) -> InternedKey {
+        self.try_get_or_intern(s)
+            .unwrap_or_else(|collision| panic!("{collision}"))
+    }
+
+    /// Validate names against the current interner and against one another
+    /// without mutating `self`. Returns their keys in input order.
+    pub fn validate_names<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<InternedKey>, InternerCollision> {
+        let names = names.into_iter();
+        let (lower, _) = names.size_hint();
+        let mut keys = Vec::with_capacity(lower);
+        let mut staged: FxHashMap<InternedKey, &'a str> = FxHashMap::default();
+
+        for name in names {
+            let key = InternedKey::from_str(name);
+            if let Some(existing) = self.strings.get(&key).map(String::as_str) {
+                if existing != name {
+                    return Err(InternerCollision {
+                        key: key.as_u64(),
+                        existing: existing.to_string(),
+                        conflicting: name.to_string(),
+                    });
+                }
+            } else if let Some(existing) = staged.get(&key).copied() {
+                if existing != name {
+                    return Err(InternerCollision {
+                        key: key.as_u64(),
+                        existing: existing.to_string(),
+                        conflicting: name.to_string(),
+                    });
+                }
+            } else {
+                staged.insert(key, name);
+            }
+            keys.push(key);
+        }
+
+        Ok(keys)
     }
 
     /// Resolve an InternedKey back to its string. Panics if the key is unknown.
@@ -169,12 +240,11 @@ impl StringInterner {
             .get(&key)
             .map(|s| s.as_str())
             .unwrap_or_else(|| {
-                eprintln!(
-                    "BUG: InternedKey {} not found in StringInterner ({} entries)",
+                panic!(
+                    "InternedKey {} not found in StringInterner ({} entries)",
                     key.as_u64(),
                     self.strings.len()
-                );
-                "<unknown>"
+                )
             })
     }
 
@@ -193,11 +263,60 @@ impl StringInterner {
     #[inline]
     pub fn try_resolve_to_key(&self, s: &str) -> Option<InternedKey> {
         let key = InternedKey::from_str(s);
-        if self.strings.contains_key(&key) {
+        if self.strings.get(&key).is_some_and(|existing| existing == s) {
             Some(key)
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_collision_is_typed_and_keeps_first_mapping() {
+        let mut interner = StringInterner::new();
+        let key = InternedKey::from_str("second");
+        interner.try_register(key, "first").unwrap();
+        let err = interner.try_register(key, "second").unwrap_err();
+        assert_eq!(err.key, key.as_u64());
+        assert_eq!(err.existing, "first");
+        assert_eq!(err.conflicting, "second");
+        assert_eq!(interner.resolve(key), "first");
+        assert_eq!(interner.try_resolve_to_key("second"), None);
+    }
+
+    #[test]
+    fn batch_validation_detects_internal_collision_without_mutation() {
+        let mut interner = StringInterner::new();
+        let key = InternedKey::from_str("incoming");
+        interner
+            .try_register(key, "existing-with-forced-key")
+            .unwrap();
+        let before: Vec<_> = interner.iter().map(|(k, v)| (k, v.to_string())).collect();
+        assert!(interner.validate_names(["ordinary", "incoming"]).is_err());
+        let after: Vec<_> = interner.iter().map(|(k, v)| (k, v.to_string())).collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn serde_collision_is_a_deserializer_error() {
+        let incoming = "persisted-name";
+        let mut interner = StringInterner::new();
+        interner
+            .try_register(InternedKey::from_str(incoming), "conflicting-existing")
+            .unwrap();
+        let bytes = bincode::serialize(incoming).unwrap();
+        let guard = SerdeDeserializeGuard::new(&mut interner);
+        let decoded = bincode::deserialize::<InternedKey>(&bytes);
+        drop(guard);
+        assert!(decoded.unwrap_err().to_string().contains("hash collision"));
+        assert_eq!(
+            interner.resolve(InternedKey::from_str(incoming)),
+            "conflicting-existing"
+        );
     }
 }
 

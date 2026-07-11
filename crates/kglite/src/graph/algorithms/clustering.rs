@@ -3,6 +3,8 @@
 // General-purpose clustering algorithms for numeric feature vectors.
 // Used by CALL cluster() in the Cypher executor.
 
+use super::Interrupt;
+
 /// A clustering assignment: original index in input array → cluster label.
 pub struct ClusterAssignment {
     pub index: usize,
@@ -12,10 +14,13 @@ pub struct ClusterAssignment {
 // ── Distance matrices ──────────────────────────────────────────────────────
 
 /// Compute pairwise Euclidean distance matrix from feature vectors.
-pub fn euclidean_distance_matrix(features: &[Vec<f64>]) -> Vec<Vec<f64>> {
+pub fn euclidean_distance_matrix(features: &[Vec<f64>], interrupt: Interrupt) -> Vec<Vec<f64>> {
     let n = features.len();
     let mut dist = vec![vec![0.0; n]; n];
     for i in 0..n {
+        if i & 0x3FF == 0 && interrupt.exceeded() {
+            return dist;
+        }
         for j in (i + 1)..n {
             let d = euclidean_distance(&features[i], &features[j]);
             dist[i][j] = d;
@@ -27,10 +32,13 @@ pub fn euclidean_distance_matrix(features: &[Vec<f64>]) -> Vec<Vec<f64>> {
 
 /// Compute pairwise Haversine (geodesic) distance matrix.
 /// Each point is (lat, lon) in degrees. Returns distances in meters.
-pub fn haversine_distance_matrix(points: &[(f64, f64)]) -> Vec<Vec<f64>> {
+pub fn haversine_distance_matrix(points: &[(f64, f64)], interrupt: Interrupt) -> Vec<Vec<f64>> {
     let n = points.len();
     let mut dist = vec![vec![0.0; n]; n];
     for i in 0..n {
+        if i & 0x3FF == 0 && interrupt.exceeded() {
+            return dist;
+        }
         for j in (i + 1)..n {
             let d = crate::graph::features::spatial::geodesic_distance(
                 points[i].0,
@@ -95,21 +103,33 @@ pub fn normalize_features(features: &mut [Vec<f64>]) {
 /// - `min_points`: Minimum neighborhood size to form a core point
 ///
 /// Returns cluster assignments. Noise points get cluster = -1.
-pub fn dbscan(distances: &[Vec<f64>], eps: f64, min_points: usize) -> Vec<ClusterAssignment> {
+pub fn dbscan(
+    distances: &[Vec<f64>],
+    eps: f64,
+    min_points: usize,
+    interrupt: Interrupt,
+) -> Vec<ClusterAssignment> {
     let n = distances.len();
     // Build neighbor lists
-    let neighbors: Vec<Vec<usize>> = (0..n)
-        .map(|i| {
+    let mut neighbors: Vec<Vec<usize>> = Vec::with_capacity(n);
+    for (i, distances_from_i) in distances.iter().enumerate() {
+        if i & 0x3FF == 0 && interrupt.exceeded() {
+            return Vec::new();
+        }
+        neighbors.push(
             (0..n)
-                .filter(|&j| j != i && distances[i][j] <= eps)
-                .collect()
-        })
-        .collect();
+                .filter(|&j| j != i && distances_from_i[j] <= eps)
+                .collect(),
+        );
+    }
 
     let mut labels: Vec<i64> = vec![-2; n]; // -2 = unvisited, -1 = noise
     let mut cluster_id: i64 = 0;
 
     for i in 0..n {
+        if i & 0x3FF == 0 && interrupt.exceeded() {
+            return Vec::new();
+        }
         if labels[i] != -2 {
             continue; // already visited
         }
@@ -122,6 +142,9 @@ pub fn dbscan(distances: &[Vec<f64>], eps: f64, min_points: usize) -> Vec<Cluste
         let mut queue: Vec<usize> = neighbors[i].clone();
         let mut qi = 0;
         while qi < queue.len() {
+            if qi & 0x3FF == 0 && interrupt.exceeded() {
+                return Vec::new();
+            }
             let q = queue[qi];
             qi += 1;
             if labels[q] == -1 {
@@ -161,7 +184,12 @@ pub fn dbscan(distances: &[Vec<f64>], eps: f64, min_points: usize) -> Vec<Cluste
 /// - `features`: NxD feature matrix
 /// - `k`: Number of clusters
 /// - `max_iterations`: Maximum iteration count
-pub fn kmeans(features: &[Vec<f64>], k: usize, max_iterations: usize) -> Vec<ClusterAssignment> {
+pub fn kmeans(
+    features: &[Vec<f64>],
+    k: usize,
+    max_iterations: usize,
+    interrupt: Interrupt,
+) -> Vec<ClusterAssignment> {
     let n = features.len();
     if n == 0 || k == 0 {
         return Vec::new();
@@ -192,7 +220,10 @@ pub fn kmeans(features: &[Vec<f64>], k: usize, max_iterations: usize) -> Vec<Clu
     centroids.push(features[first].clone());
 
     // Remaining centroids: pick farthest point from nearest existing centroid (deterministic)
-    for _ in 1..k {
+    for centroid_idx in 1..k {
+        if centroid_idx & 0x3FF == 0 && interrupt.exceeded() {
+            return Vec::new();
+        }
         let mut best_idx = 0;
         let mut best_dist = f64::NEG_INFINITY;
         for (i, feat) in features.iter().enumerate() {
@@ -210,11 +241,17 @@ pub fn kmeans(features: &[Vec<f64>], k: usize, max_iterations: usize) -> Vec<Clu
 
     // Iterate: assign + recompute
     let mut assignments: Vec<usize> = vec![0; n];
-    for _ in 0..max_iterations {
+    for iteration in 0..max_iterations {
+        if iteration & 0x3FF == 0 && interrupt.exceeded() {
+            return Vec::new();
+        }
         let mut changed = false;
 
         // Assign each point to nearest centroid
         for i in 0..n {
+            if i & 0x3FF == 0 && interrupt.exceeded() {
+                return Vec::new();
+            }
             let nearest = (0..k)
                 .min_by(|&a, &b| {
                     euclidean_distance(&features[i], &centroids[a])
@@ -268,6 +305,16 @@ pub fn kmeans(features: &[Vec<f64>], k: usize, max_iterations: usize) -> Vec<Clu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    static CANCELLED: AtomicBool = AtomicBool::new(true);
+
+    fn cancelled() -> Interrupt {
+        Interrupt {
+            deadline: None,
+            cancel: Some(&CANCELLED),
+        }
+    }
 
     #[test]
     fn test_dbscan_two_clusters() {
@@ -283,8 +330,8 @@ mod tests {
             vec![10.0, 11.0],
             vec![50.0, 50.0],
         ];
-        let dm = euclidean_distance_matrix(&features);
-        let result = dbscan(&dm, 2.0, 2);
+        let dm = euclidean_distance_matrix(&features, Interrupt::default());
+        let result = dbscan(&dm, 2.0, 2, Interrupt::default());
 
         // Points 0,1,2 should be in one cluster
         assert_eq!(result[0].cluster, result[1].cluster);
@@ -301,8 +348,8 @@ mod tests {
     #[test]
     fn test_dbscan_all_one_cluster() {
         let features = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.5, 0.5]];
-        let dm = euclidean_distance_matrix(&features);
-        let result = dbscan(&dm, 2.0, 2);
+        let dm = euclidean_distance_matrix(&features, Interrupt::default());
+        let result = dbscan(&dm, 2.0, 2, Interrupt::default());
         assert_eq!(result[0].cluster, result[1].cluster);
         assert_eq!(result[0].cluster, result[2].cluster);
         assert!(result[0].cluster >= 0);
@@ -311,8 +358,8 @@ mod tests {
     #[test]
     fn test_dbscan_all_noise() {
         let features = vec![vec![0.0, 0.0], vec![100.0, 100.0], vec![200.0, 200.0]];
-        let dm = euclidean_distance_matrix(&features);
-        let result = dbscan(&dm, 1.0, 2);
+        let dm = euclidean_distance_matrix(&features, Interrupt::default());
+        let result = dbscan(&dm, 1.0, 2, Interrupt::default());
         for r in &result {
             assert_eq!(r.cluster, -1);
         }
@@ -328,7 +375,7 @@ mod tests {
             vec![11.0, 10.0],
             vec![10.0, 11.0],
         ];
-        let result = kmeans(&features, 2, 100);
+        let result = kmeans(&features, 2, 100, Interrupt::default());
         // Points 0,1,2 should be in one cluster
         assert_eq!(result[0].cluster, result[1].cluster);
         assert_eq!(result[0].cluster, result[2].cluster);
@@ -349,9 +396,22 @@ mod tests {
     }
 
     #[test]
+    fn clustering_inner_loops_honor_cancellation() {
+        let features = vec![vec![0.0, 0.0], vec![3.0, 4.0]];
+        let dm = euclidean_distance_matrix(&features, cancelled());
+        assert_eq!(dm[0][1], 0.0);
+        assert!(dbscan(&dm, 1.0, 1, cancelled()).is_empty());
+        assert!(kmeans(&features, 2, 10, cancelled()).is_empty());
+
+        let points = vec![(0.0, 0.0), (1.0, 1.0)];
+        let geo = haversine_distance_matrix(&points, cancelled());
+        assert_eq!(geo[0][1], 0.0);
+    }
+
+    #[test]
     fn test_euclidean_distance_matrix() {
         let features = vec![vec![0.0, 0.0], vec![3.0, 4.0]];
-        let dm = euclidean_distance_matrix(&features);
+        let dm = euclidean_distance_matrix(&features, Interrupt::default());
         assert!((dm[0][1] - 5.0).abs() < 1e-10);
         assert!((dm[1][0] - 5.0).abs() < 1e-10);
         assert_eq!(dm[0][0], 0.0);
@@ -361,7 +421,7 @@ mod tests {
     fn test_haversine_distance_matrix() {
         // Oslo (59.91, 10.75) to Bergen (60.39, 5.32)
         let points = vec![(59.91, 10.75), (60.39, 5.32)];
-        let dm = haversine_distance_matrix(&points);
+        let dm = haversine_distance_matrix(&points, Interrupt::default());
         // Should be roughly 300km
         assert!(dm[0][1] > 250_000.0 && dm[0][1] < 350_000.0);
         assert_eq!(dm[0][0], 0.0);

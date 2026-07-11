@@ -459,8 +459,10 @@ fn distinct_fusable_3elem_with_constrained_group(
                 None
             } else {
                 match &item.expression {
+                    // The distinct fast path also accumulates by NodeIndex.
+                    // Property-valued grouping may collapse multiple nodes
+                    // into one group and therefore must use the eager path.
                     Expression::Variable(v) => Some(v.as_str()),
-                    Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
                     _ => None,
                 }
             }
@@ -471,7 +473,6 @@ fn distinct_fusable_3elem_with_constrained_group(
             } else {
                 match &item.expression {
                     Expression::Variable(v) => Some(v.as_str()),
-                    Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
                     _ => None,
                 }
             }
@@ -497,13 +498,14 @@ fn distinct_fusable_3elem_with_constrained_group(
     has_type || has_props
 }
 
-/// Fuse MATCH (node-edge-node) + RETURN (group-by + count) into a single
-/// pass that counts edges directly per node instead of materializing all rows.
+/// Fuse MATCH (node-edge-node) + RETURN (optional group-by + count) into a
+/// single pass that counts edges directly instead of materializing all rows.
 ///
 /// Criteria for fusion:
 /// 1. `clauses[i]` is `Match` with exactly 1 pattern of 3 elements (node-edge-node)
 /// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
-/// 3. All non-aggregate RETURN items are PropertyAccess on the first node variable
+/// 3. The RETURN is either a lone `count(*)`, or all non-aggregate items group
+///    by one endpoint node variable
 /// 4. All `count()` args reference the second node variable (or `*`)
 /// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable AND
 ///    the group node is type/property constrained (see
@@ -620,6 +622,27 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
             continue;
         }
 
+        // The direct counters do not carry a binding row across hops, so
+        // they cannot enforce repeated-variable equality constraints such as
+        // `(a)-[:R]->(b)-[:R]->(a)`. Leave those patterns to the general
+        // matcher. Anonymous occurrences are independent and need no entry.
+        let has_repeated_variables = if let Clause::Match(m) = &query.clauses[i] {
+            let mut seen = std::collections::HashSet::new();
+            m.patterns[0].elements.iter().any(|element| {
+                let variable = match element {
+                    PatternElement::Node(node) => node.variable.as_deref(),
+                    PatternElement::Edge(edge) => edge.variable.as_deref(),
+                };
+                variable.is_some_and(|name| !seen.insert(name))
+            })
+        } else {
+            false
+        };
+        if has_repeated_variables {
+            i += 1;
+            continue;
+        }
+
         // At least one of first_var / second_var must be named
         if first_var.is_none() && second_var.is_none() {
             i += 1;
@@ -640,6 +663,23 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         let (fusable, distinct_count) = if let Clause::Return(r) = &query.clauses[i + 1] {
             if r.distinct {
                 (false, false)
+            } else if r.having.is_none()
+                && r.items.len() == 1
+                && matches!(
+                    &r.items[0].expression,
+                    Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                    } if name == "count"
+                        && args.len() == 1
+                        && matches!(args[0], Expression::Star)
+                )
+            {
+                // Pure count(*) needs no group key. The fused executor sums
+                // its existing per-endpoint one-/two-hop counters and emits a
+                // single row, avoiding full path-row materialisation.
+                (true, false)
             } else {
                 let mut has_count = false;
                 let mut all_valid = true;
@@ -650,8 +690,12 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                 // First pass: identify which variable group-by items reference
                 for item in &r.items {
                     if !is_aggregate_expression(&item.expression) {
+                        // The fused executor groups by NodeIndex. A property
+                        // expression groups by the property's VALUE instead,
+                        // so two nodes with the same value must collapse into
+                        // one group. Until the fused accumulator can re-bucket
+                        // by resolved values, admit only the node variable.
                         let refs_var = match &item.expression {
-                            Expression::PropertyAccess { variable, .. } => Some(variable.as_str()),
                             Expression::Variable(v) => Some(v.as_str()),
                             _ => None,
                         };
@@ -1278,13 +1322,12 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
                 _ => return false,
             }
         } else {
-            // Non-aggregate item: must reference an M1-bound variable. Two
-            // shapes are common — bare variable (`a`) or property access
-            // (`a.title`). Anything else (literal, parameter, function) is
-            // rejected to keep correctness simple.
+            // Non-aggregate item: must be an M1-bound node variable. This
+            // fused executor accumulates by NodeIndex, whereas property
+            // expressions group by their resolved value and can collapse
+            // multiple nodes into one group.
             let referenced = match &item.expression {
                 Expression::Variable(v) => Some(v.clone()),
-                Expression::PropertyAccess { variable, .. } => Some(variable.clone()),
                 _ => None,
             };
             let v = match referenced {

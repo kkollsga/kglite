@@ -92,37 +92,43 @@ pub unsafe extern "C" fn kglite_datasets_sec_client_new(
     out_client: *mut *mut KgliteSecClient,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if user_agent.is_null() || out_client.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let ua = match unsafe { CStr::from_ptr(user_agent) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    match SecClient::new(ua) {
-        Ok(client) => {
-            unsafe {
-                *out_client = SecClientState::into_handle(client);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_client, std::ptr::null_mut()),
+        || {
+            if user_agent.is_null() || out_client.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let ua = match unsafe { CStr::from_ptr(user_agent) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            match SecClient::new(ua) {
+                Ok(client) => {
+                    unsafe {
+                        *out_client = SecClientState::into_handle(client);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_client = std::ptr::null_mut();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::InvalidArgument
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_client = std::ptr::null_mut();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::InvalidArgument
-        }
-    }
+        },
+    )
 }
 
 /// Free a SEC client handle. Idempotent on null.
@@ -133,7 +139,7 @@ pub unsafe extern "C" fn kglite_datasets_sec_client_new(
 /// returned by [`kglite_datasets_sec_client_new`].
 #[no_mangle]
 pub unsafe extern "C" fn kglite_datasets_sec_client_free(client: *mut KgliteSecClient) {
-    unsafe { SecClientState::free_handle(client) };
+    crate::ffi::void_boundary(|| unsafe { SecClientState::free_handle(client) });
 }
 
 // ───────────────────────── fetchers ─────────────────────────────────
@@ -170,51 +176,57 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_quarterly_master_idx(
     out_pair_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if client.is_null() || workdir_path.is_null() || out_pair_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    if year_start > year_end {
-        return KgliteStatusCode::InvalidArgument;
-    }
-    let client_state = unsafe { SecClientState::from_handle(client) };
-    let workdir = Workdir::new(workdir_str);
-    let range = YearRange::new(year_start, year_end);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_pair_json, std::ptr::null()),
+        || {
+            if client.is_null() || workdir_path.is_null() || out_pair_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            if year_start > year_end {
+                return KgliteStatusCode::InvalidArgument;
+            }
+            let client_state = unsafe { SecClientState::from_handle(client) };
+            let workdir = Workdir::new(workdir_str);
+            let range = YearRange::new(year_start, year_end);
 
-    match fetch_quarterly_master_idx(
-        &client_state.inner,
-        &workdir,
-        range,
-        current_year,
-        current_quarter,
-    ) {
-        Ok((fetched, skipped)) => {
-            let json = format!("[{},{}]", fetched, skipped);
-            unsafe {
-                *out_pair_json = alloc_c_string(&json);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            match fetch_quarterly_master_idx(
+                &client_state.inner,
+                &workdir,
+                range,
+                current_year,
+                current_quarter,
+            ) {
+                Ok((fetched, skipped)) => {
+                    let json = format!("[{},{}]", fetched, skipped);
+                    unsafe {
+                        *out_pair_json = alloc_c_string(&json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_pair_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_pair_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Fetch the bulk-download `submissions.zip` (all companies' filing
@@ -247,45 +259,51 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_submissions_bulk(
     out_fetched: *mut u8,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let client_state = unsafe { SecClientState::from_handle(client) };
-    let workdir = Workdir::new(workdir_str);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_fetched, 0),
+        || {
+            if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let client_state = unsafe { SecClientState::from_handle(client) };
+            let workdir = Workdir::new(workdir_str);
 
-    match fetch_submissions_bulk(
-        &client_state.inner,
-        &workdir,
-        staleness_hours,
-        force_refetch != 0,
-    ) {
-        Ok(fetched) => {
-            unsafe {
-                *out_fetched = u8::from(fetched);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            match fetch_submissions_bulk(
+                &client_state.inner,
+                &workdir,
+                staleness_hours,
+                force_refetch != 0,
+            ) {
+                Ok(fetched) => {
+                    unsafe {
+                        *out_fetched = u8::from(fetched);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_fetched = 0;
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_fetched = 0;
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Fetch the `company_tickers.json` mapping (TICKER → CIK).
@@ -303,40 +321,46 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_company_tickers(
     out_fetched: *mut u8,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let client_state = unsafe { SecClientState::from_handle(client) };
-    let workdir = Workdir::new(workdir_str);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_fetched, 0),
+        || {
+            if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let client_state = unsafe { SecClientState::from_handle(client) };
+            let workdir = Workdir::new(workdir_str);
 
-    match fetch_company_tickers(&client_state.inner, &workdir, force_refetch != 0) {
-        Ok(fetched) => {
-            unsafe {
-                *out_fetched = u8::from(fetched);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            match fetch_company_tickers(&client_state.inner, &workdir, force_refetch != 0) {
+                Ok(fetched) => {
+                    unsafe {
+                        *out_fetched = u8::from(fetched);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_fetched = 0;
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_fetched = 0;
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Fetch the XBRL `companyfacts/CIK<cik>.json` file (a single
@@ -362,40 +386,46 @@ pub unsafe extern "C" fn kglite_datasets_sec_fetch_company_facts(
     out_fetched: *mut u8,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let client_state = unsafe { SecClientState::from_handle(client) };
-    let workdir = Workdir::new(workdir_str);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_fetched, 0),
+        || {
+            if client.is_null() || workdir_path.is_null() || out_fetched.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let client_state = unsafe { SecClientState::from_handle(client) };
+            let workdir = Workdir::new(workdir_str);
 
-    match fetch_company_facts(&client_state.inner, &workdir, cik, force_refetch != 0) {
-        Ok(fetched) => {
-            unsafe {
-                *out_fetched = u8::from(fetched);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            match fetch_company_facts(&client_state.inner, &workdir, cik, force_refetch != 0) {
+                Ok(fetched) => {
+                    unsafe {
+                        *out_fetched = u8::from(fetched);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_fetched = 0;
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_fetched = 0;
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 // ───────────────────────── pure helpers ─────────────────────────────
@@ -433,42 +463,56 @@ pub unsafe extern "C" fn kglite_datasets_sec_resolve_fetch_buckets(
     out_unmatched_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if form_types_json.is_null() || out_active_json.is_null() || out_unmatched_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let json_str = match unsafe { CStr::from_ptr(form_types_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    // Accept either null (default lean buckets) or an array of strings.
-    let owned_strings: Option<Vec<String>> = if json_str.trim() == "null" {
-        None
-    } else {
-        match serde_json::from_str::<Vec<String>>(json_str) {
-            Ok(v) => Some(v),
-            Err(_) => return KgliteStatusCode::InvalidArgument,
-        }
-    };
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || {
+            crate::ffi::init_out(out_active_json, std::ptr::null());
+            crate::ffi::init_out(out_unmatched_json, std::ptr::null());
+        },
+        || {
+            if form_types_json.is_null()
+                || out_active_json.is_null()
+                || out_unmatched_json.is_null()
+            {
+                return KgliteStatusCode::NullPointer;
+            }
+            let json_str = match unsafe { CStr::from_ptr(form_types_json) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            // Accept either null (default lean buckets) or an array of strings.
+            let owned_strings: Option<Vec<String>> = if json_str.trim() == "null" {
+                None
+            } else {
+                match serde_json::from_str::<Vec<String>>(json_str) {
+                    Ok(v) => Some(v),
+                    Err(_) => return KgliteStatusCode::InvalidArgument,
+                }
+            };
 
-    let form_types_slice: Option<Vec<&str>> = owned_strings
-        .as_ref()
-        .map(|v| v.iter().map(String::as_str).collect());
+            let form_types_slice: Option<Vec<&str>> = owned_strings
+                .as_ref()
+                .map(|v| v.iter().map(String::as_str).collect());
 
-    let (active, unmatched) = resolve_fetch_buckets(form_types_slice.as_deref());
-    let active_names: Vec<&str> = active.iter().map(bucket_str).collect();
-    let active_json = serde_json::to_string(&active_names).unwrap_or_else(|_| "[]".to_string());
-    let unmatched_json = serde_json::to_string(&unmatched).unwrap_or_else(|_| "[]".to_string());
+            let (active, unmatched) = resolve_fetch_buckets(form_types_slice.as_deref());
+            let active_names: Vec<&str> = active.iter().map(bucket_str).collect();
+            let active_json =
+                serde_json::to_string(&active_names).unwrap_or_else(|_| "[]".to_string());
+            let unmatched_json =
+                serde_json::to_string(&unmatched).unwrap_or_else(|_| "[]".to_string());
 
-    unsafe {
-        *out_active_json = alloc_c_string(&active_json);
-        *out_unmatched_json = alloc_c_string(&unmatched_json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+            unsafe {
+                *out_active_json = alloc_c_string(&active_json);
+                *out_unmatched_json = alloc_c_string(&unmatched_json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Bucket → wire-name. Stable strings the caller can pattern-match
@@ -513,40 +557,46 @@ pub unsafe extern "C" fn kglite_datasets_sec_parse_tickers_json(
     out_map_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if tickers_json.is_null() || out_map_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let json_str = match unsafe { CStr::from_ptr(tickers_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    match parse_tickers_json(json_str) {
-        Ok(map) => {
-            // Serialize as JSON object — HashMap<String, u64> goes
-            // direct via serde.
-            let out_json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
-            unsafe {
-                *out_map_json = alloc_c_string(&out_json);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_map_json, std::ptr::null()),
+        || {
+            if tickers_json.is_null() || out_map_json.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let json_str = match unsafe { CStr::from_ptr(tickers_json) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            match parse_tickers_json(json_str) {
+                Ok(map) => {
+                    // Serialize as JSON object — HashMap<String, u64> goes
+                    // direct via serde.
+                    let out_json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
+                    unsafe {
+                        *out_map_json = alloc_c_string(&out_json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_map_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::InvalidArgument
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_map_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::InvalidArgument
-        }
-    }
+        },
+    )
 }
 
 // ───────────────────────── extract pipeline ─────────────────────────
@@ -589,44 +639,50 @@ pub unsafe extern "C" fn kglite_datasets_sec_run_all(
     out_report_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if workdir_path.is_null() || out_report_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let slice = match parse_slice_json(slice_json) {
-        Ok(s) => s,
-        Err(rc) => return rc,
-    };
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_report_json, std::ptr::null()),
+        || {
+            if workdir_path.is_null() || out_report_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let slice = match parse_slice_json(slice_json) {
+                Ok(s) => s,
+                Err(rc) => return rc,
+            };
 
-    let workdir = Workdir::new(workdir_str);
-    match run_all(&workdir, &slice, force != 0) {
-        Ok(report) => {
-            let json = serialize_extract_report(&report);
-            unsafe {
-                *out_report_json = alloc_c_string(&json);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let workdir = Workdir::new(workdir_str);
+            match run_all(&workdir, &slice, force != 0) {
+                Ok(report) => {
+                    let json = serialize_extract_report(&report);
+                    unsafe {
+                        *out_report_json = alloc_c_string(&json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_report_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_report_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Parse the slice-spec JSON into a `SliceSpec`. Null / empty /

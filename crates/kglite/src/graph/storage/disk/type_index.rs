@@ -39,14 +39,49 @@ const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 32;
 const DIR_ENTRY_BYTES: usize = 24;
 
+fn invalid_index(message: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid type_indices.bin: {message}"),
+    )
+}
+
+fn read_le_u32(bytes: &[u8], index: usize) -> Option<u32> {
+    let start = index.checked_mul(4)?;
+    Some(u32::from_le_bytes(
+        bytes.get(start..start.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u32_iter(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+}
+
+fn le_u32_binary_search(bytes: &[u8], wanted: u32) -> bool {
+    let mut low = 0usize;
+    let mut high = bytes.len() / 4;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match read_le_u32(bytes, mid).unwrap().cmp(&wanted) {
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
+}
+
 /// Mmap-backed read-only view of `type_indices.bin`.
+#[derive(Debug)]
 pub struct TypeIndexBase {
     mmap: Arc<Mmap>,
     /// type_name -> (file-relative offset, num_entries). Built once at load.
     dir: HashMap<String, BaseEntry>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct BaseEntry {
     payload_off: u64,
     num_entries: u32,
@@ -72,33 +107,87 @@ impl TypeIndexBase {
         }
         let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
         if version != VERSION {
-            return Ok(None);
+            return Err(invalid_index("unsupported raw index version"));
         }
         let num_types = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
-
-        let need = HEADER_BYTES + DIR_ENTRY_BYTES * num_types;
-        if len < need {
+        let declared_total = u64::from_le_bytes(mmap[16..24].try_into().unwrap());
+        let data_offset = usize::try_from(u64::from_le_bytes(mmap[24..32].try_into().unwrap()))
+            .map_err(|_| invalid_index("data offset exceeds usize"))?;
+        let dir_bytes = DIR_ENTRY_BYTES
+            .checked_mul(num_types)
+            .ok_or_else(|| invalid_index("directory size overflow"))?;
+        let need = HEADER_BYTES
+            .checked_add(dir_bytes)
+            .ok_or_else(|| invalid_index("directory offset overflow"))?;
+        if len < need || data_offset != need {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "type_indices.bin truncated at directory",
+                "type_indices.bin has an invalid directory/data boundary",
             ));
         }
 
         let mut dir_map: HashMap<String, BaseEntry> = HashMap::with_capacity(num_types);
+        let mut previous_key = None;
+        let mut expected_payload = data_offset;
+        let mut total_entries = 0u64;
         for i in 0..num_types {
             let off = HEADER_BYTES + i * DIR_ENTRY_BYTES;
             let type_key = u64::from_le_bytes(mmap[off..off + 8].try_into().unwrap());
             let payload_off = u64::from_le_bytes(mmap[off + 8..off + 16].try_into().unwrap());
             let payload_len = u64::from_le_bytes(mmap[off + 16..off + 24].try_into().unwrap());
-            if let Some(name) = interner.try_resolve(InternedKey::from_u64(type_key)) {
-                dir_map.insert(
+            if previous_key.is_some_and(|previous| type_key <= previous) {
+                return Err(invalid_index("directory keys are not strictly increasing"));
+            }
+            previous_key = Some(type_key);
+            if payload_len % 4 != 0 {
+                return Err(invalid_index("payload length is not divisible by four"));
+            }
+            let payload_off_usize = usize::try_from(payload_off)
+                .map_err(|_| invalid_index("payload offset exceeds usize"))?;
+            let payload_len_usize = usize::try_from(payload_len)
+                .map_err(|_| invalid_index("payload length exceeds usize"))?;
+            let payload_end = payload_off_usize
+                .checked_add(payload_len_usize)
+                .ok_or_else(|| invalid_index("payload range overflow"))?;
+            if payload_off_usize != expected_payload || payload_end > len {
+                return Err(invalid_index(
+                    "payloads overlap, contain gaps, or exceed the file",
+                ));
+            }
+            let mut previous_node = None;
+            for node in le_u32_iter(&mmap[payload_off_usize..payload_end]) {
+                if previous_node.is_some_and(|previous| node <= previous) {
+                    return Err(invalid_index("node indices are not strictly increasing"));
+                }
+                previous_node = Some(node);
+            }
+            expected_payload = payload_end;
+            let num_entries = payload_len / 4;
+            total_entries = total_entries
+                .checked_add(num_entries)
+                .ok_or_else(|| invalid_index("entry count overflow"))?;
+            let num_entries = u32::try_from(num_entries)
+                .map_err(|_| invalid_index("one type contains too many entries"))?;
+            let name = interner
+                .try_resolve(InternedKey::from_u64(type_key))
+                .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
+            if dir_map
+                .insert(
                     name.to_string(),
                     BaseEntry {
                         payload_off,
-                        num_entries: (payload_len / 4) as u32,
+                        num_entries,
                     },
-                );
+                )
+                .is_some()
+            {
+                return Err(invalid_index("duplicate resolved type name"));
             }
+        }
+        if expected_payload != len || total_entries != declared_total {
+            return Err(invalid_index(
+                "payload cardinality does not match the header",
+            ));
         }
 
         Ok(Some(Self {
@@ -112,40 +201,40 @@ impl TypeIndexBase {
     }
 
     /// Slice of u32 NodeIndex values for `name`, mapped directly from the file.
-    pub fn slice_for(&self, name: &str) -> Option<&[u32]> {
+    pub fn slice_for(&self, name: &str) -> Option<&[u8]> {
         let entry = self.dir.get(name)?;
         let n = entry.num_entries as usize;
         let off = entry.payload_off as usize;
         if n == 0 {
             return Some(&[]);
         }
-        let bytes = self.mmap.get(off..off + n * 4)?;
-        // SAFETY: payload was written as a little-endian u32 array at a
-        // 4-byte-aligned file offset; mmap pages are page-aligned. The
-        // sub-slice covers exactly `n * 4` bytes inside the file. `Mmap`
-        // (not `MmapMut`) is read-only, so no concurrent mutation possible.
-        unsafe { Some(std::slice::from_raw_parts(bytes.as_ptr() as *const u32, n)) }
+        self.mmap.get(off..off.checked_add(n.checked_mul(4)?)?)
     }
 
     /// Materialize a base entry into an owned Vec. Used on save and on
     /// first mutation when the entry must be promoted into the overlay.
     pub fn materialize(&self, name: &str) -> Option<Vec<NodeIndex>> {
         let slice = self.slice_for(name)?;
-        Some(slice.iter().map(|u| NodeIndex::new(*u as usize)).collect())
+        Some(
+            le_u32_iter(slice)
+                .map(|u| NodeIndex::new(u as usize))
+                .collect(),
+        )
     }
 }
 
-/// View into either the overlay's `Vec<NodeIndex>` or a `&[u32]` mmap slice.
+/// View into either the overlay's `Vec<NodeIndex>` or canonical little-endian
+/// bytes borrowed directly from the mmap.
 pub enum TypeNodesRef<'a> {
     Overlay(&'a [NodeIndex]),
-    Mmap(&'a [u32]),
+    Mmap(&'a [u8]),
 }
 
 impl<'a> TypeNodesRef<'a> {
     pub fn len(&self) -> usize {
         match self {
             TypeNodesRef::Overlay(s) => s.len(),
-            TypeNodesRef::Mmap(s) => s.len(),
+            TypeNodesRef::Mmap(s) => s.len() / 4,
         }
     }
 
@@ -156,21 +245,21 @@ impl<'a> TypeNodesRef<'a> {
     pub fn iter(&self) -> TypeNodesIter<'_> {
         match self {
             TypeNodesRef::Overlay(s) => TypeNodesIter::Overlay(s.iter()),
-            TypeNodesRef::Mmap(s) => TypeNodesIter::Mmap(s.iter()),
+            TypeNodesRef::Mmap(s) => TypeNodesIter::Mmap(s.chunks_exact(4)),
         }
     }
 
     pub fn to_vec(&self) -> Vec<NodeIndex> {
         match self {
             TypeNodesRef::Overlay(s) => s.to_vec(),
-            TypeNodesRef::Mmap(s) => s.iter().map(|u| NodeIndex::new(*u as usize)).collect(),
+            TypeNodesRef::Mmap(s) => le_u32_iter(s).map(|u| NodeIndex::new(u as usize)).collect(),
         }
     }
 
     pub fn get(&self, i: usize) -> Option<NodeIndex> {
         match self {
             TypeNodesRef::Overlay(s) => s.get(i).copied(),
-            TypeNodesRef::Mmap(s) => s.get(i).map(|u| NodeIndex::new(*u as usize)),
+            TypeNodesRef::Mmap(s) => read_le_u32(s, i).map(|u| NodeIndex::new(u as usize)),
         }
     }
 
@@ -180,7 +269,7 @@ impl<'a> TypeNodesRef<'a> {
     pub fn contains(&self, idx: &NodeIndex) -> bool {
         match self {
             TypeNodesRef::Overlay(s) => s.contains(idx),
-            TypeNodesRef::Mmap(s) => s.iter().any(|u| (*u as usize) == idx.index()),
+            TypeNodesRef::Mmap(s) => le_u32_iter(s).any(|u| u as usize == idx.index()),
         }
     }
 
@@ -198,7 +287,7 @@ impl<'a> TypeNodesRef<'a> {
             TypeNodesRef::Overlay(s) => s.binary_search(&idx).is_ok(),
             TypeNodesRef::Mmap(s) => {
                 let want = idx.index() as u32;
-                s.binary_search(&want).is_ok()
+                le_u32_binary_search(s, want)
             }
         }
     }
@@ -206,7 +295,7 @@ impl<'a> TypeNodesRef<'a> {
 
 pub enum TypeNodesIter<'a> {
     Overlay(std::slice::Iter<'a, NodeIndex>),
-    Mmap(std::slice::Iter<'a, u32>),
+    Mmap(std::slice::ChunksExact<'a, u8>),
 }
 
 impl<'a> Iterator for TypeNodesIter<'a> {
@@ -215,7 +304,9 @@ impl<'a> Iterator for TypeNodesIter<'a> {
     fn next(&mut self) -> Option<NodeIndex> {
         match self {
             TypeNodesIter::Overlay(it) => it.next().copied(),
-            TypeNodesIter::Mmap(it) => it.next().map(|u| NodeIndex::new(*u as usize)),
+            TypeNodesIter::Mmap(it) => it.next().map(|bytes| {
+                NodeIndex::new(u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
+            }),
         }
     }
 
@@ -432,23 +523,19 @@ pub fn write_type_indices_bin(
 ) -> Result<(), String> {
     // Collect (type_key, name, slice-or-vec) sorted by type_key.
     enum Source<'a> {
-        Slice(&'a [u32]),
+        Slice(&'a [u8]),
         Vec(&'a [NodeIndex]),
     }
     impl Source<'_> {
         fn len(&self) -> usize {
             match self {
-                Source::Slice(s) => s.len(),
+                Source::Slice(s) => s.len() / 4,
                 Source::Vec(s) => s.len(),
             }
         }
         fn write_into(&self, out: &mut Vec<u8>) {
             match self {
-                Source::Slice(s) => {
-                    for u in s.iter() {
-                        out.extend_from_slice(&u.to_le_bytes());
-                    }
-                }
+                Source::Slice(s) => out.extend_from_slice(s),
                 Source::Vec(s) => {
                     for n in s.iter() {
                         out.extend_from_slice(&(n.index() as u32).to_le_bytes());
@@ -461,7 +548,10 @@ pub fn write_type_indices_bin(
     let mut interner_clone = interner.clone();
     let mut entries: Vec<(u64, Source<'_>)> = Vec::new();
     for (name, view) in store.iter() {
-        let key = interner_clone.get_or_intern(name).as_u64();
+        let key = interner_clone
+            .try_get_or_intern(name)
+            .map_err(|e| e.to_string())?
+            .as_u64();
         let src = match view {
             TypeNodesRef::Overlay(s) => Source::Vec(s),
             TypeNodesRef::Mmap(s) => Source::Slice(s),
@@ -511,4 +601,103 @@ pub fn write_type_indices_bin(
     std::fs::write(dir.join("type_indices.bin"), out)
         .map_err(|e| format!("Failed to write type_indices.bin: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn fixture(type_key: u64, nodes: &[u32]) -> Vec<u8> {
+        let data_offset = HEADER_BYTES + DIR_ENTRY_BYTES;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(nodes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&type_key.to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&((nodes.len() * 4) as u64).to_le_bytes());
+        for node in nodes {
+            bytes.extend_from_slice(&node.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<TypeIndexBase>> {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("type_indices.bin"), bytes).unwrap();
+        TypeIndexBase::load_from(temp.path(), interner)
+    }
+
+    #[test]
+    fn valid_little_endian_fixture_round_trips() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let base = load(&fixture(key, &[1, 7, 42]), &interner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            base.materialize("Person").unwrap(),
+            vec![NodeIndex::new(1), NodeIndex::new(7), NodeIndex::new(42)]
+        );
+    }
+
+    #[test]
+    fn rejects_directory_arithmetic_and_payload_shape_errors() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let valid = fixture(key, &[1, 7]);
+
+        let mut directory_overflow = valid.clone();
+        directory_overflow[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            load(&directory_overflow, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut bad_boundary = valid.clone();
+        bad_boundary[24..32].copy_from_slice(&33u64.to_le_bytes());
+        assert_eq!(
+            load(&bad_boundary, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut indivisible = valid.clone();
+        indivisible[48..56].copy_from_slice(&7u64.to_le_bytes());
+        assert_eq!(
+            load(&indivisible, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut past_eof = valid.clone();
+        past_eof[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            load(&past_eof, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn rejects_header_cardinality_and_unsorted_nodes() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let mut wrong_total = fixture(key, &[1, 7]);
+        wrong_total[16..24].copy_from_slice(&3u64.to_le_bytes());
+        assert_eq!(
+            load(&wrong_total, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let unsorted = fixture(key, &[7, 1]);
+        assert_eq!(
+            load(&unsorted, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        let duplicate = fixture(key, &[7, 7]);
+        assert_eq!(
+            load(&duplicate, &interner).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
 }

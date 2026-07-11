@@ -127,9 +127,6 @@ def from_networkx(
 
     for (ctype, stype, ttype), rows in edges_by_key.items():
         df = pd.DataFrame(rows)
-        # add_connections only stores property columns named in `columns`;
-        # everything except the src/tgt id fields becomes an edge property.
-        prop_cols = [c for c in df.columns if c not in ("src", "tgt")]
         g.add_connections(
             df,
             ctype,
@@ -137,7 +134,6 @@ def from_networkx(
             "src",
             ttype,
             "tgt",
-            columns=prop_cols or None,
         )
 
     return g

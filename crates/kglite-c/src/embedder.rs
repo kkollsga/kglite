@@ -79,7 +79,7 @@ impl EmbedderState {
 /// Arc is shared, the original handle is no longer special.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_embedder_free(embedder: *mut KgliteEmbedder) {
-    unsafe { EmbedderState::free_handle(embedder) };
+    crate::ffi::void_boundary(|| unsafe { EmbedderState::free_handle(embedder) });
 }
 
 /// Attach an embedder to a session. The session retains a clone
@@ -102,13 +102,19 @@ pub unsafe extern "C" fn kglite_session_set_embedder(
     session: *mut KgliteSession,
     embedder: *const KgliteEmbedder,
 ) -> KgliteStatusCode {
-    if session.is_null() || embedder.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let session_state = unsafe { SessionState::from_handle_mut(session) };
-    let embedder_state = unsafe { EmbedderState::from_handle(embedder) };
-    session_state.embedder = Some(Arc::clone(&embedder_state.inner));
-    KgliteStatusCode::Ok
+    crate::ffi::status_boundary(
+        std::ptr::null_mut(),
+        || {},
+        || {
+            if session.is_null() || embedder.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let session_state = unsafe { SessionState::from_handle_mut(session) };
+            let embedder_state = unsafe { EmbedderState::from_handle(embedder) };
+            session_state.embedder = Some(Arc::clone(&embedder_state.inner));
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 // ───────────────────────── concrete factories ──────────────────────────
@@ -155,36 +161,42 @@ pub unsafe extern "C" fn kglite_embedder_fastembed_new(
     out_embedder: *mut *mut KgliteEmbedder,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if model_name.is_null() || out_embedder.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let model_str = match unsafe { CStr::from_ptr(model_name) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    match kglite::api::FastEmbedAdapter::new(model_str) {
-        Ok(adapter) => {
-            let arc: Arc<dyn Embedder> = Arc::new(adapter);
-            unsafe {
-                *out_embedder = EmbedderState::into_handle(arc);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_embedder, std::ptr::null_mut()),
+        || {
+            if model_name.is_null() || out_embedder.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let model_str = match unsafe { CStr::from_ptr(model_name) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            match kglite::api::FastEmbedAdapter::new(model_str) {
+                Ok(adapter) => {
+                    let arc: Arc<dyn Embedder> = Arc::new(adapter);
+                    unsafe {
+                        *out_embedder = EmbedderState::into_handle(arc);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => {
+                    unsafe {
+                        *out_embedder = std::ptr::null_mut();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&msg);
+                        }
+                    }
+                    KgliteStatusCode::InvalidArgument
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => {
-            unsafe {
-                *out_embedder = std::ptr::null_mut();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&msg);
-                }
-            }
-            KgliteStatusCode::InvalidArgument
-        }
-    }
+        },
+    )
 }

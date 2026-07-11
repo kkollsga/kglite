@@ -23,13 +23,11 @@ use std::sync::Arc;
 /// ## Isolation semantics
 ///
 /// - **Snapshot isolation**: `begin()` takes an `Arc` snapshot (O(1)) and
-///   defers the deep clone until the first mutation lands. Read-only-then-
-///   commit cycles pay zero clone cost. Read-write transactions that
-///   actually mutate clone on demand. Either way the transaction sees a
-///   frozen view of the graph at the moment `begin()` was called.
-/// - **Write isolation**: the first mutation triggers
-///   `Arc::try_unwrap` (cheap if no other ref) or a deep clone, swapping
-///   the transaction from "snapshot-only" mode into "working-copy" mode.
+///   defers its backend-specific working fork until the first mutation.
+///   Memory/mapped modes clone then; disk mode remaps immutable bases and
+///   copies only overlays. Read-only cycles pay no fork cost.
+/// - **Write isolation**: the first mutation swaps the transaction from
+///   snapshot-only mode into its isolated backend working fork.
 ///   Subsequent mutations all land on the working copy without touching
 ///   the original graph.
 /// - **Commit**: `commit()` of a no-write transaction is a no-op (no
@@ -48,7 +46,7 @@ use std::sync::Arc;
 ///
 /// The snapshot/working/CoW/OCC state machine is delegated to the engine's
 /// [`CoreTransaction`] (`kglite_core::graph::session::Transaction`) — the same
-/// type the bolt-server drives — so the deferred-clone, `Arc::try_unwrap`
+/// type the bolt-server drives — so deferred forking
 /// materialisation, and version tracking live in one place (Phase E). This
 /// wrapper adds only the binding-specific concerns: the owning
 /// `KnowledgeGraph` (so `commit()` swaps *its* `Arc`), the optional
@@ -93,7 +91,8 @@ impl Transaction {
             .is_some_and(CoreTransaction::is_read_only)
     }
 
-    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, write_scope=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (query, params=None, to_df=false, timeout_ms=None, max_rows=None, write_scope=None))]
     fn cypher(
         &mut self,
         py: Python<'_>,
@@ -101,6 +100,7 @@ impl Transaction {
         params: Option<&Bound<'_, PyDict>>,
         to_df: bool,
         timeout_ms: Option<u64>,
+        max_rows: Option<usize>,
         write_scope: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
         let write_scope_set: Option<std::collections::HashSet<String>> =
@@ -194,7 +194,7 @@ impl Transaction {
         let opts = kglite_core::api::session::ExecuteOptions {
             params: &param_map,
             deadline,
-            max_rows: None,
+            max_rows,
             // Transactions historically went through the eager path
             // (mark_lazy off, streaming off) — no lazy materializer
             // is wired through the tx ResultView. Preserve that.
@@ -214,9 +214,8 @@ impl Transaction {
         };
 
         let result = if is_mut {
-            // `working_mut` materialises the working copy on first mutation
-            // (in place via Arc::try_unwrap when uniquely held, else a deep
-            // clone) and rejects writes on a read-only tx — both in core.
+            // `working_mut` materialises the backend-specific working copy on
+            // first mutation and rejects writes on a read-only tx — both in core.
             let working = tx.working_mut().map_err(crate::error_py::kg_to_pyerr)?;
             kglite_core::api::session::execute_mut(working, query, &opts)
                 .map_err(crate::error_py::kg_to_pyerr)?

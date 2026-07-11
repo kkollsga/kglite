@@ -30,6 +30,7 @@
 //!     ├── kglite.FileIoError
 //!     ├── kglite.ArgumentError
 //!     ├── kglite.MissingArgumentError
+//!     ├── kglite.InternerCollisionError
 //!     └── kglite.InternalError
 //! ```
 //!
@@ -208,6 +209,13 @@ pyo3::create_exception!(
     "Invariant violation — kglite-internal bug. Reports the source location."
 );
 
+pyo3::create_exception!(
+    kglite,
+    InternerCollisionError,
+    KgError,
+    "Two distinct names collided on the persisted interner key; the operation was rejected unchanged."
+);
+
 // ─── PyErr boundary ──────────────────────────────────────────────────────────
 
 /// Convert a Rust [`RustKgError`] into a Python [`PyErr`], picking
@@ -245,6 +253,7 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
             ArgumentError::new_err(message)
         }
         RustKgError::MissingArgument(_) => MissingArgumentError::new_err(message),
+        RustKgError::InternerCollision(_) => InternerCollisionError::new_err(message),
         RustKgError::Internal { .. } => InternalError::new_err(message),
     }
 }
@@ -303,7 +312,30 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     )?;
 
     // Internal
+    m.add(
+        "InternerCollisionError",
+        py.get_type::<InternerCollisionError>(),
+    )?;
     m.add("InternalError", py.get_type::<InternalError>())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interner_collision_maps_to_dedicated_python_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let collision = kglite_core::api::InternerCollision {
+                key: 7,
+                existing: "first".into(),
+                conflicting: "second".into(),
+            };
+            let error = kg_to_pyerr(RustKgError::InternerCollision(collision));
+            assert!(error.is_instance_of::<InternerCollisionError>(py));
+        });
+    }
 }

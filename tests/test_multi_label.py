@@ -509,9 +509,7 @@ def test_gate_suppresses_fusion_on_multilabel(multi_label_graph):
     """Plan-shape: the aggregate fusion must NOT fire when the graph has
     secondary labels (it would mis-filter); it falls to the general path."""
     g = multi_label_graph
-    ops = [
-        r["operation"] for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a.id, count(b)").to_list()
-    ]
+    ops = [r["operation"] for r in g.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a, count(b)").to_list()]
     assert not any("FusedMatch" in o for o in ops), ops
 
 
@@ -520,7 +518,7 @@ def test_single_label_still_fuses(social_graph):
     proving the gate costs single-label graphs nothing."""
     ops = [
         r["operation"]
-        for r in social_graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.id, count(b)").to_list()
+        for r in social_graph.cypher("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(b)").to_list()
     ]
     assert any("Fused" in o for o in ops), ops
 

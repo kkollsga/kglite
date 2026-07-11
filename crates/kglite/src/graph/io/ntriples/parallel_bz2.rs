@@ -370,7 +370,19 @@ fn worker_loop(
             return;
         }
         let (start, end) = streams[idx];
-        let result = decompress_stream(&path, start, end);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decompress_stream(&path, start, end)
+        }))
+        .unwrap_or_else(|payload| {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            Err(io::Error::other(format!(
+                "parallel bzip2 worker panicked: {detail}"
+            )))
+        });
         if !sender.send_in_order(idx, result) {
             return;
         }

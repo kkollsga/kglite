@@ -90,18 +90,22 @@ pub unsafe extern "C" fn kglite_session_new(
     graph: *mut KgliteGraph,
     out_session: *mut *mut KgliteSession,
 ) -> KgliteStatusCode {
-    if graph.is_null() || out_session.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    // Safety: caller's contract — graph is a valid handle, not
-    // yet freed. We MOVE the Arc out by reconstructing the Box
-    // behind the opaque facade.
-    let graph_state = unsafe { Box::from_raw(graph.cast::<GraphState>()) };
-    let session = Session::from_arc(graph_state.inner);
-    unsafe {
-        *out_session = SessionState::into_handle(session);
-    }
-    KgliteStatusCode::Ok
+    crate::ffi::status_boundary(
+        std::ptr::null_mut(),
+        || crate::ffi::init_out(out_session, std::ptr::null_mut()),
+        || {
+            if graph.is_null() || out_session.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            // Safety: caller's contract — graph is a valid handle, not
+            // yet freed. We MOVE the Arc out by reconstructing the Box
+            // behind the opaque facade.
+            let graph_state = unsafe { Box::from_raw(graph.cast::<GraphState>()) };
+            let session = Session::from_arc(graph_state.inner);
+            unsafe { *out_session = SessionState::into_handle(session) };
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Run a read-only Cypher query.
@@ -136,47 +140,53 @@ pub unsafe extern "C" fn kglite_session_execute_read(
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || query.is_null() || out_result.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let params = match parse_params_json(params_json) {
-        Ok(p) => p,
-        Err(rc) => return rc,
-    };
-
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let snapshot = session_state.inner.snapshot();
-    let opts = session_state.make_opts(&params);
-
-    match execute_read(&snapshot, query_str, &opts) {
-        Ok(outcome) => {
-            unsafe {
-                *out_result = ResultState::into_handle(outcome.result);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_result, std::ptr::null_mut()),
+        || {
+            if session.is_null() || query.is_null() || out_result.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let params = match parse_params_json(params_json) {
+                Ok(p) => p,
+                Err(rc) => return rc,
+            };
+
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let snapshot = session_state.inner.snapshot();
+            let opts = session_state.make_opts(&params);
+
+            match execute_read(&snapshot, query_str, &opts) {
+                Ok(outcome) => {
+                    unsafe {
+                        *out_result = ResultState::into_handle(outcome.result);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_result = std::ptr::null_mut();
+                    }
+                    let code = KgliteStatusCode::from_kg_error_code(err.code());
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    code
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_result = std::ptr::null_mut();
-            }
-            let code = KgliteStatusCode::from_kg_error_code(err.code());
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            code
-        }
-    }
+        },
+    )
 }
 
 /// Run a read-only Cypher query with execution options. Same as
@@ -202,53 +212,59 @@ pub unsafe extern "C" fn kglite_session_execute_read_opts(
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || query.is_null() || out_result.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let params = match parse_params_json(params_json) {
-        Ok(p) => p,
-        Err(rc) => return rc,
-    };
-
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let snapshot = session_state.inner.snapshot();
-    let mut opts = session_state.make_opts(&params);
-    if timeout_ms > 0 {
-        opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
-    }
-    if max_rows > 0 {
-        opts.max_rows = Some(max_rows as usize);
-    }
-
-    match execute_read(&snapshot, query_str, &opts) {
-        Ok(outcome) => {
-            unsafe {
-                *out_result = ResultState::into_handle(outcome.result);
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_result, std::ptr::null_mut()),
+        || {
+            if session.is_null() || query.is_null() || out_result.is_null() {
+                return KgliteStatusCode::NullPointer;
             }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let params = match parse_params_json(params_json) {
+                Ok(p) => p,
+                Err(rc) => return rc,
+            };
+
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let snapshot = session_state.inner.snapshot();
+            let mut opts = session_state.make_opts(&params);
+            if timeout_ms > 0 {
+                opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
+            }
+            if max_rows > 0 {
+                opts.max_rows = Some(max_rows as usize);
+            }
+
+            match execute_read(&snapshot, query_str, &opts) {
+                Ok(outcome) => {
+                    unsafe {
+                        *out_result = ResultState::into_handle(outcome.result);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_result = std::ptr::null_mut();
+                    }
+                    let code = KgliteStatusCode::from_kg_error_code(err.code());
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    code
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_result = std::ptr::null_mut();
-            }
-            let code = KgliteStatusCode::from_kg_error_code(err.code());
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            code
-        }
-    }
+        },
+    )
 }
 
 /// Run a mutating Cypher query. Same shape as
@@ -271,82 +287,113 @@ pub unsafe extern "C" fn kglite_session_execute_mut(
     out_result: *mut *mut KgliteCypherResult,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || query.is_null() || out_result.is_null() {
-        return KgliteStatusCode::NullPointer;
+    unsafe { execute_mut_impl(session, query, params_json, 0, 0, out_result, out_error_msg) }
+}
+
+/// Run a mutating query with the same timeout and row/collection budget
+/// semantics as [`kglite_session_execute_read_opts`]. A budget failure rolls
+/// back the complete statement. `0` disables the corresponding option.
+///
+/// # Safety
+///
+/// Same as [`kglite_session_execute_mut`].
+#[no_mangle]
+pub unsafe extern "C" fn kglite_session_execute_mut_opts(
+    session: *mut KgliteSession,
+    query: *const c_char,
+    params_json: *const c_char,
+    timeout_ms: u64,
+    max_rows: u64,
+    out_result: *mut *mut KgliteCypherResult,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    unsafe {
+        execute_mut_impl(
+            session,
+            query,
+            params_json,
+            timeout_ms,
+            max_rows,
+            out_result,
+            out_error_msg,
+        )
     }
-    let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let params = match parse_params_json(params_json) {
-        Ok(p) => p,
-        Err(rc) => return rc,
-    };
+}
 
-    // `execute_mut` takes `*mut` for the C ABI but the SessionState
-    // mutex makes the actual interior mutation thread-safe — we
-    // borrow `&SessionState` here and rely on Session's internal
-    // Mutex for the commit-swap.
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let opts = session_state.make_opts(&params);
+#[allow(clippy::too_many_arguments)]
+unsafe fn execute_mut_impl(
+    session: *mut KgliteSession,
+    query: *const c_char,
+    params_json: *const c_char,
+    timeout_ms: u64,
+    max_rows: u64,
+    out_result: *mut *mut KgliteCypherResult,
+    out_error_msg: *mut *const c_char,
+) -> KgliteStatusCode {
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_result, std::ptr::null_mut()),
+        || {
+            if session.is_null() || query.is_null() || out_result.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let query_str = match unsafe { CStr::from_ptr(query) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let params = match parse_params_json(params_json) {
+                Ok(p) => p,
+                Err(rc) => return rc,
+            };
 
-    // Mirror the bolt-server execute_in_tx pattern: begin →
-    // working_mut → execute_mut → commit. The Transaction's
-    // working_mut lazily clones the snapshot's DirGraph for
-    // mutation; commit atomically swaps it back via the Session
-    // mutex.
-    let mut tx = session_state.inner.begin();
-    let exec_result = {
-        let working = match tx.working_mut() {
-            Ok(w) => w,
-            Err(err) => {
-                let code = KgliteStatusCode::from_kg_error_code(err.code());
-                if !out_error_msg.is_null() {
+            // `execute_mut` takes `*mut` for the C ABI but the SessionState
+            // mutex makes the actual interior mutation thread-safe — we
+            // borrow `&SessionState` here and rely on Session's internal
+            // Mutex for the commit-swap.
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let mut opts = session_state.make_opts(&params);
+            if timeout_ms > 0 {
+                opts.deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
+            }
+            if max_rows > 0 {
+                opts.max_rows = Some(max_rows as usize);
+            }
+
+            // Hold the core Session write guard across execution. This serializes the
+            // complete mutation (preventing last-writer-loses races) and reaches the
+            // unique-owner path without the old redundant working-copy clone.
+            let mut working = session_state.inner.write();
+            let exec_result = execute_mut(&mut working, query_str, &opts);
+
+            match exec_result {
+                Ok(outcome) => {
                     unsafe {
-                        *out_error_msg = alloc_c_string(&err.to_string());
+                        *out_result = ResultState::into_handle(outcome.result);
                     }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
                 }
-                unsafe {
-                    *out_result = std::ptr::null_mut();
-                }
-                return code;
-            }
-        };
-        execute_mut(working, query_str, &opts)
-    };
-
-    match exec_result {
-        Ok(outcome) => {
-            // Auto-commit. `check_occ = false` matches bolt-server's
-            // current default — no inter-session OCC checking at
-            // the C ABI surface in v1. Explicit OCC lands when a
-            // binding actually needs it.
-            let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
-            unsafe {
-                *out_result = ResultState::into_handle(outcome.result);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+                Err(err) => {
+                    // tx drops without commit — no mutation reaches the
+                    // session's stored Arc.
+                    unsafe {
+                        *out_result = std::ptr::null_mut();
+                    }
+                    let code = KgliteStatusCode::from_kg_error_code(err.code());
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    code
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            // tx drops without commit — no mutation reaches the
-            // session's stored Arc.
-            unsafe {
-                *out_result = std::ptr::null_mut();
-            }
-            let code = KgliteStatusCode::from_kg_error_code(err.code());
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            code
-        }
-    }
+        },
+    )
 }
 
 /// Run several read-only Cypher queries against a single consistent
@@ -380,44 +427,50 @@ pub unsafe extern "C" fn kglite_session_execute_read_batch(
     out_results_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let queries = match parse_batch_queries(queries_json) {
-        Ok(q) => q,
-        Err(rc) => return rc,
-    };
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let snapshot = session_state.inner.snapshot();
-    let mut results = Vec::with_capacity(queries.len());
-    for (query, params) in &queries {
-        let opts = session_state.make_opts(params);
-        match execute_read(&snapshot, query, &opts) {
-            Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
-            Err(err) => {
-                unsafe {
-                    *out_results_json = std::ptr::null();
-                }
-                let code = KgliteStatusCode::from_kg_error_code(err.code());
-                if !out_error_msg.is_null() {
-                    unsafe {
-                        *out_error_msg = alloc_c_string(&err.to_string());
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_results_json, std::ptr::null()),
+        || {
+            if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let queries = match parse_batch_queries(queries_json) {
+                Ok(q) => q,
+                Err(rc) => return rc,
+            };
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let snapshot = session_state.inner.snapshot();
+            let mut results = Vec::with_capacity(queries.len());
+            for (query, params) in &queries {
+                let opts = session_state.make_opts(params);
+                match execute_read(&snapshot, query, &opts) {
+                    Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
+                    Err(err) => {
+                        unsafe {
+                            *out_results_json = std::ptr::null();
+                        }
+                        let code = KgliteStatusCode::from_kg_error_code(err.code());
+                        if !out_error_msg.is_null() {
+                            unsafe {
+                                *out_error_msg = alloc_c_string(&err.to_string());
+                            }
+                        }
+                        return code;
                     }
                 }
-                return code;
             }
-        }
-    }
-    let json = serde_json::Value::Array(results).to_string();
-    unsafe {
-        *out_results_json = alloc_c_string(&json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+            let json = serde_json::Value::Array(results).to_string();
+            unsafe {
+                *out_results_json = alloc_c_string(&json);
+            }
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Run several mutating Cypher queries in a single transaction — one
@@ -442,23 +495,31 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
     out_results_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let queries = match parse_batch_queries(queries_json) {
-        Ok(q) => q,
-        Err(rc) => return rc,
-    };
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let mut tx = session_state.inner.begin();
-    let mut results = Vec::with_capacity(queries.len());
-    for (query, params) in &queries {
-        let opts = session_state.make_opts(params);
-        let exec = {
-            let working = match tx.working_mut() {
-                Ok(w) => w,
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_results_json, std::ptr::null()),
+        || {
+            if session.is_null() || queries_json.is_null() || out_results_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let queries = match parse_batch_queries(queries_json) {
+                Ok(q) => q,
+                Err(rc) => return rc,
+            };
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let transaction: Result<Vec<serde_json::Value>, Box<kglite::api::KgError>> =
+                session_state.inner.transact(|working| {
+                    let mut results = Vec::with_capacity(queries.len());
+                    for (query, params) in &queries {
+                        let opts = session_state.make_opts(params);
+                        let outcome = execute_mut(working, query, &opts).map_err(Box::new)?;
+                        results.push(result_to_json_object(&outcome.result));
+                    }
+                    Ok(results)
+                });
+            let results = match transaction {
+                Ok(results) => results,
                 Err(err) => {
-                    // tx drops uncommitted → atomic rollback.
                     unsafe {
                         *out_results_json = std::ptr::null();
                     }
@@ -471,36 +532,18 @@ pub unsafe extern "C" fn kglite_session_execute_mut_batch(
                     return code;
                 }
             };
-            execute_mut(working, query, &opts)
-        };
-        match exec {
-            Ok(outcome) => results.push(result_to_json_object(&outcome.result)),
-            Err(err) => {
-                // tx drops uncommitted → none of the batch's writes land.
-                unsafe {
-                    *out_results_json = std::ptr::null();
-                }
-                let code = KgliteStatusCode::from_kg_error_code(err.code());
-                if !out_error_msg.is_null() {
-                    unsafe {
-                        *out_error_msg = alloc_c_string(&err.to_string());
-                    }
-                }
-                return code;
+            let json = serde_json::Value::Array(results).to_string();
+            unsafe {
+                *out_results_json = alloc_c_string(&json);
             }
-        }
-    }
-    let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
-    let json = serde_json::Value::Array(results).to_string();
-    unsafe {
-        *out_results_json = alloc_c_string(&json);
-    }
-    if !out_error_msg.is_null() {
-        unsafe {
-            *out_error_msg = std::ptr::null();
-        }
-    }
-    KgliteStatusCode::Ok
+            if !out_error_msg.is_null() {
+                unsafe {
+                    *out_error_msg = std::ptr::null();
+                }
+            }
+            KgliteStatusCode::Ok
+        },
+    )
 }
 
 /// Bulk-create edges addressed by **stable node id + type**, bypassing
@@ -535,61 +578,67 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
     out_report_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if session.is_null() || edges_json.is_null() || out_report_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let specs = match parse_edge_specs(edges_json) {
-        Ok(s) => s,
-        Err(rc) => return rc,
-    };
-    let session_state = unsafe { SessionState::from_handle(session) };
-    let mut tx = session_state.inner.begin();
-    let working = match tx.working_mut() {
-        Ok(w) => w,
-        Err(err) => {
-            let code = KgliteStatusCode::from_kg_error_code(err.code());
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_report_json, std::ptr::null()),
+        || {
+            if session.is_null() || edges_json.is_null() || out_report_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let specs = match parse_edge_specs(edges_json) {
+                Ok(s) => s,
+                Err(rc) => return rc,
+            };
+            let session_state = unsafe { SessionState::from_handle(session) };
+            let mut tx = session_state.inner.begin();
+            let working = match tx.working_mut() {
+                Ok(w) => w,
+                Err(err) => {
+                    let code = KgliteStatusCode::from_kg_error_code(err.code());
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    unsafe {
+                        *out_report_json = std::ptr::null();
+                    }
+                    return code;
+                }
+            };
+            match add_edges_from_specs(working, specs) {
+                Ok(report) => {
+                    let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
+                    let json = serde_json::json!({
+                        "connections_created": report.connections_created,
+                        "skipped_missing_endpoint": report.skipped_missing_endpoint,
+                    })
+                    .to_string();
+                    unsafe {
+                        *out_report_json = alloc_c_string(&json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(msg) => {
+                    // tx drops uncommitted → none of the batch's edges land.
+                    unsafe {
+                        *out_report_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&msg);
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            unsafe {
-                *out_report_json = std::ptr::null();
-            }
-            return code;
-        }
-    };
-    match add_edges_from_specs(working, specs) {
-        Ok(report) => {
-            let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
-            let json = serde_json::json!({
-                "connections_created": report.connections_created,
-                "skipped_missing_endpoint": report.skipped_missing_endpoint,
-            })
-            .to_string();
-            unsafe {
-                *out_report_json = alloc_c_string(&json);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
-                }
-            }
-            KgliteStatusCode::Ok
-        }
-        Err(msg) => {
-            // tx drops uncommitted → none of the batch's edges land.
-            unsafe {
-                *out_report_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&msg);
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Free a session handle. Idempotent on null (no-op).
@@ -600,7 +649,7 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
 /// returned by [`kglite_session_new`] and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_session_free(session: *mut KgliteSession) {
-    unsafe { SessionState::free_handle(session) };
+    crate::ffi::void_boundary(|| unsafe { SessionState::free_handle(session) });
 }
 
 impl SessionState {

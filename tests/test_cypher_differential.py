@@ -53,6 +53,85 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("count_all_typed", "social_graph", "MATCH (p:Person) RETURN count(p) AS n", None),
     ("count_all_untyped", "social_graph", "MATCH (n) RETURN count(n) AS n", None),
     ("distinct_property", "social_graph", "MATCH (p:Person) RETURN DISTINCT p.city AS c", None),
+    ("budget_unwind_shape", "small_graph", "UNWIND [1, 2, 3] AS x RETURN x", None),
+    (
+        "budget_union_all_shape",
+        "small_graph",
+        "RETURN 1 AS x UNION ALL RETURN 2 AS x",
+        None,
+    ),
+    (
+        "budget_correlated_call_shape",
+        "small_graph",
+        "UNWIND [1, 2] AS x CALL { WITH x UNWIND [10, 20] AS y RETURN y } RETURN x, y",
+        None,
+    ),
+    (
+        "range_i64_terminal_shape",
+        "small_graph",
+        "RETURN range($start, $end, $step) AS r",
+        {"start": -(2**63), "end": -(2**63) + 1, "step": 1},
+    ),
+    (
+        "checked_calendar_shift_shape",
+        "small_graph",
+        "RETURN add_years(date('2024-02-29'), 1) AS d",
+        None,
+    ),
+    (
+        "duration_scale_shape",
+        "small_graph",
+        "WITH duration({months: 2, days: 3}) * 3 AS d RETURN d.months AS m, d.days AS days",
+        None,
+    ),
+    # Machine-verified trigger shapes for passes whose older comment-only
+    # corpus entries did not actually make the pass fire.
+    (
+        "trigger_push_limit_into_aggregate",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.city AS city, count(*) AS n LIMIT 2",
+        None,
+    ),
+    ("trigger_anchored_edge_count", "social_graph", "MATCH ({id: 1})-[:KNOWS]->(p) RETURN count(*) AS n", None),
+    ("trigger_count_short_circuit", "social_graph", "MATCH (p:Person) RETURN count(*) AS n", None),
+    (
+        "property_grouping_duplicate_values",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.city AS city, count(b) AS n",
+        None,
+    ),
+    (
+        "trigger_match_return_aggregate",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(b) AS n",
+        None,
+    ),
+    (
+        "trigger_match_with_aggregate",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(DISTINCT b) AS friends RETURN a, friends",
+        None,
+    ),
+    (
+        "trigger_match_with_top_k",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a, count(b) AS n RETURN a.name AS name, n ORDER BY n DESC LIMIT 3",
+        None,
+    ),
+    ("trigger_node_scan_aggregate", "social_graph", "MATCH (p:Person) RETURN sum(p.age) AS total", None),
+    (
+        "trigger_node_scan_top_k",
+        "social_graph",
+        "MATCH (p:Person) RETURN p.name AS name ORDER BY p.age DESC LIMIT 3",
+        None,
+    ),
+    ("trigger_generic_top_k", "small_graph", "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2", None),
+    (
+        "trigger_predicate_reorder",
+        "social_graph",
+        "MATCH (p) WHERE EXISTS((p)-[:KNOWS]->()) AND p:Person RETURN p.title AS title",
+        None,
+    ),
     # ── push_where_into_match ──
     ("where_eq", "social_graph", "MATCH (p:Person) WHERE p.city = 'Oslo' RETURN p.name AS n", None),
     ("where_gt", "social_graph", "MATCH (p:Person) WHERE p.age > 30 RETURN p.name AS n", None),
@@ -235,6 +314,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     # ── fuse_match_return_aggregate ──
+    (
+        "global_two_hop_count",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN count(*) AS paths",
+        None,
+    ),
     ("group_by_city", "social_graph", "MATCH (p:Person) RETURN p.city AS city, count(p) AS n", None),
     ("group_by_with_sum", "social_graph", "MATCH (p:Person) RETURN p.city AS city, sum(p.salary) AS total", None),
     # Edge-driven group-by where the target node carries a `:Type` label.
@@ -799,6 +884,13 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "multi_match_count_star",
         "social_graph",
         "MATCH (p:Person) MATCH (q:Person) WHERE p.person_id < q.person_id AND p.city = q.city RETURN count(*) AS n",
+        None,
+    ),
+    # ── safe LIMIT pushdown over an unfiltered node-only cartesian ──
+    (
+        "cartesian_node_scans_limit",
+        "social_graph",
+        "MATCH (p:Person), (c:Company) RETURN p.name AS p, c.name AS c LIMIT 100",
         None,
     ),
     # ── String operations + WHERE + ORDER BY ──
@@ -1477,6 +1569,76 @@ KNOWN_DIVERGENT: list[tuple[str, str, str, str]] = [
     # blocked; otherwise they go straight to DIFFERENTIAL_QUERIES with
     # the fix in the same commit.
 ]
+
+
+# Machine-readable ownership: every registered optimizer pass names one query
+# that must make the pass change an EXPLAIN plan. Schema-dependent passes live
+# in test_cypher_specialized_optimizer; all others point into the differential
+# corpus above. The applied-pass trace makes this stronger than comment-only
+# coverage: a gate regression that silently stops firing fails CI.
+PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
+    "optimize_nested_queries": ("differential", "call_uncorrelated_body_fusion_then_limit"),
+    "rewrite_count_bound_var_to_star": ("differential", "count_all_typed"),
+    "push_where_into_match.1": ("differential", "where_eq"),
+    "fold_or_to_in": ("differential", "or_chain_to_in"),
+    "push_where_into_match.2": ("differential", "or_chain_to_in"),
+    "extract_pushable_rel_predicates": ("differential", "rel_property_filter"),
+    "fold_pass_through_with": ("differential", "pass_through_with"),
+    "desugar_multi_match_return_aggregate": ("differential", "multi_match_group_agg"),
+    "fuse_spatial_join": ("specialized", "spatial_join"),
+    "reorder_match_clauses": ("specialized", "reorder_match_clauses"),
+    "reorder_cyclic_pattern_edges": ("specialized", "reorder_cyclic_pattern_edges"),
+    "optimize_pattern_start_node": ("specialized", "optimize_pattern_start_node"),
+    "reorder_match_patterns": ("specialized", "reorder_match_patterns"),
+    "push_limit_into_match": ("differential", "limit_simple"),
+    "push_limit_into_aggregate": ("differential", "trigger_push_limit_into_aggregate"),
+    "push_distinct_into_match": ("differential", "distinct_with_match"),
+    "fuse_anchored_edge_count": ("differential", "trigger_anchored_edge_count"),
+    "fuse_count_short_circuits": ("differential", "trigger_count_short_circuit"),
+    "fuse_optional_match_aggregate": ("differential", "count_optional_edge_var"),
+    "fuse_match_return_aggregate": ("differential", "trigger_match_return_aggregate"),
+    "fuse_match_with_aggregate": ("differential", "trigger_match_with_aggregate"),
+    "fuse_match_with_aggregate_top_k": ("differential", "trigger_match_with_top_k"),
+    "fuse_node_scan_aggregate": ("differential", "trigger_node_scan_aggregate"),
+    "fuse_node_scan_top_k": ("differential", "trigger_node_scan_top_k"),
+    "fuse_vector_score_order_limit": ("specialized", "vector_score_top_k"),
+    "fuse_order_by_top_k": ("differential", "trigger_generic_top_k"),
+    "reorder_predicates_by_cost": ("differential", "trigger_predicate_reorder"),
+    "mark_fast_var_length_paths": ("differential", "var_length_no_var_distinct"),
+    "mark_skip_target_type_check": ("differential", "anchored_three_hop"),
+}
+
+
+def test_every_registered_pass_has_a_trigger_case() -> None:
+    assert set(PASS_TRIGGER_CASES) == set(kglite.cypher_pass_names())
+    differential_ids = {entry[0] for entry in DIFFERENTIAL_QUERIES}
+    specialized_ids = {
+        "spatial_join",
+        "vector_score_top_k",
+        "text_score_top_k",
+        "reorder_match_clauses",
+        "reorder_cyclic_pattern_edges",
+        "optimize_pattern_start_node",
+        "reorder_match_patterns",
+    }
+
+    for source, case_id in PASS_TRIGGER_CASES.values():
+        available = differential_ids if source == "differential" else specialized_ids
+        assert case_id in available
+
+
+@pytest.mark.parametrize(
+    "pass_name,case_id",
+    [(pass_name, case_id) for pass_name, (source, case_id) in PASS_TRIGGER_CASES.items() if source == "differential"],
+)
+def test_registered_pass_changes_its_trigger_plan(pass_name, case_id, request) -> None:
+    cases = {entry[0]: entry for entry in DIFFERENTIAL_QUERIES}
+    _, fixture, query, params = cases[case_id]
+    graph = request.getfixturevalue(fixture)
+    kwargs = {"params": params} if params else {}
+    plan = graph.cypher(f"EXPLAIN {query}", **kwargs).to_list()
+    operations = [row["operation"] for row in plan]
+    assert f"OptimizerPass {pass_name}" in operations
 
 
 @pytest.mark.differential

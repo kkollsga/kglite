@@ -388,7 +388,8 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
         };
 
         // Only push the LIMIT hint into MATCH when this is the FIRST and ONLY
-        // MATCH clause AND the MATCH has a single pattern. Two unsafe shapes:
+        // MATCH clause and its pattern shape cannot under-fill after an early
+        // cap. Two unsafe shapes:
         //
         // 1. Multi-MATCH (separate `MATCH ... MATCH` clauses): routes through
         //    `execute_match`'s subsequent-MATCH path, where the per-row pattern
@@ -396,24 +397,36 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
         //    outer row loop and produces fewer rows than the LIMIT requests
         //    (regression seen on 3-MATCH + WHERE on last-MATCH variable + LIMIT N
         //    queries — see `test_limit_pushdown_multi_match_safety`).
-        // 2. Multi-pattern within ONE MATCH (comma-separated patterns:
+        // 2. Correlated/filtered multi-pattern within ONE MATCH (comma-separated patterns:
         //    `MATCH (p)-[:T]->(q), (p)-[:T]->(r)`): same row-loop interaction
         //    surfaces because each pattern's expansion is separately bounded
         //    by the limit_hint, so the cartesian's surviving cross-product
         //    can fall short of LIMIT (regression seen on self-join + WHERE
         //    + LIMIT — caught by the differential harness).
-        // For both shapes, leave LIMIT as a separate clause.
+        // A strict exception is safe: an unfiltered comma-list of node-only
+        // patterns is a pure cartesian product. Every prefix row has the same
+        // independent choices in the next pattern, so retaining any N rows at
+        // each stage still yields N valid final rows (LIMIT has no ordering
+        // contract here). This avoids materialising millions of pairs merely
+        // to return the first handful.
         let is_first_match = i == 0;
         let only_match = !query
             .clauses
             .iter()
             .skip(i + 1)
             .any(|c| matches!(c, Clause::Match(_) | Clause::OptionalMatch(_)));
-        let single_pattern = match &query.clauses[i] {
-            Clause::Match(m) => m.patterns.len() == 1,
+        let limit_safe_pattern_shape = match &query.clauses[i] {
+            Clause::Match(m) => {
+                m.patterns.len() == 1
+                    || (!has_where
+                        && m.patterns.len() > 1
+                        && m.patterns.iter().all(|pattern| {
+                            matches!(pattern.elements.as_slice(), [PatternElement::Node(_)])
+                        }))
+            }
             _ => false,
         };
-        if !is_first_match || !only_match || !single_pattern {
+        if !is_first_match || !only_match || !limit_safe_pattern_shape {
             i += 1;
             continue;
         }

@@ -321,6 +321,37 @@ class TestVectorSearch:
         assert "score" in df.columns
         assert "id" in df.columns
 
+    def test_search_list_and_dataframe_conversion_match_after_reload(self, tmp_path):
+        graph = kglite.KnowledgeGraph()
+        graph.cypher(
+            "CREATE (:Article {id:1, title:'A', summary:'a', scalar:7, "
+            "tags:['x','y'], meta:{rank:1, nested:[true,false]}}), "
+            "(:Article {id:2, title:'B', summary:'b', scalar:8, "
+            "tags:['z'], meta:{rank:2, nested:[false]}})"
+        )
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0], 2: [0.0, 1.0]})
+
+        def assert_parity(candidate):
+            rows = candidate.select("Article").vector_search("summary", [1.0, 0.0], top_k=2, to_df=False)
+            frame_rows = (
+                candidate.select("Article").vector_search("summary", [1.0, 0.0], top_k=2, to_df=True).to_dict("records")
+            )
+            assert frame_rows == rows
+
+        assert_parity(graph)
+        path = str(tmp_path / "vector_conversion.kgl")
+        graph.save(path)
+        assert_parity(kglite.load(path))
+
+    def test_search_dataframe_propagates_value_conversion_error(self):
+        graph = kglite.KnowledgeGraph()
+        graph.cypher("CREATE (:Article {id:1, title:'A', summary:'a', bad:datetime('10000-01-01T00:00:00')})")
+        graph.set_embeddings("Article", "summary", {1: [1.0, 0.0]})
+
+        for to_df in (False, True):
+            with pytest.raises(ValueError, match="year"):
+                graph.select("Article").vector_search("summary", [1.0, 0.0], top_k=1, to_df=to_df)
+
     def test_search_empty_selection(self):
         graph = kglite.KnowledgeGraph()
         results = graph.vector_search("text", [1.0, 0.0, 0.0], top_k=3)

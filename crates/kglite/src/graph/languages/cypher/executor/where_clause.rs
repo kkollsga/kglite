@@ -477,8 +477,7 @@ impl<'a> CypherExecutor<'a> {
                 if matches!(left_val, Value::Null) || matches!(right_val, Value::Null) {
                     return Ok(None);
                 }
-                evaluate_comparison(&left_val, operator, &right_val, Some(&self.regex_cache))
-                    .map(Some)
+                evaluate_comparison(&left_val, operator, &right_val).map(Some)
             }
             Predicate::And(left, right) => {
                 // Kleene AND: FALSE absorbs (short-circuits even past NULL);

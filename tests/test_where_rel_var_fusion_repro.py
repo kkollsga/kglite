@@ -17,10 +17,10 @@ The semantics are equivalent to:
 A second variant computes the same answer via the "narrow-then-enrich" form
 documented in the cohort fusion fall-back memo.
 
-The test asserts:
-1. Both queries return the same answer (correctness).
-2. The query with WHERE on the rel-var lands on the fused fast path
-   (`FusedMatchWithAggregate`), not the generic interpreter.
+The test asserts both forms return the same answer and the property-valued
+grouping stays on the safe eager aggregate path. The fused accumulator groups
+by node identity, which is not equivalent when multiple nodes share the same
+title and description.
 """
 
 from __future__ import annotations
@@ -105,16 +105,17 @@ def test_where_form_matches_optional_form(mini_wikidata):
     assert _names(a_rows) == _names(b_rows)
 
 
-def test_where_form_uses_fused_fast_path(mini_wikidata):
-    """The WHERE-on-rel-var query must land on FusedMatchWithAggregate."""
+def test_where_form_avoids_node_keyed_fusion(mini_wikidata):
+    """Property-valued grouping must not land on a NodeIndex-keyed fusion."""
     g, country_id = mini_wikidata
     plan = g.cypher("EXPLAIN " + _where_query(country_id))
     ops = [row["operation"] for row in plan]
-    assert any(op == "FusedMatchWithAggregate" for op in ops), f"Expected FusedMatchWithAggregate in plan; got: {ops}"
+    assert "FusedMatchWithAggregate" not in ops, ops
+    assert "With" in ops, ops
 
 
 def test_where_form_runtime(mini_wikidata):
-    """Sanity timing: fused path should be well under 1s on this tiny graph."""
+    """Sanity timing: the safe path remains well under 1s on this tiny graph."""
     g, country_id = mini_wikidata
     t0 = time.perf_counter()
     rows = list(g.cypher(_where_query(country_id)))

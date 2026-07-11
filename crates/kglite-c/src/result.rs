@@ -82,14 +82,16 @@ pub(crate) fn result_to_json_object(result: &CypherResult) -> serde_json::Value 
 pub unsafe extern "C" fn kglite_cypher_result_columns_json(
     result: *const KgliteCypherResult,
 ) -> *const c_char {
-    if result.is_null() {
-        return std::ptr::null();
-    }
-    let state = unsafe { ResultState::from_handle(result) };
-    match serde_json::to_string(&state.inner.columns) {
-        Ok(s) => alloc_c_string(&s),
-        Err(_) => std::ptr::null(),
-    }
+    crate::ffi::value_boundary(std::ptr::null(), || {
+        if result.is_null() {
+            return std::ptr::null();
+        }
+        let state = unsafe { ResultState::from_handle(result) };
+        match serde_json::to_string(&state.inner.columns) {
+            Ok(s) => alloc_c_string(&s),
+            Err(_) => std::ptr::null(),
+        }
+    })
 }
 
 /// Return all rows as a JSON array of objects keyed by column
@@ -111,15 +113,17 @@ pub unsafe extern "C" fn kglite_cypher_result_columns_json(
 pub unsafe extern "C" fn kglite_cypher_result_rows_json(
     result: *const KgliteCypherResult,
 ) -> *const c_char {
-    if result.is_null() {
-        return std::ptr::null();
-    }
-    let state = unsafe { ResultState::from_handle(result) };
-    let rows = rows_to_json_array(&state.inner);
-    match serde_json::to_string(&rows) {
-        Ok(s) => alloc_c_string(&s),
-        Err(_) => std::ptr::null(),
-    }
+    crate::ffi::value_boundary(std::ptr::null(), || {
+        if result.is_null() {
+            return std::ptr::null();
+        }
+        let state = unsafe { ResultState::from_handle(result) };
+        let rows = rows_to_json_array(&state.inner);
+        match serde_json::to_string(&rows) {
+            Ok(s) => alloc_c_string(&s),
+            Err(_) => std::ptr::null(),
+        }
+    })
 }
 
 /// Return the number of rows in the result. Useful for callers
@@ -128,11 +132,13 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
 pub unsafe extern "C" fn kglite_cypher_result_row_count(
     result: *const KgliteCypherResult,
 ) -> usize {
-    if result.is_null() {
-        return 0;
-    }
-    let state = unsafe { ResultState::from_handle(result) };
-    state.inner.rows.len()
+    crate::ffi::value_boundary(0, || {
+        if result.is_null() {
+            return 0;
+        }
+        let state = unsafe { ResultState::from_handle(result) };
+        state.inner.rows.len()
+    })
 }
 
 /// Free a result handle. Idempotent on null (no-op).
@@ -145,7 +151,7 @@ pub unsafe extern "C" fn kglite_cypher_result_row_count(
 /// and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_cypher_result_free(result: *mut KgliteCypherResult) {
-    unsafe { ResultState::free_handle(result) };
+    crate::ffi::void_boundary(|| unsafe { ResultState::free_handle(result) });
 }
 
 #[cfg(test)]

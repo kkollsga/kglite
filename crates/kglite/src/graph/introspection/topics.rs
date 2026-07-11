@@ -304,7 +304,7 @@ pub(super) fn write_topic_functions(xml: &mut String) {
     xml.push_str("    <group name=\"text_predicates\">text_edit_distance(a,b) — Levenshtein; text_normalize(s) — lowercase + strip punct + collapse whitespace; text_jaccard(a,b[,sep]) — token Jaccard; text_ngrams(s,n) — char n-grams; text_contains_any(s, needles) / text_starts_with_any(s, prefixes) — variadic or list arg</group>\n");
     xml.push_str("    <group name=\"geometry\">geom_buffer(geom, meters); geom_convex_hull(geoms); geom_union/intersection/difference(g1, g2); geom_is_valid(geom); geom_length(geom). Accept WKT strings, node variables, or Points; return WKT strings.</group>\n");
     xml.push_str("    <group name=\"aggregate\">count(*)/count(expr), sum(expr), avg(expr), min(expr), max(expr), collect(expr), stDev(expr)/std(expr), variance(expr)/var_samp(expr), median(expr), percentile_cont(expr,p), percentile_disc(expr,p)</group>\n");
-    xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]), keys(node), properties(node)/properties(rel) — full property map, start_node(rel)/end_node(rel) — endpoints</group>\n");
+    xml.push_str("    <group name=\"graph\">size(list), length(path), id(node), labels(node), type(rel), coalesce(expr,...) — first non-null, range(start,end[,step]) — checked inclusive list subject to max_rows and a 256 MiB materialization ceiling, keys(node), properties(node)/properties(rel) — full property map, start_node(rel)/end_node(rel) — endpoints</group>\n");
     xml.push_str("    <group name=\"list\">reduce(acc = init, x IN list | body) — fold accumulator over list; any/all/none/single(x IN list WHERE pred); [x IN list WHERE pred | map_expr] — comprehension</group>\n");
     xml.push_str("    <group name=\"json\">parse_json(s)/from_json(s) — parse a JSON string into a structured map/list/scalar (null on invalid). Use it to predicate over properties stored as JSON, e.g. code-graph Function.parameters / Class.fields: any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset')</group>\n");
     xml.push_str("    <examples>\n");
@@ -731,8 +731,15 @@ pub(super) fn write_topic_temporal(xml: &mut String) {
     xml.push_str("    <functions>\n");
     xml.push_str("      <fn name=\"date(str) / datetime(str)\">Parse date string to DateTime value. Supports 'YYYY-MM-DD' format.</fn>\n");
     xml.push_str("      <fn name=\"date_diff(d1, d2)\">Days between two dates (d1 - d2). Same as date subtraction.</fn>\n");
-    xml.push_str("      <fn name=\"date + N / date - N\">Add/subtract N days from a date.</fn>\n");
-    xml.push_str("      <fn name=\"date - date\">Days between two dates (returns integer).</fn>\n");
+    xml.push_str("      <fn name=\"date + N / date - N\">Add/subtract N days from a date with checked arithmetic; an unrepresentable date returns NULL.</fn>\n");
+    xml.push_str("      <fn name=\"add_days/add_months/add_years(date, n)\">Checked date/calendar shift. Unrepresentable magnitudes return NULL.</fn>\n");
+    xml.push_str(
+        "      <fn name=\"date_truncate(date, unit)\">Truncate to year/month/week/day.</fn>\n",
+    );
+    xml.push_str("      <fn name=\"duration(map) / duration * integer\">Construct or scale checked month/day/second components. Overflow, fractional values, and invalid types raise a Cypher execution error.</fn>\n");
+    xml.push_str(
+        "      <fn name=\"date - date\">Difference between two dates (returns Duration).</fn>\n",
+    );
     xml.push_str("      <fn name=\"d.year / d.month / d.day\">Extract year, month, or day from a DateTime value.</fn>\n");
     xml.push_str("      <fn name=\"valid_at(entity, date, 'from_field', 'to_field')\">True if entity.from_field &lt;= date &lt;= entity.to_field. NULL from_field = valid since beginning. NULL to_field = still valid.</fn>\n");
     xml.push_str("      <fn name=\"valid_during(entity, start, end, 'from_field', 'to_field')\">True if entity's validity period overlaps [start, end]. Overlap: entity.from_field &lt;= end AND entity.to_field &gt;= start. NULL = open-ended.</fn>\n");
@@ -1213,7 +1220,7 @@ pub(super) fn write_fluent_topic_loading(xml: &mut String) {
     );
     xml.push_str("    <methods>\n");
     xml.push_str("      <m sig=\"add_nodes(df, type, id_field, title_field, columns=None, column_types=None, conflict_handling='skip', timeseries=None)\">Load nodes. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. column_types maps columns to spatial/temporal types.</m>\n");
-    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, conflict_handling='update', query=None, extra_properties=None)\">Load edges from DataFrame (data=df) or Cypher query (data=None, query='MATCH...RETURN...'). conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. extra_properties stamps static props onto query-mode edges.</m>\n");
+    xml.push_str("      <m sig=\"add_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, columns=None, skip_columns=None, conflict_handling='update', query=None, extra_properties=None)\">Load edges from DataFrame (data=df) or Cypher query (data=None, query='MATCH...RETURN...'). columns=None keeps all non-skipped DataFrame columns; columns=[...] is an explicit property whitelist. conflict_handling: 'update'|'replace'|'skip'|'preserve'|'sum'. extra_properties stamps static props onto query-mode edges.</m>\n");
     xml.push_str("      <m sig=\"replace_connections(data, conn_type, source_type, source_id_field, target_type, target_id_field, ...)\">Atomic edge upsert: prune each source node's existing conn_type edges, then add the input's. Same args as add_connections; use to re-sync a derived edge set idempotently.</m>\n");
     xml.push_str("      <m sig=\"add_nodes_bulk(specs)\">Bulk load multiple node types: [{'node_type': ..., 'data': df, ...}].</m>\n");
     xml.push_str(

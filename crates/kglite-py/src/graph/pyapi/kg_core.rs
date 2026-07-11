@@ -154,7 +154,7 @@ impl KnowledgeGraph {
     /// or ``describe()``. The caches are persisted by ``save()`` and
     /// restored by ``load()``, so this only needs to be called once
     /// after building or mutating a graph.
-    fn rebuild_caches(&mut self) {
+    fn rebuild_caches(&mut self) -> PyResult<()> {
         // Order matters on large disk graphs: `compute_type_connectivity`
         // runs first so its single sequential sweep of `edge_endpoints.bin`
         // also warms the page cache for the histogram builder below. On
@@ -174,7 +174,8 @@ impl KnowledgeGraph {
         {
             let graph = get_graph_mut(&mut self.inner);
             if let kglite_core::api::storage::GraphBackend::Disk(ref mut dg) = graph.graph {
-                dg.rebuild_peer_count_histogram();
+                dg.rebuild_peer_count_histogram()
+                    .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
             }
         }
 
@@ -198,6 +199,7 @@ impl KnowledgeGraph {
 
         // Store type connectivity triples
         self.inner.set_type_connectivity(triples);
+        Ok(())
     }
 
     /// Total counts of nodes and edges in the graph, pandas-style.

@@ -117,16 +117,18 @@ impl KgliteStatusCode {
 /// null on `Ok` (no error to name).
 #[no_mangle]
 pub extern "C" fn kglite_status_code_name(code: KgliteStatusCode) -> *const c_char {
-    let s = match code {
-        KgliteStatusCode::Ok => return std::ptr::null(),
-        KgliteStatusCode::InvalidUtf8 => "InvalidUtf8",
-        KgliteStatusCode::NullPointer => "NullPointer",
-        other => match other.to_kg_error_code() {
-            Some(kg) => kg.as_str(),
-            None => return std::ptr::null(),
-        },
-    };
-    alloc_c_string(s)
+    crate::ffi::value_boundary(std::ptr::null(), || {
+        let s = match code {
+            KgliteStatusCode::Ok => return std::ptr::null(),
+            KgliteStatusCode::InvalidUtf8 => "InvalidUtf8",
+            KgliteStatusCode::NullPointer => "NullPointer",
+            other => match other.to_kg_error_code() {
+                Some(kg) => kg.as_str(),
+                None => return std::ptr::null(),
+            },
+        };
+        alloc_c_string(s)
+    })
 }
 
 /// Return the Neo4j wire status code for a status code (e.g.
@@ -140,10 +142,10 @@ pub extern "C" fn kglite_status_code_name(code: KgliteStatusCode) -> *const c_ch
 /// counterpart (`InvalidUtf8`, `NullPointer`).
 #[no_mangle]
 pub extern "C" fn kglite_status_code_neo4j_status(code: KgliteStatusCode) -> *const c_char {
-    match code.to_kg_error_code() {
+    crate::ffi::value_boundary(std::ptr::null(), || match code.to_kg_error_code() {
         Some(kg) => alloc_c_string(kg.neo4j_status_code()),
         None => std::ptr::null(),
-    }
+    })
 }
 
 /// Return the HTTP status code mapping for a status code (e.g.
@@ -154,14 +156,14 @@ pub extern "C" fn kglite_status_code_neo4j_status(code: KgliteStatusCode) -> *co
 /// = 400 / bad request from caller, `NullPointer` = 400).
 #[no_mangle]
 pub extern "C" fn kglite_status_code_http_status(code: KgliteStatusCode) -> u16 {
-    match code {
+    crate::ffi::value_boundary(500, || match code {
         KgliteStatusCode::Ok => 0,
         KgliteStatusCode::InvalidUtf8 | KgliteStatusCode::NullPointer => 400,
         other => match other.to_kg_error_code() {
             Some(kg) => kg.http_status_code(),
             None => 500,
         },
-    }
+    })
 }
 
 #[cfg(test)]

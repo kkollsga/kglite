@@ -91,6 +91,19 @@ class TestExplainOptimizations:
         ops = [r["operation"] for r in result.to_list()]
         assert any("TopK" in op for op in ops)
 
+    def test_explain_reports_only_applied_optimizer_passes(self, graph):
+        query = "EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT 1"
+        rows = graph.cypher(query).to_list()
+        operations = [row["operation"] for row in rows]
+        tags = [op for op in operations if op.startswith("OptimizerPass ")]
+
+        assert "OptimizerPass fuse_node_scan_top_k" in tags
+        assert [row["step"] for row in rows] == list(range(1, len(rows) + 1))
+        assert all(row["estimated_rows"] is None for row in rows if row["operation"].startswith("OptimizerPass "))
+
+        disabled = graph.cypher(query, disabled_passes=["fuse_node_scan_top_k"]).to_list()
+        assert "OptimizerPass fuse_node_scan_top_k" not in {row["operation"] for row in disabled}
+
     def test_explain_shows_sort_unfused(self, graph):
         """ORDER BY without LIMIT shows as separate step."""
         result = graph.cypher("""

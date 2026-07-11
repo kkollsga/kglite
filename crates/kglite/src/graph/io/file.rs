@@ -20,7 +20,7 @@
 // refuses v3 files outright with a clear "rebuild your graph" message.
 // One file format, one set of in-flight Value semantics.
 
-use crate::graph::algorithms::hnsw::HnswIndex;
+use crate::datatypes::values::Value;
 use crate::graph::features::timeseries::{NodeTimeseries, TimeseriesConfig};
 use crate::graph::schema::{
     CompositeIndexKey, ConnectionTypeInfo, ConnectivityTriple, DirGraph, EmbeddingStore, IndexKey,
@@ -36,15 +36,12 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 // own `ActiveGraph`, future Go/TS → their binding's struct).
 // Keeps io decoupled from binding state.
 use bincode::Options;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -638,19 +635,35 @@ pub(crate) fn read_type_indices_bin(
     }
     let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
     if version != TYPE_INDICES_VERSION {
-        return Ok(None);
+        return Err(invalid_data("unsupported type_indices.bin.zst version"));
     }
     let num_types = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
-    let total_nodes = u64::from_le_bytes(payload[16..24].try_into().unwrap()) as usize;
+    let total_nodes = usize::try_from(u64::from_le_bytes(payload[16..24].try_into().unwrap()))
+        .map_err(|_| invalid_data("type index node count exceeds usize"))?;
 
     let type_keys_offset = 24usize;
-    let offsets_offset = type_keys_offset + 8 * num_types;
-    let nodes_offset = offsets_offset + 8 * (num_types + 1);
-    let expected_len = nodes_offset + 4 * total_nodes;
-    if payload.len() < expected_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "type_indices.bin.zst is truncated",
+    let type_keys_bytes = 8usize
+        .checked_mul(num_types)
+        .ok_or_else(|| invalid_data("type index key directory size overflow"))?;
+    let offsets_offset = type_keys_offset
+        .checked_add(type_keys_bytes)
+        .ok_or_else(|| invalid_data("type index offsets location overflow"))?;
+    let offsets_bytes = num_types
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(8))
+        .ok_or_else(|| invalid_data("type index offset array size overflow"))?;
+    let nodes_offset = offsets_offset
+        .checked_add(offsets_bytes)
+        .ok_or_else(|| invalid_data("type index nodes location overflow"))?;
+    let node_bytes = total_nodes
+        .checked_mul(4)
+        .ok_or_else(|| invalid_data("type index node array size overflow"))?;
+    let expected_len = nodes_offset
+        .checked_add(node_bytes)
+        .ok_or_else(|| invalid_data("type index total size overflow"))?;
+    if payload.len() != expected_len {
+        return Err(invalid_data(
+            "type_indices.bin.zst size does not match header",
         ));
     }
 
@@ -658,27 +671,64 @@ pub(crate) fn read_type_indices_bin(
         std::collections::HashMap::<String, Vec<petgraph::graph::NodeIndex>>::with_capacity(
             num_types,
         );
+    let first_offset = u64::from_le_bytes(
+        payload[offsets_offset..offsets_offset + 8]
+            .try_into()
+            .unwrap(),
+    );
+    if first_offset != 0 {
+        return Err(invalid_data("type index offsets must start at zero"));
+    }
+    let mut previous_type_key = None;
+    let mut previous_offset = 0usize;
     for i in 0..num_types {
         let tkey_base = type_keys_offset + i * 8;
         let type_key = u64::from_le_bytes(payload[tkey_base..tkey_base + 8].try_into().unwrap());
+        if previous_type_key.is_some_and(|previous| type_key <= previous) {
+            return Err(invalid_data("type index keys are not strictly increasing"));
+        }
+        previous_type_key = Some(type_key);
         let off_base = offsets_offset + i * 8;
-        let off_start =
-            u64::from_le_bytes(payload[off_base..off_base + 8].try_into().unwrap()) as usize;
-        let off_end =
-            u64::from_le_bytes(payload[off_base + 8..off_base + 16].try_into().unwrap()) as usize;
-        let name = match interner.try_resolve(crate::graph::schema::InternedKey::from_u64(type_key))
-        {
-            Some(s) => s.to_string(),
-            None => continue, // missing interner entry; skip rather than fail
-        };
+        let off_start = usize::try_from(u64::from_le_bytes(
+            payload[off_base..off_base + 8].try_into().unwrap(),
+        ))
+        .map_err(|_| invalid_data("type index offset exceeds usize"))?;
+        let off_end = usize::try_from(u64::from_le_bytes(
+            payload[off_base + 8..off_base + 16].try_into().unwrap(),
+        ))
+        .map_err(|_| invalid_data("type index offset exceeds usize"))?;
+        if off_start != previous_offset || off_end < off_start || off_end > total_nodes {
+            return Err(invalid_data(
+                "type index offsets are not monotonic or contained",
+            ));
+        }
+        previous_offset = off_end;
+        let name = interner
+            .try_resolve(crate::graph::schema::InternedKey::from_u64(type_key))
+            .ok_or_else(|| invalid_data("type index contains an unresolved type key"))?
+            .to_string();
         let nodes_start = nodes_offset + off_start * 4;
         let nodes_end = nodes_offset + off_end * 4;
         let mut vec = Vec::with_capacity(off_end - off_start);
+        let mut previous_node = None;
         for chunk in payload[nodes_start..nodes_end].chunks_exact(4) {
             let idx = u32::from_le_bytes(chunk.try_into().unwrap()) as usize;
+            if previous_node.is_some_and(|previous| idx <= previous) {
+                return Err(invalid_data(
+                    "type index node ids are not strictly increasing",
+                ));
+            }
+            previous_node = Some(idx);
             vec.push(petgraph::graph::NodeIndex::new(idx));
         }
-        out.insert(name, vec);
+        if out.insert(name, vec).is_some() {
+            return Err(invalid_data("type index contains duplicate type names"));
+        }
+    }
+    if previous_offset != total_nodes {
+        return Err(invalid_data(
+            "type index final offset disagrees with node count",
+        ));
     }
     Ok(Some(out))
 }
@@ -712,9 +762,38 @@ pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> 
     let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
     let originals: Vec<String> = bincode::deserialize(&bytes).map_err(io::Error::other)?;
     for s in &originals {
-        graph.interner.get_or_intern(s);
+        graph
+            .interner
+            .try_get_or_intern(s)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod interner_file_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_interner_collision_is_invalid_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let incoming = "persisted-name";
+        let bytes = bincode::serialize(&vec![incoming.to_string()]).unwrap();
+        let compressed = zstd::encode_all(bytes.as_slice(), 3).unwrap();
+        std::fs::write(dir.path().join("interner.bin.zst"), compressed).unwrap();
+
+        let mut graph = DirGraph::new();
+        graph
+            .interner
+            .try_register(
+                crate::graph::schema::InternedKey::from_str(incoming),
+                "conflicting-existing",
+            )
+            .unwrap();
+        let err = read_interner_bin(dir.path(), &mut graph).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("hash collision"));
+    }
 }
 
 // ─── id_indices.bin.zst legacy reader ─────────────────────────────────────
@@ -737,83 +816,116 @@ pub(crate) fn read_id_indices_bin(
     }
     let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
     if version != ID_INDICES_VERSION {
-        return Ok(None);
+        return Err(invalid_data("unsupported id_indices.bin.zst version"));
     }
     let num_types = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+    if num_types > (payload.len() - 16) / 24 {
+        return Err(invalid_data(
+            "id_indices.bin.zst directory count is truncated",
+        ));
+    }
     let mut out = std::collections::HashMap::<String, TypeIdIndex>::with_capacity(num_types);
 
     let mut cursor = 16usize;
+    let mut previous_type_key = None;
     for _ in 0..num_types {
-        if cursor + 24 > payload.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "id_indices.bin.zst truncated at block header",
+        let header_end = cursor
+            .checked_add(24)
+            .ok_or_else(|| invalid_data("id index block header overflow"))?;
+        let header = payload
+            .get(cursor..header_end)
+            .ok_or_else(|| invalid_data("id_indices.bin.zst truncated at block header"))?;
+        let type_key = u64::from_le_bytes(header[..8].try_into().unwrap());
+        if previous_type_key.is_some_and(|previous| type_key <= previous) {
+            return Err(invalid_data(
+                "id index type keys are not strictly increasing",
             ));
         }
-        let type_key = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-        let variant_tag = payload[cursor + 8];
-        // payload[cursor+9..cursor+16] is padding (7 bytes).
-        let num_entries =
-            u64::from_le_bytes(payload[cursor + 16..cursor + 24].try_into().unwrap()) as usize;
-        cursor += 24;
+        previous_type_key = Some(type_key);
+        let variant_tag = header[8];
+        let num_entries = usize::try_from(u64::from_le_bytes(header[16..24].try_into().unwrap()))
+            .map_err(|_| invalid_data("id index entry count exceeds usize"))?;
+        cursor = header_end;
 
         let name = interner
             .try_resolve(crate::graph::schema::InternedKey::from_u64(type_key))
-            .map(|s| s.to_string());
+            .ok_or_else(|| invalid_data("id index contains an unresolved type key"))?
+            .to_string();
 
         match variant_tag {
             0 => {
-                let keys_size = 4 * num_entries;
-                let idxs_size = 4 * num_entries;
-                if cursor + keys_size + idxs_size > payload.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "id_indices Integer block truncated",
-                    ));
+                let keys_size = 4usize
+                    .checked_mul(num_entries)
+                    .ok_or_else(|| invalid_data("id index integer key size overflow"))?;
+                let block_size = keys_size
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid_data("id index integer block size overflow"))?;
+                let block_end = cursor
+                    .checked_add(block_size)
+                    .ok_or_else(|| invalid_data("id index integer block offset overflow"))?;
+                if block_end > payload.len() {
+                    return Err(invalid_data("id_indices Integer block truncated"));
                 }
                 let keys_bytes = &payload[cursor..cursor + keys_size];
-                let idxs_bytes = &payload[cursor + keys_size..cursor + keys_size + idxs_size];
-                cursor += keys_size + idxs_size;
-                if let Some(name) = name {
-                    let mut map =
-                        std::collections::HashMap::<u32, petgraph::graph::NodeIndex>::with_capacity(
-                            num_entries,
-                        );
-                    for i in 0..num_entries {
-                        let k =
-                            u32::from_le_bytes(keys_bytes[i * 4..i * 4 + 4].try_into().unwrap());
-                        let v = u32::from_le_bytes(idxs_bytes[i * 4..i * 4 + 4].try_into().unwrap())
-                            as usize;
-                        map.insert(k, petgraph::graph::NodeIndex::new(v));
+                let idxs_bytes = &payload[cursor + keys_size..block_end];
+                cursor = block_end;
+                let mut map =
+                    std::collections::HashMap::<u32, petgraph::graph::NodeIndex>::with_capacity(
+                        num_entries,
+                    );
+                let mut previous = None;
+                for i in 0..num_entries {
+                    let k = u32::from_le_bytes(keys_bytes[i * 4..i * 4 + 4].try_into().unwrap());
+                    if previous.is_some_and(|prior| k <= prior) {
+                        return Err(invalid_data(
+                            "id index integer keys are not strictly increasing",
+                        ));
                     }
-                    out.insert(name, TypeIdIndex::Integer(map));
+                    previous = Some(k);
+                    let v = u32::from_le_bytes(idxs_bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                        as usize;
+                    map.insert(k, petgraph::graph::NodeIndex::new(v));
+                }
+                if out.insert(name, TypeIdIndex::Integer(map)).is_some() {
+                    return Err(invalid_data("id index contains duplicate type names"));
                 }
             }
             1 => {
-                if cursor + 8 > payload.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "id_indices General block missing blob length",
-                    ));
-                }
+                let length_end = cursor
+                    .checked_add(8)
+                    .ok_or_else(|| invalid_data("general blob length offset overflow"))?;
+                let length_bytes = payload
+                    .get(cursor..length_end)
+                    .ok_or_else(|| invalid_data("id_indices General block missing blob length"))?;
                 let blob_len =
-                    u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap()) as usize;
-                cursor += 8;
-                if cursor + blob_len > payload.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "id_indices General blob truncated",
-                    ));
+                    usize::try_from(u64::from_le_bytes(length_bytes.try_into().unwrap()))
+                        .map_err(|_| invalid_data("general blob length exceeds usize"))?;
+                if blob_len as u64 > 2 * 1024 * 1024 * 1024 {
+                    return Err(invalid_data("general id index exceeds decode limit"));
                 }
-                let blob = &payload[cursor..cursor + blob_len];
-                cursor += blob_len;
-                if let Some(name) = name {
-                    let inner: std::collections::HashMap<
-                        crate::datatypes::values::Value,
-                        petgraph::graph::NodeIndex,
-                    > = bincode::deserialize(blob).map_err(io::Error::other)?;
-                    let _ = num_entries; // redundant with inner.len(), kept for format symmetry
-                    out.insert(name, TypeIdIndex::General(inner));
+                cursor = length_end;
+                let blob_end = cursor
+                    .checked_add(blob_len)
+                    .ok_or_else(|| invalid_data("general blob range overflow"))?;
+                let blob = payload
+                    .get(cursor..blob_end)
+                    .ok_or_else(|| invalid_data("id_indices General blob truncated"))?;
+                cursor = blob_end;
+                let inner: std::collections::HashMap<
+                    crate::datatypes::values::Value,
+                    petgraph::graph::NodeIndex,
+                > = bincode::options()
+                    .with_fixint_encoding()
+                    .with_little_endian()
+                    .reject_trailing_bytes()
+                    .with_limit(2 * 1024 * 1024 * 1024)
+                    .deserialize(blob)
+                    .map_err(|e| invalid_data(format!("invalid general id index: {e}")))?;
+                if inner.len() != num_entries {
+                    return Err(invalid_data("general id index cardinality mismatch"));
+                }
+                if out.insert(name, TypeIdIndex::General(inner)).is_some() {
+                    return Err(invalid_data("id index contains duplicate type names"));
                 }
             }
             other => {
@@ -823,6 +935,9 @@ pub(crate) fn read_id_indices_bin(
                 ));
             }
         }
+    }
+    if cursor != payload.len() {
+        return Err(invalid_data("id_indices.bin.zst has trailing bytes"));
     }
     Ok(Some(out))
 }
@@ -891,9 +1006,18 @@ pub(crate) fn write_type_connectivity_bin(
     // `get_or_intern` hashes the string internally.
     let mut interner = graph.interner.clone();
     for t in &triples {
-        let src_key = interner.get_or_intern(&t.src).as_u64();
-        let conn_key = interner.get_or_intern(&t.conn).as_u64();
-        let tgt_key = interner.get_or_intern(&t.tgt).as_u64();
+        let src_key = interner
+            .try_get_or_intern(&t.src)
+            .map_err(|e| e.to_string())?
+            .as_u64();
+        let conn_key = interner
+            .try_get_or_intern(&t.conn)
+            .map_err(|e| e.to_string())?
+            .as_u64();
+        let tgt_key = interner
+            .try_get_or_intern(&t.tgt)
+            .map_err(|e| e.to_string())?
+            .as_u64();
         payload.extend_from_slice(&src_key.to_le_bytes());
         payload.extend_from_slice(&conn_key.to_le_bytes());
         payload.extend_from_slice(&tgt_key.to_le_bytes());
@@ -1066,7 +1190,10 @@ fn decode_secondary_label_index(payload: &[u8], graph: &mut DirGraph) -> io::Res
                 "secondary_labels payload truncated (node list)",
             ));
         }
-        let key = graph.interner.get_or_intern(&name);
+        let key = graph
+            .interner
+            .try_get_or_intern(&name)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut nodes = Vec::with_capacity(num_nodes);
         for _ in 0..num_nodes {
             let raw = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap());
@@ -1140,7 +1267,24 @@ fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 
 /// Decompress zstd-compressed data.
 fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    zstd::decode_all(std::io::Cursor::new(data))
+    zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES)
+}
+
+fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
+    let decoder = zstd::Decoder::new(std::io::Cursor::new(data))
+        .map_err(|e| invalid_data(format!("invalid zstd section: {e}")))?;
+    let mut bounded = decoder.take(limit.saturating_add(1));
+    let mut decoded = Vec::new();
+    bounded
+        .read_to_end(&mut decoded)
+        .map_err(|e| invalid_data(format!("invalid zstd section: {e}")))?;
+    if decoded.len() as u64 > limit {
+        return Err(invalid_data(format!(
+            "decompressed section exceeds the {} byte load limit",
+            limit
+        )));
+    }
+    Ok(decoded)
 }
 
 /// Serialize a value using the project's pinned bincode options.
@@ -1152,10 +1296,10 @@ fn bincode_ser<T: Serialize>(val: &T) -> io::Result<Vec<u8>> {
 fn bincode_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
     bincode_options()
         .deserialize(buf)
-        .map_err(|e| io::Error::other(format!("bincode deserialization failed: {}", e)))
+        .map_err(|e| invalid_data(format!("bincode deserialization failed: {e}")))
 }
 
-/// Debug-only: verify every InternedKey in `graph.column_stores`'s schemas
+/// Verify every InternedKey in `graph.column_stores`'s schemas
 /// resolves to a string in `graph.interner`. Catches the class of bug where
 /// a writer synthesizes a key via `InternedKey::from_str()` (just hashing)
 /// and mutates a ColumnStore without first calling `interner.get_or_intern()`
@@ -1166,25 +1310,20 @@ fn bincode_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
 /// so any future regression of the same shape (in this or any other write
 /// path) panics loudly in debug builds rather than landing as silent data
 /// loss in release.
-#[cfg(debug_assertions)]
-fn debug_assert_column_keys_registered(graph: &DirGraph) {
+fn validate_column_keys_registered(graph: &DirGraph) -> io::Result<()> {
     for (type_name, store) in &graph.column_stores {
         let schema = store.schema();
         for (_slot, key) in schema.iter() {
-            assert!(
-                graph.interner.try_resolve(key).is_some(),
-                "kglite invariant violation: ColumnStore for type '{}' contains \
-                 InternedKey {} but the source string is not registered in \
-                 graph.interner. A writer synthesized the key via \
-                 `InternedKey::from_str()` without first calling \
-                 `interner.get_or_intern(...)`. save() would silently corrupt \
-                 the data — failing fast here so the offending writer is \
-                 caught at write time, not at load time on the user's machine.",
-                type_name,
-                key.as_u64()
-            );
+            if graph.interner.try_resolve(key).is_none() {
+                return Err(invalid_data(format!(
+                    "ColumnStore for type '{type_name}' contains unregistered InternedKey {}; \
+                     refusing to serialize an unknown property name",
+                    key.as_u64()
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 /// Atomic, durable counterpart of [`write_kgl`]: serialize to a sibling
@@ -1281,8 +1420,7 @@ pub fn write_kgl(graph: &DirGraph, path: &str) -> io::Result<()> {
 /// save, an in-memory `to_bytes()`, and a caller-supplied writer — none of
 /// them duplicate the section layout.
 pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()> {
-    #[cfg(debug_assertions)]
-    debug_assert_column_keys_registered(graph);
+    validate_column_keys_registered(graph)?;
 
     // 1. Serialize topology with properties stripped (v3: node props are in column sections)
     let topology_raw = {
@@ -1492,6 +1630,44 @@ pub fn save_graph_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> Re
 /// Below this threshold, `std::fs::read()` is faster (avoids mmap syscall overhead).
 const FILE_MMAP_THRESHOLD: u64 = 65_536; // 64 KB
 
+const MAX_METADATA_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED_SECTION_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+struct SectionCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SectionCursor<'a> {
+    fn new(bytes: &'a [u8], offset: usize) -> io::Result<Self> {
+        if offset > bytes.len() {
+            return Err(invalid_data("section cursor starts past end of file"));
+        }
+        Ok(Self { bytes, offset })
+    }
+
+    fn take(&mut self, encoded_len: u64, label: &str) -> io::Result<&'a [u8]> {
+        let len = usize::try_from(encoded_len)
+            .map_err(|_| invalid_data(format!("{label} section size does not fit usize")))?;
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| invalid_data(format!("{label} section offset overflow")))?;
+        let section = self.bytes.get(self.offset..end).ok_or_else(|| {
+            invalid_data(format!(
+                "file is truncated — {label} section needs {len} bytes at offset {}",
+                self.offset
+            ))
+        })?;
+        self.offset = end;
+        Ok(section)
+    }
+}
+
 pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
     // If path is a directory, load as disk graph
     let p = std::path::Path::new(path);
@@ -1608,6 +1784,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     use crate::graph::schema::GraphBackend;
 
     let _load_t = stage_timer();
+    let resolved = crate::graph::storage::disk::generation::resolve_snapshot(dir)?;
+    let logical_root = resolved.logical_root;
+    let snapshot_dir = resolved.snapshot_dir;
+    let dir = snapshot_dir.as_path();
 
     // Verify this is a disk graph directory
     if !dir.join("disk_graph_meta.json").exists() {
@@ -1659,7 +1839,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             serde_json::from_str(&interner_str)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         for original in interner_map.values() {
-            graph.interner.get_or_intern(original);
+            graph
+                .interner
+                .try_get_or_intern(original)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
     }
     log_stage("interner_load", t);
@@ -1668,8 +1851,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     // Interner is passed mutably because legacy format=0 graphs store edge
     // property keys as strings and need to register them on read.
     let t = stage_timer();
-    let (disk_graph, temp_dir) =
+    let (mut disk_graph, temp_dir) =
         crate::graph::storage::disk::graph::DiskGraph::load_from_dir(dir, &mut graph.interner)?;
+    disk_graph.set_logical_root(logical_root);
     log_stage("disk_graph_load", t);
     // Prefetch hot mmap regions (offset arrays + node_slots) into page cache.
     // On macOS, `madvise(MADV_WILLNEED)` synchronously schedules readahead and
@@ -1735,8 +1919,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                 String,
                 Vec<petgraph::graph::NodeIndex>,
             > = std::collections::HashMap::new();
-            for i in 0..dg.node_slots.len() {
-                let slot = dg.node_slots.get(i);
+            for i in 0..dg.node_slot_len() {
+                let slot = dg.node_slot(i);
                 if slot.is_alive() {
                     let key = crate::graph::schema::InternedKey::from_u64(slot.node_type);
                     if let Some(type_name) = graph.interner.try_resolve(key) {
@@ -1756,7 +1940,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     for (node_type, props) in &graph.node_type_metadata {
         let mut schema = crate::graph::schema::TypeSchema::new();
         for prop_name in props.keys() {
-            let key = graph.interner.get_or_intern(prop_name);
+            let key = graph
+                .interner
+                .try_get_or_intern(prop_name)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             schema.add_key(key);
         }
         graph
@@ -2072,14 +2259,18 @@ fn load_column_sidecars(
 /// at the magic check before they reach this function.
 fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 12 {
-        return Err(io::Error::other(
-            "v4 file is truncated — header incomplete.",
-        ));
+        return Err(invalid_data("v4 file is truncated — header incomplete"));
     }
 
     // Parse header
     let core_version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let metadata_len = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
+
+    if metadata_len > MAX_METADATA_BYTES {
+        return Err(invalid_data(format!(
+            "v4 metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
+        )));
+    }
 
     if core_version > CURRENT_CORE_DATA_VERSION {
         return Err(io::Error::other(format!(
@@ -2089,23 +2280,26 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
         )));
     }
 
-    let metadata_end = 12 + metadata_len;
-    if buf.len() < metadata_end {
-        return Err(io::Error::other(
-            "v4 file is truncated — metadata incomplete.",
+    let metadata_end = 12usize
+        .checked_add(metadata_len)
+        .ok_or_else(|| invalid_data("v4 metadata offset overflow"))?;
+    let metadata_bytes = buf
+        .get(12..metadata_end)
+        .ok_or_else(|| invalid_data("v4 file is truncated — metadata incomplete"))?;
+
+    // Parse JSON metadata
+    let metadata: FileMetadata = serde_json::from_slice(metadata_bytes)
+        .map_err(|e| invalid_data(format!("failed to parse v4 metadata: {e}")))?;
+    if metadata.column_sections.len() > 1_000_000 {
+        return Err(invalid_data(
+            "v4 metadata declares too many column sections",
         ));
     }
 
-    // Parse JSON metadata
-    let metadata: FileMetadata = serde_json::from_slice(&buf[12..metadata_end])
-        .map_err(|e| io::Error::other(format!("Failed to parse v3 metadata: {}", e)))?;
-
-    // Section offsets
-    let topology_start = metadata_end;
-    let topology_end = topology_start + metadata.topology_compressed_size as usize;
+    let mut sections = SectionCursor::new(buf, metadata_end)?;
 
     // Decompress + deserialize topology (properties are empty maps)
-    let topology_compressed = &buf[topology_start..topology_end];
+    let topology_compressed = sections.take(metadata.topology_compressed_size, "topology")?;
     let topology_raw = zstd_decompress(topology_compressed)?;
 
     let mut interner = StringInterner::new();
@@ -2134,8 +2328,6 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     dir_graph.build_connection_types_cache();
 
     // Load column sections one type at a time
-    let mut section_offset = topology_end;
-
     // Create temp directory for mmap column files (unique per load to avoid collisions)
     let temp_dir = std::env::temp_dir().join(format!(
         "kglite_v3_{}_{:x}",
@@ -2150,17 +2342,22 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
         dirs.push(temp_dir.clone());
     }
 
-    for section_meta in &column_sections {
-        let section_end = section_offset + section_meta.compressed_size as usize;
-        if buf.len() < section_end {
-            return Err(io::Error::other(format!(
-                "v3 file truncated — column section '{}' incomplete.",
-                section_meta.type_name
+    for (section_index, section_meta) in column_sections.iter().enumerate() {
+        let compressed = sections.take(
+            section_meta.compressed_size,
+            &format!("column section {section_index}"),
+        )?;
+        let packed = zstd_decompress(compressed)?;
+        let expected_rows = dir_graph
+            .type_indices
+            .get(&section_meta.type_name)
+            .map_or(0, |nodes| nodes.len());
+        if section_meta.row_count as usize != expected_rows {
+            return Err(invalid_data(format!(
+                "column section {section_index} for '{}' declares {} rows; topology has {expected_rows}",
+                section_meta.type_name, section_meta.row_count
             )));
         }
-
-        let compressed = &buf[section_offset..section_end];
-        let packed = zstd_decompress(compressed)?;
 
         // Build schema from the column section metadata (exact match for saved
         // columns). Using type_schemas here would include id/title columns that
@@ -2171,10 +2368,12 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
                 .columns
                 .keys()
                 .map(|name| {
-                    dir_graph.interner.get_or_intern(name);
-                    crate::graph::schema::InternedKey::from_str(name)
+                    dir_graph
+                        .interner
+                        .try_get_or_intern(name)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
                 })
-                .collect();
+                .collect::<io::Result<_>>()?;
             let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(col_keys));
 
             let type_meta = dir_graph
@@ -2184,7 +2383,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
                 .unwrap_or_default();
 
             // Create temp dir for this type's column files
-            let type_temp_dir = temp_dir.join(&section_meta.type_name);
+            let type_temp_dir = temp_dir.join(format!("type_{section_index}"));
             std::fs::create_dir_all(&type_temp_dir)?;
 
             let store = ColumnStore::load_packed(
@@ -2201,8 +2400,6 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
                 .column_stores
                 .insert(section_meta.type_name.clone(), Arc::new(store));
         }
-
-        section_offset = section_end;
     }
 
     // Re-point nodes to columnar storage
@@ -2238,44 +2435,31 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
         if core_version < EMBED_PROVENANCE_MIN_VERSION {
             return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
         }
-        let emb_end = section_offset + embeddings_compressed_size as usize;
-        if buf.len() >= emb_end {
-            let emb_compressed = &buf[section_offset..emb_end];
-            let emb_raw = zstd_decompress(emb_compressed)?;
-            let mut embeddings: HashMap<(String, String), EmbeddingStore> =
-                bincode_deser(&emb_raw)?;
-            // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
-            for store in embeddings.values_mut() {
-                store.rebuild_norms();
-            }
-            dir_graph.embeddings = embeddings;
-            section_offset = emb_end;
+        let emb_compressed = sections.take(embeddings_compressed_size, "embeddings")?;
+        let emb_raw = zstd_decompress(emb_compressed)?;
+        let mut embeddings: HashMap<(String, String), EmbeddingStore> = bincode_deser(&emb_raw)?;
+        // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
+        for store in embeddings.values_mut() {
+            store.rebuild_norms();
         }
+        dir_graph.embeddings = embeddings;
     }
 
     // Load timeseries if present
     if timeseries_compressed_size > 0 {
-        let ts_end = section_offset + timeseries_compressed_size as usize;
-        if buf.len() >= ts_end {
-            let ts_compressed = &buf[section_offset..ts_end];
-            let ts_raw = zstd_decompress(ts_compressed)?;
-            let ts_store: HashMap<usize, NodeTimeseries> = bincode_deser(&ts_raw)?;
-            dir_graph.timeseries_store = ts_store;
-            section_offset = ts_end;
-        }
+        let ts_compressed = sections.take(timeseries_compressed_size, "timeseries")?;
+        let ts_raw = zstd_decompress(ts_compressed)?;
+        let ts_store: HashMap<usize, NodeTimeseries> = bincode_deser(&ts_raw)?;
+        dir_graph.timeseries_store = ts_store;
     }
 
     // Load secondary-label-index section if present (0.10.5+). The
     // interner is fully populated by this point, so InternedKey →
     // String resolution works.
     if secondary_labels_compressed_size > 0 {
-        let sl_end = section_offset + secondary_labels_compressed_size as usize;
-        if buf.len() >= sl_end {
-            let sl_compressed = &buf[section_offset..sl_end];
-            let sl_raw = zstd_decompress(sl_compressed)?;
-            decode_secondary_label_index(&sl_raw, &mut dir_graph)?;
-            section_offset = sl_end;
-        }
+        let sl_compressed = sections.take(secondary_labels_compressed_size, "secondary labels")?;
+        let sl_raw = zstd_decompress(sl_compressed)?;
+        decode_secondary_label_index(&sl_raw, &mut dir_graph)?;
     }
 
     // Load the HNSW vector-index section if present (0.11.0+). Best-effort:
@@ -2283,9 +2467,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     // (the index is a rebuildable cache). Must run after embeddings are loaded
     // and their norms rebuilt (above).
     if vector_index_compressed_size > 0 {
-        let vi_end = section_offset + vector_index_compressed_size as usize;
-        if buf.len() >= vi_end {
-            let vi_compressed = &buf[section_offset..vi_end];
+        if let Ok(vi_compressed) = sections.take(vector_index_compressed_size, "vector index") {
             if let Ok(vi_raw) = zstd_decompress(vi_compressed) {
                 decode_vector_indexes(&vi_raw, &mut dir_graph);
             }
@@ -2295,538 +2477,14 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     Ok(Arc::new(dir_graph))
 }
 
-// ─── HNSW vector-index section (0.11.0) ───────────────────────────────────
-//
-// A self-describing, *skippable* `.kgl` sub-section carrying built HNSW
-// indexes. The whole point is robustness against future change: the index is a
-// rebuildable cache, never a correctness dependency, so any version mismatch or
-// corruption is silently dropped (the store loads fine without an index; the
-// user rebuilds, or auto-use just doesn't fire). Bumping
-// `VECTOR_INDEX_FORMAT_VERSION` lets the on-disk index format evolve WITHOUT a
-// core-data-version bump — older readers skip a newer index, newer readers skip
-// an older one.
-//
-//   [0..8]   magic = b"KGLVIDX1"
-//   [8..12]  format_version: u32 LE
-//   [12..]   bincode( Vec<(node_type, embedding_property, HnswIndex)> )
-const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
-const VECTOR_INDEX_FORMAT_VERSION: u32 = 1;
+mod vector_persistence;
 
-/// Encode every built HNSW index into a self-describing payload. Returns `None`
-/// when no store carries an index (the section is then omitted entirely).
-fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u8>>> {
-    let entries: Vec<(&String, &String, &HnswIndex)> = graph
-        .embeddings
-        .iter()
-        .filter_map(|((nt, prop), s)| s.index.as_ref().map(|idx| (nt, prop, idx)))
-        .collect();
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    let body = bincode_ser(&entries)?;
-    let mut payload = Vec::with_capacity(12 + body.len());
-    payload.extend_from_slice(VECTOR_INDEX_MAGIC);
-    payload.extend_from_slice(&VECTOR_INDEX_FORMAT_VERSION.to_le_bytes());
-    payload.extend_from_slice(&body);
-    Ok(Some(payload))
-}
-
-/// Decode the vector-index section and attach indexes to the matching stores.
-/// Best-effort: an unrecognised magic, an unknown format version, a bincode
-/// error, or a shape mismatch against the loaded store all result in the index
-/// being silently skipped — never a load failure. Must run AFTER embeddings are
-/// loaded and their norms rebuilt (cosine navigation needs the norm cache).
-fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
-    if payload.len() < 12 || &payload[..8] != VECTOR_INDEX_MAGIC {
-        return;
-    }
-    let ver = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
-    if ver != VECTOR_INDEX_FORMAT_VERSION {
-        return; // newer/older index format — skip, the store rebuilds on demand
-    }
-    let entries: Vec<(String, String, HnswIndex)> = match bincode_deser(&payload[12..]) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for (node_type, prop, idx) in entries {
-        if let Some(store) = graph.embeddings.get_mut(&(node_type, prop)) {
-            // Defensive: only attach an index whose shape still matches the
-            // store it was built over (dimension + vector count).
-            if idx.dim() == store.dimension && idx.len() == store.len() {
-                store.index = Some(idx);
-            }
-        }
-    }
-}
-
-// ─── Embedding Export / Import ────────────────────────────────────────────
-
-use crate::datatypes::values::Value;
-
-/// Magic bytes for the embedding export format.
-const KGLE_MAGIC: [u8; 4] = *b"KGLE";
-/// v2 (0.11.1): carries store `metric` + `model_id` + per-node `text_hash`
-/// alongside each vector, so a rebuild-from-`.kgle` pipeline retains provenance
-/// and can use `embed_texts(mode='changed')`. v1 files (no provenance) still
-/// read — see the version branch in `import_embeddings_from_file`.
-const KGLE_VERSION: u32 = 2;
-
-/// v1 `.kgle` store shape (no provenance) — kept solely to deserialize files
-/// produced by kglite ≤ 0.11.0.
-#[derive(Deserialize)]
-struct ExportedEmbeddingStoreV1 {
-    node_type: String,
-    text_column: String,
-    dimension: usize,
-    entries: Vec<(Value, Vec<f32>)>,
-}
-
-/// A single embedding store serialized with node IDs (not internal indices).
-/// v2 adds provenance: the store `metric`/`model_id` and a per-entry text hash,
-/// so `import_embeddings` round-trips what `embed_texts(mode='changed')` needs.
-#[derive(Serialize, Deserialize)]
-struct ExportedEmbeddingStore {
-    node_type: String,
-    text_column: String, // e.g. "summary" (without _emb suffix)
-    dimension: usize,
-    /// Store default metric (`set_embeddings(metric=…)`), `None` if unset.
-    metric: Option<String>,
-    /// Embedder id stamped by `embed_texts`, `None` for raw-vector stores.
-    model_id: Option<String>,
-    /// (node_id, embedding, optional source-text hash). The hash is `Some` only
-    /// for vectors produced by `embed_texts` (drives `mode='changed'`).
-    entries: Vec<(Value, Vec<f32>, Option<u64>)>,
-}
-
-/// Filter for selective embedding export.
-pub enum EmbeddingExportFilter {
-    /// Export all embedding stores for these node types.
-    Types(Vec<String>),
-    /// Export specific (node_type → [text_columns]) pairs.
-    /// An empty vec means all properties for that type.
-    TypeProperties(HashMap<String, Vec<String>>),
-}
-
-pub struct ExportStats {
-    pub stores: usize,
-    pub embeddings: usize,
-}
-
-pub struct ImportStats {
-    pub stores: usize,
-    pub imported: usize,
-    pub skipped: usize,
-    /// Number of stores in the file whose entries all failed to match
-    /// nodes in the current graph (so the store was dropped and not
-    /// inserted into `graph.embeddings`). Surfaces the silent-drop
-    /// case where the .kgle file was exported from a graph with
-    /// different node IDs or types — the count of such stores would
-    /// otherwise be invisible to callers.
-    pub dropped_stores: usize,
-}
-
-/// Export embeddings to a standalone .kgle file, keyed by node ID.
-pub fn export_embeddings_to_file(
-    graph: &DirGraph,
-    path: &str,
-    filter: Option<&EmbeddingExportFilter>,
-) -> io::Result<ExportStats> {
-    let mut exported_stores: Vec<ExportedEmbeddingStore> = Vec::new();
-    let mut total_embeddings = 0usize;
-
-    for ((node_type, store_name), store) in &graph.embeddings {
-        let text_column = store_name
-            .strip_suffix("_emb")
-            .unwrap_or(store_name.as_str());
-
-        // Apply filter
-        if let Some(f) = filter {
-            match f {
-                EmbeddingExportFilter::Types(types) => {
-                    if !types.iter().any(|t| t == node_type) {
-                        continue;
-                    }
-                }
-                EmbeddingExportFilter::TypeProperties(map) => {
-                    match map.get(node_type) {
-                        None => continue, // type not in filter
-                        Some(props) if !props.is_empty() => {
-                            if !props.iter().any(|p| p == text_column) {
-                                continue;
-                            }
-                        }
-                        Some(_) => {} // empty list = all properties for this type
-                    }
-                }
-            }
-        }
-
-        // Resolve node indices → node IDs, carrying each node's text hash.
-        let mut entries: Vec<(Value, Vec<f32>, Option<u64>)> = Vec::with_capacity(store.len());
-        for &node_index in &store.slot_to_node {
-            if let Some(node) = graph
-                .graph
-                .node_weight(petgraph::graph::NodeIndex::new(node_index))
-            {
-                if let Some(embedding) = store.get_embedding(node_index) {
-                    let hash = store.text_hashes.get(&node_index).copied();
-                    entries.push((node.id().into_owned(), embedding.to_vec(), hash));
-                }
-            }
-        }
-
-        total_embeddings += entries.len();
-        exported_stores.push(ExportedEmbeddingStore {
-            node_type: node_type.clone(),
-            text_column: text_column.to_string(),
-            dimension: store.dimension,
-            metric: store.metric.clone(),
-            model_id: store.model_id.clone(),
-            entries,
-        });
-    }
-
-    // Write: magic + version + gzip(bincode(stores))
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    writer.write_all(&KGLE_MAGIC)?;
-    writer.write_all(&KGLE_VERSION.to_le_bytes())?;
-
-    let gz = GzEncoder::new(&mut writer, Compression::new(3));
-    bincode_options()
-        .serialize_into(gz, &exported_stores)
-        .map_err(|e| io::Error::other(format!("Failed to serialize embeddings: {}", e)))?;
-
-    writer.flush()?;
-
-    Ok(ExportStats {
-        stores: exported_stores.len(),
-        embeddings: total_embeddings,
-    })
-}
-
-/// Import embeddings from a .kgle file, resolving node IDs to current graph indices.
-pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Result<ImportStats> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut buf = Vec::new();
-    reader.read_to_end(&mut buf)?;
-
-    if buf.len() < 8 {
-        return Err(io::Error::other(
-            "File is too small to be a valid .kgle file.",
-        ));
-    }
-
-    // Validate magic and version
-    if buf[..4] != KGLE_MAGIC {
-        return Err(io::Error::other(
-            "Not a valid .kgle file (bad magic bytes).",
-        ));
-    }
-    let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    if version > KGLE_VERSION {
-        return Err(io::Error::other(format!(
-            "Embedding file version {} is newer than supported version {}. Please upgrade kglite.",
-            version, KGLE_VERSION,
-        )));
-    }
-
-    // Decompress and deserialize. bincode is positional, so the v1 shape
-    // (no provenance) must be read with its own struct and lifted to v2.
-    let gz = GzDecoder::new(&buf[8..]);
-    let exported_stores: Vec<ExportedEmbeddingStore> = if version >= 2 {
-        bincode_options()
-            .deserialize_from(gz)
-            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?
-    } else {
-        let v1: Vec<ExportedEmbeddingStoreV1> =
-            bincode_options().deserialize_from(gz).map_err(|e| {
-                io::Error::other(format!("Failed to deserialize embedding data: {}", e))
-            })?;
-        v1.into_iter()
-            .map(|s| ExportedEmbeddingStore {
-                node_type: s.node_type,
-                text_column: s.text_column,
-                dimension: s.dimension,
-                metric: None,
-                model_id: None,
-                entries: s.entries.into_iter().map(|(id, v)| (id, v, None)).collect(),
-            })
-            .collect()
-    };
-
-    let mut total_imported = 0usize;
-    let mut total_skipped = 0usize;
-    let mut stores_count = 0usize;
-    let mut dropped_stores = 0usize;
-
-    for exported in exported_stores {
-        // Build ID index for this node type so lookup_by_id works
-        graph.build_id_index(&exported.node_type);
-
-        let mut store = crate::graph::schema::EmbeddingStore::new(exported.dimension);
-        // Restore store-level provenance (v2+; `None` for v1 files).
-        store.metric = exported.metric.clone();
-        store.model_id = exported.model_id.clone();
-        store
-            .data
-            .reserve(exported.entries.len() * exported.dimension);
-
-        let mut imported = 0usize;
-        let mut skipped = 0usize;
-
-        for (id, vec, hash) in &exported.entries {
-            match graph.lookup_by_id(&exported.node_type, id) {
-                Some(node_idx) => {
-                    store.set_embedding(node_idx.index(), vec);
-                    // Restore the per-node text hash so embed_texts(mode='changed')
-                    // can diff against it (the whole point of v2 provenance).
-                    if let Some(h) = hash {
-                        store.set_text_hash(node_idx.index(), *h);
-                    }
-                    imported += 1;
-                }
-                None => {
-                    skipped += 1;
-                }
-            }
-        }
-
-        if imported > 0 {
-            let key = (exported.node_type, format!("{}_emb", exported.text_column));
-            graph.embeddings.insert(key, store);
-            stores_count += 1;
-        } else if !exported.entries.is_empty() {
-            dropped_stores += 1;
-        }
-
-        total_imported += imported;
-        total_skipped += skipped;
-    }
-
-    Ok(ImportStats {
-        stores: stores_count,
-        imported: total_imported,
-        skipped: total_skipped,
-        dropped_stores,
-    })
-}
-
+#[allow(unused_imports)]
+pub use vector_persistence::ExportStats;
+use vector_persistence::{decode_vector_indexes, encode_vector_indexes};
+pub use vector_persistence::{
+    export_embeddings_to_file, import_embeddings_from_file, EmbeddingExportFilter, ImportStats,
+};
 #[cfg(test)]
-mod atomic_save_tests {
-    use super::*;
-    use crate::datatypes::{DataFrame, Value};
-    use crate::graph::dir_graph::DirGraph;
-    use crate::graph::storage::GraphRead;
-
-    /// Build a tiny columnar in-memory graph ready for `write_kgl*`.
-    fn tiny_graph(n: i64) -> Arc<DirGraph> {
-        let mut g = DirGraph::new();
-        let rows: Vec<Vec<Value>> = (1..=n)
-            .map(|i| vec![Value::Int64(i), Value::String(format!("t{i}"))])
-            .collect();
-        let df =
-            DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
-        crate::graph::mutation::maintain::add_nodes(
-            &mut g,
-            df,
-            "Doc".to_string(),
-            "id".to_string(),
-            Some("title".to_string()),
-            None,
-        )
-        .unwrap();
-        let mut arc = Arc::new(g);
-        prepare_save(&mut arc);
-        Arc::make_mut(&mut arc).enable_columnar();
-        arc
-    }
-
-    #[test]
-    fn atomic_save_roundtrips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("g.kgl");
-        let g = tiny_graph(5);
-        let want = g.graph.node_count();
-        write_kgl(&g, path.to_str().unwrap()).unwrap();
-        let loaded = load_file(path.to_str().unwrap()).unwrap();
-        assert_eq!(loaded.graph.node_count(), want);
-    }
-
-    #[test]
-    fn save_with_fsync_false_still_roundtrips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("g.kgl");
-        let g = tiny_graph(3);
-        write_kgl_with(&g, path.to_str().unwrap(), false).unwrap();
-        let loaded = load_file(path.to_str().unwrap()).unwrap();
-        assert_eq!(loaded.graph.node_count(), g.graph.node_count());
-    }
-
-    #[test]
-    fn to_bytes_roundtrips_via_load_kgl_bytes() {
-        let g = tiny_graph(4);
-        let mut buf: Vec<u8> = Vec::new();
-        write_kgl_to(&g, &mut buf).unwrap();
-        assert_eq!(&buf[..4], &V4_MAGIC, "buffer must carry the v4 magic");
-        let loaded = load_kgl_bytes(&buf).unwrap();
-        assert_eq!(loaded.graph.node_count(), g.graph.node_count());
-    }
-
-    /// A v3 (or otherwise unreadable) file is a hard break, but the error must
-    /// point the operator at the format-stable export escape hatch so a user
-    /// without the original source still has a recovery path (SQLite `.dump`
-    /// parity). Guards the recovery hint added to the break messages.
-    #[test]
-    fn hard_break_errors_point_at_export_recovery() {
-        assert!(
-            V3_HARD_BREAK_MSG.contains("export_csv")
-                && V3_HARD_BREAK_MSG.contains("from_blueprint"),
-            "v3 hard-break message must name the export_csv/from_blueprint recovery path"
-        );
-        // A fabricated v3-magic byte buffer surfaces the hint through load_kgl_bytes.
-        let v3_buf = [V3_MAGIC[0], V3_MAGIC[1], V3_MAGIC[2], V3_MAGIC[3], 0, 0];
-        let err = load_kgl_bytes(&v3_buf).err().unwrap();
-        assert!(err.to_string().contains("export_csv"));
-        // An unrecognized buffer carries the hint too.
-        let bad = [0u8, 1, 2, 3, 4, 5];
-        let err = load_kgl_bytes(&bad).err().unwrap();
-        assert!(err.to_string().contains("from_blueprint"));
-    }
-
-    /// Build a tiny graph carrying one HNSW-indexed embedding store.
-    fn tiny_indexed_graph() -> Arc<DirGraph> {
-        use crate::graph::algorithms::hnsw::HnswParams;
-        use crate::graph::algorithms::vector::DistanceMetric;
-        use crate::graph::schema::EmbeddingStore;
-
-        let mut g = tiny_graph(40);
-        {
-            let dir = Arc::make_mut(&mut g);
-            let mut store = EmbeddingStore::with_metric(4, "cosine");
-            for i in 0..40usize {
-                let v = [i as f32, (i % 3) as f32, 1.0, (i % 7) as f32];
-                store.set_embedding(i, &v);
-            }
-            store
-                .build_index(DistanceMetric::Cosine, HnswParams::default(), 7)
-                .unwrap();
-            dir.embeddings
-                .insert(("Doc".to_string(), "vec_emb".to_string()), store);
-        }
-        g
-    }
-
-    #[test]
-    fn vector_index_section_roundtrips() {
-        let g = tiny_indexed_graph();
-        let mut buf: Vec<u8> = Vec::new();
-        write_kgl_to(&g, &mut buf).unwrap();
-        let loaded = load_kgl_bytes(&buf).unwrap();
-        let store = loaded
-            .embeddings
-            .get(&("Doc".to_string(), "vec_emb".to_string()))
-            .expect("embedding store survives round-trip");
-        assert!(store.has_index(), "HNSW index must persist in the .kgl");
-        assert_eq!(store.index.as_ref().unwrap().len(), 40);
-    }
-
-    #[test]
-    fn vector_index_decode_skips_unknown_version() {
-        // The section is a rebuildable cache: an unknown format version (or a
-        // corrupt magic) must be skipped silently, never attached, never panic.
-        let g = tiny_indexed_graph();
-        let payload = encode_vector_indexes(&g).unwrap().unwrap();
-
-        let mut bumped = payload.clone();
-        bumped[8] = bumped[8].wrapping_add(1); // mangle the format-version LSB
-        let mut dst = DirGraph::new();
-        dst.embeddings.insert(
-            ("Doc".to_string(), "vec_emb".to_string()),
-            crate::graph::schema::EmbeddingStore::new(4),
-        );
-        decode_vector_indexes(&bumped, &mut dst);
-        assert!(
-            !dst.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index(),
-            "an unknown index format version must be skipped"
-        );
-
-        let mut bad_magic = payload.clone();
-        bad_magic[0] = b'X';
-        decode_vector_indexes(&bad_magic, &mut dst);
-        assert!(!dst.embeddings[&("Doc".to_string(), "vec_emb".to_string())].has_index());
-    }
-
-    #[test]
-    fn load_kgl_bytes_rejects_bad_magic() {
-        let err = match load_kgl_bytes(b"NOPE and some trailing bytes that are long enough") {
-            Ok(_) => panic!("expected an error for a bad-magic buffer"),
-            Err(e) => e.to_string().to_lowercase(),
-        };
-        assert!(
-            err.contains("magic") || err.contains("unrecognized"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn load_kgl_bytes_rejects_too_small() {
-        assert!(load_kgl_bytes(b"RG").is_err());
-        assert!(load_kgl_bytes(&[]).is_err());
-    }
-
-    #[test]
-    fn load_kgl_bytes_rejects_truncated() {
-        let g = tiny_graph(6);
-        let mut buf: Vec<u8> = Vec::new();
-        write_kgl_to(&g, &mut buf).unwrap();
-        // Keep the valid magic+header but cut the body — a torn file.
-        let truncated = &buf[..buf.len() / 2];
-        assert!(
-            load_kgl_bytes(truncated).is_err(),
-            "a truncated buffer must be rejected, not silently half-loaded"
-        );
-    }
-
-    #[test]
-    fn atomic_save_overwrites_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("g.kgl");
-        let p = path.to_str().unwrap();
-        write_kgl(&tiny_graph(2), p).unwrap();
-        write_kgl(&tiny_graph(9), p).unwrap();
-        let loaded = load_file(p).unwrap();
-        assert_eq!(loaded.graph.node_count(), tiny_graph(9).graph.node_count());
-    }
-
-    #[test]
-    fn successful_save_leaves_no_temp_litter() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("g.kgl");
-        write_kgl(&tiny_graph(3), path.to_str().unwrap()).unwrap();
-        // Only the destination should remain — no `.tmp.<pid>.<n>` siblings.
-        let entries: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(entries, vec!["g.kgl".to_string()], "temp file must be gone");
-    }
-
-    #[test]
-    fn failed_save_to_bad_dir_leaves_dest_untouched() {
-        // Write a good file first, then attempt a save into a path whose
-        // parent doesn't exist — the temp create fails, and the existing
-        // good file must be left intact (no partial overwrite).
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("g.kgl");
-        write_kgl(&tiny_graph(4), good.to_str().unwrap()).unwrap();
-        let before = std::fs::read(&good).unwrap();
-
-        let bad = dir.path().join("missing_subdir").join("g.kgl");
-        assert!(write_kgl(&tiny_graph(7), bad.to_str().unwrap()).is_err());
-
-        // The original file is byte-for-byte unchanged.
-        assert_eq!(std::fs::read(&good).unwrap(), before);
-    }
-}
+#[path = "file_tests.rs"]
+mod file_tests;

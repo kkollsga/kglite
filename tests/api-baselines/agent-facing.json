@@ -1,0 +1,20 @@
+{
+  "cypher": {
+    "core": ["crates/kglite/src/lib.rs", "pub use crate::graph::session::{"],
+    "python_stub": ["kglite/__init__.pyi", "    def cypher("],
+    "introspection": ["crates/kglite/src/graph/introspection/describe.rs", "<cypher"],
+    "mcp": ["crates/kglite-mcp-server/src/tools.rs", "\"cypher_query\""]
+  },
+  "describe": {
+    "core": ["crates/kglite/src/lib.rs", "compute_description"],
+    "python_stub": ["kglite/__init__.pyi", "    def describe("],
+    "introspection": ["crates/kglite/src/graph/introspection/topics.rs", "describe(types=['...'])"],
+    "mcp": ["crates/kglite-mcp-server/src/tools.rs", "\"graph_overview\""]
+  },
+  "save": {
+    "core": ["crates/kglite/src/lib.rs", "save_graph, save_graph_with"],
+    "python_stub": ["kglite/__init__.pyi", "    def save("],
+    "introspection": ["crates/kglite/src/graph/introspection/topics.rs", "save(path)"],
+    "mcp": ["crates/kglite-mcp-server/src/tools.rs", "\"save_graph\""]
+  }
+}

@@ -21,6 +21,16 @@ mod utility;
 use shared::*;
 
 impl<'a> CypherExecutor<'a> {
+    #[cfg(test)]
+    pub(super) fn test_eval_collection_fn(
+        &self,
+        name: &str,
+        args: &[Expression],
+        row: &ResultRow,
+    ) -> Result<Option<Value>, String> {
+        self.eval_collection_fn(name, args, row)
+    }
+
     /// Evaluate `localdatetime()` / `localtime()` / `time()`. No-arg form
     /// returns the local wall-clock "now" as an ISO-8601 string; the
     /// single-string form validates/normalises and returns `Null` on

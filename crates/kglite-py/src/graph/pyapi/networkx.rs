@@ -25,10 +25,10 @@ impl KnowledgeGraph {
     /// so ``MultiDiGraph`` is the lossless target. Each node's ``id`` is
     /// used as the networkx node key; ``node_type``, ``title`` and every
     /// property are attached as node attributes. Each edge's
-    /// ``connection_type`` is used as the networkx edge key (so parallel
-    /// edges of different types between the same pair stay distinct), and
-    /// is also stored as the ``connection_type`` edge attribute alongside
-    /// every edge property.
+    /// ``connection_type`` is used as the first networkx edge key for a node
+    /// pair; additional same-type parallel edges receive a collision-safe
+    /// composite key. The type is always stored as the ``connection_type``
+    /// edge attribute alongside every edge property.
     ///
     /// Requires the ``networkx`` package: ``pip install networkx``.
     ///
@@ -74,16 +74,18 @@ impl KnowledgeGraph {
             let attrs = PyDict::new(py);
             attrs.set_item("node_type", node.node_type_str(interner))?;
             attrs.set_item("title", value_to_py(py, &node.title())?)?;
-            for (k, v) in node.property_iter(interner) {
-                attrs.set_item(k, value_to_py(py, v)?)?;
+            // properties_cloned covers both row-backed and post-reload
+            // columnar property storage; property_iter is empty for the latter.
+            for (k, v) in node.properties_cloned(interner) {
+                attrs.set_item(k, value_to_py(py, &v)?)?;
             }
             add_node.call((key.clone_ref(py),), Some(&attrs))?;
             id_by_index.insert(idx.index(), key);
         }
 
-        // Build edges in a single global pass. Edge key = connection_type,
-        // so parallel edges of different types between the same node pair
-        // stay distinct in a MultiDiGraph.
+        // Build edges in a single global pass. Keep the readable connection
+        // type key for the first edge, then disambiguate legal same-type
+        // parallel edges with their stable edge index.
         for edge in graph.graph.edge_references() {
             let (Some(src), Some(tgt)) = (
                 id_by_index.get(&edge.source().index()),
@@ -97,7 +99,21 @@ impl KnowledgeGraph {
             for (k, v) in edge.weight().property_iter(interner) {
                 attrs.set_item(k, value_to_py(py, v)?)?;
             }
-            add_edge.call((src.clone_ref(py), tgt.clone_ref(py), ctype), Some(&attrs))?;
+            let key_in_use: bool = nxg
+                .call_method1("has_edge", (src.clone_ref(py), tgt.clone_ref(py), ctype))?
+                .extract()?;
+            if key_in_use {
+                add_edge.call(
+                    (
+                        src.clone_ref(py),
+                        tgt.clone_ref(py),
+                        (ctype, edge.id().index()),
+                    ),
+                    Some(&attrs),
+                )?;
+            } else {
+                add_edge.call((src.clone_ref(py), tgt.clone_ref(py), ctype), Some(&attrs))?;
+            }
         }
 
         Ok(nxg.into())

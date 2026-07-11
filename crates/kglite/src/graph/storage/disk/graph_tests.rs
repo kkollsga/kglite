@@ -1,10 +1,359 @@
 use super::enumerate_segment_dirs;
 use super::segment_subdir;
+use crate::datatypes::{DataFrame, Value};
+use crate::graph::schema::{EdgeData, InternedKey, NodeData, StringInterner};
+use crate::graph::storage::backend::GraphBackend;
 use crate::graph::storage::disk::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
 use crate::graph::storage::disk::graph_persist::{concat_segment_csrs, SegmentCsr};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
-use petgraph::graph::NodeIndex;
+use crate::graph::storage::{GraphRead, GraphWrite};
+use crate::graph::DirGraph;
+use petgraph::graph::{EdgeIndex, NodeIndex};
+use std::collections::{BTreeMap, HashMap};
 use tempfile::TempDir;
+
+fn add_docs(graph: &mut DirGraph, ids: &[i64]) {
+    let rows = ids
+        .iter()
+        .map(|id| vec![Value::Int64(*id), Value::String(format!("doc-{id}"))])
+        .collect();
+    let frame =
+        DataFrame::from_cypher_rows(vec!["id".to_string(), "title".to_string()], rows).unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        graph,
+        frame,
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+}
+
+fn one_doc_frame(id: i64) -> DataFrame {
+    DataFrame::from_cypher_rows(
+        vec!["id".to_string(), "title".to_string()],
+        vec![vec![Value::Int64(id), Value::String(format!("doc-{id}"))]],
+    )
+    .unwrap()
+}
+
+fn snapshot_files(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
+    fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(root, &path, out);
+            } else {
+                out.insert(
+                    path.strip_prefix(root).unwrap().display().to_string(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    collect(root, root, &mut files);
+    files
+}
+
+fn edge_score(graph: &DirGraph) -> Option<Value> {
+    let key = InternedKey::from_str("score");
+    graph
+        .graph
+        .edge_weight(EdgeIndex::new(0))?
+        .properties
+        .iter()
+        .find_map(|(candidate, value)| (*candidate == key).then(|| value.clone()))
+}
+
+#[test]
+fn legacy_flat_csr_directory_remains_readable() {
+    let tmp = TempDir::new().unwrap();
+    let mut interner = StringInterner::new();
+    let mut graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    graph.defer_csr = true;
+    let n0 = graph.add_node(seal_test_node(&mut interner, 0, "Doc"));
+    let n1 = graph.add_node(seal_test_node(&mut interner, 1, "Doc"));
+    graph.add_edge(n0, n1, seal_test_edge(&mut interner, "LINKS"));
+    graph.build_csr_from_pending().unwrap();
+    graph.save_to_dir(tmp.path(), &interner).unwrap();
+    drop(graph);
+
+    // Recreate the pre-segmentation layout: CSR and auxiliary files at the
+    // graph root, with the additive layout-version field set to zero.
+    let segment = tmp.path().join("seg_000");
+    for entry in std::fs::read_dir(&segment).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::rename(entry.path(), tmp.path().join(entry.file_name())).unwrap();
+    }
+    std::fs::remove_dir(&segment).unwrap();
+    let metadata_path = tmp.path().join("disk_graph_meta.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["csr_layout_version"] = serde_json::Value::from(0);
+    std::fs::write(
+        &metadata_path,
+        serde_json::to_vec_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(tmp.path().join("seg_manifest.json"));
+
+    let mut loaded_interner = StringInterner::new();
+    let (loaded, _cache) =
+        super::DiskGraph::load_from_dir(tmp.path(), &mut loaded_interner).unwrap();
+    assert_eq!(loaded.node_count, 2);
+    assert_eq!(loaded.edge_count, 1);
+    let start = loaded.out_offsets.get(0) as usize;
+    let end = loaded.out_offsets.get(1) as usize;
+    assert_eq!(end - start, 1);
+    assert_eq!(loaded.out_edges.get(start).peer, 1);
+}
+
+#[test]
+fn transaction_clone_keeps_published_arrays_mapped() {
+    let tmp = TempDir::new().unwrap();
+    let mut interner = StringInterner::new();
+    let mut graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    graph.add_node(NodeData::new(
+        Value::Int64(1),
+        Value::String("doc-1".into()),
+        "Doc".into(),
+        HashMap::new(),
+        &mut interner,
+    ));
+    graph.save_to_dir(tmp.path(), &interner).unwrap();
+
+    let mut loaded_interner = StringInterner::new();
+    let (loaded, _guard) =
+        super::DiskGraph::load_from_dir(tmp.path(), &mut loaded_interner).unwrap();
+    assert!(loaded.node_slots.is_mapped());
+    let fork = loaded.clone();
+    assert!(fork.node_slots.is_mapped());
+    assert_eq!(fork.out_offsets.is_mapped(), loaded.out_offsets.is_mapped());
+    assert_eq!(fork.out_edges.is_mapped(), loaded.out_edges.is_mapped());
+    assert_eq!(fork.node_slots.heap_bytes(), 0);
+    assert_eq!(fork.out_edges.heap_bytes(), loaded.out_edges.heap_bytes());
+}
+
+#[test]
+fn transaction_fork_inherits_lease_but_uses_private_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let mut parent = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    parent.prepare_mutation().unwrap();
+    let parent_dir = parent.active_write_dir().to_path_buf();
+
+    let mut child = parent.clone();
+    child.adopt_writer_lineage(&parent);
+    child.prepare_mutation().unwrap();
+
+    assert!(child.writer_lock.is_some());
+    assert_ne!(parent_dir, child.active_write_dir());
+    assert!(parent_dir.exists());
+    assert!(child.active_write_dir().exists());
+}
+
+#[test]
+fn generation_publish_keeps_held_reader_on_old_snapshot() {
+    let target = TempDir::new().unwrap();
+    let path = target.path().to_str().unwrap();
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1, 2]);
+    writer.enable_disk_mode().unwrap();
+    writer.save_disk(path).unwrap();
+    let first_current = std::fs::read_to_string(target.path().join("CURRENT")).unwrap();
+    let first_snapshot = crate::graph::storage::disk::generation::resolve_snapshot(target.path())
+        .unwrap()
+        .snapshot_dir;
+    let frozen_slots = std::fs::read(first_snapshot.join("seg_000/node_slots.bin")).unwrap();
+    let held_reader = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(held_reader.graph.node_count(), 2);
+
+    add_docs(&mut writer, &[3]);
+    assert_eq!(
+        std::fs::read(first_snapshot.join("seg_000/node_slots.bin")).unwrap(),
+        frozen_slots,
+        "creating a mutation overlay must not write the selected generation"
+    );
+    writer.save_disk(path).unwrap();
+    let second_current = std::fs::read_to_string(target.path().join("CURRENT")).unwrap();
+    assert_ne!(first_current, second_current);
+
+    let newest = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(newest.graph.node_count(), 3);
+    assert_eq!(
+        held_reader.graph.node_count(),
+        2,
+        "a reader that resolved generation 1 must remain on generation 1"
+    );
+}
+
+#[test]
+fn generation_preserves_edge_property_snapshots_and_rebases_writer() {
+    let target = TempDir::new().unwrap();
+    let path = target.path().to_str().unwrap();
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1, 2]);
+    writer.enable_disk_mode().unwrap();
+    writer.prepare_disk_mutation().unwrap();
+    let source = writer
+        .lookup_by_id_readonly("Doc", &Value::Int64(1))
+        .unwrap();
+    let target_node = writer
+        .lookup_by_id_readonly("Doc", &Value::Int64(2))
+        .unwrap();
+    let edge = EdgeData::new(
+        "LINKS".to_string(),
+        HashMap::from([("score".to_string(), Value::Int64(1))]),
+        &mut writer.interner,
+    );
+    GraphWrite::add_edge(&mut writer.graph, source, target_node, edge);
+    writer.save_disk(path).unwrap();
+
+    let first_snapshot = crate::graph::storage::disk::generation::resolve_snapshot(target.path())
+        .unwrap()
+        .snapshot_dir;
+    let frozen_tree = snapshot_files(&first_snapshot);
+    let held_reader = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(edge_score(&held_reader), Some(Value::Int64(1)));
+
+    writer.prepare_disk_mutation().unwrap();
+    let edge = GraphWrite::edge_weight_mut(&mut writer.graph, EdgeIndex::new(0)).unwrap();
+    edge.properties
+        .iter_mut()
+        .find(|(key, _)| *key == InternedKey::from_str("score"))
+        .unwrap()
+        .1 = Value::Int64(2);
+    assert_eq!(snapshot_files(&first_snapshot), frozen_tree);
+
+    writer.save_disk(path).unwrap();
+    assert_eq!(snapshot_files(&first_snapshot), frozen_tree);
+    assert_eq!(edge_score(&writer), Some(Value::Int64(2)));
+    let newest = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(edge_score(&newest), Some(Value::Int64(2)));
+    assert_eq!(edge_score(&held_reader), Some(Value::Int64(1)));
+}
+
+#[test]
+fn generation_round_trips_node_and_edge_add_delete_overlays() {
+    let target = TempDir::new().unwrap();
+    let path = target.path().to_str().unwrap();
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1, 2, 3]);
+    writer.enable_disk_mode().unwrap();
+    writer.prepare_disk_mutation().unwrap();
+    let nodes: Vec<_> = [1, 2, 3]
+        .into_iter()
+        .map(|id| {
+            writer
+                .lookup_by_id_readonly("Doc", &Value::Int64(id))
+                .unwrap()
+        })
+        .collect();
+    for pair in nodes.windows(2) {
+        let edge = EdgeData::new("LINKS".to_string(), HashMap::new(), &mut writer.interner);
+        GraphWrite::add_edge(&mut writer.graph, pair[0], pair[1], edge);
+    }
+    writer.save_disk(path).unwrap();
+    let first_snapshot = crate::graph::storage::disk::generation::resolve_snapshot(target.path())
+        .unwrap()
+        .snapshot_dir;
+    let frozen_tree = snapshot_files(&first_snapshot);
+    let held_reader = crate::graph::io::file::load_file(path).unwrap();
+
+    writer.prepare_disk_mutation().unwrap();
+    GraphWrite::remove_edge(&mut writer.graph, EdgeIndex::new(0)).unwrap();
+    crate::graph::mutation::maintain::detach_delete_nodes(
+        &mut writer,
+        &std::collections::HashSet::from([nodes[2]]),
+    );
+    add_docs(&mut writer, &[4]);
+    let fourth = writer
+        .lookup_by_id_readonly("Doc", &Value::Int64(4))
+        .unwrap();
+    let edge = EdgeData::new("LINKS".to_string(), HashMap::new(), &mut writer.interner);
+    GraphWrite::add_edge(&mut writer.graph, nodes[0], fourth, edge);
+    assert_eq!(snapshot_files(&first_snapshot), frozen_tree);
+
+    writer.save_disk(path).unwrap();
+    assert_eq!(snapshot_files(&first_snapshot), frozen_tree);
+    let newest = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(newest.graph.node_count(), 3);
+    assert_eq!(newest.graph.edge_count(), 1);
+    let only_edge = newest.graph.edge_references().next().unwrap();
+    assert_eq!((only_edge.source(), only_edge.target()), (nodes[0], fourth));
+    assert_eq!(held_reader.graph.node_count(), 3);
+    assert_eq!(held_reader.graph.edge_count(), 2);
+}
+
+#[test]
+fn second_disk_writer_is_rejected_before_mutation() {
+    let target = TempDir::new().unwrap();
+    let path = target.path().to_str().unwrap();
+    let mut first = DirGraph::new();
+    add_docs(&mut first, &[1]);
+    first.enable_disk_mode().unwrap();
+    first.save_disk(path).unwrap();
+
+    let loaded = crate::graph::io::file::load_file(path).unwrap();
+    let mut second = match std::sync::Arc::try_unwrap(loaded) {
+        Ok(graph) => graph,
+        Err(_) => panic!("fresh load unexpectedly had another Arc owner"),
+    };
+    let error = crate::graph::mutation::maintain::add_nodes(
+        &mut second,
+        one_doc_frame(2),
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .expect_err("second writer must fail before changing its overlay");
+    assert!(error.contains("active writer"), "{error}");
+    assert_eq!(second.graph.node_count(), 1);
+
+    drop(first);
+    crate::graph::mutation::maintain::add_nodes(
+        &mut second,
+        one_doc_frame(2),
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(second.graph.node_count(), 2);
+}
+
+#[test]
+fn failed_graph_save_keeps_dirty_state_and_withholds_root_metadata() {
+    let mut graph = DirGraph::new();
+    graph.enable_disk_mode().unwrap();
+    let target = TempDir::new().unwrap();
+    let blocked_generations = target.path().join("generations");
+    std::fs::write(&blocked_generations, b"not a directory").unwrap();
+
+    let error = graph
+        .save_disk(target.path().to_str().unwrap())
+        .expect_err("a blocked generations directory must fail the save");
+    assert!(error.contains("Failed to begin disk generation"));
+    assert!(!target.path().join("CURRENT").exists());
+    match &graph.graph {
+        GraphBackend::Disk(disk) => assert!(disk.persistence_is_dirty()),
+        _ => panic!("graph unexpectedly left disk mode"),
+    }
+
+    std::fs::remove_file(blocked_generations).unwrap();
+    graph.save_disk(target.path().to_str().unwrap()).unwrap();
+    let snapshot =
+        crate::graph::storage::disk::generation::resolve_snapshot(target.path()).unwrap();
+    assert!(snapshot.snapshot_dir.join("metadata.json").exists());
+    match &graph.graph {
+        GraphBackend::Disk(disk) => assert!(!disk.persistence_is_dirty()),
+        _ => panic!("graph unexpectedly left disk mode"),
+    }
+}
 
 // ------------- fixture helpers -------------
 
@@ -49,6 +398,58 @@ fn slot(node_type: u64, row_id: u32) -> DiskNodeSlot {
         row_id,
         flags: DiskNodeSlot::ALIVE_BIT,
     }
+}
+
+#[test]
+fn overlapping_query_guards_keep_materializations_alive() {
+    let tmp = TempDir::new().unwrap();
+    let graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    let mut interner = StringInterner::new();
+
+    let first = graph.begin_query();
+    graph
+        .node_arena
+        .lock()
+        .unwrap()
+        .push(Box::new(NodeData::new(
+            Value::Int64(1),
+            Value::String("one".into()),
+            "Item".into(),
+            HashMap::new(),
+            &mut interner,
+        )));
+    graph
+        .edge_arena
+        .lock()
+        .unwrap()
+        .push(Box::new(EdgeData::new(
+            "LINKS".into(),
+            HashMap::new(),
+            &mut interner,
+        )));
+
+    let second = graph.begin_query();
+    assert_eq!(*graph.active_queries.lock().unwrap(), 2);
+    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
+    assert_eq!(graph.edge_arena.lock().unwrap().len(), 1);
+
+    // A reset from another execution path must not invalidate either guard.
+    graph.reset_arenas();
+    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
+    assert_eq!(graph.edge_arena.lock().unwrap().len(), 1);
+
+    drop(first);
+    assert_eq!(*graph.active_queries.lock().unwrap(), 1);
+    assert_eq!(graph.node_arena.lock().unwrap().len(), 1);
+    drop(second);
+    assert_eq!(*graph.active_queries.lock().unwrap(), 0);
+
+    // Reclamation is deferred until the next query begins, after the last
+    // prior-generation reference is guaranteed to be gone.
+    let next = graph.begin_query();
+    assert!(graph.node_arena.lock().unwrap().is_empty());
+    assert!(graph.edge_arena.lock().unwrap().is_empty());
+    drop(next);
 }
 
 // ------------- segment_subdir + enumerate (pre-phase-7 cases) -------------
@@ -373,9 +774,6 @@ fn concat_handles_edgeless_segment() {
 
 // ------------- seal_to_new_segment round-trip (phase 8) -------------
 
-use crate::datatypes::values::Value;
-use crate::graph::schema::{EdgeData, NodeData, StringInterner};
-
 fn seal_test_node(interner: &mut StringInterner, id: i64, ntype: &str) -> NodeData {
     NodeData::new(
         Value::Int64(id),
@@ -397,7 +795,7 @@ fn seal_rejects_when_nothing_to_seal() {
     let mut dg = super::DiskGraph::new_at_path(tmp.path()).unwrap();
     dg.defer_csr = true;
     let _n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
     // save_to_dir set sealed_nodes_bound = node_count, so tail is empty.
     let err = dg.seal_to_new_segment(tmp.path()).unwrap_err();
@@ -417,7 +815,7 @@ fn seal_accepts_cross_segment_edges_via_full_range() {
     let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
     let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
     dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     // Add a new node and a cross-segment edge (seg_0's n0 → new n2).
@@ -463,7 +861,7 @@ fn seal_round_trip_basic_reads() {
     let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
     let _n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
     dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     assert_eq!(dg.node_count, 3);
@@ -559,7 +957,7 @@ fn seal_round_trip_auxiliary_indexes() {
     let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
     let _n2 = dg.add_node(seal_test_node(&mut interner, 2, "A"));
     dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     // Tail: 2 nodes of type B, 2 U-edges — one intra-tail (3→4), one
@@ -654,7 +1052,7 @@ fn save_to_dir_auto_wires_seal_when_tail_is_clean() {
     let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
     let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
     dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     // After first save: seg_000 exists, seg_001 does not.
@@ -700,7 +1098,7 @@ fn save_to_dir_seals_cross_segment_overflow_as_full_range() {
     let n0 = dg.add_node(seal_test_node(&mut interner, 0, "A"));
     let n1 = dg.add_node(seal_test_node(&mut interner, 1, "A"));
     dg.add_edge(n0, n1, seal_test_edge(&mut interner, "T"));
-    dg.build_csr_from_pending();
+    dg.build_csr_from_pending().unwrap();
     dg.save_to_dir(tmp.path(), &interner).unwrap();
 
     // Cross-segment edge (old n0 → new n2) + a purely-tail edge.

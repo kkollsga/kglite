@@ -353,29 +353,32 @@ impl KnowledgeGraph {
             let records: Vec<Py<PyAny>> = results
                 .iter()
                 .filter_map(|r| {
-                    self.inner.graph.node_weight(r.node_idx).map(|node| {
-                        let dict = PyDict::new(py);
-                        let _ = dict.set_item("id", py_out::value_to_py(py, &node.id()).ok());
-                        if want("title") {
-                            let _ =
-                                dict.set_item("title", py_out::value_to_py(py, &node.title()).ok());
-                        }
-                        if want("type") {
-                            let _ = dict.set_item("type", node.node_type_str(&self.inner.interner));
-                        }
-                        let _ = dict.set_item("score", r.score);
-                        // properties_cloned reads from PropertyStorage::Columnar
-                        // (the post-reload variant); property_iter yields
-                        // nothing for that variant.
-                        for (k, v) in node.properties_cloned(&self.inner.interner) {
-                            if want(&k) {
-                                let _ = dict.set_item(k, py_out::value_to_py(py, &v).ok());
-                            }
-                        }
-                        dict.into()
-                    })
+                    self.inner
+                        .graph
+                        .node_weight(r.node_idx)
+                        .map(|node| (r, node))
                 })
-                .collect();
+                .map(|(r, node)| -> PyResult<Py<PyAny>> {
+                    let dict = PyDict::new(py);
+                    dict.set_item("id", py_out::value_to_py(py, &node.id())?)?;
+                    if want("title") {
+                        dict.set_item("title", py_out::value_to_py(py, &node.title())?)?;
+                    }
+                    if want("type") {
+                        dict.set_item("type", node.node_type_str(&self.inner.interner))?;
+                    }
+                    dict.set_item("score", r.score)?;
+                    // properties_cloned reads from PropertyStorage::Columnar
+                    // (the post-reload variant); property_iter yields
+                    // nothing for that variant.
+                    for (k, v) in node.properties_cloned(&self.inner.interner) {
+                        if want(&k) {
+                            dict.set_item(k, py_out::value_to_py(py, &v)?)?;
+                        }
+                    }
+                    Ok(dict.into())
+                })
+                .collect::<PyResult<_>>()?;
             let py_list = PyList::new(py, &records)?;
             let df = pandas.call_method1("DataFrame", (py_list,))?;
             return df.into_py_any(py);

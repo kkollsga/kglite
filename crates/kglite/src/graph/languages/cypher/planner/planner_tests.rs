@@ -466,6 +466,54 @@ fn test_limit_pushdown_single_match_with_where() {
 }
 
 #[test]
+fn test_limit_pushdown_unfiltered_node_cartesian() {
+    let mut query =
+        parse_cypher("MATCH (a:Person), (b:Organization) RETURN a.name, b.name LIMIT 20").unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(
+        !query.clauses.iter().any(|c| matches!(c, Clause::Limit(_))),
+        "pure node cartesian should absorb LIMIT"
+    );
+    let match_clause = query
+        .clauses
+        .iter()
+        .find_map(|clause| match clause {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(match_clause.limit_hint, Some(20));
+}
+
+#[test]
+fn test_limit_pushdown_keeps_filtered_node_cartesian_conservative() {
+    let mut query = parse_cypher(
+        "MATCH (a:Person), (b:Organization) WHERE a.city = b.city \
+         RETURN a.name, b.name LIMIT 20",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(query.clauses.iter().any(|c| matches!(c, Clause::Limit(_))));
+    let match_clause = query
+        .clauses
+        .iter()
+        .find_map(|clause| match clause {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(match_clause.limit_hint, None);
+}
+
+#[test]
 fn test_multi_match_no_reverse_when_bound_var_first() {
     // Regression for the user's "(p)-[:P31]->(:human) gets reversed to scan
     // 13M humans" report: in the second MATCH, `p` is already bound by the
@@ -749,6 +797,52 @@ fn test_fuse_match_return_aggregate_count_distinct() {
 }
 
 #[test]
+fn test_fuse_match_return_aggregate_global_two_hop_count() {
+    let mut query = parse_cypher(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \
+         RETURN count(*) AS paths",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(
+        matches!(
+            query.clauses.as_slice(),
+            [Clause::FusedMatchReturnAggregate {
+                distinct_count: false,
+                ..
+            }]
+        ),
+        "pure two-hop count must use row-free aggregate fusion: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_global_two_hop_count_with_repeated_variable_is_not_fused() {
+    let mut query = parse_cypher(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(a) \
+         RETURN count(*) AS cycles",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(
+        !query
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::FusedMatchReturnAggregate { .. })),
+        "repeated node variables require the binding-aware matcher"
+    );
+}
+
+#[test]
 fn test_fuse_match_with_aggregate_count_distinct() {
     // Single-MATCH + WITH with count(DISTINCT v) — pipeline form.
     let mut query = parse_cypher(
@@ -855,34 +949,29 @@ fn test_fold_pass_through_with_between_matches() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // No bare WITH clause should remain — the pass-through one was
-    // dropped, and the multi-MATCH desugar produced a NEW with(agg)
-    // that should have been consumed by fuse_match_with_aggregate +
-    // fuse_match_with_aggregate_top_k.
+    // The pass-through WITH is dropped. The multi-MATCH desugar produces one
+    // aggregate WITH, which must remain eager because p.title groups by value,
+    // not by the p node's identity.
     let bare_with_count = query
         .clauses
         .iter()
         .filter(|c| matches!(c, Clause::With(_)))
         .count();
     assert_eq!(
-        bare_with_count, 0,
-        "pass-through WITH must be stripped, and any synthesized WITH \
-         must be absorbed by aggregate fusion; got query: {:#?}",
+        bare_with_count, 1,
+        "pass-through WITH must be stripped while the value-grouping \
+         aggregate WITH remains eager; got query: {:#?}",
         query.clauses
     );
 
-    // The query should have collapsed into a FusedMatchWithAggregate —
-    // the streaming aggregate path. (top_k absorption is a separate
-    // win that requires a pure-variable RETURN; we still benefit from
-    // the streaming aggregate even when the RETURN includes
-    // `p.title`.)
+    // The node-keyed streaming aggregate must not accept p.title grouping.
     let has_fused_aggregate = query
         .clauses
         .iter()
         .any(|c| matches!(c, Clause::FusedMatchWithAggregate { .. }));
     assert!(
-        has_fused_aggregate,
-        "expected the cohort query to land on the fused streaming \
+        !has_fused_aggregate,
+        "property-valued grouping must not land on the node-keyed \
          aggregate path; clauses: {:#?}",
         query.clauses
     );
@@ -954,30 +1043,29 @@ fn test_desugar_multi_match_return_aggregate() {
     let params = HashMap::new();
     optimize(&mut query, &graph, &params);
 
-    // Expected outcome: the aggregate fusion absorbs the synthesized
-    // WITH into a FusedMatchWithAggregate (the streaming aggregate
-    // path). top_k absorption requires a pure-variable RETURN — that's
-    // covered by a separate fusion when the RETURN qualifies; this
-    // test only pins the desugar→fusion handoff.
+    // The desugar still fires, but its synthesized value-grouping WITH stays
+    // eager rather than entering the NodeIndex-keyed aggregate fusion.
     let landed_on_fused_aggregate = query
         .clauses
         .iter()
         .any(|c| matches!(c, Clause::FusedMatchWithAggregate { .. }));
     assert!(
-        landed_on_fused_aggregate,
-        "Match-Match-Return-aggregate must desugar and fuse into the \
-         streaming aggregate path; clauses: {:#?}",
+        !landed_on_fused_aggregate,
+        "property-valued Match-Match aggregation must not enter the \
+         node-keyed streaming path; clauses: {:#?}",
         query.clauses
+    );
+    assert!(
+        query.clauses.iter().any(|c| matches!(c, Clause::With(_))),
+        "the safe eager aggregate WITH must remain after desugaring"
     );
 }
 
 #[test]
-fn test_topk_absorbed_for_property_access_return() {
-    // Cohort top-K with property-access RETURN — the shape that drove
-    // the user's Wikidata timeout. After desugar→fuse, the planner
-    // must absorb ORDER BY/LIMIT into FusedMatchWithAggregate.top_k so
-    // p.title and p.description are evaluated K times, not |cohort|
-    // times.
+fn test_topk_bails_for_property_value_grouping() {
+    // Property expressions group by VALUE, not NodeIndex. The fused
+    // accumulator is node-keyed, so it must bail until it can re-bucket
+    // equal property values without changing counts.
     let mut query = parse_cypher(
         "MATCH (p)-[:T1]->({id: 1}) \
          MATCH (p)-[r]-(other) \
@@ -996,21 +1084,15 @@ fn test_topk_absorbed_for_property_access_return() {
         .iter()
         .any(|c| matches!(c, Clause::FusedMatchWithAggregate { top_k: Some(_), .. }));
     assert!(
-        topk_absorbed,
-        "ORDER BY DESC LIMIT 10 must be absorbed into \
-         FusedMatchWithAggregate.top_k when RETURN projects \
-         properties of the group variable; clauses: {:#?}",
-        query.clauses
+        !topk_absorbed,
+        "property-value grouping must not use node-keyed fusion"
     );
 }
 
 #[test]
-fn test_topk_absorbed_with_explicit_pass_through_with() {
-    // The user's *exact* shape from the Wikidata Q1 timeout, with the
-    // explicit `WITH p` between the two MATCHes. fold_pass_through_with
-    // must remove it, then desugar+fuse must produce a
-    // FusedMatchWithAggregate with top_k = Some — otherwise the cohort's
-    // p.title and p.description columns are read for every group key.
+fn test_topk_bails_for_property_grouping_after_pass_through_with() {
+    // Folding the pass-through WITH must not accidentally admit the same
+    // unsafe property-value grouping shape downstream.
     let mut query = parse_cypher(
         "MATCH (p)-[:P27]->({id: 20}) \
          WITH p \
@@ -1030,9 +1112,8 @@ fn test_topk_absorbed_with_explicit_pass_through_with() {
         .iter()
         .any(|c| matches!(c, Clause::FusedMatchWithAggregate { top_k: Some(_), .. }));
     assert!(
-        topk_absorbed,
-        "user's exact Q1 shape must absorb top_k; clauses: {:#?}",
-        query.clauses
+        !topk_absorbed,
+        "property-value grouping must stay unfused after WITH folding"
     );
 }
 

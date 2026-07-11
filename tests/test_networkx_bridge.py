@@ -68,6 +68,32 @@ def test_to_networkx_parallel_typed_edges():
     assert nxg[1][2]["KNOWS"]["since"] == 2010
 
 
+def test_to_networkx_preserves_same_type_parallel_edges():
+    g = kglite.KnowledgeGraph()
+    g.cypher("CREATE (a:N {id:1}), (b:N {id:2}) CREATE (a)-[:R {rank:1}]->(b), (a)-[:R {rank:2}]->(b)")
+    nxg = g.to_networkx()
+    assert nxg.number_of_edges(1, 2) == 2
+    edges = list(nxg.get_edge_data(1, 2).values())
+    assert {edge["connection_type"] for edge in edges} == {"R"}
+    assert {edge["rank"] for edge in edges} == {1, 2}
+
+
+@pytest.mark.parametrize("mode", ["memory", "mapped", "disk"])
+def test_to_networkx_preserves_columnar_node_properties(mode, tmp_path):
+    kwargs = {}
+    if mode == "mapped":
+        kwargs["storage"] = "mapped"
+    elif mode == "disk":
+        kwargs.update(storage="disk", path=str(tmp_path / "disk_graph"))
+    g = kglite.KnowledgeGraph(**kwargs)
+    g.add_nodes(pd.DataFrame({"id": [1], "name": ["A"], "score": [9.5]}), "N", "id", "name")
+    assert g.to_networkx().nodes[1]["score"] == 9.5
+
+    saved = str(tmp_path / f"{mode}.kgl")
+    g.save(saved)
+    assert kglite.load(saved).to_networkx().nodes[1]["score"] == 9.5
+
+
 def test_round_trip_fidelity():
     g = _build_typed_graph()
     nxg = g.to_networkx()

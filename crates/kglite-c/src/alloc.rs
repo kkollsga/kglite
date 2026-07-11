@@ -64,11 +64,18 @@ pub struct KgMemStats {
 /// kglite's memory footprint in its own metrics.
 #[no_mangle]
 pub extern "C" fn kglite_memory_stats() -> KgMemStats {
-    KgMemStats {
-        current_bytes: CURRENT.load(Ordering::Relaxed),
-        peak_bytes: PEAK.load(Ordering::Relaxed),
-        total_allocs: TOTAL_ALLOCS.load(Ordering::Relaxed),
-    }
+    crate::ffi::value_boundary(
+        KgMemStats {
+            current_bytes: 0,
+            peak_bytes: 0,
+            total_allocs: 0,
+        },
+        || KgMemStats {
+            current_bytes: CURRENT.load(Ordering::Relaxed),
+            peak_bytes: PEAK.load(Ordering::Relaxed),
+            total_allocs: TOTAL_ALLOCS.load(Ordering::Relaxed),
+        },
+    )
 }
 
 #[cfg(test)]

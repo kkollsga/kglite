@@ -80,6 +80,9 @@ class ArgumentError(KgError):
 class MissingArgumentError(KgError):
     """A required argument wasn't passed."""
 
+class InternerCollisionError(KgError):
+    """Two distinct names collided on one persisted interner key; no mutation was applied."""
+
 class InternalError(KgError):
     """Invariant violation — kglite-internal bug. Reports the source location."""
 
@@ -1253,12 +1256,9 @@ class KnowledgeGraph:
             target_id_field: Column with target node IDs (must appear in DataFrame or query RETURN).
             source_title_field: Optional title column for source nodes.
             target_title_field: Optional title column for target nodes.
-            columns: Whitelist of property columns to include (data mode only).
-                Unlike :meth:`add_nodes`, edge ingestion keeps **only** id/title
-                columns unless this whitelist is given — so any other edge
-                property column is dropped when ``columns`` is omitted. That drop
-                now emits a ``UserWarning`` naming the dropped columns; pass
-                ``columns=[...]`` to keep them.
+            columns: Optional whitelist of property columns (data mode only).
+                When omitted, every DataFrame column is preserved except those
+                named by ``skip_columns``, matching :meth:`add_nodes`.
             skip_columns: Columns to exclude (data mode only).
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``. ``'sum'`` adds numeric edge properties
@@ -1324,7 +1324,8 @@ class KnowledgeGraph:
             target_id_field: Column with target node IDs.
             source_title_field: Optional title column for source nodes.
             target_title_field: Optional title column for target nodes.
-            columns: Whitelist of property columns to include (data mode only).
+            columns: Optional property-column whitelist (data mode only). When
+                omitted, all non-skipped DataFrame columns are preserved.
             skip_columns: Columns to exclude (data mode only).
             conflict_handling: ``'update'`` (default), ``'replace'``, ``'skip'``,
                 ``'preserve'``, or ``'sum'``.
@@ -3937,12 +3938,15 @@ class KnowledgeGraph:
         KGLite is a directed multigraph with typed nodes and edges, so
         ``MultiDiGraph`` is the lossless target. Each node's ``id`` is the
         networkx node key; ``node_type``, ``title`` and every property are
-        attached as node attributes. Each edge's ``connection_type`` is the
-        networkx edge key (so parallel edges of different types between the
-        same pair stay distinct) and is also stored as the
-        ``connection_type`` edge attribute alongside every edge property.
+        attached as node attributes. The first edge for a node pair uses its
+        ``connection_type`` as the networkx key; additional same-type parallel
+        edges use collision-safe composite keys. Every edge also stores the
+        type in its ``connection_type`` attribute alongside all properties.
 
-        The inverse is :func:`kglite.from_networkx`.
+        The inverse is :func:`kglite.from_networkx`. Because DataFrame edge
+        ingestion identifies an edge by endpoints plus type, importing a
+        NetworkX graph collapses same-type duplicate edges with identical
+        endpoints even though this export preserves them.
 
         Requires the ``networkx`` package: ``pip install networkx``.
 
@@ -4202,8 +4206,10 @@ class KnowledgeGraph:
                 deadline, a long-running **read** can be interrupted with
                 ``Ctrl-C`` (raises ``KeyboardInterrupt``) on POSIX — the
                 query aborts promptly instead of waiting for the deadline.
-            max_rows: Cap on intermediate rows; defaults to
-                ``set_default_max_rows()``.
+            max_rows: Cap on intermediate rows and retained collection/work
+                growth across every execution path. Exceeding the cap raises
+                an error (never truncates) and rolls back a mutation statement.
+                Defaults to ``set_default_max_rows()``.
             streaming: When ``True`` (default), the executor absorbs
                 compatible clause runs (currently
                 ``WITH/RETURN(group, agg) [ORDER BY ... LIMIT k]``) into
@@ -5307,11 +5313,12 @@ class Session:
         node-type whitelist — see :meth:`KnowledgeGraph.cypher`.
 
         Mutations (``CREATE`` / ``SET`` / ``DELETE`` / ``REMOVE`` / ``MERGE``)
-        take the Session's writer lock for ``begin → mutate → commit``, so
+        take the Session's writer lock for the mutation, so
         concurrent ``execute()`` calls run one at a time and each sees the
         prior writer's committed changes — no lost updates. The commit is an
-        atomic pointer swap; concurrent :meth:`cypher` readers never block and
-        keep seeing the pre-commit snapshot until the swap lands.
+        Readers already holding snapshots keep seeing the pre-write graph. A
+        new reader may briefly wait while a unique-owner write holds the core
+        graph mutex.
 
         A read-only query passed here is fast-pathed to the read path (no
         working-copy materialisation), so mixed traffic can route through
@@ -5410,7 +5417,9 @@ class Transaction:
     :meth:`KnowledgeGraph.begin_read` (read-only).
 
     Read-write transactions:
-        - **Snapshot isolation**: ``begin()`` clones the entire graph.
+        - **Snapshot isolation**: ``begin()`` is O(1); the first mutation
+          creates a working fork. Memory/mapped modes clone then, while disk
+          mode remaps immutable bases and copies only mutation overlays.
         - **Write isolation**: mutations modify only the working copy.
         - **Optimistic concurrency control**: ``commit()`` checks that the
           graph version hasn't changed since ``begin()``. If another transaction
@@ -5434,6 +5443,7 @@ class Transaction:
         params: dict[str, Any] | None = None,
         to_df: bool = False,
         timeout_ms: Optional[int] = None,
+        max_rows: Optional[int] = None,
         write_scope: list[str] | None = None,
     ) -> ResultView | pd.DataFrame:
         """Execute a Cypher query within this transaction.
@@ -5448,6 +5458,8 @@ class Transaction:
             write_scope: Role-scoped write whitelist — see
                 :meth:`KnowledgeGraph.cypher`.
             timeout_ms: Per-query timeout in milliseconds (merged with transaction deadline).
+            max_rows: Maximum intermediate rows or collection items. Exceeding
+                the cap raises an error and rolls back the statement.
         """
         ...
 

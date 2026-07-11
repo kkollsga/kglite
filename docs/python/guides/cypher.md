@@ -104,7 +104,8 @@ zero-row mystery into an actionable typo hint.
 # Abort after 500 ms; rows reflect the partial set, diagnostics['timed_out'] is True
 graph.cypher(long_query, timeout_ms=500)
 
-# Cap the result set
+# Cap intermediate rows and retained collection/work growth. Exceeding the
+# cap raises an error; writes roll back the complete statement.
 graph.cypher(broad_query, max_rows=1000)
 
 # Set graph-wide defaults (per-query args still override)

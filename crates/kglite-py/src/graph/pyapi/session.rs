@@ -18,12 +18,13 @@
 //!   (`Arc::clone`), drop the lock, and run GIL-free. Any number of threads
 //!   read the same `Session` in parallel, lock-free during execution.
 //! - **Writes** (`execute`) serialise behind a writer lock held across the
-//!   whole `begin → mutate → commit`: snapshot → copy-on-write working copy →
-//!   atomic Arc swap. The writer lock is what makes concurrent writes
+//!   whole mutation. The core Session mutates its Arc in place when no reader
+//!   snapshot is alive and copy-on-write forks once otherwise. The writer lock makes concurrent writes
 //!   *compose* — writer B's `begin()` snapshots writer A's committed state, so
 //!   B builds on A's changes rather than racing and silently overwriting them
 //!   (the lost-update failure mode of a naive shared mutable handle). Readers
-//!   never block on the writer.
+//!   that already hold a snapshot never block on the writer; a new reader may
+//!   briefly wait while a unique-owner write holds the core graph mutex.
 //!
 //! ## Relationship to `KnowledgeGraph`
 //!
@@ -172,10 +173,9 @@ impl Session {
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
     }
 
-    /// Write path: take the writer lock, then GIL-free
-    /// `begin → execute_mut → commit (atomic swap)`. Last-writer-wins is moot
-    /// under the held lock — there is never a concurrent writer to conflict
-    /// with, and each writer begins from the prior committed state.
+    /// Write path: take the writer lock, then hold the core Session's mutable
+    /// guard for the complete GIL-free mutation. This avoids the old
+    /// begin-created Arc clone that made the unique-owner path unreachable.
     fn run_write(
         &self,
         py: Python<'_>,
@@ -200,8 +200,7 @@ impl Session {
             // back to return. Poison-recover — the graph swaps
             // atomically, so a prior writer's panic doesn't cascade.
             let _wguard = write_lock.lock().unwrap_or_else(|p| p.into_inner());
-            let mut tx = core.begin();
-            let graph = tx.working_mut()?; // materialise working copy (CoW)
+            let mut graph = core.write();
             let opts = ExecuteOptions {
                 params: &param_map,
                 deadline,
@@ -215,14 +214,11 @@ impl Session {
                 git_sha: None,
                 modified_by: None,
             };
-            let outcome = execute_mut(graph, &query_owned, &opts)?;
+            let outcome = execute_mut(&mut graph, &query_owned, &opts)?;
             let mut result = outcome.result;
             // Resolve NodeRefs against the working graph before commit
             // consumes the transaction.
             resolve_noderefs(&graph.graph, &mut result.rows);
-            // Atomic Arc swap + version bump. check_occ=false: the
-            // writer lock guarantees no concurrent committer.
-            let _ = core.commit(tx, false);
             Ok(result)
         })?;
         marshal_result(py, result, qopts.to_df, qopts.output_csv)
@@ -288,11 +284,12 @@ impl Session {
     /// Run a Cypher **write** against the shared graph, serialized.
     ///
     /// Mutations (`CREATE` / `SET` / `DELETE` / `REMOVE` / `MERGE`) take the
-    /// Session's writer lock for the duration of `begin → mutate → commit`,
+    /// Session's writer lock for the duration of the mutation,
     /// so concurrent `execute()` calls run one at a time and each sees the
     /// prior writer's committed changes — no lost updates. The commit is an
-    /// atomic pointer swap; concurrent `cypher()` readers are never blocked
-    /// and keep seeing the pre-commit snapshot until the swap lands.
+    /// Readers already holding snapshots keep seeing the pre-write graph. A
+    /// reader arriving during a unique-owner write may briefly wait for the
+    /// core graph mutex.
     ///
     /// A read-only query passed to `execute()` is fast-pathed to the read
     /// path (no working-copy materialisation), so it is always safe to route

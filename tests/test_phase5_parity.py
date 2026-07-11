@@ -51,60 +51,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # traits. Each whitelist entry has a justification — if the list grows,
 # revisit the design instead of adding another file.
 ENUM_MATCH_WHITELIST = {
-    # Trait / enum declarations + the 3-arm dispatcher — required.
-    "storage/mod.rs": "GraphRead / GraphWrite trait surface",
-    # Phase 9 moved the GraphBackend enum + dispatcher from schema.rs into
-    # its own file under storage/.
-    "storage/backend.rs": "GraphBackend enum + dispatcher impls",
-    # Phase 9 extracted DirGraph from schema.rs into graph/dir_graph.rs.
-    # A handful of index-maintenance methods still match on the backend
-    # variant (petgraph-only optimisation paths for memory / mapped).
-    "dir_graph.rs": "DirGraph index maintenance (petgraph-only fast paths)",
-    # PyO3 boundary — Phase 9 split kg_methods.rs into 4 per-concern files.
-    # All four contain the same PyO3 enum-match exceptions for storage-mode
-    # toggles (enable_disk_mode, enable_columnar, unspill, etc.).
-    "pyapi/kg_core.rs": "PyO3 boundary (KnowledgeGraph storage-mode toggles)",
-    "pyapi/kg_mutation.rs": "PyO3 boundary (KnowledgeGraph mutation + storage swap)",
-    "pyapi/kg_introspection.rs": "PyO3 boundary (KnowledgeGraph introspection)",
-    "pyapi/kg_fluent.rs": "PyO3 boundary (KnowledgeGraph fluent chain)",
-    # Hot-path Rayon fast-path: compute_type_connectivity matches on the
-    # backend enum to bypass the boxed-iterator trait path on 800M+ edge
-    # scans. See the function-level doc comment for the Wikidata win.
+    "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
     "introspection/connectivity.rs": "compute_type_connectivity disk-mode Rayon fast path",
-    # Disk-internal boundary: reach into DiskGraph fields (node_slots,
-    # pending_edges, column_stores, data_dir, qnum_to_idx) for bulk-path
-    # performance. Documented and intentional; the disk-backend subdir
-    # homes these with the disk backend.
-    "io/ntriples/loader.rs": "disk-internal bulk-build (ntriples loader)",
     "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
-    "io/file.rs": "disk-internal .kgl load_disk_dir path",
     "mutation/batch.rs": "disk-internal update-path row_id lookup",
-    # Disk-to-disk streaming subgraph filter (save_subset_streaming_disk).
-    # Constructs a fresh DiskGraph destination, sets the bulk-loader
-    # defer_csr flag, and reaches into DiskGraph internals on both source
-    # and dest for sequential edge_endpoints / column_stores reads.
-    # Backend-agnostic dispatch through GraphRead is admitted as
-    # "less optimal but correct" fall-back at line 986+; the disk
-    # arm is the entire reason the file exists ("streaming pipeline is
-    # gated to disk-backed sources", per module doc).
     "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter (Pass A/B)",
-    # 0.9.0 entries: pre-existing leaks confirmed not regressed by
-    # 0.9.0 work — none of these files were touched. Each carries a
-    # backend-mode dispatch that benefits from monomorphisation
-    # without paying the trait virtual call.
+    "storage/mode.rs": "explicit storage-mode transition constructor",
     "io/ntriples/column_builder.rs": "ntriples columnar-build hot path",
-    "languages/cypher/executor/match_clause.rs": (
+    "languages/cypher/executor/match_clause/fused_match.rs": (
         "MATCH executor inspects backend variant to pick storage-mode-specific traversal primitives"
     ),
-    "pyapi/blueprint.rs": "PyO3 boundary (blueprint storage-mode dispatch)",
-    "pyapi/indexes.rs": "PyO3 boundary (index-build storage-mode dispatch)",
-    # Disk-only PyO3 entry points (_save_subset_filtered_by_edge_type,
-    # _scan_edges_filtered) that bridge into the disk-streaming filter.
-    # The dispatch is "disk → call into subgraph_streaming, anything
-    # else → return a clear PyValueError." Trait-wrapping would
-    # invent disk-only trait methods (a smell) or sacrifice the
-    # error-message specificity users see at the Python boundary.
-    "pyapi/algorithms.rs": "PyO3 boundary (disk-only subgraph streaming entry points)",
 }
 
 ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")
@@ -123,15 +80,21 @@ def _strip_test_modules(src: str) -> str:
 
     marker = "#[cfg(test)]"
     idx = src.find(marker)
-    return src if idx < 0 else src[:idx]
+    production = src if idx < 0 else src[:idx]
+    return "\n".join(line for line in production.splitlines() if not line.lstrip().startswith("//"))
 
 
 def test_enum_match_audit():
     """`GraphBackend::<Variant>` matches only appear in whitelisted files."""
 
-    src_graph = REPO_ROOT / "src" / "graph"
+    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
+    assert src_graph.is_dir(), f"structural audit root is missing: {src_graph}"
+    rs_files = _list_rs_files(src_graph)
+    assert rs_files, f"structural audit found no Rust sources under {src_graph}"
     offenders: dict[Path, int] = {}
-    for rs in _list_rs_files(src_graph):
+    for rs in rs_files:
+        if rs.name.endswith("_tests.rs"):
+            continue
         rel = rs.relative_to(src_graph).as_posix()
         if rel in ENUM_MATCH_WHITELIST:
             continue
@@ -149,6 +112,18 @@ def test_enum_match_audit():
         + "\n\nAdd the file to ENUM_MATCH_WHITELIST (with a written justification) "
         + "or route the call through GraphRead / GraphWrite."
     )
+
+
+def test_enum_match_whitelist_is_not_stale():
+    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
+    stale = []
+    for rel in ENUM_MATCH_WHITELIST:
+        path = src_graph / rel
+        if not path.is_file():
+            stale.append(f"{rel}: file no longer exists")
+        elif not ENUM_MATCH_PATTERN.search(_strip_test_modules(path.read_text())):
+            stale.append(f"{rel}: no production GraphBackend variant match remains")
+    assert not stale, "Stale enum-match whitelist entries:\n  " + "\n  ".join(stale)
 
 
 @pytest.mark.parity
@@ -202,7 +177,7 @@ def test_graph_copy_cow_correctness_mapped():
     assert mod == [{"age": 99}], f"mapped copy update lost: {mod}"
 
 
-#: Per-platform 0.9.52 release-library size baseline. The Linux ELF
+#: Per-platform release-wheel library size baseline. The Linux ELF
 #: (libkglite.so) is ~65% larger than the macOS Mach-O (.dylib) for the
 #: same source — different linker behaviour around debug info, lazy
 #: binding, and the absence of macOS-style `strip` defaults. CI runs on
@@ -211,17 +186,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 39_320_032,  # 0.10.27/0.10.28 macOS libkglite_py.dylib (value_codecs
-    # +48 B over 0.10.26's 39,319,984 — noise; 0.10.28's library-based embedder is
-    # byte-identical). The 0.10.26 jump from the 0.10.1
-    # baseline (36,173,664, +8.6%) is dominated by 0.10.26 bundling the
-    # kglite-mcp-server *library* into the wheel (its `run` is statically linked
-    # into the extension so `pip install kglite` ships the MCP server) — that
-    # pulls mcp-methods + rmcp + hyper/hyper-util + clap + tracing-subscriber
-    # into the cdylib. They share the one kglite engine (no duplication), so on
-    # macOS (aggressive linker strip) the net add is ~3 MB. The rest is
-    # 0.10.2–0.10.25 incremental growth folded into this first recapture since
-    # 0.10.1. Measured locally via `maturin develop --release`.
+    "darwin": 41_234_896,  # 0.12.15 darwin baseline
     "linux": 64_656_000,  # 0.10.26 estimate: 0.9.52 Linux .so (59,529,016) scaled by
     # the same +8.6% as the macOS recapture. Linux has no strip so the bundled
     # server likely adds more in absolute terms — refresh with the real value on
@@ -263,6 +228,12 @@ def test_binary_size_regression():
                       tracing-subscriber) into the cdylib: ~3 MB net on
                       macOS after strip, more on Linux (no strip).
 
+
+      - 0.12.15:       41,234,896 bytes (≈39.3 MB, macOS .dylib).
+                      Hardening added checked persistence decoders, disk
+                      generation/session ownership paths, complete C-ABI
+                      panic boundaries, and bounded executor guards (+4.9%).
+
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
     drilldown, run `cargo bloat --release --crates --filter kglite`.
@@ -290,7 +261,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.9.52 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.12.15 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )

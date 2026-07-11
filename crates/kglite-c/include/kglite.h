@@ -1221,6 +1221,24 @@ KgliteStatusCode kglite_session_execute_mut(struct KgliteSession *session,
                                             const char **out_error_msg);
 
 /**
+ * Run a mutating query with the same timeout and row/collection budget
+ * semantics as [`kglite_session_execute_read_opts`]. A budget failure rolls
+ * back the complete statement. `0` disables the corresponding option.
+ *
+ * # Safety
+ *
+ * Same as [`kglite_session_execute_mut`].
+ */
+
+KgliteStatusCode kglite_session_execute_mut_opts(struct KgliteSession *session,
+                                                 const char *query,
+                                                 const char *params_json,
+                                                 uint64_t timeout_ms,
+                                                 uint64_t max_rows,
+                                                 struct KgliteCypherResult **out_result,
+                                                 const char **out_error_msg);
+
+/**
  * Run several read-only Cypher queries against a single consistent
  * snapshot, in one lock acquisition.
  *

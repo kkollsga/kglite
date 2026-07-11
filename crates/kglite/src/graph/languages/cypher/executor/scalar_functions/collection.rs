@@ -132,18 +132,50 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     1
                 };
-                // Phase A.1 / C4 — native Value::List of Value::Int64.
-                let mut vals: Vec<Value> = Vec::new();
-                let mut cur = start;
-                if step > 0 {
-                    while cur <= end {
-                        vals.push(Value::Int64(cur));
-                        cur += step;
-                    }
+                // Preflight the inclusive cardinality in i128 so extrema and
+                // a negative step never overflow before allocation.
+                let len_i128 = if (step > 0 && start <= end) || (step < 0 && start >= end) {
+                    let distance = if step > 0 {
+                        i128::from(end) - i128::from(start)
+                    } else {
+                        i128::from(start) - i128::from(end)
+                    };
+                    let stride = i128::from(step).abs();
+                    distance / stride + 1
                 } else {
-                    while cur >= end {
-                        vals.push(Value::Int64(cur));
-                        cur += step;
+                    0
+                };
+                let len = usize::try_from(len_i128)
+                    .map_err(|_| "range() cardinality exceeds this platform's limits")?;
+                self.budget.check_work(len, "range()")?;
+                self.budget.consume_collection(len, "range()")?;
+                self.check_deadline()?;
+
+                const MAX_RANGE_ALLOCATION_BYTES: usize = 256 * 1024 * 1024;
+                let allocation_bytes = len
+                    .checked_mul(std::mem::size_of::<Value>())
+                    .ok_or("range() allocation size overflow")?;
+                if allocation_bytes > MAX_RANGE_ALLOCATION_BYTES {
+                    return Err(format!(
+                        "range() would materialize {len} items ({allocation_bytes} bytes), \
+                         exceeding the 256 MiB collection safety limit"
+                    ));
+                }
+
+                // Phase A.1 / C4 — native Value::List of Value::Int64.
+                // `try_reserve_exact` turns impossible theoretical ranges into
+                // a query error instead of an aborting allocator request.
+                let mut vals: Vec<Value> = Vec::new();
+                vals.try_reserve_exact(len)
+                    .map_err(|_| format!("range() cannot allocate {len} items"))?;
+                let mut cur = start;
+                for i in 0..len {
+                    self.check_interrupt_periodic(i)?;
+                    vals.push(Value::Int64(cur));
+                    if i + 1 < len {
+                        cur = cur
+                            .checked_add(step)
+                            .ok_or_else(|| "range() value overflow".to_string())?;
                     }
                 }
                 Ok(Value::List(vals))

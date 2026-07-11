@@ -57,7 +57,7 @@ fn compute_disk_parallel(dg: &crate::graph::storage::disk::graph::DiskGraph) -> 
     use petgraph::graph::NodeIndex;
     use rayon::prelude::*;
 
-    let total = (dg.next_edge_idx as usize).min(dg.edge_endpoints.len());
+    let total = (dg.next_edge_idx as usize).min(dg.edge_endpoint_len());
     if total == 0 {
         return HashMap::new();
     }
@@ -79,7 +79,7 @@ fn compute_disk_parallel(dg: &crate::graph::storage::disk::graph::DiskGraph) -> 
         .map(|(lo, hi)| {
             let mut acc: CountMap = HashMap::new();
             for i in lo..hi {
-                let ep = dg.edge_endpoints.get(i);
+                let ep = dg.edge_endpoint(i);
                 if ep.source == TOMBSTONE_EDGE {
                     continue;
                 }

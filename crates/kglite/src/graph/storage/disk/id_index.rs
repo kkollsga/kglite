@@ -38,6 +38,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeIdIndex};
+use bincode::Options;
 use memmap2::Mmap;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -48,6 +49,35 @@ const MAGIC: &[u8; 8] = b"KGLIIDXR";
 const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 32;
 const DIR_ENTRY_BYTES: usize = 48;
+const MAX_GENERAL_INDEX_DECODE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn invalid_index(message: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid id_indices.bin: {message}"),
+    )
+}
+
+fn read_le_u32(bytes: &[u8], index: usize) -> Option<u32> {
+    let start = index.checked_mul(4)?;
+    Some(u32::from_le_bytes(
+        bytes.get(start..start.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u32_binary_search(bytes: &[u8], wanted: u32) -> Option<usize> {
+    let mut low = 0usize;
+    let mut high = bytes.len() / 4;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match read_le_u32(bytes, mid)?.cmp(&wanted) {
+            std::cmp::Ordering::Less => low = mid + 1,
+            std::cmp::Ordering::Greater => high = mid,
+            std::cmp::Ordering::Equal => return Some(mid),
+        }
+    }
+    None
+}
 
 /// Mmap-backed read-only view of `id_indices.bin`.
 pub struct IdIndexBase {
@@ -88,31 +118,117 @@ impl IdIndexBase {
         }
         let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
         if version != VERSION {
-            return Ok(None);
+            return Err(invalid_index("unsupported raw index version"));
         }
         let num_types = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
-        let dir_offset = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
-        let _data_offset = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as usize;
-
-        let need = dir_offset + DIR_ENTRY_BYTES * num_types;
-        if len < need {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "id_indices.bin truncated at directory",
-            ));
+        let dir_offset = usize::try_from(u64::from_le_bytes(mmap[16..24].try_into().unwrap()))
+            .map_err(|_| invalid_index("directory offset exceeds usize"))?;
+        let data_offset = usize::try_from(u64::from_le_bytes(mmap[24..32].try_into().unwrap()))
+            .map_err(|_| invalid_index("data offset exceeds usize"))?;
+        let dir_bytes = DIR_ENTRY_BYTES
+            .checked_mul(num_types)
+            .ok_or_else(|| invalid_index("directory size overflow"))?;
+        let need = dir_offset
+            .checked_add(dir_bytes)
+            .ok_or_else(|| invalid_index("directory range overflow"))?;
+        if dir_offset != HEADER_BYTES || data_offset != need || need > len {
+            return Err(invalid_index("invalid directory/data boundary"));
         }
 
         let mut dir_map: HashMap<String, BaseEntry> = HashMap::with_capacity(num_types);
+        let mut general_cache_map = HashMap::new();
+        let mut previous_key = None;
+        let mut expected_payload = data_offset;
         for i in 0..num_types {
             let off = dir_offset + i * DIR_ENTRY_BYTES;
             let type_key = u64::from_le_bytes(mmap[off..off + 8].try_into().unwrap());
             let variant = mmap[off + 8];
-            let num_entries =
-                u64::from_le_bytes(mmap[off + 16..off + 24].try_into().unwrap()) as u32;
+            let num_entries_u64 = u64::from_le_bytes(mmap[off + 16..off + 24].try_into().unwrap());
             let payload_off = u64::from_le_bytes(mmap[off + 24..off + 32].try_into().unwrap());
             let payload_len = u64::from_le_bytes(mmap[off + 32..off + 40].try_into().unwrap());
-            if let Some(name) = interner.try_resolve(InternedKey::from_u64(type_key)) {
-                dir_map.insert(
+            if previous_key.is_some_and(|previous| type_key <= previous) {
+                return Err(invalid_index("directory keys are not strictly increasing"));
+            }
+            previous_key = Some(type_key);
+            if !matches!(variant, 0 | 1) {
+                return Err(invalid_index("directory contains an unknown variant"));
+            }
+            let num_entries = u32::try_from(num_entries_u64)
+                .map_err(|_| invalid_index("entry count exceeds u32"))?;
+            let payload_off_usize = usize::try_from(payload_off)
+                .map_err(|_| invalid_index("payload offset exceeds usize"))?;
+            let payload_len_usize = usize::try_from(payload_len)
+                .map_err(|_| invalid_index("payload length exceeds usize"))?;
+            let payload_end = payload_off_usize
+                .checked_add(payload_len_usize)
+                .ok_or_else(|| invalid_index("payload range overflow"))?;
+            if payload_off_usize != expected_payload || payload_end > len {
+                return Err(invalid_index(
+                    "payloads overlap, contain gaps, or exceed the file",
+                ));
+            }
+            if variant == 0 {
+                let expected_len = num_entries_u64
+                    .checked_mul(8)
+                    .ok_or_else(|| invalid_index("integer payload size overflow"))?;
+                if payload_len != expected_len {
+                    return Err(invalid_index("integer payload has invalid size"));
+                }
+                let keys_end = payload_off_usize + num_entries as usize * 4;
+                let mut previous = None;
+                for index in 0..num_entries as usize {
+                    let key = read_le_u32(&mmap[payload_off_usize..keys_end], index).unwrap();
+                    if previous.is_some_and(|prior| key <= prior) {
+                        return Err(invalid_index("integer keys are not strictly increasing"));
+                    }
+                    previous = Some(key);
+                }
+            } else if payload_len > MAX_GENERAL_INDEX_DECODE_BYTES {
+                return Err(invalid_index("general payload exceeds decode limit"));
+            }
+            expected_payload = payload_end;
+            let name = interner
+                .try_resolve(InternedKey::from_u64(type_key))
+                .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
+            if variant == 1 {
+                let blob = &mmap[payload_off_usize..payload_end];
+                let encoded_count = blob
+                    .get(..8)
+                    .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+                    .ok_or_else(|| invalid_index("general payload is truncated before count"))?;
+                if encoded_count != num_entries_u64 {
+                    return Err(invalid_index(
+                        "general payload count disagrees with directory",
+                    ));
+                }
+                let minimum = 8u64
+                    .checked_add(
+                        num_entries_u64
+                            .checked_mul(8)
+                            .ok_or_else(|| invalid_index("general minimum size overflow"))?,
+                    )
+                    .ok_or_else(|| invalid_index("general minimum size overflow"))?;
+                if payload_len < minimum {
+                    return Err(invalid_index(
+                        "general payload cannot contain declared entries",
+                    ));
+                }
+                let map: HashMap<Value, NodeIndex> = bincode::options()
+                    .with_fixint_encoding()
+                    .with_little_endian()
+                    .reject_trailing_bytes()
+                    .with_limit(MAX_GENERAL_INDEX_DECODE_BYTES)
+                    .deserialize(blob)
+                    .map_err(|_| invalid_index("general payload bincode is malformed"))?;
+                if map.len() != num_entries as usize {
+                    return Err(invalid_index(
+                        "general payload has duplicate or missing keys",
+                    ));
+                }
+                general_cache_map.insert(name.to_string(), Arc::new(map));
+            }
+            if dir_map
+                .insert(
                     name.to_string(),
                     BaseEntry {
                         variant,
@@ -120,14 +236,22 @@ impl IdIndexBase {
                         payload_off,
                         payload_len,
                     },
-                );
+                )
+                .is_some()
+            {
+                return Err(invalid_index("duplicate resolved type name"));
             }
+        }
+        if expected_payload != len {
+            return Err(invalid_index(
+                "payload directory does not cover the file exactly",
+            ));
         }
 
         Ok(Some(Self {
             mmap: Arc::new(mmap),
             dir: dir_map,
-            general_cache: RwLock::new(HashMap::new()),
+            general_cache: RwLock::new(general_cache_map),
         }))
     }
 
@@ -150,10 +274,14 @@ impl IdIndexBase {
         let entry = self.dir.get(name)?;
         match entry.variant {
             0 => {
-                let (keys, idxs) = self.integer_slices(entry)?;
-                let mut map: HashMap<u32, NodeIndex> = HashMap::with_capacity(keys.len());
-                for (k, v) in keys.iter().zip(idxs.iter()) {
-                    map.insert(*k, NodeIndex::new(*v as usize));
+                let (keys, idxs) = self.integer_bytes(entry)?;
+                let mut map: HashMap<u32, NodeIndex> =
+                    HashMap::with_capacity(entry.num_entries as usize);
+                for index in 0..entry.num_entries as usize {
+                    map.insert(
+                        read_le_u32(keys, index)?,
+                        NodeIndex::new(read_le_u32(idxs, index)? as usize),
+                    );
                 }
                 Some(TypeIdIndex::Integer(map))
             }
@@ -165,38 +293,22 @@ impl IdIndexBase {
         }
     }
 
-    fn integer_slices(&self, entry: &BaseEntry) -> Option<(&[u32], &[u32])> {
+    fn integer_bytes(&self, entry: &BaseEntry) -> Option<(&[u8], &[u8])> {
         let n = entry.num_entries as usize;
         let off = entry.payload_off as usize;
         let half = n * 4;
-        if entry.payload_len < (half * 2) as u64 {
+        if entry.payload_len != (half * 2) as u64 {
             return None;
         }
         let bytes = self.mmap.get(off..off + half * 2)?;
-        // SAFETY: payload was written as little-endian u32 arrays at file offsets
-        // chosen so each region begins at a 4-byte boundary; mmap pages are
-        // page-aligned (4 KB) so any sub-slice that's 4-byte aligned by file
-        // construction is also 4-byte aligned in memory.
-        // We index two adjacent u32 slices of length `n`, totalling
-        // `2 * n * 4` bytes, fully inside `payload_len` (verified above).
-        // No mutation possible — `Mmap` (not `MmapMut`) is a read-only mapping.
-        // SAFETY: see comment above (4-byte aligned + length-checked).
-        unsafe {
-            let keys_ptr = bytes.as_ptr() as *const u32;
-            let idxs_ptr = bytes.as_ptr().add(half) as *const u32;
-            Some((
-                std::slice::from_raw_parts(keys_ptr, n),
-                std::slice::from_raw_parts(idxs_ptr, n),
-            ))
-        }
+        Some(bytes.split_at(half))
     }
 
     fn lookup_integer(&self, entry: &BaseEntry, id: &Value) -> Option<NodeIndex> {
         let key_u32 = coerce_to_u32(id)?;
-        let (keys, idxs) = self.integer_slices(entry)?;
-        keys.binary_search(&key_u32)
-            .ok()
-            .map(|i| NodeIndex::new(idxs[i] as usize))
+        let (keys, idxs) = self.integer_bytes(entry)?;
+        let index = le_u32_binary_search(keys, key_u32)?;
+        Some(NodeIndex::new(read_le_u32(idxs, index)? as usize))
     }
 
     fn lookup_general(&self, name: &str, entry: &BaseEntry, id: &Value) -> Option<NodeIndex> {
@@ -238,7 +350,16 @@ impl IdIndexBase {
         let off = entry.payload_off as usize;
         let len = entry.payload_len as usize;
         let blob = self.mmap.get(off..off + len)?;
-        let map: HashMap<Value, NodeIndex> = bincode::deserialize(blob).ok()?;
+        let map: HashMap<Value, NodeIndex> = bincode::options()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .reject_trailing_bytes()
+            .with_limit(MAX_GENERAL_INDEX_DECODE_BYTES)
+            .deserialize(blob)
+            .ok()?;
+        if map.len() != entry.num_entries as usize {
+            return None;
+        }
         let arc = Arc::new(map);
         self.general_cache
             .write()
@@ -528,7 +649,10 @@ pub fn write_id_indices_bin(
     let mut entries: Vec<(u64, String, TypeIdIndex)> = Vec::new();
     let mut interner_clone = interner.clone();
     for (name, materialized) in store.iter() {
-        let key = interner_clone.get_or_intern(&name).as_u64();
+        let key = interner_clone
+            .try_get_or_intern(&name)
+            .map_err(|e| e.to_string())?
+            .as_u64();
         entries.push((key, name, materialized));
     }
     entries.sort_by_key(|(k, _, _)| *k);
@@ -623,4 +747,179 @@ pub fn write_id_indices_bin(
     std::fs::write(dir.join("id_indices.bin"), out)
         .map_err(|e| format!("Failed to write id_indices.bin: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn integer_fixture(type_key: u64, pairs: &[(u32, u32)]) -> Vec<u8> {
+        let data_offset = HEADER_BYTES + DIR_ENTRY_BYTES;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(HEADER_BYTES as u64).to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&type_key.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&[0; 7]);
+        bytes.extend_from_slice(&(pairs.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u64).to_le_bytes());
+        bytes.extend_from_slice(&((pairs.len() * 8) as u64).to_le_bytes());
+        bytes.extend_from_slice(&[0; 8]);
+        for (key, _) in pairs {
+            bytes.extend_from_slice(&key.to_le_bytes());
+        }
+        for (_, node) in pairs {
+            bytes.extend_from_slice(&node.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn load(bytes: &[u8], interner: &StringInterner) -> std::io::Result<Option<IdIndexBase>> {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("id_indices.bin"), bytes).unwrap();
+        IdIndexBase::load_from(temp.path(), interner)
+    }
+
+    fn assert_invalid(bytes: &[u8], interner: &StringInterner) {
+        let outcome = std::panic::catch_unwind(|| load(bytes, interner));
+        match outcome.expect("invalid index must not panic") {
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::InvalidData),
+            Ok(_) => panic!("invalid index loaded successfully"),
+        }
+    }
+
+    #[test]
+    fn integer_fixture_reads_canonical_little_endian_bytes() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let base = load(&integer_fixture(key, &[(7, 70), (42, 420)]), &interner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            base.lookup("Person", &Value::UniqueId(7)),
+            Some(NodeIndex::new(70))
+        );
+        assert_eq!(
+            base.lookup("Person", &Value::UniqueId(42)),
+            Some(NodeIndex::new(420))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_header_directory_and_variant() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let valid = integer_fixture(key, &[(7, 70)]);
+
+        let mut huge_count = valid.clone();
+        huge_count[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_invalid(&huge_count, &interner);
+        let mut bad_dir = valid.clone();
+        bad_dir[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_invalid(&bad_dir, &interner);
+        let mut bad_data = valid.clone();
+        bad_data[24..32].copy_from_slice(&33u64.to_le_bytes());
+        assert_invalid(&bad_data, &interner);
+        let mut bad_variant = valid.clone();
+        bad_variant[40] = 2;
+        assert_invalid(&bad_variant, &interner);
+    }
+
+    #[test]
+    fn rejects_bad_counts_ranges_and_integer_ordering() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let valid = integer_fixture(key, &[(7, 70), (42, 420)]);
+
+        let mut too_many = valid.clone();
+        too_many[48..56].copy_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
+        assert_invalid(&too_many, &interner);
+        let mut past_eof = valid.clone();
+        past_eof[56..64].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_invalid(&past_eof, &interner);
+        let mut wrong_len = valid.clone();
+        wrong_len[64..72].copy_from_slice(&15u64.to_le_bytes());
+        assert_invalid(&wrong_len, &interner);
+        assert_invalid(&integer_fixture(key, &[(42, 1), (7, 2)]), &interner);
+        assert_invalid(&integer_fixture(key, &[(7, 1), (7, 2)]), &interner);
+    }
+
+    #[test]
+    fn rejects_malformed_general_bincode_during_load() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("StringIds").as_u64();
+        let mut bytes = integer_fixture(key, &[(1, 1)]);
+        bytes[40] = 1;
+        bytes[64..72].copy_from_slice(&16u64.to_le_bytes());
+        bytes.truncate(HEADER_BYTES + DIR_ENTRY_BYTES);
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&[0xff; 8]);
+        assert_invalid(&bytes, &interner);
+    }
+
+    #[test]
+    fn writer_round_trip_accepts_unaligned_integer_payload_after_general() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut interner = StringInterner::new();
+        let candidates = ["Alpha", "Beta"];
+        for name in candidates {
+            interner.get_or_intern(name);
+        }
+        let mut ordered = candidates;
+        ordered.sort_by_key(|name| InternedKey::from_str(name).as_u64());
+        let general_name = ordered[0];
+        let integer_name = ordered[1];
+        let general = TypeIdIndex::General(HashMap::from([(
+            Value::String("x".into()),
+            NodeIndex::new(3),
+        )]));
+        let integer = TypeIdIndex::Integer(HashMap::from([(7, NodeIndex::new(4))]));
+        let mut store = IdIndexStore::default();
+        store.replace_with(HashMap::from([
+            (general_name.to_string(), general),
+            (integer_name.to_string(), integer),
+        ]));
+        write_id_indices_bin(temp.path(), &store, &interner).unwrap();
+
+        let raw = std::fs::read(temp.path().join("id_indices.bin")).unwrap();
+        let second_payload_off = u64::from_le_bytes(
+            raw[HEADER_BYTES + DIR_ENTRY_BYTES + 24..HEADER_BYTES + DIR_ENTRY_BYTES + 32]
+                .try_into()
+                .unwrap(),
+        );
+        assert_ne!(
+            second_payload_off % 4,
+            0,
+            "fixture must exercise an unaligned v1 integer payload"
+        );
+
+        let base = IdIndexBase::load_from(temp.path(), &interner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            base.lookup(general_name, &Value::String("x".into())),
+            Some(NodeIndex::new(3))
+        );
+        assert_eq!(
+            base.lookup(integer_name, &Value::UniqueId(7)),
+            Some(NodeIndex::new(4))
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_unresolved_and_trailing_data() {
+        let mut interner = StringInterner::new();
+        let key = interner.get_or_intern("Person").as_u64();
+        let valid = integer_fixture(key, &[(7, 70)]);
+        let mut version = valid.clone();
+        version[8..12].copy_from_slice(&2u32.to_le_bytes());
+        assert_invalid(&version, &interner);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        assert_invalid(&trailing, &interner);
+        assert_invalid(&integer_fixture(key.wrapping_add(1), &[(7, 70)]), &interner);
+    }
 }

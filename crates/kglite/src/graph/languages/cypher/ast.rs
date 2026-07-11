@@ -24,6 +24,9 @@ pub struct CypherQuery {
     pub explain: bool,
     pub profile: bool,
     pub output_format: OutputFormat,
+    /// Passes that changed the plan. Populated only for EXPLAIN so normal
+    /// execution pays no plan-diff allocation cost.
+    pub optimizer_tags: Vec<String>,
 }
 
 /// A node in the query pipeline.

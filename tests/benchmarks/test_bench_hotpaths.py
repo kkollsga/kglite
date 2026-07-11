@@ -8,6 +8,7 @@ attribute cleanly to a single change:
 - UNWIND expansion (per-item row clone)
 - WHERE with property access (per-row alias resolution)
 - ORDER BY + LIMIT over expressions
+- atomic-checkpoint selection for trivial in-memory mutations
 
 Sized at 50k nodes so per-row costs dominate fixed overheads while a
 full round stays comfortably under pytest-benchmark's calibration
@@ -160,4 +161,38 @@ def test_bench_order_by_expr_limit(benchmark, hot_graph):
     benchmark(
         hot_graph.cypher,
         "MATCH (n:Item) RETURN n.name, n.value ORDER BY n.value DESC LIMIT 25",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mutation checkpoint selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.benchmark
+def test_bench_single_node_create_delete_large_graph(benchmark, hot_graph):
+    """A trivial write must not deep-clone the unrelated 50k-node graph."""
+
+    def cycle():
+        hot_graph.cypher("CREATE (:Scratch {id: 9999999})")
+        hot_graph.cypher("MATCH (n:Scratch {id: 9999999}) DELETE n")
+
+    benchmark(cycle)
+
+
+@pytest.mark.benchmark
+def test_bench_cartesian_node_scans_limit(benchmark, hot_graph):
+    """LIMIT 20 must cap node-only cartesian expansion before materialization."""
+    benchmark(
+        hot_graph.cypher,
+        "MATCH (a:Item), (b:Item) RETURN a.nid, b.nid LIMIT 20",
+    )
+
+
+@pytest.mark.benchmark
+def test_bench_two_hop_global_count(benchmark, hot_graph):
+    """A pure count must stream exact path cardinality without building rows."""
+    benchmark(
+        hot_graph.cypher,
+        "MATCH (a:Item)-[:LINKS]->(b:Item)-[:LINKS]->(c:Item) RETURN count(*) AS paths",
     )

@@ -8,7 +8,6 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::{soft_alias_fallback, DirGraph, NodeData, SoftAliasFallback};
 use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 // Re-export the ast aggregate helpers so downstream code can refer to them
 // via the executor namespace (backward compatibility with pre-split code).
@@ -279,7 +278,6 @@ pub(super) fn evaluate_comparison(
     left: &Value,
     op: &ComparisonOp,
     right: &Value,
-    regex_cache: Option<&RwLock<HashMap<String, regex::Regex>>>,
 ) -> Result<bool, String> {
     // Three-valued logic: comparisons involving Null propagate Null → false
     // (except IS NULL / IS NOT NULL which are handled elsewhere, and
@@ -302,25 +300,9 @@ pub(super) fn evaluate_comparison(
         )),
         ComparisonOp::RegexMatch => match (left, right) {
             (Value::String(text), Value::String(pattern)) => {
-                // Try cached regex first
-                if let Some(cache) = regex_cache {
-                    {
-                        let read = cache.read().unwrap();
-                        if let Some(re) = read.get(pattern.as_str()) {
-                            return Ok(re.is_match(text));
-                        }
-                    }
-                    let re = regex::Regex::new(pattern)
-                        .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))?;
-                    let result = re.is_match(text);
-                    cache.write().unwrap().insert(pattern.clone(), re);
-                    Ok(result)
-                } else {
-                    match regex::Regex::new(pattern) {
-                        Ok(re) => Ok(re.is_match(text)),
-                        Err(e) => Err(format!("Invalid regular expression '{}': {}", pattern, e)),
-                    }
-                }
+                let re = super::regex_cache::get_or_compile(pattern)
+                    .map_err(|e| format!("Invalid regular expression '{}': {}", pattern, e))?;
+                Ok(re.is_match(text))
             }
             _ => Ok(false),
         },
@@ -931,12 +913,15 @@ pub(super) fn parse_json_float_list(s: &str) -> Result<Vec<f32>, String> {
         })
         .collect()
 }
+#[cfg(test)]
 pub(super) fn arithmetic_add(a: &Value, b: &Value) -> Value {
     crate::graph::core::value_operations::arithmetic_add(a, b)
 }
+#[cfg(test)]
 pub(super) fn arithmetic_sub(a: &Value, b: &Value) -> Value {
     crate::graph::core::value_operations::arithmetic_sub(a, b)
 }
+#[cfg(test)]
 pub(super) fn arithmetic_mul(a: &Value, b: &Value) -> Value {
     crate::graph::core::value_operations::arithmetic_mul(a, b)
 }

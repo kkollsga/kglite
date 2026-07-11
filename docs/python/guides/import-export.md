@@ -118,8 +118,13 @@ Round-trip with [NetworkX](https://networkx.org/) for graph algorithms.
 KGLite is a directed multigraph with typed nodes/edges, so the lossless
 target is `networkx.MultiDiGraph`: each node's `id` is the networkx node
 key (with `node_type`, `title`, and every property as node attributes),
-and each edge's `connection_type` is the edge key (so parallel edges of
-different types between the same pair stay distinct).
+and the first edge's `connection_type` is its edge key. Additional parallel
+edges with the same endpoints and type receive collision-safe composite keys,
+while every edge retains a `connection_type` attribute.
+
+`to_networkx()` preserves same-type parallel edges. The inverse bulk importer
+uses KGLite's endpoint-plus-type DataFrame identity, so importing such a
+NetworkX graph collapses duplicates with identical endpoints and type.
 
 Requires the `networkx` extra: `pip install kglite[networkx]`.
 

@@ -88,6 +88,133 @@ fn test_typed_column_uniqueid_roundtrip() {
 }
 
 #[test]
+fn packed_save_null_pads_partial_typed_columns_to_row_count() {
+    let mut interner = StringInterner::new();
+    let age = interner.get_or_intern("age");
+    let schema = Arc::new(TypeSchema::from_keys(vec![age]));
+    let meta = HashMap::from([("age".to_string(), "int64".to_string())]);
+    let mut store = ColumnStore::new(schema.clone(), &meta, &interner);
+    store.push_row(&[(age, Value::Int64(42))]);
+
+    // Reproduce a partially materialized mutation overlay: the logical store
+    // has a second row while this typed column still contains only its base row.
+    store.row_count = 2;
+    store.tombstones.push(false);
+
+    let packed = store.write_packed(&interner).unwrap();
+    let loaded = ColumnStore::load_packed(schema, &meta, &interner, &packed, 2, None).unwrap();
+    assert_eq!(loaded.get(0, age), Some(Value::Int64(42)));
+    assert_eq!(loaded.get(1, age), None);
+}
+
+fn decode_misaligned<T: PackedElement>(encoded: &[u8], len: usize) -> Vec<T> {
+    let mut framed = Vec::with_capacity(encoded.len() + 1);
+    framed.push(0xff);
+    framed.extend_from_slice(encoded);
+    let bytes = &framed[1..];
+    assert_ne!(
+        bytes.as_ptr() as usize % std::mem::align_of::<T>(),
+        0,
+        "fixture must exercise a genuinely misaligned slice"
+    );
+    ColumnStore::load_typed_vec::<T>(bytes, len, None, "fixture", "bin")
+        .unwrap()
+        .to_vec()
+}
+
+#[test]
+fn packed_primitives_decode_from_misaligned_little_endian_bytes() {
+    assert_eq!(
+        decode_misaligned::<u32>(&0x7856_3412_u32.to_le_bytes(), 1),
+        vec![0x7856_3412]
+    );
+    assert_eq!(
+        decode_misaligned::<u64>(&0xfedc_ba98_7654_3210_u64.to_le_bytes(), 1),
+        vec![0xfedc_ba98_7654_3210]
+    );
+    assert_eq!(
+        decode_misaligned::<i32>(&(-12_345_678_i32).to_le_bytes(), 1),
+        vec![-12_345_678]
+    );
+    assert_eq!(
+        decode_misaligned::<i64>(&(-1_234_567_890_123_i64).to_le_bytes(), 1),
+        vec![-1_234_567_890_123]
+    );
+    assert_eq!(
+        decode_misaligned::<f64>(&1234.5_f64.to_le_bytes(), 1),
+        vec![1234.5]
+    );
+}
+
+#[test]
+fn packed_primitive_writer_uses_little_endian_wire_order() {
+    let mut bytes = Vec::new();
+    write_packed_values(&MmapOrVec::from_vec(vec![0x7856_3412_u32]), &mut bytes).unwrap();
+    write_packed_values(
+        &MmapOrVec::from_vec(vec![0xfedc_ba98_7654_3210_u64]),
+        &mut bytes,
+    )
+    .unwrap();
+    write_packed_values(&MmapOrVec::from_vec(vec![-12_345_678_i32]), &mut bytes).unwrap();
+    write_packed_values(
+        &MmapOrVec::from_vec(vec![-1_234_567_890_123_i64]),
+        &mut bytes,
+    )
+    .unwrap();
+    write_packed_values(&MmapOrVec::from_vec(vec![1234.5_f64]), &mut bytes).unwrap();
+
+    let expected = [
+        0x7856_3412_u32.to_le_bytes().as_slice(),
+        0xfedc_ba98_7654_3210_u64.to_le_bytes().as_slice(),
+        (-12_345_678_i32).to_le_bytes().as_slice(),
+        (-1_234_567_890_123_i64).to_le_bytes().as_slice(),
+        1234.5_f64.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(bytes, expected);
+}
+
+#[test]
+fn packed_primitive_decoder_rejects_partial_or_trailing_elements() {
+    for invalid in [&[1, 2, 3][..], &[1, 2, 3, 4, 5][..]] {
+        let err = ColumnStore::load_typed_vec::<u32>(invalid, 1, None, "bad", "u32").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+}
+
+#[test]
+fn packed_column_store_round_trips_every_typed_column() {
+    let (schema, meta, interner) = make_schema_and_meta();
+    let mut store = ColumnStore::new(Arc::clone(&schema), &meta, &interner);
+    let date = NaiveDate::from_ymd_opt(2025, 7, 10).unwrap();
+    let values = [
+        (
+            InternedKey::from_str("name"),
+            Value::String("Ålesund".into()),
+        ),
+        (InternedKey::from_str("age"), Value::Int64(-42)),
+        (InternedKey::from_str("salary"), Value::Float64(1234.5)),
+        (InternedKey::from_str("active"), Value::Boolean(true)),
+        (InternedKey::from_str("joined"), Value::DateTime(date)),
+    ];
+    store.push_row(&values);
+    store.replace_id_column(TypedColumn::UniqueId {
+        data: MmapOrVec::from_vec(vec![0xfedc_ba98]),
+        nulls: MmapOrVec::from_vec(vec![0]),
+    });
+    store.push_title(&Value::String("Typed row".into()));
+
+    let packed = store.write_packed(&interner).unwrap();
+    let loaded = ColumnStore::load_packed(schema, &meta, &interner, &packed, 1, None).unwrap();
+
+    for (key, expected) in values {
+        assert_eq!(loaded.get(0, key), Some(expected));
+    }
+    assert_eq!(loaded.get_id(0), Some(Value::UniqueId(0xfedc_ba98)));
+    assert_eq!(loaded.get_title(0), Some(Value::String("Typed row".into())));
+}
+
+#[test]
 fn test_typed_column_mixed_fallback() {
     let mut col = TypedColumn::from_type_str("mixed");
     assert!(col.push(&Value::Int64(1)).is_ok());
@@ -344,4 +471,84 @@ fn test_overflow_blob_mixed_scalars_and_list_roundtrip() {
         (k_list, Value::List(vec![Value::String("red".into())]))
     );
     assert_eq!(decoded[2], (k_b, Value::Boolean(true)));
+}
+
+fn one_packed_column(name: &str, tag: &str, blob: &[u8]) -> Vec<u8> {
+    let mut packed = 1u32.to_le_bytes().to_vec();
+    packed.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    packed.extend_from_slice(name.as_bytes());
+    packed.extend_from_slice(&(tag.len() as u16).to_le_bytes());
+    packed.extend_from_slice(tag.as_bytes());
+    packed.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+    packed.extend_from_slice(blob);
+    packed
+}
+
+fn load_single_column(name: &str, tag: &str, blob: &[u8], rows: u32) -> io::Result<ColumnStore> {
+    let mut interner = StringInterner::new();
+    let key = interner.get_or_intern(name);
+    let schema = Arc::new(TypeSchema::from_keys(vec![key]));
+    let meta = HashMap::from([(name.to_string(), tag.to_string())]);
+    ColumnStore::load_packed(
+        schema,
+        &meta,
+        &interner,
+        &one_packed_column(name, tag, blob),
+        rows,
+        None,
+    )
+}
+
+#[test]
+fn packed_strings_reject_invalid_offsets_and_utf8() {
+    let mut non_monotonic = Vec::new();
+    for offset in [0u64, 2, 1] {
+        non_monotonic.extend_from_slice(&offset.to_le_bytes());
+    }
+    non_monotonic.extend_from_slice(b"x");
+    non_monotonic.extend_from_slice(&[0, 0]);
+    let err = load_single_column("name", "string", &non_monotonic, 2).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    let mut invalid_utf8 = Vec::new();
+    for offset in [0u64, 1] {
+        invalid_utf8.extend_from_slice(&offset.to_le_bytes());
+    }
+    invalid_utf8.extend_from_slice(&[0xff, 0]);
+    let err = load_single_column("name", "string", &invalid_utf8, 1).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn packed_column_names_cannot_escape_temp_root() {
+    let root = tempfile::tempdir().unwrap();
+    let load_root = root.path().join("load");
+    std::fs::create_dir(&load_root).unwrap();
+    let rows = (MMAP_THRESHOLD / 8 + 1) as u32;
+    let mut blob = vec![0u8; rows as usize * 8];
+    blob.extend(std::iter::repeat_n(0, rows as usize));
+
+    let name = "../../escaped";
+    let mut interner = StringInterner::new();
+    let key = interner.get_or_intern(name);
+    let schema = Arc::new(TypeSchema::from_keys(vec![key]));
+    let meta = HashMap::from([(name.to_string(), "int64".to_string())]);
+    ColumnStore::load_packed(
+        schema,
+        &meta,
+        &interner,
+        &one_packed_column(name, "int64", &blob),
+        rows,
+        Some(&load_root),
+    )
+    .unwrap();
+
+    assert!(!root.path().join("escaped.i64").exists());
+    for entry in std::fs::read_dir(&load_root).unwrap() {
+        let file_name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            file_name.starts_with("column_"),
+            "unexpected temp file {file_name}"
+        );
+    }
 }

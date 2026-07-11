@@ -33,237 +33,23 @@ use crate::graph::storage::GraphRead;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PERIODIC_POLLS_BEFORE_INTERRUPT: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+use budget::ExecutionBudget;
+use execution_support::*;
 
 /// Minimum row count to switch from sequential to parallel iteration.
 /// Below this threshold, sequential is faster (avoids rayon thread pool overhead).
 pub(super) const RAYON_THRESHOLD: usize = 256;
-
-// ============================================================================
-// Specialized Distance Filter Types
-// ============================================================================
-
-/// Fast-path specification for vector similarity filtering.
-/// Pre-extracts the column name, query vector, and threshold from
-/// WHERE clauses to enable optimized scoring without re-parsing.
-struct VectorScoreFilterSpec {
-    variable: String,
-    prop_name: String,
-    query_vec: Vec<f32>,
-    scorer: crate::graph::algorithms::vector::Scorer,
-    threshold: f64,
-    greater_than: bool,
-    inclusive: bool,
-}
-
-/// Fast-path specification for spatial distance filtering.
-/// Pre-extracts center point and max distance for Haversine calculations.
-struct DistanceFilterSpec {
-    variable: String,
-    lat_prop: String,
-    lon_prop: String,
-    center_lat: f64,
-    center_lon: f64,
-    threshold: f64,
-    less_than: bool,
-    inclusive: bool,
-}
-
-/// Fast-path specification for spatial contains() filtering.
-/// Pre-extracts the container variable and contained target to bypass
-/// the expression evaluator chain per row.
-struct ContainsFilterSpec {
-    /// Container variable name (must have geometry spatial config)
-    container_variable: String,
-    /// What's being tested for containment
-    contained: ContainsTarget,
-    /// Whether the predicate is negated (NOT contains(...))
-    negated: bool,
-}
-
-/// The contained target in a contains() filter.
-enum ContainsTarget {
-    /// Constant point: contains(a, point(59.91, 10.75))
-    ConstantPoint(f64, f64),
-    /// Variable with location config: contains(a, b)
-    Variable { name: String },
-}
-
-// ============================================================================
-// Unified Spatial Resolution
-// ============================================================================
-
-/// Resolved spatial value: either a Point (lat/lon) or a full Geometry with optional bbox.
-/// The bounding box enables cheap rejection before expensive polygon operations.
-enum ResolvedSpatial {
-    Point(f64, f64),
-    Geometry(Arc<geo::Geometry<f64>>, Option<geo::Rect<f64>>),
-}
-
-/// A parsed geometry paired with its bounding box for cheap spatial rejection.
-type GeomWithBBox = (Arc<geo::Geometry<f64>>, Option<geo::Rect<f64>>);
-
-/// Pre-computed spatial data for a node — populated on first access, reused
-/// for all subsequent rows binding the same NodeIndex. This eliminates
-/// redundant HashMap lookups, spatial config lookups, WKT parsing, and
-/// RwLock acquisitions in cross-product queries (N×M → N+M resolutions).
-struct NodeSpatialData {
-    /// Parsed geometry + bounding box (if geometry config present).
-    /// The bbox enables cheap point-in-bbox rejection before expensive polygon tests.
-    geometry: Option<GeomWithBBox>,
-    /// Location as (lat, lon) (if location config present).
-    location: Option<(f64, f64)>,
-    /// Named shapes: name → (geometry, bbox).
-    shapes: HashMap<String, GeomWithBBox>,
-    /// Named points: name → (lat, lon).
-    points: HashMap<String, (f64, f64)>,
-}
-
-// ============================================================================
-// Min-heap helper for top-k scoring
-// ============================================================================
-
-/// Min-heap entry for top-k scoring. Uses reverse ordering so
-/// `BinaryHeap` (max-heap) behaves as a min-heap — the lowest score
-/// gets popped first, naturally evicting the worst candidate at capacity k.
-struct ScoredRowRef {
-    score: f64,
-    index: usize,
-}
-
-impl PartialEq for ScoredRowRef {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-    }
-}
-
-impl Eq for ScoredRowRef {}
-
-impl PartialOrd for ScoredRowRef {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ScoredRowRef {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse ordering: smaller score = higher priority (popped first from max-heap)
-        other
-            .score
-            .partial_cmp(&self.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| other.index.cmp(&self.index))
-    }
-}
-
-// ============================================================================
-// Executor
-// ============================================================================
-
-/// Cache for pre-computed `vector_score()` function arguments.
-/// Initialized lazily via `OnceLock` on first use within a query.
-/// The query vector, property name, and similarity function are identical for
-/// every row, so we parse them once and reuse thereafter.
-struct VectorScoreCache {
-    prop_name: String,
-    query_vec: Vec<f32>,
-    scorer: crate::graph::algorithms::vector::Scorer,
-}
-
-/// Human-readable name for a Clause variant, used in PROFILE and EXPLAIN output.
-pub fn clause_display_name(clause: &Clause) -> String {
-    match clause {
-        Clause::Match(m) => {
-            let types: Vec<&str> = m
-                .patterns
-                .iter()
-                .flat_map(|p| p.elements.iter())
-                .filter_map(|e| {
-                    if let PatternElement::Node(n) = e {
-                        n.node_type.as_deref()
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if types.is_empty() {
-                "Match".into()
-            } else {
-                format!("Match :{}", types.join(", :"))
-            }
-        }
-        Clause::OptionalMatch(m) => {
-            let types: Vec<&str> = m
-                .patterns
-                .iter()
-                .flat_map(|p| p.elements.iter())
-                .filter_map(|e| {
-                    if let PatternElement::Node(n) = e {
-                        n.node_type.as_deref()
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if types.is_empty() {
-                "OptionalMatch".into()
-            } else {
-                format!("OptionalMatch :{}", types.join(", :"))
-            }
-        }
-        Clause::Where(_) => "Where".into(),
-        Clause::Return(_) => "Return".into(),
-        Clause::With(_) => "With".into(),
-        Clause::OrderBy(_) => "OrderBy".into(),
-        Clause::Skip(_) => "Skip".into(),
-        Clause::Limit(_) => "Limit".into(),
-        Clause::Unwind(_) => "Unwind".into(),
-        Clause::Union(_) => "Union".into(),
-        Clause::Create(_) => "Create".into(),
-        Clause::Set(_) => "Set".into(),
-        Clause::Delete(_) => "Delete".into(),
-        Clause::Remove(_) => "Remove".into(),
-        Clause::Merge(_) => "Merge".into(),
-        Clause::Foreach { .. } => "Foreach".into(),
-        Clause::Call(_) => "Call".into(),
-        Clause::CallSubquery { .. } => "CallSubquery".into(),
-        Clause::FusedOptionalMatchAggregate { .. } => "FusedOptionalMatchAggregate".into(),
-        Clause::FusedVectorScoreTopK { .. } => "FusedVectorScoreTopK".into(),
-        Clause::FusedMatchReturnAggregate { .. } => "FusedMatchReturnAggregate".into(),
-        Clause::FusedMatchWithAggregate { .. } => "FusedMatchWithAggregate".into(),
-        Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),
-        Clause::FusedCountAll { .. } => "FusedCountAll".into(),
-        Clause::FusedCountByType { .. } => "FusedCountByType".into(),
-        Clause::FusedCountEdgesByType { .. } => "FusedCountEdgesByType".into(),
-        Clause::FusedCountTypedNode { node_type, .. } => {
-            format!("FusedCountTypedNode :{node_type}")
-        }
-        Clause::FusedCountTypedEdge { edge_type, .. } => {
-            format!("FusedCountTypedEdge :{edge_type}")
-        }
-        Clause::FusedCountAnchoredEdges {
-            anchor_idx,
-            anchor_direction,
-            edge_type,
-            ..
-        } => {
-            let arrow = match anchor_direction {
-                petgraph::Direction::Outgoing => "→",
-                petgraph::Direction::Incoming => "←",
-            };
-            let t = edge_type.as_deref().unwrap_or("*");
-            format!("FusedCountAnchoredEdges (anchor#{anchor_idx} {arrow} :{t})")
-        }
-        Clause::FusedNodeScanAggregate { .. } => "FusedNodeScanAggregate".into(),
-        Clause::FusedNodeScanTopK { limit, .. } => format!("FusedNodeScanTopK (k={limit})"),
-        Clause::SpatialJoin {
-            container_type,
-            probe_type,
-            ..
-        } => format!("SpatialJoin :{container_type} ⊇ :{probe_type}"),
-    }
-}
+pub(super) const INTERRUPT_POLL_INTERVAL: usize = 4096;
 
 /// Executes parsed Cypher queries against a `DirGraph`.
 ///
@@ -282,13 +68,12 @@ pub struct CypherExecutor<'a> {
     /// `deadline` (and propagated to the pattern matcher). Set by a
     /// binding's signal model so a long query can be interrupted.
     pub(super) cancel: Option<&'static AtomicBool>,
-    /// Optional cap on intermediate result rows. Queries exceeding this return an error.
-    max_rows: Option<usize>,
+    /// Shared row/collection budget inherited by nested execution paths.
+    pub(super) budget: ExecutionBudget,
     /// Per-node spatial data cache — populated on first access per NodeIndex.
     /// Eliminates redundant property/config/WKT lookups in cross-product queries.
     spatial_node_cache: RwLock<HashMap<usize, Option<NodeSpatialData>>>,
     /// Compiled regex cache — avoids recompiling the same pattern per row.
-    regex_cache: RwLock<HashMap<String, regex::Regex>>,
     /// FNV hashes of every registered id-/title-field-alias *name*
     /// (the values of `DirGraph::id_field_aliases` / `title_field_aliases`).
     ///
@@ -324,9 +109,8 @@ impl<'a> CypherExecutor<'a> {
             vs_cache: OnceLock::new(),
             deadline,
             cancel: None,
-            max_rows: None,
+            budget: ExecutionBudget::default(),
             spatial_node_cache: RwLock::new(HashMap::new()),
-            regex_cache: RwLock::new(HashMap::new()),
             alias_name_hashes: OnceLock::new(),
             streaming: true,
         }
@@ -360,8 +144,30 @@ impl<'a> CypherExecutor<'a> {
 
     /// Set the maximum number of intermediate result rows.
     pub fn with_max_rows(mut self, max_rows: Option<usize>) -> Self {
-        self.max_rows = max_rows;
+        self.budget = ExecutionBudget::new(max_rows);
         self
+    }
+
+    /// Inherit an already-constructed budget in a nested executor.
+    #[inline]
+    pub(super) fn with_budget(mut self, budget: ExecutionBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Bound a producer at one row beyond the configured cap. The extra row
+    /// is required to distinguish "exactly at the limit" from overflow;
+    /// callers then run the normal budget check and return an error rather
+    /// than silently truncating.
+    #[inline]
+    pub(super) fn budget_probe_limit(&self, requested: Option<usize>) -> Option<usize> {
+        let probe = self.budget.max_rows().and_then(|max| max.checked_add(1));
+        match (requested, probe) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
     }
 
     /// Enable or disable the streaming-pipeline path. Default is
@@ -414,11 +220,40 @@ impl<'a> CypherExecutor<'a> {
         Ok(())
     }
 
+    /// Poll cooperative interruption at a fixed, cheap interval inside hot
+    /// loops. Passing a zero-based iteration checks before the first unit of
+    /// work and then every 4,096 units; the common path is one mask operation.
+    #[inline]
+    pub(super) fn check_interrupt_periodic(&self, iteration: usize) -> Result<(), String> {
+        const POLL_MASK: usize = INTERRUPT_POLL_INTERVAL - 1;
+        if iteration & POLL_MASK == 0 {
+            #[cfg(test)]
+            TEST_PERIODIC_POLLS_BEFORE_INTERRUPT.with(|remaining| {
+                if let Some(count) = remaining.get() {
+                    if count == 0 {
+                        remaining.set(None);
+                        return Err("Query interrupted by test hook".to_string());
+                    }
+                    remaining.set(Some(count - 1));
+                }
+                Ok(())
+            })?;
+            self.check_deadline()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn interrupt_after_periodic_polls(polls: usize) {
+        TEST_PERIODIC_POLLS_BEFORE_INTERRUPT.with(|remaining| remaining.set(Some(polls)));
+    }
+
     /// Execute a parsed Cypher query (read-only)
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
-        // Reset DiskGraph materialization arenas to prevent unbounded growth
-        // across queries. No-op for InMemory graphs.
-        GraphRead::reset_arenas(&self.graph.graph);
+        // Retain disk materializations for this entire execution. The first
+        // query after an idle period reclaims the prior generation; overlapping
+        // and nested queries share the generation without invalidating refs.
+        let _query_guard = self.graph.graph.begin_query();
 
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
         let result_set =
@@ -547,6 +382,8 @@ impl<'a> CypherExecutor<'a> {
                             }
                         }
                         result_set = run.result;
+                        self.budget
+                            .check_rows(result_set.rows.len(), "streaming pipeline")?;
                         continue;
                     }
                     stream::pipeline::StreamingOutcome::Bailed(rs) => {
@@ -598,6 +435,9 @@ impl<'a> CypherExecutor<'a> {
                     self.execute_single_clause(clause, result_set)?
                 };
             }
+
+            self.budget
+                .check_rows(result_set.rows.len(), &clause_display_name(clause))?;
         }
 
         Ok(result_set)
@@ -624,7 +464,13 @@ impl<'a> CypherExecutor<'a> {
             Clause::FusedOptionalMatchAggregate {
                 match_clause,
                 with_clause,
-            } => self.execute_fused_optional_match_aggregate(match_clause, with_clause, result_set),
+            } => {
+                self.budget.check_work(
+                    self.graph.graph.node_count(),
+                    "fused OPTIONAL MATCH aggregate",
+                )?;
+                self.execute_fused_optional_match_aggregate(match_clause, with_clause, result_set)
+            }
             Clause::FusedVectorScoreTopK {
                 return_clause,
                 score_item_index,
@@ -657,29 +503,41 @@ impl<'a> CypherExecutor<'a> {
                 top_k,
                 candidate_emit,
                 distinct_count,
-            } => self.execute_fused_match_return_aggregate(
-                match_clause,
-                return_clause,
-                top_k,
-                candidate_emit,
-                *distinct_count,
-                result_set,
-            ),
+            } => {
+                self.budget.check_work(
+                    self.graph.graph.node_count(),
+                    "fused MATCH/RETURN aggregate",
+                )?;
+                self.execute_fused_match_return_aggregate(
+                    match_clause,
+                    return_clause,
+                    top_k,
+                    candidate_emit,
+                    *distinct_count,
+                    result_set,
+                )
+            }
             Clause::FusedMatchWithAggregate {
                 match_clause,
                 with_clause,
                 secondary_match,
                 top_k,
                 distinct_count,
-            } => self.execute_fused_match_with_aggregate(
-                match_clause,
-                with_clause,
-                secondary_match.as_ref(),
-                top_k.as_ref(),
-                *distinct_count,
-                result_set,
-            ),
+            } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused MATCH/WITH aggregate")?;
+                self.execute_fused_match_with_aggregate(
+                    match_clause,
+                    with_clause,
+                    secondary_match.as_ref(),
+                    top_k.as_ref(),
+                    *distinct_count,
+                    result_set,
+                )
+            }
             Clause::FusedCountAll { alias } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused node count")?;
                 let count = self.graph.graph.node_count() as i64;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
@@ -694,6 +552,8 @@ impl<'a> CypherExecutor<'a> {
                 count_alias,
                 type_as_list,
             } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused count by node type")?;
                 let mut result_rows = Vec::with_capacity(self.graph.type_indices.len());
                 for (node_type, indices) in self.graph.type_indices.iter() {
                     let mut projected = Bindings::with_capacity(2);
@@ -720,6 +580,8 @@ impl<'a> CypherExecutor<'a> {
                 type_alias,
                 count_alias,
             } => {
+                self.budget
+                    .check_work(self.graph.graph.edge_count(), "fused count by edge type")?;
                 let counts = self.graph.get_edge_type_counts();
                 let mut result_rows = Vec::with_capacity(counts.len());
                 for (edge_type, count) in &counts {
@@ -758,6 +620,8 @@ impl<'a> CypherExecutor<'a> {
                     0
                 };
                 let count = (primary + secondary) as i64;
+                self.budget
+                    .check_work(count as usize, "fused typed node count")?;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
                 Ok(ResultSet {
@@ -774,6 +638,8 @@ impl<'a> CypherExecutor<'a> {
                 // 64 s → sub-millisecond).
                 let counts = self.graph.get_edge_type_counts();
                 let count = counts.get(edge_type).copied().unwrap_or(0) as i64;
+                self.budget
+                    .check_work(count as usize, "fused typed edge count")?;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
                 Ok(ResultSet {
@@ -801,6 +667,8 @@ impl<'a> CypherExecutor<'a> {
                     None,
                     self.deadline,
                 )? as i64;
+                self.budget
+                    .check_work(count as usize, "fused anchored edge count")?;
                 let mut projected = Bindings::with_capacity(1);
                 projected.insert(alias.clone(), Value::Int64(count));
                 Ok(ResultSet {
@@ -813,11 +681,15 @@ impl<'a> CypherExecutor<'a> {
                 match_clause,
                 where_predicate,
                 return_clause,
-            } => self.execute_fused_node_scan_aggregate(
-                match_clause,
-                where_predicate.as_ref(),
-                return_clause,
-            ),
+            } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused node-scan aggregate")?;
+                self.execute_fused_node_scan_aggregate(
+                    match_clause,
+                    where_predicate.as_ref(),
+                    return_clause,
+                )
+            }
             Clause::FusedNodeScanTopK {
                 match_clause,
                 where_predicate,
@@ -825,14 +697,18 @@ impl<'a> CypherExecutor<'a> {
                 sort_expression,
                 descending,
                 limit,
-            } => self.execute_fused_node_scan_top_k(
-                match_clause,
-                where_predicate.as_ref(),
-                return_clause,
-                sort_expression,
-                *descending,
-                *limit,
-            ),
+            } => {
+                self.budget
+                    .check_work(self.graph.graph.node_count(), "fused node-scan top-k")?;
+                self.execute_fused_node_scan_top_k(
+                    match_clause,
+                    where_predicate.as_ref(),
+                    return_clause,
+                    sort_expression,
+                    *descending,
+                    *limit,
+                )
+            }
             Clause::SpatialJoin {
                 container_var,
                 probe_var,
@@ -1008,6 +884,7 @@ impl<'a> CypherExecutor<'a> {
         } else {
             limit_hint
         };
+        let pattern_limit = self.budget_probe_limit(pattern_limit);
 
         let mut result_rows = if existing.rows.is_empty() {
             // First MATCH: execute patterns to produce initial bindings
@@ -1027,6 +904,7 @@ impl<'a> CypherExecutor<'a> {
                     .set_cancel(self.cancel)
                     .set_distinct_target(clause.distinct_node_hint.clone());
                     let matches = executor.execute(pattern)?;
+                    self.budget.check_work(matches.len(), "MATCH expansion")?;
 
                     // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
                     // creating ResultRows for matches that would be DISTINCT-removed later.
@@ -1053,6 +931,7 @@ impl<'a> CypherExecutor<'a> {
                                     _ => false,
                                 });
                             if !dominated {
+                                self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
                                 all_rows.push(self.pattern_match_to_row(m));
                             }
                         }
@@ -1067,6 +946,7 @@ impl<'a> CypherExecutor<'a> {
                                     Err(e) => return Err(e), // Propagate errors (e.g., missing param)
                                 }
                             }
+                            self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
                             all_rows.push(row);
                             // Stop after limit matching rows (not candidates)
                             if let Some(limit) = limit_hint {
@@ -1106,13 +986,14 @@ impl<'a> CypherExecutor<'a> {
                         };
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,
-                            remaining,
+                            self.budget_probe_limit(remaining),
                             &existing_row.node_bindings,
                             self.params,
                         )
                         .set_deadline(self.deadline)
                         .set_cancel(self.cancel);
                         let matches = executor.execute(pat)?;
+                        self.budget.check_work(matches.len(), "MATCH join")?;
                         // Collect compatible matches for move-on-last optimization
                         let compatible: Vec<_> = matches
                             .iter()
@@ -1123,11 +1004,13 @@ impl<'a> CypherExecutor<'a> {
                             if i + 1 == total {
                                 // Last compatible match: move row instead of cloning
                                 self.merge_match_into_row(&mut existing_row, m);
+                                self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
                                 new_rows.push(existing_row);
                                 break;
                             }
                             let mut new_row = existing_row.clone();
                             self.merge_match_into_row(&mut new_row, m);
+                            self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
                             new_rows.push(new_row);
                             if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                                 break;
@@ -1184,6 +1067,7 @@ impl<'a> CypherExecutor<'a> {
                     } else {
                         None
                     };
+                    let exec_limit = self.budget_probe_limit(exec_limit);
                     let mut expanded: Vec<ResultRow> = Vec::with_capacity(row_set.len());
                     for cur in &row_set {
                         // Fast path: probe the transient index when one was built
@@ -1193,6 +1077,11 @@ impl<'a> CypherExecutor<'a> {
                             if !cur.node_bindings.contains_key(idx.bind_var.as_str()) {
                                 if let Some(probe) = idx.probe_value(cur, self.graph) {
                                     for &node_idx in idx.lookup(&probe) {
+                                        self.budget.reserve_rows(
+                                            expanded.len(),
+                                            1,
+                                            "MATCH indexed join",
+                                        )?;
                                         let mut nr = cur.clone();
                                         nr.node_bindings.insert(idx.bind_var.clone(), node_idx);
                                         expanded.push(nr);
@@ -1220,18 +1109,21 @@ impl<'a> CypherExecutor<'a> {
                         .set_deadline(self.deadline)
                         .set_cancel(self.cancel);
                         let matches = executor.execute(pat)?;
+                        self.budget.check_work(matches.len(), "MATCH join")?;
                         for m in &matches {
                             if !self.bindings_compatible(cur, m) {
                                 continue;
                             }
                             let mut nr = cur.clone();
                             self.merge_match_into_row(&mut nr, m);
+                            self.budget.reserve_rows(expanded.len(), 1, "MATCH join")?;
                             expanded.push(nr);
                         }
                     }
                     row_set = expanded;
                 }
                 for r in row_set {
+                    self.budget.reserve_rows(new_rows.len(), 1, "MATCH join")?;
                     new_rows.push(r);
                     if limit_hint.is_some_and(|l| new_rows.len() >= l) {
                         break;
@@ -1319,16 +1211,7 @@ impl<'a> CypherExecutor<'a> {
         }
 
         // Enforce max_rows limit if configured
-        if let Some(max) = self.max_rows {
-            if result_rows.len() > max {
-                return Err(format!(
-                    "Query produced {} rows, exceeding max_rows limit of {}. \
-                     Add a LIMIT clause or increase max_rows.",
-                    result_rows.len(),
-                    max
-                ));
-            }
-        }
+        self.budget.check_rows(result_rows.len(), "MATCH")?;
 
         Ok(ResultSet {
             rows: result_rows,
@@ -1339,9 +1222,13 @@ impl<'a> CypherExecutor<'a> {
 }
 
 pub mod affected_tests;
+mod analysis_procedures;
+pub(crate) mod budget;
 pub mod call_clause;
 pub mod call_subquery;
+mod centrality_procedures;
 pub mod dead_code;
+mod execution_support;
 pub mod expression;
 pub mod helpers;
 pub mod match_clause;
@@ -1351,6 +1238,7 @@ pub mod return_clause;
 pub mod rev_procedures;
 pub mod rule_procedures;
 pub mod scalar_functions;
+mod schema_procedures;
 pub mod shortest_path;
 pub mod spatial_join;
 pub mod stream;
@@ -1360,6 +1248,7 @@ pub mod transient_index;
 pub mod where_clause;
 pub mod write;
 
+pub use execution_support::clause_display_name;
 pub use helpers::return_item_column_name;
 pub use write::{execute_mutable, is_mutation_query};
 

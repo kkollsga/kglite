@@ -93,7 +93,10 @@ def open(  # noqa: A001  (intentional `open` shadow, module-scoped)
         return _build_memory_graph(dump_path, languages, entity_limit_millions, verbose, progress)
 
     graph_dir = workdir / _graph_subdir(entity_limit_millions)
-    graph_meta = graph_dir / "disk_graph_meta.json"
+    # Generation-format graphs publish CURRENT atomically; legacy graphs use
+    # the root disk_graph_meta.json directly.
+    current = graph_dir / "CURRENT"
+    graph_meta = current if current.exists() else graph_dir / "disk_graph_meta.json"
     source_meta = graph_dir / SOURCE_META_FILENAME
     cache_key = (str(graph_dir.resolve()), entity_limit_millions)
 
@@ -209,9 +212,8 @@ def _build_graph(
 
     g = KnowledgeGraph(storage="disk", path=str(graph_dir))
     g.load_ntriples(str(dump_path), **_load_kwargs(languages, entity_limit_millions, verbose, progress))
-    # `save()` consolidates the per-segment artifacts into a top-level
-    # `disk_graph_meta.json` so `kglite.load(graph_dir)` and the
-    # cache-hit check work on later calls.
+    # `save()` atomically publishes CURRENT so `kglite.load(graph_dir)` and
+    # the cache-hit check work on later calls.
     g.save(str(graph_dir))
     _write_source_meta(graph_dir / SOURCE_META_FILENAME, dump_path, dump_mtime, entity_limit_millions)
     return g

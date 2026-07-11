@@ -24,7 +24,9 @@ use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
 use crate::graph::embedder::Embedder;
 use crate::graph::languages::cypher;
-use crate::graph::languages::cypher::ast::{CypherQuery, OutputFormat};
+use crate::graph::languages::cypher::ast::{
+    Clause, CreateElement, CreatePattern, CypherQuery, OutputFormat, RemoveItem, SetItem,
+};
 use crate::graph::languages::cypher::result::CypherResult;
 use crate::graph::languages::cypher::value_codec::ValueCodec;
 
@@ -240,6 +242,50 @@ pub fn execute_read(
     })
 }
 
+/// Whether this statement has no fallible operation after its first write.
+///
+/// This is intentionally a proof whitelist, not a general optimiser:
+///
+/// - one standalone node `CREATE` evaluates properties, validates scope/schema,
+///   and checks primary-key uniqueness before inserting its only node;
+/// - a terminal variable-only `DELETE` collects bindings and validates plain
+///   delete edge constraints before removing anything.
+///
+/// Both shapes are safe only on the default in-memory backend and without an
+/// execution budget, which is checked after a write. Deadline/cancellation is
+/// safe: CREATE polls before insertion, while DELETE completes every poll and
+/// validation in its preflight phase before entering a non-interruptible commit
+/// phase. Every other mutation retains the full rollback checkpoint.
+fn can_skip_rollback_checkpoint(
+    graph: &DirGraph,
+    query: &CypherQuery,
+    opts: &ExecuteOptions<'_>,
+) -> bool {
+    if !graph.graph.supports_checkpoint_free_mutation() || query.profile || opts.max_rows.is_some()
+    {
+        return false;
+    }
+
+    match query.clauses.as_slice() {
+        [Clause::Create(create)] => matches!(
+            create.patterns.as_slice(),
+            [pattern] if matches!(pattern.elements.as_slice(), [CreateElement::Node(_)])
+        ),
+        clauses => {
+            let Some((Clause::Delete(delete), prefix)) = clauses.split_last() else {
+                return false;
+            };
+            delete
+                .expressions
+                .iter()
+                .all(|expr| matches!(expr, cypher::ast::Expression::Variable(_)))
+                && prefix
+                    .iter()
+                    .all(|clause| !cypher::executor::write::clause_is_mutation(clause))
+        }
+    }
+}
+
 /// Mutating execution. Caller passes `&mut DirGraph` (typically
 /// from `Transaction::working_mut()`). For pure reads, use
 /// [`execute_read`] instead.
@@ -256,6 +302,9 @@ pub fn execute_mut(
     let (parsed, params, encode_plan) = prepare(graph, query, opts)?;
     let is_mutation = cypher::is_mutation_query(&parsed);
 
+    // EXPLAIN never executes the mutation. Return before collision preflight,
+    // disk promotion, or an atomic rollback checkpoint so inspecting a write
+    // plan remains a read-only, O(plan) operation.
     if parsed.explain {
         let result = cypher::generate_explain_result(&parsed, graph);
         return Ok(ExecuteOutcome {
@@ -264,6 +313,32 @@ pub fn execute_mut(
             output_format: parsed.output_format,
             explain: true,
         });
+    }
+
+    if is_mutation {
+        let mut names = Vec::new();
+        collect_mutation_names(&parsed, &mut names);
+        graph
+            .interner
+            .validate_names(names)
+            .map_err(KgError::from)?;
+    }
+
+    // A statement is atomic even when the caller supplied an already-
+    // materialized transaction working copy. Keep a checkpoint whenever the
+    // executor can still fail after its first write. A deliberately narrow
+    // in-memory fast path covers two shapes whose executors finish all
+    // fallible work before mutating; see `can_skip_rollback_checkpoint`.
+    let rollback_checkpoint = (is_mutation && !can_skip_rollback_checkpoint(graph, &parsed, opts))
+        .then(|| graph.fork_transaction());
+
+    if is_mutation {
+        if let Err(error) = graph.prepare_disk_mutation() {
+            if let Some(checkpoint) = rollback_checkpoint {
+                *graph = checkpoint;
+            }
+            return Err(KgError::FileIo(error));
+        }
     }
 
     let mut result = if is_mutation {
@@ -277,11 +352,29 @@ pub fn execute_mut(
         graph.active_write_scope = opts.write_scope.cloned();
         graph.active_git_sha = opts.git_sha.map(str::to_string);
         graph.active_modified_by = opts.modified_by.map(str::to_string);
-        let r = cypher::execute_mutable(graph, &parsed, params, interrupt);
+        let r = if opts.max_rows.is_some() {
+            cypher::executor::write::execute_mutable_bounded(
+                graph,
+                &parsed,
+                params,
+                interrupt,
+                opts.max_rows,
+            )
+        } else {
+            cypher::execute_mutable(graph, &parsed, params, interrupt)
+        };
         graph.active_write_scope = None;
         graph.active_git_sha = None;
         graph.active_modified_by = None;
-        let r = r.map_err(|message| exec_err(opts, message))?;
+        let r = match r {
+            Ok(result) => result,
+            Err(message) => {
+                if let Some(checkpoint) = rollback_checkpoint {
+                    *graph = checkpoint;
+                }
+                return Err(exec_err(opts, message));
+            }
+        };
         // A Cypher write occurred — advance the graph version so any
         // version-keyed caches (the plan cache) and OCC see the change.
         // Bumps the working copy directly so a read-after-write *within* the
@@ -307,6 +400,69 @@ pub fn execute_mut(
         output_format: parsed.output_format,
         explain: false,
     })
+}
+
+fn collect_pattern_names<'a>(pattern: &'a CreatePattern, out: &mut Vec<&'a str>) {
+    for element in &pattern.elements {
+        match element {
+            CreateElement::Node(node) => {
+                out.extend(node.label.as_deref());
+                out.extend(node.extra_labels.iter().map(String::as_str));
+                out.extend(node.properties.iter().map(|(name, _)| name.as_str()));
+            }
+            CreateElement::Edge(edge) => {
+                out.push(edge.connection_type.as_str());
+                out.extend(edge.properties.iter().map(|(name, _)| name.as_str()));
+            }
+        }
+    }
+}
+
+fn collect_set_names<'a>(items: &'a [SetItem], out: &mut Vec<&'a str>) {
+    for item in items {
+        match item {
+            SetItem::Property { property, .. } => out.push(property),
+            SetItem::Label { label, .. } => out.push(label),
+        }
+    }
+}
+
+fn collect_mutation_names<'a>(query: &'a CypherQuery, out: &mut Vec<&'a str>) {
+    collect_clause_names(&query.clauses, out);
+}
+
+fn collect_clause_names<'a>(clauses: &'a [Clause], out: &mut Vec<&'a str>) {
+    for clause in clauses {
+        match clause {
+            Clause::Create(create) => {
+                for pattern in &create.patterns {
+                    collect_pattern_names(pattern, out);
+                }
+            }
+            Clause::Set(set) => collect_set_names(&set.items, out),
+            Clause::Remove(remove) => {
+                for item in &remove.items {
+                    match item {
+                        RemoveItem::Property { property, .. } => out.push(property),
+                        RemoveItem::Label { label, .. } => out.push(label),
+                    }
+                }
+            }
+            Clause::Merge(merge) => {
+                collect_pattern_names(&merge.pattern, out);
+                if let Some(items) = &merge.on_create {
+                    collect_set_names(items, out);
+                }
+                if let Some(items) = &merge.on_match {
+                    collect_set_names(items, out);
+                }
+            }
+            Clause::Foreach { body, .. } => collect_clause_names(body, out),
+            Clause::CallSubquery { body, .. } => collect_mutation_names(body, out),
+            Clause::Union(union) => collect_mutation_names(&union.query, out),
+            _ => {}
+        }
+    }
 }
 
 /// Shared preparation: parse → validate → rewrite_text_score → embed
@@ -493,6 +649,7 @@ fn embed_into_params(
 mod version_soundness_tests {
     use super::*;
     use crate::graph::dir_graph::DirGraph;
+    use crate::graph::storage::GraphRead;
 
     /// A Cypher write through `execute_mut` must advance the graph version so
     /// version-keyed caches (the plan cache) and a read-after-write within the
@@ -522,5 +679,67 @@ mod version_soundness_tests {
         let after_write = g.version();
         let _ = execute_read(&g, "MATCH (n:Item) RETURN n.id", &opts).expect("read");
         assert_eq!(g.version(), after_write, "a read must not bump version");
+    }
+
+    #[test]
+    fn cypher_collision_is_typed_and_atomic() {
+        let mut g = DirGraph::new();
+        let incoming = "CollisionType";
+        g.interner
+            .try_register(
+                crate::graph::schema::InternedKey::from_str(incoming),
+                "conflicting-existing",
+            )
+            .unwrap();
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        let error = match execute_mut(&mut g, "CREATE (:CollisionType {id: 1})", &opts) {
+            Err(error) => error,
+            Ok(_) => panic!("colliding Cypher name must be rejected"),
+        };
+        assert!(matches!(error, KgError::InternerCollision(_)));
+        assert_eq!(g.graph.node_count(), 0);
+        assert_eq!(g.version(), 0);
+    }
+
+    #[test]
+    fn checkpointed_multi_create_rolls_back_late_expression_error() {
+        let mut g = DirGraph::new();
+        let params = HashMap::new();
+        let opts = ExecuteOptions::eager(&params);
+        let error = match execute_mut(
+            &mut g,
+            "CREATE (:Item {id: 1}), (:Item {id: 2, broken: duration({months: 2147483648})})",
+            &opts,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("the second CREATE expression must fail"),
+        };
+        assert!(
+            error.to_string().contains("duration()"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(g.graph.node_count(), 0, "the first CREATE must roll back");
+        assert_eq!(g.version(), 0);
+    }
+
+    #[test]
+    fn checkpoint_free_mutations_cancel_before_their_first_write() {
+        static CANCEL: AtomicBool = AtomicBool::new(false);
+
+        let mut g = DirGraph::new();
+        let params = HashMap::new();
+        let base_opts = ExecuteOptions::eager(&params);
+        execute_mut(&mut g, "CREATE (:Item {id: 1})", &base_opts).unwrap();
+
+        CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut cancelled_opts = ExecuteOptions::eager(&params);
+        cancelled_opts.cancel = Some(&CANCEL);
+        assert!(matches!(
+            execute_mut(&mut g, "MATCH (n:Item) DELETE n", &cancelled_opts),
+            Err(KgError::Cancelled)
+        ));
+        assert_eq!(g.graph.node_count(), 1);
+        CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }

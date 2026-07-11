@@ -223,7 +223,7 @@ pub(super) fn build_columns_direct(
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
         })
     };
-    let _ = std::fs::create_dir_all(&data_dir);
+    std::fs::create_dir_all(&data_dir)?;
 
     // ── Step 1: Layout computation — single mmap file ────────────────────
     //
@@ -1322,15 +1322,12 @@ pub(super) fn build_columns_direct(
     // The mmap file stays on disk at data_dir/columns.bin — don't delete it.
     let meta_path = data_dir.join("columns_meta.json");
     if !columns_meta.is_empty() {
-        if let Ok(json) = serde_json::to_string(&columns_meta) {
-            let _ = std::fs::write(&meta_path, json);
-        }
+        let json = serde_json::to_string(&columns_meta).map_err(std::io::Error::other)?;
+        std::fs::write(&meta_path, json)?;
         // Also save as bincode+zstd for fast loading (~10x faster than JSON parse)
-        if let Ok(bytes) = bincode::serialize(&columns_meta) {
-            if let Ok(compressed) = zstd::encode_all(bytes.as_slice(), 3) {
-                let _ = std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed);
-            }
-        }
+        let bytes = bincode::serialize(&columns_meta).map_err(std::io::Error::other)?;
+        let compressed = zstd::encode_all(bytes.as_slice(), 3)?;
+        std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed)?;
     }
 
     if verbose {

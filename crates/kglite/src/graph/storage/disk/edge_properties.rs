@@ -38,6 +38,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Filename constants for the columnar base. Both live under the graph's
 /// data directory alongside the existing CSR/column files.
@@ -132,7 +133,7 @@ fn encode_props_into(props: &[(InternedKey, Value)], heap: &mut Vec<u8>) -> io::
 /// to the base.
 #[derive(Debug, Default)]
 pub struct EdgePropertyStore {
-    base: Option<ColumnarBase>,
+    base: Option<Arc<ColumnarBase>>,
     overlay: HashMap<u32, Option<Vec<(InternedKey, Value)>>>,
 }
 
@@ -237,29 +238,13 @@ impl EdgePropertyStore {
         base_upper.max(overlay_upper)
     }
 
-    /// Deep clone — for `shallow_copy()` paths in DiskGraph that produce
-    /// a fresh in-memory graph from a disk-backed one.
-    ///
-    /// Base files are mmap'd and cannot be trivially cloned at runtime,
-    /// so we materialize everything currently visible into the new
-    /// store's overlay. This uses more RAM temporarily but preserves
-    /// semantics; if `shallow_copy` grows hot on disk graphs, revisit
-    /// and consider hard-linking or mmap sharing.
-    pub fn deep_clone(&self) -> Self {
-        let mut new = EdgePropertyStore::new();
-        if let Some(base) = self.base.as_ref() {
-            for edge_idx in 0..base.len() {
-                if let Some(cow) = self.get(edge_idx) {
-                    new.insert(edge_idx, cow.into_owned());
-                }
-            }
+    /// Fork a transaction overlay while sharing the immutable columnar base.
+    /// Only the mutation-sized overlay is copied.
+    pub(crate) fn fork_overlay(&self) -> Self {
+        Self {
+            base: self.base.clone(),
+            overlay: self.overlay.clone(),
         }
-        for (idx, entry) in &self.overlay {
-            if let Some(props) = entry {
-                new.insert(*idx, props.clone());
-            }
-        }
-        new
     }
 
     /// Write the current merged state (base ∪ overlay, minus tombstones)
@@ -372,7 +357,7 @@ impl EdgePropertyStore {
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
         Ok(Self {
-            base: Some(ColumnarBase { offsets, heap }),
+            base: Some(Arc::new(ColumnarBase { offsets, heap })),
             overlay: HashMap::new(),
         })
     }

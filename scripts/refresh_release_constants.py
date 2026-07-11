@@ -89,8 +89,10 @@ def version_slug(version: str) -> str:
 
 
 def find_release_dylib() -> Path | None:
-    """Locate the release-built kglite library; .dylib on macOS, .so on Linux."""
+    """Locate the wheel cdylib, falling back to the core Rust library."""
     for cand in (
+        REPO_ROOT / "target" / "release" / "libkglite_py.dylib",
+        REPO_ROOT / "target" / "release" / "libkglite_py.so",
         REPO_ROOT / "target" / "release" / "libkglite.dylib",
         REPO_ROOT / "target" / "release" / "libkglite.so",
     ):
@@ -160,13 +162,17 @@ def refresh_kgl_golden(version: str, new_digest: str) -> tuple[bool, str]:
 
 
 def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
-    """Update the `baseline = NNNN` literal + the docstring."""
+    """Update the current platform's size baseline + history note."""
     text = PHASE5_TEST.read_text()
 
-    bl_match = re.search(r"^(\s*)baseline\s*=\s*([0-9_]+)\s*#\s*([^\n]+)\n", text, re.MULTILINE)
+    platform_key = sys.platform if sys.platform in {"darwin", "linux"} else "linux"
+    bl_match = re.search(
+        rf'^(\s*"{platform_key}"\s*:\s*)([0-9_]+)(,\s*#\s*[^\n]+\n)',
+        text,
+        re.MULTILINE,
+    )
     if bl_match is None:
-        return False, "tests/test_phase5_parity.py: baseline line not found"
-    indent = bl_match.group(1)
+        return False, f"tests/test_phase5_parity.py: {platform_key} baseline entry not found"
     cur_baseline = int(bl_match.group(2).replace("_", ""))
 
     if cur_baseline == current_size:
@@ -174,7 +180,7 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
 
     # Replace the baseline line.
     formatted = f"{current_size:_}".replace("_", "_")  # "12_345_678" style
-    new_line = f"{indent}baseline = {formatted}  # {version} baseline\n"
+    new_line = f"{bl_match.group(1)}{formatted},  # {version} {platform_key} baseline\n"
     text = text[: bl_match.start()] + new_line + text[bl_match.end() :]
 
     # Best-effort: drop a marker into the docstring's "Baseline history:"
@@ -186,18 +192,20 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
         f"(≈{current_size / (1024 * 1024):.1f} MB). "
         "TODO: describe what grew since the prior baseline.\n"
     )
-    text = re.sub(
-        r"(      - 0\.9\.52:\s+35,925,104 bytes \(≈34\.3 MB\)\.[^\n]*\n(?:[^-][^\n]*\n)+)",
-        lambda m: m.group(1) + todo_marker if version != "0.9.52" else m.group(1),
-        text,
-        count=1,
-    )
+    existing_history = re.search(rf"^      - {re.escape(version)}:.*$", text, re.MULTILINE)
+    if existing_history is not None:
+        replacement = todo_marker.strip("\n")
+        text = text[: existing_history.start()] + replacement + text[existing_history.end() :]
+    else:
+        history_anchor = "    Raising the baseline is a deliberate act"
+        if history_anchor in text:
+            text = text.replace(history_anchor, todo_marker + "\n" + history_anchor, 1)
 
     # Update the in-message "+10% over X baseline" string to reference
     # the new version.
     text = re.sub(
-        r"\(\+10% over [0-9.]+ baseline \{baseline:,\}\)",
-        f"(+10% over {version} baseline {{baseline:,}})",
+        r"\(\+10% over [^)]* baseline \{baseline:,\}\)",
+        f"(+10% over {version} {{platform_key}} baseline {{baseline:,}})",
         text,
     )
 

@@ -9,6 +9,7 @@ use super::csr_build;
 use super::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use std::collections::HashMap;
+use std::io;
 use std::path::Path;
 
 impl DiskGraph {
@@ -26,7 +27,7 @@ impl DiskGraph {
         node_bound: usize,
         edge_count: usize,
         verbose: bool,
-    ) {
+    ) -> io::Result<()> {
         // Production reads chunking config from the environment. Tests use
         // `build_csr_merge_sort_with_config` with an explicit config instead,
         // so they never touch the process-global env vars (which would race
@@ -47,20 +48,21 @@ impl DiskGraph {
         edge_count: usize,
         verbose: bool,
         config: csr_build::BuilderConfig,
-    ) {
+    ) -> io::Result<()> {
         let phase3_start = std::time::Instant::now();
 
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let tmp_dir = self.data_dir.join(format!("_csr_build_{:x}", now_nanos));
-        let _ = std::fs::create_dir_all(&tmp_dir);
+        let write_dir = self.active_write_dir().to_path_buf();
+        let tmp_dir = write_dir.join(format!("_csr_build_{:x}", now_nanos));
+        std::fs::create_dir_all(&tmp_dir)?;
         // CSR output goes to a separate build dir, then atomically swapped
         // into data_dir. This avoids overwriting mmap'd files that self
         // still references.
-        let build_dir = self.data_dir.join(format!("_csr_output_{:x}", now_nanos));
-        let _ = std::fs::create_dir_all(&build_dir);
+        let build_dir = write_dir.join(format!("_csr_output_{:x}", now_nanos));
+        std::fs::create_dir_all(&build_dir)?;
 
         let artifacts = csr_build::build_csr_files(
             self.pending_edges.get_mut(),
@@ -70,14 +72,7 @@ impl DiskGraph {
             &tmp_dir,
             &config,
             verbose,
-        );
-
-        // Free pending_edges (file-backed mmap) now that all CSR passes are
-        // complete. The pre-refactor code freed pending after step 1; the
-        // CSR output is byte-equal either way, and we keep pending around
-        // longer here so the merge-sort passes can read from it directly
-        // without an intermediate `pending.bin` copy.
-        *self.pending_edges.get_mut() = MmapOrVec::new();
+        )?;
 
         // Clean up temp dir (sort chunks).
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -92,17 +87,19 @@ impl DiskGraph {
             artifacts.in_offsets,
             artifacts.in_edges,
             artifacts.edge_endpoints,
-        );
+        )?;
+        self.appended_edge_endpoints.clear();
+        self.removed_edges.clear();
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(artifacts.edge_type_counts);
 
         // Build connection-type inverted index from the swapped CSR.
-        self.build_conn_type_index(node_bound, verbose);
+        self.build_conn_type_index(node_bound, verbose)?;
         // Build per-(type, peer) count histogram — single scan of edge_endpoints.
-        self.build_peer_count_histogram(verbose);
+        self.build_peer_count_histogram(verbose)?;
 
-        let _ = self.write_metadata();
-        self.metadata_dirty = false;
+        self.write_metadata()?;
+        *self.pending_edges.get_mut() = MmapOrVec::new();
 
         if verbose {
             eprintln!(
@@ -112,6 +109,7 @@ impl DiskGraph {
                 node_bound
             );
         }
+        Ok(())
     }
 
     /// Hash-partitioned CSR build (Kuzu pattern).
@@ -122,26 +120,26 @@ impl DiskGraph {
         node_bound: usize,
         edge_count: usize,
         verbose: bool,
-    ) {
+    ) -> io::Result<()> {
+        let write_dir = self.active_write_dir().to_path_buf();
         let pending = self.pending_edges.get_mut();
         let phase3_start = std::time::Instant::now();
         // CSR output goes to a separate build dir, then atomically swapped into data_dir.
-        let build_dir = self.data_dir.join(format!(
+        let build_dir = write_dir.join(format!(
             "_csr_output_{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let _ = std::fs::create_dir_all(&build_dir);
+        std::fs::create_dir_all(&build_dir)?;
         let out_dir = &build_dir;
 
         // ── Step 1: Build edge_endpoints + count degrees ──
         // Single sequential pass over pending_edges: write endpoints + count degrees.
         let step = std::time::Instant::now();
         let mut edge_endpoints_vec =
-            MmapOrVec::mapped(&out_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+            MmapOrVec::mapped(&out_dir.join("edge_endpoints.bin"), edge_count)?;
         let mut out_counts = vec![0u64; node_bound];
         let mut in_counts = vec![0u64; node_bound];
         let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
@@ -167,21 +165,12 @@ impl DiskGraph {
             );
         }
 
-        // Free pending_edges — all data now in edge_endpoints.
-        let pending_path = pending.file_path().map(|p| p.to_path_buf());
-        *pending = MmapOrVec::new();
-        if let Some(path) = pending_path {
-            let _ = std::fs::remove_file(path);
-        }
-
         // ── Step 2: Build offset arrays (prefix sum) ──
         let step = std::time::Instant::now();
         let mut out_offsets: MmapOrVec<u64> =
-            MmapOrVec::mapped(&out_dir.join("out_offsets.bin"), node_bound + 1)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+            MmapOrVec::mapped(&out_dir.join("out_offsets.bin"), node_bound + 1)?;
         let mut in_offsets: MmapOrVec<u64> =
-            MmapOrVec::mapped(&out_dir.join("in_offsets.bin"), node_bound + 1)
-                .unwrap_or_else(|_| MmapOrVec::with_capacity(node_bound + 1));
+            MmapOrVec::mapped(&out_dir.join("in_offsets.bin"), node_bound + 1)?;
         let mut out_acc = 0u64;
         let mut in_acc = 0u64;
         for i in 0..node_bound {
@@ -205,8 +194,7 @@ impl DiskGraph {
         // Read edge_endpoints sequentially, scatter to out_edges via chunked buffers.
         // Uses mapped_zeroed — OS zero-fills lazily, no explicit pre-fill I/O.
         let step = std::time::Instant::now();
-        let mut out_edges = MmapOrVec::mapped_zeroed(&out_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+        let mut out_edges = MmapOrVec::mapped_zeroed(&out_dir.join("out_edges.bin"), edge_count)?;
 
         let chunk_size: usize = std::env::var("KGLITE_CSR_CHUNK")
             .ok()
@@ -337,7 +325,7 @@ impl DiskGraph {
             let num_sort_chunks = edge_count.div_ceil(sort_chunk_size);
 
             let sort_dir = out_dir.join("_in_sort");
-            let _ = std::fs::create_dir_all(&sort_dir);
+            std::fs::create_dir_all(&sort_dir)?;
 
             if num_sort_chunks == 1 {
                 // Single-chunk: sort in memory, write directly
@@ -354,8 +342,7 @@ impl DiskGraph {
                 }
                 entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
-                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
                 for entry in &entries {
                     output.push(CsrEdge {
                         peer: entry.peer,
@@ -394,8 +381,7 @@ impl DiskGraph {
                     entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
 
                     let chunk_path = sort_dir.join(format!("chunk_in_{}.bin", c));
-                    let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)
-                        .unwrap_or_else(|_| MmapOrVec::with_capacity(len));
+                    let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)?;
                     for entry in &entries {
                         chunk_mmap.push(*entry);
                     }
@@ -414,8 +400,7 @@ impl DiskGraph {
                 // K-way merge via binary heap — all reads and writes sequential
                 let substep = std::time::Instant::now();
                 let mut positions: Vec<usize> = vec![0; num_sort_chunks];
-                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)
-                    .unwrap_or_else(|_| MmapOrVec::with_capacity(edge_count));
+                let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
 
                 use std::cmp::Reverse;
                 let mut heap: std::collections::BinaryHeap<Reverse<(u32, u64, usize)>> =
@@ -459,8 +444,7 @@ impl DiskGraph {
         }
 
         // Reload out_edges (dropped before step 4) — still in build_dir
-        let out_edges: MmapOrVec<CsrEdge> = MmapOrVec::load_mapped(&out_edges_path, edge_count)
-            .unwrap_or_else(|_| MmapOrVec::new());
+        let out_edges: MmapOrVec<CsrEdge> = MmapOrVec::load_mapped(&out_edges_path, edge_count)?;
 
         // Atomic swap: move build files to data_dir, re-mmap
         self.swap_csr_files(
@@ -472,17 +456,19 @@ impl DiskGraph {
             in_offsets,
             in_edges,
             edge_endpoints_vec,
-        );
+        )?;
+        self.appended_edge_endpoints.clear();
+        self.removed_edges.clear();
         self.csr_sorted_by_type = true;
         self.edge_type_counts_raw = Some(edge_type_counts);
 
         // Build connection-type inverted index from the swapped CSR
-        self.build_conn_type_index(node_bound, verbose);
+        self.build_conn_type_index(node_bound, verbose)?;
         // Build per-(type, peer) count histogram — single scan of edge_endpoints.
-        self.build_peer_count_histogram(verbose);
+        self.build_peer_count_histogram(verbose)?;
 
-        let _ = self.write_metadata();
-        self.metadata_dirty = false;
+        self.write_metadata()?;
+        *self.pending_edges.get_mut() = MmapOrVec::new();
 
         if verbose {
             eprintln!(
@@ -492,6 +478,7 @@ impl DiskGraph {
                 node_bound
             );
         }
+        Ok(())
     }
 
     // ====================================================================
@@ -514,8 +501,8 @@ impl DiskGraph {
         in_offsets: MmapOrVec<u64>,
         in_edges: MmapOrVec<CsrEdge>,
         edge_endpoints: MmapOrVec<EdgeEndpoints>,
-    ) {
-        let data_dir = &self.data_dir;
+    ) -> io::Result<()> {
+        let data_dir = self.active_write_dir().to_path_buf();
 
         // If build_dir == data_dir, files are already in place — just assign.
         if build_dir == data_dir.as_path() {
@@ -524,7 +511,7 @@ impl DiskGraph {
             self.in_offsets = in_offsets;
             self.in_edges = in_edges;
             self.edge_endpoints = edge_endpoints;
-            return;
+            return Ok(());
         }
 
         // Drop old self mmaps (releases file handles to data_dir files)
@@ -554,15 +541,10 @@ impl DiskGraph {
             let dst = data_dir.join(fname);
             if src.exists() {
                 // Remove old file first (some filesystems require this)
-                let _ = std::fs::remove_file(&dst);
-                if let Err(e) = std::fs::rename(&src, &dst) {
-                    eprintln!(
-                        "Warning: failed to rename {} → {}: {}",
-                        src.display(),
-                        dst.display(),
-                        e
-                    );
+                if dst.exists() {
+                    std::fs::remove_file(&dst)?;
                 }
+                std::fs::rename(&src, &dst)?;
             }
         }
 
@@ -576,69 +558,68 @@ impl DiskGraph {
             let src = build_dir.join(fname);
             let dst = data_dir.join(fname);
             if src.exists() {
-                let _ = std::fs::remove_file(&dst);
-                let _ = std::fs::rename(&src, &dst);
+                if dst.exists() {
+                    std::fs::remove_file(&dst)?;
+                }
+                std::fs::rename(&src, &dst)?;
             }
         }
 
         // Re-mmap from data_dir
         self.out_offsets =
-            MmapOrVec::load_mapped(&data_dir.join("out_offsets.bin"), node_bound + 1)
-                .unwrap_or_else(|_| MmapOrVec::new());
-        self.out_edges = MmapOrVec::load_mapped(&data_dir.join("out_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::new());
-        self.in_offsets = MmapOrVec::load_mapped(&data_dir.join("in_offsets.bin"), node_bound + 1)
-            .unwrap_or_else(|_| MmapOrVec::new());
-        self.in_edges = MmapOrVec::load_mapped(&data_dir.join("in_edges.bin"), edge_count)
-            .unwrap_or_else(|_| MmapOrVec::new());
+            MmapOrVec::load_mapped(&data_dir.join("out_offsets.bin"), node_bound + 1)?;
+        self.out_edges = MmapOrVec::load_mapped(&data_dir.join("out_edges.bin"), edge_count)?;
+        self.in_offsets = MmapOrVec::load_mapped(&data_dir.join("in_offsets.bin"), node_bound + 1)?;
+        self.in_edges = MmapOrVec::load_mapped(&data_dir.join("in_edges.bin"), edge_count)?;
         self.edge_endpoints =
-            MmapOrVec::load_mapped(&data_dir.join("edge_endpoints.bin"), edge_count)
-                .unwrap_or_else(|_| MmapOrVec::new());
+            MmapOrVec::load_mapped(&data_dir.join("edge_endpoints.bin"), edge_count)?;
 
         // Re-load conn_type_index if swapped
         let types_path = data_dir.join("conn_type_index_types.bin");
         if types_path.exists() {
-            let num_types = std::fs::metadata(&types_path)
-                .map(|m| m.len() as usize / std::mem::size_of::<u64>())
-                .unwrap_or(0);
+            let num_types =
+                std::fs::metadata(&types_path)?.len() as usize / std::mem::size_of::<u64>();
             if num_types > 0 {
-                self.conn_type_index_types = MmapOrVec::load_mapped(&types_path, num_types)
-                    .unwrap_or_else(|_| MmapOrVec::new());
+                self.conn_type_index_types = MmapOrVec::load_mapped(&types_path, num_types)?;
                 self.conn_type_index_offsets = MmapOrVec::load_mapped(
                     &data_dir.join("conn_type_index_offsets.bin"),
                     num_types + 1,
-                )
-                .unwrap_or_else(|_| MmapOrVec::new());
-                let sources_len = std::fs::metadata(data_dir.join("conn_type_index_sources.bin"))
-                    .map(|m| m.len() as usize / std::mem::size_of::<u32>())
-                    .unwrap_or(0);
+                )?;
+                let sources_len = std::fs::metadata(data_dir.join("conn_type_index_sources.bin"))?
+                    .len() as usize
+                    / std::mem::size_of::<u32>();
                 self.conn_type_index_sources = MmapOrVec::load_mapped(
                     &data_dir.join("conn_type_index_sources.bin"),
                     sources_len,
-                )
-                .unwrap_or_else(|_| MmapOrVec::new());
+                )?;
             }
         }
 
         // Clean up build dir
         let _ = std::fs::remove_dir_all(build_dir);
+        Ok(())
     }
 
     /// Build connection-type inverted index from current CSR arrays.
     /// Reads self.out_offsets, self.out_edges, self.edge_endpoints (must be valid).
     /// Writes index files to self.data_dir and assigns to self.
-    pub(super) fn build_conn_type_index(&mut self, node_bound: usize, verbose: bool) {
+    pub(super) fn build_conn_type_index(
+        &mut self,
+        node_bound: usize,
+        verbose: bool,
+    ) -> io::Result<()> {
         let (types, offsets, sources) = write_conn_type_index(
             &self.out_offsets,
             &self.out_edges,
             &self.edge_endpoints,
             node_bound,
-            &self.data_dir,
+            self.active_write_dir(),
             verbose,
-        );
+        )?;
         self.conn_type_index_types = types;
         self.conn_type_index_offsets = offsets;
         self.conn_type_index_sources = sources;
+        Ok(())
     }
 
     /// Build per-(conn_type, peer) edge-count histogram. Answers unanchored
@@ -649,24 +630,35 @@ impl DiskGraph {
     /// Build (or rebuild) the per-(conn_type, peer) edge-count histogram from
     /// the current `edge_endpoints`. Safe to call on a loaded graph; writes
     /// `peer_count_*.bin` files next to the other disk artifacts.
-    pub fn rebuild_peer_count_histogram(&mut self) {
+    pub fn rebuild_peer_count_histogram(&mut self) -> io::Result<()> {
+        self.prepare_mutation()?;
         let verbose = std::env::var("KGLITE_BUILD_DEBUG").is_ok();
-        self.build_peer_count_histogram(verbose);
+        self.build_peer_count_histogram(verbose)
     }
 
-    pub(super) fn build_peer_count_histogram(&mut self, verbose: bool) {
+    pub(super) fn build_peer_count_histogram(&mut self, verbose: bool) -> io::Result<()> {
         // Use edge_endpoints.len() rather than next_edge_idx — after certain
         // build paths (compact, merge rebuilds) next_edge_idx may have been
         // reset while edge_endpoints still holds the authoritative count.
-        let total = self.edge_endpoints.len().min(self.next_edge_idx as usize);
+        let total = self.edge_endpoint_len().min(self.next_edge_idx as usize);
         if total == 0 {
-            return;
+            return Ok(());
         }
+        let logical_endpoints;
+        let endpoints = if self.appended_edge_endpoints.is_empty() && self.removed_edges.is_empty()
+        {
+            &self.edge_endpoints
+        } else {
+            logical_endpoints =
+                MmapOrVec::from_vec((0..total).map(|index| self.edge_endpoint(index)).collect());
+            &logical_endpoints
+        };
         let (types, offsets, entries) =
-            write_peer_count_histogram(&self.edge_endpoints, 0, total, &self.data_dir, verbose);
+            write_peer_count_histogram(endpoints, 0, total, self.active_write_dir(), verbose)?;
         self.peer_count_types = types;
         self.peer_count_offsets = offsets;
         self.peer_count_entries = entries;
+        Ok(())
     }
 }
 
@@ -679,13 +671,13 @@ pub(super) fn write_peer_count_histogram(
     edge_hi: usize,
     target_dir: &Path,
     verbose: bool,
-) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+) -> io::Result<(MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>)> {
     use rayon::prelude::*;
     let start = std::time::Instant::now();
 
     let total = edge_hi.saturating_sub(edge_lo);
     if total == 0 {
-        return (MmapOrVec::new(), MmapOrVec::new(), MmapOrVec::new());
+        return Ok((MmapOrVec::new(), MmapOrVec::new(), MmapOrVec::new()));
     }
 
     // Advise kernel: we're about to do one large sequential read then drop
@@ -769,25 +761,22 @@ pub(super) fn write_peer_count_histogram(
     let types_path = target_dir.join("peer_count_types.bin");
     let offsets_path = target_dir.join("peer_count_offsets.bin");
     let entries_path = target_dir.join("peer_count_entries.bin");
-    let _ = write_u64(&types_path, &types_vec);
-    let _ = write_u64(&offsets_path, &offsets_vec);
-    let _ = write_u32(&entries_path, &entries_vec);
+    write_u64(&types_path, &types_vec)?;
+    write_u64(&offsets_path, &offsets_vec)?;
+    write_u32(&entries_path, &entries_vec)?;
 
     let pc_types = if !types_vec.is_empty() {
-        MmapOrVec::load_mapped(&types_path, types_vec.len())
-            .unwrap_or_else(|_| MmapOrVec::from_vec(types_vec.clone()))
+        MmapOrVec::load_mapped(&types_path, types_vec.len())?
     } else {
         MmapOrVec::new()
     };
     let pc_offsets = if !offsets_vec.is_empty() {
-        MmapOrVec::load_mapped(&offsets_path, offsets_vec.len())
-            .unwrap_or_else(|_| MmapOrVec::from_vec(offsets_vec.clone()))
+        MmapOrVec::load_mapped(&offsets_path, offsets_vec.len())?
     } else {
         MmapOrVec::new()
     };
     let pc_entries = if !entries_vec.is_empty() {
-        MmapOrVec::load_mapped(&entries_path, entries_vec.len())
-            .unwrap_or_else(|_| MmapOrVec::from_vec(entries_vec.clone()))
+        MmapOrVec::load_mapped(&entries_path, entries_vec.len())?
     } else {
         MmapOrVec::new()
     };
@@ -801,7 +790,7 @@ pub(super) fn write_peer_count_histogram(
         );
     }
 
-    (pc_types, pc_offsets, pc_entries)
+    Ok((pc_types, pc_offsets, pc_entries))
 }
 
 // ============================================================================
@@ -824,7 +813,7 @@ pub(super) fn write_conn_type_index(
     node_bound: usize,
     target_dir: &Path,
     verbose: bool,
-) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+) -> io::Result<(MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>)> {
     use rayon::prelude::*;
     let idx_start = std::time::Instant::now();
 
@@ -870,18 +859,15 @@ pub(super) fn write_conn_type_index(
     let mut idx_types = MmapOrVec::mapped(
         &target_dir.join("conn_type_index_types.bin"),
         sorted_types.len(),
-    )
-    .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len()));
+    )?;
     let mut idx_offsets = MmapOrVec::mapped(
         &target_dir.join("conn_type_index_offsets.bin"),
         sorted_types.len() + 1,
-    )
-    .unwrap_or_else(|_| MmapOrVec::with_capacity(sorted_types.len() + 1));
+    )?;
     let mut idx_sources = MmapOrVec::mapped(
         &target_dir.join("conn_type_index_sources.bin"),
         total_sources,
-    )
-    .unwrap_or_else(|_| MmapOrVec::with_capacity(total_sources));
+    )?;
 
     let mut offset: u64 = 0;
     for &ct in &sorted_types {
@@ -900,9 +886,9 @@ pub(super) fn write_conn_type_index(
     // 64-element minimum. Phase-7's multi-segment concat uses file-size
     // inference on these files (via `load_raw_or_zst_optional`), so stray
     // padding would poison the inverted-index types array.
-    let _ = idx_types.trim_to_logical_length();
-    let _ = idx_offsets.trim_to_logical_length();
-    let _ = idx_sources.trim_to_logical_length();
+    idx_types.trim_to_logical_length()?;
+    idx_offsets.trim_to_logical_length()?;
+    idx_sources.trim_to_logical_length()?;
 
     if verbose {
         eprintln!(
@@ -913,7 +899,7 @@ pub(super) fn write_conn_type_index(
         );
     }
 
-    (idx_types, idx_offsets, idx_sources)
+    Ok((idx_types, idx_offsets, idx_sources))
 }
 
 #[cfg(test)]
@@ -956,7 +942,7 @@ mod tests {
         for &(s, t, ct) in edges {
             dg.add_edge(node_ids[s], node_ids[t], make_edge(&mut interner, ct));
         }
-        dg.build_csr_from_pending();
+        dg.build_csr_from_pending().unwrap();
         (dg, interner)
     }
 
@@ -979,14 +965,15 @@ mod tests {
             dg.add_edge(node_ids[s], node_ids[t], make_edge(&mut interner, ct));
         }
         let pending_len = dg.pending_edges.get_mut().len();
-        let node_bound = dg.node_slots.len();
+        let node_bound = dg.node_slot_len();
         // Explicit config (no env var) keeps these tests deterministic under
         // the harness's parallel threads.
         let config = super::csr_build::BuilderConfig {
             chunk_mb_override: None,
             force_chunks,
         };
-        dg.build_csr_merge_sort_with_config(node_bound, pending_len, false, config);
+        dg.build_csr_merge_sort_with_config(node_bound, pending_len, false, config)
+            .unwrap();
         dg.defer_csr = false;
         (dg, interner)
     }
@@ -1242,5 +1229,54 @@ mod tests {
         // No env vars set in the standard test environment.
         // (force_chunks=Some(0) is filtered to None inside from_env.)
         assert!(env_cfg.force_chunks.is_none() || env_cfg.force_chunks.unwrap() > 0);
+    }
+
+    #[test]
+    fn auxiliary_index_writers_propagate_output_failures() {
+        let tmp = TempDir::new().unwrap();
+        let blocked = tmp.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+
+        let offsets = MmapOrVec::from_vec(vec![0u64, 1, 1]);
+        let edges = MmapOrVec::from_vec(vec![CsrEdge {
+            peer: 1,
+            edge_idx: 0,
+        }]);
+        let endpoints = MmapOrVec::from_vec(vec![EdgeEndpoints {
+            source: 0,
+            target: 1,
+            connection_type: 7,
+        }]);
+
+        assert!(write_conn_type_index(&offsets, &edges, &endpoints, 2, &blocked, false).is_err());
+        assert!(write_peer_count_histogram(&endpoints, 0, 1, &blocked, false).is_err());
+    }
+
+    #[test]
+    fn csr_build_failure_keeps_pending_edges_for_retry() {
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let mut dg = DiskGraph::new_at_path(tmp.path()).unwrap();
+        dg.defer_csr = true;
+        let a = dg.add_node(make_node(&mut interner, 1));
+        let b = dg.add_node(make_node(&mut interner, 2));
+        dg.add_edge(a, b, make_edge(&mut interner, "R"));
+
+        let data_dir = dg.data_dir.clone();
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::write(&data_dir, b"blocks child creation").unwrap();
+        let error = dg
+            .build_csr_from_pending()
+            .expect_err("blocked output directory must fail the CSR build");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(dg.pending_edges.get_mut().len(), 1);
+        assert!(dg.defer_csr, "failed builds must remain retryable");
+
+        std::fs::remove_file(&data_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        dg.build_csr_from_pending().unwrap();
+        assert_eq!(dg.pending_edges.get_mut().len(), 0);
+        assert!(!dg.defer_csr);
+        assert_eq!(dg.edge_endpoint_len(), 1);
     }
 }

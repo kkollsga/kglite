@@ -13,17 +13,29 @@
 //!   so commits can atomically swap the inner Arc.
 //! - [`Transaction`] holds an optional `snapshot: Arc<DirGraph>`
 //!   taken at BEGIN time + an optional `working: DirGraph`
-//!   materialized lazily on first mutation via `Arc::try_unwrap`
-//!   (cheap when only the tx holds the snapshot Arc) or a deep
-//!   clone.
+//!   materialized lazily on first mutation. Memory/mapped transactions clone
+//!   their stable BEGIN snapshot; disk transactions remap immutable bases and
+//!   copy only mutation overlays.
 //! - [`Session::commit`] performs the OCC version check + Arc
 //!   swap; returns [`CommitOutcome`] so the binding decides how to
 //!   surface conflicts to its consumers.
 
-use std::sync::{Arc, Mutex};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::KgError;
 use crate::graph::dir_graph::DirGraph;
+
+impl DirGraph {
+    /// Create a transaction working copy. Disk backends remap immutable base
+    /// arrays and inherit the serialized writer lineage; memory/mapped modes
+    /// retain their ordinary snapshot clone semantics.
+    pub(crate) fn fork_transaction(&self) -> Self {
+        let mut child = self.clone();
+        child.graph.adopt_transaction_lineage(&self.graph);
+        child
+    }
+}
 
 /// Shared graph state. Sessions live in bindings' top-level state
 /// (Python's `KnowledgeGraph.inner` is conceptually a Session; the
@@ -44,6 +56,31 @@ pub struct Session {
     /// Inner Arc allows cheap reader snapshots; outer Mutex allows
     /// atomic commit-swap.
     graph: Mutex<Arc<DirGraph>>,
+}
+
+/// Serialized mutable access to a Session graph. The guard holds the Session
+/// mutex for the complete write, so a uniquely-owned Arc mutates in place and
+/// a held reader snapshot triggers copy-on-write exactly once.
+pub struct SessionWriteGuard<'a> {
+    guard: MutexGuard<'a, Arc<DirGraph>>,
+}
+
+impl Deref for SessionWriteGuard<'_> {
+    type Target = DirGraph;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SessionWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if Arc::get_mut(&mut self.guard).is_none() {
+            let child = self.guard.fork_transaction();
+            *self.guard = Arc::new(child);
+        }
+        Arc::get_mut(&mut self.guard).expect("Session write guard owns the active graph")
+    }
 }
 
 impl Session {
@@ -78,6 +115,33 @@ impl Session {
     /// without going through [`begin`](Self::begin).
     pub fn version(&self) -> u64 {
         self.snapshot().version()
+    }
+
+    /// Lock the Session for one serialized mutation and return its mutable
+    /// graph view. Unlike `begin()` this does not first clone the Session's
+    /// Arc, so the unique mutable path is reachable when no reader snapshot
+    /// is alive. Readers that already hold a snapshot remain on the
+    /// prior graph; new snapshots wait for this short write guard.
+    pub fn write(&self) -> SessionWriteGuard<'_> {
+        SessionWriteGuard {
+            guard: self.graph.lock().unwrap_or_else(|p| p.into_inner()),
+        }
+    }
+
+    /// Run a detached serialized transaction under one Session lock. The
+    /// closure sees a transaction fork; success swaps it atomically and bumps
+    /// the live version once, while error drops it with no partial writes.
+    pub fn transact<T, E>(
+        &self,
+        operation: impl FnOnce(&mut DirGraph) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut guard = self.graph.lock().unwrap_or_else(|p| p.into_inner());
+        let current_version = guard.version();
+        let mut working = guard.fork_transaction();
+        let value = operation(&mut working)?;
+        working.set_version(current_version + 1);
+        *guard = Arc::new(working);
+        Ok(value)
     }
 
     /// Begin a new read-write transaction. The snapshot is taken
@@ -167,8 +231,8 @@ impl Session {
 /// - **Initial / read-only-after-begin**: `snapshot: Some, working:
 ///   None`. Reads route through `snapshot`. No clone cost.
 /// - **After first mutation**: `snapshot: None, working: Some`. The
-///   snapshot Arc gets consumed via `Arc::try_unwrap` (free when no
-///   other refs) or `(*arc).clone()` (deep copy fallback). Reads
+///   snapshot Arc is consumed. An owned snapshot can move directly; otherwise
+///   the backend-specific transaction fork preserves isolation. Reads
 ///   and writes both route through `working`.
 /// - **After commit / rollback**: `snapshot: None, working: None`.
 ///   Calls to `current()` or `working_mut()` fail with
@@ -231,9 +295,10 @@ impl Transaction {
             let snap = self.snapshot.take().ok_or_else(|| {
                 KgError::Argument("transaction already committed or rolled back".to_string())
             })?;
-            // Free when this tx holds the only Arc ref; deep clone
-            // otherwise. Same shape as pyapi/transaction.rs:210.
-            let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| (*arc).clone());
+            // Move an unusually unique snapshot directly; normal Session/KG
+            // transactions retain an owner Arc and therefore use the
+            // backend-specific transaction fork.
+            let working = Arc::try_unwrap(snap).unwrap_or_else(|arc| arc.fork_transaction());
             self.working = Some(working);
         }
         Ok(self
@@ -294,6 +359,129 @@ mod tests {
         let snap2 = s.snapshot();
         // Both Arcs point at the same inner DirGraph.
         assert!(Arc::ptr_eq(&snap1, &snap2));
+    }
+
+    #[test]
+    fn serialized_write_uses_unique_arc_in_place() {
+        use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
+
+        for mode in [StorageMode::Memory, StorageMode::Mapped] {
+            let s = Session::new(new_dir_graph_in_mode(mode, None).unwrap());
+            let before = {
+                let guard = s.graph.lock().unwrap();
+                Arc::as_ptr(&guard)
+            };
+            {
+                let mut graph = s.write();
+                graph.bump_version();
+            }
+            let after = {
+                let guard = s.graph.lock().unwrap();
+                Arc::as_ptr(&guard)
+            };
+            assert_eq!(
+                before, after,
+                "unique Session write must not clone the graph"
+            );
+            assert_eq!(s.version(), 1);
+        }
+    }
+
+    #[test]
+    fn serialized_execute_skips_checkpoint_for_proven_single_node_create() {
+        use crate::graph::session::execute::{execute_mut, ExecuteOptions};
+        use crate::graph::storage::backend::{backend_clone_count, reset_backend_clone_count};
+
+        let params = std::collections::HashMap::new();
+        let mut opts = ExecuteOptions::eager(&params);
+        opts.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+
+        let unique = Session::new(empty_graph());
+        reset_backend_clone_count();
+        execute_mut(&mut unique.write(), "CREATE (:N {id: 1})", &opts).unwrap();
+        assert_eq!(
+            backend_clone_count(),
+            0,
+            "proven single-node CREATE must not clone a uniquely-owned graph"
+        );
+
+        let shared = Session::new(empty_graph());
+        let _reader = shared.snapshot();
+        reset_backend_clone_count();
+        execute_mut(&mut shared.write(), "CREATE (:N {id: 1})", &opts).unwrap();
+        assert_eq!(
+            backend_clone_count(),
+            1,
+            "held reader needs only the working fork, not a second checkpoint"
+        );
+
+        let checkpointed = Session::new(empty_graph());
+        reset_backend_clone_count();
+        execute_mut(
+            &mut checkpointed.write(),
+            "CREATE (:N {id: 1}), (:N {id: 2})",
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(
+            backend_clone_count(),
+            1,
+            "multi-element CREATE must retain its atomic rollback checkpoint"
+        );
+
+        reset_backend_clone_count();
+        execute_mut(
+            &mut checkpointed.write(),
+            "MATCH (n:N {id: 1}) DELETE n",
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(
+            backend_clone_count(),
+            0,
+            "terminal preflighted DELETE must not clone the graph"
+        );
+    }
+
+    #[test]
+    fn serialized_write_forks_when_reader_snapshot_is_held() {
+        let s = Session::new(empty_graph());
+        let old = s.snapshot();
+        {
+            let mut graph = s.write();
+            graph.bump_version();
+        }
+        let current = s.snapshot();
+        assert!(!Arc::ptr_eq(&old, &current));
+        assert_eq!(old.version(), 0);
+        assert_eq!(current.version(), 1);
+    }
+
+    #[test]
+    fn serialized_transaction_swaps_once_or_discards_on_error() {
+        let s = Session::new(empty_graph());
+        let old = s.snapshot();
+        let value = s
+            .transact(|working| {
+                working.bump_version();
+                working.bump_version();
+                Ok::<_, &'static str>(42)
+            })
+            .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(s.version(), 1, "one transaction is one committed version");
+        assert_eq!(old.version(), 0);
+
+        let failed = s.transact(|working| {
+            working.bump_version();
+            Err::<(), _>("cancelled")
+        });
+        assert_eq!(failed, Err("cancelled"));
+        assert_eq!(
+            s.version(),
+            1,
+            "failed transaction must not reach the live Arc"
+        );
     }
 
     #[test]

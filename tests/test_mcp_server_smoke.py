@@ -9,9 +9,10 @@ Tests are skipped when the binary isn't built. Build it with::
 
     cargo build -p kglite-mcp-server --release
 
-GitHub-token-gated tools (`github_issues`, `github_api`) are exercised
-when ``GITHUB_TOKEN`` is set in the environment, OR when a sibling
-``mcp-methods/.env`` exists with one (the same walk-up mcp-server does).
+GitHub-token-gated tool registration is exercised with synthetic tokens.
+Requests to the live GitHub API additionally require the explicit
+``KGLITE_GITHUB_INTEGRATION=1`` opt-in and a reachable ``GITHUB_TOKEN``
+(including the sibling ``mcp-methods/.env`` lookup the server performs).
 """
 
 from __future__ import annotations
@@ -64,6 +65,11 @@ def _discover_github_token() -> Optional[str]:
 
 
 GITHUB_TOKEN = _discover_github_token()
+
+
+def _github_live_enabled() -> bool:
+    """Live GitHub calls require an explicit opt-in as well as a token."""
+    return os.environ.get("KGLITE_GITHUB_INTEGRATION") == "1" and GITHUB_TOKEN is not None
 
 
 # ── Fixture builders ──────────────────────────────────────────────────────
@@ -236,6 +242,27 @@ def _text_content(result: dict[str, Any]) -> str:
     parts = result.get("content", [])
     text_parts = [p["text"] for p in parts if p.get("type") == "text"]
     return "\n".join(text_parts)
+
+
+def _validate_github_user_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Validate the stable subset of the ``github_api`` user response contract.
+
+    This is deliberately a response-shape validator, not an HTTP mock: the
+    network client lives in the external ``mcp-methods`` crate.
+    """
+    payload = json.loads(_text_content(result))
+    assert isinstance(payload.get("login"), str) and payload["login"]
+    assert isinstance(payload.get("id"), int)
+    assert isinstance(payload.get("html_url"), str) and payload["html_url"].startswith("https://")
+    return payload
+
+
+def _validate_github_issues_response(result: dict[str, Any]) -> str:
+    """Validate the text contract exposed by ``github_issues``."""
+    text = _text_content(result).strip()
+    assert text
+    assert "error" not in text.lower()[:80]
+    return text
 
 
 # ── Test: --graph mode (kglite-side tools + ping) ─────────────────────────
@@ -572,8 +599,8 @@ class TestGithubTools:
             client.shutdown()
 
     @pytest.mark.skipif(
-        GITHUB_TOKEN is None,
-        reason="No GITHUB_TOKEN reachable.",
+        not _github_live_enabled(),
+        reason="set KGLITE_GITHUB_INTEGRATION=1 and provide GITHUB_TOKEN to run live GitHub calls",
     )
     def test_github_api_call(self, graph_fixture: Path):
         """Live GitHub call against a stable public endpoint."""
@@ -584,14 +611,14 @@ class TestGithubTools:
         try:
             # 'octocat' is GitHub's mascot account — stable since forever.
             r = client.call_tool("github_api", {"path": "users/octocat"})
-            text = _text_content(r)
-            assert "octocat" in text.lower()
+            payload = _validate_github_user_response(r)
+            assert payload["login"].lower() == "octocat"
         finally:
             client.shutdown()
 
     @pytest.mark.skipif(
-        GITHUB_TOKEN is None,
-        reason="No GITHUB_TOKEN reachable.",
+        not _github_live_enabled(),
+        reason="set KGLITE_GITHUB_INTEGRATION=1 and provide GITHUB_TOKEN to run live GitHub calls",
     )
     def test_github_issues_search(self, graph_fixture: Path):
         client = _spawn(
@@ -604,11 +631,10 @@ class TestGithubTools:
                 "github_issues",
                 {"query": "bug", "repo_name": "rust-lang/rust", "limit": 3},
             )
-            text = _text_content(r)
+            text = _validate_github_issues_response(r)
             # Search response should mention the repo or at least produce
             # non-empty output (not the no-token error).
-            assert text.strip(), "github_issues returned empty body"
-            assert "error" not in text.lower()[:80]
+            assert text
         finally:
             client.shutdown()
 

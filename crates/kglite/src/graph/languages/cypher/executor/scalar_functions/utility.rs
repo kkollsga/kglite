@@ -184,15 +184,11 @@ impl<'a> CypherExecutor<'a> {
                 // NULL = open-ended boundary
                 let from_ok = match &from_val {
                     Value::Null => true,
-                    _ => {
-                        evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &date_val, None)?
-                    }
+                    _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &date_val)?,
                 };
                 let to_ok = match &to_val {
                     Value::Null => true,
-                    _ => {
-                        evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &date_val, None)?
-                    }
+                    _ => evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &date_val)?,
                 };
                 Ok(Value::Boolean(from_ok && to_ok))
             }
@@ -228,16 +224,11 @@ impl<'a> CypherExecutor<'a> {
                 // Overlap: entity.from <= query_end AND entity.to >= query_start
                 let from_ok = match &from_val {
                     Value::Null => true,
-                    _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &end_val, None)?,
+                    _ => evaluate_comparison(&from_val, &ComparisonOp::LessThanEq, &end_val)?,
                 };
                 let to_ok = match &to_val {
                     Value::Null => true,
-                    _ => evaluate_comparison(
-                        &to_val,
-                        &ComparisonOp::GreaterThanEq,
-                        &start_val,
-                        None,
-                    )?,
+                    _ => evaluate_comparison(&to_val, &ComparisonOp::GreaterThanEq, &start_val)?,
                 };
                 Ok(Value::Boolean(from_ok && to_ok))
             }

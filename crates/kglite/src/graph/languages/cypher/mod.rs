@@ -136,10 +136,13 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
         rows.push(vec![Value::Int64(step), Value::String(operation), est]);
     }
 
-    // (Optimisation tags collected here in the previous tree; kept
-    // as a metadata-row placeholder for future EXPLAIN extensions.
-    // Behavior unchanged from pre-G state — these tags were
-    // collected but not yet surfaced into the result rows.)
+    for pass in &query.optimizer_tags {
+        rows.push(vec![
+            Value::Int64((rows.len() + 1) as i64),
+            Value::String(format!("OptimizerPass {pass}")),
+            Value::Null,
+        ]);
+    }
 
     result::CypherResult {
         columns: vec!["step".into(), "operation".into(), "estimated_rows".into()],

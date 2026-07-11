@@ -36,6 +36,47 @@ struct InlineConfig {
     column_list: Vec<String>,
 }
 
+fn validate_interner_names<'a>(
+    graph: &DirGraph,
+    names: impl IntoIterator<Item = &'a str>,
+) -> PyResult<()> {
+    graph
+        .interner
+        .validate_names(names)
+        .map(|_| ())
+        .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))
+}
+
+fn collect_bulk_connection_names(
+    connections: &Bound<'_, PyList>,
+    loaded_types: &std::collections::HashSet<String>,
+    filter_to_loaded: bool,
+) -> PyResult<Vec<String>> {
+    let mut names = Vec::new();
+    for item in connections.iter() {
+        let spec = item.cast::<PyDict>()?;
+        let required = |key: &str| -> PyResult<Bound<'_, PyAny>> {
+            spec.get_item(key)?.ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "Missing '{key}' in connection spec"
+                ))
+            })
+        };
+        let source_type: String = required("source_type")?.extract()?;
+        let target_type: String = required("target_type")?.extract()?;
+        let connection_name: String = required("connection_name")?.extract()?;
+        let data = required("data")?;
+        if filter_to_loaded
+            && (!loaded_types.contains(&source_type) || !loaded_types.contains(&target_type))
+        {
+            continue;
+        }
+        names.extend([source_type, target_type, connection_name]);
+        names.extend(data.getattr("columns")?.extract::<Vec<String>>()?);
+    }
+    Ok(names)
+}
+
 /// Build the internal DataFrame for a connection ingest from a pandas
 /// frame (the `data` mode shared by `add_connections` and
 /// `replace_connections`). Returns the columnar DataFrame plus any
@@ -74,53 +115,16 @@ fn build_connection_df_from_pandas(
         default_cols.push(col.as_str());
     }
 
-    // enforce_columns=true: connection ingests whitelist their edge props.
+    // Match add_nodes: without an explicit whitelist, preserve every DataFrame
+    // column except those named in skip_columns. Passing columns=[...] keeps
+    // the explicit whitelist behavior.
     let column_list = py_in::ensure_columns(
         &all_columns,
         &default_cols,
         columns,
         skip_columns,
-        Some(true),
+        Some(false),
     )?;
-
-    // Footgun mitigation: with no explicit `columns=`, the whitelist keeps only
-    // id/title (+ column_types) columns and silently drops every other edge
-    // property — asymmetric with `add_nodes`, which keeps them. Warn once,
-    // naming the dropped columns, so the drop is visible. Columns the caller
-    // explicitly listed in `skip_columns` are intentional and not reported.
-    if columns.is_none() {
-        let skip_set: Vec<String> = match skip_columns {
-            Some(list) => list
-                .iter()
-                .map(|item| item.extract::<String>())
-                .collect::<PyResult<_>>()?,
-            None => Vec::new(),
-        };
-        let dropped: Vec<&str> = all_columns
-            .iter()
-            .filter(|c| !column_list.contains(c) && !skip_set.contains(c))
-            .map(|c| c.as_str())
-            .collect();
-        if !dropped.is_empty() {
-            let msg = format!(
-                "add_connections: {} edge column(s) dropped because no columns= \
-                 whitelist was given: [{}]. Pass columns=[...] to keep them \
-                 (unlike add_nodes, add_connections keeps only id/title columns \
-                 by default).",
-                dropped.len(),
-                dropped.join(", "),
-            );
-            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
-            let _ = PyErr::warn(
-                data.py(),
-                data.py()
-                    .get_type::<pyo3::exceptions::PyUserWarning>()
-                    .as_any(),
-                cmsg.as_c_str(),
-                1,
-            );
-        }
-    }
 
     // Parse temporal column_types (validFrom/validTo → datetime)
     let py = data.py();
@@ -269,6 +273,15 @@ fn write_connections(
             }
         }
 
+        let mut names = vec![
+            connection_type.as_str(),
+            source_type.as_str(),
+            target_type.as_str(),
+        ];
+        let frame_names = df_result.get_column_names();
+        names.extend(frame_names.iter().map(String::as_str));
+        validate_interner_names(&inner_clone, names)?;
+
         // Drop the Arc clone so Arc::make_mut in get_graph_mut doesn't
         // need to deep-copy the entire graph (refcount goes back to 1).
         drop(inner_clone);
@@ -326,6 +339,15 @@ fn write_connections(
         column_types,
     )?;
 
+    let mut names = vec![
+        connection_type.as_str(),
+        source_type.as_str(),
+        target_type.as_str(),
+    ];
+    let frame_names = df_result.get_column_names();
+    names.extend(frame_names.iter().map(String::as_str));
+    validate_interner_names(&kg.inner, names)?;
+
     let graph = get_graph_mut(&mut kg.inner);
 
     let result = if replace {
@@ -372,7 +394,9 @@ fn write_connections(
 
     // Disk mode: build CSR from pending edges so queries work immediately
     let graph = get_graph_mut(&mut kg.inner);
-    graph.ensure_disk_edges_built();
+    graph
+        .ensure_disk_edges_built()
+        .map_err(pyo3::exceptions::PyOSError::new_err)?;
 
     kg.add_report(OperationReport::ConnectionOperation(result.clone()));
 
@@ -604,8 +628,13 @@ fn apply_batch_labels<'py>(
     graph.build_id_index(node_type);
     let label_keys: Vec<kglite_core::api::InternedKey> = labels
         .iter()
-        .map(|l| graph.interner.get_or_intern(l))
-        .collect();
+        .map(|l| {
+            graph
+                .interner
+                .try_get_or_intern(l)
+                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))
+        })
+        .collect::<PyResult<_>>()?;
     let id_series = data.get_item(unique_id_field)?;
     let nrows: usize = data.getattr("shape")?.get_item(0)?.extract()?;
     for i in 0..nrows {
@@ -978,6 +1007,13 @@ impl KnowledgeGraph {
             nullable_int_downcast,
         )?;
 
+        let mut names = vec![node_type.as_str()];
+        names.extend(parsed.column_list.iter().map(String::as_str));
+        if let Some(label_list) = labels.as_ref() {
+            names.extend(label_list.iter().map(String::as_str));
+        }
+        validate_interner_names(&self.inner, names)?;
+
         let graph = get_graph_mut(&mut self.inner);
         let result = apply_node_batch(
             graph,
@@ -1159,7 +1195,8 @@ impl KnowledgeGraph {
     ///     target_id_field: Column containing target node IDs.
     ///     source_title_field: Optional column to update source node titles.
     ///     target_title_field: Optional column to update target node titles.
-    ///     columns: Whitelist of columns to include as edge properties (data mode only).
+    ///     columns: Optional edge-property whitelist (data mode only). None keeps all
+    ///         non-skipped DataFrame columns, matching add_nodes.
     ///     skip_columns: Columns to exclude from edge properties (data mode only).
     ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
     ///     column_types: Override column type detection (data mode only).
@@ -1244,7 +1281,8 @@ impl KnowledgeGraph {
     ///     target_id_field: Column containing target node IDs.
     ///     source_title_field: Optional column to update source node titles.
     ///     target_title_field: Optional column to update target node titles.
-    ///     columns: Whitelist of columns to include as edge properties (data mode only).
+    ///     columns: Optional edge-property whitelist (data mode only). None keeps all
+    ///         non-skipped DataFrame columns, matching add_nodes.
     ///     skip_columns: Columns to exclude from edge properties (data mode only).
     ///     conflict_handling: 'update' (default), 'replace', 'skip', or 'preserve'.
     ///     column_types: Override column type detection (data mode only).
@@ -1337,6 +1375,7 @@ impl KnowledgeGraph {
         ids: &Bound<'_, PyList>,
         label: &str,
     ) -> PyResult<Py<PyAny>> {
+        validate_interner_names(&self.inner, [label])?;
         let g = Arc::make_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1345,7 +1384,10 @@ impl KnowledgeGraph {
             )));
         }
         g.build_id_index(node_type);
-        let key = g.interner.get_or_intern(label);
+        let key = g
+            .interner
+            .try_get_or_intern(label)
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))?;
         let mut labelled = 0usize;
         let mut skipped = 0usize;
         for item in ids.iter() {
@@ -1388,6 +1430,7 @@ impl KnowledgeGraph {
         ids: &Bound<'_, PyList>,
         label: &str,
     ) -> PyResult<Py<PyAny>> {
+        validate_interner_names(&self.inner, [label])?;
         let g = Arc::make_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1396,7 +1439,10 @@ impl KnowledgeGraph {
             )));
         }
         g.build_id_index(node_type);
-        let key = g.interner.get_or_intern(label);
+        let key = g
+            .interner
+            .try_get_or_intern(label)
+            .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::from(e)))?;
         let mut removed = 0usize;
         let mut skipped = 0usize;
         for item in ids.iter() {
@@ -1595,6 +1641,8 @@ impl KnowledgeGraph {
         } else {
             std::collections::HashSet::new()
         };
+        let names = collect_bulk_connection_names(connections, &loaded_types, filter_to_loaded)?;
+        validate_interner_names(&self.inner, names.iter().map(String::as_str))?;
 
         for item in connections.iter() {
             let spec = item.cast::<PyDict>()?;

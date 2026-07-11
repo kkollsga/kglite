@@ -54,11 +54,18 @@ const ABI_PATCH: u32 = parse_u32(env!("CARGO_PKG_VERSION_PATCH"));
 /// ```
 #[no_mangle]
 pub extern "C" fn kglite_abi_version() -> KgliteAbiVersion {
-    KgliteAbiVersion {
-        major: ABI_MAJOR,
-        minor: ABI_MINOR,
-        patch: ABI_PATCH,
-    }
+    crate::ffi::value_boundary(
+        KgliteAbiVersion {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        },
+        || KgliteAbiVersion {
+            major: ABI_MAJOR,
+            minor: ABI_MINOR,
+            patch: ABI_PATCH,
+        },
+    )
 }
 
 #[cfg(test)]

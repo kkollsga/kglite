@@ -28,7 +28,7 @@ import re
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SRC_GRAPH = REPO_ROOT / "src" / "graph"
+SRC_GRAPH = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
 
 # ── God-file gate ──────────────────────────────────────────────────────────
 #
@@ -36,23 +36,7 @@ SRC_GRAPH = REPO_ROOT / "src" / "graph"
 # carry a rationale + the 0.9.0+ follow-up plan.
 HARD_CAP = 2500
 
-GOD_FILE_EXCEPTIONS: dict[str, str] = {
-    # 0.9.0 follow-up: both files grew with Cypher dialect work
-    # (multi-MATCH spatial fusion, count-subquery, size() pattern-expr,
-    # NULLS LAST sort in heap_top_k, polygon-vs-polygon fast path).
-    # Splitting them would touch the executor/planner critical paths
-    # mid-release. Tracked for 0.9.x as "executor split into per-clause
-    # subfiles" + "planner fusion split into one file per fusion shape".
-    "languages/cypher/executor/match_clause.rs": (
-        "0.9.x split: extract pattern-execution helpers + the streaming "
-        "match orchestration into peer files (`match_executor.rs`, "
-        "`match_stream.rs`)."
-    ),
-    "languages/cypher/planner/fusion.rs": (
-        "0.9.x split: one file per fusion shape — fuse_spatial_join, "
-        "fuse_topk, fuse_aggregate_pushdown, fuse_simplification."
-    ),
-}
+GOD_FILE_EXCEPTIONS: dict[str, str] = {}
 
 
 def _relative_rs_path(path: Path) -> str:
@@ -75,6 +59,19 @@ def test_god_file_gate():
             "with a written rationale and 0.9.0+ follow-up plan."
         )
         pytest.fail(msg)
+
+
+def test_god_file_exceptions_are_not_stale():
+    """Exceptions must name an existing file that still exceeds the cap."""
+    stale: list[str] = []
+    for rel in GOD_FILE_EXCEPTIONS:
+        path = SRC_GRAPH / rel
+        if not path.is_file():
+            stale.append(f"{rel}: file no longer exists")
+        elif len(path.read_text().splitlines()) <= HARD_CAP:
+            stale.append(f"{rel}: file is now within the {HARD_CAP}-line cap")
+    if stale:
+        pytest.fail("Stale god-file exception(s):\n" + "\n".join(f"  {item}" for item in stale))
 
 
 UNSAFE_OPEN = re.compile(r"unsafe\s*\{")

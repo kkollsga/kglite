@@ -410,13 +410,9 @@ pub fn apply<'q>(
         })
         .collect();
 
-    let mut row_count = 0u64;
-    for row_result in upstream {
+    for (row_count, row_result) in upstream.enumerate() {
         let row = row_result?;
-        row_count += 1;
-        if row_count.is_multiple_of(4096) {
-            executor.check_deadline()?;
-        }
+        executor.check_interrupt_periodic(row_count)?;
 
         let key_parts: Vec<GroupKeyPart> = strategies
             .iter()
@@ -476,7 +472,8 @@ pub fn apply<'q>(
     // half of `execute_return_with_aggregation` (~lines 279-316). One
     // disk read per (NodeIndex, slot) pair, deduplicated.
     let mut resolved_node_props: HashMap<(NodeIndex, usize), Value> = HashMap::new();
-    for (key_parts, _) in &surrogate_groups {
+    for (group_idx, (key_parts, _)) in surrogate_groups.iter().enumerate() {
+        executor.check_interrupt_periodic(group_idx)?;
         for (slot, part) in key_parts.iter().enumerate() {
             if let GroupKeyPart::NodeProp(idx) = part {
                 resolved_node_props.entry((*idx, slot)).or_insert_with(|| {
@@ -489,7 +486,8 @@ pub fn apply<'q>(
     let mut groups: Vec<(Vec<Value>, GroupAcc)> = Vec::new();
     let mut group_index_map: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
 
-    for (key_parts, acc) in surrogate_groups {
+    for (group_idx, (key_parts, acc)) in surrogate_groups.into_iter().enumerate() {
+        executor.check_interrupt_periodic(group_idx)?;
         let resolved: Vec<Value> = key_parts
             .iter()
             .enumerate()
@@ -525,7 +523,8 @@ pub fn apply<'q>(
         .collect();
 
     let mut output_rows: Vec<ResultRow> = Vec::with_capacity(groups.len());
-    for (resolved_keys, acc) in &groups {
+    for (group_idx, (resolved_keys, acc)) in groups.iter().enumerate() {
+        executor.check_interrupt_periodic(group_idx)?;
         let mut projected = Bindings::with_capacity(return_clause.items.len());
 
         for (ki, &item_idx) in group_indices.iter().enumerate() {

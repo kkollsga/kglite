@@ -41,9 +41,9 @@
 //! Argument validation: `ArgumentError`, `MissingArgumentError` —
 //! subclass `KgError`.
 //!
-//! Internal: `InternalError` — subclass `KgError`. Reserved for
-//! invariants that should never trip (e.g. node-binding lookup that
-//! was guaranteed by upstream pattern match).
+//! Internal identity: `InternerCollisionError` reports a rejected persisted
+//! name-key collision. `InternalError` is reserved for invariants that should
+//! never trip (e.g. node-binding lookup guaranteed by upstream pattern match).
 
 use std::fmt;
 use std::path::PathBuf;
@@ -51,6 +51,7 @@ use std::path::PathBuf;
 use crate::graph::blueprint::expr::ExprError;
 use crate::graph::languages::cypher::planner::schema_check::SchemaError;
 use crate::graph::schema::ValidationError;
+use crate::graph::storage::interner::InternerCollision;
 
 // ─── KgErrorCode ─────────────────────────────────────────────────────────────
 
@@ -325,6 +326,10 @@ pub enum KgError {
     /// A required argument wasn't passed.
     MissingArgument(String),
 
+    /// Two distinct names mapped to the same persisted u64 interner key. The
+    /// existing mapping is retained; callers must reject the operation.
+    InternerCollision(InternerCollision),
+
     // ── Internal ─────────────────────────────────────────────────────
     /// An invariant was violated. Reserved for "should never happen"
     /// — e.g. a node-binding lookup whose existence was guaranteed by
@@ -386,6 +391,7 @@ impl KgError {
             KgError::FileIo(_) => KgErrorCode::FileIo,
             KgError::InvalidArgument { .. } | KgError::Argument(_) => KgErrorCode::InvalidArgument,
             KgError::MissingArgument(_) => KgErrorCode::MissingArgument,
+            KgError::InternerCollision(_) => KgErrorCode::Internal,
             KgError::Internal { .. } => KgErrorCode::Internal,
         }
     }
@@ -477,6 +483,7 @@ impl fmt::Display for KgError {
             ),
             KgError::Argument(message) => write!(f, "Invalid argument: {}", message),
             KgError::MissingArgument(name) => write!(f, "Missing required argument: {}", name),
+            KgError::InternerCollision(collision) => collision.fmt(f),
             KgError::Internal { message, location } => {
                 write!(f, "Internal error at {}: {}", location, message)
             }
@@ -488,6 +495,7 @@ impl std::error::Error for KgError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             KgError::FileIo(e) => Some(e),
+            KgError::InternerCollision(e) => Some(e),
             _ => None,
         }
     }
@@ -527,6 +535,12 @@ impl From<std::io::Error> for KgError {
             }
             _ => KgError::FileIo(e),
         }
+    }
+}
+
+impl From<InternerCollision> for KgError {
+    fn from(e: InternerCollision) -> Self {
+        KgError::InternerCollision(e)
     }
 }
 

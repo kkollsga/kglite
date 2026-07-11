@@ -283,3 +283,33 @@ class TestTransactionRollbackHardening:
         tx.cypher("UNWIND range(1, 200000) AS i CREATE (:N {id: i})")
         tx.commit()
         assert _count(g) == 200000
+
+    def test_disk_commit_and_rollback_after_prior_write(self, tmp_path):
+        path = str(tmp_path / "disk-transactions")
+        g = kglite.KnowledgeGraph(storage="disk", path=path)
+        g.cypher("CREATE (:N {id: 1})")
+
+        committed = g.begin()
+        committed.cypher("CREATE (:N {id: 2})")
+        committed.commit()
+        assert _count(g) == 2
+
+        rolled_back = g.begin()
+        rolled_back.cypher("CREATE (:N {id: 3})")
+        assert _count(rolled_back) == 3
+        rolled_back.rollback()
+        assert _count(g) == 2
+        g.save(path)
+        reloaded = kglite.load(path)
+        assert _count(reloaded) == 2
+
+        winner = g.begin()
+        loser = g.begin()
+        winner.cypher("CREATE (:N {id: 10})")
+        loser.cypher("CREATE (:N {id: 20})")
+        winner.commit()
+        with pytest.raises(Exception, match="conflict"):
+            loser.commit()
+        assert _count(g) == 3
+        g.cypher("CREATE (:N {id: 30})")
+        assert _count(g) == 4

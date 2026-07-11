@@ -5,6 +5,126 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.12.15] - 2026-07-11
+
+### Added
+
+- **`EXPLAIN` now reports which optimizer passes actually changed the plan.**
+  `OptimizerPass <name>` rows follow the physical plan and disappear when the
+  corresponding pass is disabled, providing a deterministic rewrite oracle.
+
+### Performance
+
+- **Trivial in-memory writes no longer clone the entire graph for rollback.**
+  Standalone single-node `CREATE` and terminal variable-only `DELETE` complete
+  all validation and interruption checks before entering an infallible commit
+  phase. On the 50k-node regression fixture, a CREATE+DELETE cycle falls from
+  milliseconds to single-digit microseconds while complex, budgeted, mapped,
+  disk, and durable mutations retain their full atomic checkpoint.
+- **`LIMIT` now caps unfiltered node-only cartesian matches before expansion.**
+  A representative 10k-node two-label query returning 20 rows falls from
+  roughly 2.8 seconds to 10 µs. Correlated, filtered, ordered, multi-MATCH,
+  and relationship patterns retain the conservative materialized path.
+- **Ungrouped one- and two-hop `count(*)` queries now count paths directly.**
+  The aggregate planner reuses the exact per-endpoint counters instead of
+  materializing every matched path. A 30k-node, 90k-edge two-hop count falls
+  from roughly 41 ms to 3.4 ms while repeated-variable patterns retain the
+  binding-aware executor.
+
+### Fixed
+
+- **Interned names can no longer silently alias on a hash collision.** Release
+  and debug builds detect conflicting strings, ingestion preflights complete
+  batches before mutation, Cypher surfaces a typed collision error, and
+  malformed persisted interners fail as file-format errors. The deterministic
+  FNV u64 representation and ordinary saved-file bytes remain unchanged.
+- **Python edge ingestion now preserves properties by default, and vector
+  DataFrame results propagate conversion failures.** `add_connections` and
+  `replace_connections` without `columns=` retain all non-skipped DataFrame
+  columns, matching `add_nodes`; vector search no longer substitutes `None`
+  when Python value conversion or dictionary insertion fails.
+- **NetworkX export now preserves columnar node properties and same-type
+  parallel edges.** Mapped/disk and reloaded graphs export custom attributes,
+  while duplicate endpoint/type edges receive collision-safe keys instead of
+  overwriting each other in `MultiDiGraph`.
+- **C ABI failures now produce deterministic outputs and cannot unwind into
+  host runtimes.** Every export initializes its output slots before validation;
+  valid-call Rust panics map to `Internal` with owned error text, while direct
+  accessors and destructors return their documented fallback without aborting.
+- **Session writes now use real ownership-aware copy-on-write.** Unique
+  memory/mapped Session writes mutate without the previously inevitable
+  transaction fork; held readers retain their stable snapshot, and concurrent
+  C auto-commit writers serialize without losing updates.
+- **Disk-backed Session and explicit transaction writes now work after prior
+  mutations.** Transaction forks retain their writer lineage, use distinct
+  overlay workspaces, and remap immutable CSR arrays instead of copying an
+  entire disk graph into heap memory.
+- **Fused top-K operators now preserve stable ordering at equal-score cutoffs.**
+  Vector, text-score, and generic top-K plans retain the earlier input row when
+  values tie, matching the unfused stable `ORDER BY ... LIMIT` result.
+- **Property-valued grouping no longer enters a node-keyed aggregate fusion.**
+  `MATCH ... RETURN n.property, count(...)` now stays on the value-grouping
+  path, so equal values across distinct nodes collapse into one correctly
+  counted group instead of producing duplicate under-counted rows.
+
+- **Concurrent disk-backed Cypher reads no longer invalidate each other's
+  materialized nodes or edges.** Disk arena reclamation is now tied to the
+  complete query lifetime and deferred while overlapping or nested readers are
+  active, preventing incorrect rows and use-after-free failures under load.
+- **Packed typed columns are now alignment-safe and portable.** Fixed-width
+  values are decoded from arbitrary byte slices using checked little-endian
+  primitives rather than aligned native pointer reads, and saves emit canonical
+  little-endian bytes on every architecture.
+- **Malformed `.kgl` files now fail safely and predictably.** Section sizes and
+  offsets use checked slicing, decompression has a bounded streaming limit,
+  column row counts must agree with topology, string offsets and UTF-8 are
+  validated, and serialized names can no longer influence temporary paths.
+- **Disk index files are now fully validated before use.** Type, ID, legacy,
+  and property indexes reject malformed headers, counts, variants, ranges,
+  ordering, duplicates, invalid text, and corrupt general-index payloads;
+  integer arrays are read and written as alignment-independent little-endian
+  bytes on every architecture.
+- **N-Triples input failures can no longer masquerade as clean EOF.** Reader
+  and decompressor errors, invalid UTF-8 in accepted entity lines, and reader
+  or parallel-bzip2 worker panics now propagate as load errors instead of
+  returning success with a partial import.
+- **Disk persistence now reports artifact failures instead of publishing an
+  incomplete save.** CSR construction and swapping, auxiliary indexes,
+  sidecars, trims, N-Triples finalisation, and property-index rebuilds now
+  propagate write errors; graph completion metadata is published last and a
+  failed save remains dirty and retryable.
+- **Disk saves now publish immutable generations atomically.** Readers resolve
+  one `CURRENT` snapshot for their lifetime, mutations use private overlays,
+  and an exclusive cross-process writer lease prevents concurrent writers from
+  altering or publishing over one another. Interrupted saves leave the prior
+  generation selected and retry safely without exposing partial artifacts.
+- **Persistent property-index names are now collision-resistant and exact.**
+  SHA-256-addressed bundles carry validated type/property identities, so
+  punctuation, Unicode, underscores, and case-distinct names no longer
+  overwrite or masquerade as one another. Legacy bundles remain readable by
+  exact request, and dropping a disk index is persisted in a new generation.
+- **`max_rows` now guards the complete Cypher execution, including writes.**
+  UNWIND, UNION/set operations, CALL procedures and subqueries, joins, fused
+  and streaming plans, and retained aggregate collections share one execution
+  budget. Exceeding it raises an error without truncation and rolls back the
+  whole mutation statement. Python transactions and the C ABI now expose the
+  same bounded-write behavior.
+- **Range and temporal arithmetic now reject unsafe magnitudes cleanly.**
+  `range()` preflights inclusive cardinality, allocation size, execution
+  budget, and integer stepping before materializing. Date/calendar shifts
+  return NULL when unrepresentable, while Duration construction, addition,
+  subtraction, and integer scaling use checked components and raise a typed
+  Cypher error instead of narrowing, wrapping, panicking, or exhausting memory.
+- **Regex evaluation and long-running Cypher loops are now resource-bounded.**
+  Both `=~` and `text_match_regex()` share a poison-tolerant 128-entry cache;
+  regex programs have a 2 MiB compiled-size limit and misses compile outside
+  the lock. Range/UNWIND expansion, aggregation, set operations, subquery joins,
+  fused two-hop counts, clustering/property procedures, result conversion, and
+  mutation row loops now poll timeout and cancellation at least every 4,096
+  work units. Interrupted session mutations still roll back atomically.
+
 ## [0.12.14] - 2026-07-10
 
 ### Changed

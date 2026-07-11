@@ -120,6 +120,43 @@ class TestConcurrentReads:
         for i, got in enumerate(worker_results):
             assert got == baseline, f"worker {i} diverged from sequential baseline"
 
+    def test_concurrent_disk_reads_keep_materialized_nodes_alive(self, tmp_path):
+        """Overlapping disk queries must not reclaim another query's node arena."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        graph = kglite.KnowledgeGraph(storage="disk", path=str(tmp_path / "concurrent-disk"))
+        node_count = 400
+        graph.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": range(node_count),
+                    "title": [f"Node {i}" for i in range(node_count)],
+                    "payload": [f"payload-{i:04d}-" * 8 for i in range(node_count)],
+                }
+            ),
+            "Item",
+            "id",
+            "title",
+        )
+
+        query = "MATCH (n:Item) RETURN n ORDER BY n.id"
+        baseline = list(graph.cypher(query))
+        assert len(baseline) == node_count
+
+        workers = 8
+        rounds = 12
+        barrier = threading.Barrier(workers)
+
+        def read_repeatedly():
+            for _ in range(rounds):
+                barrier.wait(timeout=10)
+                assert list(graph.cypher(query)) == baseline
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(read_repeatedly) for _ in range(workers)]
+            for future in futures:
+                future.result(timeout=30)
+
 
 class TestReadWriteIsolation:
     """Reads and writes don't interfere."""

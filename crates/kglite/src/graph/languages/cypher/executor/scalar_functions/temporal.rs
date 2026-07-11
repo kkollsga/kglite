@@ -108,20 +108,27 @@ impl<'a> CypherExecutor<'a> {
                         let v = self.evaluate_expression(expr, row)?;
                         let n = match v {
                             Value::Int64(n) => n,
-                            Value::Float64(f) => f as i64,
+                            Value::Float64(f)
+                                if f.is_finite()
+                                    && f.fract() == 0.0
+                                    && f >= i64::MIN as f64
+                                    && f < -(i64::MIN as f64) =>
+                            {
+                                f as i64
+                            }
                             Value::Null => 0,
                             _ => {
                                 return Err(format!("duration({{{key}: ...}}) expects a number"));
                             }
                         };
                         match key.as_str() {
-                            "years" => months += n * 12,
-                            "months" => months += n,
-                            "weeks" => days += n * 7,
-                            "days" => days += n,
-                            "hours" => seconds += n * 3600,
-                            "minutes" => seconds += n * 60,
-                            "seconds" => seconds += n,
+                            "years" => checked_component_add(&mut months, n, 12, "years")?,
+                            "months" => checked_component_add(&mut months, n, 1, "months")?,
+                            "weeks" => checked_component_add(&mut days, n, 7, "weeks")?,
+                            "days" => checked_component_add(&mut days, n, 1, "days")?,
+                            "hours" => checked_component_add(&mut seconds, n, 3600, "hours")?,
+                            "minutes" => checked_component_add(&mut seconds, n, 60, "minutes")?,
+                            "seconds" => checked_component_add(&mut seconds, n, 1, "seconds")?,
                             other => {
                                 return Err(format!(
                                     "duration(): unknown key '{other}' (expected years/months/weeks/days/hours/minutes/seconds)"
@@ -130,8 +137,12 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                     Ok(Value::Duration {
-                        months: months as i32,
-                        days: days as i32,
+                        months: i32::try_from(months).map_err(|_| {
+                            "duration() calendar months exceed the supported i32 range"
+                        })?,
+                        days: i32::try_from(days).map_err(|_| {
+                            "duration() calendar days exceed the supported i32 range"
+                        })?,
                         seconds,
                     })
                 } else {
@@ -155,7 +166,9 @@ impl<'a> CypherExecutor<'a> {
                         let total_secs = (end - start).num_seconds();
                         Ok(Value::Duration {
                             months: 0,
-                            days: (total_secs / 86_400) as i32,
+                            days: i32::try_from(total_secs / 86_400).map_err(|_| {
+                                "duration.between() day component exceeds the supported i32 range"
+                            })?,
                             seconds: total_secs % 86_400,
                         })
                     }
@@ -176,7 +189,9 @@ impl<'a> CypherExecutor<'a> {
                 let n = self.evaluate_expression(&args[1], row)?;
                 match (&d, &n) {
                     (Value::DateTime(date), Value::Int64(n)) => {
-                        match date.checked_add_signed(chrono::Duration::days(*n)) {
+                        match chrono::TimeDelta::try_days(*n)
+                            .and_then(|delta| date.checked_add_signed(delta))
+                        {
                             Some(out) => Ok(Value::DateTime(out)),
                             None => Ok(Value::Null),
                         }
@@ -193,11 +208,7 @@ impl<'a> CypherExecutor<'a> {
                 let n = self.evaluate_expression(&args[1], row)?;
                 match (&d, &n) {
                     (Value::DateTime(date), Value::Int64(n)) => {
-                        let result = if *n >= 0 {
-                            date.checked_add_months(chrono::Months::new(*n as u32))
-                        } else {
-                            date.checked_sub_months(chrono::Months::new((-*n) as u32))
-                        };
+                        let result = checked_shift_months(*date, *n);
                         match result {
                             Some(out) => Ok(Value::DateTime(out)),
                             None => Ok(Value::Null),
@@ -217,12 +228,9 @@ impl<'a> CypherExecutor<'a> {
                     (Value::DateTime(date), Value::Int64(n)) => {
                         // 12 months per year — chrono's Months handles
                         // leap-year edge case (Feb 29 + 1 year → Feb 28).
-                        let months_delta = n.saturating_mul(12);
-                        let result = if months_delta >= 0 {
-                            date.checked_add_months(chrono::Months::new(months_delta as u32))
-                        } else {
-                            date.checked_sub_months(chrono::Months::new((-months_delta) as u32))
-                        };
+                        let result = n
+                            .checked_mul(12)
+                            .and_then(|months_delta| checked_shift_months(*date, months_delta));
                         match result {
                             Some(out) => Ok(Value::DateTime(out)),
                             None => Ok(Value::Null),
@@ -272,5 +280,32 @@ impl<'a> CypherExecutor<'a> {
             _ => return Ok(None),
         };
         result.map(Some)
+    }
+}
+
+fn checked_component_add(
+    total: &mut i64,
+    value: i64,
+    scale: i64,
+    component: &str,
+) -> Result<(), String> {
+    let scaled = value
+        .checked_mul(scale)
+        .ok_or_else(|| format!("duration() {component} component overflow"))?;
+    *total = total
+        .checked_add(scaled)
+        .ok_or_else(|| format!("duration() {component} component overflow"))?;
+    Ok(())
+}
+
+/// Shift a date by a signed month delta without negating `i64::MIN` or
+/// narrowing a file/query-controlled value to `u32`.
+fn checked_shift_months(date: chrono::NaiveDate, delta: i64) -> Option<chrono::NaiveDate> {
+    if delta >= 0 {
+        let magnitude = u32::try_from(delta).ok()?;
+        date.checked_add_months(chrono::Months::new(magnitude))
+    } else {
+        let magnitude = u32::try_from(delta.unsigned_abs()).ok()?;
+        date.checked_sub_months(chrono::Months::new(magnitude))
     }
 }

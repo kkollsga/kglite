@@ -1484,7 +1484,12 @@ fn cluster_traversal(
     let assignments = match algorithm {
         "kmeans" => {
             let k_val = k.ok_or("method='cluster' with algorithm='kmeans' requires k parameter")?;
-            crate::graph::algorithms::clustering::kmeans(&feature_matrix, k_val, 100)
+            crate::graph::algorithms::clustering::kmeans(
+                &feature_matrix,
+                k_val,
+                100,
+                crate::graph::algorithms::Interrupt::default(),
+            )
         }
         "dbscan" => {
             let eps_val =
@@ -1514,13 +1519,24 @@ fn cluster_traversal(
                     .iter()
                     .map(|row| (row[lat_idx], row[lon_idx]))
                     .collect();
-                crate::graph::algorithms::clustering::haversine_distance_matrix(&coords)
+                crate::graph::algorithms::clustering::haversine_distance_matrix(
+                    &coords,
+                    crate::graph::algorithms::Interrupt::default(),
+                )
             } else {
                 let mut feat_clone = feature_matrix.clone();
                 crate::graph::algorithms::clustering::normalize_features(&mut feat_clone);
-                crate::graph::algorithms::clustering::euclidean_distance_matrix(&feat_clone)
+                crate::graph::algorithms::clustering::euclidean_distance_matrix(
+                    &feat_clone,
+                    crate::graph::algorithms::Interrupt::default(),
+                )
             };
-            crate::graph::algorithms::clustering::dbscan(&distances, eps_val, min_pts)
+            crate::graph::algorithms::clustering::dbscan(
+                &distances,
+                eps_val,
+                min_pts,
+                crate::graph::algorithms::Interrupt::default(),
+            )
         }
         _ => {
             return Err(format!(

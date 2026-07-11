@@ -100,54 +100,60 @@ pub unsafe extern "C" fn kglite_datasets_sodir_fetch_all(
     out_report_json: *mut *const c_char,
     out_error_msg: *mut *const c_char,
 ) -> KgliteStatusCode {
-    if workdir_path.is_null() || datasets_json.is_null() || out_report_json.is_null() {
-        return KgliteStatusCode::NullPointer;
-    }
-    let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let datasets_str = match unsafe { CStr::from_ptr(datasets_json) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return KgliteStatusCode::InvalidUtf8,
-    };
-    let datasets: Vec<String> = match serde_json::from_str(datasets_str) {
-        Ok(v) => v,
-        Err(_) => return KgliteStatusCode::InvalidArgument,
-    };
+    crate::ffi::status_boundary(
+        out_error_msg,
+        || crate::ffi::init_out(out_report_json, std::ptr::null()),
+        || {
+            if workdir_path.is_null() || datasets_json.is_null() || out_report_json.is_null() {
+                return KgliteStatusCode::NullPointer;
+            }
+            let workdir_str = match unsafe { CStr::from_ptr(workdir_path) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let datasets_str = match unsafe { CStr::from_ptr(datasets_json) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return KgliteStatusCode::InvalidUtf8,
+            };
+            let datasets: Vec<String> = match serde_json::from_str(datasets_str) {
+                Ok(v) => v,
+                Err(_) => return KgliteStatusCode::InvalidArgument,
+            };
 
-    let workdir = Workdir::new(workdir_str);
-    match fetch_all(
-        &workdir,
-        &datasets,
-        index_cooldown_days,
-        dataset_cooldown_days,
-        concurrency,
-    ) {
-        Ok(report) => {
-            let json = serialize_fetch_all_report(&report);
-            unsafe {
-                *out_report_json = alloc_c_string(&json);
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = std::ptr::null();
+            let workdir = Workdir::new(workdir_str);
+            match fetch_all(
+                &workdir,
+                &datasets,
+                index_cooldown_days,
+                dataset_cooldown_days,
+                concurrency,
+            ) {
+                Ok(report) => {
+                    let json = serialize_fetch_all_report(&report);
+                    unsafe {
+                        *out_report_json = alloc_c_string(&json);
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = std::ptr::null();
+                        }
+                    }
+                    KgliteStatusCode::Ok
+                }
+                Err(err) => {
+                    unsafe {
+                        *out_report_json = std::ptr::null();
+                    }
+                    if !out_error_msg.is_null() {
+                        unsafe {
+                            *out_error_msg = alloc_c_string(&err.to_string());
+                        }
+                    }
+                    KgliteStatusCode::Internal
                 }
             }
-            KgliteStatusCode::Ok
-        }
-        Err(err) => {
-            unsafe {
-                *out_report_json = std::ptr::null();
-            }
-            if !out_error_msg.is_null() {
-                unsafe {
-                    *out_error_msg = alloc_c_string(&err.to_string());
-                }
-            }
-            KgliteStatusCode::Internal
-        }
-    }
+        },
+    )
 }
 
 /// Hand-build the report JSON. We don't add `Serialize` derives

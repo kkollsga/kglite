@@ -12,6 +12,7 @@ shared-handle failure mode that panicked on a shared live `KnowledgeGraph`.
 import threading
 
 import pandas as pd
+import pytest
 
 import kglite
 
@@ -101,6 +102,33 @@ def test_session_execute_basic_write():
     assert title == "edited"
     s.execute("MATCH (n:Doc {id: 99}) DELETE n")
     assert _count(s) == 2
+
+
+def test_disk_session_reuses_writer_lineage_and_composes(tmp_path):
+    path = str(tmp_path / "disk-session")
+    g = kglite.KnowledgeGraph(storage="disk", path=path)
+    g.cypher("CREATE (:Doc {id: 1, title: 'base'})")
+    s = g.session()
+    old = s.snapshot()
+
+    s.execute("CREATE (:Doc {id: 2, title: 'second'})")
+    s.execute("CREATE (:Doc {id: 3, title: 'third'})")
+
+    assert _count(s) == 3
+    assert _count(old) == 1
+    held = s.snapshot()
+    s.execute("MATCH (n:Doc {id: 2}) SET n.title = 'edited'")
+    assert held.cypher("MATCH (n:Doc {id: 2}) RETURN n.title AS t").to_list()[0]["t"] == "second"
+
+    with pytest.raises(Exception):
+        s.execute(
+            "MATCH (n:Doc {id: 2}) SET n.title = 'leaked' WITH [1, 2, 3] AS xs UNWIND xs AS x RETURN x",
+            max_rows=1,
+        )
+    s.execute("CREATE (:Doc {id: 4, title: 'after-error'})")
+    assert _count(s) == 4
+    title = s.cypher("MATCH (n:Doc {id: 2}) RETURN n.title AS t").to_list()[0]["t"]
+    assert title == "edited"
 
 
 def test_session_execute_read_fastpath():

@@ -1,4 +1,4 @@
-"""God-file size gate: reject new Rust source files larger than 3000 LoC.
+"""God-file size gate: reject new Rust source files larger than 2500 LoC.
 
 Phase A.3 / 0.9.53 code-rot audit found one file (`cypher/planner/fusion.rs`)
 already past 3000 LoC. The user explicitly accepted that as a deferred
@@ -24,9 +24,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_DIRS = [REPO_ROOT / "crates" / "kglite-py" / "src", REPO_ROOT / "crates" / "kglite" / "src"]
 
-# Default cap. CLAUDE.md says compartmentalize aggressively; 3000 is a soft
-# upper bound — most files should be well under 1500.
-DEFAULT_LIMIT = 3000
+# Hard cap ratcheted down by the library-hardening decomposition. Most files
+# should remain well under the 1500-line soft target.
+DEFAULT_LIMIT = 2500
 
 # Per-file ceilings for files known to be over the default. Each entry pins
 # the CURRENT line count so the file can't grow further without an explicit
@@ -49,7 +49,7 @@ def _rel_path(path: Path) -> str:
 
 
 def test_no_new_god_files():
-    """Fail if any .rs file under src/ exceeds 3000 LoC without an allowlist
+    """Fail if any .rs file under src/ exceeds 2500 LoC without an allowlist
     entry, or if an allowlisted file exceeds its pinned ceiling."""
     violations: list[str] = []
     rs_files = []

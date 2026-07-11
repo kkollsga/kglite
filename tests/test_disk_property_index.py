@@ -2,9 +2,8 @@
 
 Verifies that ``create_index`` on a ``storage='disk'`` graph:
   1. Succeeds and reports ``persistent=True``.
-  2. Writes four ``property_index_*`` files next to the CSR (in
-     ``seg_000/`` under PR1 phase 4's segmented layout; at the graph
-     root for pre-phase-4 directories).
+  2. Publishes four ``property_index_*`` files next to the CSR in an
+     immutable generation when the graph is saved.
   3. Is consulted by the Cypher planner on ``WHERE n.prop = 'X'`` queries.
   4. Survives a save/load roundtrip (lazy-loaded on first lookup).
 """
@@ -39,6 +38,12 @@ def _build_disk_graph(path: str) -> KnowledgeGraph:
     return g
 
 
+def _published_snapshot(path: str) -> Path:
+    root = Path(path)
+    generation = (root / "CURRENT").read_text().strip()
+    return root / "generations" / generation
+
+
 class TestPersistentIndexBuild:
     def test_create_index_reports_persistent_on_disk(self, disk_dir):
         g = _build_disk_graph(disk_dir)
@@ -50,15 +55,69 @@ class TestPersistentIndexBuild:
     def test_create_index_writes_files_to_disk(self, disk_dir):
         g = _build_disk_graph(disk_dir)
         g.create_index("Country", "label")
-        # PR1 phase 4: property-index files live alongside the CSR in
-        # seg_000/ for fresh graphs. Legacy flat-layout directories
-        # would have them at the root — check whichever matches.
-        d = Path(disk_dir)
-        csr_dir = d / "seg_000" if (d / "seg_000").exists() else d
-        assert (csr_dir / "property_index_Country_label_meta.bin").exists()
-        assert (csr_dir / "property_index_Country_label_keys.bin").exists()
-        assert (csr_dir / "property_index_Country_label_offsets.bin").exists()
-        assert (csr_dir / "property_index_Country_label_ids.bin").exists()
+        g.save(disk_dir)
+        # Mutation-time index files remain private until save atomically
+        # publishes a complete immutable generation.
+        csr_dir = _published_snapshot(disk_dir) / "seg_000"
+        meta = next(csr_dir.glob("property_index_v2_*_meta.bin"))
+        stem = meta.name.removesuffix("_meta.bin")
+        assert (csr_dir / f"{stem}_keys.bin").exists()
+        assert (csr_dir / f"{stem}_offsets.bin").exists()
+        assert (csr_dir / f"{stem}_ids.bin").exists()
+
+
+class TestCollisionFreeIdentity:
+    def test_former_delimiter_collision_round_trips_independently(self, disk_dir):
+        g = KnowledgeGraph(storage="disk", path=disk_dir)
+        g.add_nodes(pd.DataFrame({"id": ["L"], "c": ["left"]}), "a_b", "id", "id")
+        g.add_nodes(pd.DataFrame({"id": ["R"], "b_c": ["right"]}), "a", "id", "id")
+        g.create_index("a_b", "c")
+        g.create_index("a", "b_c")
+        g.save(disk_dir)
+        first_snapshot = _published_snapshot(disk_dir)
+        meta_files = sorted((first_snapshot / "seg_000").glob("property_index_v2_*_meta.bin"))
+        assert len(meta_files) == 2
+        assert all(len(path.name) < 128 for path in meta_files)
+        del g
+
+        reloaded = load(disk_dir)
+        left = reloaded.cypher("MATCH (n:a_b {c: 'left'}) RETURN n.id").to_list()
+        right = reloaded.cypher("MATCH (n:a {b_c: 'right'}) RETURN n.id").to_list()
+        assert left == [{"n.id": "L"}]
+        assert right == [{"n.id": "R"}]
+        reloaded.save(disk_dir)
+        import json
+
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
+        pairs = {(entry[0], entry[1]) for entry in manifest["segments"][0]["indexed_prop_ranges"]}
+        assert pairs == {
+            (_fnv1a_64("a_b"), _fnv1a_64("c")),
+            (_fnv1a_64("a"), _fnv1a_64("b_c")),
+        }
+
+    def test_drop_one_index_publishes_removal_without_touching_other(self, disk_dir):
+        g = KnowledgeGraph(storage="disk", path=disk_dir)
+        g.add_nodes(pd.DataFrame({"id": ["L"], "c": ["left"]}), "a_b", "id", "id")
+        g.add_nodes(pd.DataFrame({"id": ["R"], "b_c": ["right"]}), "a", "id", "id")
+        g.create_index("a_b", "c")
+        g.create_index("a", "b_c")
+        g.save(disk_dir)
+        first_snapshot = _published_snapshot(disk_dir)
+        first_files = {path.name: path.read_bytes() for path in (first_snapshot / "seg_000").iterdir()}
+        del g
+
+        writer = load(disk_dir)
+        assert writer.drop_index("a_b", "c") is True
+        writer.save(disk_dir)
+        second_snapshot = _published_snapshot(disk_dir)
+        assert first_snapshot != second_snapshot
+        assert {path.name: path.read_bytes() for path in (first_snapshot / "seg_000").iterdir()} == first_files
+        assert len(list((second_snapshot / "seg_000").glob("property_index_v2_*_meta.bin"))) == 1
+        del writer
+
+        newest = load(disk_dir)
+        assert newest.cypher("MATCH (n:a {b_c: 'right'}) RETURN n.id").to_list() == [{"n.id": "R"}]
+        assert newest.drop_index("a_b", "c") is False
 
 
 class TestPlannerRoutesToIndex:
@@ -253,7 +312,7 @@ class TestSegmentManifestRecordsIndexes:
         g.save(disk_dir)
         del g
 
-        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
         assert len(manifest["segments"]) == 1
         ranges = manifest["segments"][0]["indexed_prop_ranges"]
         # Expect exactly one entry for (Country, label) as StringBloomPlaceholder.
@@ -269,7 +328,7 @@ class TestSegmentManifestRecordsIndexes:
 
         g = _build_disk_graph(disk_dir)
         g.save(disk_dir)
-        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
         assert manifest["segments"][0]["indexed_prop_ranges"] == []
 
     def test_manifest_survives_reload_and_resave(self, disk_dir):
@@ -288,7 +347,7 @@ class TestSegmentManifestRecordsIndexes:
         reloaded = load(disk_dir)
         reloaded.save(disk_dir)
 
-        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
         ranges = manifest["segments"][0]["indexed_prop_ranges"]
         t_hash = _fnv1a_64("Country")
         p_hash = _fnv1a_64("label")
@@ -313,6 +372,6 @@ class TestSegmentManifestRecordsIndexes:
         g.create_global_index("label")
         g.save(disk_dir)
 
-        manifest = json.loads((Path(disk_dir) / "seg_manifest.json").read_text())
+        manifest = json.loads((_published_snapshot(disk_dir) / "seg_manifest.json").read_text())
         # Only the global index was built — no per-type indexes.
         assert manifest["segments"][0]["indexed_prop_ranges"] == []
