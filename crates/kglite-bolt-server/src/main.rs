@@ -42,10 +42,9 @@ enum AuthScheme {
 #[command(
     name = "kglite-bolt-server",
     about = "Bolt v5.x protocol server for kglite knowledge graphs.",
-    long_about = "Loads a .kgl file and serves it over the Neo4j Bolt wire protocol \
-                  so any Neo4j-aware client (Cypher Shell, Neo4j Browser, the official \
-                  drivers, BloodHound, LangChain's Neo4jGraph, ...) can query it as if \
-                  it were a Neo4j instance. See bolt_implementation.md for the phase plan."
+    long_about = "Loads a .kgl file and serves it over the Neo4j Bolt wire protocol. \
+                  The official Python driver path is regression-tested; other Bolt v5 \
+                  clients are subject to KGLite's documented protocol and Cypher limits."
 )]
 struct Cli {
     /// Path to the graph to serve. An existing `.kgl` file or disk-graph

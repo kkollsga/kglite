@@ -1,5 +1,5 @@
 # kglite-bolt-server — serve a `.kgl` knowledge graph over the Bolt wire
-# protocol, so any Neo4j-compatible driver can query a kglite graph.
+# protocol; the Python Neo4j driver path is covered by automated tests.
 #
 # Multi-stage: compile the binary against the workspace in a Rust builder,
 # then ship just the binary on a slim Debian runtime. Build from the repo

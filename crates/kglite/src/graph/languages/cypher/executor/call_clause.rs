@@ -288,7 +288,15 @@ impl<'a> CypherExecutor<'a> {
     ) -> Result<ResultSet, String> {
         self.check_deadline()?;
 
-        let proc_name = clause.procedure_name.to_lowercase();
+        let raw_proc_name = clause.procedure_name.to_lowercase();
+        // Custom procedures are canonically documented under `kglite.*`.
+        // Flat names remain accepted to preserve the existing interface.
+        // `db.*` procedures are already in their established namespace and
+        // pass through unchanged.
+        let proc_name = raw_proc_name
+            .strip_prefix("kglite.")
+            .unwrap_or(raw_proc_name.as_str())
+            .to_string();
 
         // Validate YIELD columns
         let valid_yields: &[&str] = match proc_name.as_str() {

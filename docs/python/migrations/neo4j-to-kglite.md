@@ -224,7 +224,7 @@ Verified absent against 0.10.14:
 
 | Neo4j construct | KGLite status | Workaround |
 |---|---|---|
-| `FOREACH (x IN list \| ...)` | Not supported | `UNWIND list AS x` then `CREATE`/`SET` |
+| `FOREACH (x IN list \| ...)` | Supported | Updating bodies, including nested `FOREACH` |
 | `CALL { ... CREATE/SET/DELETE ... }` (writes in body) | Not supported (v1) | Do writes in a separate top-level clause; read subqueries **are** supported (see below) |
 | `CALL { ... UNION ... }` (UNION inside body) | Not supported (v1) | Top-level `UNION`, or combine separate `cypher()` results |
 | Unit `CALL { ... }` (no terminal `RETURN`) | Not supported (v1) | Body must end in `RETURN` |

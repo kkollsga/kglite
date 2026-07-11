@@ -1,7 +1,9 @@
 # Cypher Reference
 
-The Cypher KGLite supports — broad openCypher coverage, all running
-**in-process** (no server). For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
+KGLite's independently implemented Cypher dialect runs **in-process** (no
+server). It provides a tested openCypher-compatible subset plus explicitly
+classified KGLite and GQL-style extensions; it is not a complete openCypher or
+Neo4j implementation. For a quick overview, see the [Cypher guide](https://kglite.readthedocs.io/en/latest/guides/cypher.html).
 
 > **Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'` (`REMOVE n:Primary` errors deliberately).
 
@@ -1853,84 +1855,107 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |
 | **Operators** | `+`, `-`, `*`, `/`, `\|\|` (string concat), `=~` (regex), `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL` |
 
-## openCypher Compatibility Matrix
+## Cypher Dialect Contract
 
-Clause-by-clause comparison with the openCypher specification.
+The machine-readable source of truth is
+[`tests/api-baselines/cypher-dialect.json`](tests/api-baselines/cypher-dialect.json).
+KGLite is not a complete openCypher or Neo4j implementation.
+`Covered` below means the stated behavior is implemented and locked by local,
+independently authored tests. It is not a claim that every grammar production
+or edge case from an external conformance suite is implemented. `Partial`
+names a useful implementation with a known gap; `Extension` is outside the
+claimed openCypher-compatible subset.
 
 ### Clauses
 
 | Clause | Status | Notes |
 |--------|--------|-------|
-| `MATCH` | Full | Node patterns, relationship patterns, variable-length paths, `shortestPath` |
-| `OPTIONAL MATCH` | Full | Automatic fusion optimization with aggregation |
-| `WHERE` | Full | All comparison, logical, string, and pattern operators |
-| `RETURN` | Full | Aliases, `DISTINCT`, expressions, map projections, `HAVING` |
-| `WITH` | Full | Aggregation passthrough, grouping, chained subqueries |
-| `ORDER BY` | Full | Multi-column, `ASC`/`DESC`, fused top-k optimization |
-| `SKIP` / `LIMIT` | Full | |
-| `UNWIND` | Full | List expansion, works with `collect()` round-trips |
-| `UNION` / `UNION ALL` | Full | |
-| `CREATE` | Full | Nodes, relationships, inline properties |
-| `SET` | Full | `n.prop = expr`, `n += {map}` |
-| `DELETE` / `DETACH DELETE` | Full | |
-| `REMOVE` | Full | `REMOVE n.prop` — property removal |
-| `MERGE` | Full | `ON CREATE SET`, `ON MATCH SET` |
-| `EXPLAIN` | Full | Structured `ResultView` with cardinality estimates |
-| `PROFILE` | Full | Execute + per-clause stats (rows_in, rows_out, elapsed_us) |
-| `HAVING` | Full | Post-aggregation filter on `RETURN`/`WITH` |
-| `CALL ... YIELD` | Full | Built-in graph algorithm procedures |
+| `MATCH` | Partial | Node, relationship, variable-length, and shortest-path patterns; exact relationship uniqueness is tracked |
+| `OPTIONAL MATCH` | Covered | Null-extending optional patterns |
+| `WHERE` | Partial | Broad predicate support; remaining expression-level unknown propagation is tracked |
+| `RETURN` | Covered | Aliases, `DISTINCT`, expressions, and map projections |
+| `WITH` | Partial | Projection and grouping; strict scope validation is tracked |
+| `ORDER BY` | Covered | Multi-column, `ASC`/`DESC`, fused top-k optimization |
+| `SKIP` / `LIMIT` | Covered | |
+| `UNWIND` | Covered | List expansion, works with `collect()` round-trips |
+| `UNION` / `UNION ALL` | Covered | |
+| `CREATE` | Covered | Nodes, relationships, inline properties |
+| `SET` | Partial | Property and label assignment; complete map replacement/merge forms are tracked |
+| `DELETE` / `DETACH DELETE` | Covered | |
+| `REMOVE` | Covered | Property and secondary-label removal |
+| `MERGE` | Partial | `ON CREATE SET`, `ON MATCH SET`; null-property rejection is tracked |
+| `EXPLAIN` | Extension | KGLite-specific structured plan output |
+| `PROFILE` | Extension | KGLite-specific per-clause execution statistics |
+| `HAVING` | Extension | Post-aggregation filter on `RETURN`/`WITH` |
+| `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures |
 | `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See [`CALL { ... }` Subqueries](#call----subqueries) |
-| `FOREACH` | Not supported | Use `UNWIND` + `CREATE`/`SET` instead |
-| `LOAD CSV` | Not supported | By design — use Python `pandas`/`csv` for better control |
+| `FOREACH` | Covered | Updating bodies, including nested `FOREACH` |
+| `LOAD CSV` | Unsupported | Use Python, Rust, or blueprint ingestion APIs |
 
 ### Expressions & Operators
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Arithmetic (`+`, `-`, `*`, `/`) | Full | |
-| String concat (`\|\|`) | Full | Auto-converts non-strings |
-| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Full | Three-valued logic (Null = false) |
-| Boolean (`AND`, `OR`, `NOT`) | Full | |
-| `IS NULL` / `IS NOT NULL` | Full | Also works as expressions in RETURN/WITH |
-| `IN [list]` | Full | |
-| `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Full | |
-| `=~` regex | Full | Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
-| `CASE WHEN...THEN...ELSE...END` | Full | Simple and generic forms |
-| Parameter references (`$param`) | Full | In WHERE, pattern properties, and expressions |
-| List comprehensions (`[x IN list WHERE ... \| expr]`) | Full | |
-| List slicing (`expr[start..end]`) | Full | Open-ended, negative indices |
-| List quantifiers (`any/all/none/single(x IN list WHERE ...)`) | Full | |
-| `EXISTS { pattern WHERE ... }` | Full | Brace `{}`, parenthesis `(( ))`, inline pattern, with WHERE |
-| Map projections (`n {.prop1, .prop2}`) | Full | |
-| Map literals (`{key: expr}`) | Full | |
-| Variable binding in pattern properties | Full | `WITH val AS x MATCH ({prop: x})` |
-| Window functions (`OVER`) | Full | `row_number()`, `rank()`, `dense_rank()` with `PARTITION BY`/`ORDER BY` |
+| Arithmetic (`+`, `-`, `*`, `/`) | Partial | Numeric arithmetic is covered; list `+` is tracked |
+| String concat (`\|\|`) | Extension | Auto-converts non-strings |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core comparisons are covered; remaining unknown cases are tracked |
+| Boolean (`AND`, `OR`, `XOR`, `NOT`) | Partial | Complete expression placement and unknown propagation are tracked |
+| `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
+| `IN [list]` | Partial | Null-containing list semantics are tracked |
+| `CONTAINS` / `STARTS WITH` / `ENDS WITH` | Covered | |
+| `=~` regex | Covered | Shares a process-wide FIFO cache with `text_match_regex()` (128 entries; 2 MiB compiled-program limit; misses compile outside the lock) |
+| `CASE WHEN...THEN...ELSE...END` | Covered | Simple and generic forms |
+| Parameter references (`$param`) | Covered | In WHERE, pattern properties, and expressions |
+| List comprehensions (`[x IN list WHERE ... \| expr]`) | Covered | |
+| List slicing (`expr[start..end]`) | Covered | Open-ended, negative indices |
+| List quantifiers (`any/all/none/single(x IN list WHERE ...)`) | Partial | Unknown propagation is tracked |
+| `EXISTS { pattern WHERE ... }` | Covered | Brace `{}`, parenthesis `(( ))`, inline pattern, with WHERE |
+| Map projections (`n {.prop1, .prop2}`) | Covered | |
+| Map literals (`{key: expr}`) | Covered | |
+| Variable binding in pattern properties | Covered | `WITH val AS x MATCH ({prop: x})` |
+| Window functions (`OVER`) | Extension | `row_number()`, `rank()`, `dense_rank()` with `PARTITION BY`/`ORDER BY` |
 
 ### Scalar & Aggregation Functions
 
 | Function | Status | Notes |
 |----------|--------|-------|
-| `count(*)`, `count(expr)` | Full | With `DISTINCT` support |
-| `sum`, `avg`/`mean`, `min`, `max` | Full | |
-| `collect` | Full | |
-| `std` | Full | Standard deviation |
-| `toUpper`, `toLower`, `toString` | Full | |
-| `toInteger`, `toFloat` | Full | |
-| `size`, `length` | Full | Strings, lists, and paths |
-| `type(r)` | Full | Returns relationship type |
-| `id(n)` | Full | Returns node id |
-| `labels(n)` | Full | Returns the label list, primary type first (multi-label since 0.10.5) |
-| `keys(n)` / `keys(r)` | Full | Returns property names as JSON list |
-| `date(str)` / `datetime(str)` | Full | Parse date string to DateTime; `d.year`, `d.month`, `d.day` accessors; `date ± N`, `date - date`, `date_diff()` |
-| `coalesce` | Full | |
-| `range(start, end [, step])` | Full | Inclusive integer range |
-| `round(x [, precision])` | Full | |
-| `nodes(p)`, `relationships(p)` | Full | Path decomposition |
-| String functions | Full | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` — auto-coerce non-strings |
-| Math functions | Full | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
-| Trig functions | Full | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` — radians; NULL/non-numeric → NULL |
-| Spatial functions | Full | `point`, `distance`, `contains`, `intersects`, `centroid`, `area`, `perimeter` |
-| Temporal functions | Full | `valid_at`, `valid_during` — NULL = open-ended; `localdatetime`/`localtime`/`time` → ISO strings |
+| `count(*)`, `count(expr)` | Covered | With `DISTINCT` support |
+| `sum`, `avg`/`mean`, `min`, `max` | Covered | |
+| `collect` | Covered | |
+| `std` | Extension | Standard deviation helper |
+| `toUpper`, `toLower`, `toString` | Covered | |
+| `toInteger`, `toFloat` | Covered | |
+| `size`, `length` | Covered | Strings, lists, and paths |
+| `type(r)` | Covered | Returns relationship type |
+| `id(entity)` | Partial | Node identity is covered; relationship identity is tracked |
+| `labels(n)` | Intentional divergence | Primary type first, then secondary labels |
+| `keys(n)` / `keys(r)` | Covered | Returns property names |
+| `date(str)` / `datetime(str)` | Partial | KGLite's temporal value model and documented arithmetic subset |
+| `coalesce` | Covered | |
+| `range(start, end [, step])` | Covered | Inclusive integer range |
+| `round(x [, precision])` | Covered | |
+| `nodes(p)`, `relationships(p)` | Partial | Exact relationship identity for parallel/incoming paths is tracked |
+| String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
+| Math functions | Covered | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
+| Trig functions | Covered | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` |
+| Spatial functions | Extension | KGLite's pragmatic `point`, geometry, containment, and distance model |
+| Temporal functions | Extension | `valid_at`, `valid_during`, and KGLite temporal helpers |
+
+### Extensions and canonical names
+
+Custom callable features have canonical `kglite.*` spellings. Historical flat
+names remain accepted and execute the same AST, so existing applications keep
+all functionality while new integrations can distinguish extensions from the
+compatible subset.
+
+- `kglite.pagerank and related procedures` (legacy: flat procedure names)
+- `kglite.text_score / kglite.vector_score` (legacy: flat function names)
+- `kglite.geom_* and KGLite spatial helpers`
+- `kglite.ts_*`
+- `kglite.text_*`
+- `HAVING` and window functions using `OVER`
+- `INTERSECT / EXCEPT`
+- `EXPLAIN / PROFILE`
 
 ### Architectural Differences from Neo4j
 

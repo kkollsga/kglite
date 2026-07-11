@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Cypher compatibility claims now have an executable dialect contract.** A
+  machine-readable manifest classifies covered, partial, unsupported, extended,
+  and intentionally divergent behavior; public docs and agent introspection no
+  longer imply complete openCypher or Neo4j compatibility. KGLite functions and
+  procedures also accept canonical `kglite.*` names while existing flat names
+  remain equivalent.
+
 ## [0.12.15] - 2026-07-11
 
 ### Added

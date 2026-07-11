@@ -1,4 +1,4 @@
-# Cypher Conformance — On-Demand Check Against Neo4j
+# Cypher Compatibility — Independent Differential Checks
 
 KGLite ships a focused openCypher subset, not a Neo4j drop-in
 replacement. The regular test suite (CI) checks self-consistency:
@@ -6,15 +6,25 @@ optimizer-on vs optimizer-off (the differential corpus), and memory
 vs mapped vs disk (the parity oracles). Neither of those catches a
 bug where *every* code path is wrong in the same way.
 
-`scripts/cypher_conformance.py` is the absolute-correctness oracle —
-on-demand, opt-in, never wired into pytest or CI. When you suspect a
-semantic divergence (NULL handling, aggregate corner case, path
-operator behaviour), bring up Neo4j locally, run the script, get a
-PASS/FAIL report.
+`scripts/cypher_conformance.py` is an empirical differential oracle —
+on-demand, opt-in, never wired into pytest or CI. It compares independently
+authored KGLite queries with a selected Neo4j database. Agreement is useful
+evidence, but is not a standards certification and does not make Neo4j the
+definition of Cypher.
+
+## Clean-room test policy
+
+KGLite's committed compatibility cases are authored from neutral behavioral
+requirements and observed public interfaces. The repository does not vendor,
+copy, translate, execute, fetch, or depend on the Apache-licensed openCypher
+TCK, its Gherkin features, or upstream scenario text. This keeps KGLite's test
+implementation independent while preserving the externally observable
+language behavior we choose to support. The machine-readable claim boundary is
+[`tests/api-baselines/cypher-dialect.json`](../../tests/api-baselines/cypher-dialect.json).
 
 ## When to run it
 
-- After a non-trivial change to the Cypher executor (`src/graph/languages/cypher/executor/`).
+- After a non-trivial change to the Cypher executor (`crates/kglite/src/graph/languages/cypher/executor/`).
 - When triaging a "Neo4j gives X but KGLite gives Y" bug report.
 - Before claiming any specific Cypher behaviour is "openCypher-compliant" in docs or PRs.
 - Periodically — once per major release is a reasonable rhythm.
@@ -32,15 +42,17 @@ Not for:
 The runner reuses the existing differential corpus and the shared
 pytest fixtures:
 
-1. For each `(name, fixture, query, params)` in `DIFFERENTIAL_QUERIES`,
-   the script builds the fixture *once* via the `build_*` helpers in
-   `tests/conftest.py` and pushes it to Neo4j via the existing
-   `kglite.to_neo4j()` export.
+1. For each case in `DIFFERENTIAL_QUERIES`, the script activates the named
+   fixture via a plain `build_*` helper in `tests/conftest.py`. Whenever the
+   corpus changes fixtures — including when it returns to an earlier one — it
+   rebuilds KGLite and clears/re-exports the selected Neo4j database.
 2. The query runs on both KGLite and Neo4j.
-3. Results are normalised (row order ignored unless `ORDER BY` is
-   present) and compared.
-4. A summary plus per-failure detail (query text + first 5 rows from
-   each side + set diff) is printed.
+3. Columns and typed values (including nested graph, temporal, and spatial
+   values) are normalized. Duplicate rows are preserved; row order is ignored
+   unless the case marks it significant.
+4. Expected error categories and optional mutation side-effect probes are
+   compared separately, then a counter summary and per-failure detail are
+   printed.
 
 The same corpus is the per-PR differential gate's input, so both
 engines see identical queries.
@@ -68,24 +80,28 @@ Exit code: 0 if every query passes (modulo intentional divergences);
 ## Interpreting output
 
 ```
-  PASS   simple_match                            (5 rows)
-  SKIP   div_by_zero                             (intentional: KGLite returns NULL for x/0)
-  SKIP   wikidata_cohort                         (KGLite-only feature)
-  FAIL   ne_with_null                            kglite=3 rows, neo4j=5 rows
+summary: 201 checked — pass_result=199, fail_result=2,
+fixture_activation=19, skip_kglite_extension=4
+
+FAIL membership_unknown: columns or rows differ
+  query: RETURN null IN [1, null] AS result
+  kglite: ...
+  neo4j:  ...
 ```
 
-- `PASS` — row sets match. Either both are correct, or both wrong in
-  the same way (rare — the differential corpus would have caught
-  most "wrong in the same way" cases at PR time).
+- `pass_result` — columns and rows match for that independently authored case.
+  This is evidence for that behavior, not a completeness claim.
 - `SKIP (intentional)` — entry registered in
   `INTENTIONAL_DIVERGENCES` with a one-line rationale.
 - `SKIP (KGLite-only)` — query references a KGLite-only feature
   (e.g. `CALL kglite.affected_tests(...)`, `text_score(...)`,
   `FORMAT CSV`). Skipped because Neo4j has no equivalent.
-- `FAIL` — real divergence to investigate.
+- `FAIL` — a real divergence to investigate; it may be a KGLite defect, an
+  intentional dialect difference that needs registration, or a Neo4j-specific
+  behavior outside KGLite's claim.
 
-For each failure, the script prints both row sets (first 5) and a
-set diff highlighting rows present in only one side.
+For each failure, the script prints both canonical results without collapsing
+duplicates.
 
 ## Registering a deliberate divergence
 

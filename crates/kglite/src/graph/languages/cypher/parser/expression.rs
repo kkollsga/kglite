@@ -465,6 +465,14 @@ impl CypherParser {
         } else {
             name.to_ascii_lowercase()
         };
+        // KGLite extensions have a canonical namespace so they cannot be
+        // mistaken for language-standard functions. Keep accepting historical
+        // flat spellings by normalising both forms to the same AST; planner
+        // rewrites and execution therefore remain identical.
+        let name = name
+            .strip_prefix("kglite.")
+            .unwrap_or(name.as_str())
+            .to_string();
         self.expect(&CypherToken::LParen)?;
 
         // 0.9.0 §6 — `size(<pattern-expression>)` is the openCypher

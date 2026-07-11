@@ -13,10 +13,9 @@ description output, text export, diffs, and the interactive shell.
 
 ## Bolt server (Neo4j wire protocol)
 
-[`kglite-bolt-server`](bolt-server.md) speaks the Bolt v5.x wire
-protocol so any Neo4j-aware client (Neo4j Browser, BloodHound, the
-official drivers in Python / JS / Java / Go / .NET, LangChain's
-`Neo4jGraph`) plugs in unchanged.
+[`kglite-bolt-server`](bolt-server.md) speaks the Bolt v5.x wire protocol. The
+official Python driver path is regression-tested; other Bolt clients may
+connect, subject to KGLite's documented protocol and Cypher limits.
 
 After Phase F (2026-05-24):
 - `neo4j://` URIs work via single-server routing (`--advertise-addr`

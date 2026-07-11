@@ -1,6 +1,6 @@
 # KGLite
 
-The embedded openCypher engine for LLM-agent workloads. A knowledge
+An embedded Cypher dialect for LLM-agent workloads. A knowledge
 graph that runs inside your Python process — load data, query with
 Cypher, hand the graph to an agent via the bundled MCP server. No
 server to run, no infrastructure to manage, one `.kgl` file to ship.
@@ -14,8 +14,9 @@ engine. The `.kgl` file format is portable across all bindings.
 ```
 
 **Cypher** is the primary query surface — agents already know it, and
-the engine targets honest openCypher semantics (three-valued NULL
-logic, conformance-tested against Neo4j on demand). DataFrame
+the engine targets an explicitly documented openCypher-compatible subset
+(including three-valued NULL logic), checked with independently authored local
+contracts and optional Neo4j differential runs. DataFrame
 loaders `add_nodes()` / `add_connections()` exist to get bulk data
 in; once it's in, you query with Cypher.
 

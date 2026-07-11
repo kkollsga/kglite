@@ -4,10 +4,10 @@
 [![License: MIT](https://img.shields.io/crates/l/kglite-bolt-server)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 
 **Bolt v5.x protocol server for [kglite](https://crates.io/crates/kglite)
-knowledge graphs.** A pure-Rust single binary speaking the Neo4j
-wire protocol — the Neo4j driver ecosystem (Python / JS / Java /
-Go / .NET drivers, Cypher Shell, Neo4j Browser, BloodHound,
-LangChain's `Neo4jGraph`) plugs in unchanged.
+knowledge graphs.** A pure-Rust single binary speaking the Neo4j wire protocol.
+The official Python driver is regression-tested; other Bolt v5 clients may
+connect but can rely on features outside KGLite's documented wire and Cypher
+contracts.
 
 ```bash
 cargo install kglite-bolt-server
@@ -15,8 +15,8 @@ cargo install kglite-bolt-server
 kglite-bolt-server --graph my-graph.kgl --bind 127.0.0.1 --port 7687
 ```
 
-Then point any Neo4j-aware client at `bolt://localhost:7687` and
-run Cypher against the loaded `.kgl` graph.
+Then point a Bolt v5 client at `bolt://localhost:7687` and run KGLite's
+documented Cypher dialect against the loaded `.kgl` graph.
 
 ## Features (Phase F)
 

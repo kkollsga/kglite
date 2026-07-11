@@ -2,10 +2,10 @@
 
 The bolt-server is a pure-Rust binary that exposes a loaded kglite
 `.kgl` graph over the [Bolt v5 wire protocol](https://neo4j.com/docs/bolt/current/).
-Any Neo4j-aware client — the official Python/JS/Java/Go drivers,
-Cypher Shell, Neo4j Browser, BloodHound, LangChain's `Neo4jGraph` —
-can connect and run Cypher queries with **zero consumer-side
-changes**.
+The official Neo4j Python driver is regression-tested against this server.
+Other Bolt v5 clients may connect, but are not implied to be drop-in compatible:
+their discovery procedures, Cypher expectations, APOC usage, or UI assumptions
+can exceed KGLite's documented protocol and dialect contracts.
 
 ## Architecture
 
@@ -84,10 +84,9 @@ kglite-bolt-server \
 ## Connection URLs
 
 - **`bolt://host:port`** — direct connection. **Use this.**
-- **`neo4j://host:port`** — *routed* connection (cluster-aware).
-  Rejected: returns `Neo.ClientError.Request.Invalid` with the
-  message `routing not supported by kglite-bolt-server — connect
-  with bolt:// (direct) rather than neo4j:// (routed)`.
+- **`neo4j://host:port`** — routed connection using KGLite's single-server
+  routing table. Set `--advertise-addr` when the externally reachable address
+  differs from the bind address.
 
 ## Auth modes
 
@@ -157,7 +156,7 @@ manually before relying on them.
 |---|---|---|
 | `ServiceUnavailable: Failed to establish connection` | Server not running, or wrong port | Check `--bind` / `--port`; verify with `nc -z host port` |
 | `AuthError: invalid username or password` | `--auth basic` is on; driver sent wrong creds | Match driver's `auth=(...)` against the server's `--auth-user` / `--auth-pass` |
-| `ClientError: routing not supported ...` | Driver used `neo4j://` URI scheme | Switch to `bolt://` |
+| A routed client cannot reach the advertised address | `--advertise-addr` does not match the externally reachable host/port | Set `--advertise-addr HOST:PORT` or use a direct `bolt://` URI |
 | `ClientError: server is read-only — ...` | `--readonly` is on | Either start server without `--readonly` or use a read-only query |
 | `ClientError: empty Cypher query` | Whitespace-only or empty string sent | Check the query string isn't being silently truncated upstream |
 | `ClientError: multi-statement queries not supported` | Cypher with a `;` separator | Split into separate `session.run` calls, or use `BEGIN`/`COMMIT` to group |

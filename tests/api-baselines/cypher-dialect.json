@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "dialect": "KGLite Cypher",
+  "claim": "An independently implemented Cypher dialect with a tested openCypher-compatible subset and documented extensions; not a complete openCypher or Neo4j implementation.",
+  "status_definitions": {
+    "covered": "Implemented behavior is locked by KGLite-authored contract tests.",
+    "partial": "Useful behavior exists, but a documented semantic or syntactic gap remains.",
+    "extension": "KGLite behavior outside the claimed openCypher-compatible subset.",
+    "unsupported": "Rejected or deliberately not implemented.",
+    "intentional_divergence": "Supported behavior deliberately differs for KGLite's data model or runtime."
+  },
+  "features": [
+    {"id": "clause.match", "syntax": "MATCH", "status": "partial", "note": "Core patterns are supported; relationship uniqueness for repeated and variable-length patterns is being aligned."},
+    {"id": "clause.optional_match", "syntax": "OPTIONAL MATCH", "status": "covered", "note": "Null-extending optional pattern matches."},
+    {"id": "clause.where", "syntax": "WHERE", "status": "partial", "note": "Predicates are broad; the remaining expression-level three-valued cases are tracked explicitly."},
+    {"id": "clause.return", "syntax": "RETURN", "status": "covered", "note": "Projection, aliases, DISTINCT, and aggregation."},
+    {"id": "clause.with", "syntax": "WITH", "status": "partial", "note": "Projection and aggregation are supported; strict scope validation is being aligned."},
+    {"id": "clause.order", "syntax": "ORDER BY / SKIP / LIMIT", "status": "covered", "note": "Stable multi-key ordering and pagination."},
+    {"id": "clause.unwind", "syntax": "UNWIND", "status": "covered", "note": "List expansion including null and empty-list behavior."},
+    {"id": "clause.union", "syntax": "UNION / UNION ALL", "status": "covered", "note": "Duplicate-removing and duplicate-preserving set composition."},
+    {"id": "clause.create", "syntax": "CREATE", "status": "covered", "note": "Node and relationship creation with inline properties."},
+    {"id": "clause.set", "syntax": "SET", "status": "partial", "note": "Property and label updates are supported; complete map replacement/merge forms are tracked."},
+    {"id": "clause.delete", "syntax": "DELETE / DETACH DELETE / REMOVE", "status": "covered", "note": "Entity deletion, detach deletion, and property/label removal."},
+    {"id": "clause.merge", "syntax": "MERGE", "status": "partial", "note": "Pattern merge and ON CREATE/ON MATCH are supported; null-property rejection is tracked."},
+    {"id": "clause.foreach", "syntax": "FOREACH", "status": "covered", "note": "Updating bodies and nested FOREACH are supported."},
+    {"id": "clause.call_subquery", "syntax": "CALL { ... }", "status": "partial", "note": "Read subqueries support correlated importing WITH; unit, write, UNION-body, and IN TRANSACTIONS forms are not supported."},
+    {"id": "clause.load_csv", "syntax": "LOAD CSV", "status": "unsupported", "note": "Use the Python, Rust, or blueprint ingestion APIs."},
+    {"id": "expression.boolean", "syntax": "AND / OR / XOR / NOT", "status": "partial", "note": "Predicate forms exist; complete expression placement and unknown propagation are tracked."},
+    {"id": "expression.in", "syntax": "IN", "status": "partial", "note": "Membership is supported; null-containing list semantics are tracked."},
+    {"id": "expression.list", "syntax": "list literals, indexing, slicing, concatenation", "status": "partial", "note": "Core list values are supported; list + and strict index typing are tracked."},
+    {"id": "expression.quantifiers", "syntax": "any / all / none / single", "status": "partial", "note": "Quantifiers are supported; unknown propagation is tracked."},
+    {"id": "expression.case", "syntax": "CASE", "status": "covered", "note": "Simple and generic CASE forms."},
+    {"id": "path.values", "syntax": "nodes(p) / relationships(p)", "status": "partial", "note": "Path values exist; exact relationship identity for parallel and incoming edges is tracked."},
+    {"id": "function.id", "syntax": "id(entity)", "status": "partial", "note": "Node identity is supported; relationship identity is tracked."},
+    {"id": "model.labels", "syntax": "labels(n) / SET n:Label", "status": "intentional_divergence", "note": "KGLite stores one immutable primary type plus additive secondary labels; labels(n) returns primary type first."},
+    {"id": "transaction.model", "syntax": "transactions", "status": "intentional_divergence", "note": "Embedded snapshots and optimistic commit checking replace a remote database transaction service."}
+  ],
+  "extensions": [
+    {"id": "extension.namespace", "kind": "naming", "canonical": "kglite.*", "legacy": "flat names", "note": "KGLite functions and procedures accept canonical namespaced spellings; historical flat spellings remain equivalent."},
+    {"id": "extension.analytics", "kind": "procedure_family", "canonical": "kglite.pagerank and related procedures", "legacy": "pagerank and related flat names", "note": "Graph algorithms, rules, code analysis, and statistics procedures."},
+    {"id": "extension.semantic", "kind": "function_family", "canonical": "kglite.text_score / kglite.vector_score", "legacy": "text_score / vector_score", "note": "Embedding-backed semantic scoring."},
+    {"id": "extension.spatial", "kind": "function_family", "canonical": "kglite.geom_* and KGLite spatial helpers", "legacy": "flat function names", "note": "Pragmatic geometry and spatial helpers beyond the compatible subset."},
+    {"id": "extension.timeseries", "kind": "function_family", "canonical": "kglite.ts_*", "legacy": "ts_*", "note": "Time-series channel functions."},
+    {"id": "extension.text", "kind": "function_family", "canonical": "kglite.text_*", "legacy": "text_*", "note": "Text normalization, matching, token, and distance helpers."},
+    {"id": "extension.having", "kind": "clause", "canonical": "HAVING", "legacy": null, "note": "Post-aggregation filter accepted as a KGLite extension."},
+    {"id": "extension.window", "kind": "expression", "canonical": "OVER", "legacy": null, "note": "Window functions are a KGLite/GQL-style extension."},
+    {"id": "extension.set_operators", "kind": "clause", "canonical": "INTERSECT / EXCEPT", "legacy": null, "note": "Additional set operators outside the claimed openCypher-compatible subset."},
+    {"id": "extension.explain_profile", "kind": "clause", "canonical": "EXPLAIN / PROFILE", "legacy": null, "note": "KGLite plan and execution diagnostics; output shape is KGLite-specific."}
+  ]
+}
