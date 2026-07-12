@@ -970,6 +970,8 @@ impl core::marker::StructuralPartialEq for kglite::api::io::GraphFileIdentity
 pub struct kglite::api::io::GraphWriterLease
 impl kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> std::io::error::Result<Self>
+impl core::ops::drop::Drop for kglite::api::io::GraphWriterLease
+pub fn kglite::api::io::GraphWriterLease::drop(&mut self)
 pub struct kglite::api::io::ImportStats
 pub kglite::api::io::ImportStats::dropped_stores: usize
 pub kglite::api::io::ImportStats::imported: usize
