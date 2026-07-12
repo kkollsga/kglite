@@ -34,6 +34,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use kglite::api::io::OpenDisposition;
 use mcp_methods::server::manifest::{
     find_sibling_manifest, find_workspace_manifest, ManifestError,
 };
@@ -278,26 +279,14 @@ where
 
 /// Fail fast on bad mode-specific path arguments before any expensive setup.
 fn validate_mode_paths(mode: &Mode, cli: &Cli) -> Result<()> {
-    if let Mode::Graph { path } = mode {
+    if let Mode::Graph { .. } = mode {
         // Validate --storage up front (only used when creating a new graph).
         if let Some(s) = &cli.storage {
             StorageMode::parse(s).map_err(|e| anyhow::anyhow!(e))?;
         }
-        // An existing path must be a loadable .kgl file or disk-graph
-        // directory; a non-existent path errors unless --storage opts in to
-        // creating one (handled in bind_mode).
-        if path.exists() && !path.is_file() && !path.is_dir() {
-            anyhow::bail!(
-                "--graph path is neither a file nor a directory: {}",
-                path.display()
-            );
-        }
-        if !path.exists() && cli.storage.is_none() {
-            anyhow::bail!(
-                "--graph path does not exist: {} (pass --storage memory|mapped|disk to create one)",
-                path.display()
-            );
-        }
+        // Existence and open-vs-create are resolved exactly once by
+        // `open_or_create_graph` in bind_mode; checking here would introduce a
+        // second TOCTOU decision.
     }
     if let Mode::SourceRoot { dir } | Mode::Watch { dir } = mode {
         if !dir.is_dir() {
@@ -422,27 +411,26 @@ fn bind_mode(
 ) -> Result<ServerOptions> {
     match mode {
         Mode::Graph { path } => {
-            // Exists → load (auto-detect saved mode); absent → create fresh
-            // in --storage mode. Mirrors kglite.open(path, storage=...).
-            let base: PathBuf = if path.exists() {
-                let canon = path.canonicalize()?;
-                graph_state.load_kgl(&canon).context("kglite.load failed")?;
-                canon
+            let create_mode = cli
+                .storage
+                .as_deref()
+                .map(StorageMode::parse)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let disposition = graph_state
+                .open_or_create(path, create_mode)
+                .context("kglite graph open/create failed")?;
+            tracing::info!(
+                path = %path.display(),
+                disposition = match disposition {
+                    OpenDisposition::Opened => "opened",
+                    OpenDisposition::Created => "created",
+                },
+                "graph ready"
+            );
+            let base = if disposition == OpenDisposition::Opened {
+                path.canonicalize().unwrap_or_else(|_| path.clone())
             } else {
-                // validate_mode_paths guarantees --storage is set when the
-                // path is missing (else it already bailed with a clean error).
-                let mode_str = cli.storage.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("--graph path does not exist: {}", path.display())
-                })?;
-                let smode = StorageMode::parse(mode_str).map_err(|e| anyhow::anyhow!(e))?;
-                tracing::info!(
-                    path = %path.display(),
-                    storage = smode.as_str(),
-                    "--graph path does not exist; creating new empty graph"
-                );
-                graph_state
-                    .create_in_mode(path, smode)
-                    .context("kglite create-in-mode failed")?;
                 path.clone()
             };
             // P1 (operator feedback): honor the manifest's explicit

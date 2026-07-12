@@ -18,7 +18,7 @@ use boltr::server::BoltServer;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use kglite::api::io::open_or_create_graph;
+use kglite::api::io::{open_or_create_graph, OpenDisposition};
 use kglite::api::storage::StorageMode;
 
 use crate::backend::KgliteBackend;
@@ -167,18 +167,14 @@ async fn main() -> Result<()> {
         .map(StorageMode::parse)
         .transpose()
         .map_err(|e| anyhow::anyhow!(e))?;
-    if cli.graph.exists() {
-        tracing::info!(path = %cli.graph.display(), "loading graph");
-    } else if let Some(mode) = create_mode {
-        tracing::info!(
-            path = %cli.graph.display(),
-            storage = mode.as_str(),
-            "created new empty graph; constructing Bolt server"
-        );
-    }
-    let dir_arc = open_or_create_graph(&cli.graph, create_mode)
+    let opened = open_or_create_graph(&cli.graph, create_mode)
         .with_context(|| format!("opening or creating {}", cli.graph.display()))?;
+    let dir_arc = opened.graph;
     tracing::info!(
+        disposition = match opened.disposition {
+            OpenDisposition::Opened => "opened",
+            OpenDisposition::Created => "created",
+        },
         storage = storage_mode_str(&dir_arc),
         "graph ready; constructing Bolt server"
     );

@@ -11,7 +11,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use kglite::api::cypher;
@@ -19,7 +19,7 @@ use kglite::api::cypher::ValueCodec;
 use kglite::api::introspection::{
     compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
-use kglite::api::io::open_or_create_graph;
+use kglite::api::io::{open_or_create_graph, GraphWriterLease, OpenDisposition};
 use kglite::api::storage::StorageMode;
 use kglite::api::{Embedder, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
@@ -101,6 +101,9 @@ struct RebuildStatus {
 struct ActiveGraph {
     kg: KnowledgeGraph,
     source_path: Option<std::path::PathBuf>,
+    /// Held for every path-backed graph because this MCP surface can publish
+    /// mutations through `save_graph` / `save_graph_as`.
+    writer_lease: Option<GraphWriterLease>,
     /// The source root this graph was built/loaded from — a code-tree
     /// directory or a `.kgl` file path. Stamped into agent-facing output
     /// (the `<active_graph/>` header, the `cypher_query` footer, and the
@@ -304,7 +307,7 @@ impl GraphState {
         // wrap into KnowledgeGraph here to preserve ActiveGraph's
         // existing shape (kg.set_embedder_native, kg.source_location,
         // kg.cypher, etc. are still used downstream).
-        self.open_or_create(path, None)
+        self.open_or_create(path, None).map(|_| ())
     }
 
     /// Create a fresh, empty graph in `mode` bound to `path` (so `save_graph`
@@ -313,21 +316,41 @@ impl GraphState {
     /// (`new_dir_graph_in_mode`) so the server speaks the same
     /// memory/mapped/disk vocabulary as the wheel and C ABI.
     pub fn create_in_mode(&self, path: &Path, mode: StorageMode) -> Result<()> {
-        self.open_or_create(path, Some(mode))
+        self.open_or_create(path, Some(mode)).map(|_| ())
     }
 
-    fn open_or_create(&self, path: &Path, create_mode: Option<StorageMode>) -> Result<()> {
-        let dir = open_or_create_graph(path, create_mode)
+    pub fn open_or_create(
+        &self,
+        path: &Path,
+        create_mode: Option<StorageMode>,
+    ) -> Result<OpenDisposition> {
+        let reuse_existing = read_lock(&self.inner)
+            .as_ref()
+            .is_some_and(|active| active.source_path.as_deref() == Some(path));
+        let mut writer_lease = if reuse_existing {
+            None
+        } else {
+            Some(
+                GraphWriterLease::acquire(path, Duration::from_secs(30))
+                    .map_err(|e| anyhow::anyhow!("kglite writer lease failed: {e}"))?,
+            )
+        };
+        let opened = open_or_create_graph(path, create_mode)
             .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
-        let kg = KnowledgeGraph::from_arc(dir);
-        *write_lock(&self.inner) = Some(ActiveGraph {
+        let kg = KnowledgeGraph::from_arc(opened.graph);
+        let mut guard = write_lock(&self.inner);
+        if reuse_existing {
+            writer_lease = guard.as_mut().and_then(|active| active.writer_lease.take());
+        }
+        *guard = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
+            writer_lease,
             root: Some(path.to_path_buf()),
             revs: None,
             built_at: SystemTime::now(),
         });
-        Ok(())
+        Ok(opened.disposition)
     }
 
     /// Save the active graph to an explicit `path` and rebind the active
@@ -339,6 +362,11 @@ impl GraphState {
         let Some(active) = guard.as_mut() else {
             return Err(NO_GRAPH.to_string());
         };
+        let replacing_target = active.source_path.as_deref() != Some(path);
+        let new_lease = replacing_target
+            .then(|| GraphWriterLease::acquire(path, Duration::from_secs(30)))
+            .transpose()
+            .map_err(|e| format!("save_graph_as writer lease error: {e}"))?;
         let path_str = path.to_string_lossy().into_owned();
         // Save through the active graph's own Arc (write lock held) so
         // `prepare_save`'s `Arc::make_mut` sees refcount 1 — no deep copy,
@@ -347,6 +375,9 @@ impl GraphState {
         kglite::api::io::save_graph(active.kg.dir_mut(), &path_str)
             .map_err(|e| format!("save_graph_as error: {e}"))?;
         active.source_path = Some(path.to_path_buf());
+        if let Some(lease) = new_lease {
+            active.writer_lease = Some(lease);
+        }
         let overview = compute_schema(active.kg.dir());
         Ok(format!(
             "Saved {path_str} ({} nodes, {} edges); save target rebound here.",
@@ -376,6 +407,7 @@ impl GraphState {
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: None,
+            writer_lease: None,
             root: Some(dir.to_path_buf()),
             revs: None,
             built_at: SystemTime::now(),
@@ -416,6 +448,7 @@ impl GraphState {
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: None,
+            writer_lease: None,
             root: Some(dir.to_path_buf()),
             revs: Some(revs),
             built_at: SystemTime::now(),
@@ -1360,6 +1393,7 @@ mod tests {
         ActiveGraph {
             kg: KnowledgeGraph::from_arc(Arc::new(dir)),
             source_path: None,
+            writer_lease: None,
             root: None,
             revs: None,
             built_at: SystemTime::now(),
@@ -1704,10 +1738,23 @@ mod tests {
             .unwrap();
         assert!(r.is_ok(), "{r:?}");
         s.save_as(&p).unwrap();
+        drop(s);
         // load into a *fresh* state → the node survived (the 0.12.2 fix path too)
         let s2 = GraphState::default();
         s2.load_kgl(&p).unwrap();
         assert_eq!(s2.schema().unwrap().0, 1, "expected 1 node after reload");
+        drop(s2);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn path_backed_active_graph_retains_writer_lease() {
+        let p = tmp_kgl("retained_lease");
+        let state = GraphState::default();
+        state.create_in_mode(&p, StorageMode::Memory).unwrap();
+        assert!(kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).is_err());
+        drop(state);
+        kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).unwrap();
         let _ = std::fs::remove_file(&p);
     }
 
@@ -1732,6 +1779,7 @@ mod tests {
         assert_eq!(s.schema().unwrap().0, 1);
         s.load_kgl(&pb).unwrap();
         assert_eq!(s.schema().unwrap().0, 3, "load_graph should swap to B");
+        drop(s);
         let _ = std::fs::remove_file(&pa);
         let _ = std::fs::remove_file(&pb);
     }

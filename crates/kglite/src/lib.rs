@@ -343,7 +343,10 @@ pub mod api {
         pub use crate::graph::io::ntriples::{
             load_ntriples, Cancelled, NTriplesConfig, ProgressEvent, ProgressSink, ProgressValue,
         };
-        pub use crate::graph::io::open::open_or_create_graph;
+        pub use crate::graph::io::open::{
+            open_or_create_graph, GraphFileIdentity, GraphWriterLease, OpenDisposition,
+            OpenGraphResult,
+        };
         /// General-purpose RDF loader (Turtle / N-Triples / N-Quads /
         /// TriG). Gated behind the `rdf` Cargo feature.
         #[cfg(feature = "rdf")]

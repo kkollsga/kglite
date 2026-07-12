@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use kglite::api::io::{save_graph, to_csv_dir};
+use kglite::api::io::{to_csv_dir, GraphFileIdentity};
 use kglite::api::session::{execute_read, ExecuteOptions};
 use kglite::api::{DirGraph, Value};
 use rustyline::error::ReadlineError;
@@ -22,6 +22,7 @@ use rustyline::Editor;
 use crate::exec::{self, QueryOptions};
 use crate::format::Mode;
 use crate::helper::ShellHelper;
+use crate::save_loaded_graph;
 
 const PROMPT: &str = "kglite> ";
 
@@ -54,13 +55,19 @@ struct Shell {
     graph: Arc<DirGraph>,
     /// The file the graph is associated with (for `.save` with no argument).
     path: Option<String>,
+    /// Identity of `path` when it was loaded or last saved.
+    source_identity: Option<GraphFileIdentity>,
     mode: Mode,
     /// Print wall-time after each statement (`.timing on`).
     timing: bool,
 }
 
 /// Run the REPL against `graph` until EOF / `.quit`.
-pub fn run(graph: Arc<DirGraph>, source: Option<&str>) -> Result<()> {
+pub fn run(
+    graph: Arc<DirGraph>,
+    source: Option<&str>,
+    source_identity: Option<GraphFileIdentity>,
+) -> Result<()> {
     // Install the SIGINT → cancel handler once. Ignore an error (e.g. handler
     // already set in an odd embedding) — the shell still works, just without
     // mid-query cancellation.
@@ -71,6 +78,7 @@ pub fn run(graph: Arc<DirGraph>, source: Option<&str>) -> Result<()> {
     let mut shell = Shell {
         graph,
         path: source.map(str::to_string),
+        source_identity,
         mode: Mode::default(),
         timing: false,
     };
@@ -219,10 +227,28 @@ impl Shell {
             println!("Usage: .save <path>  (no path is associated with this session yet)");
             return;
         };
-        match save_graph(&mut self.graph, &path) {
+        let same_source = self.path.as_deref() == Some(path.as_str());
+        let mut identity = if same_source && self.source_identity.is_some() {
+            self.source_identity.clone().expect("checked above")
+        } else {
+            match GraphFileIdentity::capture(std::path::Path::new(&path)) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    return;
+                }
+            }
+        };
+        match save_loaded_graph(
+            &mut self.graph,
+            std::path::Path::new(&path),
+            &mut identity,
+            false,
+        ) {
             Ok(()) => {
                 println!("saved to {path}");
                 self.path = Some(path);
+                self.source_identity = Some(identity);
             }
             Err(e) => eprintln!("error: {e}"),
         }

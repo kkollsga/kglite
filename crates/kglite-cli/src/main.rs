@@ -11,19 +11,20 @@ mod helper;
 mod repl;
 
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use kglite::api::introspection::{
     compute_description, ConnectionDetail, CypherDetail, FluentDetail,
 };
-use kglite::api::io::{load_file, open_or_create_graph, save_graph};
+use kglite::api::io::{
+    load_file, open_or_create_graph, save_graph, GraphFileIdentity, GraphWriterLease,
+    OpenDisposition,
+};
 use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{DirGraph, Value};
 
@@ -309,27 +310,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let (graph, source): (Arc<DirGraph>, Option<String>) = match &cli.graph {
-        Some(path) if path.exists() => {
-            let p = path.to_string_lossy().to_string();
-            let g = load_file(&p).with_context(|| format!("failed to open {p}"))?;
-            (g, Some(p))
-        }
+    let (graph, source, source_identity) = match &cli.graph {
         Some(path) => {
-            // Named but missing: start fresh; `.save <path>` (Phase 5) will
-            // write here. Tell the user so a typo'd path isn't silently empty.
             let p = path.to_string_lossy().to_string();
-            eprintln!("note: {p} does not exist — starting an empty in-memory graph");
-            (
-                open_or_create_graph(path, Some(StorageMode::Memory))
-                    .with_context(|| format!("failed to create {}", path.display()))?,
-                None,
-            )
+            let opened = open_or_create_graph(path, Some(StorageMode::Memory))
+                .with_context(|| format!("failed to open or create {}", path.display()))?;
+            if opened.disposition == OpenDisposition::Created {
+                eprintln!("note: {p} does not exist — starting an empty in-memory graph");
+            }
+            let source = (opened.disposition == OpenDisposition::Opened).then_some(p);
+            let identity = source.as_ref().map(|_| opened.identity);
+            (opened.graph, source, identity)
         }
-        None => (Arc::new(fresh_graph()?), None),
+        None => (Arc::new(fresh_graph()?), None, None),
     };
 
-    repl::run(graph, source.as_deref())
+    repl::run(graph, source.as_deref(), source_identity)
 }
 
 /// A fresh in-memory graph. `new_dir_graph_in_mode` returns `Result<_, String>`
@@ -367,20 +363,14 @@ fn run_write(
     git_sha: Option<String>,
     modified_by: Option<String>,
 ) -> Result<()> {
-    let _lock = if persist {
-        Some(WriteLock::acquire(path, WRITE_LOCK_TIMEOUT)?)
+    let _lease = if persist {
+        Some(GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT)?)
     } else {
         None
     };
-    let mut graph = if path.exists() || persist {
-        open_or_create_graph(path, persist.then_some(StorageMode::Memory))
-            .with_context(|| format!("failed to open or create {}", path.display()))?
-    } else {
-        anyhow::bail!(
-            "{} does not exist; pass --save to create it after a successful write",
-            path.display()
-        );
-    };
+    let mut graph = open_or_create_graph(path, persist.then_some(StorageMode::Memory))
+        .with_context(|| format!("failed to open or create {}", path.display()))?
+        .graph;
     let params: HashMap<String, Value> = HashMap::new();
     let options = QueryOptions {
         write_scope: exec::parse_write_scope(write_scope),
@@ -460,20 +450,15 @@ fn run_session(
     git_sha: Option<String>,
     modified_by: Option<String>,
 ) -> Result<()> {
-    let _lock = if save_on_exit {
-        Some(WriteLock::acquire(path, WRITE_LOCK_TIMEOUT)?)
+    let lease = if save_on_exit {
+        Some(GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT)?)
     } else {
         None
     };
-    let mut graph = if path.exists() || save_on_exit {
-        open_or_create_graph(path, save_on_exit.then_some(StorageMode::Memory))
-            .with_context(|| format!("failed to open or create {}", path.display()))?
-    } else {
-        anyhow::bail!(
-            "{} does not exist; pass --save-on-exit to create it when the session exits",
-            path.display()
-        );
-    };
+    let mut graph = open_or_create_graph(path, save_on_exit.then_some(StorageMode::Memory))
+        .with_context(|| format!("failed to open or create {}", path.display()))?
+        .graph;
+    let mut source_identity = GraphFileIdentity::capture(path)?;
     let base_options = QueryOptions {
         write_scope: exec::parse_write_scope(write_scope),
         git_sha,
@@ -487,19 +472,27 @@ fn run_session(
         if line.is_empty() {
             continue;
         }
-        match handle_session_line(&mut graph, path, line, default_mode, &base_options) {
+        match handle_session_line(
+            &mut graph,
+            path,
+            line,
+            default_mode,
+            &base_options,
+            &mut source_identity,
+            lease.is_some(),
+        ) {
             SessionAction::Continue(value) => write_json_line(value)?,
             SessionAction::Exit(value) => {
                 write_json_line(value)?;
                 if save_on_exit {
-                    save_loaded_graph(&mut graph, path)?;
+                    save_loaded_graph(&mut graph, path, &mut source_identity, lease.is_some())?;
                 }
                 return Ok(());
             }
         }
     }
     if save_on_exit {
-        save_loaded_graph(&mut graph, path)?;
+        save_loaded_graph(&mut graph, path, &mut source_identity, lease.is_some())?;
     }
     Ok(())
 }
@@ -515,6 +508,8 @@ fn handle_session_line(
     line: &str,
     default_mode: Mode,
     base_options: &QueryOptions,
+    source_identity: &mut GraphFileIdentity,
+    lease_held: bool,
 ) -> SessionAction {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -536,9 +531,8 @@ fn handle_session_line(
             base_options,
         ),
         "describe" => session_describe(graph, &request),
-        "save" => {
-            save_loaded_graph(graph, path).map(|()| serde_json::json!({"ok": true, "op": "save"}))
-        }
+        "save" => save_loaded_graph(graph, path, source_identity, lease_held)
+            .map(|()| serde_json::json!({"ok": true, "op": "save"})),
         "exit" | "quit" => {
             let mut value = serde_json::json!({"ok": true, "op": op});
             insert_request_id(&mut value, request_id);
@@ -617,9 +611,26 @@ fn session_describe(
     }))
 }
 
-fn save_loaded_graph(graph: &mut Arc<DirGraph>, path: &Path) -> Result<()> {
+fn save_loaded_graph(
+    graph: &mut Arc<DirGraph>,
+    path: &Path,
+    source_identity: &mut GraphFileIdentity,
+    lease_held: bool,
+) -> Result<()> {
+    let _lease = (!lease_held)
+        .then(|| GraphWriterLease::acquire(path, WRITE_LOCK_TIMEOUT))
+        .transpose()?;
+    let current = GraphFileIdentity::capture(path)?;
+    if current != *source_identity {
+        anyhow::bail!(
+            "refusing to overwrite {}: it changed since this session loaded it",
+            path.display()
+        );
+    }
     let p = path.to_string_lossy().to_string();
-    save_graph(graph, &p).map_err(|e| anyhow::anyhow!("failed to save {p}: {e}"))
+    save_graph(graph, &p).map_err(|e| anyhow::anyhow!("failed to save {p}: {e}"))?;
+    *source_identity = GraphFileIdentity::capture(path)?;
+    Ok(())
 }
 
 fn write_json_line(value: serde_json::Value) -> Result<()> {
@@ -840,163 +851,29 @@ fn cypher_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-struct WriteLock {
-    path: PathBuf,
-}
-
-impl WriteLock {
-    fn acquire(graph_path: &Path, timeout: Duration) -> Result<Self> {
-        let path = lock_path(graph_path);
-        let started = Instant::now();
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    write_lock_metadata(&mut file)?;
-                    return Ok(Self { path });
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                    if reclaim_stale_lock(&path)? {
-                        continue;
-                    }
-                    if started.elapsed() >= timeout {
-                        anyhow::bail!(
-                            "timed out waiting for write lock {}; another kglite write may be active",
-                            path.display()
-                        );
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "failed to create write lock {}: {e}",
-                        path.display()
-                    ));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for WriteLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn lock_path(graph_path: &Path) -> PathBuf {
-    let mut lock = graph_path.as_os_str().to_os_string();
-    lock.push(".lock");
-    PathBuf::from(lock)
-}
-
-fn write_lock_metadata(file: &mut File) -> io::Result<()> {
-    writeln!(file, "pid={}", std::process::id())
-}
-
-/// Remove a lock whose recorded owner process is no longer alive. Unknown or
-/// malformed lock metadata is retained conservatively.
-fn reclaim_stale_lock(path: &Path) -> Result<bool> {
-    let metadata = match fs::read_to_string(path) {
-        Ok(metadata) => metadata,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "failed to read write lock {}: {e}",
-                path.display()
-            ));
-        }
-    };
-    let Some(pid) = metadata
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-    else {
-        return Ok(false);
-    };
-    if process_is_alive(pid) {
-        return Ok(false);
-    }
-
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(anyhow::anyhow!(
-            "failed to reclaim stale write lock {} owned by pid {pid}: {e}",
-            path.display()
-        )),
-    }
-}
-
-#[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    // Signal zero performs existence/permission checking without delivering a
-    // signal. Lock owners are sibling processes of the same user, so success
-    // is the expected live-process result.
-    unsafe { kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
-    // Until a native process probe is added for this target, never risk
-    // deleting another process's live lock.
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{lock_path, reclaim_stale_lock, WriteLock};
+    use super::save_loaded_graph;
+    use kglite::api::io::GraphFileIdentity;
+    use kglite::api::DirGraph;
     use std::fs;
-    use std::path::Path;
-    use std::time::Duration;
+    use std::sync::Arc;
 
     #[test]
-    fn lock_path_appends_lock_suffix() {
-        assert_eq!(
-            lock_path(Path::new("/tmp/demo.kgl")),
-            Path::new("/tmp/demo.kgl.lock")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stale_lock_is_reclaimed_and_replaced_with_current_pid() {
+    fn ad_hoc_save_rejects_lost_update() {
         let tmp = tempfile::tempdir().unwrap();
         let graph = tmp.path().join("demo.kgl");
-        let lock = lock_path(&graph);
-        fs::write(&lock, "pid=4294967295\n").unwrap();
+        let mut initial = Arc::new(DirGraph::new());
+        kglite::api::io::save_graph(&mut initial, &graph.to_string_lossy()).unwrap();
+        let mut identity = GraphFileIdentity::capture(&graph).unwrap();
+        let mut working = initial.clone();
 
-        let guard = WriteLock::acquire(&graph, Duration::ZERO).unwrap();
-        let metadata = fs::read_to_string(&lock).unwrap();
-        assert_eq!(metadata, format!("pid={}\n", std::process::id()));
-        drop(guard);
-        assert!(!lock.exists());
-    }
+        fs::write(&graph, b"competing writer").unwrap();
+        let error = save_loaded_graph(&mut working, &graph, &mut identity, false).unwrap_err();
 
-    #[test]
-    fn live_lock_is_not_reclaimed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let graph = tmp.path().join("demo.kgl");
-        let lock = lock_path(&graph);
-        fs::write(&lock, format!("pid={}\n", std::process::id())).unwrap();
-
-        assert!(!reclaim_stale_lock(&lock).unwrap());
-        assert!(WriteLock::acquire(&graph, Duration::ZERO).is_err());
-    }
-
-    #[test]
-    fn malformed_lock_is_retained_conservatively() {
-        let tmp = tempfile::tempdir().unwrap();
-        let graph = tmp.path().join("demo.kgl");
-        let lock = lock_path(&graph);
-        fs::write(&lock, "owner unknown\n").unwrap();
-
-        assert!(!reclaim_stale_lock(&lock).unwrap());
-        assert!(lock.exists());
+        assert!(error
+            .to_string()
+            .contains("changed since this session loaded"));
+        assert_eq!(fs::read(&graph).unwrap(), b"competing writer");
     }
 }

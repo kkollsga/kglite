@@ -925,6 +925,18 @@ pub mod kglite::api::io
 pub enum kglite::api::io::EmbeddingExportFilter
 pub kglite::api::io::EmbeddingExportFilter::TypeProperties(std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>)
 pub kglite::api::io::EmbeddingExportFilter::Types(alloc::vec::Vec<alloc::string::String>)
+pub enum kglite::api::io::OpenDisposition
+pub kglite::api::io::OpenDisposition::Created
+pub kglite::api::io::OpenDisposition::Opened
+impl core::clone::Clone for kglite::api::io::OpenDisposition
+pub fn kglite::api::io::OpenDisposition::clone(&self) -> kglite::api::io::OpenDisposition
+impl core::cmp::Eq for kglite::api::io::OpenDisposition
+impl core::cmp::PartialEq for kglite::api::io::OpenDisposition
+pub fn kglite::api::io::OpenDisposition::eq(&self, other: &kglite::api::io::OpenDisposition) -> bool
+impl core::fmt::Debug for kglite::api::io::OpenDisposition
+pub fn kglite::api::io::OpenDisposition::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::io::OpenDisposition
+impl core::marker::StructuralPartialEq for kglite::api::io::OpenDisposition
 pub enum kglite::api::io::ProgressEvent<'a>
 pub kglite::api::io::ProgressEvent::Complete
 pub kglite::api::io::ProgressEvent::Complete::elapsed_s: f64
@@ -944,6 +956,20 @@ pub kglite::api::io::ProgressValue::F64(f64)
 pub kglite::api::io::ProgressValue::Str(&'a str)
 pub kglite::api::io::ProgressValue::U64(u64)
 pub struct kglite::api::io::Cancelled
+pub struct kglite::api::io::GraphFileIdentity
+impl kglite::api::io::GraphFileIdentity
+pub fn kglite::api::io::GraphFileIdentity::capture(path: &std::path::Path) -> std::io::error::Result<Self>
+impl core::clone::Clone for kglite::api::io::GraphFileIdentity
+pub fn kglite::api::io::GraphFileIdentity::clone(&self) -> kglite::api::io::GraphFileIdentity
+impl core::cmp::Eq for kglite::api::io::GraphFileIdentity
+impl core::cmp::PartialEq for kglite::api::io::GraphFileIdentity
+pub fn kglite::api::io::GraphFileIdentity::eq(&self, other: &kglite::api::io::GraphFileIdentity) -> bool
+impl core::fmt::Debug for kglite::api::io::GraphFileIdentity
+pub fn kglite::api::io::GraphFileIdentity::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::io::GraphFileIdentity
+pub struct kglite::api::io::GraphWriterLease
+impl kglite::api::io::GraphWriterLease
+pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> std::io::error::Result<Self>
 pub struct kglite::api::io::ImportStats
 pub kglite::api::io::ImportStats::dropped_stores: usize
 pub kglite::api::io::ImportStats::imported: usize
@@ -959,6 +985,10 @@ pub kglite::api::io::NTriplesConfig::predicate_labels: std::collections::hash::m
 pub kglite::api::io::NTriplesConfig::predicates: core::option::Option<std::collections::hash::set::HashSet<alloc::string::String>>
 pub kglite::api::io::NTriplesConfig::progress: core::option::Option<alloc::boxed::Box<dyn kglite::api::io::ProgressSink>>
 pub kglite::api::io::NTriplesConfig::verbose: bool
+pub struct kglite::api::io::OpenGraphResult
+pub kglite::api::io::OpenGraphResult::disposition: kglite::api::io::OpenDisposition
+pub kglite::api::io::OpenGraphResult::graph: alloc::sync::Arc<kglite::api::DirGraph>
+pub kglite::api::io::OpenGraphResult::identity: kglite::api::io::GraphFileIdentity
 pub struct kglite::api::io::RankIndex
 impl kglite::api::io::RankIndex
 pub fn kglite::api::io::RankIndex::contains(&self, old_id: u32) -> bool
@@ -984,7 +1014,7 @@ pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::Dir
 pub fn kglite::api::io::load_file(path: &str) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
-pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
+pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> std::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
