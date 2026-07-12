@@ -7,7 +7,6 @@ from pathlib import Path
 import subprocess
 
 import pytest
-import tomllib
 
 from tests.test_cli_shell_smoke import BINARY
 
@@ -47,8 +46,15 @@ def test_cli_help_and_error_contract_matches_baseline():
 
 
 def test_cli_version_tracks_workspace_version():
-    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
-    expected = cargo["workspace"]["package"]["version"]
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    packages = json.loads(metadata.stdout)["packages"]
+    expected = next(package["version"] for package in packages if package["name"] == "kglite-cli")
     proc = _run("--version")
     assert proc.returncode == 0
     assert proc.stdout.strip() == f"kglite {expected}"

@@ -739,6 +739,10 @@ impl<T: MmapPod> MmapOrVec<T> {
                 let replacement = if byte_len == 0 {
                     None
                 } else {
+                    // SAFETY: `byte_len` is at most the old mapped capacity,
+                    // and truncation happens only after this replacement map
+                    // succeeds, so the open file currently covers the entire
+                    // requested range and remains owned for the map's lifetime.
                     Some(unsafe {
                         MmapOptions::new()
                             .len(byte_len)

@@ -460,6 +460,27 @@ jobs:
             tests/test_disk_mutation_roundtrip.py::test_disk_parallel_projection_no_interner_corruption \
             tests/test_session.py::test_disk_session_reuses_writer_lineage_and_composes
 
+  native-lifecycle-locks:
+    name: Native lifecycle locks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-lifecycle-${{ matrix.os }}
+          workspaces: ". -> target"
+      - name: Test core cross-process lease recovery
+        run: cargo test -p kglite --lib graph::io::open::tests::crashed_process_releases_writer_lease -- --exact --nocapture
+      - name: Test core lease-protected publication
+        run: cargo test -p kglite --lib graph::io::open::tests::writer_lease_serializes_open_create_and_publish -- --exact
+      - name: Test CLI lifecycle unit suite
+        run: cargo test -p kglite-cli
+
   loom-session:
     name: Loom Session model
     runs-on: ubuntu-latest
@@ -536,6 +557,7 @@ jobs:
       - public-api
       - storage-parity
       - disk-concurrency
+      - native-lifecycle-locks
       - loom-session
       - miri-loaders
       - address-sanitizer

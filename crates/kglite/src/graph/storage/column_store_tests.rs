@@ -108,10 +108,18 @@ fn packed_save_null_pads_partial_typed_columns_to_row_count() {
 }
 
 fn decode_misaligned<T: PackedElement>(encoded: &[u8], len: usize) -> Vec<T> {
-    let mut framed = Vec::with_capacity(encoded.len() + 1);
-    framed.push(0xff);
-    framed.extend_from_slice(encoded);
-    let bytes = &framed[1..];
+    let alignment = std::mem::align_of::<T>();
+    assert!(
+        alignment > 1,
+        "fixture requires a type with nontrivial alignment"
+    );
+    let mut framed = vec![0xff; encoded.len() + alignment];
+    let base = framed.as_ptr() as usize;
+    let offset = (0..alignment)
+        .find(|offset| (base + offset) % alignment != 0)
+        .expect("nontrivial alignment must have a misaligned offset");
+    framed[offset..offset + encoded.len()].copy_from_slice(encoded);
+    let bytes = &framed[offset..offset + encoded.len()];
     assert_ne!(
         bytes.as_ptr() as usize % std::mem::align_of::<T>(),
         0,
