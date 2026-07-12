@@ -339,8 +339,12 @@ fn estimate_match_edge_cost(
         // Need at least one id-anchored endpoint on every pattern in
         // the clause. Mid-pattern nodes are not checked — typical case
         // is `(node)-[:T]->(node)`.
-        let first = &pattern.elements[0];
-        let last = pattern.elements.last().unwrap();
+        let (first, last) = match (pattern.elements.first(), pattern.elements.last()) {
+            (Some(first), Some(last)) => (first, last),
+            // Empty patterns can't be produced by the parser; bail rather
+            // than panic in release if a pass ever emits one.
+            _ => return None,
+        };
         if !is_id_anchored(first) && !is_id_anchored(last) {
             return None;
         }

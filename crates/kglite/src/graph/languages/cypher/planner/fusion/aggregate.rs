@@ -554,8 +554,12 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
         let (first_var, second_var, edge_has_props, edge_var) = if let Clause::Match(m) =
             &query.clauses[i]
         {
-            let n_elems = m.patterns[0].elements.len();
-            if m.patterns.len() != 1 || (n_elems != 3 && n_elems != 5) {
+            let n_elems = if m.patterns.len() == 1 {
+                m.patterns[0].elements.len()
+            } else {
+                0
+            };
+            if n_elems != 3 && n_elems != 5 {
                 i += 1;
                 continue;
             }

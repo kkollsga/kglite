@@ -322,12 +322,14 @@ pub(super) fn push_limit_into_aggregate(query: &mut CypherQuery, _graph: &DirGra
     }
 }
 
-/// Example: MATCH (n:Person) WHERE n.age = 30
-/// Becomes: MATCH (n:Person {age: 30}) (WHERE removed if fully consumed)
-///
-/// Also handles parameterized equalities:
-/// MATCH (n:Person) WHERE n.age = $min_age  (with params = {min_age: 30})
-/// Becomes: MATCH (n:Person {age: 30})
+/// Precondition: a single-MATCH query whose terminal `RETURN ... LIMIT n`
+/// (or `WITH ... LIMIT n`) follows with no intervening cardinality-changing
+/// clause. Pattern: stamps `limit_hint = n` onto the MATCH so the pattern
+/// executor stops expanding once n rows exist, and removes the now-redundant
+/// LIMIT clause. Why-bail: multi-MATCH queries and correlated/filtered
+/// comma-pattern shapes interact incorrectly with the per-row `max_matches`
+/// bound and can return fewer rows than LIMIT requests (see the safety notes
+/// in the body); only the provably-safe shapes are rewritten.
 pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) {
     if query.clauses.len() < 3 {
         return;
@@ -439,7 +441,6 @@ pub(super) fn push_limit_into_match(query: &mut CypherQuery, _graph: &DirGraph) 
             m.limit_hint = Some(limit);
         }
         query.clauses.remove(limit_offset);
-        let _ = has_where; // currently unused; preserved for future logging
     }
 }
 

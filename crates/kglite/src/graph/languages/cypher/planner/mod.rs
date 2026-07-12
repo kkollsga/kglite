@@ -80,6 +80,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `fuse_spatial_join` | safe-by-shape | Matches `(Match, Where)` adjacency. |
 /// | `reorder_match_clauses` | safe-by-shape | Reorders only WITHIN a contiguous span of `Clause::Match`; a CallSubquery ends the span (`_ => break`). |
 /// | `optimize_pattern_start_node` / `reorder_match_patterns` | safe-by-shape | Reorder patterns WITHIN one MATCH; never move clauses. CallSubquery hits `_ => continue`; its body vars don't enter bound_vars (heuristic-only anyway). |
+/// | `reorder_cyclic_pattern_edges` | safe-by-shape | Reorders edge elements WITHIN one MATCH pattern; never moves or spans clauses (added post-Phase-5 audit). |
 /// | `push_limit_into_match` | safe-by-shape | Matches `Match → [Where] → Return → Limit` adjacency; a CallSubquery breaks it. The `only_match` guard also bails if any MATCH is non-first. |
 /// | `push_limit_into_aggregate` | safe-by-shape | Matches `(Return\|With) → Limit` adjacency. |
 /// | `push_distinct_into_match` | safe-by-shape | Matches `Match → [Where] → Return` adjacency. |
