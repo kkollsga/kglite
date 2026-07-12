@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Point lookups and cache rebuilds no longer copy the graph or stall other
+  threads.** `node()` on a graph with live fluent clones is ~5,400× faster
+  (it deep-copied the entire graph through `Arc::make_mut`; now a read-only
+  index lookup), `build_id_indices()` pre-warms without copying,
+  `rebuild_caches()` and bulk `add_nodes`/`add_connections`/`traverse` run
+  their pure-Rust phases off the GIL so other Python threads keep making
+  progress, the MCP server saves through the live graph instead of
+  deep-cloning it on every save, and the pattern matcher no longer clones
+  every matched edge's property map into a field nothing read (−29% on
+  relationship-property projections).
 - **Trivial in-memory writes no longer clone the entire graph for rollback.**
   Standalone single-node `CREATE` and terminal variable-only `DELETE` complete
   all validation and interruption checks before entering an infallible commit

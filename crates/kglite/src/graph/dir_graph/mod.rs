@@ -492,6 +492,17 @@ impl DirGraph {
         self.id_indices.insert(node_type.to_string(), index);
     }
 
+    /// `&self` counterpart of [`build_id_index`](Self::build_id_index):
+    /// pre-warm the id index for a type through the `IdIndexStore`'s
+    /// interior mutability. Same effect, but callable on a shared
+    /// `Arc<DirGraph>` without `Arc::make_mut` (which would deep-copy the
+    /// whole graph when another handle shares the Arc). No-op if the type
+    /// is already indexed.
+    pub fn ensure_id_index(&self, node_type: &str) {
+        self.id_indices
+            .ensure(node_type, || self.compute_id_index(node_type));
+    }
+
     /// Build id_index for a type using column stores directly (no node materialization).
     /// For DiskGraph, reads ids from mmap'd column stores via row_id from node_slots.
     /// Much faster and uses no arena memory. `compute_id_index` already
@@ -1225,6 +1236,10 @@ impl DirGraph {
     pub fn update_property_indices_for_add(&mut self, node_type: &str, node_idx: NodeIndex) {
         // Collect single-property index updates (immutable borrow of self.graph)
         let prop_updates: Vec<(IndexKey, Value)> = {
+            // Disk backend: node_weight materializes into the query arena,
+            // which must run under a DiskQueryGuard (arena protocol in
+            // disk/graph.rs). No-op on memory/mapped backends.
+            let _guard = self.graph.begin_query();
             let node = match self.graph.node_weight(node_idx) {
                 Some(n) => n,
                 None => return,
@@ -1250,6 +1265,8 @@ impl DirGraph {
 
         // Collect composite index updates
         let comp_updates: Vec<(CompositeIndexKey, CompositeValue)> = {
+            // Arena guard: see prop_updates block above.
+            let _guard = self.graph.begin_query();
             let node = match self.graph.node_weight(node_idx) {
                 Some(n) => n,
                 None => return,
@@ -1374,10 +1391,15 @@ impl DirGraph {
             return;
         }
 
-        // Read current node properties once
-        let current_props: HashMap<String, Value> = match self.graph.node_weight(node_idx) {
-            Some(node) => node.properties_cloned(&self.interner),
-            None => return,
+        // Read current node properties once. Arena guard: disk-backend
+        // node_weight materializes into the query arena (protocol in
+        // disk/graph.rs); no-op on memory/mapped backends.
+        let current_props: HashMap<String, Value> = {
+            let _guard = self.graph.begin_query();
+            match self.graph.node_weight(node_idx) {
+                Some(node) => node.properties_cloned(&self.interner),
+                None => return,
+            }
         };
 
         for key in comp_keys {

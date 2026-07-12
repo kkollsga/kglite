@@ -320,3 +320,103 @@ class TestDocumentedQuirks:
             futures = [pool.submit(lambda: g.cypher(query)) for _ in range(8)]
             results = [f.result(timeout=10)[0]["inside"] for f in futures]
         assert all(r is True for r in results), "spatial reads under contention diverged"
+
+
+# ── GIL-release progress checks for batch/maintenance paths ─────────────────
+#
+# Each test runs a heavy pure-Rust operation on the main thread while a
+# ticker thread appends timestamps. Only ticks that land strictly inside
+# the operation's [start, end] window count, and we require >= 3 of them —
+# a GIL-holding operation can leak at most a boundary tick or two around
+# the window edges (sys.setswitchinterval-scale scheduling), never a
+# sustained stream. The workloads are sized to run tens of milliseconds,
+# so a released GIL yields dozens of 1 ms ticks — comfortably determinate
+# on a loaded CI runner (same pattern as
+# TestGILReleasePerformance.test_gil_released_during_centrality above).
+
+
+def _ticks_during(op):
+    """Run ``op()`` while a ticker thread stamps timestamps; return the
+    number of ticks that landed strictly inside op's execution window."""
+    stamps = []
+    stop = threading.Event()
+
+    def ticker():
+        while not stop.is_set():
+            stamps.append(time.perf_counter())
+            time.sleep(0.001)
+
+    t = threading.Thread(target=ticker, daemon=True)
+    t.start()
+    try:
+        t0 = time.perf_counter()
+        op()
+        t1 = time.perf_counter()
+    finally:
+        stop.set()
+        t.join(timeout=5)
+    return sum(1 for s in stamps if t0 < s < t1), t1 - t0
+
+
+class TestGILReleaseBatchPaths:
+    """rebuild_caches / add_nodes / add_connections / traverse release the
+    GIL around their pure-Rust phase, so other Python threads progress."""
+
+    @pytest.fixture
+    def edge_heavy_graph(self):
+        """Graph with 200k edges so the O(E) cache sweep is non-trivial."""
+        g = kglite.KnowledgeGraph()
+        n_nodes, n_edges = 20_000, 200_000
+        nodes = pd.DataFrame(
+            {
+                "id": list(range(n_nodes)),
+                "title": [f"N_{i}" for i in range(n_nodes)],
+            }
+        )
+        g.add_nodes(nodes, "Node", "id", "title")
+        edges = pd.DataFrame(
+            {
+                "src": [i % n_nodes for i in range(n_edges)],
+                "dst": [(i * 7 + 13) % n_nodes for i in range(n_edges)],
+            }
+        )
+        g.add_connections(edges, "LINKS", "Node", "src", "Node", "dst")
+        return g
+
+    def test_rebuild_caches_releases_gil(self, edge_heavy_graph):
+        # Repeat the call so the timed window is comfortably > a few ms
+        # even though a single 200k-edge sweep is fast on a release build.
+        ticks, _ = _ticks_during(lambda: [edge_heavy_graph.rebuild_caches() for _ in range(50)])
+        assert ticks >= 3, f"rebuild_caches held the GIL (ticks={ticks})"
+
+    def test_add_nodes_releases_gil_during_apply(self):
+        g = kglite.KnowledgeGraph()
+        n = 400_000
+        df = pd.DataFrame(
+            {
+                "id": list(range(n)),
+                "title": [f"Item_{i}" for i in range(n)],
+                "value": [float(i) for i in range(n)],
+                "tag": [f"t_{i % 97}" for i in range(n)],
+            }
+        )
+        ticks, _ = _ticks_during(lambda: g.add_nodes(df, "Item", "id", "title"))
+        assert ticks >= 3, f"add_nodes held the GIL through the apply phase (ticks={ticks})"
+        assert g.cypher("MATCH (n:Item) RETURN count(n) AS c")[0]["c"] == n
+
+    def test_add_connections_releases_gil_during_apply(self, edge_heavy_graph):
+        n_nodes, n_edges = 20_000, 400_000
+        edges = pd.DataFrame(
+            {
+                "src": [(i * 3) % n_nodes for i in range(n_edges)],
+                "dst": [(i * 11 + 5) % n_nodes for i in range(n_edges)],
+            }
+        )
+        ticks, _ = _ticks_during(lambda: edge_heavy_graph.add_connections(edges, "ALSO", "Node", "src", "Node", "dst"))
+        assert ticks >= 3, f"add_connections held the GIL through the apply phase (ticks={ticks})"
+
+    def test_traverse_releases_gil(self, edge_heavy_graph):
+        sel = edge_heavy_graph.select("Node")
+        # Two-hop traversal over 200k edges; repeat to widen the window.
+        ticks, _ = _ticks_during(lambda: [sel.traverse("LINKS").traverse("LINKS") for _ in range(5)])
+        assert ticks >= 3, f"traverse held the GIL (ticks={ticks})"

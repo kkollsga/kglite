@@ -215,3 +215,71 @@ def test_bench_variable_path_relationship_materialization(benchmark, hot_graph):
         hot_graph.cypher,
         "MATCH p=(a:Item {nid: 1})-[:LINKS*1..3]->(b:Item) RETURN sum(size(relationships(p))) AS relationships",
     )
+
+
+# ---------------------------------------------------------------------------
+# Point lookup with a live fluent clone (Arc shared) + rel-heavy named-var
+# match — the two perf landmines fixed in the opencypher-contract branch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def prop_edge_graph():
+    """20k nodes / 100k edges with 5 string props per edge.
+
+    Sized so a per-edge property-map clone in the matcher (the old
+    `MatchBinding::Edge { properties }` fill for named edge vars)
+    dominates the query time if it ever comes back.
+    """
+    n_nodes, n_edges = 20_000, 100_000
+    graph = KnowledgeGraph()
+    nodes = pd.DataFrame(
+        {
+            "nid": list(range(n_nodes)),
+            "name": [f"N_{i}" for i in range(n_nodes)],
+        }
+    )
+    graph.add_nodes(nodes, "PN", "nid", "name")
+    edges = pd.DataFrame(
+        {
+            "src": [i % n_nodes for i in range(n_edges)],
+            "dst": [(i * 7 + 13) % n_nodes for i in range(n_edges)],
+            "p1": [f"alpha_{i % 50}" for i in range(n_edges)],
+            "p2": [f"beta_{i % 40}" for i in range(n_edges)],
+            "p3": [f"gamma_{i % 30}" for i in range(n_edges)],
+            "p4": [f"delta_{i % 20}" for i in range(n_edges)],
+            "p5": [f"epsilon_{i % 10}" for i in range(n_edges)],
+        }
+    )
+    graph.add_connections(edges, "PR", "PN", "src", "PN", "dst", columns=["p1", "p2", "p3", "p4", "p5"])
+    return graph
+
+
+@pytest.mark.benchmark
+def test_bench_node_lookup_while_arc_shared(benchmark, hot_graph):
+    """node() point lookup with a fresh fluent clone sharing the Arc.
+
+    Each round re-shares the Arc (select) then does the point lookup —
+    if node() ever regresses to `Arc::make_mut`, every round deep-copies
+    the whole 50k-node graph and this jumps by ~4 orders of magnitude.
+    """
+    hot_graph.build_id_indices(["Item"])
+
+    def share_then_lookup():
+        holder = hot_graph.select("Item")
+        got = hot_graph.node("Item", 1234)
+        assert got is not None
+        del holder
+
+    benchmark(share_then_lookup)
+
+
+@pytest.mark.benchmark
+def test_bench_named_rel_match_count(benchmark, prop_edge_graph):
+    """MATCH with a *named* edge variable over 100k property-heavy edges.
+
+    count(r) needs r bound but never reads its properties — the binding
+    must stay index-only (no per-edge property-map clone in the matcher).
+    """
+    result = benchmark(prop_edge_graph.cypher, "MATCH (a:PN)-[r:PR]->(b:PN) RETURN count(r) AS c")
+    assert result[0]["c"] == 100_000

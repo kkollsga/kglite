@@ -1143,27 +1143,30 @@ impl KnowledgeGraph {
     ///     user = graph.node("User", 38870)
     ///     ```
     #[pyo3(signature = (node_type, node_id))]
-    fn node(&mut self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    fn node(&self, node_type: &str, node_id: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
         // Convert Python value to Rust Value
         let id_value = py_in::py_value_to_value(node_id)?;
 
-        // Get mutable access to build index if needed
-        let graph = Arc::make_mut(&mut self.inner);
-
-        // This will build the index lazily if not already built
-        let node_idx = match graph.lookup_by_id(node_type, &id_value) {
+        // Read-only, O(1) typed lookup — same path as `exists()`.
+        // `lookup_by_id_readonly` self-heals the id-index on a miss
+        // (interior mutability in `IdIndexStore`), so no `&mut` /
+        // `Arc::make_mut` is needed. The old `Arc::make_mut` route
+        // deep-copied the ENTIRE graph whenever any other handle
+        // (a fluent clone, a frozen view, a session) shared the Arc —
+        // an O(graph) hit on a point lookup.
+        let node_idx = match self.inner.lookup_by_id_readonly(node_type, &id_value) {
             Some(idx) => idx,
             None => return Ok(None),
         };
 
         // Get the node data
-        let node = match graph.get_node(node_idx) {
+        let node = match self.inner.get_node(node_idx) {
             Some(n) => n,
             None => return Ok(None),
         };
 
         // Convert to Python dict
-        let node_info = node.to_node_info(&graph.interner);
+        let node_info = node.to_node_info(&self.inner.interner);
         Python::attach(|py| {
             let dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
             Ok(Some(dict))

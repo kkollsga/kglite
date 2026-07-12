@@ -154,7 +154,7 @@ impl KnowledgeGraph {
     /// or ``describe()``. The caches are persisted by ``save()`` and
     /// restored by ``load()``, so this only needs to be called once
     /// after building or mutating a graph.
-    fn rebuild_caches(&mut self) -> PyResult<()> {
+    fn rebuild_caches(&mut self, py: Python<'_>) -> PyResult<()> {
         // Order matters on large disk graphs: `compute_type_connectivity`
         // runs first so its single sequential sweep of `edge_endpoints.bin`
         // also warms the page cache for the histogram builder below. On
@@ -162,10 +162,17 @@ impl KnowledgeGraph {
         // read and cuts `rebuild_caches` by ~100 s on loaded-from-cold-disk
         // graphs. See `src/graph/storage/disk/builder.rs::build_peer_count_histogram`
         // — it deliberately no longer evicts pages after finishing.
+        //
+        // Both sweeps are pure Rust (no Python objects touched), so they
+        // run under `py.detach()` — a rebuild that takes minutes on
+        // Wikidata-scale graphs must not wedge every other Python thread.
 
         // Single O(E) pass: compute type connectivity triples
         // Uses edge_endpoint_keys() — mmap reads only, no heap allocation per edge.
-        let triples = introspection::compute_type_connectivity(&self.inner);
+        let triples = {
+            let inner = &self.inner;
+            py.detach(|| introspection::compute_type_connectivity(inner))
+        };
 
         // On disk graphs, also rebuild the per-(conn_type, peer) edge-count
         // histogram so the Cypher planner's fast path for unanchored
@@ -174,7 +181,7 @@ impl KnowledgeGraph {
         {
             let graph = get_graph_mut(&mut self.inner);
             if let kglite_core::api::storage::GraphBackend::Disk(ref mut dg) = graph.graph {
-                dg.rebuild_peer_count_histogram()
+                py.detach(|| dg.rebuild_peer_count_histogram())
                     .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
             }
         }
@@ -182,8 +189,14 @@ impl KnowledgeGraph {
         // Derive edge type counts + endpoint types from triples (no extra scan)
         let derived = introspection::derive_edge_counts_from_triples(&triples);
 
-        // Populate edge type counts cache
-        *self.inner.edge_type_counts_cache.write().unwrap() = Some(derived.counts);
+        // Populate edge type counts cache. Poison-recovering: the guarded
+        // state is swapped in place (never left half-written), so a panic
+        // in some other holder must not turn every later rebuild into one.
+        *self
+            .inner
+            .edge_type_counts_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(derived.counts);
 
         // Backfill connection_type_metadata with discovered endpoint types
         let graph = get_graph_mut(&mut self.inner);
@@ -1463,7 +1476,7 @@ impl KnowledgeGraph {
         })?;
 
         // Convert matches to Python
-        py_out::pattern_matches_to_pylist(py, &matches, &self.inner.interner)
+        py_out::pattern_matches_to_pylist(py, &matches, &self.inner)
     }
 
     /// Execute a Cypher query against the graph.

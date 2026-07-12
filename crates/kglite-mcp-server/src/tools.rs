@@ -346,12 +346,14 @@ impl GraphState {
             return Err(NO_GRAPH.to_string());
         };
         let path_str = path.to_string_lossy().into_owned();
-        let mut dir_arc = active.kg.dir().clone();
-        kglite::api::io::save_graph(&mut dir_arc, &path_str)
+        // Save through the active graph's own Arc (write lock held) so
+        // `prepare_save`'s `Arc::make_mut` sees refcount 1 — no deep copy,
+        // and the columnar consolidation lands on the live graph instead
+        // of a discarded clone. `compute_schema` only needs `&DirGraph`.
+        kglite::api::io::save_graph(active.kg.dir_mut(), &path_str)
             .map_err(|e| format!("save_graph_as error: {e}"))?;
         active.source_path = Some(path.to_path_buf());
-        let dir = std::sync::Arc::make_mut(&mut dir_arc);
-        let overview = compute_schema(dir);
+        let overview = compute_schema(active.kg.dir());
         Ok(format!(
             "Saved {path_str} ({} nodes, {} edges); save target rebound here.",
             overview.node_count, overview.edge_count
@@ -1073,7 +1075,11 @@ pub fn register(
             "Persist the active graph to its source .kgl file (single-graph mode only).",
             move |_| {
                 s.ensure_code_tree_fresh();
-                s.with_active(run_save)
+                // Mutable access: the save must go through the active
+                // graph's own Arc so `prepare_save`'s `Arc::make_mut` sees
+                // refcount 1 (no whole-graph deep copy per save).
+                s.with_active_mut(run_save)
+                    .unwrap_or_else(|| NO_GRAPH.to_string())
             },
         );
     }
@@ -1320,7 +1326,7 @@ fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
     }
 }
 
-fn run_save(graph: &ActiveGraph) -> String {
+fn run_save(graph: &mut ActiveGraph) -> String {
     let Some(path) = graph.source_path.as_ref() else {
         return "save_graph requires --graph mode (no source path bound).".to_string();
     };
@@ -1331,11 +1337,16 @@ fn run_save(graph: &ActiveGraph) -> String {
     //   - in-memory  → `prepare_save` → `enable_columnar` → `write_kgl`
     // The pre-0.9.45 inline `save_disk` call errored "save_disk requires
     // disk mode" for in-memory `.kgl` graphs — see CHANGELOG [0.9.45].
-    let mut dir_arc = graph.kg.dir().clone();
-    match kglite::api::io::save_graph(&mut dir_arc, &path_str) {
+    //
+    // Save through the active graph's OWN Arc (`dir_mut`), under the
+    // caller's write lock. The previous `graph.kg.dir().clone()` bumped
+    // the refcount to ≥2, so `prepare_save`'s `Arc::make_mut` deep-copied
+    // the entire graph on EVERY save — and the columnar consolidation
+    // landed in the discarded clone, so the next save paid it all again.
+    match kglite::api::io::save_graph(graph.kg.dir_mut(), &path_str) {
         Ok(()) => {
-            let dir = std::sync::Arc::make_mut(&mut dir_arc);
-            let overview = compute_schema(dir);
+            // `compute_schema` only needs `&DirGraph` — no second make_mut.
+            let overview = compute_schema(graph.kg.dir());
             format!(
                 "Saved {path_str} ({} nodes, {} edges).",
                 overview.node_count, overview.edge_count
@@ -1359,6 +1370,67 @@ mod tests {
             revs: None,
             built_at: SystemTime::now(),
         }
+    }
+
+    #[test]
+    fn save_does_not_deep_copy_the_active_graph() {
+        // `run_save` / `save_as` must save through the active graph's OWN
+        // Arc so `prepare_save`'s `Arc::make_mut` sees refcount 1. The old
+        // `kg.dir().clone()` route deep-copied the entire graph on every
+        // save (and threw the columnar consolidation away with the clone).
+        // Pin the fix by asserting the DirGraph allocation is pointer-
+        // identical across the save.
+        let mut active = fresh_active();
+        {
+            // Put something in the graph so the save isn't trivially empty.
+            let dir = kglite::api::make_dir_graph_mut(active.kg.dir_mut());
+            let opts_params = std::collections::HashMap::new();
+            let opts = kglite::api::session::ExecuteOptions::eager(&opts_params);
+            kglite::api::session::execute_mut(
+                dir,
+                "CREATE (a:Thing {id: 1, name: 'a'})-[:REL]->(b:Thing {id: 2, name: 'b'})",
+                &opts,
+            )
+            .expect("seed mutation");
+        }
+        let path = std::env::temp_dir().join(format!(
+            "kglite-mcp-save-noclone-{}.kgl",
+            std::process::id()
+        ));
+        active.source_path = Some(path.clone());
+
+        let before = Arc::as_ptr(active.kg.dir());
+        let msg = run_save(&mut active);
+        assert!(msg.starts_with("Saved"), "save must succeed: {msg}");
+        assert_eq!(
+            Arc::as_ptr(active.kg.dir()),
+            before,
+            "save must not deep-copy the active graph (refcount must be 1 \
+             at prepare_save's Arc::make_mut)"
+        );
+
+        // save_as: same invariant, and the save target must rebind.
+        let path2 = std::env::temp_dir().join(format!(
+            "kglite-mcp-saveas-noclone-{}.kgl",
+            std::process::id()
+        ));
+        let state = GraphState::new(false);
+        *write_lock(&state.inner) = Some(active);
+        let msg = state.save_as(&path2).expect("save_as succeeds");
+        assert!(msg.starts_with("Saved"), "{msg}");
+        {
+            let guard = read_lock(&state.inner);
+            let active = guard.as_ref().expect("still active");
+            assert_eq!(
+                Arc::as_ptr(active.kg.dir()),
+                before,
+                "save_as must not deep-copy the active graph"
+            );
+            assert_eq!(active.source_path.as_deref(), Some(path2.as_path()));
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

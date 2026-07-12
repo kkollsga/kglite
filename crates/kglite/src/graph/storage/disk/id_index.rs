@@ -460,6 +460,22 @@ impl IdIndexStore {
         ov.entry(name.to_string()).or_insert(built).get(id)
     }
 
+    /// Ensure `name` is indexed (overlay or base) — the `&self` pre-warm
+    /// counterpart of the self-healing read path. No-op when already
+    /// indexed; otherwise builds via `build` and caches it in the overlay
+    /// (idempotent under a concurrent race: the first writer wins, both
+    /// indices are equal). Lets callers pre-build id indices without
+    /// `&mut` — and therefore without `Arc::make_mut` deep-copying a
+    /// shared graph.
+    pub fn ensure(&self, name: &str, build: impl FnOnce() -> TypeIdIndex) {
+        if self.contains_key(name) {
+            return;
+        }
+        let built = build();
+        let mut ov = self.overlay.write().unwrap();
+        ov.entry(name.to_string()).or_insert(built);
+    }
+
     /// Look up without building — None when the type isn't indexed.
     pub fn lookup(&self, name: &str, id: &Value) -> Option<NodeIndex> {
         {

@@ -1718,25 +1718,16 @@ impl<'a> PatternExecutor<'a> {
                     }
                 }
 
-                // Create edge binding — skip expensive clones when the edge has
-                // no named variable (the caller will drop the binding unused).
-                let edge_binding = if edge_pattern.variable.is_some() {
-                    let edge_data = edge.weight();
-                    MatchBinding::Edge {
-                        source,
-                        target,
-                        edge_index: edge.id(),
-                        connection_type: edge_data.connection_type,
-                        properties: edge_data.properties_cloned(&self.graph.interner),
-                    }
-                } else {
-                    MatchBinding::Edge {
-                        source,
-                        target,
-                        edge_index: edge.id(),
-                        connection_type: conn_type,
-                        properties: HashMap::new(),
-                    }
+                // Create edge binding. Index-only — `conn_type` was already
+                // read via the cheap accessor above, and consumers resolve
+                // edge properties from the graph on demand, so no edge
+                // materialisation or property-map clone happens here even
+                // when the edge variable is named.
+                let edge_binding = MatchBinding::Edge {
+                    source,
+                    target,
+                    edge_index: edge.id(),
+                    connection_type: conn_type,
                 };
 
                 results.push((target, edge_binding));

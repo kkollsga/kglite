@@ -669,7 +669,6 @@ pub enum kglite::api::fluent::MatchBinding
 pub kglite::api::fluent::MatchBinding::Edge
 pub kglite::api::fluent::MatchBinding::Edge::connection_type: kglite::api::InternedKey
 pub kglite::api::fluent::MatchBinding::Edge::edge_index: petgraph::graph_impl::EdgeIndex
-pub kglite::api::fluent::MatchBinding::Edge::properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub kglite::api::fluent::MatchBinding::Edge::source: petgraph::graph_impl::NodeIndex
 pub kglite::api::fluent::MatchBinding::Edge::target: petgraph::graph_impl::NodeIndex
 pub kglite::api::fluent::MatchBinding::Node
@@ -1799,6 +1798,7 @@ pub fn kglite::api::DirGraph::drop_range_index(&mut self, node_type: &str, prope
 pub fn kglite::api::DirGraph::embedding_store(&self, node_type: &str, prop_name: &str) -> core::option::Option<&kglite::api::storage::EmbeddingStore>
 pub fn kglite::api::DirGraph::enable_columnar(&mut self)
 pub fn kglite::api::DirGraph::ensure_column_store_for_push(&mut self, node_type: &str) -> &mut kglite::graph::storage::column_store::ColumnStore
+pub fn kglite::api::DirGraph::ensure_id_index(&self, node_type: &str)
 pub fn kglite::api::DirGraph::ensure_type_schema_keys(&mut self, node_type: &str, keys: &[kglite::api::InternedKey])
 pub fn kglite::api::DirGraph::find_matching_composite_index(&self, node_type: &str, filter_properties: &[alloc::string::String]) -> core::option::Option<((alloc::string::String, alloc::vec::Vec<alloc::string::String>), bool)>
 pub fn kglite::api::DirGraph::from_graph(graph: kglite::api::storage::GraphBackend) -> Self

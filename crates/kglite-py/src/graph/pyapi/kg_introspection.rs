@@ -37,23 +37,27 @@ impl KnowledgeGraph {
     ///     graph.build_id_indices(["User", "Product"])
     ///     ```
     #[pyo3(signature = (node_types=None))]
-    fn build_id_indices(&mut self, node_types: Option<Vec<String>>) {
-        let graph = Arc::make_mut(&mut self.inner);
-
-        match node_types {
+    fn build_id_indices(&self, py: Python<'_>, node_types: Option<Vec<String>>) {
+        // Pre-warm through the IdIndexStore's interior mutability
+        // (`ensure_id_index`, the same store the self-healing read path
+        // uses) — a cache warm is a read, so no `&mut` / `Arc::make_mut`,
+        // which would deep-copy the whole graph when any other handle
+        // (fluent clone, frozen view, session) shares the Arc. The index
+        // scans are pure Rust; release the GIL for their duration.
+        let inner = &self.inner;
+        py.detach(|| match node_types {
             Some(types) => {
                 for node_type in types {
-                    graph.build_id_index(&node_type);
+                    inner.ensure_id_index(&node_type);
                 }
             }
             None => {
                 // Build for all existing types
-                let types: Vec<String> = graph.type_indices.keys().map(|s| s.to_string()).collect();
-                for node_type in types {
-                    graph.build_id_index(&node_type);
+                for node_type in inner.type_indices.keys() {
+                    inner.ensure_id_index(node_type);
                 }
             }
-        }
+        });
     }
 
     /// Rebuild all indexes from the current graph state.
@@ -579,6 +583,7 @@ impl KnowledgeGraph {
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
+        py: Python<'_>,
         connection_type: String,
         level_index: Option<usize>,
         direction: Option<String>,
@@ -736,23 +741,32 @@ impl KnowledgeGraph {
             }
         };
 
-        kglite_core::api::fluent::make_traversal(
-            &self.inner,
-            &mut new_kg.cursor.selection,
-            connection_type.clone(),
-            level_index,
-            direction,
-            conditions.as_ref(),
-            conn_conditions.as_ref(),
-            sort_fields.as_ref(),
-            limit,
-            new_level,
-            temporal_filter.as_ref(),
-            target_types.as_deref(),
-        )
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
-        })?;
+        // All inputs are converted to pure Rust by now — run the traversal
+        // itself off-GIL so other Python threads keep making progress
+        // during a large multi-level expansion.
+        {
+            let inner = &self.inner;
+            let selection = &mut new_kg.cursor.selection;
+            py.detach(|| {
+                kglite_core::api::fluent::make_traversal(
+                    inner,
+                    selection,
+                    connection_type.clone(),
+                    level_index,
+                    direction,
+                    conditions.as_ref(),
+                    conn_conditions.as_ref(),
+                    sort_fields.as_ref(),
+                    limit,
+                    new_level,
+                    temporal_filter.as_ref(),
+                    target_types.as_deref(),
+                )
+            })
+            .map_err(|e: String| -> PyErr {
+                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+            })?;
+        }
 
         let actual = new_kg
             .cursor
@@ -1046,6 +1060,7 @@ impl KnowledgeGraph {
     #[allow(clippy::too_many_arguments)]
     fn collect_children(
         &mut self,
+        py: Python<'_>,
         property: Option<&str>,
         r#where: Option<&Bound<'_, PyDict>>,
         sort: Option<&Bound<'_, PyAny>>,
@@ -1109,12 +1124,15 @@ impl KnowledgeGraph {
             })?;
         }
 
-        // Generate the property lists with titles already included
-        let property_groups = kglite_core::api::fluent::get_children_properties(
-            &filtered_kg.inner,
-            &filtered_kg.cursor.selection,
-            property_name,
-        );
+        // Generate the property lists with titles already included.
+        // Pure-Rust scan over the selection — run off-GIL.
+        let property_groups = {
+            let inner = &filtered_kg.inner;
+            let selection = &filtered_kg.cursor.selection;
+            py.detach(|| {
+                kglite_core::api::fluent::get_children_properties(inner, selection, property_name)
+            })
+        };
 
         // If store_as is not provided, return the properties as a dictionary
         if store_as.is_none() {
@@ -1240,6 +1258,7 @@ impl KnowledgeGraph {
     #[pyo3(signature = (expression, level_index=None, store_as=None, keep_selection=None, aggregate_connections=None))]
     fn calculate(
         &mut self,
+        py: Python<'_>,
         expression: &str,
         level_index: Option<usize>,
         store_as: Option<&str>,
@@ -1250,14 +1269,18 @@ impl KnowledgeGraph {
         if let Some(target_property) = store_as {
             let graph = get_graph_mut(&mut self.inner);
 
-            let process_result = kglite_core::api::fluent::process_equation(
-                graph,
-                &self.cursor.selection,
-                expression,
-                level_index,
-                Some(target_property),
-                aggregate_connections,
-            );
+            // Pure-Rust evaluation + store — run off-GIL.
+            let selection = &self.cursor.selection;
+            let process_result = py.detach(|| {
+                kglite_core::api::fluent::process_equation(
+                    &mut *graph,
+                    selection,
+                    expression,
+                    level_index,
+                    Some(target_property),
+                    aggregate_connections,
+                )
+            });
 
             match process_result {
                 Ok(kglite_core::api::fluent::EvaluationResult::Stored(report)) => {
@@ -1297,15 +1320,23 @@ impl KnowledgeGraph {
                 }
             }
         } else {
-            // Just computing without storing - no need to modify graph
-            let process_result = kglite_core::api::fluent::process_equation(
-                &mut (*self.inner).clone(), // Create a temporary clone just for calculation
-                &self.cursor.selection,
-                expression,
-                level_index,
-                None,
-                aggregate_connections,
-            );
+            // Just computing without storing - no need to modify graph.
+            // The temporary whole-graph clone + evaluation are pure Rust —
+            // run off-GIL. (That `process_equation` demands `&mut DirGraph`
+            // even when nothing is stored — forcing this deep clone — is a
+            // pre-existing core-signature wart, out of scope here.)
+            let inner = &self.inner;
+            let selection = &self.cursor.selection;
+            let process_result = py.detach(|| {
+                kglite_core::api::fluent::process_equation(
+                    &mut (**inner).clone(), // Create a temporary clone just for calculation
+                    selection,
+                    expression,
+                    level_index,
+                    None,
+                    aggregate_connections,
+                )
+            });
 
             // Handle regular errors with descriptive messages
             match process_result {

@@ -36,6 +36,23 @@ struct InlineConfig {
     column_list: Vec<String>,
 }
 
+/// Run a pure-Rust batch-mutation closure with the GIL released, mapping
+/// the engine's `String` error to the typed `kglite.*` exception.
+///
+/// The apply phase of `add_nodes` / `add_connections` operates purely on
+/// already-converted Rust data (`DataFrame`, `&mut DirGraph`), so holding
+/// the GIL through it starves every other Python thread for the duration
+/// of a bulk insert. Detach only spans like this one — anything touching
+/// `Bound`/`PyAny` must stay attached.
+fn detach_mutation<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    F: pyo3::marker::Ungil + Send + FnOnce() -> Result<T, String>,
+    T: pyo3::marker::Ungil + Send,
+{
+    py.detach(f)
+        .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e)))
+}
+
 fn validate_interner_names<'a>(
     graph: &DirGraph,
     names: impl IntoIterator<Item = &'a str>,
@@ -154,6 +171,7 @@ fn build_connection_df_from_pandas(
 /// `query` Cypher) and every option behave the same across the two.
 #[allow(clippy::too_many_arguments)]
 fn write_connections(
+    py: Python<'_>,
     kg: &mut KnowledgeGraph,
     replace: bool,
     data: Option<&Bound<'_, PyAny>>,
@@ -288,35 +306,35 @@ fn write_connections(
 
         let graph = get_graph_mut(&mut kg.inner);
 
-        let result = if replace {
-            kglite_core::api::mutation::replace_connections(
-                graph,
-                df_result,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                source_title_field,
-                target_title_field,
-                conflict_handling,
-            )
-        } else {
-            kglite_core::api::mutation::add_connections(
-                graph,
-                df_result,
-                connection_type.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                source_title_field,
-                target_title_field,
-                conflict_handling,
-            )
-        }
-        .map_err(|e: String| -> PyErr {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+        // Everything past this point is pure Rust — run off-GIL.
+        let result = detach_mutation(py, || {
+            if replace {
+                kglite_core::api::mutation::replace_connections(
+                    &mut *graph,
+                    df_result,
+                    connection_type.clone(),
+                    source_type,
+                    source_id_field,
+                    target_type,
+                    target_id_field,
+                    source_title_field,
+                    target_title_field,
+                    conflict_handling,
+                )
+            } else {
+                kglite_core::api::mutation::add_connections(
+                    &mut *graph,
+                    df_result,
+                    connection_type.clone(),
+                    source_type,
+                    source_id_field,
+                    target_type,
+                    target_id_field,
+                    source_title_field,
+                    target_title_field,
+                    conflict_handling,
+                )
+            }
         })?;
 
         kg.cursor.selection.clear();
@@ -350,35 +368,35 @@ fn write_connections(
 
     let graph = get_graph_mut(&mut kg.inner);
 
-    let result = if replace {
-        kglite_core::api::mutation::replace_connections(
-            graph,
-            df_result,
-            connection_type.clone(),
-            source_type,
-            source_id_field,
-            target_type,
-            target_id_field,
-            source_title_field,
-            target_title_field,
-            conflict_handling,
-        )
-    } else {
-        kglite_core::api::mutation::add_connections(
-            graph,
-            df_result,
-            connection_type.clone(),
-            source_type,
-            source_id_field,
-            target_type,
-            target_id_field,
-            source_title_field,
-            target_title_field,
-            conflict_handling,
-        )
-    }
-    .map_err(|e: String| -> PyErr {
-        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+    // The converted frame is pure Rust — apply the batch off-GIL.
+    let result = detach_mutation(py, || {
+        if replace {
+            kglite_core::api::mutation::replace_connections(
+                &mut *graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+        } else {
+            kglite_core::api::mutation::add_connections(
+                &mut *graph,
+                df_result,
+                connection_type.clone(),
+                source_type,
+                source_id_field,
+                target_type,
+                target_id_field,
+                source_title_field,
+                target_title_field,
+                conflict_handling,
+            )
+        }
     })?;
 
     // Merge temporal config into graph (auto-detected from validFrom/validTo column types)
@@ -539,7 +557,10 @@ fn convert_dataframe<'py>(
     })
 }
 
+/// Apply the converted node batch with the GIL released — the DataFrame is
+/// already pure Rust at this point, so the insert runs off-GIL.
 fn apply_node_batch(
+    py: Python<'_>,
     graph: &mut DirGraph,
     df: DataFrame,
     node_type: &str,
@@ -547,16 +568,15 @@ fn apply_node_batch(
     node_title_field: Option<String>,
     conflict_handling: Option<String>,
 ) -> PyResult<NodeOperationReport> {
-    kglite_core::api::mutation::add_nodes(
-        graph,
-        df,
-        node_type.to_string(),
-        unique_id_field,
-        node_title_field,
-        conflict_handling,
-    )
-    .map_err(|e: String| -> PyErr {
-        crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+    detach_mutation(py, || {
+        kglite_core::api::mutation::add_nodes(
+            &mut *graph,
+            df,
+            node_type.to_string(),
+            unique_id_field,
+            node_title_field,
+            conflict_handling,
+        )
     })
 }
 
@@ -1016,6 +1036,7 @@ impl KnowledgeGraph {
 
         let graph = get_graph_mut(&mut self.inner);
         let result = apply_node_batch(
+            py,
             graph,
             converted.df,
             &node_type,
@@ -1212,6 +1233,7 @@ impl KnowledgeGraph {
     #[allow(clippy::too_many_arguments)]
     fn add_connections(
         &mut self,
+        py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         connection_type: String,
         source_type: String,
@@ -1228,6 +1250,7 @@ impl KnowledgeGraph {
         extra_properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
+            py,
             self,
             false,
             data,
@@ -1296,6 +1319,7 @@ impl KnowledgeGraph {
     #[allow(clippy::too_many_arguments)]
     fn replace_connections(
         &mut self,
+        py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         connection_type: String,
         source_type: String,
@@ -1312,6 +1336,7 @@ impl KnowledgeGraph {
         extra_properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         write_connections(
+            py,
             self,
             true,
             data,
@@ -1539,16 +1564,16 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = kglite_core::api::mutation::add_nodes(
-                graph,
-                df_result,
-                node_type.clone(),
-                unique_id_field,
-                Some(node_title_field),
-                None,
-            )
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+            // Converted frame is pure Rust — apply off-GIL.
+            let report = detach_mutation(py, || {
+                kglite_core::api::mutation::add_nodes(
+                    &mut *graph,
+                    df_result,
+                    node_type.clone(),
+                    unique_id_field,
+                    Some(node_title_field),
+                    None,
+                )
             })?;
 
             result_dict.set_item(&node_type, report.nodes_created + report.nodes_updated)?;
@@ -1721,20 +1746,20 @@ impl KnowledgeGraph {
 
             let graph = get_graph_mut(&mut self.inner);
 
-            let report = kglite_core::api::mutation::add_connections(
-                graph,
-                df_result,
-                connection_name.clone(),
-                source_type,
-                source_id_field,
-                target_type,
-                target_id_field,
-                None, // source_title_field
-                None, // target_title_field
-                None, // conflict_handling
-            )
-            .map_err(|e: String| -> PyErr {
-                crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(e))
+            // Converted frame is pure Rust — apply off-GIL.
+            let report = detach_mutation(py, || {
+                kglite_core::api::mutation::add_connections(
+                    &mut *graph,
+                    df_result,
+                    connection_name.clone(),
+                    source_type,
+                    source_id_field,
+                    target_type,
+                    target_id_field,
+                    None, // source_title_field
+                    None, // target_title_field
+                    None, // conflict_handling
+                )
             })?;
 
             result_dict.set_item(&connection_name, report.connections_created)?;

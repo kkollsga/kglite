@@ -357,12 +357,16 @@ pub enum MatchBinding {
     /// Lightweight node reference — stores only NodeIndex (4 bytes).
     /// Used in Cypher executor path where node data is resolved on demand from graph.
     NodeRef(NodeIndex),
+    /// Relationship binding. Deliberately index-only: consumers resolve
+    /// edge properties on demand from the graph via `edge_index` (the
+    /// Cypher executor's `EdgeBinding` and the fluent API's dict
+    /// conversion both do), so the matcher never clones a property map
+    /// into the binding on the expansion hot path.
     Edge {
         source: NodeIndex,
         target: NodeIndex,
         edge_index: EdgeIndex,
         connection_type: InternedKey,
-        properties: HashMap<String, Value>,
     },
     /// Variable-length path binding for patterns like -[:TYPE*1..3]->
     VariableLengthPath {

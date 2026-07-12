@@ -664,13 +664,21 @@ pub fn string_pairs_to_pydict(py: Python, pairs: &[(String, String)]) -> PyResul
     Ok(result.into())
 }
 
-/// Convert pattern matching results to a Python list of dictionaries
+/// Convert pattern matching results to a Python list of dictionaries.
+///
+/// Takes the graph (not just the interner): `MatchBinding::Edge` is
+/// index-only, so edge properties are resolved here — once per *returned*
+/// binding — instead of being cloned into every candidate binding on the
+/// matcher's expansion hot path.
 pub fn pattern_matches_to_pylist(
     py: Python,
     matches: &[kglite_core::api::fluent::PatternMatch],
-    interner: &kglite_core::api::StringInterner,
+    graph: &kglite_core::api::DirGraph,
 ) -> PyResult<Py<PyAny>> {
     use kglite_core::api::fluent::MatchBinding;
+    use kglite_core::api::GraphRead;
+
+    let interner = &graph.interner;
 
     let result = PyList::empty(py);
 
@@ -707,15 +715,16 @@ pub fn pattern_matches_to_pylist(
                     target,
                     edge_index,
                     connection_type,
-                    properties,
                 } => {
                     binding_dict.set_item("source_idx", source.index())?;
                     binding_dict.set_item("target_idx", target.index())?;
                     binding_dict.set_item("edge_index", edge_index.index())?;
                     binding_dict.set_item("connection_type", interner.resolve(*connection_type))?;
                     let props_dict = PyDict::new(py);
-                    for (key, value) in properties {
-                        props_dict.set_item(key, value_to_py(py, value)?)?;
+                    if let Some(edge_data) = graph.graph.edge_weight(*edge_index) {
+                        for (key, value) in edge_data.properties_cloned(interner) {
+                            props_dict.set_item(key, value_to_py(py, &value)?)?;
+                        }
                     }
                     binding_dict.set_item("properties", props_dict)?;
                 }
