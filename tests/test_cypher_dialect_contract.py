@@ -39,6 +39,16 @@ def test_dialect_manifest_has_stable_unique_classifications():
     }
 
 
+def test_completed_alignment_work_is_not_described_as_future_work():
+    manifest = _manifest()
+    features = {feature["id"]: feature for feature in manifest["features"]}
+    assert features["clause.where"]["status"] == "covered"
+    assert features["path.values"]["status"] == "covered"
+    rendered = json.dumps(manifest).lower()
+    assert "being aligned" not in rendered
+    assert "is tracked" not in rendered
+
+
 def test_reference_links_the_machine_readable_contract_and_names_every_extension():
     document = DOC_PATH.read_text()
     manifest = _manifest()

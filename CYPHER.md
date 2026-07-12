@@ -1870,9 +1870,9 @@ claimed openCypher-compatible subset.
 
 | Clause | Status | Notes |
 |--------|--------|-------|
-| `MATCH` | Partial | Node, relationship, variable-length, and shortest-path patterns; exact relationship uniqueness is tracked |
+| `MATCH` | Partial | Node, relationship, variable-length, shortest-path, and relationship-unique trail patterns; not every openCypher pattern grammar form is implemented |
 | `OPTIONAL MATCH` | Covered | Null-extending optional patterns |
-| `WHERE` | Partial | Broad predicate support; remaining expression-level unknown propagation is tracked |
+| `WHERE` | Covered | Predicates preserve three-valued boolean, membership, and quantifier semantics |
 | `RETURN` | Covered | Aliases, `DISTINCT`, expressions, and map projections |
 | `WITH` | Covered | Projection, grouping, wildcard preservation, and strict post-projection scope |
 | `ORDER BY` | Covered | Multi-column, `ASC`/`DESC`, fused top-k optimization |
@@ -1898,7 +1898,7 @@ claimed openCypher-compatible subset.
 |---------|--------|-------|
 | Arithmetic (`+`, `-`, `*`, `/`) | Covered | Numeric arithmetic plus list/list and element/list composition |
 | String concat (`\|\|`) | Extension | Auto-converts non-strings |
-| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core comparisons are covered; remaining unknown cases are tracked |
+| Comparison (`=`, `<>`, `<`, `>`, `<=`, `>=`) | Partial | Core scalar comparisons and null propagation are covered; composite and cross-type ordering are not a complete openCypher implementation |
 | Boolean (`AND`, `OR`, `XOR`, `NOT`) | Covered | Predicate and expression positions preserve three-valued results |
 | `IS NULL` / `IS NOT NULL` | Covered | Also works as expressions in RETURN/WITH |
 | `IN [list]` | Covered | Null operands and null-containing no-match lists preserve unknown |
@@ -1934,7 +1934,7 @@ claimed openCypher-compatible subset.
 | `coalesce` | Covered | |
 | `range(start, end [, step])` | Covered | Inclusive integer range |
 | `round(x [, precision])` | Covered | |
-| `nodes(p)`, `relationships(p)` | Partial | Exact relationship identity for parallel/incoming paths is tracked |
+| `nodes(p)`, `relationships(p)` | Covered | Exact node order, relationship identity, properties, and traversal direction are preserved for parallel and incoming paths |
 | String functions | Covered | `split`, `replace`, `substring`, `left`, `right`, `trim`, `ltrim`, `rtrim`, `reverse` |
 | Math functions | Covered | `abs`, `ceil`, `floor`, `sqrt`, `sign`, `log`/`ln`, `log10`, `exp`, `pow`, `pi`, `rand`, `randomUUID` |
 | Trig functions | Covered | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(y,x)`, `cot`, `haversin`, `degrees`, `radians` |

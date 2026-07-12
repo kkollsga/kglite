@@ -10,9 +10,9 @@
     "intentional_divergence": "Supported behavior deliberately differs for KGLite's data model or runtime."
   },
   "features": [
-    {"id": "clause.match", "syntax": "MATCH", "status": "partial", "note": "Core patterns are supported; relationship uniqueness for repeated and variable-length patterns is being aligned."},
+    {"id": "clause.match", "syntax": "MATCH", "status": "partial", "note": "Core node, relationship, variable-length, shortest-path, and relationship-unique trail patterns are covered; not every openCypher pattern grammar form is implemented."},
     {"id": "clause.optional_match", "syntax": "OPTIONAL MATCH", "status": "covered", "note": "Null-extending optional pattern matches."},
-    {"id": "clause.where", "syntax": "WHERE", "status": "partial", "note": "Predicates are broad; the remaining expression-level three-valued cases are tracked explicitly."},
+    {"id": "clause.where", "syntax": "WHERE", "status": "covered", "note": "Predicates preserve three-valued boolean, membership, and quantifier semantics."},
     {"id": "clause.return", "syntax": "RETURN", "status": "covered", "note": "Projection, aliases, DISTINCT, and aggregation."},
     {"id": "clause.with", "syntax": "WITH", "status": "covered", "note": "Projection, aggregation, wildcard preservation, and strict post-projection scope validation."},
     {"id": "clause.order", "syntax": "ORDER BY / SKIP / LIMIT", "status": "covered", "note": "Stable multi-key ordering and pagination."},
@@ -30,7 +30,7 @@
     {"id": "expression.list", "syntax": "list literals, indexing, slicing, concatenation", "status": "covered", "note": "List composition supports list/list and element/list forms; indexes and slice bounds require integers."},
     {"id": "expression.quantifiers", "syntax": "any / all / none / single", "status": "covered", "note": "Quantifiers preserve unknown unless a decisive true/false result exists."},
     {"id": "expression.case", "syntax": "CASE", "status": "covered", "note": "Simple and generic CASE forms."},
-    {"id": "path.values", "syntax": "nodes(p) / relationships(p)", "status": "partial", "note": "Path values exist; exact relationship identity for parallel and incoming edges is tracked."},
+    {"id": "path.values", "syntax": "nodes(p) / relationships(p)", "status": "covered", "note": "Path values preserve exact node order, relationship identity, properties, and traversal direction, including parallel and incoming edges."},
     {"id": "function.id", "syntax": "id(entity)", "status": "covered", "note": "Returns KGLite logical node identity or stable relationship identity."},
     {"id": "model.labels", "syntax": "labels(n) / SET n:Label", "status": "intentional_divergence", "note": "KGLite stores one immutable primary type plus additive secondary labels; labels(n) returns primary type first."},
     {"id": "transaction.model", "syntax": "transactions", "status": "intentional_divergence", "note": "Embedded snapshots and optimistic commit checking replace a remote database transaction service."}
