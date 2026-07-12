@@ -1749,13 +1749,14 @@ mod tests {
 
     #[test]
     fn path_backed_active_graph_retains_writer_lease() {
-        let p = tmp_kgl("retained_lease");
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("retained_lease.kgl");
         let state = GraphState::default();
         state.create_in_mode(&p, StorageMode::Memory).unwrap();
+        assert_eq!(Arc::strong_count(&state.inner), 1);
         assert!(kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).is_err());
         drop(state);
         kglite::api::io::GraphWriterLease::acquire(&p, Duration::ZERO).unwrap();
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

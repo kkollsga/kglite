@@ -8,12 +8,30 @@ from pathlib import Path
 import subprocess
 import sys
 
-import tomllib
-
 ROOT = Path(__file__).resolve().parent.parent
 POLICY = ROOT / "tests" / "api-baselines" / "dependency-licenses.json"
 PUBLISHED_CRATES = ("kglite", "kglite-c", "kglite-cli", "kglite-mcp-server", "kglite-bolt-server")
 FORBIDDEN = ("AGPL", "GPL", "SSPL", "BUSL", "Commons-Clause", "NonCommercial")
+
+
+def project_literal(path: Path, key: str) -> str | None:
+    """Read one simple literal from [project], rejecting ambiguous TOML."""
+    in_project = False
+    found: str | None = None
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if line.startswith("["):
+            in_project = line == "[project]"
+            continue
+        if not in_project or line.startswith("#") or "=" not in line:
+            continue
+        candidate, value = line.split("=", 1)
+        if candidate.strip() != key:
+            continue
+        if found is not None:
+            return None
+        found = value.strip()
+    return found
 
 
 def main() -> int:
@@ -62,10 +80,9 @@ def main() -> int:
             errors.append(f"crates/{crate}/LICENSE is missing or differs from root LICENSE")
 
     for pyproject in (ROOT / "pyproject.toml", ROOT / "crates" / "kglite-cli" / "pyproject.toml"):
-        project = tomllib.loads(pyproject.read_text())["project"]
-        if project.get("license") != "MIT":
+        if project_literal(pyproject, "license") != '"MIT"':
             errors.append(f"{pyproject.relative_to(ROOT)}: project.license must be SPDX 'MIT'")
-        if "LICENSE" not in project.get("license-files", []):
+        if project_literal(pyproject, "license-files") != '["LICENSE"]':
             errors.append(f"{pyproject.relative_to(ROOT)}: project.license-files must include LICENSE")
 
     if errors:

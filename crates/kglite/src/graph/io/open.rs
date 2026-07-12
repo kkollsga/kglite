@@ -31,7 +31,7 @@ pub struct OpenGraphResult {
 /// Cross-process writer ownership for a graph path. The sibling lock file is
 /// persistent; OS advisory-lock teardown, not PID-file deletion, owns liveness.
 pub struct GraphWriterLease {
-    _file: File,
+    file: File,
 }
 
 impl GraphWriterLease {
@@ -51,7 +51,7 @@ impl GraphWriterLease {
                     file.rewind()?;
                     writeln!(file, "pid={}", std::process::id())?;
                     file.sync_data()?;
-                    return Ok(Self { _file: file });
+                    return Ok(Self { file });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if started.elapsed() >= timeout {
@@ -71,6 +71,15 @@ impl GraphWriterLease {
     }
 }
 
+impl Drop for GraphWriterLease {
+    fn drop(&mut self) {
+        // Closing a locked descriptor normally releases its advisory lock,
+        // but doing so explicitly gives every fs2 backend the same teardown
+        // boundary and lets another writer acquire immediately after drop.
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 fn writer_lease_path(graph_path: &Path) -> std::path::PathBuf {
     let mut lock = graph_path.as_os_str().to_os_string();
     lock.push(".lock");
@@ -86,30 +95,42 @@ struct MetadataIdentity {
     #[cfg(unix)]
     inode: u64,
     #[cfg(windows)]
-    volume: Option<u32>,
-    #[cfg(windows)]
-    file_index: Option<u64>,
+    handle: Arc<same_file::Handle>,
 }
 
 impl MetadataIdentity {
-    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+    fn capture(path: &Path) -> io::Result<(Self, std::fs::Metadata)> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
+        #[cfg(not(windows))]
+        let metadata = std::fs::metadata(path)?;
         #[cfg(windows)]
-        use std::os::windows::fs::MetadataExt;
+        let (metadata, handle) = {
+            let handle = Arc::new(same_file::Handle::from_path(path)?);
+            let metadata = handle.as_file().metadata()?;
+            (metadata, handle)
+        };
 
-        Ok(Self {
-            len: metadata.len(),
-            modified: metadata.modified()?,
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(windows)]
-            volume: metadata.volume_serial_number(),
-            #[cfg(windows)]
-            file_index: metadata.file_index(),
-        })
+        Ok((
+            Self {
+                len: metadata.len(),
+                modified: metadata.modified()?,
+                #[cfg(unix)]
+                device: metadata.dev(),
+                #[cfg(unix)]
+                inode: metadata.ino(),
+                #[cfg(windows)]
+                handle,
+            },
+            metadata,
+        ))
+    }
+
+    fn open_snapshot(&self, _path: &Path) -> io::Result<File> {
+        #[cfg(windows)]
+        return self.handle.as_file().try_clone();
+        #[cfg(not(windows))]
+        File::open(_path)
     }
 }
 
@@ -124,8 +145,8 @@ pub struct GraphFileIdentity {
 
 impl GraphFileIdentity {
     pub fn capture(path: &Path) -> io::Result<Self> {
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
+        let (root, metadata) = match MetadataIdentity::capture(path) {
+            Ok(captured) => captured,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     root: None,
@@ -134,7 +155,6 @@ impl GraphFileIdentity {
             }
             Err(error) => return Err(error),
         };
-        let root = MetadataIdentity::from_metadata(&metadata)?;
         if !metadata.is_dir() {
             return Ok(Self {
                 root: Some(root),
@@ -143,8 +163,8 @@ impl GraphFileIdentity {
         }
 
         let current_path = path.join("CURRENT");
-        let current_metadata = match std::fs::metadata(&current_path) {
-            Ok(metadata) => metadata,
+        let (current_identity, current_metadata) = match MetadataIdentity::capture(&current_path) {
+            Ok(captured) => captured,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Self {
                     root: Some(root),
@@ -159,9 +179,10 @@ impl GraphFileIdentity {
                 "disk graph CURRENT pointer exceeds 4096 bytes",
             ));
         }
-        let current_identity = MetadataIdentity::from_metadata(&current_metadata)?;
         let mut bytes = Vec::with_capacity(current_metadata.len() as usize);
-        File::open(current_path)?.read_to_end(&mut bytes)?;
+        current_identity
+            .open_snapshot(&current_path)?
+            .read_to_end(&mut bytes)?;
         Ok(Self {
             root: Some(root),
             current: Some((current_identity, bytes)),

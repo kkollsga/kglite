@@ -208,6 +208,9 @@ yaml-rust2 = { version = "0.10", optional = true }
 oxttl = { version = "0.2", optional = true }
 oxrdf = { version = "0.3", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
+
 [dev-dependencies]
 tempfile = "3"
 

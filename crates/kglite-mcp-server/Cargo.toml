@@ -82,6 +82,9 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 # `fastembed` is an OPTIONAL feature, default OFF. Enabling it
 # pulls in `kglite/fastembed` → fastembed → ort-sys, which has
