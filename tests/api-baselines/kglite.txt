@@ -270,7 +270,7 @@ pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> co
 pub mod kglite::api::code_tree
 pub enum kglite::api::code_tree::CodeContextLookup
 pub kglite::api::code_tree::CodeContextLookup::Ambiguous(alloc::vec::Vec<kglite::api::NodeInfo>)
-pub kglite::api::code_tree::CodeContextLookup::Found(kglite::api::code_tree::CodeEntityContext)
+pub kglite::api::code_tree::CodeContextLookup::Found(alloc::boxed::Box<kglite::api::code_tree::CodeEntityContext>)
 pub kglite::api::code_tree::CodeContextLookup::NotFound
 impl core::fmt::Debug for kglite::api::code_tree::CodeContextLookup
 pub fn kglite::api::code_tree::CodeContextLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result

@@ -131,7 +131,7 @@ pub struct CodeEntityContext {
 /// Outcome of resolving a code entity for [`code_entity_context`].
 #[derive(Debug)]
 pub enum CodeContextLookup {
-    Found(CodeEntityContext),
+    Found(Box<CodeEntityContext>),
     Ambiguous(Vec<schema::NodeInfo>),
     NotFound,
 }
@@ -256,7 +256,7 @@ pub fn code_entity_context(
             .collect()
     };
 
-    CodeContextLookup::Found(CodeEntityContext {
+    CodeContextLookup::Found(Box::new(CodeEntityContext {
         node: target_node.to_node_info(&dir.interner),
         defined_in: match target_node.get_field_ref("file_path").as_deref() {
             Some(Value::String(path)) => Some(path.clone()),
@@ -264,7 +264,7 @@ pub fn code_entity_context(
         },
         outgoing: materialise_groups(outgoing_indices),
         incoming: materialise_groups(incoming_indices),
-    })
+    }))
 }
 
 /// Resolve a name (or qualified-name suffix) to a single code-entity
