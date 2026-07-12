@@ -142,7 +142,7 @@ impl ResultView {
     /// `from_preprocessed`-equivalent path when `result.lazy` is `None`.
     pub fn from_cypher_result_with_graph(result: CypherResult, graph: Arc<DirGraph>) -> Self {
         if let Some(lazy_desc) = result.lazy {
-            let n = lazy_desc.pending_rows.len();
+            let n = lazy_desc.len();
             let cache = Mutex::new((0..n).map(|_| None).collect::<Vec<_>>());
             return ResultView {
                 columns: result.columns,
@@ -287,7 +287,7 @@ impl ResultView {
     /// (`self.lazy.pending`) backings without forcing materialisation.
     fn effective_len(&self) -> usize {
         if let Some(lz) = &self.lazy {
-            return lz.descriptor.pending_rows.len();
+            return lz.descriptor.len();
         }
         self.rows.len()
     }
@@ -297,17 +297,18 @@ impl ResultView {
     /// `edge_bindings`. Caches the result so repeat access is O(1) after
     /// the first call. Caller already holds the cache lock; we re-lock
     /// inside to keep the borrow scope tight.
-    fn materialise_lazy_row(&self, index: usize) -> Vec<PreProcessedValue> {
+    fn materialise_lazy_row(&self, index: usize) -> PyResult<Vec<PreProcessedValue>> {
         let lz = self
             .lazy
             .as_ref()
             .expect("materialise_lazy_row called without lazy backing");
         // Quick read-after-write check: if cache hit, return clone.
         if let Some(row) = lz.cache.lock().unwrap().get(index).and_then(|c| c.clone()) {
-            return row;
+            return Ok(row);
         }
         let cells: Vec<PreProcessedValue> =
             kglite_core::api::cypher::materialise_lazy_row(&lz.descriptor, &lz.graph, index)
+                .map_err(crate::error_py::kg_to_pyerr)?
                 .into_iter()
                 .map(PreProcessedValue::Plain)
                 .collect();
@@ -315,20 +316,20 @@ impl ResultView {
         if let Some(slot) = lz.cache.lock().unwrap().get_mut(index) {
             *slot = Some(cells.clone());
         }
-        cells
+        Ok(cells)
     }
 
     /// Force materialisation of every lazy row (or return the existing
     /// eager rows) — used by `to_df` which consumes every cell. Public to
     /// the crate so `kg_core::cypher` can build a DataFrame from a lazy
     /// result without re-implementing the resolver.
-    pub fn materialise_all(&self) -> Vec<Vec<PreProcessedValue>> {
+    pub fn materialise_all(&self) -> PyResult<Vec<Vec<PreProcessedValue>>> {
         if self.lazy.is_some() {
             return (0..self.effective_len())
                 .map(|i| self.materialise_lazy_row(i))
                 .collect();
         }
-        self.rows.clone()
+        Ok(self.rows.clone())
     }
 
     /// Owned-clone of the column names; used in DataFrame construction
@@ -341,7 +342,7 @@ impl ResultView {
     fn row_to_py(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyAny>> {
         let owned;
         let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
-            owned = self.materialise_lazy_row(index);
+            owned = self.materialise_lazy_row(index)?;
             &owned
         } else {
             &self.rows[index]
@@ -370,7 +371,7 @@ impl ResultView {
     ) -> PyResult<Py<PyAny>> {
         let owned;
         let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
-            owned = self.materialise_lazy_row(index);
+            owned = self.materialise_lazy_row(index)?;
             &owned
         } else {
             &self.rows[index]
@@ -441,7 +442,7 @@ impl ResultView {
             while (indices.step > 0 && i < indices.stop) || (indices.step < 0 && i > indices.stop) {
                 if i >= 0 && (i as usize) < len {
                     if self.lazy.is_some() {
-                        sliced_rows.push(self.materialise_lazy_row(i as usize));
+                        sliced_rows.push(self.materialise_lazy_row(i as usize)?);
                     } else {
                         sliced_rows.push(self.rows[i as usize].clone());
                     }
@@ -474,20 +475,20 @@ impl ResultView {
         }
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&self) -> PyResult<String> {
         // Materialise lazy rows for printing; format_table needs concrete
         // PreProcessedValues. For very large lazy results, callers should
         // use head()/tail() instead of repr.
         if self.lazy.is_some() {
             let rows: Vec<Vec<PreProcessedValue>> = (0..self.effective_len())
                 .map(|i| self.materialise_lazy_row(i))
-                .collect();
-            return format_table(&self.columns, &rows);
+                .collect::<PyResult<_>>()?;
+            return Ok(format_table(&self.columns, &rows));
         }
-        format_table(&self.columns, &self.rows)
+        Ok(format_table(&self.columns, &self.rows))
     }
 
-    fn __str__(&self) -> String {
+    fn __str__(&self) -> PyResult<String> {
         self.__repr__()
     }
 
@@ -630,7 +631,7 @@ impl ResultView {
         }
         let owned;
         let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
-            owned = self.materialise_lazy_row(0);
+            owned = self.materialise_lazy_row(0)?;
             &owned
         } else {
             &self.rows[0]
@@ -672,7 +673,7 @@ impl ResultView {
         for i in 0..self.effective_len() {
             let owned;
             let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
-                owned = self.materialise_lazy_row(i);
+                owned = self.materialise_lazy_row(i)?;
                 &owned
             } else {
                 &self.rows[i]
@@ -694,25 +695,27 @@ impl ResultView {
     /// r.head(10)   # first 10 rows
     /// ```
     #[pyo3(signature = (n=5))]
-    fn head(&self, n: usize) -> Self {
+    fn head(&self, n: usize) -> PyResult<Self> {
         let total = self.effective_len();
         let take = n.min(total);
         // For lazy results we materialise the first `take` rows so the
         // returned view is concrete (head() callers commonly print or
         // sample). The lazy → eager conversion is paid once.
         let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
-            (0..take).map(|i| self.materialise_lazy_row(i)).collect()
+            (0..take)
+                .map(|i| self.materialise_lazy_row(i))
+                .collect::<PyResult<_>>()?
         } else {
             self.rows[..take].to_vec()
         };
-        ResultView {
+        Ok(ResultView {
             columns: self.columns.clone(),
             rows,
             stats: None,
             profile: None,
             diagnostics: None,
             lazy: None,
-        }
+        })
     }
 
     /// Last *n* rows as a new ResultView (default 5). Data stays lazy.
@@ -724,22 +727,24 @@ impl ResultView {
     /// r.tail(10)   # last 10 rows
     /// ```
     #[pyo3(signature = (n=5))]
-    fn tail(&self, n: usize) -> Self {
+    fn tail(&self, n: usize) -> PyResult<Self> {
         let len = self.effective_len();
         let start = len.saturating_sub(n);
         let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
-            (start..len).map(|i| self.materialise_lazy_row(i)).collect()
+            (start..len)
+                .map(|i| self.materialise_lazy_row(i))
+                .collect::<PyResult<_>>()?
         } else {
             self.rows[start..].to_vec()
         };
-        ResultView {
+        Ok(ResultView {
             columns: self.columns.clone(),
             rows,
             stats: None,
             profile: None,
             diagnostics: None,
             lazy: None,
-        }
+        })
     }
 
     /// Materialize as a pandas DataFrame.
@@ -753,7 +758,7 @@ impl ResultView {
     fn to_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.lazy.is_some() {
             // DataFrame consumes every cell — force lazy materialisation.
-            let materialised = self.materialise_all();
+            let materialised = self.materialise_all()?;
             return preprocessed_result_to_dataframe(py, &self.columns, &materialised);
         }
         preprocessed_result_to_dataframe(py, &self.columns, &self.rows)
@@ -779,7 +784,7 @@ impl ResultView {
         crs: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let df = if self.lazy.is_some() {
-            let materialised = self.materialise_all();
+            let materialised = self.materialise_all()?;
             preprocessed_result_to_dataframe(py, &self.columns, &materialised)?
         } else {
             preprocessed_result_to_dataframe(py, &self.columns, &self.rows)?

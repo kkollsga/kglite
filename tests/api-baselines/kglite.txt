@@ -535,8 +535,9 @@ impl core::fmt::Debug for kglite::api::cypher::EdgeBinding
 pub fn kglite::api::cypher::EdgeBinding::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::cypher::EdgeBinding
 pub struct kglite::api::cypher::LazyResultDescriptor
-pub kglite::api::cypher::LazyResultDescriptor::pending_rows: alloc::vec::Vec<kglite::api::cypher::ResultRow>
-pub kglite::api::cypher::LazyResultDescriptor::return_items: alloc::vec::Vec<kglite::api::cypher::ReturnItem>
+impl kglite::api::cypher::LazyResultDescriptor
+pub fn kglite::api::cypher::LazyResultDescriptor::is_empty(&self) -> bool
+pub fn kglite::api::cypher::LazyResultDescriptor::len(&self) -> usize
 impl core::fmt::Debug for kglite::api::cypher::LazyResultDescriptor
 pub fn kglite::api::cypher::LazyResultDescriptor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::MutationStats
@@ -598,8 +599,8 @@ pub fn kglite::api::cypher::execute_mutable(graph: &mut kglite::api::DirGraph, q
 pub fn kglite::api::cypher::generate_explain_result(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> kglite::api::cypher::CypherResult
 pub fn kglite::api::cypher::is_mutation_query(query: &kglite::api::cypher::CypherQuery) -> bool
 pub fn kglite::api::cypher::mark_lazy_eligibility(query: &mut kglite::api::cypher::CypherQuery)
-pub fn kglite::api::cypher::materialise_lazy(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph) -> alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>
-pub fn kglite::api::cypher::materialise_lazy_row(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph, index: usize) -> alloc::vec::Vec<kglite::datatypes::values::Value>
+pub fn kglite::api::cypher::materialise_lazy(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>, kglite::error::KgError>
+pub fn kglite::api::cypher::materialise_lazy_row(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph, index: usize) -> core::result::Result<alloc::vec::Vec<kglite::datatypes::values::Value>, kglite::error::KgError>
 pub fn kglite::api::cypher::optimize(query: &mut kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>)
 pub fn kglite::api::cypher::parse_cypher(input: &str) -> core::result::Result<kglite::api::cypher::CypherQuery, kglite::error::KgError>
 pub fn kglite::api::cypher::parse_with_mutation_check(query: &str) -> core::result::Result<(kglite::api::cypher::CypherQuery, bool), kglite::error::KgError>

@@ -1785,7 +1785,7 @@ impl KnowledgeGraph {
                             std::sync::Arc::clone(&inner),
                         );
                     let materialised = view
-                        .materialise_all()
+                        .materialise_all()?
                         .into_iter()
                         .map(|row| {
                             row.into_iter()
@@ -1840,7 +1840,7 @@ impl KnowledgeGraph {
                     // backings). For now, route through to_list-style
                     // materialisation by triggering the lazy resolver per
                     // row and rebuilding the eager form.
-                    let preprocessed = view.materialise_all();
+                    let preprocessed = view.materialise_all()?;
                     let cols = view.columns_owned();
                     cypher::py_convert::preprocessed_result_to_dataframe(py, &cols, &preprocessed)
                 } else {

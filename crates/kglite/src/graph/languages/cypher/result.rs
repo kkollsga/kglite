@@ -256,8 +256,56 @@ pub struct QueryDiagnostics {
 /// lazy materialisation (the standard ResultView path does).
 #[derive(Debug)]
 pub struct LazyResultDescriptor {
-    pub pending_rows: Vec<ResultRow>,
-    pub return_items: Vec<super::ast::ReturnItem>,
+    pending_rows: Vec<ResultRow>,
+    return_items: Vec<super::ast::ReturnItem>,
+    graph_id: u64,
+    graph_version: u64,
+}
+
+impl LazyResultDescriptor {
+    pub(crate) fn new(
+        pending_rows: Vec<ResultRow>,
+        return_items: Vec<super::ast::ReturnItem>,
+        graph: &crate::graph::dir_graph::DirGraph,
+    ) -> Self {
+        Self {
+            pending_rows,
+            return_items,
+            graph_id: graph.graph_id(),
+            graph_version: graph.version(),
+        }
+    }
+
+    /// Number of unresolved rows held by this descriptor.
+    pub fn len(&self) -> usize {
+        self.pending_rows.len()
+    }
+
+    /// Whether this descriptor contains no unresolved rows.
+    pub fn is_empty(&self) -> bool {
+        self.pending_rows.is_empty()
+    }
+
+    fn validate_graph(
+        &self,
+        graph: &crate::graph::dir_graph::DirGraph,
+    ) -> Result<(), crate::error::KgError> {
+        if graph.graph_id() != self.graph_id {
+            return Err(crate::error::KgError::InvalidArgument {
+                argument: "graph".to_string(),
+                expected: format!("graph id {}", self.graph_id),
+                found: format!("graph id {}", graph.graph_id()),
+            });
+        }
+        if graph.version() != self.graph_version {
+            return Err(crate::error::KgError::InvalidArgument {
+                argument: "graph".to_string(),
+                expected: format!("snapshot version {}", self.graph_version),
+                found: format!("snapshot version {}", graph.version()),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Materialise one pending lazy-result row against `graph`.
@@ -267,10 +315,31 @@ pub fn materialise_lazy_row(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,
     index: usize,
+) -> Result<Vec<Value>, crate::error::KgError> {
+    descriptor.validate_graph(graph)?;
+    let pending_row = descriptor.pending_rows.get(index).ok_or_else(|| {
+        crate::error::KgError::InvalidArgument {
+            argument: "index".to_string(),
+            expected: format!("an index below {}", descriptor.len()),
+            found: index.to_string(),
+        }
+    })?;
+    // Disk node/edge materialization returns arena-backed references. Keep
+    // the arena generation alive until every cell in this row is owned.
+    let _arena_guard = graph.graph.begin_query();
+    Ok(materialise_lazy_row_inner(
+        pending_row,
+        &descriptor.return_items,
+        graph,
+    ))
+}
+
+fn materialise_lazy_row_inner(
+    pending_row: &ResultRow,
+    return_items: &[super::ast::ReturnItem],
+    graph: &crate::graph::dir_graph::DirGraph,
 ) -> Vec<Value> {
-    let pending_row = &descriptor.pending_rows[index];
-    descriptor
-        .return_items
+    return_items
         .iter()
         .map(|item| match &item.expression {
             super::ast::Expression::PropertyAccess { variable, property } => {
@@ -317,10 +386,20 @@ pub fn materialise_lazy_row(
 pub fn materialise_lazy(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,
-) -> Vec<Vec<Value>> {
-    (0..descriptor.pending_rows.len())
-        .map(|index| materialise_lazy_row(descriptor, graph, index))
-        .collect()
+) -> Result<Vec<Vec<Value>>, crate::error::KgError> {
+    descriptor.validate_graph(graph)?;
+    let mut rows = Vec::with_capacity(descriptor.len());
+    for pending_row in &descriptor.pending_rows {
+        // One guard per row bounds sequential disk-arena growth. Each cell is
+        // converted to an owned Value before the guard drops.
+        let _arena_guard = graph.graph.begin_query();
+        rows.push(materialise_lazy_row_inner(
+            pending_row,
+            &descriptor.return_items,
+            graph,
+        ));
+    }
+    Ok(rows)
 }
 
 /// Final query result returned to Python
@@ -442,28 +521,135 @@ fn csv_value(buf: &mut String, val: &Value) {
 #[cfg(test)]
 mod lazy_materialisation_tests {
     use super::*;
-    use crate::graph::dir_graph::DirGraph;
     use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
+    use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
     use std::collections::HashMap;
+    use std::sync::{Arc, Barrier};
 
-    #[test]
-    fn core_materialises_lazy_property_rows() {
-        let mut graph = DirGraph::new();
+    fn graph_in_mode(
+        mode: StorageMode,
+    ) -> (crate::graph::dir_graph::DirGraph, Option<tempfile::TempDir>) {
+        let temp = (mode == StorageMode::Disk)
+            .then(tempfile::tempdir)
+            .transpose()
+            .unwrap();
+        let mut graph = new_dir_graph_in_mode(mode, temp.as_ref().map(|dir| dir.path())).unwrap();
         let params = HashMap::new();
         execute_mut(
             &mut graph,
-            "CREATE (:Person {id:1, title:'Alice', name:'Alice'})",
+            "CREATE (:Person {id:1, title:'Alice', name:'Alice', age:30}), \
+             (:Person {id:2, title:'Bob', name:'Bob', age:25})",
             &ExecuteOptions::eager(&params),
         )
         .expect("fixture CREATE");
+        (graph, temp)
+    }
+
+    fn execute_lazy(graph: &crate::graph::dir_graph::DirGraph) -> LazyResultDescriptor {
+        let params = HashMap::new();
         let mut opts = ExecuteOptions::eager(&params);
         opts.lazy_eligible = true;
         let mut outcome =
-            execute_read(&graph, "MATCH (n:Person) RETURN n.name", &opts).expect("lazy read");
-        let descriptor = outcome.result.lazy.take().expect("lazy descriptor");
-        assert_eq!(
+            execute_read(graph, "MATCH (n:Person) RETURN n.name, n.age", &opts).expect("lazy read");
+        outcome.result.lazy.take().expect("lazy descriptor")
+    }
+
+    #[test]
+    fn lazy_matches_eager_across_storage_modes() {
+        for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+            let (graph, _temp) = graph_in_mode(mode);
+            let params = HashMap::new();
+            let eager = execute_read(
+                &graph,
+                "MATCH (n:Person) RETURN n.name, n.age",
+                &ExecuteOptions::eager(&params),
+            )
+            .expect("eager read")
+            .result
+            .rows;
+            let descriptor = execute_lazy(&graph);
+            assert_eq!(materialise_lazy(&descriptor, &graph).unwrap(), eager);
+        }
+    }
+
+    #[test]
+    fn invalid_index_wrong_graph_and_stale_snapshot_are_typed_errors() {
+        let (mut graph, _temp) = graph_in_mode(StorageMode::Memory);
+        let descriptor = execute_lazy(&graph);
+        assert!(matches!(
+            materialise_lazy_row(&descriptor, &graph, descriptor.len()),
+            Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "index"
+        ));
+
+        let (other, _other_temp) = graph_in_mode(StorageMode::Memory);
+        assert!(matches!(
+            materialise_lazy(&descriptor, &other),
+            Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "graph"
+        ));
+
+        graph.bump_version();
+        assert!(matches!(
             materialise_lazy(&descriptor, &graph),
-            vec![vec![Value::String("Alice".into())]]
+            Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "graph"
+        ));
+    }
+
+    #[test]
+    fn disk_lazy_access_survives_executor_drop_and_intervening_query() {
+        let (graph, _temp) = graph_in_mode(StorageMode::Disk);
+        let descriptor = execute_lazy(&graph);
+        let params = HashMap::new();
+        execute_read(
+            &graph,
+            "MATCH (n:Person) RETURN count(n)",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("intervening query");
+        assert_eq!(
+            materialise_lazy_row(&descriptor, &graph, 0).unwrap(),
+            vec![Value::String("Alice".into()), Value::Int64(30)]
         );
+    }
+
+    #[test]
+    fn concurrent_disk_lazy_reads_remain_exact() {
+        let (graph, _temp) = graph_in_mode(StorageMode::Disk);
+        let graph = Arc::new(graph);
+        let descriptor = Arc::new(execute_lazy(&graph));
+        let barrier = Arc::new(Barrier::new(3));
+
+        let materializer = {
+            let graph = Arc::clone(&graph);
+            let descriptor = Arc::clone(&descriptor);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..250 {
+                    assert_eq!(
+                        materialise_lazy_row(&descriptor, &graph, 1).unwrap(),
+                        vec![Value::String("Bob".into()), Value::Int64(25)]
+                    );
+                }
+            })
+        };
+        let querier = {
+            let graph = Arc::clone(&graph);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let params = HashMap::new();
+                barrier.wait();
+                for _ in 0..250 {
+                    execute_read(
+                        &graph,
+                        "MATCH (n:Person) RETURN n.title LIMIT 1",
+                        &ExecuteOptions::eager(&params),
+                    )
+                    .expect("concurrent query");
+                }
+            })
+        };
+        barrier.wait();
+        materializer.join().expect("materializer thread");
+        querier.join().expect("query thread");
     }
 }

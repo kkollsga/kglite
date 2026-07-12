@@ -1632,10 +1632,11 @@ impl<'a> CypherExecutor<'a> {
                 stats: None,
                 profile: None,
                 diagnostics: None,
-                lazy: Some(super::super::result::LazyResultDescriptor {
-                    pending_rows: result_set.rows,
+                lazy: Some(super::super::result::LazyResultDescriptor::new(
+                    result_set.rows,
                     return_items,
-                }),
+                    self.graph,
+                )),
             });
         }
 
