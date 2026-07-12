@@ -1061,9 +1061,10 @@ pub fn load_ntriples(
                     .write(true)
                     .open(&mmap_path)
                     .map_err(|e| format!("open columns.bin: {}", e))?;
-                // SAFETY: columns.bin was just written by a prior save pass;
-                // we re-open + mmap the existing file read-write. No other
-                // handle is writing to it concurrently.
+                // SAFETY: this DiskGraph exclusively owns the active build
+                // workspace, and GraphDirectoryLock serializes external
+                // writers. No other writer can truncate or replace columns.bin
+                // while this mapping is live.
                 let mmap = unsafe {
                     memmap2::MmapMut::map_mut(&file)
                         .map_err(|e| format!("mmap columns.bin: {}", e))?

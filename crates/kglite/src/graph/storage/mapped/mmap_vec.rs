@@ -6,7 +6,7 @@
 // require dropping and recreating the mapping (memmap2 limitation).
 //
 // SAFETY invariants shared by every `unsafe { ... }` in this file:
-//  - `T: Copy + Default + 'static` — no drop glue, no uninitialised reads.
+//  - `T: MmapPod` — no drop glue, padding, or invalid bit patterns.
 //  - mmap regions are created after `file.set_len(byte_len)`; byte_len is
 //    always `capacity * size_of::<T>()` or larger.
 //  - mmap start is page-aligned (OS guarantee); elements are stored
@@ -24,7 +24,43 @@ use std::path::{Path, PathBuf};
 
 // ─── MmapOrVec ──────────────────────────────────────────────────────────────
 
-/// A resizable buffer of `T: Copy + Default` values, optionally file-backed.
+/// Marker for types that can safely be stored in and reconstructed from an mmap.
+///
+/// # Safety
+///
+/// Implementors must be `Copy`, have no padding or invalid bit patterns, and
+/// contain no pointers, references, interior mutability, or drop glue. Their
+/// layout must also be stable for every on-disk format in which they occur.
+/// This is the same contract commonly called "plain old data" / `Pod`.
+pub unsafe trait MmapPod: Copy + Default + 'static {}
+
+macro_rules! impl_mmap_pod_primitive {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            // SAFETY: every bit pattern is valid for these fixed-width scalar types.
+            unsafe impl MmapPod for $ty {}
+        )+
+    };
+}
+
+impl_mmap_pod_primitive!(u8, u32, u64, i32, i64, f64);
+
+// These two tuple layouts predate the marker trait and are persisted as
+// fixed-size scratch/disk records. Compile-time layout checks keep a compiler
+// change from silently introducing padding; every component accepts all bits.
+const _: () = assert!(std::mem::size_of::<(u32, u32, u64)>() == 16);
+const _: () = assert!(std::mem::align_of::<(u32, u32, u64)>() == 8);
+// SAFETY: layout is asserted above; u32/u64 are plain old data.
+unsafe impl MmapPod for (u32, u32, u64) {}
+
+const _: () =
+    assert!(std::mem::size_of::<(u32, u32, crate::graph::storage::interner::InternedKey)>() == 16);
+const _: () =
+    assert!(std::mem::align_of::<(u32, u32, crate::graph::storage::interner::InternedKey)>() == 8);
+// SAFETY: layout is asserted above; InternedKey is a transparent u64 value.
+unsafe impl MmapPod for (u32, u32, crate::graph::storage::interner::InternedKey) {}
+
+/// A resizable buffer of [`MmapPod`] values, optionally file-backed.
 ///
 /// - `Heap` variant: plain `Vec<T>` — default, no file I/O.
 /// - `Mapped` variant: memory-mapped file — data lives on disk, OS pages in/out.
@@ -34,7 +70,7 @@ use std::path::{Path, PathBuf};
 /// old pointers, which is safe because `PropertyStorage::Columnar` returns
 /// owned `Cow::Owned` values, never references into the mapping).
 #[derive(Debug)]
-pub enum MmapOrVec<T: Copy + Default + 'static> {
+pub enum MmapOrVec<T: MmapPod> {
     Heap {
         data: Vec<T>,
     },
@@ -48,7 +84,7 @@ pub enum MmapOrVec<T: Copy + Default + 'static> {
     },
 }
 
-impl<T: Copy + Default + 'static> MmapOrVec<T> {
+impl<T: MmapPod> MmapOrVec<T> {
     /// Create a new heap-backed buffer.
     pub fn new() -> Self {
         MmapOrVec::Heap { data: Vec::new() }
@@ -449,7 +485,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
         // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mut mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
-        // SAFETY: `data` is a Vec<T> where `T: Copy+Default`; contiguous
+        // SAFETY: `data` is a Vec<T> where `T: MmapPod`; contiguous
         // layout means reinterpreting as a u8 slice of the same byte count
         // is well-defined.
         // Copy data into mmap
@@ -536,8 +572,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     /// Return the raw bytes of the data (without copying for heap).
     pub fn as_raw_bytes(&self) -> &[u8] {
         match self {
-            // SAFETY: Vec<T> with `T: Copy+Default` is contiguous and has
-            // no drop glue; viewing it as u8 bytes is well-defined.
+            // SAFETY: Vec<T> with `T: MmapPod` is contiguous and has no
+            // padding or invalid bytes; viewing it as bytes is well-defined.
             MmapOrVec::Heap { data } => unsafe {
                 std::slice::from_raw_parts(
                     data.as_ptr() as *const u8,
@@ -601,8 +637,8 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
         match self {
             MmapOrVec::Heap { data } => {
-                // SAFETY: Vec<T> with `T: Copy+Default` is contiguous and
-                // has no drop glue; viewing it as u8 bytes is well-defined.
+                // SAFETY: Vec<T> with `T: MmapPod` is contiguous and has no
+                // padding or invalid bytes; viewing it as bytes is well-defined.
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
                         data.as_ptr() as *const u8,
@@ -653,7 +689,7 @@ impl<T: Copy + Default + 'static> MmapOrVec<T> {
     }
 }
 
-impl<T: Copy + Default + 'static> Clone for MmapOrVec<T> {
+impl<T: MmapPod> Clone for MmapOrVec<T> {
     /// Clone always produces a Heap variant (cloning a mapped file doesn't make sense).
     fn clone(&self) -> Self {
         MmapOrVec::Heap {
@@ -662,7 +698,7 @@ impl<T: Copy + Default + 'static> Clone for MmapOrVec<T> {
     }
 }
 
-impl<T: Copy + Default + 'static> Default for MmapOrVec<T> {
+impl<T: MmapPod> Default for MmapOrVec<T> {
     fn default() -> Self {
         MmapOrVec::new()
     }
@@ -738,8 +774,11 @@ impl MmapBytes {
         }
     }
 
-    /// Append bytes, return the start offset.
-    pub fn extend(&mut self, bytes: &[u8]) -> usize {
+    /// Append bytes and return the start offset.
+    ///
+    /// A mapped buffer reports file-growth or remapping failures without
+    /// changing its logical length, so callers can abort or fall back safely.
+    pub fn extend(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let start = self.len();
         match self {
             MmapBytes::Heap { data } => data.extend_from_slice(bytes),
@@ -753,23 +792,26 @@ impl MmapBytes {
                 let needed = *len + bytes.len();
                 if needed > *capacity {
                     let new_cap = (needed * 2).max(*capacity * 2);
-                    file.set_len(new_cap as u64).expect("ftruncate failed");
+                    file.set_len(new_cap as u64)?;
                     // SAFETY: file just truncated to new_cap; see module invariants.
-                    *mmap = unsafe {
-                        MmapOptions::new()
-                            .len(new_cap)
-                            .map_mut(&*file)
-                            .unwrap_or_else(|e| {
-                                panic!("mmap remap failed for {}: {}", path.display(), e)
-                            })
-                    };
+                    // Keep the old mapping and logical length intact if the
+                    // replacement mapping cannot be created. The backing file
+                    // may already be larger, which is harmless and reusable.
+                    let new_mmap = unsafe { MmapOptions::new().len(new_cap).map_mut(&*file) }
+                        .map_err(|error| {
+                            io::Error::new(
+                                error.kind(),
+                                format!("mmap remap failed for {}: {error}", path.display()),
+                            )
+                        })?;
+                    *mmap = new_mmap;
                     *capacity = new_cap;
                 }
                 mmap[*len..*len + bytes.len()].copy_from_slice(bytes);
                 *len += bytes.len();
             }
         }
-        start
+        Ok(start)
     }
 
     /// Read a byte range.
@@ -1080,8 +1122,8 @@ mod tests {
     #[test]
     fn test_bytes_heap_basic() {
         let mut buf = MmapBytes::new();
-        let off0 = buf.extend(b"hello");
-        let off1 = buf.extend(b"world");
+        let off0 = buf.extend(b"hello").unwrap();
+        let off1 = buf.extend(b"world").unwrap();
         assert_eq!(off0, 0);
         assert_eq!(off1, 5);
         assert_eq!(buf.slice(0, 5), b"hello");
@@ -1097,8 +1139,8 @@ mod tests {
         let mut buf = MmapBytes::mapped(&path, 16).unwrap();
         assert!(buf.is_mapped());
 
-        let off0 = buf.extend(b"hello");
-        let off1 = buf.extend(b"world");
+        let off0 = buf.extend(b"hello").unwrap();
+        let off1 = buf.extend(b"world").unwrap();
         assert_eq!(off0, 0);
         assert_eq!(off1, 5);
         assert_eq!(buf.slice(0, 5), b"hello");
@@ -1113,9 +1155,29 @@ mod tests {
         let mut buf = MmapBytes::mapped(&path, 16).unwrap();
         // Exceed initial capacity (min 4096)
         let big = vec![b'x'; 5000];
-        buf.extend(&big);
+        buf.extend(&big).unwrap();
         assert_eq!(buf.len(), 5000);
         assert_eq!(buf.slice(0, 3), b"xxx");
+    }
+
+    #[test]
+    fn test_bytes_mapped_grow_reports_file_error_without_advancing_length() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "bytes_grow_error.bin");
+        let mut buf = MmapBytes::mapped(&path, 16).unwrap();
+
+        // Replace only the retained file descriptor with a read-only one.
+        // The existing mapping remains readable/writable, while the growth
+        // ftruncate deterministically fails without relying on a full disk.
+        if let MmapBytes::Mapped { file, .. } = &mut buf {
+            *file = File::open(&path).unwrap();
+        } else {
+            unreachable!();
+        }
+
+        let error = buf.extend(&vec![b'x'; 5000]).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(buf.len(), 0);
     }
 
     #[test]
@@ -1124,7 +1186,7 @@ mod tests {
         let path = tmp_path(&dir, "bytes_save.bin");
 
         let mut buf = MmapBytes::new();
-        buf.extend(b"test data here");
+        buf.extend(b"test data here").unwrap();
         buf.save_to_file(&path).unwrap();
 
         let loaded = MmapBytes::load_mapped(&path, 14).unwrap();
@@ -1137,7 +1199,7 @@ mod tests {
         let path = tmp_path(&dir, "bytes_clone.bin");
 
         let mut buf = MmapBytes::mapped(&path, 16).unwrap();
-        buf.extend(b"data");
+        buf.extend(b"data").unwrap();
         let cloned = buf.clone();
         assert!(!cloned.is_mapped());
         assert_eq!(cloned.slice(0, 4), b"data");

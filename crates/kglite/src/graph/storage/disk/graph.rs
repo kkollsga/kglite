@@ -2115,7 +2115,10 @@ impl Clone for DiskGraph {
         // files and copies only mutation-sized overlays. This is O(number of
         // changed rows), not O(nodes + edges), and keeps reader snapshots on
         // the prior generation. Heap-backed arrays still clone normally.
-        fn snapshot<T: Copy + Default + 'static>(name: &str, value: &MmapOrVec<T>) -> MmapOrVec<T> {
+        fn snapshot<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
+            name: &str,
+            value: &MmapOrVec<T>,
+        ) -> MmapOrVec<T> {
             value
                 .clone_snapshot()
                 .unwrap_or_else(|error| panic!("failed to clone disk {name} snapshot: {error}"))

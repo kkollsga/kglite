@@ -312,7 +312,7 @@ impl TypeWriter {
             use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
             let offsets_vec = MmapOrVec::from_vec(self.overflow_offsets);
             let mut data_bytes = MmapBytes::new();
-            data_bytes.extend(&self.overflow_data);
+            data_bytes.extend(&self.overflow_data)?;
             store.replace_overflow_bag(offsets_vec, data_bytes);
         }
 

@@ -1,13 +1,13 @@
 //! Fixed-width primitive codec for packed `.kgl` columns.
 
-use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
+use crate::graph::storage::mapped::mmap_vec::{MmapOrVec, MmapPod};
 use std::io;
 
 /// Primitive types admitted by the packed-column wire format.
 ///
 /// Keeping this closed prevents generic pointer reads from constructing
 /// arbitrary values from unaligned, file-controlled bytes.
-pub(super) trait PackedElement: Copy + Default + 'static {
+pub(super) trait PackedElement: MmapPod {
     const WIDTH: usize;
 
     fn decode_le(bytes: &[u8]) -> Self;

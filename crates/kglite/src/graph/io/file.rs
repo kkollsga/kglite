@@ -1120,6 +1120,10 @@ fn validate_column_keys_registered(graph: &DirGraph) -> io::Result<()> {
 /// — never a torn/truncated `.kgl`. The temp name embeds the pid and a
 /// per-process counter so two processes saving the same path can't
 /// clobber each other's in-flight temp (last *rename* wins, cleanly).
+/// Unlike disk-graph directories, a standalone `.kgl` path has no
+/// `GraphDirectoryLock`: callers must serialize writers if last-writer-wins is
+/// not acceptable. Atomic rename protects readers from torn files, but is not
+/// a cross-process write-ownership lock.
 ///
 /// `fsync = true` (the default via [`write_kgl`]) flushes the file and
 /// its parent directory to disk before returning, so the bytes survive an
@@ -1468,10 +1472,10 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
 
     // For large files, mmap avoids the full copy into a Vec<u8>
     if file_len >= FILE_MMAP_THRESHOLD {
-        // SAFETY: `Mmap::map` is unsafe because a concurrent writer could
-        // race with the reader. The caller of `load_kgl` is the KGLite
-        // Python binding, which holds the GIL; no other process is
-        // expected to mutate the file during load.
+        // SAFETY: standalone `.kgl` files follow a caller-enforced
+        // single-writer contract. Writers replace the destination atomically
+        // rather than truncating it in place, so this opened inode remains
+        // stable for the mapping's lifetime.
         let mmap = unsafe { Mmap::map(&file)? };
         if mmap.len() < 4 {
             return Err(io::Error::other(
@@ -1780,9 +1784,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             .read(true)
             .write(true)
             .open(&mmap_path)?;
-        // SAFETY: columns.bin exists in the disk-graph directory and is
-        // opened read-write by this loader. KGLite holds the Python GIL
-        // during load; no other process writes to the file concurrently.
+        // SAFETY: GraphDirectoryLock serializes disk-graph writers, which
+        // publish a new immutable generation instead of truncating the
+        // generation selected by this reader. This columns.bin inode remains
+        // stable for the mapping's lifetime.
         let mmap = unsafe { MmapMut::map_mut(&file)? };
         let mmap_arc = std::sync::Arc::new(mmap);
 

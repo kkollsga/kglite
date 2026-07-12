@@ -224,6 +224,7 @@ fn merge_sort_build(
                 conn_type: ct,
                 peer,
                 orig_idx: i as u32,
+                padding: 0,
             });
         }
         // Sort by (node, connection_type) so edges are grouped by type within
@@ -268,6 +269,7 @@ fn merge_sort_build(
                 conn_type: ct,
                 peer,
                 orig_idx: i as u32,
+                padding: 0,
             });
         }
         chunk.sort_unstable_by_key(|e| (e.key, e.conn_type));

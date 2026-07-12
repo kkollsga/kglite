@@ -15,8 +15,9 @@ pub struct CsrEdge {
     pub edge_idx: u32,
 }
 
-// SAFETY: CsrEdge is repr(C), Copy, Default, and contains only fixed-size integers.
-// No padding issues on any platform since fields are naturally aligned (4+4=8).
+// SAFETY: repr(C), 8 bytes with no padding, and both fields accept all bits.
+unsafe impl crate::graph::storage::mapped::mmap_vec::MmapPod for CsrEdge {}
+const _: () = assert!(std::mem::size_of::<CsrEdge>() == 8);
 
 /// [DEV] Entry for external merge sort. Carries all fields needed for CsrEdge
 /// output plus sort keys, so the merge never needs to seek back to pending_mmap.
@@ -27,10 +28,16 @@ pub struct CsrEdge {
 #[derive(Copy, Clone, Default)]
 pub(super) struct MergeSortEntry {
     pub(super) key: u32,       // primary sort key (source or target node index)
+    pub(super) padding: u32,   // explicit alignment padding; always initialized
     pub(super) conn_type: u64, // secondary sort key (connection type)
     pub(super) peer: u32,      // the other endpoint
     pub(super) orig_idx: u32,  // original edge index (for CsrEdge.edge_idx)
 }
+
+// SAFETY: repr(C), all implicit padding is represented by `padding`, and every
+// field is an integer that accepts all bit patterns.
+unsafe impl crate::graph::storage::mapped::mmap_vec::MmapPod for MergeSortEntry {}
+const _: () = assert!(std::mem::size_of::<MergeSortEntry>() == 24);
 
 /// Edge endpoint metadata — stored in a dense array indexed by edge_idx.
 /// 16 bytes per edge. Includes connection_type for O(1) lookup (avoids CSR scan).
@@ -41,6 +48,10 @@ pub struct EdgeEndpoints {
     pub target: u32,
     pub connection_type: u64,
 }
+
+// SAFETY: repr(C), 16 bytes with no padding, and all fields accept all bits.
+unsafe impl crate::graph::storage::mapped::mmap_vec::MmapPod for EdgeEndpoints {}
+const _: () = assert!(std::mem::size_of::<EdgeEndpoints>() == 16);
 
 /// Tombstone marker for deleted edges.
 pub const TOMBSTONE_EDGE: u32 = u32::MAX;
@@ -58,6 +69,10 @@ pub struct DiskNodeSlot {
     pub row_id: u32,    // row into the type's ColumnStore
     pub flags: u32,     // bit 0 = alive
 }
+
+// SAFETY: repr(C), 16 bytes with no padding, and all fields accept all bits.
+unsafe impl crate::graph::storage::mapped::mmap_vec::MmapPod for DiskNodeSlot {}
+const _: () = assert!(std::mem::size_of::<DiskNodeSlot>() == 16);
 
 impl DiskNodeSlot {
     pub(super) const ALIVE_BIT: u32 = 1;

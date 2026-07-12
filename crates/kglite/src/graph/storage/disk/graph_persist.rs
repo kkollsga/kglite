@@ -1168,7 +1168,7 @@ impl DiskGraph {
 /// Write a MmapOrVec as a zstd-compressed file.
 /// Load a binary array: try raw `.bin` first (direct mmap, no temp dir),
 /// fall back to `.bin.zst` (decompress to temp dir, then mmap).
-fn load_raw_or_zst<T: Copy + Default + 'static>(
+fn load_raw_or_zst<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     base_path: &Path,
     len: usize,
     temp_dir: &Path,
@@ -1187,7 +1187,9 @@ fn load_raw_or_zst<T: Copy + Default + 'static>(
 
 /// Load a raw .bin file if it exists, otherwise return empty MmapOrVec.
 /// Used for optional supplementary files (e.g., connection-type inverted index).
-fn load_raw_or_zst_optional<T: Copy + Default + 'static>(base_path: &Path) -> MmapOrVec<T> {
+fn load_raw_or_zst_optional<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
+    base_path: &Path,
+) -> MmapOrVec<T> {
     let raw_path = base_path.with_extension("bin");
     if raw_path.exists() {
         let file_len = std::fs::metadata(&raw_path)
@@ -1204,7 +1206,7 @@ fn load_raw_or_zst_optional<T: Copy + Default + 'static>(base_path: &Path) -> Mm
 
 /// Load a zstd-compressed file, decompress to temp file, and mmap it.
 /// Used only for loading legacy .bin.zst files from older graph format.
-fn load_compressed<T: Copy + Default + 'static>(
+fn load_compressed<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     path: &Path,
     len: usize,
     temp_dir: &Path,
@@ -1323,7 +1325,7 @@ impl SegmentCsr {
 /// Simplest way to get all three: snapshot the current contents into
 /// a Vec, replace `field` with a fresh heap-backed MmapOrVec holding
 /// that Vec, then reopen the file briefly just to `set_len`.
-fn reconcile_seg0_csr<T: Copy + Default + 'static>(
+fn reconcile_seg0_csr<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     field: &mut MmapOrVec<T>,
     seg0_len: usize,
 ) -> std::io::Result<()> {
@@ -1343,7 +1345,7 @@ fn reconcile_seg0_csr<T: Copy + Default + 'static>(
 /// size on disk rather than from a pre-known length. Used in the multi-
 /// segment load path, where `DiskGraphMeta`'s `*_len` fields describe
 /// the *graph-level* concat total, not any one segment.
-fn load_with_inferred_len<T: Copy + Default + 'static>(
+fn load_with_inferred_len<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
     base_path: &Path,
     temp_dir: &Path,
 ) -> std::io::Result<MmapOrVec<T>> {

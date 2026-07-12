@@ -387,7 +387,7 @@ fn seg(
     }
 }
 
-fn from_vec<T: Copy + Default + 'static>(v: Vec<T>) -> MmapOrVec<T> {
+fn from_vec<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(v: Vec<T>) -> MmapOrVec<T> {
     let mut m: MmapOrVec<T> = MmapOrVec::with_capacity(v.len());
     for x in v {
         m.push(x);

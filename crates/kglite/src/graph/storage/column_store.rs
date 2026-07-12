@@ -187,7 +187,10 @@ impl TypedColumn {
                 },
                 Value::String(s),
             ) => {
-                data.extend(s.as_bytes());
+                // On mmap growth failure, report a failed typed push. The
+                // caller's existing demotion path preserves the logical row
+                // in a heap-backed Mixed column instead of panicking.
+                data.extend(s.as_bytes()).map_err(|_| ())?;
                 offsets.push(data.len() as u64);
                 nulls.push(0);
             }

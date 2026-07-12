@@ -1921,7 +1921,7 @@ impl core::clone::Clone for kglite::graphgen::GraphGenStats
 pub fn kglite::graphgen::GraphGenStats::clone(&self) -> kglite::graphgen::GraphGenStats
 impl core::fmt::Debug for kglite::graphgen::GraphGenStats
 pub fn kglite::graphgen::GraphGenStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct kglite::api::InternedKey(_)
+#[repr(transparent)] pub struct kglite::api::InternedKey(_)
 impl kglite::api::InternedKey
 pub fn kglite::api::InternedKey::as_u64(&self) -> u64
 pub fn kglite::api::InternedKey::from_str(s: &str) -> Self

@@ -110,8 +110,10 @@ impl IdIndexBase {
         if len < HEADER_BYTES {
             return Ok(None);
         }
-        // SAFETY: opened above; KGLite holds the GIL during load and no
-        // other process writes to the file concurrently.
+        // SAFETY: GraphDirectoryLock serializes disk-graph writers, which
+        // publish a new immutable generation instead of truncating the
+        // generation selected by this reader. This inode therefore remains
+        // stable for the mapping's lifetime.
         let mmap = unsafe { Mmap::map(&file)? };
         if &mmap[..8] != MAGIC {
             return Ok(None);

@@ -338,6 +338,7 @@ impl DiskGraph {
                         conn_type: ep.connection_type,
                         peer: ep.source,
                         orig_idx: i as u32,
+                        padding: 0,
                     });
                 }
                 entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
@@ -376,6 +377,7 @@ impl DiskGraph {
                             conn_type: ep.connection_type,
                             peer: ep.source,
                             orig_idx: i as u32,
+                            padding: 0,
                         });
                     }
                     entries.sort_unstable_by_key(|e| (e.key, e.conn_type));
