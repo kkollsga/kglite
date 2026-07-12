@@ -69,6 +69,9 @@ impl DirGraph {
             }
         }
         // Slow path: count distinct values across the type's nodes (O(type)).
+        // Arena guard: get_node -> node_weight materializes on the disk
+        // backend (protocol in disk/graph.rs); no-op on memory/mapped.
+        let _arena_guard = self.graph.begin_query();
         let mut seen: std::collections::HashSet<Value> = std::collections::HashSet::new();
         for idx in nodes.iter() {
             if let Some(node) = self.get_node(idx) {

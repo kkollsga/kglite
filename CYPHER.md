@@ -1843,7 +1843,7 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | Category | Supported |
 |----------|-----------|
 | **Clauses** | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `UNION`/`UNION ALL`, `CALL { ... }` (read subqueries — uncorrelated + correlated), `CREATE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`, `MERGE`, `EXPLAIN`, `PROFILE` |
-| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
+| **Patterns** | Node `(n:Type)`, relationship `-[:REL]->`, abbreviated `-->` / `--` / `<--`, variable-length `*1..3`, undirected `-[:REL]-`, properties `{key: val, key: $param, key: var}`, `p = shortestPath(...)` |
 | **WHERE** | `=`, `<>`, `<`, `>`, `<=`, `>=`, `=~` (regex), `AND`, `OR`, `NOT`, `IS NULL`, `IS NOT NULL`, `IN [...]`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `EXISTS { pattern WHERE ... }`, `EXISTS(( pattern ))`, inline pattern predicates, `any/all/none/single(x IN list WHERE ...)` |
 | **RETURN** | `n.prop`, `r.prop`, `AS` aliases, `DISTINCT`, arithmetic `+`/`-`/`*`/`/`, string concat `\|\|`, map projections `n {.prop}`, map literals `{k: expr}`, list slicing `[i..j]` |
 | **Aggregation** | `count(*)`, `count(expr)`, `sum`, `avg`/`mean`, `min`, `max`, `collect`, `std` |
@@ -1877,7 +1877,7 @@ claimed openCypher-compatible subset.
 
 | Clause | Status | Notes |
 |--------|--------|-------|
-| `MATCH` | Partial | Node, relationship, variable-length, shortest-path, and relationship-unique trail patterns; not every openCypher pattern grammar form is implemented |
+| `MATCH` | Partial | Node, relationship, variable-length, shortest-path, abbreviated (`-->`, `--`, `<--`), and relationship-unique trail patterns; not every openCypher pattern grammar form is implemented |
 | `OPTIONAL MATCH` | Covered | Null-extending optional patterns |
 | `WHERE` | Covered | Predicates preserve three-valued boolean, membership, and quantifier semantics |
 | `RETURN` | Covered | Aliases, `DISTINCT`, expressions, and map projections |

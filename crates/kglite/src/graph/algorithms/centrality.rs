@@ -43,6 +43,10 @@ pub fn betweenness_centrality(
     scope: Option<&NodeScope>,
     deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -339,6 +343,10 @@ pub fn pagerank(
     scope: Option<&NodeScope>,
     deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
@@ -499,6 +507,10 @@ pub fn degree_centrality(
     scope: Option<&NodeScope>,
     deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);
     let n = nodes.len();
 
@@ -579,6 +591,10 @@ pub fn closeness_centrality(
     scope: Option<&NodeScope>,
     deadline: Interrupt,
 ) -> Result<Vec<CentralityResult>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let nodes: Vec<NodeIndex> = scoped_node_set(graph, scope);

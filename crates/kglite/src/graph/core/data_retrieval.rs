@@ -28,6 +28,9 @@ pub fn get_nodes(
     indices: Option<&[usize]>,
     max_nodes: Option<usize>,
 ) -> Vec<LevelNodes> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // If specific indices are provided, do direct lookup
     if let Some(idx) = indices {
         let mut direct_nodes = Vec::new();
@@ -162,6 +165,9 @@ pub fn get_property_values(
     indices: Option<&[usize]>,
     max_nodes: Option<usize>,
 ) -> Vec<LevelValues> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 
@@ -239,6 +245,9 @@ pub fn get_unique_values(
     group_by_parent: bool,
     indices: Option<&[usize]>,
 ) -> Vec<UniqueValues> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 
@@ -412,6 +421,9 @@ pub fn get_connections(
     indices: Option<&[usize]>,
     include_node_properties: bool,
 ) -> Vec<LevelConnections> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_idx = level_index.unwrap_or_else(|| selection.get_level_count().saturating_sub(1));
     let mut result = Vec::new();
 

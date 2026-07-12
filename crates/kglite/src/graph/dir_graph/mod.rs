@@ -552,6 +552,11 @@ impl DirGraph {
 
         // In-memory (and disk-without-column-store): scan node weights.
         if !used_columns {
+            // Arena guard: on the disk backend node_weight materializes into
+            // the query arena, which must run under a DiskQueryGuard (arena
+            // protocol in disk/graph.rs, enforced by a debug assert); no-op
+            // on memory/mapped backends.
+            let _guard = self.graph.begin_query();
             for node_idx in node_indices.iter() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let node_id = node.id().into_owned();
@@ -737,6 +742,9 @@ impl DirGraph {
             }
         }
         // Cold: O(E) walk grouping by (src_type, conn_type, tgt_type).
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); no-op on memory/mapped.
+        let _guard = self.graph.begin_query();
         let mut counts: HashMap<(InternedKey, InternedKey, InternedKey), usize> = HashMap::new();
         for (src_idx, tgt_idx, conn_key) in self.graph.edge_endpoint_keys() {
             let src_type = match self.graph.node_weight(src_idx) {
@@ -1484,13 +1492,19 @@ impl DirGraph {
         let avg_per_type = self.graph.node_count() / type_count.max(1);
         let mut new_type_indices: HashMap<String, Vec<NodeIndex>> =
             HashMap::with_capacity(type_count);
-        for node_idx in self.graph.node_indices() {
-            if let Some(node) = self.graph.node_weight(node_idx) {
-                let type_str = node.node_type_str(&self.interner).to_string();
-                new_type_indices
-                    .entry(type_str)
-                    .or_insert_with(|| Vec::with_capacity(avg_per_type))
-                    .push(node_idx);
+        {
+            // Arena guard: node_weight materializes on the disk backend
+            // (protocol in disk/graph.rs); scoped so the borrow ends before
+            // the replace_with below.
+            let _guard = self.graph.begin_query();
+            for node_idx in self.graph.node_indices() {
+                if let Some(node) = self.graph.node_weight(node_idx) {
+                    let type_str = node.node_type_str(&self.interner).to_string();
+                    new_type_indices
+                        .entry(type_str)
+                        .or_insert_with(|| Vec::with_capacity(avg_per_type))
+                        .push(node_idx);
+                }
             }
         }
         self.type_indices.replace_with(new_type_indices);
@@ -1648,8 +1662,12 @@ impl DirGraph {
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
-        // Fallback: if metadata is empty (pre-metadata graph), scan nodes
+        // Fallback: if metadata is empty (pre-metadata graph), scan nodes.
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); scoped so the borrow ends before
+        // Phase 3's node_weight_mut.
         if schemas.is_empty() {
+            let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let type_str = node.node_type_str(&self.interner).to_string();
@@ -1702,8 +1720,12 @@ impl DirGraph {
             schemas.insert(node_type.clone(), TypeSchema::from_keys(keys));
         }
 
-        // Fallback: if metadata is empty (loaded from file), scan nodes
+        // Fallback: if metadata is empty (loaded from file), scan nodes.
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); scoped so the borrow ends before
+        // the single-pass node_weight_mut loop below.
         if schemas.is_empty() {
+            let _guard = self.graph.begin_query();
             for node_idx in self.graph.node_indices() {
                 if let Some(node) = self.graph.node_weight(node_idx) {
                     let type_str = node.node_type_str(&self.interner).to_string();
@@ -1790,6 +1812,10 @@ impl DirGraph {
     /// forked node, so the cost is O(N × cheap-match) at worst.
     pub fn enable_columnar(&mut self) {
         if !self.column_stores.is_empty() && self.is_columnar() {
+            // Arena guard: node_weight materializes on the disk backend
+            // (protocol in disk/graph.rs); the whole drift check is
+            // read-only and the guard drops at the end of this block.
+            let _guard = self.graph.begin_query();
             let interner = &self.interner;
             let column_stores = &self.column_stores;
             let any_drift = self
@@ -1854,12 +1880,21 @@ impl DirGraph {
         // Track row_id assignment per type
         let mut row_ids: HashMap<String, HashMap<NodeIndex, u32>> = HashMap::new();
 
-        // Clean type_indices: remove entries for deleted/tombstoned nodes
-        let graph_ref = &self.graph;
-        self.type_indices
-            .retain_all(|idx| graph_ref.node_weight(*idx).is_some());
+        // Clean type_indices: remove entries for deleted/tombstoned nodes.
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); block-scoped read.
+        {
+            let _guard = self.graph.begin_query();
+            let graph_ref = &self.graph;
+            self.type_indices
+                .retain_all(|idx| graph_ref.node_weight(*idx).is_some());
+        }
 
-        // First pass: create stores and push rows
+        // First pass: create stores and push rows. Arena guard: node_weight
+        // materializes on the disk backend (protocol in disk/graph.rs);
+        // scoped so the borrow ends before the second pass's
+        // node_weight_mut re-pointing below.
+        let first_pass_guard = self.graph.begin_query();
         for (node_type, indices) in self.type_indices.iter() {
             let schema = match self.type_schemas.get(node_type) {
                 Some(s) => Arc::clone(s),
@@ -1967,6 +2002,7 @@ impl DirGraph {
             stores.insert(node_type.to_string(), store);
             row_ids.insert(node_type.to_string(), type_row_ids);
         }
+        drop(first_pass_guard);
 
         // Spill to disk if over memory limit
         if let Some(limit) = self.memory_limit {

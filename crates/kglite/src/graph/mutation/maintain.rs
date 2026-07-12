@@ -1258,6 +1258,10 @@ pub fn create_connections(
 
         for &target_idx in targets {
             if detected_target_type.is_none() {
+                // Arena guard: get_node -> node_weight materializes on the
+                // disk backend (protocol in disk/graph.rs); scoped so the
+                // borrow ends before the batch's &mut graph calls.
+                let _arena_guard = graph.graph.begin_query();
                 if let Some(node) = graph.get_node(target_idx) {
                     detected_target_type = Some(node.node_type_str(&graph.interner).to_string());
                 }
@@ -1265,6 +1269,8 @@ pub fn create_connections(
 
             for &source_idx in &source_nodes {
                 if detected_source_type.is_none() {
+                    // Arena guard: scoped read (see above).
+                    let _arena_guard = graph.graph.begin_query();
                     if let Some(node) = graph.get_node(source_idx) {
                         detected_source_type =
                             Some(node.node_type_str(&graph.interner).to_string());
@@ -1273,6 +1279,10 @@ pub fn create_connections(
 
                 // Collect properties from nodes in the chain (source → ... → target)
                 let edge_props = if let Some(ref prop_spec) = copy_properties {
+                    // Arena guard: node_weight materializes on the disk
+                    // backend; scoped so the borrow ends before
+                    // batch.add_connection's &mut graph below.
+                    let _arena_guard = graph.graph.begin_query();
                     let mut props = HashMap::new();
                     // Add source and target node properties
                     for &node_idx in &[source_idx, target_idx] {
@@ -1423,8 +1433,13 @@ pub fn update_node_properties(
 
     for (node_idx_opt, value) in nodes {
         if let Some(node_idx) = node_idx_opt {
-            // Only add valid nodes to batch
-            if graph.graph.node_weight(*node_idx).is_some() {
+            // Only add valid nodes to batch. Arena guard: node_weight
+            // materializes on the disk backend; scoped read.
+            let is_live = {
+                let _arena_guard = graph.graph.begin_query();
+                graph.graph.node_weight(*node_idx).is_some()
+            };
+            if is_live {
                 let mut properties = HashMap::new();
                 properties.insert(property_string.clone(), value.clone());
 
@@ -1595,6 +1610,9 @@ pub fn add_properties(
     // Collect updates first (to avoid borrow issues with graph)
     let mut updates: Vec<(NodeIndex, HashMap<String, Value>)> = Vec::new();
 
+    // Arena guard: node_weight materializes on the disk backend (protocol
+    // in disk/graph.rs); dropped before the &mut apply loop below.
+    let collect_guard = graph.graph.begin_query();
     for (_parent_opt, targets) in target_level_data.iter_groups() {
         for &target_idx in targets {
             let mut props_to_set: HashMap<String, Value> = HashMap::new();
@@ -1654,6 +1672,8 @@ pub fn add_properties(
             }
         }
     }
+
+    drop(collect_guard);
 
     // Apply updates
     let mut nodes_updated = 0;
@@ -1848,6 +1868,9 @@ fn add_properties_aggregate(
 
     let mut updates: HashMap<NodeIndex, HashMap<String, Value>> = HashMap::new();
 
+    // Arena guard: node_weight materializes on the disk backend (protocol
+    // in disk/graph.rs); dropped before the &mut apply loop below.
+    let collect_guard = graph.graph.begin_query();
     for (source_type, spec) in property_spec {
         let source_level = match type_to_level.get(source_type) {
             Some(&lvl) => lvl,
@@ -1985,6 +2008,8 @@ fn add_properties_aggregate(
             }
         }
     }
+
+    drop(collect_guard);
 
     let mut nodes_updated = 0;
     let mut properties_set = 0;

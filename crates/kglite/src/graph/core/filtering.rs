@@ -534,6 +534,9 @@ pub fn process_nodes(
     sort_fields: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Vec<NodeIndex> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let mut result = if let Some(max) = max_nodes {
         Vec::with_capacity(max.min(nodes.len()))
     } else {
@@ -580,6 +583,9 @@ pub fn filter_nodes_by_label(
     sort_fields: Option<Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -603,6 +609,9 @@ pub fn filter_nodes(
     sort_fields: Option<Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -694,6 +703,9 @@ pub fn sort_nodes(
     selection: &mut CurrentSelection,
     sort_fields: Vec<(String, bool)>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -730,6 +742,9 @@ pub fn limit_nodes_per_group(
     selection: &mut CurrentSelection,
     max_per_group: usize,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -769,6 +784,9 @@ pub fn filter_nodes_any(
     sort_fields: Option<Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -838,6 +856,9 @@ pub fn offset_nodes(
     selection: &mut CurrentSelection,
     n: usize,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -872,6 +893,9 @@ pub fn filter_by_connection(
     connection_type: &str,
     direction: Option<petgraph::Direction>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)
@@ -954,6 +978,9 @@ pub fn filter_orphan_nodes(
     sort_fields: Option<&Vec<(String, bool)>>,
     max_nodes: Option<usize>,
 ) -> Result<(), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let current_index = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level_mut(current_index)

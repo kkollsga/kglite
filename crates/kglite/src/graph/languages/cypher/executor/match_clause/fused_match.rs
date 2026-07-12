@@ -1103,13 +1103,15 @@ impl<'a> CypherExecutor<'a> {
                             // cloned into a BTreeMap) per row just to test non-null.
                             Value::Boolean(true)
                         } else {
-                            self.evaluate_expression(&args[0], &eval_row)
-                                .unwrap_or(Value::Null)
+                            // Errors propagate — same contract as the group
+                            // keys above and the materialized aggregation
+                            // path: a null argument arrives as Ok(Null) and
+                            // is skipped by the accumulators; an Err is a
+                            // genuine error (missing parameter, overflow, …).
+                            self.evaluate_expression(&args[0], &eval_row)?
                         }
                     }
-                    _ => self
-                        .evaluate_expression(&item.expression, &eval_row)
-                        .unwrap_or(Value::Null),
+                    _ => self.evaluate_expression(&item.expression, &eval_row)?,
                 };
                 agg_vals.push(v);
             }

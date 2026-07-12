@@ -163,6 +163,13 @@ pub struct PatternExecutor<'a> {
     /// At the last hop expansion, paths leading to already-seen target nodes
     /// are skipped, avoiding PatternMatch cloning and allocation overhead.
     distinct_target_var: Option<String>,
+    /// Holds the disk materialization arenas alive for this executor's
+    /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
+    /// debug assert). Acquired in every constructor so pattern matching is
+    /// guard-covered no matter which surface spawned it (Cypher executor,
+    /// fluent API, MERGE matching). `None` on memory/mapped backends —
+    /// one enum match at construction on the in-memory hot path.
+    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard<'a>>,
 }
 
 /// Static empty params for constructors that don't take parameters.
@@ -184,6 +191,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            _arena_guard: graph.graph.begin_query(),
         }
     }
 
@@ -202,6 +210,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            _arena_guard: graph.graph.begin_query(),
         }
     }
 
@@ -220,6 +229,7 @@ impl<'a> PatternExecutor<'a> {
             deadline: None,
             cancel: None,
             distinct_target_var: None,
+            _arena_guard: graph.graph.begin_query(),
         }
     }
 

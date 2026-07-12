@@ -414,28 +414,27 @@ pub fn apply<'q>(
         let row = row_result?;
         executor.check_interrupt_periodic(row_count)?;
 
+        // Group-key errors propagate — same contract as the materialized
+        // path (`execute_return_with_aggregation`): null keys arrive as
+        // Ok(Null); an Err (missing parameter, overflow, …) aborts the query.
         let key_parts: Vec<GroupKeyPart> = strategies
             .iter()
             .zip(folded_group_exprs.iter())
-            .map(|(strategy, expr)| match strategy {
-                GroupExprStrategy::NodeProp { variable } => {
-                    if let Some(&idx) = row.node_bindings.get(variable) {
-                        GroupKeyPart::NodeProp(idx)
-                    } else {
-                        GroupKeyPart::Resolved(
-                            executor
-                                .evaluate_expression(expr, &row)
-                                .unwrap_or(Value::Null),
-                        )
+            .map(|(strategy, expr)| {
+                Ok(match strategy {
+                    GroupExprStrategy::NodeProp { variable } => {
+                        if let Some(&idx) = row.node_bindings.get(variable) {
+                            GroupKeyPart::NodeProp(idx)
+                        } else {
+                            GroupKeyPart::Resolved(executor.evaluate_expression(expr, &row)?)
+                        }
                     }
-                }
-                GroupExprStrategy::Eval => GroupKeyPart::Resolved(
-                    executor
-                        .evaluate_expression(expr, &row)
-                        .unwrap_or(Value::Null),
-                ),
+                    GroupExprStrategy::Eval => {
+                        GroupKeyPart::Resolved(executor.evaluate_expression(expr, &row)?)
+                    }
+                })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
 
         let group_idx = match surrogate_index.get(&key_parts) {
             Some(&idx) => idx,
@@ -464,7 +463,7 @@ pub fn apply<'q>(
                 folded_args[ai].as_ref(),
                 &row,
                 executor,
-            );
+            )?;
         }
     }
 
@@ -572,20 +571,24 @@ pub fn apply<'q>(
     Ok(RowStream::from_vec(output_rows, columns))
 }
 
+/// Fold one row into an aggregate's running state. Argument-evaluation
+/// errors propagate (missing parameter, overflow, …) — matching the
+/// materialized path's `evaluate_aggregate_with_rows`; a null argument is
+/// Ok(Null) and simply doesn't contribute.
 fn update_agg_state(
     state: &mut AggState,
     spec: &AggSpec,
     folded_arg: Option<&Expression>,
     row: &ResultRow,
     executor: &CypherExecutor<'_>,
-) {
+) -> Result<(), String> {
     if matches!(spec.kind, AggKind::CountStar) {
         state.record(None, spec);
-        return;
+        return Ok(());
     }
     let expr = match folded_arg {
         Some(e) => e,
-        None => return,
+        None => return Ok(()),
     };
 
     if spec.distinct {
@@ -598,15 +601,15 @@ fn update_agg_state(
                 let key = idx.index();
                 let dn = state.distinct_nodes.get_or_insert_with(FxHashSet::default);
                 if !dn.insert(key) {
-                    return;
+                    return Ok(());
                 }
                 // Treat as non-null; record drives the aggregate kind logic.
                 let val = match spec.kind {
                     AggKind::Count => Value::Boolean(true), // count() inc; record skips Null
-                    _ => return, // other aggregates with DISTINCT-on-node are unusual; skip
+                    _ => return Ok(()), // other aggregates with DISTINCT-on-node are unusual; skip
                 };
                 state.record(Some(val), spec);
-                return;
+                return Ok(());
             }
         }
         if let Some(var_name) = &spec.arg_is_edge_var {
@@ -614,29 +617,26 @@ fn update_agg_state(
                 let key = eb.edge_index.index();
                 let de = state.distinct_edges.get_or_insert_with(FxHashSet::default);
                 if !de.insert(key) {
-                    return;
+                    return Ok(());
                 }
                 state.record(Some(Value::Boolean(true)), spec);
-                return;
+                return Ok(());
             }
         }
-        let val = executor
-            .evaluate_expression(expr, row)
-            .unwrap_or(Value::Null);
+        let val = executor.evaluate_expression(expr, row)?;
         if matches!(val, Value::Null) {
-            return;
+            return Ok(());
         }
         let dv = state.distinct_values.get_or_insert_with(FxHashSet::default);
         if !dv.insert(val.clone()) {
-            return;
+            return Ok(());
         }
         state.record(Some(val), spec);
     } else {
-        let val = executor
-            .evaluate_expression(expr, row)
-            .unwrap_or(Value::Null);
+        let val = executor.evaluate_expression(expr, row)?;
         state.record(Some(val), spec);
     }
+    Ok(())
 }
 
 fn merge_group_accs(mut a: GroupAcc, b: GroupAcc) -> GroupAcc {

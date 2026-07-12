@@ -23,6 +23,31 @@ impl<'a> CypherExecutor<'a> {
                     }
                     _ => return false,
                 }
+            } else if let MatchBinding::Node { index, .. } | MatchBinding::NodeRef(index) = binding
+            {
+                // A node variable carried only as a projected VALUE — a
+                // `Value::Node` / `Value::NodeRef` from `WITH n` after the
+                // fold pass rewrote bindings, or `UNWIND collect(n) AS n` —
+                // constrains the pattern to exactly that node, the same
+                // openCypher re-MATCH semantics the Edge arm below applies
+                // to relationship variables. A null-valued binding matches
+                // nothing; a non-node projected value can never satisfy a
+                // node pattern. (`NodeValue.id` / `NodeRef` both carry the
+                // petgraph NodeIndex — see `materialize_node_value`.)
+                match row.projected.get(var) {
+                    None => {}
+                    Some(Value::Node(nv)) => {
+                        if nv.id as usize != index.index() {
+                            return false;
+                        }
+                    }
+                    Some(Value::NodeRef(i)) => {
+                        if *i as usize != index.index() {
+                            return false;
+                        }
+                    }
+                    Some(_) => return false,
+                }
             }
             // A relationship variable already bound on the row (carried
             // edge binding, or a projected relationship value from
@@ -640,6 +665,7 @@ impl<'a> CypherExecutor<'a> {
             }
             Predicate::Exists {
                 patterns,
+                pattern_groups,
                 where_clause,
             } => {
                 // Fast path: single 3-element pattern with one bound node
@@ -663,11 +689,44 @@ impl<'a> CypherExecutor<'a> {
                 // MATCH — `prod` in `MATCH ... MATCH (prod) WHERE prod.price > X`
                 // wouldn't be in scope when the first MATCH's results were
                 // checked.
+                // Relationship uniqueness (the openCypher trail rule) applies
+                // across the subquery's comma patterns exactly as across the
+                // comma patterns of one MATCH: two different pattern edges may
+                // not bind the same relationship. It does NOT apply across the
+                // multi-clause subquery form's separate MATCHes
+                // (`EXISTS { MATCH … MATCH … }`) — those are distinct clause
+                // scopes (`pattern_groups`), and edges may repeat across them
+                // exactly as across top-level MATCH clauses. Only enforced
+                // when some group carries two or more edge patterns — the
+                // common single-pattern EXISTS pays nothing.
+                let enforce_rel_uniqueness =
+                    match_clause::grouped_patterns_need_rel_uniqueness(patterns, pattern_groups);
                 let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
-                for pattern in patterns {
+                // Parallel to `combined_rows` when enforcing: the edge indices
+                // each row consumed within the CURRENT clause group (clause-
+                // local — outer MATCH edges may legitimately reappear here,
+                // and the sets reset at every group boundary).
+                let mut clause_edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> =
+                    if enforce_rel_uniqueness {
+                        vec![Vec::new()]
+                    } else {
+                        Vec::new()
+                    };
+                let mut prev_group: Option<usize> = None;
+                for (pi, pattern) in patterns.iter().enumerate() {
                     if combined_rows.is_empty() {
                         return Ok(Some(false));
                     }
+                    // New clause group (a MATCH separator): edges bound by
+                    // earlier groups no longer constrain — reset each row's
+                    // clause-local edge set.
+                    let group = pattern_groups.get(pi).copied().unwrap_or(0);
+                    if enforce_rel_uniqueness && prev_group.is_some_and(|g| g != group) {
+                        for set in &mut clause_edge_sets {
+                            set.clear();
+                        }
+                    }
+                    prev_group = Some(group);
                     // Resolve EqualsVar references against current row
                     let resolved;
                     let pat = if Self::pattern_has_vars(pattern) {
@@ -687,10 +746,21 @@ impl<'a> CypherExecutor<'a> {
                     let matches = executor.execute(pat)?;
 
                     let mut next_rows: Vec<ResultRow> = Vec::new();
-                    for current in &combined_rows {
+                    let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
+                    for (ci, current) in combined_rows.iter().enumerate() {
                         for m in &matches {
                             if !self.bindings_compatible(current, m) {
                                 continue;
+                            }
+                            if enforce_rel_uniqueness {
+                                let mut m_edges = Vec::new();
+                                match_clause::match_edge_indices(m, &mut m_edges);
+                                if m_edges.iter().any(|e| clause_edge_sets[ci].contains(e)) {
+                                    continue; // trail rule: edge re-use across patterns
+                                }
+                                let mut next = clause_edge_sets[ci].clone();
+                                next.extend(m_edges);
+                                next_sets.push(next);
                             }
                             let mut merged = current.clone();
                             self.merge_match_into_row(&mut merged, m);
@@ -698,6 +768,9 @@ impl<'a> CypherExecutor<'a> {
                         }
                     }
                     combined_rows = next_rows;
+                    if enforce_rel_uniqueness {
+                        clause_edge_sets = next_sets;
+                    }
                 }
 
                 if combined_rows.is_empty() {

@@ -375,6 +375,7 @@ fn validate_predicate_scope(
         Predicate::Exists {
             patterns,
             where_clause,
+            ..
         } => {
             let mut inner = scope.clone();
             for pattern in patterns {
@@ -942,6 +943,7 @@ fn walk_predicate_for_nested_patterns(
         Predicate::Exists {
             patterns,
             where_clause,
+            ..
         } => {
             let mut inner_vars = var_types.clone();
             for p in patterns {

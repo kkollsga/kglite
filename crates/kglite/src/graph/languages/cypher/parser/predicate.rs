@@ -32,7 +32,7 @@ impl CypherParser {
     pub(super) fn parse_exists_predicate(&mut self) -> Result<Predicate, String> {
         if self.check(&CypherToken::LBrace) {
             self.advance(); // consume {
-            let patterns = self.parse_exists_patterns()?;
+            let (patterns, pattern_groups) = self.parse_exists_patterns()?;
             // Check for optional WHERE clause inside EXISTS { MATCH ... WHERE ... }
             let where_clause = if self.check(&CypherToken::Where) {
                 self.advance(); // consume WHERE
@@ -43,6 +43,7 @@ impl CypherParser {
             self.expect(&CypherToken::RBrace)?;
             Ok(Predicate::Exists {
                 patterns,
+                pattern_groups,
                 where_clause,
             })
         } else if self.check(&CypherToken::LParen) {
@@ -54,6 +55,7 @@ impl CypherParser {
                 self.expect(&CypherToken::RParen)?; // consume outer )
                 Ok(Predicate::Exists {
                     patterns: vec![pattern],
+                    pattern_groups: vec![0],
                     where_clause: None,
                 })
             } else if self.looks_like_property_access() {

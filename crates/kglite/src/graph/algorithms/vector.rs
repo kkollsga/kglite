@@ -72,6 +72,10 @@ pub fn vector_search(
     metric: DistanceMetric,
     exact: bool,
 ) -> Result<Vec<VectorSearchResult>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena, which must run under a DiskQueryGuard (arena protocol in
+    // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_count = selection.get_level_count();
     if level_count == 0 {
         return Ok(Vec::new());

@@ -1182,6 +1182,9 @@ impl CurrentSelection {
     /// Returns the node type of the first node in the current selection, if any.
     /// Used by spatial auto-resolution to look up SpatialConfig.
     pub fn first_node_type(&self, graph: &DirGraph) -> Option<String> {
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); no-op on memory/mapped.
+        let _arena_guard = graph.graph.begin_query();
         self.current_node_indices()
             .next()
             .and_then(|idx| graph.graph.node_weight(idx))

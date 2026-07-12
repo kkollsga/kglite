@@ -127,6 +127,9 @@ pub fn calculate_property_stats(
     pairs: &[ParentChildPair],
     property: &str,
 ) -> Vec<PropertyStats> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     pairs
         .iter()
         .map(|pair| {

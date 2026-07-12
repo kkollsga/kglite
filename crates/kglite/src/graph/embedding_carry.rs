@@ -29,6 +29,10 @@ impl DirGraph {
         let mut vectors_copied = 0usize;
         let mut vectors_skipped = 0usize;
 
+        // Arena guard: node_weight on a disk-backed `src` materializes into
+        // its query arena (protocol in disk/graph.rs); no-op on memory/mapped.
+        let _src_arena_guard = src.graph.begin_query();
+
         // Snapshot the store keys + node types first so we can build each
         // type's id index (a `&mut self` op) before the immutable id lookups.
         let store_keys: Vec<(String, String)> = src.embeddings.keys().cloned().collect();

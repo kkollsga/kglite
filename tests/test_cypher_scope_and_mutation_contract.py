@@ -97,6 +97,50 @@ def test_relationship_id_is_stable_across_variable_and_materialized_value():
     assert rows[0]["direct"] == rows[0]["carried"]
 
 
+# ── Node identity through projected node values ─────────────────────────
+#
+# A node variable re-used in a later MATCH pins the pattern to exactly
+# that node (openCypher re-MATCH identity) — including when the row
+# carries it only as a projected Value::Node (`UNWIND collect(n) AS n`),
+# not a live binding. Parallel to the relationship-identity contract
+# above.
+
+
+def _paired_graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:A {id: 1}), (:A {id: 2}), (:B {id: 10}), (:B {id: 20})").to_list()
+    graph.cypher("MATCH (a:A {id: 1}), (b:B {id: 10}) CREATE (a)-[:R]->(b)").to_list()
+    graph.cypher("MATCH (a:A {id: 2}), (b:B {id: 20}) CREATE (a)-[:R]->(b)").to_list()
+    return graph
+
+
+def test_node_identity_pinned_through_with():
+    graph = _paired_graph()
+    rows = graph.cypher("MATCH (n:A) WITH n MATCH (n)-[:R]->(m) RETURN n.id AS nid, m.id AS mid ORDER BY nid").to_list()
+    assert rows == [{"nid": 1, "mid": 10}, {"nid": 2, "mid": 20}]
+
+
+def test_node_identity_pinned_through_projected_node_value():
+    # UNWIND over collect(n) carries `n` as a projected Value::Node; the
+    # later MATCH must bind exactly that node, not cartesian-join against
+    # every :R edge (which produced 4 rows with mismatched pairs).
+    graph = _paired_graph()
+    rows = graph.cypher(
+        "MATCH (n:A) WITH collect(n) AS ns UNWIND ns AS n "
+        "MATCH (n)-[:R]->(m) RETURN n.id AS nid, m.id AS mid ORDER BY nid"
+    ).to_list()
+    assert rows == [{"nid": 1, "mid": 10}, {"nid": 2, "mid": 20}]
+
+
+def test_node_identity_pinned_in_exists_through_projected_node_value():
+    graph = _paired_graph()
+    rows = graph.cypher(
+        "MATCH (n:A) WITH collect(n) AS ns UNWIND ns AS n "
+        "RETURN n.id AS nid, EXISTS { (n)-[:R]->(:B {id: 10}) } AS to10 ORDER BY nid"
+    ).to_list()
+    assert rows == [{"nid": 1, "to10": True}, {"nid": 2, "to10": False}]
+
+
 # ── Writes on NULL targets are no-ops (openCypher) ──────────────────────
 #
 # An OPTIONAL MATCH miss leaves the variable null-valued; SET / REMOVE on

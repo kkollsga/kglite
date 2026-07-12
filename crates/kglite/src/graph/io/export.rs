@@ -15,6 +15,9 @@ pub fn to_graphml(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Result<String, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let mut xml = String::with_capacity(64 * 1024); // Pre-allocate 64KB
 
     // XML header
@@ -141,6 +144,9 @@ pub fn to_d3_json(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Result<String, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Determine which nodes to export
     let node_indices: Vec<_> = if let Some(sel) = selection {
         let level_idx = sel.get_level_count().saturating_sub(1);
@@ -241,6 +247,9 @@ pub fn to_d3_json(
 /// GEXF is the native format for Gephi and supports dynamic graphs,
 /// hierarchies, and rich attribute types.
 pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result<String, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let mut xml = String::with_capacity(64 * 1024);
 
     // XML header
@@ -358,6 +367,9 @@ pub fn to_gexf(graph: &DirGraph, selection: Option<&CurrentSelection>) -> Result
 /// (`updated_at`/`git_sha`/`modified_by`) are omitted — they change on every
 /// write and would swamp the diff (and they're engine metadata, not data).
 pub fn to_text(graph: &DirGraph) -> String {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     use crate::datatypes::values::raw_string;
     use crate::graph::schema::is_reserved_provenance_key;
 
@@ -465,6 +477,9 @@ pub fn to_csv(
     graph: &DirGraph,
     selection: Option<&CurrentSelection>,
 ) -> Result<(String, String), String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Determine which nodes to export
     let node_indices: Vec<_> = if let Some(sel) = selection {
         let level_idx = sel.get_level_count().saturating_sub(1);
@@ -551,6 +566,9 @@ pub fn to_csv_dir(
     selection: Option<&CurrentSelection>,
     parent_types: &HashMap<String, String>,
 ) -> Result<ExportSummary, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let output = Path::new(output_dir);
     let mut log_lines = Vec::new();
     log_lines.push(format!("Exporting to {}...", output_dir));

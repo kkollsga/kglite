@@ -300,17 +300,24 @@ impl<'a> CypherExecutor<'a> {
                         // A relationship variable re-used from a prior clause
                         // pins the pattern to that edge — seed its endpoints
                         // so the executor doesn't enumerate every edge.
-                        let seeded = match_clause::seed_bound_edge_endpoints(pat, &existing_row);
-                        let pre_bindings = seeded.as_ref().unwrap_or(&existing_row.node_bindings);
-                        let executor = PatternExecutor::with_bindings_and_params(
-                            self.graph,
-                            self.budget_probe_limit(remaining),
-                            pre_bindings,
-                            self.params,
-                        )
-                        .set_deadline(self.deadline)
-                        .set_cancel(self.cancel);
-                        let matches = executor.execute(pat)?;
+                        let seeded = match_clause::seed_prebound_pattern_vars(pat, &existing_row);
+                        // Block-scoped: the PatternExecutor holds the disk
+                        // arena guard (drop glue), so its borrow of
+                        // `existing_row` via `pre_bindings` must end before
+                        // the move/merge below.
+                        let matches = {
+                            let pre_bindings =
+                                seeded.as_ref().unwrap_or(&existing_row.node_bindings);
+                            let executor = PatternExecutor::with_bindings_and_params(
+                                self.graph,
+                                self.budget_probe_limit(remaining),
+                                pre_bindings,
+                                self.params,
+                            )
+                            .set_deadline(self.deadline)
+                            .set_cancel(self.cancel);
+                            executor.execute(pat)?
+                        };
                         self.budget.check_work(matches.len(), "MATCH join")?;
                         // Collect compatible matches (with their clause-local
                         // edge sets when uniqueness is enforced) for the
@@ -426,10 +433,17 @@ impl<'a> CypherExecutor<'a> {
                     for (ci, cur) in row_set.iter().enumerate() {
                         // Fast path: probe the transient index when one was built
                         // and the bind-var isn't already constrained by a prior
-                        // binding. (Transient indexes only cover single-node
-                        // patterns, so the clause-local edge set is unchanged.)
+                        // binding — live (`node_bindings`) or projected value
+                        // (`UNWIND collect(n) AS n` → Value::Node; OPTIONAL
+                        // MATCH miss → Null). Projected constraints are
+                        // enforced by `bindings_compatible` on the general
+                        // path, which the probe would bypass. (Transient
+                        // indexes only cover single-node patterns, so the
+                        // clause-local edge set is unchanged.)
                         if let Some(idx) = &transient_indexes[pi] {
-                            if !cur.node_bindings.contains_key(idx.bind_var.as_str()) {
+                            if !cur.node_bindings.contains_key(idx.bind_var.as_str())
+                                && !cur.projected.contains_key(idx.bind_var.as_str())
+                            {
                                 if let Some(probe) = idx.probe_value(cur, self.graph) {
                                     for &node_idx in idx.lookup(&probe) {
                                         self.budget.reserve_rows(
@@ -461,7 +475,7 @@ impl<'a> CypherExecutor<'a> {
                         // A relationship variable re-used from a prior clause
                         // pins the pattern to that edge — seed its endpoints
                         // so the executor doesn't enumerate every edge.
-                        let seeded = match_clause::seed_bound_edge_endpoints(pat, cur);
+                        let seeded = match_clause::seed_prebound_pattern_vars(pat, cur);
                         let pre_bindings = seeded.as_ref().unwrap_or(&cur.node_bindings);
                         let executor = PatternExecutor::with_bindings_and_params(
                             self.graph,

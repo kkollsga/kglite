@@ -36,6 +36,9 @@ pub fn within_bounds(
     max_lon: f64,
     geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
@@ -88,6 +91,9 @@ pub fn near_point(
     max_distance: f64,
     geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
@@ -139,6 +145,9 @@ pub fn near_point_m(
     max_distance_m: f64,
     geom_fallback: Option<&str>,
 ) -> Result<Vec<NodeIndex>, String> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Get nodes from current selection
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
@@ -467,6 +476,9 @@ pub fn contains_point(
     lat: f64,
     lon: f64,
 ) -> Result<Vec<NodeIndex>, String> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let query_point = Point::new(lon, lat); // geo uses (x, y) = (lon, lat)
 
     // Get nodes from current selection
@@ -518,6 +530,9 @@ pub fn intersects_geometry(
     geometry_field: &str,
     query_wkt: &str,
 ) -> Result<Vec<NodeIndex>, String> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let query_geometry = parse_wkt(query_wkt)?;
 
     // Get nodes from current selection
@@ -640,6 +655,9 @@ pub fn calculate_centroid(
     lon_field: &str,
     geom_fallback: Option<&str>,
 ) -> Option<(f64, f64)> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
         selection
@@ -679,6 +697,9 @@ pub fn get_bounds(
     lon_field: &str,
     geom_fallback: Option<&str>,
 ) -> Option<(f64, f64, f64, f64)> {
+    // Arena guard: disk-backed node reads materialize into the query arena
+    // (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let level_count = selection.get_level_count();
     let nodes: Vec<NodeIndex> = if level_count > 0 {
         selection

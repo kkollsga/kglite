@@ -183,6 +183,9 @@ pub fn explore_markdown(
 }
 
 fn lexical_search(dir: &DirGraph, query: &str, max_entities: usize) -> Vec<Hit> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = dir.graph.begin_query();
     let q_lower = query.to_lowercase();
     let mut hits: Vec<Hit> = Vec::new();
 
@@ -264,6 +267,9 @@ fn lexical_search(dir: &DirGraph, query: &str, max_entities: usize) -> Vec<Hit> 
 }
 
 fn traverse(dir: &DirGraph, seeds: &[Hit], max_depth: usize) -> Vec<Hit> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = dir.graph.begin_query();
     if max_depth == 0 {
         return Vec::new();
     }

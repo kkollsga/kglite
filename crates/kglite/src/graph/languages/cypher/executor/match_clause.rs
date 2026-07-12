@@ -107,13 +107,40 @@ pub(super) fn null_pad_pattern_vars(row: &mut ResultRow, clause: &MatchClause) {
 /// enforces the trail rule; a single-edge-pattern clause has nothing to
 /// cross-check, so the hot single-pattern path pays nothing.)
 pub(super) fn clause_needs_rel_uniqueness(clause: &MatchClause) -> bool {
-    clause.patterns.len() > 1
-        && clause
-            .patterns
-            .iter()
-            .filter(|p| p.elements.len() > 1)
-            .count()
-            >= 2
+    patterns_need_rel_uniqueness(&clause.patterns)
+}
+
+/// Pattern-list form of [`clause_needs_rel_uniqueness`] — shared with the
+/// `EXISTS { p1, p2, … }` subquery evaluation, whose comma patterns form
+/// one clause scope under the same openCypher trail rule.
+pub(super) fn patterns_need_rel_uniqueness(patterns: &[Pattern]) -> bool {
+    patterns.len() > 1 && patterns.iter().filter(|p| p.elements.len() > 1).count() >= 2
+}
+
+/// Group-aware form for pattern subqueries: relationship uniqueness must
+/// be enforced only when some single clause group (`groups[i]` — comma-
+/// joined patterns share a group, each `MATCH` separator starts a new one)
+/// contains two or more edge-bearing patterns. Groups are emitted in
+/// non-decreasing order by the parser, so a run-length scan suffices.
+pub(super) fn grouped_patterns_need_rel_uniqueness(patterns: &[Pattern], groups: &[usize]) -> bool {
+    let mut run_group: Option<usize> = None;
+    let mut run_edge_count = 0usize;
+    for (pi, pattern) in patterns.iter().enumerate() {
+        if pattern.elements.len() <= 1 {
+            continue;
+        }
+        let group = groups.get(pi).copied().unwrap_or(0);
+        if run_group == Some(group) {
+            run_edge_count += 1;
+            if run_edge_count >= 2 {
+                return true;
+            }
+        } else {
+            run_group = Some(group);
+            run_edge_count = 1;
+        }
+    }
+    false
 }
 
 /// Resolve a relationship variable already bound on the incoming row —
@@ -137,21 +164,68 @@ pub(super) fn row_bound_edge(
     None
 }
 
-/// When a pattern re-uses a relationship variable that is already bound on
-/// the incoming row (openCypher: the pattern must then match exactly that
-/// relationship), seed the pattern's adjacent node variables from the
-/// stored edge's endpoints so the `PatternExecutor` expands around the
-/// bound edge instead of enumerating every candidate edge. Purely a
-/// search-space constraint — `bindings_compatible` enforces the edge
-/// identity itself, including the undirected (`Both`) case this helper
-/// skips because the orientation is ambiguous. Returns `None` (no
-/// allocation) when no edge variable of the pattern is pre-bound — the
-/// common path.
-pub(super) fn seed_bound_edge_endpoints(
+/// Resolve a node variable carried on the incoming row only as a projected
+/// VALUE — `Value::Node` (e.g. `UNWIND collect(n) AS n`, `WITH n` after the
+/// fold pass rewrote bindings) or the transient `Value::NodeRef`. Both carry
+/// the petgraph NodeIndex (see `materialize_node_value`). Returns `None` for
+/// live `node_bindings` entries (the caller reads those directly) and for
+/// any other value shape.
+pub(super) fn row_projected_node(row: &ResultRow, var: &str) -> Option<NodeIndex> {
+    match row.projected.get(var) {
+        Some(Value::Node(nv)) => Some(NodeIndex::new(nv.id as usize)),
+        Some(Value::NodeRef(i)) => Some(NodeIndex::new(*i as usize)),
+        _ => None,
+    }
+}
+
+/// Seed pattern node variables that are pre-bound on the row only as
+/// projected `Value::Node` / `Value::NodeRef` values, so the
+/// `PatternExecutor` anchors at that node instead of enumerating every
+/// candidate. Purely a search-space constraint — `bindings_compatible`
+/// enforces the node identity itself. Returns `None` (no allocation) when
+/// nothing needs seeding — the common path.
+fn seed_projected_node_vars(pattern: &Pattern, row: &ResultRow) -> Option<Bindings<NodeIndex>> {
+    let mut extended: Option<Bindings<NodeIndex>> = None;
+    for elem in &pattern.elements {
+        let PatternElement::Node(np) = elem else {
+            continue;
+        };
+        let Some(var) = np.variable.as_ref() else {
+            continue;
+        };
+        if row.node_bindings.contains_key(var) {
+            continue; // an existing binding always wins
+        }
+        let Some(idx) = row_projected_node(row, var) else {
+            continue;
+        };
+        let ext = extended.get_or_insert_with(|| row.node_bindings.clone());
+        if !ext.contains_key(var) {
+            ext.insert(var.clone(), idx);
+        }
+    }
+    extended
+}
+
+/// When a pattern re-uses a variable that is already bound on the incoming
+/// row only as a projected value (openCypher: the pattern must then match
+/// exactly that entity), seed the pattern so the `PatternExecutor` expands
+/// around the bound entity instead of enumerating every candidate:
+/// - a relationship variable bound as `EdgeBinding` / `Value::Relationship`
+///   seeds its adjacent node variables from the stored edge's endpoints;
+/// - a node variable bound as `Value::Node` / `Value::NodeRef` seeds
+///   itself (via `seed_projected_node_vars`).
+///
+/// Purely a search-space constraint — `bindings_compatible` enforces the
+/// identities themselves, including the undirected (`Both`) edge case this
+/// helper skips because the orientation is ambiguous. Returns `None` (no
+/// allocation) when no variable of the pattern is pre-bound — the common
+/// path.
+pub(super) fn seed_prebound_pattern_vars(
     pattern: &Pattern,
     row: &ResultRow,
 ) -> Option<Bindings<NodeIndex>> {
-    let mut extended: Option<Bindings<NodeIndex>> = None;
+    let mut extended = seed_projected_node_vars(pattern, row);
     for (i, elem) in pattern.elements.iter().enumerate() {
         let PatternElement::Edge(ep) = elem else {
             continue;
@@ -345,7 +419,7 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     pattern
                 };
-                let seeded = seed_bound_edge_endpoints(pat, cur);
+                let seeded = seed_prebound_pattern_vars(pat, cur);
                 let pre_bindings = seeded.as_ref().unwrap_or(&cur.node_bindings);
                 let executor = PatternExecutor::with_bindings_and_params(
                     self.graph,
@@ -610,6 +684,19 @@ impl<'a> CypherExecutor<'a> {
         if let Some(var) = edge.variable.as_deref() {
             if row_bound_edge(row, var).is_some() {
                 return None;
+            }
+        }
+
+        // Same for node variables carried only as projected VALUES
+        // (`UNWIND collect(n) AS n` → Value::Node, or an OPTIONAL MATCH
+        // miss → projected Null): they constrain the pattern to exactly
+        // that node (or to nothing, for Null). The sweep below only
+        // consults `node_bindings`, so fall back to the full executor.
+        for np in [node_a, node_b] {
+            if let Some(var) = np.variable.as_deref() {
+                if !row.node_bindings.contains_key(var) && row.projected.contains_key(var) {
+                    return None;
+                }
             }
         }
 

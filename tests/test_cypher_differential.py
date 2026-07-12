@@ -1569,6 +1569,60 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        # Node parallel of the relationship contract above: a node variable
+        # carried through WITH re-used in a later MATCH pins the pattern to
+        # exactly that node.
+        "node_var_rebind_after_with",
+        "social_graph",
+        "MATCH (n:Person {person_id: 1}) WITH n MATCH (n)-[:WORKS_AT]->(c) "
+        "RETURN n.name AS name, c.name AS cn ORDER BY cn",
+        None,
+    ),
+    (
+        # Node identity through a projected node VALUE: UNWIND over
+        # collect(n) re-binds `n` as a Value::Node, which must pin the MATCH
+        # to that node (openCypher re-MATCH identity), not cartesian-join
+        # against every WORKS_AT edge.
+        "node_var_rebind_after_unwind",
+        "social_graph",
+        "MATCH (n:Person) WHERE n.person_id <= 2 WITH collect(n) AS ns "
+        "UNWIND ns AS n MATCH (n)-[:WORKS_AT]->(c) "
+        "RETURN n.name AS name, c.name AS cn ORDER BY name",
+        None,
+    ),
+    (
+        # Trail rule across the comma patterns of one EXISTS subquery:
+        # Person_1 has exactly one WORKS_AT edge, so the two-pattern EXISTS
+        # must be false while the single-pattern one stays true.
+        "exists_trail_rule_comma_patterns",
+        "social_graph",
+        "MATCH (p:Person {person_id: 1}) "
+        "RETURN EXISTS { (p)-[r1:WORKS_AT]->(c), (p)-[r2:WORKS_AT]->(d) } AS two, "
+        "EXISTS { (p)-[r1:WORKS_AT]->(c) } AS one",
+        None,
+    ),
+    (
+        # CASE result positions parse at the full expression tower:
+        # comparisons and pattern predicates in THEN/ELSE.
+        "case_result_predicate_positions",
+        "social_graph",
+        "MATCH (p:Person {person_id: 1}) "
+        "RETURN CASE WHEN true THEN 1 < 2 ELSE false END AS cmp, "
+        "CASE WHEN false THEN false ELSE EXISTS { (p)-[:WORKS_AT]->() } END AS pat",
+        None,
+    ),
+    (
+        # Abbreviated relationship patterns: --> / -- / <-- are -[]-> /
+        # -[]- / <-[]-.
+        "abbreviated_edge_forms",
+        "social_graph",
+        "MATCH (p:Person {person_id: 1})-->(x) WITH count(x) AS out "
+        "MATCH (p:Person {person_id: 1})--(y) WITH out, count(y) AS both "
+        "MATCH (c:Company {company_id: 100})<--(z) "
+        "RETURN out, both, count(z) AS inn",
+        None,
+    ),
+    (
         # Relationship uniqueness (trail rule) across comma patterns of ONE
         # MATCH: Person_1 has exactly one WORKS_AT edge, so two different
         # edge variables anchored on the same node can't both bind it.

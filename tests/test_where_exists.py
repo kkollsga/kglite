@@ -51,6 +51,52 @@ def social_graph():
     return graph
 
 
+class TestExistsCrossPatternRelUniqueness:
+    """Relationship uniqueness (the openCypher trail rule) applies across
+    the comma patterns of one EXISTS subquery, but NOT across the separate
+    MATCH clauses of the multi-clause subquery form."""
+
+    @pytest.fixture
+    def one_edge_graph(self):
+        graph = KnowledgeGraph()
+        graph.cypher("CREATE (:P {id: 1})")
+        graph.cypher("CREATE (:X {id: 1}), (:Y {id: 2})")
+        graph.cypher("MATCH (x:X {id: 1}), (y:Y {id: 2}) CREATE (x)-[:R]->(y)")
+        return graph
+
+    def test_two_comma_patterns_cannot_share_the_only_edge(self, one_edge_graph):
+        rows = one_edge_graph.cypher(
+            "MATCH (p:P) WHERE EXISTS { (a)-[r1:R]->(b), (c)-[r2:R]->(d) } RETURN count(p) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 0
+
+    def test_single_pattern_still_matches(self, one_edge_graph):
+        rows = one_edge_graph.cypher("MATCH (p:P) WHERE EXISTS { (a)-[r1:R]->(b) } RETURN count(p) AS c").to_list()
+        assert rows[0]["c"] == 1
+
+    def test_anonymous_comma_pattern_edges_also_enforced(self, one_edge_graph):
+        rows = one_edge_graph.cypher(
+            "MATCH (p:P) WHERE EXISTS { (:X)-[:R]->(), ()-[:R]->(:Y) } RETURN count(p) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 0
+
+    def test_two_edges_satisfy_two_comma_patterns(self, one_edge_graph):
+        one_edge_graph.cypher("CREATE (:X {id: 3}), (:Y {id: 4})")
+        one_edge_graph.cypher("MATCH (x:X {id: 3}), (y:Y {id: 4}) CREATE (x)-[:R]->(y)")
+        rows = one_edge_graph.cypher(
+            "MATCH (p:P) WHERE EXISTS { (a)-[r1:R]->(b), (c)-[r2:R]->(d) } RETURN count(p) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 1
+
+    def test_multi_match_subquery_clauses_may_reuse_an_edge(self, one_edge_graph):
+        # Separate MATCH clauses inside EXISTS are separate clause scopes —
+        # both may bind the single stored edge (as across top-level MATCHes).
+        rows = one_edge_graph.cypher(
+            "MATCH (p:P) WHERE EXISTS { MATCH (a)-[r1:R]->(b) MATCH (c)-[r2:R]->(d) } RETURN count(p) AS c"
+        ).to_list()
+        assert rows[0]["c"] == 1
+
+
 class TestWhereExists:
     """Test WHERE EXISTS { pattern } subpattern predicate."""
 

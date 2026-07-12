@@ -336,6 +336,9 @@ pub fn evaluate_equation(
     parsed_expr: &Expr,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let is_aggregation = has_aggregation(parsed_expr);
 
     if is_aggregation {
@@ -447,6 +450,9 @@ pub fn evaluate_connection_equation(
     parsed_expr: &Expr,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Connection aggregation requires at least 2 levels (parent -> child relationship)
     if selection.get_level_count() < 2 {
         return vec![StatResult {
@@ -597,6 +603,9 @@ pub fn count_nodes_by_parent(
     selection: &CurrentSelection,
     level_index: Option<usize>,
 ) -> Vec<StatResult> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let pairs = get_parent_child_pairs(selection, level_index);
 
     pairs

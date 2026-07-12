@@ -20,6 +20,9 @@ use super::{
 /// Fast path: uses connection_type_metadata + cached edge counts (O(types)).
 /// Fallback: scans all edges (O(edges)) for pre-metadata graphs.
 pub fn compute_connection_type_stats(graph: &DirGraph) -> Vec<ConnectionTypeStats> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Fast path: use metadata (already has source/target types) + cached counts
     if !graph.connection_type_metadata.is_empty() {
         let counts = graph.get_edge_type_counts();
@@ -527,6 +530,9 @@ pub(crate) fn collect_property_keys(graph: &DirGraph) -> Vec<String> {
 
 /// Full schema overview: node types, connection types, indexes, totals.
 pub fn compute_schema(graph: &DirGraph) -> SchemaOverview {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Node types from type_indices
     let mut node_types: Vec<(String, NodeTypeOverview)> = graph
         .type_indices
@@ -664,6 +670,9 @@ pub fn compute_property_stats(
     max_values: usize,
     sample_size: Option<usize>,
 ) -> Result<Vec<PropertyStatInfo>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let node_indices = graph
         .type_indices
         .get(node_type)
@@ -860,6 +869,9 @@ pub fn compute_neighbors_schema(
     graph: &DirGraph,
     node_type: &str,
 ) -> Result<NeighborsSchema, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let node_indices = graph
         .type_indices
         .get(node_type)
@@ -929,6 +941,9 @@ pub fn compute_neighbors_schema(
 /// Pre-compute neighbor schemas for ALL types in a single pass over edges.
 /// Much faster than calling `compute_neighbors_schema` per type in `describe()`.
 pub fn compute_all_neighbors_schemas(graph: &DirGraph) -> HashMap<String, NeighborsSchema> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Key: (source_type, conn_type, target_type) → count
     let mut edge_counts: HashMap<(String, String, String), usize> = HashMap::new();
 
@@ -999,6 +1014,9 @@ pub fn compute_sample<'a>(
     node_type: &str,
     n: usize,
 ) -> Result<Vec<&'a NodeData>, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     let node_indices = graph
         .type_indices
         .get(node_type)

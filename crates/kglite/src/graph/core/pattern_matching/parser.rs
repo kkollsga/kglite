@@ -417,7 +417,9 @@ impl Parser {
     }
 
     /// Parse edge pattern: -[:TYPE]-> or <-[:TYPE]- or -[:TYPE]-
-    /// Also supports variable-length: -[:TYPE*1..3]->
+    /// Also supports variable-length: -[:TYPE*1..3]-> and the openCypher
+    /// abbreviated forms without a bracket part: `-->`, `<--`, `--`
+    /// (equivalent to -[]->, <-[]-, -[]-).
     fn parse_edge_pattern(&mut self) -> Result<EdgePattern, String> {
         let mut direction = EdgeDirection::Both;
         let mut incoming_start = false;
@@ -430,6 +432,32 @@ impl Parser {
         }
 
         self.expect(&Token::Dash)?;
+
+        // Abbreviated edge (no bracket part): a second dash immediately
+        // follows — `-->` (Dash Dash GreaterThan), `--` (Dash Dash) or
+        // `<--` (LessThan Dash Dash, incoming_start already consumed).
+        if let Some(Token::Dash) = self.peek() {
+            self.advance(); // consume the second -
+            if let Some(Token::GreaterThan) = self.peek() {
+                self.advance(); // consume >
+                if incoming_start {
+                    // <--> is invalid
+                    return Err("Invalid edge pattern: cannot have both '<' and '>' arrows. Use --> for outgoing, <-- for incoming, or -- for both directions.".to_string());
+                }
+                direction = EdgeDirection::Outgoing;
+            }
+            return Ok(EdgePattern {
+                variable: None,
+                connection_type: None,
+                connection_types: None,
+                direction,
+                properties: None,
+                var_length: None,
+                needs_path_info: true,
+                skip_target_type_check: false,
+                edge_filter: None,
+            });
+        }
 
         // Parse the bracket part: [:TYPE {props}]
         self.expect(&Token::LBracket)?;
@@ -941,5 +969,58 @@ mod tests {
         } else {
             panic!("Expected edge pattern");
         }
+    }
+
+    // Abbreviated (bracketless) edge forms: -->, --, <--
+
+    fn abbreviated_edge(pattern_str: &str) -> EdgePattern {
+        let pattern = parse_pattern(pattern_str).unwrap();
+        assert_eq!(pattern.elements.len(), 3);
+        match &pattern.elements[1] {
+            PatternElement::Edge(ep) => ep.clone(),
+            _ => panic!("Expected edge pattern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_abbreviated_outgoing() {
+        let ep = abbreviated_edge("(a)-->(b)");
+        assert_eq!(ep.direction, EdgeDirection::Outgoing);
+        assert_eq!(ep.connection_type, None);
+        assert_eq!(ep.variable, None);
+        assert_eq!(ep.var_length, None);
+    }
+
+    #[test]
+    fn test_parse_abbreviated_undirected() {
+        let ep = abbreviated_edge("(a)--(b)");
+        assert_eq!(ep.direction, EdgeDirection::Both);
+        assert_eq!(ep.connection_type, None);
+    }
+
+    #[test]
+    fn test_parse_abbreviated_incoming() {
+        let ep = abbreviated_edge("(a)<--(b)");
+        assert_eq!(ep.direction, EdgeDirection::Incoming);
+        assert_eq!(ep.connection_type, None);
+    }
+
+    #[test]
+    fn test_parse_abbreviated_multi_hop() {
+        let pattern = parse_pattern("(a)-->(b)--(c)<--(d)").unwrap();
+        assert_eq!(pattern.elements.len(), 7);
+    }
+
+    #[test]
+    fn test_parse_abbreviated_double_arrow_rejected() {
+        // <--> is invalid — both arrowheads.
+        assert!(parse_pattern("(a)<-->(b)").is_err());
+    }
+
+    #[test]
+    fn test_parse_single_dash_still_rejected() {
+        // `(a)-(b)` is not a pattern edge (a lone dash is subtraction in
+        // expression positions and invalid in patterns).
+        assert!(parse_pattern("(a)-(b)").is_err());
     }
 }

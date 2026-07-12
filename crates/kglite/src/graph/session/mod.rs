@@ -69,6 +69,10 @@ use crate::graph::storage::GraphRead;
 /// Lifted from the wheel crate in 0.10.1 so every binding can call
 /// the same post-execute cleanup instead of re-implementing it.
 pub fn resolve_noderefs(graph: &GraphBackend, rows: &mut [Vec<Value>]) {
+    // Arena guard: node_weight materializes on the disk backend (arena
+    // protocol in disk/graph.rs, enforced by a debug assert); no-op on
+    // memory/mapped backends.
+    let _arena_guard = graph.begin_query();
     for row in rows.iter_mut() {
         for val in row.iter_mut() {
             if let Value::NodeRef(idx) = val {

@@ -95,6 +95,15 @@ pub struct CypherExecutor<'a> {
     /// into the streaming pipeline ([`stream::pipeline::try_run_streaming`]).
     /// Default `true`; disabled per-query via `kg.cypher(streaming=False)`.
     streaming: bool,
+    /// Holds the disk materialization arenas alive for this executor's
+    /// lifetime (arena protocol in `storage/disk/graph.rs`, enforced by a
+    /// debug assert). Acquired in the constructor so EVERY read this
+    /// executor performs — including the temporary executors the mutable
+    /// engine (`executor/write.rs`) spins up per clause/row — runs under
+    /// an active `DiskQueryGuard`. `None` on the memory/mapped backends
+    /// (they don't materialize through shared arenas), so the in-memory
+    /// hot path pays one enum match at construction.
+    _arena_guard: Option<crate::graph::storage::disk::graph::DiskQueryGuard<'a>>,
 }
 
 impl<'a> CypherExecutor<'a> {
@@ -113,6 +122,7 @@ impl<'a> CypherExecutor<'a> {
             spatial_node_cache: RwLock::new(HashMap::new()),
             alias_name_hashes: OnceLock::new(),
             streaming: true,
+            _arena_guard: graph.graph.begin_query(),
         }
     }
 
@@ -249,12 +259,12 @@ impl<'a> CypherExecutor<'a> {
     }
 
     /// Execute a parsed Cypher query (read-only)
+    ///
+    /// Disk materializations are retained for this entire execution by the
+    /// `_arena_guard` the constructor acquired. The first query after an
+    /// idle period reclaims the prior generation; overlapping and nested
+    /// queries share the generation without invalidating refs.
     pub fn execute(&self, query: &CypherQuery) -> Result<CypherResult, String> {
-        // Retain disk materializations for this entire execution. The first
-        // query after an idle period reclaims the prior generation; overlapping
-        // and nested queries share the generation without invalidating refs.
-        let _query_guard = self.graph.graph.begin_query();
-
         let mut profile_stats: Vec<ClauseStats> = Vec::new();
         let result_set =
             self.execute_clauses_profiled(query, ResultSet::new(), Some(&mut profile_stats))?;

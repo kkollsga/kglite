@@ -84,6 +84,7 @@ impl CypherParser {
             let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)?;
             return Ok(Expression::PredicateExpr(Box::new(Predicate::Exists {
                 patterns: vec![pattern],
+                pattern_groups: vec![0],
                 where_clause: None,
             })));
         }
@@ -608,7 +609,7 @@ impl CypherParser {
         // are unsupported here — Cypher only allows a single pattern
         // expression as size()'s arg.
         if name == "size" && self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
-            let patterns = self.parse_pattern_subquery_patterns(&CypherToken::RParen)?;
+            let (patterns, _groups) = self.parse_pattern_subquery_patterns(&CypherToken::RParen)?;
             self.expect(&CypherToken::RParen)?; // close size(
             return Ok(Expression::CountSubquery {
                 patterns,
@@ -702,7 +703,7 @@ impl CypherParser {
     /// ORDER BY etc.
     pub(super) fn parse_count_subquery(&mut self) -> Result<Expression, String> {
         self.expect(&CypherToken::LBrace)?;
-        let patterns = self.parse_exists_patterns()?;
+        let (patterns, _groups) = self.parse_exists_patterns()?;
         let where_clause = if self.check(&CypherToken::Where) {
             self.advance(); // consume WHERE
             Some(Box::new(self.parse_predicate()?))
@@ -794,11 +795,16 @@ impl CypherParser {
     /// Generic form: CASE WHEN predicate THEN result [WHEN ...] [ELSE default] END
     /// Simple form:  CASE operand WHEN value THEN result [WHEN ...] [ELSE default] END
     pub(super) fn parse_case_expression(&mut self) -> Result<Expression, String> {
-        // Determine form: if next token is WHEN, it's generic; otherwise parse operand
+        // Determine form: if next token is WHEN, it's generic; otherwise parse
+        // operand. Operand, WHEN values, and THEN/ELSE results all parse at
+        // the full unified-tower entry (`parse_expression_with_predicates`)
+        // so comparisons, boolean operators, EXISTS subqueries, and pattern
+        // expressions work in every CASE position — the tower stops at the
+        // WHEN/THEN/ELSE/END keywords, so nothing is over-consumed.
         let operand = if self.check(&CypherToken::When) {
             None
         } else {
-            Some(Box::new(self.parse_expression()?))
+            Some(Box::new(self.parse_expression_with_predicates()?))
         };
 
         let mut when_clauses = Vec::new();
@@ -809,14 +815,14 @@ impl CypherParser {
 
             let condition = if operand.is_some() {
                 // Simple form: WHEN value — compare against operand
-                CaseCondition::Expression(self.parse_expression()?)
+                CaseCondition::Expression(self.parse_expression_with_predicates()?)
             } else {
                 // Generic form: WHEN predicate — evaluated as boolean
                 CaseCondition::Predicate(self.parse_predicate()?)
             };
 
             self.expect(&CypherToken::Then)?;
-            let result = self.parse_expression()?;
+            let result = self.parse_expression_with_predicates()?;
             when_clauses.push((condition, result));
         }
 
@@ -827,7 +833,7 @@ impl CypherParser {
         // Optional ELSE
         let else_expr = if self.check(&CypherToken::Else) {
             self.advance();
-            Some(Box::new(self.parse_expression()?))
+            Some(Box::new(self.parse_expression_with_predicates()?))
         } else {
             None
         };

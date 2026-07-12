@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Node identity, EXISTS uniqueness, CASE positions, and aggregate errors
+  follow openCypher semantics; abbreviated edges parse.** A node carried
+  through `collect()`/`UNWIND` constrains a later `MATCH` to that exact node
+  (matching the relationship-identity contract); comma patterns inside
+  `EXISTS { }` enforce relationship uniqueness per clause; comparisons and
+  pattern expressions work in CASE operand/WHEN/THEN/ELSE positions;
+  aggregate argument evaluation errors propagate on the fused and streaming
+  paths (previously only the fully-materialized path errored); and the
+  abbreviated edge forms `-->`, `<--`, and `--` are accepted everywhere
+  patterns parse. Disk-mode arena reads are now guarded engine-wide — both
+  query executors hold the read guard for their lifetime, enforced by a
+  debug assertion across the whole workspace test suite.
 - **Corrupted graph files fail loudly instead of silently degrading.** A
   disk-graph sidecar (embeddings, timeseries, secondary labels) that exists
   but fails to decode now fails the load with an error naming the file,

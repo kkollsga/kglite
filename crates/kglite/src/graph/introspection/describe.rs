@@ -1769,6 +1769,9 @@ pub fn compute_description(
     max_pairs: Option<usize>,
     sample_truncate: Option<usize>,
 ) -> Result<String, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = graph.graph.begin_query();
     // Default cap matches pre-parameter behavior — 50 pairs is enough
     // to cover the dominant (src_type, tgt_type) relationships while
     // staying well under typical MCP response budgets.

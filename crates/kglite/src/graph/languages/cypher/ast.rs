@@ -360,6 +360,13 @@ pub enum Predicate {
     },
     Exists {
         patterns: Vec<Pattern>,
+        /// Clause-group id per pattern (same length as `patterns`).
+        /// Comma-separated patterns share a group; each `MATCH` keyword in
+        /// the multi-clause subquery form (`EXISTS { MATCH ... MATCH ... }`)
+        /// starts a new one. Relationship uniqueness (the openCypher trail
+        /// rule) applies WITHIN a group, never across groups — exactly as
+        /// it applies within one MATCH clause but not across clauses.
+        pattern_groups: Vec<usize>,
         where_clause: Option<Box<Predicate>>,
     },
     /// IN with a general expression (variable, parameter, function call) as the list.

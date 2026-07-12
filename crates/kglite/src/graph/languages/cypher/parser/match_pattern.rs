@@ -135,9 +135,17 @@ impl CypherParser {
 
     /// Parse patterns inside EXISTS { ... } — same as parse_match_patterns but uses
     /// extract_exists_pattern_string which stops at RBrace instead of clause boundaries.
+    /// Returns the patterns plus their clause-group ids (comma-joined
+    /// patterns share a group; each MATCH keyword starts a new one).
     pub(super) fn parse_exists_patterns(
         &mut self,
-    ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
+    ) -> Result<
+        (
+            Vec<crate::graph::core::pattern_matching::Pattern>,
+            Vec<usize>,
+        ),
+        String,
+    > {
         // Default delimiter for `EXISTS { ... }` / `count { ... }`: closing brace.
         self.parse_pattern_subquery_patterns(&CypherToken::RBrace)
     }
@@ -145,11 +153,26 @@ impl CypherParser {
     /// Parse one or more comma/MATCH-separated patterns until a delimiter
     /// token at top level. Used by EXISTS/count (delimiter = `}`) and the
     /// 0.9.0 §6 `size((pattern))` form (delimiter = `)`).
+    ///
+    /// The second return value assigns each pattern a clause-group id:
+    /// comma-separated patterns share the group of the pattern before them
+    /// (they form ONE clause, subject to the relationship-uniqueness trail
+    /// rule); a `MATCH` keyword separator starts a new group (a separate
+    /// clause — relationships may be re-used across it, as across separate
+    /// MATCH clauses).
     pub(super) fn parse_pattern_subquery_patterns(
         &mut self,
         end_token: &CypherToken,
-    ) -> Result<Vec<crate::graph::core::pattern_matching::Pattern>, String> {
+    ) -> Result<
+        (
+            Vec<crate::graph::core::pattern_matching::Pattern>,
+            Vec<usize>,
+        ),
+        String,
+    > {
         let mut patterns = Vec::new();
+        let mut groups: Vec<usize> = Vec::new();
+        let mut group = 0usize;
 
         loop {
             let pattern_str = self.extract_pattern_subquery_string(end_token)?;
@@ -163,6 +186,7 @@ impl CypherParser {
             let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)
                 .map_err(|e| format!("Pattern parse error in EXISTS: {}", e))?;
             patterns.push(pattern);
+            groups.push(group);
 
             if self.check(&CypherToken::Comma) {
                 self.advance();
@@ -171,12 +195,13 @@ impl CypherParser {
                 // Don't advance — the next iteration's
                 // extract_exists_pattern_string will skip the MATCH at its
                 // start (same path as the optional first MATCH).
+                group += 1;
             } else {
                 break;
             }
         }
 
-        Ok(patterns)
+        Ok((patterns, groups))
     }
 
     /// Extract tokens forming a pattern inside EXISTS { ... }, stopping at RBrace or comma.

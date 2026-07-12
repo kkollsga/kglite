@@ -362,6 +362,146 @@ class TestCaseEdgeCases:
         for row in rows:
             assert row["label"] is None
 
+    # CASE result/operand positions parse at the full expression tower —
+    # comparisons, boolean operators, EXISTS subqueries, and pattern
+    # expressions all work in THEN / ELSE / WHEN / operand positions.
+    # (Regression: results parsed below the comparison level, so
+    # `THEN 1 < 2` and `THEN (n)-[:R]->()` were syntax errors.)
+
+    def test_case_comparison_in_then(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (n:Person {id: 1}) RETURN CASE WHEN true THEN 1 < 2 ELSE false END AS v")
+        assert [r["v"] for r in rows] == [True]
+
+    def test_case_comparison_in_else(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (n:Person {id: 1}) RETURN CASE WHEN false THEN false ELSE 2 > 3 END AS v")
+        assert [r["v"] for r in rows] == [False]
+
+    def test_case_exists_subquery_in_then(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {id: 1}) RETURN CASE WHEN true THEN EXISTS { (n)-[:KNOWS]->() } ELSE false END AS v"
+        )
+        assert [r["v"] for r in rows] == [True]
+
+    def test_case_pattern_expression_in_then(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {id: 1}) RETURN CASE WHEN true THEN (n)-[:KNOWS]->() ELSE false END AS v"
+        )
+        assert [r["v"] for r in rows] == [True]
+
+    def test_case_pattern_expression_in_else(self, cypher_graph):
+        # Eve (id 5) has no outgoing KNOWS edge.
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {id: 5}) RETURN CASE WHEN false THEN true ELSE (n)-[:KNOWS]->() END AS v"
+        )
+        assert [r["v"] for r in rows] == [False]
+
+    def test_case_exists_subquery_in_when(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {id: 1}) RETURN CASE WHEN EXISTS { (n)-[:KNOWS]->() } THEN 'y' ELSE 'n' END AS v"
+        )
+        assert [r["v"] for r in rows] == ["y"]
+
+    def test_case_boolean_operand_position(self, cypher_graph):
+        rows = cypher_graph.cypher(
+            "MATCH (n:Person {id: 1}) RETURN CASE n.age >= 30 WHEN true THEN 'senior' ELSE 'junior' END AS v"
+        )
+        assert [r["v"] for r in rows] == ["senior"]
+
+
+class TestAbbreviatedEdgePatterns:
+    """openCypher abbreviated relationship patterns: -->, --, <--.
+
+    (Regression: the pattern parser rejected them with "expected '['".)
+    Fixture shape: KNOWS 1→2, 1→3, 2→3, 3→4, 4→5; PURCHASED 1→101,
+    1→102, 2→103, 3→101.
+    """
+
+    def test_abbreviated_outgoing(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (a:Person {id: 1})-->(x) RETURN count(x) AS c")
+        assert rows[0]["c"] == 4  # KNOWS ×2 + PURCHASED ×2
+
+    def test_abbreviated_undirected(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (b:Person {id: 2})--(y) RETURN count(y) AS c")
+        assert rows[0]["c"] == 3  # in: KNOWS 1→2; out: KNOWS 2→3, PURCHASED 2→103
+
+    def test_abbreviated_incoming(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (b:Person {id: 2})<--(a) RETURN count(a) AS c")
+        assert rows[0]["c"] == 1  # KNOWS 1→2
+
+    def test_abbreviated_matches_bracketed_equivalent(self, cypher_graph):
+        abbrev = cypher_graph.cypher("MATCH (a:Person)-->(x) RETURN count(*) AS c")[0]["c"]
+        bracketed = cypher_graph.cypher("MATCH (a:Person)-[]->(x) RETURN count(*) AS c")[0]["c"]
+        assert abbrev == bracketed == 9  # 5 KNOWS + 4 PURCHASED
+
+    def test_abbreviated_multi_hop(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (a:Person {id: 1})-->(b:Person)-->(c:Person) RETURN count(*) AS c")
+        # 1→2→3 and 1→3→4
+        assert rows[0]["c"] == 2
+
+    def test_abbreviated_in_optional_match(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (e:Person {id: 5}) OPTIONAL MATCH (e)-->(m) RETURN count(m) AS c")
+        assert rows[0]["c"] == 0  # Eve has no outgoing edges; row survives
+
+    def test_abbreviated_in_exists(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE EXISTS { (p)-->() } RETURN count(p) AS c")
+        assert rows[0]["c"] == 4  # everyone but Eve
+
+    def test_abbreviated_pattern_expression_in_where(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (p:Person) WHERE (p)-->() RETURN count(p) AS c")
+        assert rows[0]["c"] == 4
+
+    def test_abbreviated_pattern_expression_in_return(self, cypher_graph):
+        rows = cypher_graph.cypher("MATCH (p:Person {id: 5}) RETURN (p)-->() AS has_out, (p)<--() AS has_in")
+        assert rows[0]["has_out"] is False
+        assert rows[0]["has_in"] is True
+
+    def test_double_arrow_rejected(self, cypher_graph):
+        with pytest.raises(kglite.CypherError):
+            cypher_graph.cypher("MATCH (a)<-->(b) RETURN count(*) AS c")
+
+    def test_single_dash_still_rejected_in_match(self, cypher_graph):
+        with pytest.raises(kglite.CypherError):
+            cypher_graph.cypher("MATCH (a)-(b) RETURN count(*) AS c")
+
+
+class TestAggregateArgumentErrors:
+    """Aggregate ARGUMENT evaluation errors must propagate on every
+    execution path (fused node-scan, streaming, materialized) instead of
+    being swallowed into Null. Legitimate null semantics (property on a
+    node that lacks it) stay non-erroring.
+    """
+
+    PATH_KWARGS = (
+        {},  # optimizer + streaming (fused node-scan aggregate)
+        {"disable_optimizer": True},  # streaming aggregate
+        {"streaming": False},  # optimizer, no streaming
+        {"streaming": False, "disable_optimizer": True},  # materialized
+    )
+
+    @pytest.mark.parametrize("kwargs", PATH_KWARGS)
+    def test_missing_parameter_in_aggregate_argument_errors(self, cypher_graph, kwargs):
+        with pytest.raises(kglite.CypherError, match="Missing parameter"):
+            cypher_graph.cypher("MATCH (n:Person) RETURN sum($missing) AS s", **kwargs)
+
+    @pytest.mark.parametrize("kwargs", PATH_KWARGS)
+    def test_missing_parameter_in_compound_aggregate_argument_errors(self, cypher_graph, kwargs):
+        with pytest.raises(kglite.CypherError, match="Missing parameter"):
+            cypher_graph.cypher(
+                "MATCH (n:Person) RETURN n.city AS city, sum(n.age + $missing) AS s",
+                **kwargs,
+            )
+
+    @pytest.mark.parametrize("kwargs", PATH_KWARGS)
+    def test_missing_parameter_after_with_errors(self, cypher_graph, kwargs):
+        with pytest.raises(kglite.CypherError, match="Missing parameter"):
+            cypher_graph.cypher("MATCH (n:Person) WITH n RETURN sum($missing) AS s", **kwargs)
+
+    @pytest.mark.parametrize("kwargs", PATH_KWARGS)
+    def test_absent_property_stays_null_not_error(self, cypher_graph, kwargs):
+        rows = cypher_graph.cypher("MATCH (n:Person) RETURN sum(n.absent) AS s, count(n.absent) AS c", **kwargs)
+        assert rows[0]["s"] == 0
+        assert rows[0]["c"] == 0
+
 
 class TestParameters:
     """Tests for $param parameter substitution."""

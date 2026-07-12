@@ -1520,6 +1520,7 @@ fn collect_predicate_refs(pred: &Predicate, out: &mut HashSet<String>) {
         Predicate::Exists {
             patterns,
             where_clause,
+            ..
         } => {
             collect_pattern_refs(patterns, out);
             if let Some(p) = where_clause {

@@ -963,8 +963,15 @@ fn decode_secondary_label_index(payload: &[u8], graph: &mut DirGraph) -> io::Res
     // carry the labels (this index is canonical), so we can't rebuild — but
     // we can drop indices whose node is gone, mirroring the live-node retain
     // pattern used elsewhere. Nodes are fully loaded before this runs.
-    for bucket in index.values_mut() {
-        bucket.retain(|idx| graph.graph.node_weight(*idx).is_some());
+    {
+        // Arena guard: node_weight materializes on the disk backend
+        // (protocol in disk/graph.rs); no-op on the memory/mapped graphs
+        // this load path produces. Scoped so the borrow ends before the
+        // &mut assignments below.
+        let _arena_guard = graph.graph.begin_query();
+        for bucket in index.values_mut() {
+            bucket.retain(|idx| graph.graph.node_weight(*idx).is_some());
+        }
     }
     index.retain(|_, bucket| !bucket.is_empty());
     if !index.is_empty() {

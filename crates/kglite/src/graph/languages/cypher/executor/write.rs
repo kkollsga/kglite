@@ -921,11 +921,18 @@ fn execute_set(
                             // Record for a post-loop updated_at bump if the edge
                             // type opted in (skip writes to the reserved key).
                             if property != "updated_at" {
-                                if let Some(ct_key) = graph
-                                    .graph
-                                    .edge_weight(edge_index)
-                                    .map(|e| e.connection_type)
-                                {
+                                // Arena guard: edge_weight materializes on the
+                                // disk backend (protocol in disk/graph.rs);
+                                // scoped so the borrow ends before the next
+                                // item's &mut uses.
+                                let ct_key = {
+                                    let _arena_guard = graph.graph.begin_query();
+                                    graph
+                                        .graph
+                                        .edge_weight(edge_index)
+                                        .map(|e| e.connection_type)
+                                };
+                                if let Some(ct_key) = ct_key {
                                     let ct = graph.interner.resolve(ct_key).to_string();
                                     if graph.auto_timestamp_for_connection(&ct) {
                                         edges_to_stamp.insert(edge_index);
@@ -962,32 +969,39 @@ fn execute_set(
                         executor.evaluate_expression(expression, row)?
                     };
 
-                    // Capture old value + node_type before mutable borrow (for index update)
-                    let (old_value, node_type_str) = match graph.get_node(*node_idx) {
-                        Some(node) => {
-                            let nt = node.get_node_type_ref(&graph.interner).to_string();
-                            // For `name` (the canonical title-alias name in
-                            // Cypher), the value is stored on `node.title`,
-                            // not in the property map. `get_field_ref("name")`
-                            // returns None for graphs where "name" isn't
-                            // also redundantly in properties — which is the
-                            // case for `.kgl`-loaded graphs and for indexes
-                            // built from `get_node_title` (see
-                            // `dir_graph.rs::create_index`'s alias-resolution
-                            // path). Falling back to the title keeps
-                            // index auto-maintenance consistent with how
-                            // those indexes were populated.
-                            let old = match property.as_str() {
-                                "name" => node
-                                    .get_field_ref("name")
-                                    .map(Cow::into_owned)
-                                    .or_else(|| Some(node.title.clone())),
-                                "title" => Some(node.title.clone()),
-                                _ => node.get_field_ref(property).map(Cow::into_owned),
-                            };
-                            (old, nt)
+                    // Capture old value + node_type before mutable borrow (for
+                    // index update). Arena guard: get_node → node_weight
+                    // materializes on the disk backend (protocol in
+                    // disk/graph.rs); scoped so the borrow ends before the
+                    // &mut mutation below.
+                    let (old_value, node_type_str) = {
+                        let _arena_guard = graph.graph.begin_query();
+                        match graph.get_node(*node_idx) {
+                            Some(node) => {
+                                let nt = node.get_node_type_ref(&graph.interner).to_string();
+                                // For `name` (the canonical title-alias name in
+                                // Cypher), the value is stored on `node.title`,
+                                // not in the property map. `get_field_ref("name")`
+                                // returns None for graphs where "name" isn't
+                                // also redundantly in properties — which is the
+                                // case for `.kgl`-loaded graphs and for indexes
+                                // built from `get_node_title` (see
+                                // `dir_graph.rs::create_index`'s alias-resolution
+                                // path). Falling back to the title keeps
+                                // index auto-maintenance consistent with how
+                                // those indexes were populated.
+                                let old = match property.as_str() {
+                                    "name" => node
+                                        .get_field_ref("name")
+                                        .map(Cow::into_owned)
+                                        .or_else(|| Some(node.title.clone())),
+                                    "title" => Some(node.title.clone()),
+                                    _ => node.get_field_ref(property).map(Cow::into_owned),
+                                };
+                                (old, nt)
+                            }
+                            None => continue,
                         }
-                        None => continue,
                     };
 
                     // Role-scoped write guard: reject SET on a node type
@@ -1018,14 +1032,19 @@ fn execute_set(
                     // the initial clone, if any), so subsequent writes
                     // mutate in place. We refresh the per-node Arcs in a
                     // single sweep at end of batch (see below).
-                    let columnar_row_id =
+                    // Arena guard: node_weight materializes on the disk
+                    // backend (protocol in disk/graph.rs); scoped so the
+                    // borrow ends before the &mut writes below.
+                    let columnar_row_id = {
+                        let _arena_guard = graph.graph.begin_query();
                         match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
                             Some(crate::graph::schema::PropertyStorage::Columnar {
                                 row_id,
                                 ..
                             }) => Some(*row_id),
                             _ => None,
-                        };
+                        }
+                    };
                     let mut wrote_via_master = false;
                     // Disk-backed graphs use a separate write path; the
                     // master `column_stores` Arc is for the in-memory
@@ -1162,7 +1181,11 @@ fn execute_set(
                     };
 
                     if *replace {
-                        let existing_keys: Vec<String> =
+                        // Arena guard: node_weight/edge_weight materialize on
+                        // the disk backend (protocol in disk/graph.rs); scoped
+                        // so the borrow ends before execute_remove's &mut.
+                        let existing_keys: Vec<String> = {
+                            let _arena_guard = graph.graph.begin_query();
                             if let Some(node_idx) = row.node_bindings.get(variable) {
                                 let mut keys: Vec<String> = graph
                                     .graph
@@ -1194,7 +1217,8 @@ fn execute_set(
                                     .unwrap_or_default()
                             } else {
                                 Vec::new()
-                            };
+                            }
+                        };
                         let removals: Vec<RemoveItem> = existing_keys
                             .into_iter()
                             .filter(|key| {
@@ -1255,12 +1279,16 @@ fn execute_set(
                         stats.properties_set += 1;
                         // A label add is a modification — bump `updated_at` if
                         // the node's type opted in (same post-loop stamp as a
-                        // property SET).
-                        if let Some(nt) = graph
-                            .graph
-                            .node_weight(node_idx)
-                            .map(|n| n.node_type_str(&graph.interner).to_string())
-                        {
+                        // property SET). Arena guard: node_weight materializes
+                        // on the disk backend; scoped read.
+                        let nt = {
+                            let _arena_guard = graph.graph.begin_query();
+                            graph
+                                .graph
+                                .node_weight(node_idx)
+                                .map(|n| n.node_type_str(&graph.interner).to_string())
+                        };
+                        if let Some(nt) = nt {
                             if graph.auto_timestamp_for(&nt) {
                                 nodes_to_stamp.insert(node_idx, nt);
                             }
@@ -1281,11 +1309,17 @@ fn execute_set(
         let prov = graph.provenance_props();
         let is_in_memory = !graph.graph.is_disk();
         for (node_idx, node_type) in &nodes_to_stamp {
-            let columnar_row_id = match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
-                Some(crate::graph::schema::PropertyStorage::Columnar { row_id, .. }) => {
-                    Some(*row_id)
+            // Arena guard: node_weight materializes on the disk backend
+            // (protocol in disk/graph.rs); scoped so the borrow ends before
+            // the &mut writes below.
+            let columnar_row_id = {
+                let _arena_guard = graph.graph.begin_query();
+                match graph.graph.node_weight(*node_idx).map(|n| &n.properties) {
+                    Some(crate::graph::schema::PropertyStorage::Columnar { row_id, .. }) => {
+                        Some(*row_id)
+                    }
+                    _ => None,
                 }
-                _ => None,
             };
             for &(pname, ref pval) in &prov {
                 let key = graph.interner.get_or_intern(pname);
@@ -1440,6 +1474,10 @@ fn execute_delete(
     // deletes are statement-atomic, so `MATCH (a)-[r]->(b) DELETE r, a`
     // succeeds when `r` covers every relationship attached to `a`.
     if !delete.detach {
+        // Arena guard: node_weight (and the disk backend's edge iteration)
+        // materialize into the query arena (protocol in disk/graph.rs);
+        // scoped so the borrow ends before Phase 3's &mut commits.
+        let _arena_guard = graph.graph.begin_query();
         for (node_count, &node_idx) in nodes_to_delete.iter().enumerate() {
             check_interrupt_periodic(interrupt, node_count)?;
             let has_edges = graph
@@ -1643,18 +1681,22 @@ fn execute_merge(
         check_interrupt_periodic(interrupt, row_idx)?;
         // Equality against null is undefined, so a null-bearing MERGE key
         // cannot identify either a match or a safe entity to create.
-        let executor = CypherExecutor::with_params(graph, params, None);
-        for element in &merge.pattern.elements {
-            let properties = match element {
-                CreateElement::Node(node) => &node.properties,
-                CreateElement::Edge(edge) => &edge.properties,
-            };
-            for (name, expression) in properties {
-                if matches!(
-                    executor.evaluate_expression(expression, &new_row)?,
-                    Value::Null
-                ) {
-                    return Err(format!("MERGE cannot use null for property '{}'", name));
+        // (Block-scoped: the executor holds the disk arena guard, whose
+        // borrow of `graph` must end before the &mut mutation calls below.)
+        {
+            let executor = CypherExecutor::with_params(graph, params, None);
+            for element in &merge.pattern.elements {
+                let properties = match element {
+                    CreateElement::Node(node) => &node.properties,
+                    CreateElement::Edge(edge) => &edge.properties,
+                };
+                for (name, expression) in properties {
+                    if matches!(
+                        executor.evaluate_expression(expression, &new_row)?,
+                        Value::Null
+                    ) {
+                        return Err(format!("MERGE cannot use null for property '{}'", name));
+                    }
                 }
             }
         }

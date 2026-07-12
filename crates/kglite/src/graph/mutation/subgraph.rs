@@ -67,6 +67,9 @@ pub fn extract_subgraph(
     source: &DirGraph,
     selection: &CurrentSelection,
 ) -> Result<DirGraph, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = source.graph.begin_query();
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)
@@ -138,6 +141,9 @@ pub fn get_subgraph_stats(
     source: &DirGraph,
     selection: &CurrentSelection,
 ) -> Result<SubgraphStats, String> {
+    // Arena guard: disk-backed node/edge reads materialize into the query
+    // arena (protocol in disk/graph.rs); no-op on memory/mapped.
+    let _arena_guard = source.graph.begin_query();
     let level_idx = selection.get_level_count().saturating_sub(1);
     let level = selection
         .get_level(level_idx)
