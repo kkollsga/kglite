@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   license, while an all-feature dependency audit requires explicit review of
   new license expressions and Apache/MPL-only packages.
 
+- **Soft keywords used as names keep their verbatim case.** `{order: 1}`
+  stores the key `order` (previously `ORDER`), `SET n.contains` writes
+  `contains`, and `AS Order` names the column `Order`, matching Neo4j.
+  Graphs written by earlier versions store the canonical-uppercase form;
+  reach those keys with backticks (`` n.`ORDER` ``). Documented in CYPHER.md
+  and the dialect manifest.
+
 ### Added
 
 - **`EXPLAIN` now reports which optimizer passes actually changed the plan.**
@@ -63,6 +70,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`COUNT { }` subqueries count joined rows.** Comma-separated patterns
+  inside `COUNT { }` join with shared-variable compatibility and the
+  relationship-uniqueness rule (matching `EXISTS { }` and `MATCH`) instead
+  of summing per-pattern counts.
+- **N-Triples disk builds reload correctly without an intervening save.**
+  Build finalisation never flushed appended node slots and wrote the graph
+  sidecars into the segment directory the loader doesn't read — large
+  builds failed to reload and small builds silently reloaded with dead node
+  data. Both finalisation gaps are fixed and pinned by reload regressions.
+- **numpy array cells become native list properties.** A numpy array in a
+  DataFrame cell round-trips as a list (nested for multi-dimensional)
+  through `add_nodes` and `add_connections` instead of stringifying.
 - **Node identity, EXISTS uniqueness, CASE positions, and aggregate errors
   follow openCypher semantics; abbreviated edges parse.** A node carried
   through `collect()`/`UNWIND` constrains a later `MATCH` to that exact node

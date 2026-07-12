@@ -35,6 +35,14 @@ pub struct CypherParser {
     /// parens/lists/`NOT`s) returns a parse error instead of overflowing the
     /// stack and aborting the process.
     depth: usize,
+    /// Verbatim source lexeme per keyword-token index (see
+    /// [`super::tokenizer::TokenizedCypher::keyword_lexemes`]). Keyword
+    /// tokens are unit variants, so a keyword used as a NAME (property key,
+    /// label, rel type, alias) recovers its exact source spelling here —
+    /// `{order: 1}` stores key `order`, not the canonical `ORDER`. When a
+    /// token index is absent the parser falls back to the canonical keyword
+    /// spelling.
+    keyword_lexemes: std::collections::HashMap<usize, String>,
 }
 
 /// Maximum expression-nesting depth accepted by the parser.
@@ -48,12 +56,26 @@ pub struct CypherParser {
 const MAX_EXPRESSION_DEPTH: usize = 512;
 
 impl CypherParser {
-    pub fn new(tokens: Vec<CypherToken>) -> Self {
+    /// Construct with the tokenizer's verbatim keyword-lexeme table —
+    /// the production path (`parse_cypher`). An empty table is valid;
+    /// such parsers fall back to canonical keyword spellings in name
+    /// position.
+    pub fn with_keyword_lexemes(
+        tokens: Vec<CypherToken>,
+        keyword_lexemes: Vec<(usize, String)>,
+    ) -> Self {
         CypherParser {
             tokens,
             pos: 0,
             depth: 0,
+            keyword_lexemes: keyword_lexemes.into_iter().collect(),
         }
+    }
+
+    /// Verbatim source lexeme of the keyword token at `idx`, when the
+    /// parser was built with the tokenizer's lexeme table.
+    pub(super) fn keyword_lexeme_at(&self, idx: usize) -> Option<&str> {
+        self.keyword_lexemes.get(&idx).map(String::as_str)
     }
 
     /// Run `f` one expression-nesting level deeper, failing with a clean
@@ -119,10 +141,18 @@ impl CypherParser {
 
     /// Consume the next token as an alias name (after AS).
     /// Accepts identifiers and reserved keywords (e.g. `AS optional`, `AS type`).
+    /// Case-preserving: a keyword alias keeps its verbatim source spelling
+    /// (`AS Order` names the column `Order`), falling back to the canonical
+    /// lowercase word when no lexeme table is present (unit tests).
     pub(super) fn try_consume_alias_name(&mut self) -> Result<String, String> {
         match self.advance().cloned() {
             Some(CypherToken::Identifier(name)) => Ok(name),
             Some(ref token) => token_to_keyword_name(token)
+                .map(|canonical| {
+                    self.keyword_lexeme_at(self.pos - 1)
+                        .map(str::to_string)
+                        .unwrap_or(canonical)
+                })
                 .ok_or_else(|| format!("Expected alias name after AS, got {:?}", token)),
             None => Err("Expected alias name after AS".to_string()),
         }
@@ -133,12 +163,18 @@ impl CypherParser {
     /// keyword via `keyword_name_token` (KG-2: `[:CONTAINS]`, `(:CONTAINS)`,
     /// `{contains: 1}`). `context` names the position for the error message,
     /// preserving the original "Expected <X>" wording. Case-preserving: a
-    /// keyword name round-trips as its canonical uppercase word.
+    /// keyword name keeps its verbatim source spelling (`{order: 1}` stores
+    /// key `order`), falling back to the canonical uppercase word when no
+    /// lexeme table is present (unit tests).
     pub(super) fn expect_name(&mut self, context: &str) -> Result<String, String> {
         match self.advance().cloned() {
             Some(CypherToken::Identifier(name)) => Ok(name),
             Some(ref token) => keyword_name_token(token)
-                .map(str::to_string)
+                .map(|canonical| {
+                    self.keyword_lexeme_at(self.pos - 1)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| canonical.to_string())
+                })
                 .ok_or_else(|| format!("Expected {}, got {:?}", context, token)),
             None => Err(format!("Expected {}", context)),
         }
@@ -399,8 +435,9 @@ pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
                 col: None,
             }
         })?;
-    let (tokens, positions): (Vec<_>, Vec<_>) = positioned.into_iter().unzip();
-    let mut parser = CypherParser::new(tokens);
+    let keyword_lexemes = positioned.keyword_lexemes;
+    let (tokens, positions): (Vec<_>, Vec<_>) = positioned.tokens.into_iter().unzip();
+    let mut parser = CypherParser::with_keyword_lexemes(tokens, keyword_lexemes);
     match parser.parse_query() {
         Ok(q) => Ok(q),
         Err(e) => {

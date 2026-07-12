@@ -305,10 +305,15 @@ impl CypherParser {
                 // params worked everywhere except inside an EXISTS pattern.
                 CypherToken::Parameter(name) => parts.push(format!("${}", name)),
                 // KG-2: a reserved keyword used as a name (label / rel-type /
-                // property key) — backtick it so the secondary pattern parser
-                // reads it as an identifier (`[:CONTAINS]`, `(:CONTAINS)`).
+                // property key) — backtick its verbatim source lexeme so the
+                // secondary pattern parser reads it as an identifier
+                // (`[:CONTAINS]`, `(:CONTAINS)`, `{contains: 1}` keeps key
+                // `contains`).
                 tok if keyword_name_token(tok).is_some() => {
-                    parts.push(format!("`{}`", keyword_name_token(tok).unwrap()));
+                    let name = self
+                        .keyword_lexeme_at(self.pos - 1)
+                        .unwrap_or_else(|| keyword_name_token(tok).unwrap());
+                    parts.push(format!("`{}`", name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in EXISTS pattern: {:?}", token));
@@ -419,12 +424,16 @@ impl CypherParser {
                     parts.push(format!("${}", name));
                 }
                 // KG-2: a reserved keyword used as a name (label / rel-type /
-                // property key) — backtick it so the secondary pattern parser
-                // reads it as an identifier (`[:CONTAINS]`, `(:CONTAINS)`,
-                // `{contains: 1}`). Only reached at bracket/paren depth > 0
+                // property key) — backtick its verbatim source lexeme so the
+                // secondary pattern parser reads it as an identifier
+                // (`[:CONTAINS]`, `(:CONTAINS)`, `{contains: 1}` keeps key
+                // `contains`). Only reached at bracket/paren depth > 0
                 // (depth-0 keywords break out earlier as clause boundaries).
                 tok if keyword_name_token(tok).is_some() => {
-                    parts.push(format!("`{}`", keyword_name_token(tok).unwrap()));
+                    let name = self
+                        .keyword_lexeme_at(self.pos - 1)
+                        .unwrap_or_else(|| keyword_name_token(tok).unwrap());
+                    parts.push(format!("`{}`", name));
                 }
                 _ => {
                     return Err(format!("Unexpected token in MATCH pattern: {:?}", token));

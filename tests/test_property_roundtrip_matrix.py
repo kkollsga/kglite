@@ -508,3 +508,53 @@ def test_point_roundtrips_through_kgl(tmp_path):
     kg.save(p)
     got = kglite.load(p).cypher("MATCH (n:N) RETURN n.loc AS x").to_dicts()[0]["x"]
     assert got == _POINT_READBACK
+
+
+# ── numpy array cells → native lists ────────────────────────────────────────
+# Regression: numpy.ndarray cells in object columns fell through the
+# list/tuple/dict detection and stringified via str() ("[1. 2.]"). They now
+# convert to native List properties (elements via the standard numeric
+# conversion; multi-D arrays nest).
+def _one_node_df(value: object) -> pd.DataFrame:
+    return pd.DataFrame({"id": [1], "p": pd.Series([value], dtype="object")})
+
+
+@pytest.mark.parametrize(
+    ("arr", "expected"),
+    [
+        (np.array([1.0, 2.0]), [1.0, 2.0]),
+        (np.array([1, 2, 3], dtype=np.int32), [1, 2, 3]),
+        (np.array([0.5], dtype=np.float32), [0.5]),
+        (np.array([[1.0, 2.0], [3.0, 4.0]]), [[1.0, 2.0], [3.0, 4.0]]),
+    ],
+    ids=["float64_1d", "int32_1d", "float32_single", "float64_2d"],
+)
+def test_numpy_array_node_cell_roundtrips_as_list(arr, expected):
+    kg = kglite.KnowledgeGraph()
+    kg.add_nodes(_one_node_df(arr), "N", "id")
+    got = kg.cypher("MATCH (n:N) RETURN n.p AS x").to_dicts()[0]["x"]
+    assert got == expected, f"numpy cell degraded to {got!r}"
+
+
+def test_numpy_array_edge_cell_roundtrips_as_list():
+    kg = kglite.KnowledgeGraph()
+    kg.add_nodes(pd.DataFrame({"id": [1, 2]}), "N", "id")
+    edges = pd.DataFrame({"s": [1], "t": [2], "w": pd.Series([np.array([0.25, 0.75])], dtype="object")})
+    kg.add_connections(edges, "R", "N", "s", "N", "t")
+    got = kg.cypher("MATCH ()-[r:R]->() RETURN r.w AS x").to_dicts()[0]["x"]
+    assert got == [0.25, 0.75], f"numpy edge cell degraded to {got!r}"
+
+
+def test_numpy_array_inside_dict_cell_roundtrips():
+    kg = kglite.KnowledgeGraph()
+    kg.add_nodes(_one_node_df({"emb": np.array([5.0, 6.0])}), "N", "id")
+    got = kg.cypher("MATCH (n:N) RETURN n.p.emb AS x").to_dicts()[0]["x"]
+    assert got == [5.0, 6.0], f"dict-wrapped numpy cell degraded to {got!r}"
+
+
+def test_numpy_array_cell_supports_unwind_and_membership():
+    kg = kglite.KnowledgeGraph()
+    kg.add_nodes(_one_node_df(np.array([1, 2])), "N", "id")
+    rows = kg.cypher("MATCH (n:N) UNWIND n.p AS x RETURN x").to_dicts()
+    assert rows == [{"x": 1}, {"x": 2}]
+    assert kg.cypher("MATCH (n:N) WHERE 2 IN n.p RETURN count(n) AS c").to_dicts() == [{"c": 1}]

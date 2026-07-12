@@ -132,6 +132,39 @@ impl DiskGraph {
         Ok(())
     }
 
+    /// Merge heap-side node slots (`appended_node_slots` +
+    /// `node_slot_updates`) into the mapped `node_slots.bin` backing file.
+    ///
+    /// Bulk loaders (ntriples) add nodes through `add_node`, which appends
+    /// to the heap-side overlay — nothing extends the mmap'd file. The full
+    /// `save_to_dir` path merges the overlay via `save_logical_node_slots`,
+    /// but a build that finalises *without* an explicit `save()` (the
+    /// ntriples disk build writes CSR + columns + metadata in place) used
+    /// to leave `node_slots.bin` at its initial 1024-slot allocation while
+    /// `disk_graph_meta.json` already claimed the full logical length —
+    /// making the directory unloadable ("File too small") past 1024 nodes,
+    /// and silently loading zeroed (dead) slots below it. Loaders call this
+    /// during finalisation so the on-disk file matches the logical state.
+    pub(crate) fn flush_node_slots(&mut self) -> std::io::Result<()> {
+        if self.appended_node_slots.is_empty() && self.node_slot_updates.is_empty() {
+            return Ok(());
+        }
+        let path = self.data_dir.join("node_slots.bin");
+        self.save_logical_node_slots(&path)?;
+        // `save_logical_node_slots` only swaps in the merged file (and
+        // clears the overlay) when node_slots was already mapped at
+        // `path`. A heap-resident node_slots (empty MmapOrVec fallback)
+        // wrote the file above but keeps its overlay; reload it so the
+        // in-memory view matches the published file either way.
+        if self.node_slots.file_path() != Some(path.as_path()) {
+            let logical_len = self.node_slot_len();
+            self.node_slots = MmapOrVec::load_mapped(&path, logical_len)?;
+            self.node_slot_updates.clear();
+            self.appended_node_slots.clear();
+        }
+        Ok(())
+    }
+
     fn save_logical_edge_endpoints(&mut self, path: &Path) -> std::io::Result<()> {
         let logical_len = self.edge_endpoint_len();
         let replace_mapped = self.edge_endpoints.file_path() == Some(path);

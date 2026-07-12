@@ -1116,8 +1116,39 @@ pub fn load_ntriples(
 
     // Save interner + metadata to disk so load() works.
     if graph.graph.is_disk() {
+        // Merge the heap-side node-slot overlay into node_slots.bin.
+        // `add_node` appends to `appended_node_slots` without extending
+        // the mmap'd file; without this flush the directory publishes a
+        // metadata node_slots_len the file can't back, and a reload
+        // fails ("File too small") past 1024 nodes — or silently loads
+        // zeroed dead slots below that.
+        if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+            let flush_step = Instant::now();
+            dg.flush_node_slots()
+                .map_err(|e| format!("Failed to flush node slots: {e}"))?;
+            if build_debug() {
+                eplog!(
+                    "  node_slots.bin flush: {}",
+                    fmt_dur(flush_step.elapsed().as_secs_f64())
+                );
+            }
+        }
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
             let data_dir = dg.data_dir.clone();
+            // DirGraph-level sidecars (interner, metadata, id/type
+            // indexes) belong at the graph ROOT, next to
+            // disk_graph_meta.json — that's where `load_disk_dir`
+            // reads them (only columns.bin has a seg_000 fallback).
+            // `data_dir` is the segment dir (`root/seg_000/`, PR1
+            // phase 4); writing the sidecars there made a fresh
+            // ntriples disk build unreadable — the reloaded graph had
+            // an empty interner and no type indexes, so every typed
+            // MATCH returned zero rows until an explicit save()
+            // rewrote the sidecars at the root.
+            let root_dir = data_dir
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| data_dir.clone());
 
             // Build type_connectivity_cache from connection_type_metadata + edge_type_counts.
             // This makes describe(types=['human']) instant instead of scanning 10K nodes.
@@ -1168,7 +1199,7 @@ pub fn load_ntriples(
                 .collect();
             let json = serde_json::to_string(&interner_map)
                 .map_err(|e| format!("Failed to serialize interner: {e}"))?;
-            std::fs::write(data_dir.join("interner.json"), json)
+            std::fs::write(root_dir.join("interner.json"), json)
                 .map_err(|e| format!("Failed to write interner: {e}"))?;
             if build_debug() {
                 eplog!(
@@ -1182,9 +1213,9 @@ pub fn load_ntriples(
             // fields as separate binary sidecars and strips them from the
             // JSON; the remaining JSON is tiny and parses in ms.
             let save_step = Instant::now();
-            crate::graph::io::file::write_node_type_metadata_bin(&data_dir, graph)
+            crate::graph::io::file::write_node_type_metadata_bin(&root_dir, graph)
                 .map_err(|e| format!("Failed to write node-type metadata: {e}"))?;
-            crate::graph::io::file::write_connection_type_metadata_bin(&data_dir, graph)
+            crate::graph::io::file::write_connection_type_metadata_bin(&root_dir, graph)
                 .map_err(|e| format!("Failed to write connection-type metadata: {e}"))?;
             let mut meta = crate::graph::io::file::build_disk_metadata(graph);
             crate::graph::io::file::strip_heavy_metadata(&mut meta);
@@ -1198,7 +1229,7 @@ pub fn load_ntriples(
             let save_step = Instant::now();
             if !graph.id_indices.is_empty() {
                 crate::graph::storage::disk::id_index::write_id_indices_bin(
-                    &data_dir,
+                    &root_dir,
                     &graph.id_indices,
                     &graph.interner,
                 )
@@ -1216,7 +1247,7 @@ pub fn load_ntriples(
             let save_step = Instant::now();
             if !graph.type_indices.is_empty() {
                 crate::graph::storage::disk::type_index::write_type_indices_bin(
-                    &data_dir,
+                    &root_dir,
                     &graph.type_indices,
                     &graph.interner,
                 )
@@ -1232,7 +1263,7 @@ pub fn load_ntriples(
 
             // Publish root metadata last: readers must never observe a new
             // completion marker before its required sidecars exist.
-            std::fs::write(data_dir.join("metadata.json"), json)
+            std::fs::write(root_dir.join("metadata.json"), json)
                 .map_err(|e| format!("Failed to publish graph metadata: {e}"))?;
         }
 
@@ -1641,7 +1672,7 @@ mod tests {
     }
 
     struct PoisonFinalisationSink {
-        data_dir: std::path::PathBuf,
+        root_dir: std::path::PathBuf,
         completed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -1652,7 +1683,10 @@ mod tests {
                     phase: "finalising",
                     ..
                 } => {
-                    std::fs::create_dir(self.data_dir.join("interner.json")).unwrap();
+                    // The DirGraph sidecars are published at the graph ROOT
+                    // (next to disk_graph_meta.json) — poison the interner
+                    // path there.
+                    std::fs::create_dir(self.root_dir.join("interner.json")).unwrap();
                 }
                 ProgressEvent::Complete { phase, .. } => {
                     self.completed.lock().unwrap().push(phase.to_string());
@@ -1669,14 +1703,18 @@ mod tests {
         std::fs::write(fixture.path(), VALID_TRIPLE).unwrap();
         let mut graph = DirGraph::new();
         graph.enable_disk_mode().unwrap();
-        let data_dir = match &graph.graph {
-            crate::graph::schema::GraphBackend::Disk(disk) => disk.data_dir.clone(),
+        let root_dir = match &graph.graph {
+            crate::graph::schema::GraphBackend::Disk(disk) => disk
+                .data_dir
+                .parent()
+                .expect("segment dir has a graph root")
+                .to_path_buf(),
             _ => unreachable!(),
         };
         let completed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut config = test_config();
         config.progress = Some(Box::new(PoisonFinalisationSink {
-            data_dir: data_dir.clone(),
+            root_dir: root_dir.clone(),
             completed: std::sync::Arc::clone(&completed),
         }));
 
@@ -1687,7 +1725,7 @@ mod tests {
         assert!(error.contains("Failed to write interner"), "{error}");
         assert!(!completed.lock().unwrap().iter().any(|p| p == "finalising"));
         assert!(
-            !data_dir.join("metadata.json").exists(),
+            !root_dir.join("metadata.json").exists(),
             "root completion metadata must be withheld on finalisation failure"
         );
     }

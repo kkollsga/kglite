@@ -330,8 +330,9 @@ fn convert_pandas_series(series: &Bound<'_, PyAny>, col_type: ColumnType) -> PyR
 }
 
 /// Convert a single pandas cell into a `Vec<Value>`. A Python list/tuple maps
-/// element-wise via [`py_value_to_value`]; any scalar is wrapped as a
-/// single-element list so it isn't silently dropped.
+/// element-wise via [`py_value_to_value`]; a numpy array converts through
+/// `.tolist()` (1-D → flat list, multi-D → nested lists); any scalar is
+/// wrapped as a single-element list so it isn't silently dropped.
 fn py_cell_to_value_list(item: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
     if let Ok(list) = item.cast::<PyList>() {
         return list.iter().map(|el| py_value_to_value(&el)).collect();
@@ -339,7 +340,23 @@ fn py_cell_to_value_list(item: &Bound<'_, PyAny>) -> PyResult<Vec<Value>> {
     if let Ok(tuple) = item.cast::<PyTuple>() {
         return tuple.iter().map(|el| py_value_to_value(&el)).collect();
     }
+    if is_numpy_ndarray(item) {
+        let as_list = item.call_method0("tolist")?;
+        return py_cell_to_value_list(&as_list);
+    }
     Ok(vec![py_value_to_value(item)?])
+}
+
+/// True when the object is a `numpy.ndarray`, checked structurally via the
+/// type's name + defining module so numpy is never imported when absent.
+fn is_numpy_ndarray(value: &Bound<'_, PyAny>) -> bool {
+    let ty = value.get_type();
+    ty.name().map(|n| n == "ndarray").unwrap_or(false)
+        && ty
+            .getattr("__module__")
+            .ok()
+            .and_then(|m| m.extract::<String>().ok())
+            .is_some_and(|m| m == "numpy" || m.starts_with("numpy."))
 }
 
 pub fn pandas_to_dataframe(
@@ -556,7 +573,8 @@ fn first_non_null_collection_type(series: &Bound<'_, PyAny>) -> PyResult<Option<
         .call_method0("tolist")?
         .cast::<PyList>()?
         .get_item(0)?;
-    if first.cast::<PyList>().is_ok() || first.cast::<PyTuple>().is_ok() {
+    if first.cast::<PyList>().is_ok() || first.cast::<PyTuple>().is_ok() || is_numpy_ndarray(&first)
+    {
         return Ok(Some(ColumnType::List));
     }
     if first.cast::<PyDict>().is_ok() {
@@ -721,6 +739,14 @@ pub fn py_value_to_value(value: &Bound<'_, PyAny>) -> PyResult<Value> {
         if let Ok(b) = value.extract::<bool>() {
             return Ok(Value::Boolean(b));
         }
+    }
+
+    // numpy.ndarray → native List via `.tolist()` (multi-D nests through the
+    // list branch below). Checked before the numeric extracts because a
+    // size-1 float array would otherwise scalar-ize through `__float__`.
+    if is_numpy_ndarray(value) {
+        let as_list = value.call_method0("tolist")?;
+        return py_value_to_value(&as_list);
     }
 
     // Try numeric types before string (they fail fast without allocation)

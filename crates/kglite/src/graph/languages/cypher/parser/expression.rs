@@ -609,10 +609,12 @@ impl CypherParser {
         // are unsupported here — Cypher only allows a single pattern
         // expression as size()'s arg.
         if name == "size" && self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
-            let (patterns, _groups) = self.parse_pattern_subquery_patterns(&CypherToken::RParen)?;
+            let (patterns, pattern_groups) =
+                self.parse_pattern_subquery_patterns(&CypherToken::RParen)?;
             self.expect(&CypherToken::RParen)?; // close size(
             return Ok(Expression::CountSubquery {
                 patterns,
+                pattern_groups,
                 where_clause: None,
             });
         }
@@ -703,7 +705,7 @@ impl CypherParser {
     /// ORDER BY etc.
     pub(super) fn parse_count_subquery(&mut self) -> Result<Expression, String> {
         self.expect(&CypherToken::LBrace)?;
-        let (patterns, _groups) = self.parse_exists_patterns()?;
+        let (patterns, pattern_groups) = self.parse_exists_patterns()?;
         let where_clause = if self.check(&CypherToken::Where) {
             self.advance(); // consume WHERE
             Some(Box::new(self.parse_predicate()?))
@@ -713,6 +715,7 @@ impl CypherParser {
         self.expect(&CypherToken::RBrace)?;
         Ok(Expression::CountSubquery {
             patterns,
+            pattern_groups,
             where_clause,
         })
     }

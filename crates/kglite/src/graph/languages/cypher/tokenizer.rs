@@ -110,6 +110,23 @@ pub enum CypherToken {
 // Tokenizer
 // ============================================================================
 
+/// Tokenizer output: positioned tokens plus the verbatim source
+/// lexeme of every keyword token.
+///
+/// Keyword tokens are unit variants — the tokenizer canonicalises
+/// their case so the parser can match them structurally. Name-position
+/// consumers (property keys, labels, rel types, aliases) must instead
+/// see the **verbatim source spelling** (`{order: 1}` stores key
+/// `order`, not `ORDER`), so the tokenizer records the original
+/// lexeme for each keyword token here, keyed by token index.
+pub struct TokenizedCypher {
+    /// `(token, char-position of token start)` pairs.
+    pub tokens: Vec<(CypherToken, usize)>,
+    /// `(token index, verbatim source lexeme)` for every keyword
+    /// token. Sparse — identifiers carry their own string.
+    pub keyword_lexemes: Vec<(usize, String)>,
+}
+
 /// Position-stripping wrapper kept for the tokenizer's own tests
 /// (which assert on `Vec<CypherToken>` directly). Production code
 /// goes through [`tokenize_cypher_with_positions`] via
@@ -117,22 +134,25 @@ pub enum CypherToken {
 #[cfg(test)]
 pub fn tokenize_cypher(input: &str) -> Result<Vec<CypherToken>, String> {
     Ok(tokenize_cypher_with_positions(input)?
+        .tokens
         .into_iter()
         .map(|(tok, _pos)| tok)
         .collect())
 }
 
 /// Same as [`tokenize_cypher`] but returns the **char-position** at
-/// the start of each token, alongside the token. 0.9.0 Cluster 3 — the
-/// parser uses this to format byte-precise `(line, col)` in error
-/// messages instead of the prior approximate token re-walk.
+/// the start of each token, alongside the token — plus the verbatim
+/// keyword lexeme table (see [`TokenizedCypher`]). 0.9.0 Cluster 3 —
+/// the parser uses positions to format byte-precise `(line, col)` in
+/// error messages instead of the prior approximate token re-walk.
 ///
 /// Char-position is the index into `input.chars().collect()` —
 /// converted to byte offset / line:col by the consumer on error
 /// (rare path; not worth a parallel byte-offset table for the hot
 /// path).
-pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, usize)>, String> {
+pub fn tokenize_cypher_with_positions(input: &str) -> Result<TokenizedCypher, String> {
     let mut tokens: Vec<(CypherToken, usize)> = Vec::new();
+    let mut keyword_lexemes: Vec<(usize, String)> = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
@@ -456,7 +476,16 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, u
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                tokens.push((identifier_to_token(ident), start));
+                match keyword_token(&ident) {
+                    Some(tok) => {
+                        // Keyword tokens are unit variants; record the
+                        // verbatim source lexeme so name-position
+                        // consumers can recover the exact spelling.
+                        keyword_lexemes.push((tokens.len(), ident));
+                        tokens.push((tok, start));
+                    }
+                    None => tokens.push((CypherToken::Identifier(ident), start)),
+                }
             }
 
             // Backtick-quoted identifiers: `My Identifier`
@@ -481,12 +510,16 @@ pub fn tokenize_cypher_with_positions(input: &str) -> Result<Vec<(CypherToken, u
         }
     }
 
-    Ok(tokens)
+    Ok(TokenizedCypher {
+        tokens,
+        keyword_lexemes,
+    })
 }
 
-/// Convert an identifier string to the appropriate token (keyword or identifier)
-fn identifier_to_token(ident: String) -> CypherToken {
-    match ident.to_uppercase().as_str() {
+/// Keyword token for an identifier lexeme, or `None` when the lexeme
+/// is a plain identifier. Case-insensitive (Cypher keywords are).
+fn keyword_token(ident: &str) -> Option<CypherToken> {
+    let tok = match ident.to_uppercase().as_str() {
         "MATCH" => CypherToken::Match,
         "OPTIONAL" => CypherToken::Optional,
         "WHERE" => CypherToken::Where,
@@ -539,8 +572,9 @@ fn identifier_to_token(ident: String) -> CypherToken {
         "PARTITION" => CypherToken::Partition,
         "HAVING" => CypherToken::Having,
         "XOR" => CypherToken::Xor,
-        _ => CypherToken::Identifier(ident),
-    }
+        _ => return None,
+    };
+    Some(tok)
 }
 
 /// Convert a keyword token back to its string form for use as an alias name.
@@ -609,9 +643,14 @@ pub fn token_to_keyword_name(token: &CypherToken) -> Option<String> {
 /// non-keyword tokens AND for keywords that must stay reserved even in name
 /// position.
 ///
-/// Distinct from `token_to_keyword_name` (lowercase, for `AS` aliases): names
-/// are case-sensitive and must round-trip verbatim (`[:CONTAINS]` stays
-/// `CONTAINS`, not `contains`).
+/// This decides *whether* a keyword is soft-reservable; the actual NAME the
+/// parser stores is the **verbatim source lexeme** from
+/// [`TokenizedCypher::keyword_lexemes`] (`{order: 1}` → key `order`, matching
+/// Neo4j's case-preserving property keys). The canonical uppercase returned
+/// here is only the fallback for parsers constructed without a lexeme table
+/// (unit tests).
+///
+/// Distinct from `token_to_keyword_name` (lowercase, for `AS` aliases).
 ///
 /// The SAFE set is the operator / comparison / sort / set / mutation keywords —
 /// words that, inside a pattern, can only be a name (they appear elsewhere only

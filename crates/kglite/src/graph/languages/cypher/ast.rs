@@ -505,13 +505,21 @@ pub enum Expression {
         order_by: Vec<OrderItem>,
     },
     /// Cypher subquery expression: `count { <pattern(s)> [WHERE <pred>] }`.
-    /// Evaluates to the number of matches for the pattern(s), scoped to
-    /// the current row's outer bindings. The parser routes
+    /// Evaluates to the number of JOIN rows produced by the pattern(s),
+    /// scoped to the current row's outer bindings. The parser routes
     /// `count { ... }` here (vs the `count(...)` aggregate-function form).
     /// `EXISTS { ... }` stays on the separate predicate path at
     /// `Predicate::Exists`.
     CountSubquery {
         patterns: Vec<crate::graph::core::pattern_matching::Pattern>,
+        /// Clause-group id per pattern (same length as `patterns`) —
+        /// identical semantics to [`Predicate::Exists::pattern_groups`]:
+        /// comma-separated patterns share a group and join under the
+        /// openCypher trail rule (no relationship reuse within a group);
+        /// each `MATCH` keyword in `COUNT { MATCH ... MATCH ... }` starts
+        /// a new group, and edges may repeat across groups exactly as
+        /// across top-level MATCH clauses.
+        pattern_groups: Vec<usize>,
         where_clause: Option<Box<Predicate>>,
     },
 }

@@ -1602,6 +1602,28 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        # COUNT subquery mirrors the EXISTS contract above: the value is the
+        # number of JOIN rows, with the trail rule across the comma patterns
+        # of one subquery. Person_1 has exactly one WORKS_AT edge, so the
+        # two-pattern COUNT must be 0 while the single-pattern one counts it.
+        "count_subquery_trail_rule_comma_patterns",
+        "social_graph",
+        "MATCH (p:Person {person_id: 1}) "
+        "RETURN COUNT { (p)-[r1:WORKS_AT]->(c), (p)-[r2:WORKS_AT]->(d) } AS two, "
+        "COUNT { (p)-[r1:WORKS_AT]->(c) } AS one",
+        None,
+    ),
+    (
+        # COUNT subquery join semantics: comma patterns sharing a variable
+        # join on it (row count, not a per-pattern sum), and the multi-MATCH
+        # subquery form joins independent clause scopes (counts multiply).
+        "count_subquery_join_rows",
+        "social_graph",
+        "RETURN COUNT { (x)-[r1:KNOWS]->(y), (y)-[r2:KNOWS]->(z) } AS chained, "
+        "COUNT { MATCH (p:Person {person_id: 1})-[r1:WORKS_AT]->(c) MATCH (a)-[r2:WORKS_AT]->(b) } AS crossed",
+        None,
+    ),
+    (
         # CASE result positions parse at the full expression tower:
         # comparisons and pattern predicates in THEN/ELSE.
         "case_result_predicate_positions",

@@ -602,15 +602,25 @@ impl<'a> CypherExecutor<'a> {
             }
             Expression::CountSubquery {
                 patterns,
+                pattern_groups,
                 where_clause,
             } => {
-                // Evaluate each pattern scoped to the outer row's
-                // bindings; sum the match counts. Mirrors the
-                // `Predicate::Exists` execution in `where_clause.rs`
-                // but counts (not short-circuits).
+                // openCypher COUNT subquery semantics: the value is the
+                // number of RESULT ROWS of the inner subquery, scoped to
+                // the outer row's bindings — not a per-pattern sum.
+                // Mirrors the `Predicate::Exists` execution in
+                // `where_clause.rs` (progressive cross-join with
+                // shared-variable compatibility + clause-local edge
+                // uniqueness) but counts the joined rows instead of
+                // short-circuiting on the first one.
                 use crate::graph::core::pattern_matching::PatternExecutor;
-                let mut total = 0i64;
-                for pattern in patterns {
+
+                // Fast path: single pattern without WHERE — the join
+                // degenerates to counting compatible matches, no row
+                // merging needed. This keeps the common
+                // `count { (n)-[:R]->() }` shape allocation-free.
+                if patterns.len() == 1 && where_clause.is_none() {
+                    let pattern = &patterns[0];
                     let resolved;
                     let pat = if Self::pattern_has_vars(pattern) {
                         resolved = self.resolve_pattern_vars(pattern, row);
@@ -627,28 +637,105 @@ impl<'a> CypherExecutor<'a> {
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel);
                     let matches = executor.execute(pat)?;
-                    let count = if let Some(ref where_pred) = where_clause {
-                        matches
-                            .iter()
-                            .filter(|m| {
-                                if !self.bindings_compatible(row, m) {
-                                    return false;
-                                }
-                                let mut combined = row.clone();
-                                self.merge_match_into_row(&mut combined, m);
-                                self.evaluate_predicate(where_pred, &combined)
-                                    .unwrap_or(false)
-                            })
-                            .count()
-                    } else {
-                        matches
-                            .iter()
-                            .filter(|m| self.bindings_compatible(row, m))
-                            .count()
-                    };
-                    total += count as i64;
+                    let count = matches
+                        .iter()
+                        .filter(|m| self.bindings_compatible(row, m))
+                        .count();
+                    return Ok(Value::Int64(count as i64));
                 }
-                Ok(Value::Int64(total))
+
+                // General path: accumulate bindings progressively across
+                // patterns. Comma patterns within one clause group join
+                // under the openCypher trail rule (an edge may not bind
+                // twice within the group); each MATCH separator in
+                // `COUNT { MATCH ... MATCH ... }` starts a new group and
+                // resets the clause-local edge sets, exactly as across
+                // top-level MATCH clauses. The WHERE predicate filters
+                // the fully merged rows; the count is the surviving
+                // row count.
+                let enforce_rel_uniqueness =
+                    match_clause::grouped_patterns_need_rel_uniqueness(patterns, pattern_groups);
+                let mut combined_rows: Vec<ResultRow> = vec![row.clone()];
+                let mut clause_edge_sets: Vec<Vec<petgraph::graph::EdgeIndex>> =
+                    if enforce_rel_uniqueness {
+                        vec![Vec::new()]
+                    } else {
+                        Vec::new()
+                    };
+                let mut prev_group: Option<usize> = None;
+                for (pi, pattern) in patterns.iter().enumerate() {
+                    if combined_rows.is_empty() {
+                        return Ok(Value::Int64(0));
+                    }
+                    let group = pattern_groups.get(pi).copied().unwrap_or(0);
+                    if enforce_rel_uniqueness && prev_group.is_some_and(|g| g != group) {
+                        for set in &mut clause_edge_sets {
+                            set.clear();
+                        }
+                    }
+                    prev_group = Some(group);
+                    let resolved;
+                    let pat = if Self::pattern_has_vars(pattern) {
+                        resolved = self.resolve_pattern_vars(pattern, row);
+                        &resolved
+                    } else {
+                        pattern
+                    };
+                    let executor = PatternExecutor::with_bindings_and_params(
+                        self.graph,
+                        None,
+                        &row.node_bindings,
+                        self.params,
+                    )
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel);
+                    let matches = executor.execute(pat)?;
+
+                    let mut next_rows: Vec<ResultRow> = Vec::new();
+                    let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
+                    for (ci, current) in combined_rows.iter().enumerate() {
+                        for m in &matches {
+                            if !self.bindings_compatible(current, m) {
+                                continue;
+                            }
+                            if enforce_rel_uniqueness {
+                                let mut m_edges = Vec::new();
+                                match_clause::match_edge_indices(m, &mut m_edges);
+                                if m_edges.iter().any(|e| clause_edge_sets[ci].contains(e)) {
+                                    continue; // trail rule: edge re-use across patterns
+                                }
+                                let mut next = clause_edge_sets[ci].clone();
+                                next.extend(m_edges);
+                                next_sets.push(next);
+                            }
+                            let mut merged = current.clone();
+                            self.merge_match_into_row(&mut merged, m);
+                            next_rows.push(merged);
+                        }
+                    }
+                    combined_rows = next_rows;
+                    if enforce_rel_uniqueness {
+                        clause_edge_sets = next_sets;
+                    }
+                }
+
+                let count = if let Some(ref where_pred) = where_clause {
+                    combined_rows
+                        .iter()
+                        .filter(|r| {
+                            // Same NULL handling as EXISTS: a NULL inner
+                            // predicate means "row doesn't satisfy" — it
+                            // isn't counted.
+                            matches!(
+                                self.evaluate_predicate_tristate(where_pred, r),
+                                Ok(Some(true))
+                            )
+                        })
+                        .count()
+                } else {
+                    combined_rows.len()
+                };
+                Ok(Value::Int64(count as i64))
             }
         }
     }

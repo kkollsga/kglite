@@ -192,3 +192,61 @@ class TestEdgeCases:
         graph = KnowledgeGraph()
         with pytest.raises(RuntimeError, match="Cannot open"):
             graph.load_ntriples("/nonexistent/path.nt")
+
+
+class TestDiskBuildReloadWithoutSave:
+    """A disk-mode `load_ntriples` build must be reloadable as-is — the
+    directory IS the graph, with no intervening `save()` required.
+
+    Regression for two related finalisation bugs (pre-0.12.16):
+
+    * node slots stayed in the heap-side overlay (`appended_node_slots`)
+      and were never merged into `node_slots.bin`, so a reload failed with
+      "File too small" past the initial 1024-slot allocation — and below
+      it, silently loaded zeroed (dead) slots;
+    * the DirGraph sidecars (interner.json, metadata.json, id/type
+      indexes) were written into `seg_000/` while the loader reads them
+      from the graph root, so even a loadable directory came back with an
+      empty interner — every typed MATCH returned zero rows.
+    """
+
+    @staticmethod
+    def _write_nt(path, n):
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n):
+                f.write(
+                    f"<http://www.wikidata.org/entity/Q{i}> "
+                    f'<http://www.w3.org/2000/01/rdf-schema#label> "Entity {i}"@en .\n'
+                )
+                if i > 0:
+                    f.write(
+                        f"<http://www.wikidata.org/entity/Q{i}> "
+                        f"<http://www.wikidata.org/prop/direct/P17> "
+                        f"<http://www.wikidata.org/entity/Q{i - 1}> .\n"
+                    )
+
+    @pytest.mark.parametrize("entities", [500, 2000])
+    def test_reload_without_save(self, tmp_path, entities):
+        # 500 sits under the 1024-slot initial allocation (the silent-zeroed
+        # class); 2000 sits above it (the hard "File too small" class).
+        import kglite
+
+        nt_path = tmp_path / f"build_{entities}.nt"
+        self._write_nt(nt_path, entities)
+        graph_dir = tmp_path / f"disk_{entities}"
+
+        g = KnowledgeGraph(storage="disk", path=str(graph_dir))
+        stats = g.load_ntriples(str(nt_path), languages=["en"])
+        assert stats["entities"] == entities
+        del g
+
+        reloaded = kglite.open(str(graph_dir))
+        assert reloaded.cypher("MATCH (n:Entity) RETURN count(n) AS c").to_list() == [{"c": entities}]
+        # Titles and traversals prove the interner + column stores + CSR all
+        # reloaded, not just the counts.
+        assert reloaded.cypher("MATCH (n:Entity) WHERE n.title = 'Entity 1' RETURN count(n) AS c").to_list() == [
+            {"c": 1}
+        ]
+        hop = reloaded.cypher("MATCH (a:Entity {title: 'Entity 1'})-[r]->(b) RETURN b.title AS t").to_list()
+        assert hop == [{"t": "Entity 0"}]
+        assert reloaded.cypher("MATCH ()-[r]->() RETURN count(r) AS c").to_list() == [{"c": entities - 1}]

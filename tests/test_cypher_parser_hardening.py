@@ -255,13 +255,17 @@ def test_legacy_exists_property_hint_still_raised(chain):
 def test_map_literal_accepts_soft_keyword_keys():
     g = KnowledgeGraph()
     got = g.cypher("RETURN {order: 1, contains: 2, count: 3} AS m").scalar()
-    # Soft keywords canonicalise to their uppercase word, exactly like
-    # pattern property maps (KG-2); plain identifiers keep their case.
-    assert got == {"ORDER": 1, "CONTAINS": 2, "count": 3}
+    # Soft keywords keep their verbatim source spelling (Neo4j-style
+    # case-preserving names), exactly like pattern property maps (KG-2)
+    # and plain identifiers.
+    assert got == {"order": 1, "contains": 2, "count": 3}
 
 
 def test_map_projection_accepts_soft_keyword_keys():
     g = KnowledgeGraph()
-    g.cypher("CREATE (:T {id: 7, `ORDER`: 5})")
-    assert g.cypher("MATCH (n:T) RETURN n {.order} AS m").scalar() == {"ORDER": 5}
-    assert g.cypher("MATCH (n:T) RETURN n {order: n.id} AS m").scalar() == {"ORDER": 7}
+    g.cypher("CREATE (:T {id: 7, `ORDER`: 5, order: 3})")
+    # Names are case-sensitive: `.order` reads the lowercase key verbatim,
+    # never the backticked uppercase sibling.
+    assert g.cypher("MATCH (n:T) RETURN n {.order} AS m").scalar() == {"order": 3}
+    assert g.cypher("MATCH (n:T) RETURN n {.ORDER} AS m").scalar() == {"ORDER": 5}
+    assert g.cypher("MATCH (n:T) RETURN n {order: n.id} AS m").scalar() == {"order": 7}

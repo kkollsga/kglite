@@ -530,6 +530,7 @@ fn validate_expression_scope(
         Expression::CountSubquery {
             patterns,
             where_clause,
+            ..
         } => {
             let mut inner = scope.clone();
             for pattern in patterns {

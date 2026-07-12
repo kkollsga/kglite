@@ -91,6 +91,82 @@ def test_several_safe_keywords_as_rel_types():
         assert n == 1, f"keyword {kw} should be usable as a rel type"
 
 
+class TestKeywordNamesKeepVerbatimCase:
+    """Keyword names are case-preserving (Neo4j-parity): the stored name is
+    the exact source spelling, not the keyword's canonical uppercase word.
+    Before 0.12.16 the parser canonicalised (`{order: 1}` stored key
+    `ORDER`); a graph written by an older release may therefore carry
+    uppercase keys where a lowercase source now reads the verbatim key."""
+
+    def test_property_map_key_verbatim_through_python(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:T {order: 1})")
+        props = g.cypher("MATCH (n:T) RETURN properties(n) AS p").scalar()
+        assert props["order"] == 1
+        assert "ORDER" not in props
+
+    def test_set_and_read_roundtrip_verbatim(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:T {id: 1})")
+        g.cypher("MATCH (n:T) SET n.contains = 5")
+        assert g.cypher("MATCH (n:T) RETURN n.contains AS v").scalar() == 5
+        props = g.cypher("MATCH (n:T) RETURN properties(n) AS p").scalar()
+        assert props["contains"] == 5
+        assert "CONTAINS" not in props
+        # Mixed-case source spelling is preserved too.
+        g.cypher("MATCH (n:T) SET n.Contains = 6")
+        props = g.cypher("MATCH (n:T) RETURN properties(n) AS p").scalar()
+        assert props["contains"] == 5
+        assert props["Contains"] == 6
+
+    def test_map_literal_key_verbatim(self):
+        g = KnowledgeGraph()
+        assert g.cypher("RETURN {order: 1} AS m").scalar() == {"order": 1}
+        assert g.cypher("RETURN {Order: 1} AS m").scalar() == {"Order": 1}
+
+    def test_keyword_names_are_case_sensitive(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:T {order: 1})")
+        assert g.cypher("MATCH (n:T) RETURN n.order AS v").scalar() == 1
+        assert g.cypher("MATCH (n:T) RETURN n.ORDER AS v").scalar() is None
+
+    def test_rel_type_and_label_verbatim(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (a:contains)-[:contains]->(b:CONTAINS)")
+        rows = g.cypher("MATCH (a)-[r:contains]->(b) RETURN type(r) AS t").to_list()
+        assert rows == [{"t": "contains"}]
+        assert g.cypher("MATCH (n:contains) RETURN count(n) AS c").scalar() == 1
+        assert g.cypher("MATCH (n:CONTAINS) RETURN count(n) AS c").scalar() == 1
+
+    def test_keyword_key_inside_match_pattern_map_verbatim(self):
+        # The MATCH-pattern re-serializer backticks the verbatim lexeme, so
+        # `{contains: 5}` filters on key `contains`, not `CONTAINS`.
+        g = KnowledgeGraph()
+        # One node carrying BOTH spellings as distinct keys (single CREATE —
+        # the schema typo-guard rejects new keys on later CREATEs).
+        g.cypher("CREATE (:Thing {contains: 5, `CONTAINS`: 7})")
+        assert g.cypher("MATCH (n:Thing {contains: 5}) RETURN count(n) AS c").scalar() == 1
+        assert g.cypher("MATCH (n:Thing {CONTAINS: 7}) RETURN count(n) AS c").scalar() == 1
+        assert g.cypher("MATCH (n:Thing {CONTAINS: 5}) RETURN count(n) AS c").scalar() == 0
+
+    def test_exists_subquery_pattern_keeps_verbatim_keyword_names(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (p:P {id: 1})-[:contains]->(c:C {order: 2})")
+        assert g.cypher("MATCH (p:P) WHERE EXISTS { (p)-[:contains]->({order: 2}) } RETURN count(p) AS c").scalar() == 1
+        assert g.cypher("MATCH (p:P) WHERE EXISTS { (p)-[:CONTAINS]->() } RETURN count(p) AS c").scalar() == 0
+
+    def test_backticked_names_unaffected(self):
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:T {`ORDER`: 5})")
+        assert g.cypher("MATCH (n:T) RETURN n.`ORDER` AS v").scalar() == 5
+        assert g.cypher("MATCH (n:T) RETURN n.order AS v").scalar() is None
+
+    def test_keyword_alias_keeps_source_case(self):
+        g = KnowledgeGraph()
+        assert g.cypher("RETURN 1 AS Order").columns == ["Order"]
+        assert g.cypher("RETURN 1 AS order").columns == ["order"]
+
+
 def test_reserved_words_still_error_with_backtick_escape():
     """Load-bearing keywords stay reserved as names (clear error), but the
     backtick escape hatch keeps working."""

@@ -1663,6 +1663,7 @@ fn collect_expression_refs(expr: &Expression, out: &mut HashSet<String>) {
         Expression::CountSubquery {
             patterns,
             where_clause,
+            ..
         } => {
             collect_pattern_refs(patterns, out);
             if let Some(p) = where_clause {
