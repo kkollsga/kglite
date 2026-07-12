@@ -1,7 +1,7 @@
 """Bolt overhead + throughput characterization benchmarks.
 
 These quantify the Bolt-server wire tax on top of the direct kglite
-`cypher()` call. Numbers go into `docs/explanation/bolt-server.md` and
+`cypher()` call. Numbers go into `docs/operators/bolt-server.md` and
 become a regression gate once a release captures baselines.
 
 Run with: `pytest tests/benchmarks/test_bench_bolt.py -m benchmark -v`

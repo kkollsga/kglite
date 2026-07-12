@@ -5,7 +5,7 @@ chains, that `kglite.KgError` is the universal catch. They don't yet
 exercise the executor's error paths (that's C2-C5's job; those tests
 flip from xfail to passing as the migration sweeps through).
 
-See `docs/explanation/error-handling.md` (added in C12) for the
+See `docs/python/error-handling.md` (added in C12) for the
 full taxonomy and migration guidance.
 """
 

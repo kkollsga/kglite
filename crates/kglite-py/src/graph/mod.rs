@@ -141,7 +141,7 @@ pub(crate) use kglite_core::api::session::resolve_noderefs;
 ///
 /// Cloned onto every derived view (O(1) — `selection`/`reports` are Arc-backed)
 /// and reset by `copy()`. Grouping these into one struct is the first step of
-/// the god-object decomposition (see `roadmap.md`): it is the seam the future
+/// the god-object decomposition (see `docs/history/roadmap-2026H1.md`): it is the seam the future
 /// public `Cursor` type is built on. No behaviour change — purely a field
 /// grouping.
 #[derive(Clone)]
@@ -207,7 +207,7 @@ pub struct KnowledgeGraph {
 ///
 /// Grouped out of the `KnowledgeGraph` god-object alongside [`CursorState`]
 /// (per-query) and the shared `DirGraph` (storage). This is the surface a
-/// future core-`Session` lifecycle lift would target (see `roadmap.md`).
+/// future core-`Session` lifecycle lift would target (see `docs/history/roadmap-2026H1.md`).
 pub(crate) struct GraphLifecycle {
     /// Path this graph was opened from / last associated with, if any. Set by
     /// `kglite.open(path)` / `kglite.load(path)`; lets `save()` default to the
@@ -292,7 +292,7 @@ impl KnowledgeGraph {
     ///
     /// This replaces the copy-pasted `let mut new_kg = self.clone(); …mutate
     /// new_kg.cursor…; Ok(new_kg)` body in the fluent methods, and is the seam
-    /// the future public `Cursor` type is built on (see `roadmap.md`).
+    /// the future public `Cursor` type is built on (see `docs/history/roadmap-2026H1.md`).
     pub(crate) fn derive_with<F>(&self, f: F) -> PyResult<Self>
     where
         F: FnOnce(&Arc<DirGraph>, &mut CursorState) -> PyResult<()>,

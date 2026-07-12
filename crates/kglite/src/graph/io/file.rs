@@ -2,7 +2,7 @@
 //
 // Versioned binary format for KnowledgeGraph persistence.
 //
-// File format v4 layout (Phase A.1 / C5 of bolt_implementation.md):
+// File format v4 layout (Phase A.1 / C5 of docs/history/bolt-implementation.md):
 //   [0..4]    Magic: b"RGF\x04" (Rusty Graph Format, version 4)
 //   [4..8]    core_data_version: u32 LE (tracks NodeData/EdgeData/Value changes)
 //   [8..12]   metadata_length: u32 LE
@@ -71,7 +71,7 @@ const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
 /// Magic bytes for the v4 columnar format: "RGF\x04". Phase A.1 / C5
 /// introduced v4 alongside the `Value::Node`/`Relationship`/`Path`/
 /// `List`/`Map` enum extension. Hard break on v3 files (no read-compat
-/// path) per the bolt_implementation.md plan.
+/// path) per the docs/history/bolt-implementation.md plan.
 const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
@@ -1764,7 +1764,7 @@ const EMBED_FORMAT_BREAK_MSG: &str =
      (Embeddings are a rebuildable cache; only the vector section broke.)";
 
 /// Hard-break message for v3 files in a v4 binary. Per the
-/// Phase A.1 user-decision in bolt_implementation.md: no read-compat
+/// Phase A.1 user-decision in docs/history/bolt-implementation.md: no read-compat
 /// path; rebuild the graph from source. Message gives the operator
 /// enough breadcrumbs to know what changed and what to do.
 const V3_HARD_BREAK_MSG: &str = "kglite .kgl file format v3 is not supported by this binary. \

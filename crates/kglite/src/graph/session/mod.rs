@@ -19,7 +19,7 @@
 //! 0 rows for any non-ORDER-BY RETURN until the robustness pass
 //! surfaced it.
 //!
-//! See [`bolt_implementation.md`](../../../bolt_implementation.md)
+//! See [`docs/history/bolt-implementation.md`](../../../../../docs/history/bolt-implementation.md)
 //! Phase E for the full rationale.
 //!
 //! ## Surface

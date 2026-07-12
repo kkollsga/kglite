@@ -1,6 +1,6 @@
 # Error handling — typed exceptions
 
-> Companion to [`bolt_implementation.md`](https://github.com/kkollsga/kglite/blob/main/bolt_implementation.md)
+> Companion to [`bolt-implementation.md`](https://github.com/kkollsga/kglite/blob/main/docs/history/bolt-implementation.md)
 > Phase A.2. Reference for Python consumers catching kglite-raised
 > exceptions, and for binding implementers (Bolt server in Phase C.6,
 > future Arrow / language-binding work) mapping typed errors to
@@ -13,7 +13,7 @@ with the pre-A.2 built-in-exception surface.
 ## The hierarchy
 
 Every kglite-raised exception is a subclass of `kglite.KgError`. The
-class chain mirrors the Rust `KgError` enum at `src/error.rs`:
+class chain mirrors the Rust `KgError` enum at `crates/kglite/src/error.rs`:
 
 ```text
 Exception
@@ -179,7 +179,7 @@ Phase C.6), a future Arrow exporter, a JNI bridge — your error
 mapping layer takes `KgError` and produces the consumer-specific
 shape.
 
-The `KgErrorCode` enum (at `src/error.rs`) gives you a `Copy + Eq +
+The `KgErrorCode` enum (at `crates/kglite/src/error.rs`) gives you a `Copy + Eq +
 Hash` classifier suitable for match-dispatch tables. For Bolt's
 FAILURE-code mapping (Phase C.6), the table looks like:
 
@@ -226,14 +226,14 @@ If you see `kglite.InternalError` in production, file a bug — the
 
 ## See also
 
-- `src/error.rs` — the Rust `KgError` enum + `KgErrorCode` definitions.
-- `src/error_py.rs` — `create_exception!` declarations + the
+- `crates/kglite/src/error.rs` — the Rust `KgError` enum + `KgErrorCode` definitions.
+- `crates/kglite-py/src/error_py.rs` — `create_exception!` declarations + the
   canonical `From<KgError> for PyErr` boundary conversion.
 - `kglite/__init__.pyi` — Python stub declarations matching the
   hierarchy here.
 - `tests/test_error_types.py` — canonical pinning suite (54 tests
   covering hierarchy, cross-mode behaviour, diagnostic quality).
-- `bolt_implementation.md` Phase C.6 — Bolt FAILURE-code mapping
+- `docs/history/bolt-implementation.md` Phase C.6 — Bolt FAILURE-code mapping
   (consumes the table shape sketched above).
 - `docs/python/value-projection.md` — Phase A.1 companion;
   shape-and-value answer to A.2's error-and-type answer.

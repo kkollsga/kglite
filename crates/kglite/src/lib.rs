@@ -455,7 +455,7 @@ pub mod api {
 
     /// Canonical query + transaction surface — single source of
     /// truth for the Cypher pipeline + snapshot/working CoW
-    /// transaction model. See `docs/explanation/session.md`.
+    /// transaction model. See `docs/rust/session.md`.
     pub mod session {
         pub use crate::graph::session::{
             execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,

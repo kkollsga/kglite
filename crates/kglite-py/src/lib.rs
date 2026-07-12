@@ -147,7 +147,7 @@ pub mod api {
     /// All bindings (pyapi, mcp-server, bolt-server, future Go/TS/JVM)
     /// wrap this module's types and free functions.
     ///
-    /// See `docs/explanation/session.md` for the operator-facing
+    /// See `docs/rust/session.md` for the operator-facing
     /// guide and `bolt_implementation.md` Phase E for the rationale.
     pub mod session {
         pub use kglite_core::api::session::{

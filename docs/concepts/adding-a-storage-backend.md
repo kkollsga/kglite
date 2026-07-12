@@ -10,9 +10,9 @@ open/closed.
 
 Adding a backend is a **3-src-file change**:
 
-1. **Own file** — `src/graph/storage/<name>.rs`: a struct + `impl GraphRead for Name` (+ optionally `impl GraphWrite for Name`).
-2. **Enum variant** — `src/graph/storage/backend.rs`: a new `GraphBackend::Name(...)` arm in the dispatch enum.
-3. **Re-export** — `src/graph/storage/mod.rs`: `pub mod <name>; pub use <name>::Name;`.
+1. **Own file** — `crates/kglite/src/graph/storage/<name>.rs`: a struct + `impl GraphRead for Name` (+ optionally `impl GraphWrite for Name`).
+2. **Enum variant** — `crates/kglite/src/graph/storage/backend.rs`: a new `GraphBackend::Name(...)` arm in the dispatch enum.
+3. **Re-export** — `crates/kglite/src/graph/storage/mod.rs`: `pub mod <name>; pub use <name>::Name;`.
 
 Plus a parity test in `tests/test_phaseN_parity.py` that wraps your
 backend in the existing cross-mode oracle.
@@ -26,7 +26,7 @@ KGLite's storage layer is anchored on two traits:
 - `GraphWrite: GraphRead` — mutations (add/remove node/edge,
   `node_weight_mut`, `edge_weight_mut`, `update_row_id`).
 
-Both live in `src/graph/storage/mod.rs`. Iterator methods use generic
+Both live in `crates/kglite/src/graph/storage/mod.rs`. Iterator methods use generic
 associated types (GATs) — see the "GATs and object-safety" section of
 the trait doc. The trait is **not object-safe**; `&dyn GraphRead` does
 not compile. All consumers take `&impl GraphRead`.
@@ -43,11 +43,11 @@ method call to a `Mutex<Vec<&'static str>>` while forwarding every
 call to an inner backend. It's generic over any `G: GraphRead`, so
 you can wrap a Memory / Mapped / Disk graph and get a read-audit
 log for free. It's Rust-only (no Python constructor reaches it) — the
-parity matrix for it lives in `src/graph/storage/recording.rs::tests`.
+parity matrix for it lives in `crates/kglite/src/graph/storage/recording.rs::tests`.
 
 ### 1. Write the backend module
 
-File: `src/graph/storage/recording.rs`.
+File: `crates/kglite/src/graph/storage/recording.rs`.
 
 ```rust
 use crate::graph::storage::{GraphRead, GraphWrite};
@@ -105,7 +105,7 @@ Key points:
 
 ### 2. Add the enum variant
 
-File: `src/graph/storage/backend.rs`.
+File: `crates/kglite/src/graph/storage/backend.rs`.
 
 ```rust
 pub enum GraphBackend {
@@ -152,7 +152,7 @@ fn is_memory(&self) -> bool {
 
 ### 3. Register the module
 
-File: `src/graph/storage/mod.rs`.
+File: `crates/kglite/src/graph/storage/mod.rs`.
 
 ```rust
 pub mod recording;
@@ -204,9 +204,9 @@ surface on each of the three production backends it can wrap.
 Phase 6's gate (`tests/test_phase6_parity.py::test_file_count_budget`)
 enforces that adding a wrapper backend touches at most 3 src files:
 
-- own file (`src/graph/storage/recording.rs`)
-- enum + dispatch (`src/graph/storage/backend.rs`)
-- re-export (`src/graph/storage/mod.rs`)
+- own file (`crates/kglite/src/graph/storage/recording.rs`)
+- enum + dispatch (`crates/kglite/src/graph/storage/backend.rs`)
+- re-export (`crates/kglite/src/graph/storage/mod.rs`)
 
 Anything more than that means either (a) the new backend couldn't
 express itself in the existing trait surface (add the method to the
@@ -216,8 +216,8 @@ layer. Both require design revisions.
 
 ## Reading more
 
-- `src/graph/storage/mod.rs` — the `GraphRead` / `GraphWrite` trait surface.
-- `src/graph/storage/recording.rs` — the worked example from this guide.
-- `src/graph/storage/impls.rs` — the three production backends' trait impls (Memory / Mapped / Disk).
-- `src/graph/storage/backend.rs` — the 4-arm `GraphBackend` dispatcher.
+- `crates/kglite/src/graph/storage/mod.rs` — the `GraphRead` / `GraphWrite` trait surface.
+- `crates/kglite/src/graph/storage/recording.rs` — the worked example from this guide.
+- `crates/kglite/src/graph/storage/impls.rs` — the three production backends' trait impls (Memory / Mapped / Disk).
+- `crates/kglite/src/graph/storage/backend.rs` — the 4-arm `GraphBackend` dispatcher.
 - `dev_workfolder/dev-documentation/todo.md` Phase 6 Report-out (gitignored, repo-checkout only) — lessons learned from RecordingGraph's implementation.

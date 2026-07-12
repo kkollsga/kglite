@@ -1,6 +1,6 @@
 //! Python-side machinery for the [`crate::error::KgError`] taxonomy.
 //!
-//! Phase A.2 of bolt_implementation.md — defines the typed Python
+//! Phase A.2 of docs/history/bolt-implementation.md — defines the typed Python
 //! exception classes (`kglite.CypherSyntaxError`, `kglite.SchemaError`,
 //! etc.) via PyO3's `create_exception!` macro, and provides the
 //! [`From<KgError> for PyErr`] impl that picks the most specific
@@ -46,7 +46,7 @@
 //! `kglite.KgError` as a base AND `PyValueError` as an additional
 //! base would require Python-level multiple inheritance which PyO3
 //! doesn't support cleanly. The user-decided trade-off in
-//! `bolt_implementation.md` is consistency-first: every kglite error
+//! `docs/history/bolt-implementation.md` is consistency-first: every kglite error
 //! is now `isinstance(e, kglite.KgError)`.
 //!
 //! Migration path: change `except ValueError as e:` to

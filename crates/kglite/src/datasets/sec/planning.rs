@@ -3,7 +3,7 @@
 //!
 //! Pure formulas, ported from the Python `sec/wrapper.py`. The size
 //! formula is calibrated against the loader's measured node-count
-//! behaviour (see `docs/guides/sec.md` "Sizing").
+//! behaviour (see `docs/python/guides/sec.md` "Sizing").
 
 /// The full SEC filer universe — used to scale a `cik_list` scope
 /// down to a fraction of the whole.

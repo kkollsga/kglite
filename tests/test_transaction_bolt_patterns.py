@@ -1,12 +1,12 @@
 """Pin the Bolt server's expected transaction usage patterns.
 
-The Bolt server (Phase B/C of bolt_implementation.md) consumes the existing
+The Bolt server (Phase B/C of docs/history/bolt-implementation.md) consumes the existing
 `graph.begin()` / `graph.begin_read()` / `tx.commit()` / `tx.rollback()` /
 context-manager surface to map Bolt's BEGIN / RUN / COMMIT / ROLLBACK
 messages onto kglite operations. These tests pin the contracts so library
 refactors can't silently regress the surface Phase C will consume.
 
-See docs/explanation/transactions.md for the binding-implementer narrative.
+See docs/python/transactions.md for the binding-implementer narrative.
 """
 
 from __future__ import annotations

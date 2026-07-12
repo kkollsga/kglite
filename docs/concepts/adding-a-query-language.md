@@ -1,6 +1,6 @@
 # Adding a query language
 
-KGLite's query surface lives under `src/graph/languages/`. Today there
+KGLite's query surface lives under `crates/kglite/src/graph/languages/`. Today there
 is one concrete implementation — **Cypher** — plus scaffolding for a
 second (`languages/fluent/`). This guide walks through how Cypher is
 put together and how a hypothetical peer language (SPARQL, GraphQL,
@@ -14,11 +14,11 @@ asks about them.
 
 ## TL;DR
 
-A new query language is a new directory under `src/graph/languages/`
+A new query language is a new directory under `crates/kglite/src/graph/languages/`
 containing its own `parser/`, `planner/` (optional), `executor/`, and a
 public entry function callable from `pyapi/`. Most of the heavy work
 — pattern matching, filtering, traversal, aggregation, value coercion
-— already exists in `src/graph/core/` and is designed to be shared
+— already exists in `crates/kglite/src/graph/core/` and is designed to be shared
 across languages.
 
 The integration checklist:
@@ -39,7 +39,7 @@ the `GraphRead` / `GraphWrite` split.
 ## The `languages/` umbrella
 
 ```
-src/graph/languages/
+crates/kglite/src/graph/languages/
 ├── mod.rs
 ├── cypher/            # The concrete implementation
 │   ├── mod.rs         # Re-exports + estimate_match_rows + explain helper
@@ -194,7 +194,7 @@ Python: list of dicts, pandas DataFrame, GeoDataFrame
 
 Suppose you want to add SPARQL. Concrete steps:
 
-1. `src/graph/languages/sparql/` with `mod.rs`, `parser.rs`,
+1. `crates/kglite/src/graph/languages/sparql/` with `mod.rs`, `parser.rs`,
    `executor.rs`. Optional `planner.rs` if SPARQL-specific optimisations
    are worth it.
 2. In `parser.rs`, convert SPARQL into an AST. Wherever possible,
@@ -217,13 +217,13 @@ churn in its neighbours.
 ## Testing
 
 Each language ships its own test module. For Cypher, tests live in
-`src/graph/languages/cypher/executor/tests.rs` (unit) +
+`crates/kglite/src/graph/languages/cypher/executor/tests.rs` (unit) +
 `tests/test_cypher.py` (Python end-to-end) + the `test_phaseN_parity.py`
 files (cross-storage oracle).
 
 A new language should mirror this layout:
 
-- Unit tests alongside the executor (`src/graph/languages/<name>/tests.rs`
+- Unit tests alongside the executor (`crates/kglite/src/graph/languages/<name>/tests.rs`
   or inline `#[cfg(test)] mod tests`).
 - Python end-to-end tests exercising the full parser → executor →
   `ResultView` path.
@@ -232,10 +232,10 @@ A new language should mirror this layout:
 
 ## Reading more
 
-- `src/graph/languages/cypher/mod.rs` — the Cypher dispatcher + re-exports.
-- `src/graph/languages/cypher/executor/mod.rs` — the executor entry point; scroll the file for the clause-submodule glob imports.
-- `src/graph/core/` — the shared primitives; read `mod.rs` files for each sub-module's public API.
-- `src/graph/pyapi/kg_core.rs` — where `cypher` is exposed to Python.
+- `crates/kglite/src/graph/languages/cypher/mod.rs` — the Cypher dispatcher + re-exports.
+- `crates/kglite/src/graph/languages/cypher/executor/mod.rs` — the executor entry point; scroll the file for the clause-submodule glob imports.
+- `crates/kglite/src/graph/core/` — the shared primitives; read `mod.rs` files for each sub-module's public API.
+- `crates/kglite-py/src/graph/pyapi/kg_core.rs` — where `cypher` is exposed to Python.
 - `dev_workfolder/dev-documentation/todo.md` Phase 8 + Phase 9 Report-outs (gitignored,
   repo-checkout only) — the decisions behind the `languages/` umbrella
   and the executor's clause-per-file split.

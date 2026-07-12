@@ -215,12 +215,12 @@ layer.
 
 ## Where to read the code
 
-- `src/graph/session/mod.rs` — module-level rationale + re-exports.
-- `src/graph/session/execute.rs` — `ExecuteOptions`, `ExecuteOutcome`,
+- `crates/kglite/src/graph/session/mod.rs` — module-level rationale + re-exports.
+- `crates/kglite/src/graph/session/execute.rs` — `ExecuteOptions`, `ExecuteOutcome`,
   `execute_read`, `execute_mut` (the canonical pipeline).
-- `src/graph/session/transaction.rs` — `Session`, `Transaction`,
+- `crates/kglite/src/graph/session/transaction.rs` — `Session`, `Transaction`,
   `CommitOutcome` plus ~15 unit tests pinning the contract.
-- `src/lib.rs::api::session` — public re-exports.
-- `src/graph/pyapi/kg_core.rs::cypher` — Python wrapper (≈80 lines after Phase E).
+- `crates/kglite/src/lib.rs::api::session` — public re-exports.
+- `crates/kglite-py/src/graph/pyapi/kg_core.rs::cypher` — Python wrapper (≈80 lines after Phase E).
 - `crates/kglite-bolt-server/src/backend.rs` — Bolt wrapper (≈350 lines).
 - `crates/kglite-mcp-server/src/tools.rs::run_cypher_inner` — MCP wrapper.

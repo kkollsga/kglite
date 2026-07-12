@@ -1,6 +1,16 @@
+---
+orphan: true
+---
+
 # Bolt protocol — implementation plan
 
-> Umbrella plan for `ROADMAP.md` §1 (roadmap now internal). The Bolt
+> **Historical record** — archived to `docs/history/` on 2026-07-12 (it
+> lived at the repo root as `bolt_implementation.md`). Source paths in this
+> document reflect the pre-workspace layout (root `src/`); the engine now
+> lives at `crates/kglite/src/` and the PyO3 wrapper at `crates/kglite-py/src/`.
+>
+> Umbrella plan for §1 of the since-retired public `ROADMAP.md` (the roadmap
+> went internal in 0.10.14 and the root file was removed). The Bolt
 > implementation decomposes into discrete phase-loops (A → B → C →
 > robustness → E → D) that are planned, implemented, and committed
 > independently. Each future plan loop opens by saying *"this is
@@ -727,7 +737,8 @@ the 0.10.x line — Phase E, the C.1–C.6 implementation, and Phase F (TLS,
 `neo4j://` routing, `db.*` key naming) all landed in **0.10.1** — so there
 was nothing left to bundle. Phase D (this section: conformance script,
 reference examples, docs) shipped as a patch, **0.10.14**, which finalizes
-the feature. `ROADMAP.md` §1 was flipped to shipped + the section removed;
+the feature. The public roadmap's §1 was flipped to shipped + the section
+removed (`ROADMAP.md` itself was later retired when the roadmap went internal);
 this doc is retained as the design record. The `kglite-bolt-server` crate
 tracks the workspace version (it never reset to `0.1.0` — it was already
 publishing on crates.io at 0.10.x).

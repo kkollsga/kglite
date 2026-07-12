@@ -204,7 +204,7 @@ server, one driver, fresh 10k-Person + 30k-KNOWS graph:
 - [`docs/concepts/concurrency.md`](../concepts/concurrency.md) — the
   single-owner contract, `freeze()` snapshots, and the underlying
   `Arc<DirGraph>` + GIL-release model.
-- [`bolt_implementation.md`](../../bolt_implementation.md) — Phase
+- [`bolt-implementation.md`](../history/bolt-implementation.md) — Phase
   plan and status, including the boltr v0.2 dependency rationale.
 - [`tests/test_bolt_server_*.py`](../../tests) — the 226+ tests
   exercising the server (smoke / correctness / transactions /

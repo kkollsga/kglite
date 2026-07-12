@@ -1,7 +1,13 @@
+---
+orphan: true
+---
+
 # KGLite Architecture Roadmap — sealing `kglite::api` as the single chokepoint
 
 > Created 2026-06-19, replacing the completed `KnowledgeGraph` handle-decomposition
 > record (shipped 0.11.3; see git history of this file for that archival content).
+> Lived at the repo root as `roadmap.md` until 2026-07-12, when it was archived
+> here as a historical record.
 > **Status: COMPLETE (2026-06-20).** All four pieces + an api-organization pass
 > shipped. `kglite::graph` is now `pub(crate)` and every wrapper crate (the
 > Python wheel + the bolt / mcp / c servers) reaches the engine EXCLUSIVELY

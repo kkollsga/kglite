@@ -51,7 +51,7 @@ jobs:
       - name: API chokepoint gate
         # Enforce the kglite::api single-chokepoint boundary: server crates
         # stay at zero below-api reaches; the wheel's reach count can only
-        # shrink from its frozen baseline (roadmap.md).
+        # shrink from its frozen baseline (docs/history/roadmap-2026H1.md).
         run: ./scripts/check_api_chokepoint.sh
 
       - name: Run clippy

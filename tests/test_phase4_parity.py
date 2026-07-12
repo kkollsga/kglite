@@ -133,7 +133,7 @@ GOLDEN_V3_DIGEST = "f8158438e01400126b7843d545b8e62c28484df8de7b3836a765a654a8b6
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
-# in bolt_implementation.md), so every digest captured against a v3
+# in docs/history/bolt-implementation.md), so every digest captured against a v3
 # binary is now meaningless — the test would never re-see those byte
 # patterns. The name `GOLDEN_V3_DIGEST` is kept for git-blame
 # continuity; the digest itself is now the v4 byte pattern.

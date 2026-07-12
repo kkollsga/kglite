@@ -1,7 +1,7 @@
 # Concurrency
 
 kglite is designed for embedded use, but the read path is genuinely
-parallel and the Bolt server (Phase B/C of `bolt_implementation.md`)
+parallel and the Bolt server (Phase B/C of `docs/history/bolt-implementation.md`)
 runs N concurrent sessions against one shared `KnowledgeGraph`. This
 document explains the thread-safety contract bindings can rely on and
 the two documented contention quirks.

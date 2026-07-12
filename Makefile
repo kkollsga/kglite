@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -36,6 +36,17 @@ test-rust:
 ## Run Python tests only (excludes benchmarks)
 test-py:
 	$(ACTIVATE) && pytest tests/ -v
+
+## Full local suite: Rust tests + Python tests INCLUDING the parity and
+## bolt marker suites that `make test` skips (pyproject addopts deselects
+## benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress).
+## Still excludes benchmark (needs pytest-benchmark), stress (30GB-scale),
+## model_download (multi-GB weights), binary_size (needs the release
+## cdylib) and bolt_stress (slow, opt-in). The bolt tests skip silently
+## unless target/release/kglite-bolt-server exists — build it first via
+## `cargo build --release -p kglite-bolt-server`.
+test-full: test-rust
+	$(ACTIVATE) && pytest tests/ -v -m "not benchmark and not stress and not model_download and not binary_size and not bolt_stress"
 
 ## Run performance benchmarks (forces release build — saved baselines
 ## are release-built, so a dev-profile comparison shows ~15× false
@@ -92,7 +103,7 @@ refresh-api-baseline:
 	@echo "refreshed tests/api-baselines/kglite.txt ($(KGLITE_API_NIGHTLY))"
 
 ## On-demand openCypher conformance check vs Neo4j. Not part of CI.
-## See docs/explanation/cypher-conformance.md for the full workflow.
+## See docs/concepts/cypher-conformance.md for the full workflow.
 neo4j-up:
 	docker run -d --name kglite-neo4j-conformance \
 		-p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/conformance \
@@ -134,7 +145,7 @@ clippy:
 lint-py:
 	$(ACTIVATE) && ruff format --check . && ruff check .
 
-## Enforce the kglite::api single-chokepoint boundary (roadmap.md)
+## Enforce the kglite::api single-chokepoint boundary (docs/history/roadmap-2026H1.md)
 check-api-chokepoint:
 	./scripts/check_api_chokepoint.sh
 

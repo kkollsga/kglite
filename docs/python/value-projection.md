@@ -1,6 +1,6 @@
 # Value projection — how RETURN materialises
 
-> Companion to [`bolt_implementation.md`](https://github.com/kkollsga/kglite/blob/main/bolt_implementation.md)
+> Companion to [`bolt-implementation.md`](https://github.com/kkollsga/kglite/blob/main/docs/history/bolt-implementation.md)
 > Phase A.1. Reference for reviewers of the executor / projection code,
 > and for implementers of future bindings (Bolt server in
 > `crates/kglite-bolt-server`, Arrow exporter, Polars adapter).
@@ -12,7 +12,7 @@ serialised `.kgl` format, and the contract that bindings consume.
 
 ## The `Value` enum
 
-Defined at `src/datatypes/values.rs`. Fourteen variants today (Phase
+Defined at `crates/kglite/src/datatypes/values.rs`. Fourteen variants today (Phase
 A.1 added five):
 
 | Variant | What it carries | Bolt PackStream analogue |
@@ -53,7 +53,7 @@ but serve different roles in the executor:
   carries n forward, etc.
 
 The transition happens in `evaluate_expression(Expression::Variable)`
-at `src/graph/languages/cypher/executor/expression.rs`:
+at `crates/kglite/src/graph/languages/cypher/executor/expression.rs`:
 
 ```rust
 if let Some(&idx) = row.node_bindings.get(name) {
@@ -116,7 +116,7 @@ behaviours in lockstep.
 
 ## At the Python boundary
 
-`src/datatypes/py_out.rs::value_to_py` recursively converts the
+`crates/kglite-py/src/datatypes/py_out.rs::value_to_py` recursively converts the
 fourteen `Value` variants to Python objects. The shapes consumers
 see:
 
@@ -148,7 +148,7 @@ terminal `RETURN` as `lazy_eligible`, per-cell materialisation runs
 on Python access (cached via `Mutex<Vec<Option<Vec<PreProcessedValue>>>>`).
 The cell shape got richer post-A.1 (one `Box<NodeValue>` per node
 projection, vs. one `u32` pre-A.1) — see the Performance note at the
-bottom of `bolt_implementation.md`.
+bottom of `docs/history/bolt-implementation.md`.
 
 ## In `.kgl` files
 
@@ -166,7 +166,7 @@ The `.kgl` v4 format (Phase A.1 / C5) is a binary container:
 ```
 
 `Value` serialises via `serde` with a discriminant tagged by
-variant position. The order in `src/datatypes/values.rs` is
+variant position. The order in `crates/kglite/src/datatypes/values.rs` is
 intentionally stable for the first 9 variants (Null=0 .. Duration=8)
 so any future enum changes append at the end (variants 9..=14
 today). The format-version + magic-byte bump in C5 makes the
@@ -207,7 +207,7 @@ Bolt PackStream analogue. For other targets:
   [`docs/rust/c-abi.md`](../rust/c-abi.md) §7.
 
 The `Value::type_name() -> &'static str` method (added in C7a, at
-`src/datatypes/values.rs`) returns the canonical PascalCase variant
+`crates/kglite/src/datatypes/values.rs`) returns the canonical PascalCase variant
 name — useful for binding-side dispatch tables. The `impl Display`
 gives a debug-shaped string suitable for log lines and error
 messages; for wire serialisation, use the per-binding mapping
@@ -216,17 +216,17 @@ explicitly.
 ## What this is NOT
 
 - **Not the public API surface.** That's `kglite::api::*`
-  (`src/lib.rs`).
+  (`crates/kglite/src/lib.rs`).
 - **Not a serialisation spec for the `.kgl` format.** The bincode +
-  zstd layout details live in `src/graph/io/file.rs`; this doc just
+  zstd layout details live in `crates/kglite/src/graph/io/file.rs`; this doc just
   names the format-version boundaries.
 - **Not a guide to writing new scalar functions.** That's covered
-  inline in `src/graph/languages/cypher/executor/scalar_functions.rs`
+  inline in `crates/kglite/src/graph/languages/cypher/executor/scalar_functions/`
   — search for the pattern of an existing function and mirror it.
 
 ## See also
 
-- `bolt_implementation.md` — Phase A.1 plan + the broader Bolt
+- `docs/history/bolt-implementation.md` — Phase A.1 plan + the broader Bolt
   implementation roadmap.
 - `docs/concepts/multi-label-rationale.md` — multi-label nodes
   shipped in 0.10.5. `labels()` now returns `[primary, ...secondaries]`.

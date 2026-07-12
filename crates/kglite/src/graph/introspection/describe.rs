@@ -2004,7 +2004,7 @@ tools:
     to replace bundled tools, swap the rmcp transport, or register
     conditional tools. For everything else (custom Cypher tools,
     source-file access, Python hooks), the manifest is the answer. See
-    docs/guides/mcp-servers.md for the full reference.
+    docs/python/guides/mcp-servers.md for the full reference.
   </forking>
 
 </mcp_quickstart>

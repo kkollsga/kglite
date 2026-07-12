@@ -296,4 +296,4 @@ for minor-version compatibility.
 - `docs/operators/bolt-server.md` — Bolt server operator guide
   (an example of a sibling-crate binding).
 - `CYPHER.md` — Cypher language reference.
-- `bolt_implementation.md` — Phase E + Phase G design docs.
+- `docs/history/bolt-implementation.md` — Phase E + Phase G design docs.

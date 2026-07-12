@@ -5,22 +5,28 @@
 ```bash
 source .venv/bin/activate && unset CONDA_PREFIX
 maturin develop --release    # release build; required for any perf measurement
-make test                    # Rust + Python tests
+make test                    # Rust + Python tests (default markers — skips benchmark/parity/stress/model_download/binary_size/bolt/bolt_stress)
+make test-full               # test-rust + Python suite including the parity + bolt markers
 make lint                    # fmt + clippy + ruff format/check + mypy stubtest; run before pushing
 ```
 
-`make lint` covers the full CI gate. If you run pieces by hand, both
-`cargo fmt --check` and `ruff format --check` matter — CI gates on the
-`--check` variants separately from the auto-fix variants.
+`make lint` covers the local lint gate (api-chokepoint, clean-room +
+dependency-license checks, `cargo fmt --check`, clippy, ruff, stubtest).
+CI additionally gates things `make lint` doesn't run: the public-API diff
+(`cargo public-api` on a pinned nightly vs `tests/api-baselines/kglite.txt`),
+`kglite-c` clippy + tests with `--features sec,sodir,wikidata,rdf`, and the
+cbindgen header-drift check on `crates/kglite-c/include/kglite.h`. If you run
+pieces by hand, both `cargo fmt --check` and `ruff format --check` matter —
+CI gates on the `--check` variants separately from the auto-fix variants.
 
 ## Architecture
 
-- **Rust core** (`src/`): `KnowledgeGraph` exposed to Python via PyO3, `petgraph` storage.
-- **Cypher engine** (`src/graph/languages/cypher/`): parser → AST → planner → executor.
-- **Shared query primitives** (`src/graph/core/`): pattern matching, filtering, traversal — used by both Cypher and the fluent API.
+- **Rust core** (`crates/kglite/src/`): the engine — `petgraph` storage; `KnowledgeGraph` is exposed to Python via PyO3 from the wrapper crate (`crates/kglite-py/src/`).
+- **Cypher engine** (`crates/kglite/src/graph/languages/cypher/`): parser → AST → planner → executor.
+- **Shared query primitives** (`crates/kglite/src/graph/core/`): pattern matching, filtering, traversal — used by both Cypher and the fluent API.
 - **Python package** (`kglite/`): thin wrapper + `code_tree/` (tree-sitter codebase parsing).
 - **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs.
-- **Introspection** (`src/graph/introspection/`): `describe()` XML schema for agents.
+- **Introspection** (`crates/kglite/src/graph/introspection/`): `describe()` XML schema for agents.
 
 ### The boundary principle (wrappers vs core) — summary
 
@@ -56,7 +62,7 @@ binding. The essentials:
 
 Three storage modes: `Default` (in-memory petgraph), `Mapped` (mmap-backed columns), `Disk` (CSR + mmap). The disk modes are addons for large-graph exploration (Wikidata-scale). When optimisation conflicts arise, **in-memory wins** — never regress in-memory perf to protect disk safety. Add disk-specific workarounds gated on storage mode or graph size instead.
 
-The Cypher planner/executor is shared across all modes. Changes to `core/pattern_matching.rs` or `languages/cypher/executor.rs` affect everyone — benchmark on small in-memory graphs before merging.
+The Cypher planner/executor is shared across all modes. Changes to `core/pattern_matching/` or `languages/cypher/executor/` affect everyone — benchmark on small in-memory graphs before merging.
 
 ## Code health
 
@@ -70,7 +76,7 @@ Each pass through a file should leave it more compartmentalised than you found i
 
 ### Cypher planner passes
 
-The optimiser pipeline lives at `src/graph/languages/cypher/planner/mod.rs` as `const PASSES: &[(&str, PassFn)]` — single source of truth for order and naming. When adding or changing a pass:
+The optimiser pipeline lives at `crates/kglite/src/graph/languages/cypher/planner/mod.rs` as `const PASSES: &[(&str, PassFn)]` — single source of truth for order and naming. When adding or changing a pass:
 
 1. **Implement** in the appropriate sub-module (`fusion.rs`, `simplification.rs`, …) or a new file for fresh concerns.
 2. **Register** in `PASSES` with a unique stable name (user-facing via `disabled_passes=[...]`).
@@ -97,18 +103,18 @@ Before any perf-related change:
 ## Key patterns
 
 - **PyO3**: `&self` for read-only methods; return `PyResult<Py<PyAny>>`; wrap blocking work in `Python::attach()`. Use `.cast::<T>()`, not `.downcast::<T>()` (deprecated in pyo3 0.27+).
-- **`#[pymethods]` location**: all method blocks live under `src/graph/pyapi/`. Private helpers stay in `src/graph/mod.rs` as `pub(crate)`. The `#[pyclass]` *struct attribute* may stay with the struct definition.
+- **`#[pymethods]` location**: all method blocks live under `crates/kglite-py/src/graph/pyapi/`. Private helpers stay in `crates/kglite-py/src/graph/mod.rs` as `pub(crate)`. The `#[pyclass]` *struct attribute* may stay with the struct definition.
 - **Value conversion**: `py_out::value_to_py()` and `py_out::nodeinfo_to_pydict()`.
-- **Storage traits**: reads on `GraphRead`, mutations on `GraphWrite: GraphRead` (both in `src/graph/storage/mod.rs`). Add new storage ops to the trait first. `GraphRead` is non-object-safe (GATs on iterator methods) — use `&impl GraphRead` everywhere, never `&dyn`. Iterator-returning trait methods declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
+- **Storage traits**: reads on `GraphRead`, mutations on `GraphWrite: GraphRead` (both in `crates/kglite/src/graph/storage/mod.rs`). Add new storage ops to the trait first. `GraphRead` is non-object-safe (GATs on iterator methods) — use `&impl GraphRead` everywhere, never `&dyn`. Iterator-returning trait methods declare an associated type (`type FooIter<'a>: Iterator<…> where Self: 'a;`).
 - **Transactions stay on `DirGraph`**, not in the trait surface (`version`, `read_only`, `schema_locked`, validation helpers).
 - **No back-compat shims, no `#[deprecated]` — this is about *code/APIs*, not *data*.** Obsoleted code/API paths are deleted in the same PR as their replacement: no deprecated public surface, no dual old-vs-new-API codepaths, no compat wrappers for renamed/replaced functions. **Data-format compatibility is a separate, legitimate concern and is NOT a "shim".** Persisted files (`.kgl`, disk graphs) outlive the binary that wrote them, so *reading* an older on-disk/serialized format (read-compat), or *detecting* one and refusing it with a clear "rebuild your graph" message (a deliberate hard-break, e.g. the `.kgl` v3→v4 break or the embeddings-provenance break), is expected format-lifecycle handling — keep or migrate it, don't delete it to satisfy this rule. The test when unsure: *would deleting this break a caller's **code** (shim → remove) or an existing user's **saved file** (data-compat → keep/migrate)?* Examples that are NOT shims and stay: `EdgePropertyStore` legacy-format detection, `ConnectionTypeInfo`'s old-field deserializer, the v3-magic rejection in `io/file.rs`.
 - **Parity oracles** at `tests/test_storage_parity.py`, `tests/test_phase{1,2,3}_parity.py` (gated by `pytest -m parity`) must stay green after any backend-touching change.
 
 ## When changing a `#[pymethods]` function — the five-place checklist
 
-1. `src/graph/pyapi/*.rs` — implementation.
+1. `crates/kglite-py/src/graph/pyapi/*.rs` — implementation.
 2. `kglite/__init__.pyi` — type stub + docstring.
-3. `src/graph/introspection/*.rs` — `describe()` output, if agent-facing.
+3. `crates/kglite/src/graph/introspection/*.rs` — `describe()` output, if agent-facing.
 4. `crates/kglite-mcp-server/src/tools.rs` — MCP tool wrapper, if agent-facing.
 5. `CHANGELOG.md` `[Unreleased]` — user-visible changes only.
 
@@ -119,7 +125,7 @@ Docs auto-rebuild at [kglite.readthedocs.io](https://kglite.readthedocs.io) on e
 - **API reference**: auto-generated from `kglite/__init__.pyi` docstrings.
 - **Cypher reference**: `CYPHER.md`.
 - **Fluent API reference**: `FLUENT.md`.
-- **Guide content**: `docs/guides/*.md`.
+- **Guide content**: `docs/python/guides/*.md`.
 - **README.md**: landing page only — don't duplicate guide content.
 
 ## Inbox hygiene

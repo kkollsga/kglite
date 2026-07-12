@@ -1,6 +1,6 @@
 //! Typed error taxonomy for KGLite.
 //!
-//! Phase A.2 of bolt_implementation.md — replaces the prior
+//! Phase A.2 of docs/history/bolt-implementation.md — replaces the prior
 //! "everything is a `String` then wrapped as `PyValueError` /
 //! `PyRuntimeError`" pattern with a structured [`KgError`] enum + a
 //! [`KgErrorCode`] classification. Existing per-module error types

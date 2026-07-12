@@ -1,6 +1,6 @@
 //! Serde types for the blueprint JSON schema.
 //!
-//! See docs/guides/blueprints.md for the user-facing spec. These structs
+//! See docs/python/guides/blueprints.md for the user-facing spec. These structs
 //! are lenient: unknown fields are allowed and missing fields default to
 //! empty where sensible, matching the behaviour of the old Python loader.
 

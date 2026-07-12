@@ -8,7 +8,7 @@
 # `kglite_core::graph::*` (or `kglite::graph::*`) module tree.
 #
 # This script is the regression RATCHET for the api-sealing effort (see
-# roadmap.md). As of the Piece 4 hard seal, ALL wrapper crates (the wheel +
+# docs/history/roadmap-2026H1.md). As of the Piece 4 hard seal, ALL wrapper crates (the wheel +
 # the bolt/mcp/c servers) reach the engine through `kglite::api` only, and
 # `kglite::graph` is `pub(crate)` — so a below-api reach is also a compile
 # error. This grep is the fast, human-readable secondary check: it enforces
@@ -86,7 +86,7 @@ if [ "$wheel" -gt "$WHEEL_BASELINE" ]; then
 	echo "FAIL: crates/kglite-py below-api reaches grew to $wheel (baseline $WHEEL_BASELINE)."
 	echo "      A new kglite_core::graph:: reach crept in. Route it through"
 	echo "      kglite::api instead, or lift the needed item into api first"
-	echo "      (see roadmap.md / CLAUDE.md boundary principle)."
+	echo "      (see docs/history/roadmap-2026H1.md / CLAUDE.md boundary principle)."
 	fail=1
 elif [ "$wheel" -lt "$WHEEL_BASELINE" ]; then
 	echo "FAIL: crates/kglite-py below-api reaches dropped to $wheel (baseline $WHEEL_BASELINE)."

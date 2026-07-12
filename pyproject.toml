@@ -121,7 +121,7 @@ markers = [
     "differential: cypher optimizer differential tests (optimized vs. naive)",
     "model_download: tests that fetch multi-GB ML model weights (bge-m3 etc.). Opt-in via '-m model_download'.",
     "binary_size: structural gate that needs the release .dylib built (cargo build --release). CI runs it in the python-tests job which already builds the release artifact for the MCP smoke test.",
-    "bolt: Bolt protocol smoke tests (require kglite-bolt-server binary, neo4j driver, port binding). Failing-by-design contract per `bolt_implementation.md` Phase B — all 8 tests xfail(strict=True) until each Phase C sub-phase retires its slice.",
+    "bolt: Bolt protocol smoke/correctness tests (require the kglite-bolt-server release binary, neo4j driver, port binding). Phase C of docs/history/bolt-implementation.md shipped, so the original xfail(strict=True) contract stubs are now ordinary passing tests. Select with '-m bolt' or `make test-full`.",
     "bolt_stress: Bolt-protocol concurrency/stress tests (slow; multi-session under load). Opt-in via '-m bolt_stress'; excluded from default suite to keep iteration fast.",
 ]
 addopts = "-m 'not benchmark and not parity and not stress and not model_download and not binary_size and not bolt and not bolt_stress'"
