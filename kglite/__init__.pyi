@@ -3195,6 +3195,12 @@ class KnowledgeGraph:
                 crash). Set ``False`` to skip the flush for speed — the write is
                 still atomic (temp + rename, no torn file), just not guaranteed
                 flushed to physical media when the call returns.
+
+                For graphs opened with ``kglite.open(..., durable=True)``,
+                ``fsync=False`` is ignored (a ``UserWarning`` is emitted and the
+                flush happens anyway): the save is the checkpoint that truncates
+                the fsync'd write-ahead log, so skipping the flush could lose
+                both the checkpoint and the log on a crash.
         """
         ...
 

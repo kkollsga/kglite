@@ -107,11 +107,24 @@ impl DiskGraph {
             writer.write_all(bytes)?;
         }
         writer.flush()?;
-        drop(writer);
+        let file = writer
+            .into_inner()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if replace_mapped {
+            // In-place replacement of the mapped file must follow the
+            // atomic-publish doctrine (io/file.rs::write_kgl_with):
+            // fsync the staged bytes, rename OVER the live target (no
+            // remove-first window where NO file exists), then fsync the
+            // parent directory so the rename itself is durable. A crash
+            // at any point leaves either the old file or the new one.
+            file.sync_all()?;
+            drop(file);
+            // Drop the live mapping before replacing the file under it.
             self.node_slots = MmapOrVec::new();
-            std::fs::remove_file(path)?;
             std::fs::rename(&output, path)?;
+            if let Some(parent) = path.parent() {
+                super::generation::sync_directory(parent)?;
+            }
             self.node_slots = MmapOrVec::load_mapped(path, logical_len)?;
             self.node_slot_updates.clear();
             self.appended_node_slots.clear();
@@ -145,11 +158,20 @@ impl DiskGraph {
             writer.write_all(bytes)?;
         }
         writer.flush()?;
-        drop(writer);
+        let file = writer
+            .into_inner()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if replace_mapped {
+            // Same atomic-publish shape as `save_logical_node_slots`
+            // above: fsync stage, rename over the target (no remove),
+            // fsync parent dir.
+            file.sync_all()?;
+            drop(file);
             self.edge_endpoints = MmapOrVec::new();
-            std::fs::remove_file(path)?;
             std::fs::rename(&output, path)?;
+            if let Some(parent) = path.parent() {
+                super::generation::sync_directory(parent)?;
+            }
             self.edge_endpoints = MmapOrVec::load_mapped(path, logical_len)?;
             self.appended_edge_endpoints.clear();
             self.removed_edges.clear();

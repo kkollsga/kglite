@@ -22,6 +22,9 @@ impl TypeLookup {
         let mut uid_to_index = HashMap::new();
         let mut title_to_index = HashMap::new();
 
+        // Arena guard: node_weight materializes on the disk backend and
+        // must run under a DiskQueryGuard (protocol in disk/graph.rs).
+        let _guard = graph.begin_query();
         // Single pass through the graph
         for i in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(i) {
@@ -99,6 +102,9 @@ impl CombinedTypeLookup {
             Some(HashMap::new())
         };
 
+        // Arena guard: node_weight materializes on the disk backend and
+        // must run under a DiskQueryGuard (protocol in disk/graph.rs).
+        let _guard = graph.begin_query();
         // Single pass through graph - collect both source and target if different types
         for idx in graph.node_indices() {
             if let Some(node_data) = graph.node_weight(idx) {

@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Corrupted graph files fail loudly instead of silently degrading.** A
+  disk-graph sidecar (embeddings, timeseries, secondary labels) that exists
+  but fails to decode now fails the load with an error naming the file,
+  while genuinely absent sidecars stay optional; sidecar decompression is
+  bounded; mapped string columns are UTF-8-and-boundary validated once at
+  load (skippable via `KGLITE_SKIP_UTF8_VALIDATION=1` for very large trusted
+  graphs); a corrupt WAL length prefix can no longer trigger a giant
+  allocation, torn WAL headers are repaired when provably frameless and
+  refused otherwise, WAL creation fsyncs its parent directory, and
+  `save(fsync=False)` on a durable graph warns and fsyncs anyway. The
+  overflow property codec is unified into one module — timestamps
+  round-trip through the mapped borrowed decoder, and an unknown tag skips
+  one value instead of dropping the rest of the row's properties. The
+  N-Triples label journal truncates at character boundaries and
+  distinguishes torn records from clean end-of-file.
 - **The Cypher parser rejects invalid input cleanly instead of surprising or
   crashing.** Variable-length bounds validate (`*5..2` errors; `*11..` means
   eleven-or-more instead of silently matching nothing; the default 10-hop cap

@@ -341,261 +341,16 @@ pub(crate) fn strip_heavy_metadata(meta: &mut FileMetadata) {
     meta.connection_type_metadata.clear();
 }
 
-// ─── node_type_metadata.bin.zst (0.8.28 fast-load) ───────────────────────────
+// ─── node/connection type-metadata sidecars ─────────────────────────────────
 //
-// Replaces ~50% of `metadata.json` parse cost on slice-built graphs. The
-// field is HashMap<String, HashMap<String, String>> = {type_name:
-// {prop_name: prop_type_str}}. JSON parses 50K outer × 3 inner entries
-// in ~2 s; the packed binary parses the same payload in <50 ms.
-//
-// Payload (pre-zstd):
-//   [ 0.. 8]  magic       = b"KGLNTM1\0"
-//   [ 8..12]  version     = u32 LE (= 1)
-//   [12..16]  num_types   = u32 LE
-//   per type (repeated num_types times):
-//     name_len:    u32 LE
-//     name:        [u8; name_len]   (UTF-8)
-//     num_props:   u32 LE
-//     per prop:
-//       prop_name_len: u32 LE
-//       prop_name:     [u8; prop_name_len]   (UTF-8)
-//       prop_type_len: u32 LE
-//       prop_type:     [u8; prop_type_len]   (UTF-8)
-
-const NODE_TYPE_META_MAGIC: &[u8; 8] = b"KGLNTM1\0";
-const NODE_TYPE_META_VERSION: u32 = 1;
-
-pub(crate) fn write_node_type_metadata_bin(
-    dir: &std::path::Path,
-    graph: &DirGraph,
-) -> Result<(), String> {
-    if graph.node_type_metadata.is_empty() {
-        return Ok(());
-    }
-
-    // Sort entries deterministically so re-saves produce byte-identical
-    // files for clean diffs.
-    let mut entries: Vec<(&String, &HashMap<String, String>)> =
-        graph.node_type_metadata.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
-    payload.extend_from_slice(NODE_TYPE_META_MAGIC);
-    payload.extend_from_slice(&NODE_TYPE_META_VERSION.to_le_bytes());
-    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-
-    for (type_name, props) in entries {
-        payload.extend_from_slice(&(type_name.len() as u32).to_le_bytes());
-        payload.extend_from_slice(type_name.as_bytes());
-
-        let mut prop_pairs: Vec<(&String, &String)> = props.iter().collect();
-        prop_pairs.sort_by(|a, b| a.0.cmp(b.0));
-        payload.extend_from_slice(&(prop_pairs.len() as u32).to_le_bytes());
-        for (k, v) in prop_pairs {
-            payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
-            payload.extend_from_slice(k.as_bytes());
-            payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            payload.extend_from_slice(v.as_bytes());
-        }
-    }
-
-    let compressed = zstd::encode_all(payload.as_slice(), 3)
-        .map_err(|e| format!("node_type_metadata compression failed: {}", e))?;
-    std::fs::write(dir.join("node_type_metadata.bin.zst"), compressed)
-        .map_err(|e| format!("Failed to write node_type_metadata.bin.zst: {}", e))?;
-    Ok(())
-}
-
-pub(crate) fn read_node_type_metadata_bin(
-    dir: &std::path::Path,
-) -> io::Result<Option<HashMap<String, HashMap<String, String>>>> {
-    let path = dir.join("node_type_metadata.bin.zst");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let compressed = std::fs::read(&path)?;
-    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-    if bytes.len() < 16 || &bytes[..8] != NODE_TYPE_META_MAGIC {
-        return Ok(None);
-    }
-    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    if version != NODE_TYPE_META_VERSION {
-        return Ok(None);
-    }
-    let num_types = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-
-    let mut out = HashMap::with_capacity(num_types);
-    let mut cursor = 16usize;
-    for _ in 0..num_types {
-        let name = read_lp_string(&bytes, &mut cursor)?;
-        let num_props = read_u32(&bytes, &mut cursor)? as usize;
-        let mut props = HashMap::with_capacity(num_props);
-        for _ in 0..num_props {
-            let k = read_lp_string(&bytes, &mut cursor)?;
-            let v = read_lp_string(&bytes, &mut cursor)?;
-            props.insert(k, v);
-        }
-        out.insert(name, props);
-    }
-    Ok(Some(out))
-}
-
-// ─── connection_type_metadata.bin.zst (0.8.28 fast-load) ──────────────────────
-//
-// Replaces ~40% of `metadata.json` parse cost. Field is
-// HashMap<String, ConnectionTypeInfo>. ConnectionTypeInfo carries
-// source_types/target_types HashSets plus a property_types map.
-//
-// Payload (pre-zstd):
-//   [ 0.. 8]  magic       = b"KGLCTM1\0"
-//   [ 8..12]  version     = u32 LE (= 1)
-//   [12..16]  num_conns   = u32 LE
-//   per conn (repeated num_conns times):
-//     name_len:    u32, name: [u8]
-//     num_sources: u32, then (name_len + name) × num_sources
-//     num_targets: u32, then (name_len + name) × num_targets
-//     num_props:   u32, then (k_len + k + v_len + v) × num_props
-
-const CONN_TYPE_META_MAGIC: &[u8; 8] = b"KGLCTM1\0";
-const CONN_TYPE_META_VERSION: u32 = 1;
-
-pub(crate) fn write_connection_type_metadata_bin(
-    dir: &std::path::Path,
-    graph: &DirGraph,
-) -> Result<(), String> {
-    use crate::graph::schema::ConnectionTypeInfo;
-    if graph.connection_type_metadata.is_empty() {
-        return Ok(());
-    }
-
-    let mut entries: Vec<(&String, &ConnectionTypeInfo)> =
-        graph.connection_type_metadata.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
-    payload.extend_from_slice(CONN_TYPE_META_MAGIC);
-    payload.extend_from_slice(&CONN_TYPE_META_VERSION.to_le_bytes());
-    payload.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-
-    for (conn_name, info) in entries {
-        payload.extend_from_slice(&(conn_name.len() as u32).to_le_bytes());
-        payload.extend_from_slice(conn_name.as_bytes());
-
-        let mut sources: Vec<&String> = info.source_types.iter().collect();
-        sources.sort();
-        payload.extend_from_slice(&(sources.len() as u32).to_le_bytes());
-        for s in sources {
-            payload.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            payload.extend_from_slice(s.as_bytes());
-        }
-
-        let mut targets: Vec<&String> = info.target_types.iter().collect();
-        targets.sort();
-        payload.extend_from_slice(&(targets.len() as u32).to_le_bytes());
-        for t in targets {
-            payload.extend_from_slice(&(t.len() as u32).to_le_bytes());
-            payload.extend_from_slice(t.as_bytes());
-        }
-
-        let mut props: Vec<(&String, &String)> = info.property_types.iter().collect();
-        props.sort_by(|a, b| a.0.cmp(b.0));
-        payload.extend_from_slice(&(props.len() as u32).to_le_bytes());
-        for (k, v) in props {
-            payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
-            payload.extend_from_slice(k.as_bytes());
-            payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            payload.extend_from_slice(v.as_bytes());
-        }
-    }
-
-    let compressed = zstd::encode_all(payload.as_slice(), 3)
-        .map_err(|e| format!("connection_type_metadata compression failed: {}", e))?;
-    std::fs::write(dir.join("connection_type_metadata.bin.zst"), compressed)
-        .map_err(|e| format!("Failed to write connection_type_metadata.bin.zst: {}", e))?;
-    Ok(())
-}
-
-pub(crate) fn read_connection_type_metadata_bin(
-    dir: &std::path::Path,
-) -> io::Result<Option<HashMap<String, crate::graph::schema::ConnectionTypeInfo>>> {
-    use crate::graph::schema::ConnectionTypeInfo;
-    let path = dir.join("connection_type_metadata.bin.zst");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let compressed = std::fs::read(&path)?;
-    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-    if bytes.len() < 16 || &bytes[..8] != CONN_TYPE_META_MAGIC {
-        return Ok(None);
-    }
-    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    if version != CONN_TYPE_META_VERSION {
-        return Ok(None);
-    }
-    let num_conns = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-
-    let mut out = HashMap::with_capacity(num_conns);
-    let mut cursor = 16usize;
-    for _ in 0..num_conns {
-        let name = read_lp_string(&bytes, &mut cursor)?;
-        let num_sources = read_u32(&bytes, &mut cursor)? as usize;
-        let mut source_types = std::collections::HashSet::with_capacity(num_sources);
-        for _ in 0..num_sources {
-            source_types.insert(read_lp_string(&bytes, &mut cursor)?);
-        }
-        let num_targets = read_u32(&bytes, &mut cursor)? as usize;
-        let mut target_types = std::collections::HashSet::with_capacity(num_targets);
-        for _ in 0..num_targets {
-            target_types.insert(read_lp_string(&bytes, &mut cursor)?);
-        }
-        let num_props = read_u32(&bytes, &mut cursor)? as usize;
-        let mut property_types = HashMap::with_capacity(num_props);
-        for _ in 0..num_props {
-            let k = read_lp_string(&bytes, &mut cursor)?;
-            let v = read_lp_string(&bytes, &mut cursor)?;
-            property_types.insert(k, v);
-        }
-        out.insert(
-            name,
-            ConnectionTypeInfo {
-                source_types,
-                target_types,
-                property_types,
-            },
-        );
-    }
-    Ok(Some(out))
-}
-
-// Helpers for length-prefixed string + u32 reads.
-#[inline]
-fn read_u32(bytes: &[u8], cursor: &mut usize) -> io::Result<u32> {
-    if *cursor + 4 > bytes.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "metadata sidecar truncated",
-        ));
-    }
-    let v = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().unwrap());
-    *cursor += 4;
-    Ok(v)
-}
-
-#[inline]
-fn read_lp_string(bytes: &[u8], cursor: &mut usize) -> io::Result<String> {
-    let len = read_u32(bytes, cursor)? as usize;
-    if *cursor + len > bytes.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "metadata sidecar string truncated",
-        ));
-    }
-    let s = std::str::from_utf8(&bytes[*cursor..*cursor + len])
-        .map_err(io::Error::other)?
-        .to_string();
-    *cursor += len;
-    Ok(s)
-}
+// The `node_type_metadata.bin.zst` / `connection_type_metadata.bin.zst`
+// fast-load codecs live in a submodule (split out of this file for the
+// god-file gate); re-exported here so caller paths stay stable.
+mod metadata_sidecars;
+pub(crate) use metadata_sidecars::{
+    read_connection_type_metadata_bin, read_node_type_metadata_bin,
+    write_connection_type_metadata_bin, write_node_type_metadata_bin,
+};
 
 // ─── type_indices.bin.zst (0.8.13 fast-load) ─────────────────────────────────
 //
@@ -759,7 +514,7 @@ pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> 
         return Ok(false);
     }
     let compressed = std::fs::read(&path)?;
-    let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    let bytes = zstd_decompress(&compressed)?;
     let originals: Vec<String> = bincode::deserialize(&bytes).map_err(io::Error::other)?;
     for s in &originals {
         graph
@@ -1042,7 +797,7 @@ pub(crate) fn read_type_connectivity_bin(
         return Ok(None);
     }
     let compressed = std::fs::read(&path)?;
-    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+    let payload = zstd_decompress(&compressed)?;
     if payload.len() < 16 || &payload[..8] != TYPE_CONN_MAGIC {
         return Ok(None);
     }
@@ -1237,7 +992,11 @@ pub(crate) fn write_secondary_labels_bin(
 
 /// Disk-mode reader for `secondary_labels.bin.zst`. Returns
 /// `Ok(false)` if the file is absent (graceful — older disk graphs
-/// don't have it).
+/// don't have it). A file that exists but doesn't decode — bad zstd,
+/// truncated payload, or wrong magic/version — is corruption and
+/// errors (the sidecar is written whole with its magic by every
+/// version that emits it, so "present but unrecognisable" is never a
+/// legitimate state).
 pub(crate) fn read_secondary_labels_bin(
     dir: &std::path::Path,
     graph: &mut DirGraph,
@@ -1247,8 +1006,13 @@ pub(crate) fn read_secondary_labels_bin(
         return Ok(false);
     }
     let compressed = std::fs::read(&path)?;
-    let payload = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
-    decode_secondary_label_index(&payload, graph)
+    let payload = zstd_decompress(&compressed)?;
+    match decode_secondary_label_index(&payload, graph)? {
+        true => Ok(true),
+        false => Err(invalid_data(
+            "secondary_labels.bin.zst decompressed but its header is unrecognised",
+        )),
+    }
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -1268,6 +1032,23 @@ fn zstd_compress(data: &[u8]) -> io::Result<Vec<u8>> {
 /// Decompress zstd-compressed data.
 fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES)
+}
+
+/// Wrap a sidecar decode failure in an error that names the file and
+/// tells the operator what to do. Used by `load_disk_dir` for optional
+/// sidecars (embeddings / timeseries / secondary labels): a *missing*
+/// sidecar is legitimate (older graphs), but a present-and-undecodable
+/// one is corruption and must fail the load rather than silently
+/// loading a graph with data quietly absent.
+fn corrupt_sidecar_error(file_name: &str, cause: &io::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "disk graph sidecar '{file_name}' exists but is corrupt ({cause}); refusing to \
+             load the graph with this data silently missing. Restore '{file_name}' from a \
+             backup, rebuild the graph, or delete the file to load without it."
+        ),
+    )
 }
 
 fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
@@ -1896,7 +1677,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             let ti_path = dir.join("type_indices.bin.zst");
             if ti_path.exists() {
                 if let Ok(compressed) = std::fs::read(&ti_path) {
-                    if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                    if let Ok(bytes) = zstd_decompress(&compressed) {
                         match read_type_indices_bin(&bytes, &graph.interner) {
                             Ok(Some(indices)) => {
                                 graph.type_indices.replace_with(indices);
@@ -2001,15 +1782,25 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         // Prefer bincode (fast) over JSON (slow for 295 MB)
         let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
             let compressed = std::fs::read(&meta_bin_path)?;
-            let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+            let bytes = zstd_decompress(&compressed)?;
             bincode::deserialize(&bytes).map_err(io::Error::other)?
         } else {
             let meta_json = std::fs::read_to_string(&meta_json_path)?;
             serde_json::from_str(&meta_json).map_err(io::Error::other)?
         };
 
+        // `columns.bin` bytes are untrusted disk input, but the hot string
+        // readers use `from_utf8_unchecked` (see MmapColumnStore::read_str).
+        // Validate every string column once here — load-time, amortized —
+        // so the per-access unchecked conversion stays sound. Opt-out for
+        // very large trusted graphs (validation touches every string byte,
+        // forcing a full read of columns.bin): KGLITE_SKIP_UTF8_VALIDATION=1.
+        let skip_utf8 = std::env::var_os("KGLITE_SKIP_UTF8_VALIDATION").is_some();
         for tm in type_metas {
             let store = tm.to_mmap_store(std::sync::Arc::clone(&mmap_arc));
+            if !skip_utf8 {
+                store.validate_utf8(&tm.type_name)?;
+            }
             let cs = crate::graph::storage::column_store::ColumnStore::from_mmap_store(
                 std::sync::Arc::new(store),
             );
@@ -2049,7 +1840,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
             let id_indices_path = dir.join("id_indices.bin.zst");
             if id_indices_path.exists() {
                 if let Ok(compressed) = std::fs::read(&id_indices_path) {
-                    if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
+                    if let Ok(bytes) = zstd_decompress(&compressed) {
                         match read_id_indices_bin(&bytes, &graph.interner) {
                             Ok(Some(indices)) => graph.id_indices.replace_with(indices),
                             _ => {
@@ -2088,43 +1879,48 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     }
     log_stage("type_connectivity_load", t);
 
-    // Load embeddings if present
+    // Load embeddings if present. Absent file = fine (older graphs, or no
+    // embeddings). A file that EXISTS but fails to decode is corruption and
+    // must fail the load loudly — silently loading without embeddings would
+    // present a complete-looking graph with data quietly missing.
     let emb_path = dir.join("embeddings.bin.zst");
     if emb_path.exists() {
-        if let Ok(compressed) = std::fs::read(&emb_path) {
-            if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                if let Ok(mut embeddings) =
-                    bincode::deserialize::<HashMap<(String, String), EmbeddingStore>>(&bytes)
-                {
-                    // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
-                    for store in embeddings.values_mut() {
-                        store.rebuild_norms();
-                    }
-                    graph.embeddings = embeddings;
-                }
-            }
+        let mut embeddings = (|| -> io::Result<HashMap<(String, String), EmbeddingStore>> {
+            let compressed = std::fs::read(&emb_path)?;
+            let bytes = zstd_decompress(&compressed)?;
+            // Plain `bincode::deserialize` for wire parity with the plain
+            // `bincode::serialize` writer (disk_persistence.rs); size is
+            // already bounded by the zstd decompression limit above.
+            bincode::deserialize(&bytes).map_err(|e| invalid_data(e.to_string()))
+        })()
+        .map_err(|e| corrupt_sidecar_error("embeddings.bin.zst", &e))?;
+        // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
+        for store in embeddings.values_mut() {
+            store.rebuild_norms();
         }
+        graph.embeddings = embeddings;
     }
 
-    // Load timeseries if present
+    // Load timeseries if present — same fail-loud-on-corruption policy.
     let ts_path = dir.join("timeseries.bin.zst");
     if ts_path.exists() {
-        if let Ok(compressed) = std::fs::read(&ts_path) {
-            if let Ok(bytes) = zstd::decode_all(compressed.as_slice()) {
-                if let Ok(ts_store) = bincode::deserialize::<HashMap<usize, NodeTimeseries>>(&bytes)
-                {
-                    graph.timeseries_store = ts_store;
-                }
-            }
-        }
+        graph.timeseries_store = (|| -> io::Result<HashMap<usize, NodeTimeseries>> {
+            let compressed = std::fs::read(&ts_path)?;
+            let bytes = zstd_decompress(&compressed)?;
+            bincode::deserialize(&bytes).map_err(|e| invalid_data(e.to_string()))
+        })()
+        .map_err(|e| corrupt_sidecar_error("timeseries.bin.zst", &e))?;
     }
 
     // Load secondary labels sidecar if present (0.10.5+). Disk's
     // columnar layout has no slot for NodeData.extra_labels, so the
     // sidecar carries the inverted index. Older disk graphs (0.10.4
     // and earlier) won't have this file — that's the graceful single-
-    // label degrade path.
-    let _ = read_secondary_labels_bin(dir, &mut graph);
+    // label degrade path (the reader returns Ok(false) when absent).
+    // A present-but-undecodable file fails the load, same policy as
+    // embeddings/timeseries above.
+    read_secondary_labels_bin(dir, &mut graph)
+        .map_err(|e| corrupt_sidecar_error("secondary_labels.bin.zst", &e))?;
 
     // Backfill the connection_types O(1)-lookup cache from the loaded
     // metadata. The v3 / file loader does this at line 1606 of read_v3;
@@ -2218,7 +2014,7 @@ fn load_column_sidecars(
         .map(
             |job| -> io::Result<(String, crate::graph::storage::column_store::ColumnStore)> {
                 let compressed = std::fs::read(&job.col_file)?;
-                let decoded = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
+                let decoded = zstd_decompress(&compressed)?;
                 // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
                 // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
                 // magic tag. Old-format row_count is derived from

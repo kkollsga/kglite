@@ -251,12 +251,12 @@ fn sync_tree(root: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 

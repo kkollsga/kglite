@@ -25,6 +25,7 @@ pub mod mapped;
 pub mod mapped_graph_impl;
 pub mod memory;
 pub mod mode;
+pub mod overflow;
 mod packed_codec;
 pub mod type_build_meta;
 

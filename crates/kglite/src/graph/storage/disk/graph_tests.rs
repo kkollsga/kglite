@@ -60,6 +60,9 @@ fn snapshot_files(root: &std::path::Path) -> BTreeMap<String, Vec<u8>> {
 
 fn edge_score(graph: &DirGraph) -> Option<Value> {
     let key = InternedKey::from_str("score");
+    // Arena-materializing reads must run under a DiskQueryGuard (the
+    // debug assert in materialize_edge enforces the protocol).
+    let _guard = graph.graph.begin_query();
     graph
         .graph
         .edge_weight(EdgeIndex::new(0))?

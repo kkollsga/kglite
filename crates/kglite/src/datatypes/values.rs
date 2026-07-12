@@ -184,6 +184,11 @@ pub enum BorrowedValue<'a> {
     UniqueId(u32),
     String(&'a str),
     DateTime(NaiveDate),
+    /// Timestamp with seconds precision (mirrors [`Value::Timestamp`]).
+    /// `NaiveDateTime` is `Copy`, so this stays a cheap scalar variant;
+    /// it lets timestamp properties survive the borrowed streaming /
+    /// overflow-bag paths instead of being silently dropped.
+    Timestamp(chrono::NaiveDateTime),
     /// A borrowed list of owned values. Unlike the scalar variants this
     /// borrows the `Vec<Value>` slice from the source rather than copying;
     /// it lets native list properties survive the streaming-disk save path
@@ -203,6 +208,7 @@ impl<'a> BorrowedValue<'a> {
             BorrowedValue::UniqueId(v) => Value::UniqueId(v),
             BorrowedValue::String(s) => Value::String(s.to_string()),
             BorrowedValue::DateTime(d) => Value::DateTime(d),
+            BorrowedValue::Timestamp(t) => Value::Timestamp(t),
             BorrowedValue::List(items) => Value::List(items.to_vec()),
         }
     }

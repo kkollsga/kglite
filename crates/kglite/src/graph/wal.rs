@@ -201,11 +201,26 @@ pub fn read_header(r: &mut impl Read) -> io::Result<u8> {
 }
 
 /// Read every intact frame from `r`, which must be positioned at the
-/// start of the file. Reads and validates the header, then frames until
-/// a clean EOF or the first torn/corrupt frame (short read or CRC
-/// mismatch) — that frame and anything after it are discarded, modelling
-/// a crash mid-append. Returns the recovered frames in file order.
-pub fn read_frames(mut r: impl Read) -> io::Result<Vec<WalFrame>> {
+/// start of the file; `stream_len` is the total byte length of the
+/// stream (file size). Reads and validates the header, then frames
+/// until a clean EOF or the first torn/corrupt frame (short read,
+/// over-long declared length, or CRC mismatch) — that frame and
+/// anything after it are discarded, modelling a crash mid-append.
+/// Returns the recovered frames in file order.
+///
+/// `stream_len` bounds the per-frame allocation: a corrupt length
+/// prefix can otherwise ask for up to 4 GiB *before* the short read is
+/// detected. A declared length larger than the bytes remaining in the
+/// stream is provably torn/corrupt and stops recovery without
+/// allocating.
+///
+/// When recovery stops before consuming the whole stream (a torn tail
+/// after a crash, or garbage mid-file), a one-line warning reporting
+/// how many frames were recovered and the byte offset of the bad frame
+/// is printed to stderr — the frames before it are still returned, so
+/// the contract (recover everything up to the first bad frame) is
+/// unchanged; the failure is just no longer silent.
+pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame>> {
     let version = read_header(&mut r)?;
     if version != WAL_FORMAT_VERSION {
         return Err(io::Error::new(
@@ -217,30 +232,51 @@ pub fn read_frames(mut r: impl Read) -> io::Result<Vec<WalFrame>> {
         ));
     }
 
+    let header_len = (WAL_MAGIC.len() + 1) as u64;
+    let mut consumed: u64 = header_len;
     let mut frames = Vec::new();
-    loop {
+    let stopped_at = loop {
+        let frame_start = consumed;
         let mut len_buf = [0u8; 4];
         if read_exact_opt(&mut r, &mut len_buf)?.is_none() {
-            break; // clean EOF or torn length prefix
+            // Clean EOF or torn length prefix. Only warn for a torn
+            // (partial) prefix; a clean EOF is the normal end.
+            break (frame_start != stream_len).then_some(frame_start);
         }
         let mut crc_buf = [0u8; 4];
         if read_exact_opt(&mut r, &mut crc_buf)?.is_none() {
-            break; // torn: header present, crc missing
+            break Some(frame_start); // torn: length present, crc missing
         }
-        let len = u32::from_le_bytes(len_buf) as usize;
+        consumed += 8;
+        let len = u32::from_le_bytes(len_buf) as u64;
         let expected_crc = u32::from_le_bytes(crc_buf);
 
-        let mut payload = vec![0u8; len];
-        if read_exact_opt(&mut r, &mut payload)?.is_none() {
-            break; // torn: payload short
+        if len > stream_len.saturating_sub(consumed) {
+            // Declared length exceeds the bytes that exist — torn or
+            // corrupt prefix. Stop WITHOUT allocating `len` bytes.
+            break Some(frame_start);
         }
+        let mut payload = vec![0u8; len as usize];
+        if read_exact_opt(&mut r, &mut payload)?.is_none() {
+            break Some(frame_start); // torn: payload short
+        }
+        consumed += len;
         if crc32(&payload) != expected_crc {
-            break; // corrupt/torn payload — stop here
+            break Some(frame_start); // corrupt/torn payload — stop here
         }
         match bincode::deserialize::<WalFrame>(&payload) {
             Ok(frame) => frames.push(frame),
-            Err(_) => break, // unparseable payload — treat as torn tail
+            Err(_) => break Some(frame_start), // unparseable — treat as torn
         }
+    };
+    if let Some(offset) = stopped_at {
+        eprintln!(
+            "[kglite] WAL recovery stopped at a torn/corrupt frame at byte offset {offset} \
+             (of {stream_len}); recovered {} intact frame(s) before it. This is expected \
+             after a crash mid-commit; the torn tail is discarded and will be truncated at \
+             the next checkpoint.",
+            frames.len()
+        );
     }
     Ok(frames)
 }
@@ -264,9 +300,25 @@ pub fn wal_path(checkpoint: &Path) -> PathBuf {
 /// [`read_frames`]).
 pub fn recover(path: &Path) -> io::Result<Vec<WalFrame>> {
     match File::open(path) {
-        Ok(f) => read_frames(BufReader::new(f)),
+        Ok(f) => {
+            let len = f.metadata()?.len();
+            read_frames(BufReader::new(f), len)
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e),
+    }
+}
+
+/// Best-effort fsync of a file's parent directory, so a freshly created
+/// file's directory entry survives an OS/power crash (mirrors the
+/// directory-fsync step of `io/file.rs::write_kgl_with`). Errors are
+/// ignored: some filesystems don't support directory fsync, and the
+/// file's own contents are already synced.
+fn sync_parent_dir(path: &Path) {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(dirfile) = File::open(dir) {
+            let _ = dirfile.sync_all();
+        }
     }
 }
 
@@ -286,6 +338,14 @@ impl Wal {
     /// header if absent. An existing WAL is opened in append mode with its
     /// frames intact — call [`recover`] *before* opening if you need to
     /// replay them.
+    ///
+    /// The header is validated on open. A file too short to hold a full
+    /// header, or a header-sized file with the wrong magic, can never
+    /// contain a frame — it is the residue of a crash between `create`
+    /// and the header `fsync` — so it is truncated and re-initialised in
+    /// place. A *longer* file with a bad magic could be somebody's data:
+    /// that errors loudly instead of destroying it. (`recover` handles
+    /// version mismatches; open only repairs what is provably frameless.)
     pub fn open(path: PathBuf) -> io::Result<Self> {
         let existed = path.exists();
         let mut file = OpenOptions::new()
@@ -293,9 +353,46 @@ impl Wal {
             .read(true)
             .append(true)
             .open(&path)?;
-        if !existed {
+        let header_len = (WAL_MAGIC.len() + 1) as u64;
+        let file_len = file.metadata()?.len();
+        if !existed || file_len == 0 {
             write_header(&mut file)?;
             file.sync_all()?;
+            // fsync the parent directory so the file's creation itself
+            // survives a crash (same doctrine as io/file.rs's atomic
+            // save: without this the fsync'd file can vanish with the
+            // unsynced directory entry).
+            sync_parent_dir(&path);
+        } else {
+            let mut header = [0u8; 5];
+            let read_len = file_len.min(header_len) as usize;
+            {
+                use std::io::{Read, Seek, SeekFrom};
+                // `append` mode only affects writes; reads may seek.
+                file.seek(SeekFrom::Start(0))?;
+                file.read_exact(&mut header[..read_len])?;
+                file.seek(SeekFrom::End(0))?;
+            }
+            let magic_ok = read_len >= WAL_MAGIC.len() && header[..4] == WAL_MAGIC;
+            if file_len < header_len || (!magic_ok && file_len == header_len) {
+                // Torn header (crash between create and header fsync):
+                // shorter than a header, or exactly header-sized with a
+                // bad magic. No frame can exist — repair in place.
+                file.set_len(0)?;
+                write_header(&mut file)?;
+                file.sync_all()?;
+            } else if !magic_ok {
+                // Bad magic with data after the header position: this is
+                // not a torn header — refuse to touch it.
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} is not a kglite WAL file (bad magic) and is not empty; \
+                         refusing to overwrite it. Move the file aside if it is stale.",
+                        path.display()
+                    ),
+                ));
+            }
         }
         Ok(Self { file, path })
     }
@@ -370,6 +467,14 @@ mod tests {
         buf
     }
 
+    /// Test shim: run [`read_frames`] over an in-memory byte buffer,
+    /// supplying its length as the stream length (as `recover` does
+    /// with the file size).
+    fn read_frames_all(bytes: Vec<u8>) -> io::Result<Vec<WalFrame>> {
+        let len = bytes.len() as u64;
+        read_frames(Cursor::new(bytes), len)
+    }
+
     #[test]
     fn crc32_matches_known_vector() {
         // CRC32/IEEE of "123456789" is the standard check value.
@@ -384,7 +489,7 @@ mod tests {
             ops: sample_ops(),
         };
         let bytes = write_wal(std::slice::from_ref(&frame));
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         assert_eq!(got, vec![frame]);
     }
 
@@ -408,7 +513,7 @@ mod tests {
             },
         ];
         let bytes = write_wal(&frames);
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         assert_eq!(got, frames);
     }
 
@@ -428,7 +533,7 @@ mod tests {
         // Simulate a crash mid-append: lop off the last 5 bytes of the
         // final frame's payload.
         bytes.truncate(bytes.len() - 5);
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         // Only the first, fully-written frame survives.
         assert_eq!(got, vec![frames[0].clone()]);
     }
@@ -443,7 +548,7 @@ mod tests {
         // Append a stray partial length prefix (2 of 4 bytes) — a crash
         // before even the length was fully written.
         bytes.extend_from_slice(&[0u8, 0u8]);
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         assert_eq!(got, frames);
     }
 
@@ -458,27 +563,27 @@ mod tests {
         // len/crc prefix) — CRC must catch it and drop the frame.
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         assert!(got.is_empty(), "corrupt frame must not be returned");
     }
 
     #[test]
     fn header_only_wal_yields_no_frames() {
         let bytes = write_wal(&[]);
-        let got = read_frames(Cursor::new(bytes)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
         assert!(got.is_empty());
     }
 
     #[test]
     fn bad_magic_is_rejected() {
         let bytes = b"XXXX\x01".to_vec();
-        assert!(read_frames(Cursor::new(bytes)).is_err());
+        assert!(read_frames_all(bytes).is_err());
     }
 
     #[test]
     fn empty_reader_is_error() {
         let bytes: Vec<u8> = Vec::new();
-        assert!(read_frames(Cursor::new(bytes)).is_err());
+        assert!(read_frames_all(bytes).is_err());
     }
 
     // ── file handle ──────────────────────────────────────────────────
@@ -542,5 +647,102 @@ mod tests {
             wal_path(Path::new("/data/graph.kgl")),
             PathBuf::from("/data/graph.kgl-wal")
         );
+    }
+
+    // ── hardening: torn header / corrupt length / bad magic ─────────
+
+    /// A crash between `File::create` and the header fsync leaves a
+    /// 0–4 byte file. `open` must repair it (truncate + rewrite the
+    /// header) and the WAL must be fully usable afterwards.
+    #[test]
+    fn open_repairs_torn_header() {
+        for torn_len in 0..5usize {
+            let dir = TempDir::new().unwrap();
+            let p = dir.path().join("g.kgl-wal");
+            std::fs::write(&p, &WAL_MAGIC[..torn_len.min(4)]).unwrap();
+            // For torn_len == 4 the magic is complete but the version
+            // byte is missing — still shorter than a full header.
+            let mut wal = Wal::open(p.clone()).unwrap();
+            wal.append(&frame(1)).unwrap();
+            drop(wal);
+            let frames = recover(&p).unwrap();
+            assert_eq!(
+                frames.iter().map(|f| f.lsn).collect::<Vec<_>>(),
+                [1],
+                "torn header of {torn_len} bytes must be repaired"
+            );
+        }
+    }
+
+    /// A header-sized file with the wrong magic can hold no frames —
+    /// repair it too (crash could sync garbage for the header page).
+    #[test]
+    fn open_repairs_header_sized_bad_magic() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        std::fs::write(&p, b"XXXXX").unwrap();
+        let mut wal = Wal::open(p.clone()).unwrap();
+        wal.append(&frame(7)).unwrap();
+        drop(wal);
+        assert_eq!(recover(&p).unwrap().len(), 1);
+    }
+
+    /// A bad-magic file with MORE than a header's worth of data could
+    /// be someone's data — `open` must refuse, not destroy it.
+    #[test]
+    fn open_refuses_bad_magic_with_data() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        std::fs::write(&p, b"not a wal file at all").unwrap();
+        let err = Wal::open(p.clone()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // The file is untouched.
+        assert_eq!(std::fs::read(&p).unwrap(), b"not a wal file at all");
+    }
+
+    /// A corrupt length prefix must not drive a multi-GiB allocation:
+    /// the declared length is capped against the stream size, so a
+    /// 0xFFFF_FFFF prefix on a tiny file ends recovery gracefully with
+    /// the intact frames — asserted via recovered count, not by
+    /// probing the allocator.
+    #[test]
+    fn corrupt_giant_length_prefix_is_bounded() {
+        let frames = vec![frame(1), frame(2)];
+        let mut bytes = write_wal(&frames);
+        // Append a "frame" whose length prefix claims ~4 GiB.
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // len
+        bytes.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // crc
+        bytes.extend_from_slice(b"tiny tail, nowhere near 4 GiB");
+        let got = read_frames_all(bytes).unwrap();
+        assert_eq!(got, frames, "intact frames before the bad prefix survive");
+    }
+
+    /// Garbage mid-file: recovery stops at the first bad frame and
+    /// returns everything before it (existing contract, locked in).
+    #[test]
+    fn garbage_mid_file_stops_at_first_bad_frame() {
+        let good = vec![frame(1), frame(2)];
+        let mut bytes = write_wal(&good);
+        // A structurally-plausible but corrupt frame (bad CRC), then a
+        // perfectly valid frame after it.
+        let mut corrupt = Vec::new();
+        append_frame(&mut corrupt, &frame(3)).unwrap();
+        corrupt[10] ^= 0xFF; // flip a payload byte, CRC now mismatches
+        bytes.extend_from_slice(&corrupt);
+        append_frame(&mut bytes, &frame(4)).unwrap();
+        let got = read_frames_all(bytes).unwrap();
+        // Frames 1-2 recovered; 3 is corrupt; 4 is unreachable (a
+        // frame boundary can't be trusted past corruption).
+        assert_eq!(got.iter().map(|f| f.lsn).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// `Wal::open` on a fresh path must leave a recoverable, valid WAL
+    /// even before any append (header fsync + parent dir fsync).
+    #[test]
+    fn open_fresh_file_is_immediately_recoverable() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("g.kgl-wal");
+        let _wal = Wal::open(p.clone()).unwrap();
+        assert!(recover(&p).unwrap().is_empty());
     }
 }

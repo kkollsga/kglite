@@ -38,6 +38,10 @@ const HEADER_BYTES: usize = 6;
 /// of Phase 1, dropped at the end.
 pub struct LabelSpillWriter {
     writer: BufWriter<File>,
+    /// Labels longer than `u16::MAX` bytes, truncated on append.
+    /// Counted so `finish()` can report them (loader convention:
+    /// timestamped eprintln, like `loader.rs`'s `eplog!`).
+    truncated: u64,
 }
 
 impl LabelSpillWriter {
@@ -50,18 +54,33 @@ impl LabelSpillWriter {
             // measurably on NVMe and costs memory against the build's
             // already-tight budget.
             writer: BufWriter::with_capacity(64 * 1024, file),
+            truncated: 0,
         })
     }
 
     /// Append a `(qnum, label)` pair. Labels longer than `u16::MAX`
-    /// (65 535 bytes) are truncated — Wikidata labels are ~10-200 chars
-    /// in practice, so this limit is a formality.
+    /// (65 535 bytes) are truncated **at a char boundary** — Wikidata
+    /// labels are ~10-200 chars in practice, so this limit is a
+    /// formality, but a byte-exact cut could split a multi-byte code
+    /// point and turn the tail character into U+FFFD on the reader's
+    /// (deliberately lossy) decode. Truncations are counted and
+    /// reported by [`finish`](Self::finish).
     pub fn append(&mut self, qnum: u32, label: &str) -> std::io::Result<()> {
         let bytes = label.as_bytes();
-        let len = bytes.len().min(u16::MAX as usize) as u16;
+        let len = if bytes.len() > u16::MAX as usize {
+            // Floor to the nearest char boundary at or below the cap.
+            let mut cut = u16::MAX as usize;
+            while cut > 0 && !label.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            self.truncated += 1;
+            cut
+        } else {
+            bytes.len()
+        };
         self.writer.write_all(&qnum.to_le_bytes())?;
-        self.writer.write_all(&len.to_le_bytes())?;
-        self.writer.write_all(&bytes[..len as usize])?;
+        self.writer.write_all(&(len as u16).to_le_bytes())?;
+        self.writer.write_all(&bytes[..len])?;
         Ok(())
     }
 
@@ -69,6 +88,15 @@ impl LabelSpillWriter {
     /// in bytes — useful for verbose logging.
     pub fn finish(mut self) -> std::io::Result<u64> {
         self.writer.flush()?;
+        if self.truncated > 0 {
+            eprintln!(
+                "[{}] label journal: truncated {} label(s) longer than {} bytes \
+                 (kept the leading bytes, cut at a char boundary)",
+                chrono::Local::now().format("%H:%M:%S"),
+                self.truncated,
+                u16::MAX
+            );
+        }
         let file = self
             .writer
             .into_inner()
@@ -94,22 +122,52 @@ pub fn read_labels_for(
     wanted: &HashSet<u32>,
 ) -> std::io::Result<HashMap<u32, String>> {
     let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut result: HashMap<u32, String> = HashMap::with_capacity(wanted.len());
 
     let mut qbuf = [0u8; 4];
     let mut lenbuf = [0u8; 2];
+    // Byte offset of the record currently being read — for the torn-
+    // record warning and the payload-fits-in-file check below.
+    let mut offset: u64 = 0;
+    let torn = |offset: u64, what: &str| {
+        eprintln!(
+            "[{}] label journal: torn record at byte offset {offset} ({what}); \
+             keeping the {} bytes before it and stopping",
+            chrono::Local::now().format("%H:%M:%S"),
+            offset
+        );
+    };
 
     loop {
-        // Graceful EOF on the qnum read.
-        match reader.read_exact(&mut qbuf) {
-            Ok(()) => {}
-            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e),
+        // Clean EOF is 0 bytes read at a record boundary. 1-3 bytes is
+        // a TORN record (e.g. a crash mid-append): the data before it
+        // is fine — stop reading, but say so. (`read_exact` can't
+        // distinguish the two, hence `read_full`.)
+        let n = read_full(&mut reader, &mut qbuf)?;
+        if n == 0 {
+            break; // clean EOF
         }
-        reader.read_exact(&mut lenbuf)?;
+        if n < qbuf.len() {
+            torn(offset, "partial qnum header");
+            break;
+        }
+        let n = read_full(&mut reader, &mut lenbuf)?;
+        if n < lenbuf.len() {
+            torn(offset, "partial length header");
+            break;
+        }
         let qnum = u32::from_le_bytes(qbuf);
         let len = u16::from_le_bytes(lenbuf) as usize;
+
+        // A payload that extends past the file is torn too — detect it
+        // by arithmetic (the skip path's `seek` would silently succeed
+        // past EOF and masquerade as a clean EOF on the next record).
+        if offset + HEADER_BYTES as u64 + len as u64 > file_len {
+            torn(offset, "payload extends past end of file");
+            break;
+        }
 
         if wanted.contains(&qnum) && len > 0 {
             let mut bytes = vec![0u8; len];
@@ -117,14 +175,34 @@ pub fn read_labels_for(
             // Lossy decode: Wikidata labels are valid UTF-8, but a
             // malformed byte sequence shouldn't fail the whole rename
             // pass. Bad labels end up as the U+FFFD-substituted form.
+            // (This is deliberate; the WRITER truncates at char
+            // boundaries so well-formed input never triggers it.)
             result.insert(qnum, String::from_utf8_lossy(&bytes).into_owned());
         } else {
             // Skip without allocating. `seek_relative` bypasses the
             // BufReader buffer when possible — fast on NVMe.
             reader.seek(SeekFrom::Current(len as i64))?;
         }
+        offset += HEADER_BYTES as u64 + len as u64;
     }
     Ok(result)
+}
+
+/// `read_exact` that reports HOW MANY bytes it read before EOF instead
+/// of collapsing "0 bytes" and "some but not all" into one error —
+/// needed to tell a clean end-of-journal from a torn trailing record.
+/// Non-EOF I/O errors propagate.
+fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 /// Total record overhead per entry, for size estimation in callers
@@ -210,6 +288,95 @@ mod tests {
         let wanted: HashSet<u32> = [1, 2, 3].into_iter().collect();
         let got = read_labels_for(&path, &wanted).unwrap();
         assert!(got.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_label_truncates_at_char_boundary() {
+        // 4-byte code points; u16::MAX (65535) is not a multiple of 4,
+        // so a byte-exact cut WOULD split a character. The writer must
+        // floor to the nearest boundary and the read-back must be
+        // valid UTF-8 (no U+FFFD from the lossy decode).
+        let path = tmp_path();
+        let big: String = "\u{10348}".repeat(20_000); // 80,000 bytes
+        let mut w = LabelSpillWriter::new(&path).unwrap();
+        w.append(1, &big).unwrap();
+        w.append(2, "after").unwrap();
+        w.finish().unwrap();
+
+        let wanted: HashSet<u32> = [1, 2].into_iter().collect();
+        let got = read_labels_for(&path, &wanted).unwrap();
+        let label = got.get(&1).unwrap();
+        assert!(label.len() <= u16::MAX as usize);
+        assert_eq!(label.len() % 4, 0, "cut must land on a 4-byte boundary");
+        assert!(
+            !label.contains('\u{FFFD}'),
+            "char-boundary truncation must survive the lossy decode intact"
+        );
+        assert!(big.starts_with(label.as_str()));
+        // The record after the truncated one is still readable.
+        assert_eq!(got.get(&2).unwrap(), "after");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn torn_trailing_header_stops_cleanly() {
+        // A crash mid-append can leave 1-3 bytes of the next record's
+        // header. The reader must return every complete record before
+        // it, without error.
+        let path = tmp_path();
+        let mut w = LabelSpillWriter::new(&path).unwrap();
+        w.append(5, "human").unwrap();
+        w.append(20, "Norway").unwrap();
+        w.finish().unwrap();
+        // Append 3 stray bytes — a torn qnum.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&[0xAA, 0xBB, 0xCC]).unwrap();
+        }
+
+        let wanted: HashSet<u32> = [5, 20].into_iter().collect();
+        let got = read_labels_for(&path, &wanted).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got.get(&5).unwrap(), "human");
+        assert_eq!(got.get(&20).unwrap(), "Norway");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn torn_payload_stops_cleanly_even_when_skipped() {
+        // A record whose declared payload extends past EOF is torn.
+        // The skip path's `seek` would silently jump past EOF, so the
+        // reader must catch this by arithmetic — for both wanted and
+        // unwanted (skipped) records.
+        let path = tmp_path();
+        let mut w = LabelSpillWriter::new(&path).unwrap();
+        w.append(5, "human").unwrap();
+        w.finish().unwrap();
+        // Append a header claiming 100 payload bytes, then only 4.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&9u32.to_le_bytes()).unwrap();
+            f.write_all(&100u16.to_le_bytes()).unwrap();
+            f.write_all(b"oops").unwrap();
+        }
+        for wanted_set in [vec![5u32, 9], vec![5u32]] {
+            let wanted: HashSet<u32> = wanted_set.into_iter().collect();
+            let got = read_labels_for(&path, &wanted).unwrap();
+            assert_eq!(got.len(), 1, "only the intact record survives");
+            assert_eq!(got.get(&5).unwrap(), "human");
+        }
 
         let _ = std::fs::remove_file(path);
     }

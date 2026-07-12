@@ -791,16 +791,24 @@ pub(crate) fn detach_delete_nodes(
     // Remove every incident edge — a self-loop is listed twice, so dedup.
     let mut deleted_edges: HashSet<EdgeIndex> = HashSet::new();
     for &node_idx in nodes_to_delete {
-        let incident: Vec<EdgeIndex> = graph
-            .graph
-            .edges_directed(node_idx, petgraph::Direction::Outgoing)
-            .chain(
-                graph
-                    .graph
-                    .edges_directed(node_idx, petgraph::Direction::Incoming),
-            )
-            .map(|e| e.id())
-            .collect();
+        // Scope the arena guard to the read: edge iteration materializes
+        // into the disk backend's query arena, which must run under a
+        // DiskQueryGuard (arena protocol in disk/graph.rs, enforced by a
+        // debug assert). The guard is dropped before the `&mut`
+        // remove_edge calls below.
+        let incident: Vec<EdgeIndex> = {
+            let _guard = graph.graph.begin_query();
+            graph
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Outgoing)
+                .chain(
+                    graph
+                        .graph
+                        .edges_directed(node_idx, petgraph::Direction::Incoming),
+                )
+                .map(|e| e.id())
+                .collect()
+        };
         for edge_idx in incident {
             if deleted_edges.insert(edge_idx) {
                 GraphWrite::remove_edge(&mut graph.graph, edge_idx);
@@ -814,10 +822,15 @@ pub(crate) fn detach_delete_nodes(
     }
 
     // Affected node types — collected before deletion for index cleanup.
+    // Same guard scoping as the edge collection above (node_weight
+    // materializes on the disk backend).
     let mut affected_types: HashSet<String> = HashSet::new();
-    for &node_idx in nodes_to_delete {
-        if let Some(node) = graph.graph.node_weight(node_idx) {
-            affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
+    {
+        let _guard = graph.graph.begin_query();
+        for &node_idx in nodes_to_delete {
+            if let Some(node) = graph.graph.node_weight(node_idx) {
+                affected_types.insert(node.get_node_type_ref(&graph.interner).to_string());
+            }
         }
     }
 

@@ -552,6 +552,27 @@ impl KnowledgeGraph {
 
     #[pyo3(signature = (path=None, *, fsync=true))]
     fn save(&mut self, py: Python<'_>, path: Option<&str>, fsync: bool) -> PyResult<()> {
+        // Durable (WAL) graphs: `save()` is the checkpoint that TRUNCATES
+        // the fsync'd WAL below. Honouring `fsync=False` here would pair a
+        // maybe-not-on-disk checkpoint with a destroyed log — a crash then
+        // loses both. Force the flush and tell the caller (documented
+        // contract in the `save()` docstring).
+        let fsync = if self.lifecycle.durable.is_some() && !fsync {
+            let msg = "save(fsync=False) is ignored for durable graphs: the checkpoint \
+                       truncates the write-ahead log, so it must itself be flushed to disk \
+                       (fsync forced to True) or a crash would lose both the checkpoint and \
+                       the log.";
+            let cmsg = std::ffi::CString::new(msg).unwrap_or_default();
+            let _ = PyErr::warn(
+                py,
+                py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+                cmsg.as_c_str(),
+                1,
+            );
+            true
+        } else {
+            fsync
+        };
         // Resolve the target: explicit path wins; otherwise fall back to the
         // origin file this graph was opened from (`kglite.open`/`load`). A
         // graph built in memory with no origin and no explicit path has

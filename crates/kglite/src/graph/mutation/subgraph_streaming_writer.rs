@@ -66,7 +66,7 @@ pub(super) struct TypeWriter {
     /// Per-row offsets into [`Self::overflow_data`]. Length =
     /// `row_count + 1` once `finalize` is called (with the final entry
     /// being the past-the-end offset, matching the source's wire
-    /// format — see [`crate::graph::storage::column_store::ColumnStore::scan_overflow_blob`]).
+    /// format — see [`crate::graph::storage::overflow`]).
     overflow_offsets: Vec<u64>,
     /// Concatenated per-row overflow blobs. Each row's blob is
     /// `[u16 LE: num_entries] + entries…` where each entry is
@@ -371,7 +371,11 @@ impl<'a> RowVisitor<'a> {
             // matches!(value, Value::Null) skip on the ntriples
             // ingestion path).
             if !matches!(value, BorrowedValue::Null) {
-                ColumnStore::serialize_overflow_value_borrowed(self.overflow_buf, key, &value);
+                crate::graph::storage::overflow::encode_value_borrowed(
+                    self.overflow_buf,
+                    key,
+                    &value,
+                );
                 *self.overflow_count = self.overflow_count.saturating_add(1);
             }
         }
@@ -939,6 +943,7 @@ fn borrowed_kind(v: &BorrowedValue<'_>) -> &'static str {
         BorrowedValue::UniqueId(_) => "UniqueId",
         BorrowedValue::String(_) => "String",
         BorrowedValue::DateTime(_) => "DateTime",
+        BorrowedValue::Timestamp(_) => "Timestamp",
         BorrowedValue::List(_) => "List",
     }
 }

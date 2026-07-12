@@ -682,7 +682,11 @@ impl DirGraph {
             return;
         }
 
-        // Fallback: scan all edges (pre-metadata graphs)
+        // Fallback: scan all edges (pre-metadata graphs). On the disk
+        // backend `edge_weights()` materializes into the query arena,
+        // which must run under a DiskQueryGuard (arena protocol in
+        // disk/graph.rs, enforced by a debug assert).
+        let _guard = self.graph.begin_query();
         for edge in self.graph.edge_weights() {
             self.connection_types.insert(edge.connection_type);
         }

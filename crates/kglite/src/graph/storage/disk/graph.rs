@@ -354,6 +354,34 @@ impl Drop for DiskQueryGuard<'_> {
     }
 }
 
+/// Debug-only check that a materializing read is running under an
+/// active [`DiskQueryGuard`]. The arena SAFETY argument (see the block
+/// comment above) rests on the guard count keeping
+/// `begin_query`/`reset_arenas` from clearing the arenas while returned
+/// references are alive — a materialization with the count at zero is a
+/// protocol violation that could become a use-after-free the moment a
+/// concurrent query begins. Compiles to nothing in release builds.
+#[inline(always)]
+fn debug_assert_arena_guard_active(graph: &DiskGraph, who: &str) {
+    #[cfg(debug_assertions)]
+    {
+        let active = graph
+            .active_queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(
+            *active > 0,
+            "DiskGraph::{who} materialized into the arena without an active \
+             DiskQueryGuard (active_queries == 0); wrap the read in begin_query() \
+             — see the arena SAFETY protocol comment in disk/graph.rs"
+        );
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (graph, who);
+    }
+}
+
 impl std::fmt::Debug for DiskGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -570,12 +598,23 @@ impl DiskGraph {
         // used by `edge_arena`.
         let boxed = Box::new(node_data);
         let ptr: *const NodeData = &*boxed;
+        debug_assert_arena_guard_active(self, "node_weight");
         self.node_arena.lock().unwrap().push(boxed);
-        // SAFETY: `boxed` lives in the arena until `clear_arenas`
-        // (`&mut self`) or `reset_arenas` (called between top-level
-        // queries with no live materialization refs). Our `&self`
-        // borrow keeps both at bay, so the heap pointer is valid for
-        // the returned `&NodeData`'s lifetime.
+        // `boxed` lives in the arena until the arena is cleared, and
+        // clearing is governed by the `active_queries` guard protocol
+        // (see the DiskGraph interior-mutability block comment): the only
+        // `&self` clear paths — `begin_query` and `reset_arenas` — take
+        // the `active_queries` lock and clear ONLY while the count is
+        // zero, and every materializing read runs under a `DiskQueryGuard`
+        // that holds the count above zero for the returned reference's
+        // lifetime. (`clear_arenas` takes `&mut self`, which the borrow
+        // checker already orders after this `&self` borrow.) The `&self`
+        // borrow alone would NOT be enough — `begin_query`/`reset_arenas`
+        // clear through `&self`.
+        //
+        // SAFETY: the guard-count protocol above keeps the arena (and so
+        // this heap pointer) alive for the returned reference's lifetime;
+        // the protocol is asserted in debug builds above.
         unsafe { Some(&*ptr) }
     }
 
@@ -803,15 +842,19 @@ impl DiskGraph {
             connection_type: ct,
             properties: props,
         });
-        // SAFETY: Box allocates on the heap — the pointer is stable even when
-        // the Vec grows. The arena is never cleared while &self borrows are alive
-        // (clear_arenas requires &mut self).
         let ptr = &*boxed as *const EdgeData;
+        debug_assert_arena_guard_active(self, "materialize_edge");
         let mut arena = self.edge_arena.lock().unwrap();
         arena.push(boxed);
-        // SAFETY: `boxed: Box<EdgeData>` gives a stable heap pointer; the
-        // arena keeps it alive until `clear_arenas` (`&mut self`); our
-        // `&self` borrow prevents that. See block comment above.
+        // `boxed: Box<EdgeData>` gives a stable heap pointer that survives
+        // Vec regrowth. Its lifetime is protected by the `active_queries`
+        // guard protocol, not by `&self` alone — `begin_query`/
+        // `reset_arenas` clear through `&self` but only while the guard
+        // count is zero (see the DiskGraph interior-mutability block
+        // comment and the matching note in `node_weight`).
+        // SAFETY: materializing reads run under a `DiskQueryGuard`
+        // (asserted in debug builds above), which keeps the arena — and
+        // this pointer — alive for the returned reference's lifetime.
         unsafe { &*ptr }
     }
 

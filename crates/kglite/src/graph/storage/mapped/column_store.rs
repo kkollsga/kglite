@@ -158,13 +158,18 @@ impl MmapColumnStore {
     /// Offset convention: `offsets[row]` is the cumulative end byte.
     /// Row 0 starts at byte 0; row i>0 starts at `offsets[i-1]`.
     ///
-    /// SAFETY: Strings on disk were always written through
-    /// `Value::String` / `String::as_bytes()`, which are valid UTF-8
-    /// by Rust's core invariant. We use `from_utf8_unchecked` to
-    /// skip the byte-by-byte validator that walks every character.
-    /// On the Wikidata streaming workload this matters: at 30
-    /// strings × 17 M rows × ~50 bytes the validator was processing
-    /// ~25 GB of data per save, far more than the actual work.
+    /// SAFETY: the `from_utf8_unchecked` below is sound because every
+    /// string column reachable here was validated **once, at load
+    /// time**: the disk-graph loader (`io/file.rs::load_disk_dir`)
+    /// calls [`Self::validate_utf8`] on each store mapped from an
+    /// existing `columns.bin` (whole-blob UTF-8 check + offset
+    /// monotonicity/bounds + char-boundary check per row), and the
+    /// only other constructor path is the same-process direct-write
+    /// builder (`ntriples/column_builder.rs`), which writes the bytes
+    /// from `String::as_bytes()` itself. Skipping the per-access
+    /// validator matters on the Wikidata streaming workload: at 30
+    /// strings × 17 M rows × ~50 bytes it was processing ~25 GB of
+    /// data per save, far more than the actual work.
     #[inline]
     fn read_str(&self, data_region: &Region, offsets_region: &Region, row: usize) -> &str {
         let end = self.read_u64(offsets_region, row) as usize;
@@ -174,9 +179,97 @@ impl MmapColumnStore {
             0
         };
         let bytes = &self.mmap[data_region.offset + start..data_region.offset + end];
-        // SAFETY: see method-level note. Values written via
-        // `String::as_bytes()` are guaranteed valid UTF-8.
+        // SAFETY: see method-level note — validated at load time (or
+        // written in-process from `String::as_bytes()`).
         unsafe { std::str::from_utf8_unchecked(bytes) }
+    }
+}
+
+// ─── Load-time validation ────────────────────────────────────────────────────
+
+impl MmapColumnStore {
+    /// Validate every string column of this store — bytes come from
+    /// disk and are untrusted until proven UTF-8. Runs **once at load
+    /// time** (called by `load_disk_dir` for stores mapped from an
+    /// existing `columns.bin`), never on the per-access read path; the
+    /// hot readers keep their `from_utf8_unchecked` with this pass as
+    /// the soundness citation.
+    ///
+    /// Checks, per string column (id / title / dense str columns):
+    /// - the data/offsets/nulls regions lie within the mmap;
+    /// - the whole data blob is valid UTF-8;
+    /// - offsets are monotonically non-decreasing, within the blob,
+    ///   and land on char boundaries (a corrupt offset that slices a
+    ///   multi-byte code point would make a *slice* of a valid blob
+    ///   invalid).
+    pub fn validate_utf8(&self, type_name: &str) -> std::io::Result<()> {
+        if let Some(sc) = &self.id_str {
+            self.validate_str_column(sc, type_name, "__id__")?;
+        }
+        self.validate_str_column(&self.title, type_name, "__title__")?;
+        for (i, sc) in self.str_cols.iter().enumerate() {
+            self.validate_str_column(sc, type_name, &format!("str_col[{i}]"))?;
+        }
+        Ok(())
+    }
+
+    fn validate_str_column(
+        &self,
+        sc: &StrColumnMeta,
+        type_name: &str,
+        col: &str,
+    ) -> std::io::Result<()> {
+        let corrupt = |what: &str| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "columns.bin string column '{type_name}.{col}' is corrupt: {what} \
+                     (refusing to load — rebuild the graph or restore the file from backup)"
+                ),
+            )
+        };
+        // Fully-absent column (e.g. a store with no titles).
+        if sc.data.len == 0 && sc.offsets.len == 0 && sc.nulls.len == 0 {
+            return Ok(());
+        }
+        for (region, what) in [
+            (&sc.data, "data"),
+            (&sc.offsets, "offsets"),
+            (&sc.nulls, "nulls"),
+        ] {
+            let end = region
+                .offset
+                .checked_add(region.len)
+                .ok_or_else(|| corrupt(&format!("{what} region overflows usize")))?;
+            if end > self.mmap.len() {
+                return Err(corrupt(&format!("{what} region extends past the file")));
+            }
+        }
+        let rows = self.row_count as usize;
+        let need_offsets = rows
+            .checked_mul(8)
+            .ok_or_else(|| corrupt("offset count overflows usize"))?;
+        if sc.offsets.len < need_offsets {
+            return Err(corrupt("offsets region too small for the row count"));
+        }
+        let blob = &self.mmap[sc.data.offset..sc.data.offset + sc.data.len];
+        let s = std::str::from_utf8(blob).map_err(|e| corrupt(&format!("invalid UTF-8: {e}")))?;
+        let mut prev = 0u64;
+        for row in 0..rows {
+            let end = self.read_u64(&sc.offsets, row);
+            if end < prev || end as usize > blob.len() {
+                return Err(corrupt(&format!(
+                    "non-monotonic or out-of-range offset at row {row}"
+                )));
+            }
+            if !s.is_char_boundary(end as usize) {
+                return Err(corrupt(&format!(
+                    "offset at row {row} splits a UTF-8 code point"
+                )));
+            }
+            prev = end;
+        }
+        Ok(())
     }
 }
 
@@ -415,130 +508,20 @@ impl MmapColumnStore {
                 }
             }
         }
-        // Overflow bag — decode bincode entries IN PLACE and yield
-        // `BorrowedValue` slices into the mmap blob. The naïve path
-        // would call `overflow_row_properties` which allocates a
+        // Overflow bag — decode entries IN PLACE via the shared codec
+        // ([`crate::graph::storage::overflow`]) and yield `BorrowedValue`
+        // slices into the mmap blob. The naïve path would call
+        // `overflow_row_properties` which allocates a
         // `Vec<(InternedKey, Value)>` + a `String` per entry; on
-        // Wikidata articles ~20+ properties per row land in
-        // overflow, so that's ~250 M `String` allocations across the
-        // node walk. The custom decoder below skips them entirely:
-        // strings borrow the raw mmap bytes via
-        // `from_utf8_unchecked` (overflow blobs were written from
-        // `String::as_bytes`, so guaranteed valid UTF-8).
+        // Wikidata articles ~20+ properties per row land in overflow,
+        // so that's ~250 M `String` allocations across the node walk.
+        // The shared borrowed decoder skips them: strings borrow the
+        // raw mmap bytes (UTF-8 *checked* — disk bytes are untrusted),
+        // unknown future tags are skipped without dropping the rest of
+        // the row, and Timestamp (tag 7) round-trips (both were bugs of
+        // this file's previous hand-rolled copy of the decoder).
         if let Some(blob) = self.overflow_blob(row_id) {
-            if blob.len() >= 2 {
-                let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
-                let mut pos = 2;
-                for _ in 0..num_entries {
-                    if pos + 9 > blob.len() {
-                        break;
-                    }
-                    let entry_key =
-                        u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
-                    let type_tag = blob[pos + 8];
-                    pos += 9;
-                    let key = InternedKey::from_u64(entry_key);
-                    match type_tag {
-                        0 => {
-                            f(key, BorrowedValue::Null)?;
-                        }
-                        1 => {
-                            if pos + 8 > blob.len() {
-                                break;
-                            }
-                            let v =
-                                i64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
-                            pos += 8;
-                            f(key, BorrowedValue::Int64(v))?;
-                        }
-                        2 => {
-                            if pos + 8 > blob.len() {
-                                break;
-                            }
-                            let v =
-                                f64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
-                            pos += 8;
-                            f(key, BorrowedValue::Float64(v))?;
-                        }
-                        3 => {
-                            if pos + 4 > blob.len() {
-                                break;
-                            }
-                            let v =
-                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]));
-                            pos += 4;
-                            f(key, BorrowedValue::UniqueId(v))?;
-                        }
-                        4 => {
-                            if pos + 1 > blob.len() {
-                                break;
-                            }
-                            let v = blob[pos] != 0;
-                            pos += 1;
-                            f(key, BorrowedValue::Boolean(v))?;
-                        }
-                        5 => {
-                            if pos + 4 > blob.len() {
-                                break;
-                            }
-                            let days =
-                                i32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]));
-                            pos += 4;
-                            f(
-                                key,
-                                BorrowedValue::DateTime(
-                                    UNIX_EPOCH_DATE + chrono::Duration::days(days as i64),
-                                ),
-                            )?;
-                        }
-                        6 => {
-                            if pos + 4 > blob.len() {
-                                break;
-                            }
-                            let slen =
-                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]))
-                                    as usize;
-                            pos += 4;
-                            if pos + slen > blob.len() {
-                                break;
-                            }
-                            // SAFETY: overflow strings were written via
-                            // `String::as_bytes()` (overflow_serializer in
-                            // ntriples build / save paths), so the bytes
-                            // are valid UTF-8 by construction.
-                            let s =
-                                unsafe { std::str::from_utf8_unchecked(&blob[pos..pos + slen]) };
-                            pos += slen;
-                            f(key, BorrowedValue::String(s))?;
-                        }
-                        8 => {
-                            // List: u32 length prefix + bincode(Vec<Value>).
-                            // Unlike strings this can't borrow the blob —
-                            // bincode must allocate — but the owned `Vec`
-                            // lives across the synchronous `f()` call, so a
-                            // borrowed slice into it is valid.
-                            if pos + 4 > blob.len() {
-                                break;
-                            }
-                            let blen =
-                                u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap_or([0; 4]))
-                                    as usize;
-                            pos += 4;
-                            if pos + blen > blob.len() {
-                                break;
-                            }
-                            let items: Vec<crate::datatypes::values::Value> =
-                                match bincode::deserialize(&blob[pos..pos + blen]) {
-                                    Ok(v) => v,
-                                    Err(_) => break,
-                                };
-                            pos += blen;
-                            f(key, BorrowedValue::List(&items))?;
-                        }
-                        _ => break,
-                    }
-                }
-            }
+            crate::graph::storage::overflow::try_for_each_borrowed(blob, f)?;
         }
         Ok(())
     }
@@ -578,23 +561,21 @@ impl MmapColumnStore {
 
 // ─── Overflow bag ────────────────────────────────────────────────────────────
 //
-// Format per entity blob: [num_entries: u16]
-// then repeated: [key_u64: 8B][type_tag: 1B][value_bytes: variable]
-//
-// Type tags: 0=Null, 1=Int64(8B), 2=Float64(8B), 3=UniqueId(4B),
-//            4=Bool(1B), 5=Date(4B i32), 6=String(u32 len + bytes)
+// Wire format + tag table live in `crate::graph::storage::overflow` —
+// the single shared codec for both this mmap-backed store and the heap
+// `ColumnStore`.
 
 impl MmapColumnStore {
     /// Look up a single property in the overflow bag for a given row.
     pub fn get_overflow_property(&self, row_id: u32, key: InternedKey) -> Option<Value> {
         let blob = self.overflow_blob(row_id)?;
-        Self::scan_overflow_blob(blob, key)
+        crate::graph::storage::overflow::scan_blob(blob, key)
     }
 
     /// Decode all properties from the overflow bag for a given row.
     fn overflow_row_properties(&self, row_id: u32) -> Vec<(InternedKey, Value)> {
         match self.overflow_blob(row_id) {
-            Some(blob) => Self::decode_overflow_blob(blob),
+            Some(blob) => crate::graph::storage::overflow::decode_blob(blob),
             None => Vec::new(),
         }
     }
@@ -617,163 +598,123 @@ impl MmapColumnStore {
         }
         Some(&self.mmap[self.overflow_data.offset + start..self.overflow_data.offset + end])
     }
+}
 
-    /// Scan an overflow blob for a specific key. Returns the value if found.
-    fn scan_overflow_blob(blob: &[u8], key: InternedKey) -> Option<Value> {
-        let target = key.as_u64();
-        if blob.len() < 2 {
-            return None;
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memmap2::MmapMut;
+
+    /// Build a minimal store over an anonymous mmap with one string
+    /// title column: `titles` are laid out back-to-back, followed by a
+    /// u64 cumulative-end offset per row, followed by a null byte per
+    /// row. Returns the store plus the byte range of the title data
+    /// (so tests can corrupt it).
+    fn store_with_titles(titles: &[&str]) -> (MmapColumnStore, usize) {
+        let data_bytes: Vec<u8> = titles.iter().flat_map(|t| t.bytes()).collect();
+        let mut offsets: Vec<u8> = Vec::new();
+        let mut end = 0u64;
+        for t in titles {
+            end += t.len() as u64;
+            offsets.extend_from_slice(&end.to_le_bytes());
         }
-        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
-        let mut pos = 2;
-        for _ in 0..num_entries {
-            if pos + 9 > blob.len() {
-                break;
-            }
-            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
-            let type_tag = blob[pos + 8];
-            pos += 9;
-            if entry_key == target {
-                return Self::read_overflow_value(blob, &mut pos, type_tag);
-            }
-            // Skip value
-            Self::skip_overflow_value(blob, &mut pos, type_tag);
-        }
-        None
+        let nulls = vec![0u8; titles.len()];
+
+        let total = data_bytes.len() + offsets.len() + nulls.len();
+        let mut mmap = MmapMut::map_anon(total.max(1)).unwrap();
+        mmap[..data_bytes.len()].copy_from_slice(&data_bytes);
+        mmap[data_bytes.len()..data_bytes.len() + offsets.len()].copy_from_slice(&offsets);
+        mmap[data_bytes.len() + offsets.len()..total].copy_from_slice(&nulls);
+
+        let store = MmapColumnStore {
+            mmap: Arc::new(mmap),
+            row_count: titles.len() as u32,
+            id_is_string: false,
+            id_fixed: None,
+            id_str: None,
+            title: StrColumnMeta {
+                data: Region {
+                    offset: 0,
+                    len: data_bytes.len(),
+                },
+                offsets: Region {
+                    offset: data_bytes.len(),
+                    len: offsets.len(),
+                },
+                nulls: Region {
+                    offset: data_bytes.len() + offsets.len(),
+                    len: titles.len(),
+                },
+            },
+            col_map: HashMap::new(),
+            fixed_cols: Vec::new(),
+            str_cols: Vec::new(),
+            overflow_offsets: Region::EMPTY,
+            overflow_data: Region::EMPTY,
+            has_overflow: false,
+        };
+        (store, data_bytes.len())
     }
 
-    /// Decode all entries from an overflow blob.
-    fn decode_overflow_blob(blob: &[u8]) -> Vec<(InternedKey, Value)> {
-        if blob.len() < 2 {
-            return Vec::new();
-        }
-        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
-        let mut result = Vec::with_capacity(num_entries);
-        let mut pos = 2;
-        for _ in 0..num_entries {
-            if pos + 9 > blob.len() {
-                break;
-            }
-            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
-            let type_tag = blob[pos + 8];
-            pos += 9;
-            let key = InternedKey::from_u64(entry_key);
-            if let Some(val) = Self::read_overflow_value(blob, &mut pos, type_tag) {
-                result.push((key, val));
-            }
-        }
-        result
+    #[test]
+    fn validate_utf8_accepts_valid_store() {
+        let (store, _) = store_with_titles(&["Zebra", "blåbær", "日本語"]);
+        store.validate_utf8("T").unwrap();
+        assert_eq!(store.title_borrowed(1), Some("blåbær"));
     }
 
-    /// Read a single value from the overflow blob at the given position.
-    fn read_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
-        match type_tag {
-            0 => Some(Value::Null),
-            1 => {
-                // Int64: 8 bytes
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let v = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                Some(Value::Int64(v))
-            }
-            2 => {
-                // Float64: 8 bytes
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let v = f64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                Some(Value::Float64(v))
-            }
-            3 => {
-                // UniqueId: 4 bytes
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let v = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
-                *pos += 4;
-                Some(Value::UniqueId(v))
-            }
-            4 => {
-                // Bool: 1 byte
-                if *pos + 1 > blob.len() {
-                    return None;
-                }
-                let v = blob[*pos] != 0;
-                *pos += 1;
-                Some(Value::Boolean(v))
-            }
-            5 => {
-                // Date: 4 bytes as i32 days since epoch
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let days = i32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
-                *pos += 4;
-                let date = UNIX_EPOCH_DATE + chrono::Duration::days(days as i64);
-                Some(Value::DateTime(date))
-            }
-            6 => {
-                // String: u32 length prefix + bytes
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let slen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
-                *pos += 4;
-                if *pos + slen > blob.len() {
-                    return None;
-                }
-                let s = String::from_utf8_lossy(&blob[*pos..*pos + slen]).into_owned();
-                *pos += slen;
-                Some(Value::String(s))
-            }
-            7 => {
-                // Timestamp: 8 bytes i64 seconds since the unix epoch.
-                // (Parity with the heap ColumnStore reader — this arm was
-                // previously missing here, silently dropping timestamps in
-                // mapped-mode overflow.)
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let secs = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
-                Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
-            }
-            8 => {
-                // List: u32 length prefix + bincode(Vec<Value>).
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let blen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
-                *pos += 4;
-                if *pos + blen > blob.len() {
-                    return None;
-                }
-                let items: Vec<Value> = bincode::deserialize(&blob[*pos..*pos + blen]).ok()?;
-                *pos += blen;
-                Some(Value::List(items))
-            }
-            _ => None,
+    #[test]
+    fn validate_utf8_rejects_invalid_bytes() {
+        let (mut store, _) = store_with_titles(&["Zebra", "Fjord"]);
+        {
+            // Corrupt a title byte: 0xFF is never valid UTF-8.
+            let m = Arc::get_mut(&mut store.mmap).unwrap();
+            m[2] = 0xFF;
         }
+        let err = store.validate_utf8("T").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid UTF-8"), "{err}");
     }
 
-    /// Skip over a value in the overflow blob without decoding it.
-    fn skip_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) {
-        match type_tag {
-            0 => {}                 // Null: no data
-            1 | 2 | 7 => *pos += 8, // Int64 / Float64 / Timestamp (i64 seconds)
-            3 | 5 => *pos += 4,     // UniqueId or Date
-            4 => *pos += 1,         // Bool
-            6 | 8 if *pos + 4 <= blob.len() => {
-                // String (6) and List (8): u32 length prefix + payload bytes.
-                let slen =
-                    u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
-                *pos += 4 + slen;
-            }
-            _ => {}
+    /// A corrupt OFFSET that slices a multi-byte code point must be
+    /// rejected even though the whole blob is valid UTF-8 — the
+    /// per-row slice would be invalid, breaking the
+    /// `from_utf8_unchecked` readers' invariant.
+    #[test]
+    fn validate_utf8_rejects_offset_splitting_code_point() {
+        let (mut store, data_len) = store_with_titles(&["blåbær", "xyz"]);
+        {
+            let m = Arc::get_mut(&mut store.mmap).unwrap();
+            // Row 0's end offset is 8 ("blåbær" = 8 bytes: å/æ are 2 each).
+            // Move it to 3, landing inside the 2-byte 'å'.
+            m[data_len..data_len + 8].copy_from_slice(&3u64.to_le_bytes());
         }
+        let err = store.validate_utf8("T").unwrap_err();
+        assert!(
+            err.to_string().contains("splits a UTF-8 code point"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_utf8_rejects_out_of_range_offset() {
+        let (mut store, data_len) = store_with_titles(&["abc", "def"]);
+        {
+            let m = Arc::get_mut(&mut store.mmap).unwrap();
+            // Row 1's end offset claims bytes past the data region.
+            m[data_len + 8..data_len + 16].copy_from_slice(&999u64.to_le_bytes());
+        }
+        let err = store.validate_utf8("T").unwrap_err();
+        assert!(err.to_string().contains("out-of-range"), "{err}");
+    }
+
+    #[test]
+    fn validate_utf8_rejects_region_past_file() {
+        let (mut store, _) = store_with_titles(&["abc"]);
+        store.title.data.len = 1 << 20; // region claims more than the mmap holds
+        let err = store.validate_utf8("T").unwrap_err();
+        assert!(err.to_string().contains("extends past the file"), "{err}");
     }
 }

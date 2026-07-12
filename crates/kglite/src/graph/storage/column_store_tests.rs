@@ -436,9 +436,9 @@ fn test_overflow_value_list_roundtrip() {
     ]);
 
     let mut buf = 1u16.to_le_bytes().to_vec(); // entry-count header
-    ColumnStore::serialize_overflow_value(&mut buf, key, &list);
+    crate::graph::storage::overflow::encode_value(&mut buf, key, &list);
 
-    let decoded = ColumnStore::decode_overflow_blob(&buf);
+    let decoded = crate::graph::storage::overflow::decode_blob(&buf);
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].0, key);
     assert_eq!(decoded[0].1, list);
@@ -460,10 +460,10 @@ fn test_overflow_blob_mixed_scalars_and_list_roundtrip() {
     ];
     let mut buf = (entries.len() as u16).to_le_bytes().to_vec(); // entry-count header
     for (k, v) in &entries {
-        ColumnStore::serialize_overflow_value(&mut buf, *k, v);
+        crate::graph::storage::overflow::encode_value(&mut buf, *k, v);
     }
 
-    let decoded = ColumnStore::decode_overflow_blob(&buf);
+    let decoded = crate::graph::storage::overflow::decode_blob(&buf);
     assert_eq!(decoded.len(), 3);
     assert_eq!(decoded[0], (k_a, Value::Int64(1)));
     assert_eq!(

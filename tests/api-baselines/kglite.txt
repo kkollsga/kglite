@@ -3142,6 +3142,7 @@ pub kglite::datatypes::values::BorrowedValue::Int64(i64)
 pub kglite::datatypes::values::BorrowedValue::List(&'a [kglite::datatypes::values::Value])
 pub kglite::datatypes::values::BorrowedValue::Null
 pub kglite::datatypes::values::BorrowedValue::String(&'a str)
+pub kglite::datatypes::values::BorrowedValue::Timestamp(chrono::naive::datetime::NaiveDateTime)
 pub kglite::datatypes::values::BorrowedValue::UniqueId(u32)
 impl<'a> kglite::datatypes::values::BorrowedValue<'a>
 pub fn kglite::datatypes::values::BorrowedValue<'a>::to_value(self) -> kglite::datatypes::values::Value

@@ -740,7 +740,11 @@ pub(super) fn build_columns_direct(
                 }
 
                 if writer.overflow_keys.contains(key) {
-                    ColumnStore::serialize_overflow_value(&mut overflow_entry_buf, *key, value);
+                    crate::graph::storage::overflow::encode_value(
+                        &mut overflow_entry_buf,
+                        *key,
+                        value,
+                    );
                     overflow_entry_count += 1;
                     continue;
                 }

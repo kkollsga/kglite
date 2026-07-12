@@ -277,7 +277,11 @@ impl TypedColumn {
                 let start = offsets.get(idx) as usize;
                 let end = offsets.get(idx + 1) as usize;
                 let bytes = data.slice(start, end);
-                // SAFETY: We only write valid UTF-8 via Value::String, so skip validation.
+                // SAFETY: `Str` column bytes are either written in-process
+                // from `Value::String` (`String::as_bytes()` — valid UTF-8
+                // by Rust's core invariant) or come from a packed file via
+                // `unpack_column`, which validates the whole blob as UTF-8
+                // and checks offset monotonicity/bounds at load time.
                 let s = unsafe { String::from_utf8_unchecked(bytes.to_vec()) };
                 Some(Value::String(s))
             }
@@ -312,7 +316,9 @@ impl TypedColumn {
                 let start = offsets.get(idx) as usize;
                 let end = offsets.get(idx + 1) as usize;
                 let bytes = data.slice(start, end);
-                // SAFETY: We only write valid UTF-8 via Value::String.
+                // SAFETY: same invariant as `get`'s Str arm — written
+                // in-process from `Value::String`, or UTF-8-validated at
+                // load time by `unpack_column`.
                 Some(unsafe { std::str::from_utf8_unchecked(bytes) })
             }
             _ => None,
@@ -819,7 +825,7 @@ impl ColumnStore {
             return None;
         }
         let blob = data.slice(start, end);
-        Self::scan_overflow_blob(blob, key)
+        super::overflow::scan_blob(blob, key)
     }
 
     /// Decode all properties from an overflow blob for a given row.
@@ -842,241 +848,7 @@ impl ColumnStore {
             return Vec::new();
         }
         let blob = data.slice(start, end);
-        Self::decode_overflow_blob(blob)
-    }
-
-    /// Scan an overflow blob for a specific key. Returns the value if found.
-    fn scan_overflow_blob(blob: &[u8], key: InternedKey) -> Option<Value> {
-        let target = key.as_u64();
-        if blob.len() < 2 {
-            return None;
-        }
-        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
-        let mut pos = 2;
-        for _ in 0..num_entries {
-            if pos + 9 > blob.len() {
-                break;
-            }
-            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().ok()?);
-            let type_tag = blob[pos + 8];
-            pos += 9;
-            if entry_key == target {
-                return Self::read_overflow_value(blob, &mut pos, type_tag);
-            }
-            // Skip value
-            Self::skip_overflow_value(blob, &mut pos, type_tag);
-        }
-        None
-    }
-
-    /// Decode all entries from an overflow blob.
-    fn decode_overflow_blob(blob: &[u8]) -> Vec<(InternedKey, Value)> {
-        if blob.len() < 2 {
-            return Vec::new();
-        }
-        let num_entries = u16::from_le_bytes([blob[0], blob[1]]) as usize;
-        let mut result = Vec::with_capacity(num_entries);
-        let mut pos = 2;
-        for _ in 0..num_entries {
-            if pos + 9 > blob.len() {
-                break;
-            }
-            let entry_key = u64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap_or([0; 8]));
-            let type_tag = blob[pos + 8];
-            pos += 9;
-            let key = InternedKey::from_u64(entry_key);
-            if let Some(val) = Self::read_overflow_value(blob, &mut pos, type_tag) {
-                result.push((key, val));
-            }
-        }
-        result
-    }
-
-    /// Read a single value from the overflow blob at the given position.
-    fn read_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
-        match type_tag {
-            0 => Some(Value::Null),
-            1 => {
-                // Int64: 8 bytes
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let v = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                Some(Value::Int64(v))
-            }
-            2 => {
-                // Float64: 8 bytes
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let v = f64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                Some(Value::Float64(v))
-            }
-            3 => {
-                // UniqueId: 4 bytes
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let v = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
-                *pos += 4;
-                Some(Value::UniqueId(v))
-            }
-            4 => {
-                // Bool: 1 byte
-                if *pos + 1 > blob.len() {
-                    return None;
-                }
-                let v = blob[*pos] != 0;
-                *pos += 1;
-                Some(Value::Boolean(v))
-            }
-            5 => {
-                // Date: 4 bytes as i32 days since epoch
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let days = i32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?);
-                *pos += 4;
-                let date = UNIX_EPOCH_DATE + chrono::Duration::days(days as i64);
-                Some(Value::DateTime(date))
-            }
-            6 => {
-                // String: u32 length prefix + bytes
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let slen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
-                *pos += 4;
-                if *pos + slen > blob.len() {
-                    return None;
-                }
-                let s = String::from_utf8_lossy(&blob[*pos..*pos + slen]).into_owned();
-                *pos += slen;
-                Some(Value::String(s))
-            }
-            7 => {
-                // Timestamp: 8 bytes as i64 seconds since the unix epoch
-                if *pos + 8 > blob.len() {
-                    return None;
-                }
-                let secs = i64::from_le_bytes(blob[*pos..*pos + 8].try_into().ok()?);
-                *pos += 8;
-                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0)?;
-                Some(Value::Timestamp(epoch + chrono::Duration::seconds(secs)))
-            }
-            8 => {
-                // List: u32 length prefix + bincode(Vec<Value>).
-                if *pos + 4 > blob.len() {
-                    return None;
-                }
-                let blen = u32::from_le_bytes(blob[*pos..*pos + 4].try_into().ok()?) as usize;
-                *pos += 4;
-                if *pos + blen > blob.len() {
-                    return None;
-                }
-                let items: Vec<Value> = bincode::deserialize(&blob[*pos..*pos + blen]).ok()?;
-                *pos += blen;
-                Some(Value::List(items))
-            }
-            _ => None,
-        }
-    }
-
-    /// Skip over a value in the overflow blob without decoding it.
-    fn skip_overflow_value(blob: &[u8], pos: &mut usize, type_tag: u8) {
-        match type_tag {
-            0 => {}                 // Null: no data
-            1 | 2 | 7 => *pos += 8, // Int64 / Float64 / Timestamp (i64 seconds)
-            3 | 5 => *pos += 4,     // UniqueId or Date
-            4 => *pos += 1,         // Bool
-            6 | 8 if *pos + 4 <= blob.len() => {
-                // String (6) and List (8) share the layout: u32 length
-                // prefix + that many payload bytes.
-                let slen =
-                    u32::from_le_bytes(blob[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
-                *pos += 4 + slen;
-            }
-            _ => {}
-        }
-    }
-
-    /// Serialize a Value into overflow bag format, appending to the buffer.
-    pub fn serialize_overflow_value(buf: &mut Vec<u8>, key: InternedKey, value: &Value) {
-        buf.extend_from_slice(&key.as_u64().to_le_bytes());
-        match value {
-            Value::Null => buf.push(0),
-            Value::Int64(v) => {
-                buf.push(1);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Value::Float64(v) => {
-                buf.push(2);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Value::UniqueId(v) => {
-                buf.push(3);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            Value::Boolean(v) => {
-                buf.push(4);
-                buf.push(*v as u8);
-            }
-            Value::DateTime(d) => {
-                buf.push(5);
-                let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
-                buf.extend_from_slice(&days.to_le_bytes());
-            }
-            Value::Timestamp(dt) => {
-                buf.push(7);
-                let epoch = UNIX_EPOCH_DATE.and_hms_opt(0, 0, 0).unwrap_or_default();
-                let secs = (*dt - epoch).num_seconds();
-                buf.extend_from_slice(&secs.to_le_bytes());
-            }
-            Value::String(s) => {
-                buf.push(6);
-                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                buf.extend_from_slice(s.as_bytes());
-            }
-            Value::Point { lat, lon } => {
-                // Serialize Point as a string "lat,lon"
-                let s = format!("{},{}", lat, lon);
-                buf.push(6);
-                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                buf.extend_from_slice(s.as_bytes());
-            }
-            Value::NodeRef(_) => {
-                // NodeRef is transient — skip (write as null)
-                buf.push(0);
-            }
-            Value::Duration { .. } => {
-                // Durations are query-time-only — never persisted in
-                // the overflow bag (Cluster 2). Skip as null.
-                buf.push(0);
-            }
-            // Lists ARE real persistable property values (native list
-            // properties, 0.11.x). Tag 8: u32 length prefix + bincode of
-            // the `Vec<Value>` — additive to the wire format (old files
-            // never contain tag 8; the reader maps unknown tags to null).
-            Value::List(items) => match bincode::serialize(items) {
-                Ok(bytes) => {
-                    buf.push(8);
-                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(&bytes);
-                }
-                // Serialisation should never fail for a Vec<Value>; if it
-                // somehow does, fall back to null rather than corrupting
-                // the blob.
-                Err(_) => buf.push(0),
-            },
-            // Map / graph-entity variants are query-result-time values;
-            // they don't belong in the overflow property bag. Skip as null
-            // (matches the Duration/NodeRef precedent).
-            Value::Map(_) | Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
-                buf.push(0);
-            }
-        }
+        super::overflow::decode_blob(blob)
     }
 
     // ─── Id/Title column methods (mapped mode only) ──────────────────────
@@ -1242,9 +1014,14 @@ impl ColumnStore {
                 Value::UniqueId(v) => crate::datatypes::values::BorrowedValue::UniqueId(*v),
                 Value::String(s) => crate::datatypes::values::BorrowedValue::String(s.as_str()),
                 Value::DateTime(d) => crate::datatypes::values::BorrowedValue::DateTime(*d),
+                Value::Timestamp(t) => crate::datatypes::values::BorrowedValue::Timestamp(*t),
                 // Native list properties survive the streaming path by
                 // borrowing the slice; the overflow serializer encodes it.
                 Value::List(items) => crate::datatypes::values::BorrowedValue::List(items),
+                // Point / Map / graph-entity / Duration / NodeRef have no
+                // borrowed form; the overflow codec stores them as null
+                // anyway (documented limitation), so skipping here keeps
+                // the two paths behaviourally identical.
                 _ => continue,
             };
             f(*key, bv)?;
@@ -1754,55 +1531,6 @@ impl ColumnStore {
     pub fn replace_overflow_bag(&mut self, offsets: MmapOrVec<u64>, data: MmapBytes) {
         self.overflow_offsets = Some(offsets);
         self.overflow_data = Some(data);
-    }
-
-    /// Borrowed-value equivalent of [`Self::serialize_overflow_value`]
-    /// for hot-path callers that already hold a `BorrowedValue` slice
-    /// (avoids the clone into `Value`).
-    pub fn serialize_overflow_value_borrowed(
-        buf: &mut Vec<u8>,
-        key: InternedKey,
-        value: &crate::datatypes::values::BorrowedValue<'_>,
-    ) {
-        use crate::datatypes::values::BorrowedValue;
-        buf.extend_from_slice(&key.as_u64().to_le_bytes());
-        match value {
-            BorrowedValue::Null => buf.push(0),
-            BorrowedValue::Int64(v) => {
-                buf.push(1);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            BorrowedValue::Float64(v) => {
-                buf.push(2);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            BorrowedValue::UniqueId(v) => {
-                buf.push(3);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-            BorrowedValue::Boolean(v) => {
-                buf.push(4);
-                buf.push(*v as u8);
-            }
-            BorrowedValue::DateTime(d) => {
-                buf.push(5);
-                let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
-                buf.extend_from_slice(&days.to_le_bytes());
-            }
-            BorrowedValue::String(s) => {
-                buf.push(6);
-                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                buf.extend_from_slice(s.as_bytes());
-            }
-            BorrowedValue::List(items) => match bincode::serialize(items) {
-                Ok(bytes) => {
-                    buf.push(8);
-                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(&bytes);
-                }
-                Err(_) => buf.push(0),
-            },
-        }
     }
 
     /// Set the row count after wiring up replaced columns. The store's
@@ -2359,10 +2087,24 @@ impl ColumnStore {
                 let str_bytes = &rest[..last_offset];
                 let null_bytes = &rest[last_offset..last_offset + null_size];
 
+                let validated = std::str::from_utf8(str_bytes).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("column '{col_name}' contains invalid UTF-8: {e}"),
+                    )
+                })?;
                 let mut previous = 0u64;
                 for (index, chunk) in offsets_bytes.chunks_exact(8).enumerate() {
                     let offset = u64::from_le_bytes(chunk.try_into().unwrap());
-                    if (index == 0 && offset != 0) || offset < previous || offset > last_offset_u64
+                    // Each offset must also land on a char boundary of the
+                    // (already whole-blob-validated) string data: a corrupt
+                    // offset that splits a multi-byte code point would make
+                    // the per-row *slice* invalid UTF-8, breaking the
+                    // `from_utf8_unchecked` readers' invariant.
+                    if (index == 0 && offset != 0)
+                        || offset < previous
+                        || offset > last_offset_u64
+                        || !validated.is_char_boundary(offset as usize)
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -2373,12 +2115,6 @@ impl ColumnStore {
                     }
                     previous = offset;
                 }
-                std::str::from_utf8(str_bytes).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("column '{col_name}' contains invalid UTF-8: {e}"),
-                    )
-                })?;
 
                 let offsets =
                     Self::load_typed_vec::<u64>(offsets_bytes, rc + 1, temp_dir, col_name, "off")?;
