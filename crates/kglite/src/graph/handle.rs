@@ -86,21 +86,29 @@ pub fn find_code_entities(
             let Some(node) = dir.get_node(index) else {
                 continue;
             };
+            // `title` is a primary NodeData field, not an ordinary property.
+            // Resolve it explicitly: `field_*_ci("title")` only covers the
+            // property store and silently missed titles extracted at load.
+            let title = node.title();
+            let title_string = match &*title {
+                Value::String(value) => Some(value.as_str()),
+                _ => None,
+            };
             let matches = match match_type {
                 CodeEntityMatch::Contains => {
                     node.field_contains_ci("name", &name_lower)
-                        || node.field_contains_ci("title", &name_lower)
+                        || title_string
+                            .is_some_and(|value| value.to_lowercase().contains(&name_lower))
                 }
                 CodeEntityMatch::StartsWith => {
                     node.field_starts_with_ci("name", &name_lower)
-                        || node.field_starts_with_ci("title", &name_lower)
+                        || title_string
+                            .is_some_and(|value| value.to_lowercase().starts_with(&name_lower))
                 }
                 CodeEntityMatch::Exact => {
                     node.get_field_ref("name")
                         .is_some_and(|value| *value == name_value)
-                        || node
-                            .get_field_ref("title")
-                            .is_some_and(|value| *value == name_value)
+                        || *title == name_value
                 }
             };
             if matches {
@@ -574,7 +582,7 @@ mod boundary_lift_tests {
         execute_mut(
             &mut graph,
             "CREATE (a:Function {id:'mod::alpha', title:'alpha', name:'alpha', file_path:'src/a.rs'}), \
-             (b:Function {id:'mod::beta', title:'BetaWorker', name:'BetaWorker', file_path:'src/b.rs'}), \
+             (b:Function {id:'mod::beta', title:'BetaWorker', name:'beta', file_path:'src/b.rs'}), \
              (c:Function {id:'mod::gamma', title:'gamma', name:'gamma', file_path:'src/c.rs'}), \
              (f:File {id:'src/a.rs', title:'src/a.rs'})",
             &ExecuteOptions::eager(&params),
