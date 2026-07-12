@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedures also accept canonical `kglite.*` names while existing flat names
   remain equivalent. The compatibility surface is locked by independently
   authored MIT-licensed behavioral cases and an artifact-provenance gate.
+  Every covered or partial dialect feature now cites the behavioral case ids
+  that exercise it (manifest `schema_version` 2), the contract test verifies
+  the cited cases exist and execute, and the clean-room checker declares the
+  guarded-vs-reviewed conformance-suite boundary explicitly.
 - **Public distribution interfaces and license metadata are now executable
   contracts.** Reviewed snapshots lock Python exports and signatures, MCP tool
   schemas by server mode, Bolt columns and graph values, and CLI help/errors.

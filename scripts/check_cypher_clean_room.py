@@ -10,6 +10,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT_ROOT = ROOT / "tests" / "cypher_contract"
 RUNNER = ROOT / "tests" / "test_cypher_clean_room_contract.py"
+
+# Conformance-surface manifest.
+#
+# PROVENANCE_GUARDED_PATHS is the clean-room boundary: everything under these
+# paths must stay free of external-suite artifacts and is scanned by this
+# script. REVIEWED_SEMANTIC_SUITES are the other independently authored
+# semantic suites that back KGLite's dialect claims. They are deliberately
+# NOT marker-scanned — several legitimately *mention* external suites in
+# negations (e.g. "not an openCypher TCK runner"), so scanning them would
+# false-positive; their provenance is governed by ordinary code review.
+# validate() checks both lists against reality so the boundary cannot go
+# stale silently, and tests/test_cypher_dialect_contract.py asserts the same.
+PROVENANCE_GUARDED_PATHS = (
+    "tests/cypher_contract",
+    "tests/test_cypher_clean_room_contract.py",
+)
+REVIEWED_SEMANTIC_SUITES = (
+    "tests/test_cypher_differential.py",
+    "tests/test_cypher_operator_precedence.py",
+    "tests/test_cypher_standard_expression_semantics.py",
+    "tests/test_cypher_scope_and_mutation_contract.py",
+    "tests/test_cypher_correctness.py",
+    "tests/test_cypher_conformance_runner.py",
+    "tests/test_bolt_server_differential.py",
+    "tests/golden",
+    "scripts/cypher_conformance.py",
+    "scripts/bolt_conformance.py",
+)
 FORBIDDEN_SUFFIXES = {".feature", ".gherkin"}
 FORBIDDEN_TEXT = (
     "Apache License",
@@ -25,6 +53,9 @@ ALLOWED_RUNNER_IMPORTS = {"__future__", "json", "pathlib", "pytest", "kglite", "
 
 def validate() -> list[str]:
     errors: list[str] = []
+    for rel in PROVENANCE_GUARDED_PATHS + REVIEWED_SEMANTIC_SUITES:
+        if not (ROOT / rel).exists():
+            errors.append(f"conformance-surface manifest is stale: {rel} does not exist")
     files = [path for path in CONTRACT_ROOT.rglob("*") if path.is_file()]
     for path in files:
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
