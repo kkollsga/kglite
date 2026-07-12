@@ -20,10 +20,9 @@
 
 use super::super::super::ast::MatchClause;
 use super::super::super::result::ResultRow;
+use super::super::match_clause::null_pad_pattern_vars;
 use super::super::CypherExecutor;
 use super::RowStream;
-use crate::datatypes::values::Value;
-use crate::graph::core::pattern_matching::PatternElement;
 
 /// State machine for streaming OPTIONAL MATCH. Holds the upstream
 /// iterator plus a buffer of expanded rows for the row we're currently
@@ -105,30 +104,6 @@ pub fn apply<'q>(
     )
 }
 
-/// NULL-pad pattern-introduced variables on `row`. Matches the
-/// "OPTIONAL MATCH yields no rows -> keep upstream row with NULL
-/// projections for pattern vars" semantics in `execute_optional_match`.
-fn null_pad_pattern_vars(row: &mut ResultRow, clause: &MatchClause) {
-    for pattern in &clause.patterns {
-        for elem in &pattern.elements {
-            match elem {
-                PatternElement::Node(np) => {
-                    if let Some(ref var) = np.variable {
-                        if !row.node_bindings.contains_key(var) && !row.projected.contains_key(var)
-                        {
-                            row.projected.insert(var.clone(), Value::Null);
-                        }
-                    }
-                }
-                PatternElement::Edge(ep) => {
-                    if let Some(ref var) = ep.variable {
-                        if !row.edge_bindings.contains_key(var) && !row.projected.contains_key(var)
-                        {
-                            row.projected.insert(var.clone(), Value::Null);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+// NULL-padding for unmatched pattern variables lives in
+// `super::super::match_clause::null_pad_pattern_vars`, shared with the
+// materialized `execute_optional_match`.

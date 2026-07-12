@@ -111,6 +111,30 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
                 continue;
             };
 
+        // A relationship variable re-used from a prior clause pins the
+        // OPTIONAL pattern to exactly that edge (openCypher re-MATCH
+        // semantics). The fused counters (`try_count_simple_pattern`)
+        // never see the row's edge bindings and would count every
+        // candidate edge — bail to the materialized executor, whose
+        // `bindings_compatible` enforces the identity.
+        let edge_var_pre_bound = if let Clause::OptionalMatch(m) = &query.clauses[i] {
+            m.patterns.iter().any(|p| {
+                p.elements.iter().any(|e| match e {
+                    PatternElement::Edge(ep) => ep
+                        .variable
+                        .as_ref()
+                        .is_some_and(|v| pre_bound_vars.contains(v)),
+                    _ => false,
+                })
+            })
+        } else {
+            false
+        };
+        if edge_var_pre_bound {
+            i += 1;
+            continue;
+        }
+
         // Check that the WITH/RETURN contains count() aggregation and simple pass-through group keys
         let fusable = match &query.clauses[i + 1] {
             Clause::With(w) => is_fusable_with_clause(w),
@@ -1232,7 +1256,7 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
     }
 
     // ---- M1 inspection ----
-    let (m1_first_var, m1_second_var) = {
+    let (m1_first_var, m1_second_var, m1_edge_var) = {
         let m1 = if let Clause::Match(m) = &query.clauses[i] {
             m
         } else {
@@ -1242,7 +1266,13 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             return false;
         }
         let pat = &m1.patterns[0];
-        let edge_blocking = matches!(&pat.elements[1], PatternElement::Edge(ep) if ep.properties.is_some() || ep.var_length.is_some());
+        let (edge_blocking, m1_edge_var) = match &pat.elements[1] {
+            PatternElement::Edge(ep) => (
+                ep.properties.is_some() || ep.var_length.is_some(),
+                ep.variable.clone(),
+            ),
+            _ => return false,
+        };
         if edge_blocking {
             return false;
         }
@@ -1254,7 +1284,7 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             PatternElement::Node(np) => np.variable.clone(),
             _ => return false,
         };
-        (first_var, second_var)
+        (first_var, second_var, m1_edge_var)
     };
 
     // ---- M2 inspection ----
@@ -1285,6 +1315,16 @@ fn try_fuse_two_match_with_aggregate(query: &mut CypherQuery, i: usize) -> bool 
             Some(v) => v.clone(),
             None => return false,
         };
+        // M2's edge variable re-using ANY M1 variable (its edge var — the
+        // openCypher pre-bound-relationship re-MATCH constraint — or a node
+        // var shadowing) pins M2 to specific graph objects the fused
+        // counter can't see. Bail to the general path.
+        if m1_edge_var.as_deref() == Some(edge_var.as_str())
+            || m1_first_var.as_deref() == Some(edge_var.as_str())
+            || m1_second_var.as_deref() == Some(edge_var.as_str())
+        {
+            return false;
+        }
         // M2's first node variable must match one of M1's bound vars.
         let shared = m2_first_var.as_ref().filter(|v| {
             m1_first_var.as_deref() == Some(v.as_str())

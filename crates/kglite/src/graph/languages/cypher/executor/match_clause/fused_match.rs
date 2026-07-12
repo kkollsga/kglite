@@ -1070,13 +1070,13 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
-            // Evaluate group key (reuse the scratch buffer — no per-row alloc)
+            // Evaluate group key (reuse the scratch buffer — no per-row
+            // alloc). Errors propagate — same contract as the materialized
+            // aggregation path: null groups arrive as Ok(Null); an Err is a
+            // genuine error (missing parameter, overflow, …), never a group.
             key_values.clear();
             for expr in &folded_group_exprs {
-                key_values.push(
-                    self.evaluate_expression(expr, &eval_row)
-                        .unwrap_or(Value::Null),
-                );
+                key_values.push(self.evaluate_expression(expr, &eval_row)?);
             }
 
             // Evaluate all aggregate expressions for this node (reuse buffer)

@@ -24,6 +24,29 @@ impl<'a> CypherExecutor<'a> {
                     _ => return false,
                 }
             }
+            // A relationship variable already bound on the row (carried
+            // edge binding, or a projected relationship value from
+            // `WITH r` / `UNWIND collect(r)`) constrains the pattern to
+            // exactly that edge — openCypher re-MATCH semantics. A
+            // null-valued binding matches nothing; a non-relationship
+            // projected value can never satisfy a relationship pattern.
+            if let MatchBinding::Edge { edge_index, .. } = binding {
+                if let Some(existing) = row.edge_bindings.get(var) {
+                    if existing.edge_index != *edge_index {
+                        return false;
+                    }
+                } else {
+                    match row.projected.get(var) {
+                        None => {}
+                        Some(Value::Relationship(rel)) => {
+                            if rel.id as usize != edge_index.index() {
+                                return false;
+                            }
+                        }
+                        Some(_) => return false,
+                    }
+                }
+            }
         }
         true
     }

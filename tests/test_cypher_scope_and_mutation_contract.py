@@ -95,3 +95,72 @@ def test_relationship_id_is_stable_across_variable_and_materialized_value():
     assert len(rows) == 1
     assert isinstance(rows[0]["direct"], int)
     assert rows[0]["direct"] == rows[0]["carried"]
+
+
+# ── Writes on NULL targets are no-ops (openCypher) ──────────────────────
+#
+# An OPTIONAL MATCH miss leaves the variable null-valued; SET / REMOVE on
+# it must skip that row (mirroring DELETE's existing null handling), while
+# a truly undefined variable still fails scope validation before execution
+# (covered by test_undefined_variables_are_rejected_before_execution).
+
+
+def _optional_miss_graph():
+    graph = kglite.KnowledgeGraph()
+    graph.cypher("CREATE (:Person {id: 1, name: 'Ada', keep: 1})").to_list()
+    return graph
+
+
+@pytest.mark.parametrize(
+    "write_clause",
+    (
+        "SET m.x = 1",
+        "SET m = {x: 1}",
+        "SET m += {x: 1}",
+        "SET m:Flagged",
+        "REMOVE m.keep",
+        "REMOVE m:Flagged",
+    ),
+)
+def test_write_on_null_optional_variable_is_noop(write_clause):
+    graph = _optional_miss_graph()
+    rows = graph.cypher(
+        f"MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) {write_clause} RETURN n.name AS name"
+    ).to_list()
+    assert rows == [{"name": "Ada"}]
+    # The anchor node is untouched.
+    assert graph.cypher("MATCH (n:Person) RETURN n.keep AS keep").to_list() == [{"keep": 1}]
+
+
+def test_set_on_matched_optional_variable_still_writes():
+    graph = _optional_miss_graph()
+    graph.cypher("CREATE (:Person {id: 2, name: 'Bob'})").to_list()
+    graph.cypher("MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:KNOWS]->(b)").to_list()
+    graph.cypher("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) SET m.x = 7").to_list()
+    # Bob (the only KNOWS target) got the write; Ada's miss row was a no-op.
+    assert graph.cypher("MATCH (p:Person) RETURN p.name AS name, p.x AS x ORDER BY name").to_list() == [
+        {"name": "Ada", "x": None},
+        {"name": "Bob", "x": 7},
+    ]
+
+
+# ── DELETE is statement-atomic ──────────────────────────────────────────
+
+
+def test_delete_edge_and_node_in_one_statement():
+    graph = _graph()
+    graph.cypher("MATCH (a:Person {id: 1})-[r:KNOWS]->(b) DELETE r, a").to_list()
+    assert graph.cypher("MATCH (n:Person) RETURN count(n) AS n").to_list() == [{"n": 1}]
+    assert graph.cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS n").to_list() == [{"n": 0}]
+
+
+def test_plain_delete_still_rejects_node_with_surviving_edges():
+    graph = _graph()
+    with pytest.raises(kglite.CypherExecutionError, match="still has relationships"):
+        graph.cypher("MATCH (a:Person {id: 1}) DELETE a").to_list()
+
+
+def test_plain_delete_error_names_node_without_debug_formatting():
+    graph = _graph()
+    with pytest.raises(kglite.CypherExecutionError, match="node 'Ada'"):
+        graph.cypher("MATCH (a:Person {id: 1}) DELETE a").to_list()

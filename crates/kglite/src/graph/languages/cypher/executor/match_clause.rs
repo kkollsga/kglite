@@ -10,10 +10,187 @@ use crate::graph::core::pattern_matching::{
 };
 use crate::graph::schema::InternedKey;
 use crate::graph::storage::GraphRead;
-use petgraph::graph::NodeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
+
+/// Collect the edge indices a [`PatternMatch`] consumed, deduplicated into
+/// `out`. Fixed-length hops live on the compact `exact_path` trail (named
+/// *and* anonymous — the matcher tracks it whenever `needs_path_info` is
+/// set, the parser default for fixed edges); named fixed edges additionally
+/// appear as `Edge` bindings, and var-length matches carry their hop list
+/// in `VariableLengthPath` bindings. Used to enforce openCypher
+/// relationship uniqueness (the trail rule) across the comma patterns of a
+/// single MATCH clause.
+pub(super) fn match_edge_indices(m: &PatternMatch, out: &mut Vec<EdgeIndex>) {
+    let push = |edge: EdgeIndex, out: &mut Vec<EdgeIndex>| {
+        if !out.contains(&edge) {
+            out.push(edge);
+        }
+    };
+    if let Some((_, path)) = &m.exact_path {
+        for hop in path {
+            push(hop.edge, out);
+        }
+    }
+    for (_, binding) in &m.bindings {
+        match binding {
+            MatchBinding::Edge { edge_index, .. } => push(*edge_index, out),
+            MatchBinding::VariableLengthPath { path, .. } => {
+                for hop in path {
+                    push(hop.edge, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Edge indices a freshly-created row consumed, read back off its bindings:
+/// named edges plus every fixed-trail (`__fixed_path`) and var-length path
+/// hop. Only valid as a *clause-local* edge set when the row was produced
+/// by a single pattern of the current clause (no inherited bindings) — the
+/// first-MATCH first-pattern case.
+pub(super) fn row_edge_indices(row: &ResultRow) -> Vec<EdgeIndex> {
+    let mut out = Vec::new();
+    for (_, eb) in &row.edge_bindings {
+        if !out.contains(&eb.edge_index) {
+            out.push(eb.edge_index);
+        }
+    }
+    for (_, pb) in &row.path_bindings {
+        for hop in &pb.path {
+            if !out.contains(&hop.edge) {
+                out.push(hop.edge);
+            }
+        }
+    }
+    out
+}
+
+/// NULL-pad pattern-introduced variables on `row`: every node/edge variable
+/// declared by the clause's patterns that the row doesn't already bind gets
+/// an explicit `projected: NULL` entry. Recording the null (rather than
+/// leaving the name absent) is what lets downstream consumers distinguish a
+/// bound-but-null variable — e.g. a later MATCH re-using a relationship
+/// variable must match NOTHING when it's null, and `bindings_compatible`
+/// can only see that through the projected entry.
+pub(super) fn null_pad_pattern_vars(row: &mut ResultRow, clause: &MatchClause) {
+    for pattern in &clause.patterns {
+        for elem in &pattern.elements {
+            match elem {
+                PatternElement::Node(np) => {
+                    if let Some(ref var) = np.variable {
+                        if !row.node_bindings.contains_key(var) && !row.projected.contains_key(var)
+                        {
+                            row.projected.insert(var.clone(), Value::Null);
+                        }
+                    }
+                }
+                PatternElement::Edge(ep) => {
+                    if let Some(ref var) = ep.variable {
+                        if !row.edge_bindings.contains_key(var) && !row.projected.contains_key(var)
+                        {
+                            row.projected.insert(var.clone(), Value::Null);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// True when relationship uniqueness must be enforced across this MATCH
+/// clause's comma patterns: at least two patterns contain an edge element.
+/// (Within one pattern the matcher's `reuses_bound_relationship` already
+/// enforces the trail rule; a single-edge-pattern clause has nothing to
+/// cross-check, so the hot single-pattern path pays nothing.)
+pub(super) fn clause_needs_rel_uniqueness(clause: &MatchClause) -> bool {
+    clause.patterns.len() > 1
+        && clause
+            .patterns
+            .iter()
+            .filter(|p| p.elements.len() > 1)
+            .count()
+            >= 2
+}
+
+/// Resolve a relationship variable already bound on the incoming row —
+/// either as a live `EdgeBinding` (MATCH/WITH carry-through) or as a
+/// projected `Value::Relationship` (e.g. `UNWIND collect(r) AS r`).
+/// Returns `(source, target, edge_index)` of the stored edge.
+pub(super) fn row_bound_edge(
+    row: &ResultRow,
+    var: &str,
+) -> Option<(NodeIndex, NodeIndex, EdgeIndex)> {
+    if let Some(eb) = row.edge_bindings.get(var) {
+        return Some((eb.source, eb.target, eb.edge_index));
+    }
+    if let Some(Value::Relationship(rel)) = row.projected.get(var) {
+        return Some((
+            NodeIndex::new(rel.start_id as usize),
+            NodeIndex::new(rel.end_id as usize),
+            EdgeIndex::new(rel.id as usize),
+        ));
+    }
+    None
+}
+
+/// When a pattern re-uses a relationship variable that is already bound on
+/// the incoming row (openCypher: the pattern must then match exactly that
+/// relationship), seed the pattern's adjacent node variables from the
+/// stored edge's endpoints so the `PatternExecutor` expands around the
+/// bound edge instead of enumerating every candidate edge. Purely a
+/// search-space constraint — `bindings_compatible` enforces the edge
+/// identity itself, including the undirected (`Both`) case this helper
+/// skips because the orientation is ambiguous. Returns `None` (no
+/// allocation) when no edge variable of the pattern is pre-bound — the
+/// common path.
+pub(super) fn seed_bound_edge_endpoints(
+    pattern: &Pattern,
+    row: &ResultRow,
+) -> Option<Bindings<NodeIndex>> {
+    let mut extended: Option<Bindings<NodeIndex>> = None;
+    for (i, elem) in pattern.elements.iter().enumerate() {
+        let PatternElement::Edge(ep) = elem else {
+            continue;
+        };
+        if ep.var_length.is_some() {
+            continue;
+        }
+        let Some(var) = ep.variable.as_deref() else {
+            continue;
+        };
+        let Some((src, tgt, _)) = row_bound_edge(row, var) else {
+            continue;
+        };
+        // Pattern-order endpoints: `Outgoing` means left-to-right.
+        let (left, right) = match ep.direction {
+            EdgeDirection::Outgoing => (src, tgt),
+            EdgeDirection::Incoming => (tgt, src),
+            EdgeDirection::Both => continue,
+        };
+        let mut seed = |node_elem: Option<&PatternElement>, idx: NodeIndex| {
+            let Some(PatternElement::Node(np)) = node_elem else {
+                return;
+            };
+            let Some(node_var) = np.variable.as_ref() else {
+                return;
+            };
+            if row.node_bindings.contains_key(node_var) {
+                return; // an existing binding always wins
+            }
+            let ext = extended.get_or_insert_with(|| row.node_bindings.clone());
+            if !ext.contains_key(node_var) {
+                ext.insert(node_var.clone(), idx);
+            }
+        };
+        seed(i.checked_sub(1).and_then(|j| pattern.elements.get(j)), left);
+        seed(pattern.elements.get(i + 1), right);
+    }
+    extended
+}
 
 /// True when a `count(...)` call is `count(*)` (or the empty-arg form,
 /// treated as star elsewhere in the fused paths too). `count(var)`
@@ -119,34 +296,98 @@ impl<'a> CypherExecutor<'a> {
         clause: &MatchClause,
         row: &ResultRow,
     ) -> Result<Vec<ResultRow>, String> {
-        let mut expanded = Vec::new();
+        self.expand_optional_match_row(clause, row, 0)
+    }
+
+    /// Expand one upstream row through ALL comma patterns of an OPTIONAL
+    /// MATCH as one joined unit: each pattern extends the working row set
+    /// produced by the previous one (cross-join with shared-variable and
+    /// relationship-uniqueness constraints), exactly like a regular
+    /// multi-pattern MATCH. An empty return means the *joined* pattern set
+    /// produced no match — the caller emits the single null-padded
+    /// fallback row (openCypher: OPTIONAL MATCH succeeds or fails as a
+    /// unit; per-pattern partial rows are not a thing). Earlier code
+    /// expanded each pattern independently against the original row and
+    /// unioned the results, yielding quasi-independent half-rows.
+    ///
+    /// `budget_rows_base` is the caller's already-materialized row count,
+    /// so the budget reservation reflects the true total.
+    fn expand_optional_match_row(
+        &self,
+        clause: &MatchClause,
+        row: &ResultRow,
+        budget_rows_base: usize,
+    ) -> Result<Vec<ResultRow>, String> {
+        let enforce_rel_uniqueness = clause_needs_rel_uniqueness(clause);
+        let mut row_set: Vec<ResultRow> = vec![row.clone()];
+        // Relationship-uniqueness bookkeeping, parallel to `row_set`: the
+        // edges each working row consumed within THIS clause. Only
+        // maintained when two or more comma patterns carry edges.
+        let mut edge_sets: Vec<Vec<EdgeIndex>> = if enforce_rel_uniqueness {
+            vec![Vec::new()]
+        } else {
+            Vec::new()
+        };
         for pattern in &clause.patterns {
-            let resolved;
-            let pat = if Self::pattern_has_vars(pattern) {
-                resolved = self.resolve_pattern_vars(pattern, row);
-                &resolved
-            } else {
-                pattern
-            };
-            let pe = PatternExecutor::with_bindings_and_params(
-                self.graph,
-                None,
-                &row.node_bindings,
-                self.params,
-            )
-            .set_deadline(self.deadline)
-            .set_cancel(self.cancel);
-            let matches = pe.execute(pat)?;
-            for m in &matches {
-                if !self.bindings_compatible(row, m) {
-                    continue;
+            if row_set.is_empty() {
+                break;
+            }
+            let mut expanded: Vec<ResultRow> = Vec::new();
+            let mut expanded_sets: Vec<Vec<EdgeIndex>> = Vec::new();
+            for (ci, cur) in row_set.iter().enumerate() {
+                // Resolve EqualsVar references against the working row so a
+                // later pattern can reference variables bound by an earlier
+                // one within the same OPTIONAL MATCH.
+                let resolved;
+                let pat = if Self::pattern_has_vars(pattern) {
+                    resolved = self.resolve_pattern_vars(pattern, cur);
+                    &resolved
+                } else {
+                    pattern
+                };
+                let seeded = seed_bound_edge_endpoints(pat, cur);
+                let pre_bindings = seeded.as_ref().unwrap_or(&cur.node_bindings);
+                let executor = PatternExecutor::with_bindings_and_params(
+                    self.graph,
+                    self.budget_probe_limit(None),
+                    pre_bindings,
+                    self.params,
+                )
+                .set_deadline(self.deadline)
+                .set_cancel(self.cancel);
+                let matches = executor.execute(pat)?;
+                self.budget
+                    .check_work(matches.len(), "OPTIONAL MATCH expansion")?;
+                for m in &matches {
+                    if !self.bindings_compatible(cur, m) {
+                        continue;
+                    }
+                    if enforce_rel_uniqueness {
+                        let mut m_edges = Vec::new();
+                        match_edge_indices(m, &mut m_edges);
+                        if m_edges.iter().any(|e| edge_sets[ci].contains(e)) {
+                            continue;
+                        }
+                        let mut next_set = edge_sets[ci].clone();
+                        next_set.extend(m_edges);
+                        expanded_sets.push(next_set);
+                    }
+                    self.budget.reserve_rows(
+                        budget_rows_base + expanded.len(),
+                        1,
+                        "OPTIONAL MATCH",
+                    )?;
+                    let mut new_row = cur.clone();
+                    self.merge_match_into_row(&mut new_row, m);
+                    expanded.push(new_row);
                 }
-                let mut new_row = row.clone();
-                self.merge_match_into_row(&mut new_row, m);
-                expanded.push(new_row);
+            }
+            row_set = expanded;
+            if enforce_rel_uniqueness {
+                edge_sets = expanded_sets;
             }
         }
-        Ok(expanded)
+        Ok(row_set)
     }
 
     /// Merge a PatternMatch's bindings into an existing ResultRow
@@ -297,47 +538,18 @@ impl<'a> CypherExecutor<'a> {
         let mut new_rows = Vec::with_capacity(existing.rows.len());
 
         for row in &existing.rows {
-            let mut found_any = false;
-
-            for pattern in &clause.patterns {
-                // Resolve EqualsVar references against current row
-                let resolved;
-                let pat = if Self::pattern_has_vars(pattern) {
-                    resolved = self.resolve_pattern_vars(pattern, row);
-                    &resolved
-                } else {
-                    pattern
-                };
-                let executor = PatternExecutor::with_bindings_and_params(
-                    self.graph,
-                    self.budget_probe_limit(None),
-                    &row.node_bindings,
-                    self.params,
-                )
-                .set_deadline(self.deadline)
-                .set_cancel(self.cancel);
-                let matches = executor.execute(pat)?;
-                self.budget
-                    .check_work(matches.len(), "OPTIONAL MATCH expansion")?;
-
-                for m in &matches {
-                    if !self.bindings_compatible(row, m) {
-                        continue;
-                    }
-                    self.budget
-                        .reserve_rows(new_rows.len(), 1, "OPTIONAL MATCH")?;
-                    let mut new_row = row.clone();
-                    self.merge_match_into_row(&mut new_row, m);
-                    new_rows.push(new_row);
-                    found_any = true;
-                }
-            }
-
-            if !found_any {
-                // Keep the row - OPTIONAL MATCH produces NULLs for unmatched variables
+            let expanded = self.expand_optional_match_row(clause, row, new_rows.len())?;
+            if expanded.is_empty() {
+                // The joined pattern set produced no match: keep the row,
+                // recording an explicit NULL for every pattern variable so
+                // downstream clauses see them as bound-but-null.
                 self.budget
                     .reserve_rows(new_rows.len(), 1, "OPTIONAL MATCH")?;
-                new_rows.push(row.clone());
+                let mut keep = row.clone();
+                null_pad_pattern_vars(&mut keep, clause);
+                new_rows.push(keep);
+            } else {
+                new_rows.extend(expanded);
             }
         }
 
@@ -389,6 +601,16 @@ impl<'a> CypherExecutor<'a> {
         // Skip variable-length edges and edge property filters
         if edge.var_length.is_some() || edge.properties.is_some() {
             return None;
+        }
+
+        // A pre-bound relationship variable pins the pattern to exactly
+        // that edge; the direct edges_directed sweep below never checks
+        // edge identity, so fall back to the full executor (whose
+        // bindings_compatible enforces it).
+        if let Some(var) = edge.variable.as_deref() {
+            if row_bound_edge(row, var).is_some() {
+                return None;
+            }
         }
 
         // Determine which node is bound from the outer row

@@ -1545,6 +1545,67 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "WITH n, count(a) AS ca, count(b) AS cb RETURN n.name AS name, ca, cb",
         None,
     ),
+    # ── openCypher contract shapes (0.12.x semantics alignment) ─────────
+    (
+        # Pre-bound relationship variable re-used in a later MATCH: the
+        # pattern must bind exactly the carried edge (openCypher re-MATCH
+        # identity), not enumerate every KNOWS edge per row.
+        "rel_var_rebind_after_with",
+        "social_graph",
+        "MATCH (:Person {person_id: 1})-[r:KNOWS]->() WITH r, r.since AS s "
+        "MATCH (a)-[r]->(b) RETURN a.name AS an, b.name AS bn, s, r.since AS s2 "
+        "ORDER BY bn",
+        None,
+    ),
+    (
+        # Same contract through a projected relationship VALUE: UNWIND over
+        # collect(r) re-binds `r` as a relationship value, which must pin
+        # the MATCH to that edge.
+        "rel_var_rebind_after_unwind",
+        "social_graph",
+        "MATCH (:Person {person_id: 1})-[r0:KNOWS]->() WITH collect(r0) AS rels "
+        "UNWIND rels AS r MATCH (a)-[r]->(b) "
+        "RETURN a.name AS an, b.name AS bn ORDER BY bn",
+        None,
+    ),
+    (
+        # Relationship uniqueness (trail rule) across comma patterns of ONE
+        # MATCH: Person_1 has exactly one WORKS_AT edge, so two different
+        # edge variables anchored on the same node can't both bind it.
+        "trail_rule_comma_patterns_named",
+        "social_graph",
+        "MATCH (a:Person {person_id: 1})-[r1:WORKS_AT]->(c), (a)-[r2:WORKS_AT]->(d) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # Trail rule with anonymous pattern edges — tracked via the match's
+        # exact fixed trail, not named bindings.
+        "trail_rule_comma_patterns_anonymous",
+        "social_graph",
+        "MATCH (a:Person {person_id: 1})-[:WORKS_AT]->(c), (a)-[:WORKS_AT]->(d) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # Comma patterns join: an empty pattern empties the whole clause.
+        # (Regression: the first-MATCH loop re-entered the "first pattern"
+        # branch when an earlier pattern produced no rows, fabricating rows
+        # that ignored the empty pattern.)
+        "comma_pattern_empty_join",
+        "social_graph",
+        "MATCH (x:Person {person_id: 9999}), (y:Person) RETURN count(*) AS n",
+        None,
+    ),
+    (
+        # Multi-pattern OPTIONAL MATCH where BOTH patterns match: openCypher
+        # join-then-null-pad semantics make the row set the cross join
+        # (3 KNOWS × 1 WORKS_AT), not a per-pattern union.
+        "optional_multi_pattern_join_cross",
+        "social_graph",
+        "MATCH (n:Person {person_id: 1}) "
+        "OPTIONAL MATCH (n)-[:KNOWS]->(a), (n)-[:WORKS_AT]->(b) "
+        "RETURN a.name AS an, b.name AS bn ORDER BY an, bn",
+        None,
+    ),
 ]
 
 

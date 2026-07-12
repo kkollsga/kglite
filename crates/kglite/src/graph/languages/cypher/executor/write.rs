@@ -833,6 +833,21 @@ fn resolve_create_node_idx(
     }
 }
 
+/// True when `variable` is a bound-but-null write target on this row —
+/// e.g. an unmatched OPTIONAL MATCH variable (no binding at all) or an
+/// explicit NULL projection. openCypher: SET / REMOVE on a NULL target is
+/// a no-op for that row, mirroring how DELETE already skips NULLs. A
+/// *truly undefined* name never reaches here — the planner's scope
+/// validation (`validate_scope`) rejects it before execution — so any
+/// remaining non-entity target that isn't NULL is a genuine type error
+/// and the caller keeps returning its descriptive error for it.
+fn is_null_write_target(row: &ResultRow, variable: &str) -> bool {
+    !row.node_bindings.contains_key(variable)
+        && !row.edge_bindings.contains_key(variable)
+        && !row.path_bindings.contains_key(variable)
+        && matches!(row.projected.get(variable), None | Some(Value::Null))
+}
+
 /// Execute a SET clause, modifying node properties in the graph.
 fn execute_set(
     graph: &mut DirGraph,
@@ -922,10 +937,17 @@ fn execute_set(
                         return Err("Cannot SET node type via property assignment".to_string());
                     }
 
-                    // Resolve the node
-                    let node_idx = row.node_bindings.get(variable).ok_or_else(|| {
-                        format!("Variable '{}' not bound to a node in SET", variable)
-                    })?;
+                    // Resolve the node. A null-valued target (OPTIONAL MATCH
+                    // miss) makes this row's write a no-op per openCypher.
+                    let Some(node_idx) = row.node_bindings.get(variable) else {
+                        if is_null_write_target(row, variable) {
+                            continue;
+                        }
+                        return Err(format!(
+                            "Variable '{}' not bound to a node in SET",
+                            variable
+                        ));
+                    };
 
                     // Evaluate the expression (borrows graph immutably)
                     let value = {
@@ -1119,6 +1141,10 @@ fn execute_set(
                     if !row.node_bindings.contains_key(variable)
                         && !row.edge_bindings.contains_key(variable)
                     {
+                        // Null target (OPTIONAL MATCH miss): no-op for this row.
+                        if is_null_write_target(row, variable) {
+                            continue;
+                        }
                         return Err(format!("Variable '{}' is not bound in SET", variable));
                     }
 
@@ -1207,9 +1233,16 @@ fn execute_set(
                     }
                 }
                 SetItem::Label { variable, label } => {
-                    let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
-                        format!("Variable '{}' not bound to a node in SET", variable)
-                    })?;
+                    let Some(&node_idx) = row.node_bindings.get(variable) else {
+                        // Null target (OPTIONAL MATCH miss): no-op for this row.
+                        if is_null_write_target(row, variable) {
+                            continue;
+                        }
+                        return Err(format!(
+                            "Variable '{}' not bound to a node in SET",
+                            variable
+                        ));
+                    };
                     let key = graph.interner.get_or_intern(label);
                     if graph.add_node_label(node_idx, key) {
                         stats.properties_set += 1;
@@ -1345,8 +1378,12 @@ fn execute_delete(
     use std::collections::HashSet;
 
     let mut nodes_to_delete: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
-    // For edge deletion we store edge indices directly — O(1) lookup
-    let mut edge_vars_to_delete: Vec<(String, petgraph::graph::EdgeIndex)> = Vec::new();
+    // For edge deletion we store edge indices directly — O(1) lookup.
+    // Collected as a set up front because the Phase-2 "node still has
+    // relationships" check must see the WHOLE statement's deletions:
+    // openCypher deletes are statement-atomic, so `DELETE r, n` is legal
+    // when `r` is the only relationship attached to `n`.
+    let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
 
     // Phase 1: collect all nodes and edges to delete across all rows
     for (row_idx, row) in result_set.rows.iter().enumerate() {
@@ -1360,7 +1397,7 @@ fn execute_delete(
             if let Some(&node_idx) = row.node_bindings.get(var_name) {
                 nodes_to_delete.insert(node_idx);
             } else if let Some(edge_binding) = row.edge_bindings.get(var_name) {
-                edge_vars_to_delete.push((var_name.clone(), edge_binding.edge_index));
+                deleted_edges.insert(edge_binding.edge_index);
             } else {
                 // Not bound to a node/edge. A node VALUE (NodeRef from
                 // WITH / collect) is still deletable; anything else is NULL
@@ -1391,20 +1428,21 @@ fn execute_delete(
         }
     }
 
-    // Phase 2: for plain DELETE (not DETACH), verify no node has edges
+    // Phase 2: for plain DELETE (not DETACH), verify no node keeps edges.
+    // Relationships deleted by THIS statement don't count — openCypher
+    // deletes are statement-atomic, so `MATCH (a)-[r]->(b) DELETE r, a`
+    // succeeds when `r` covers every relationship attached to `a`.
     if !delete.detach {
         for (node_count, &node_idx) in nodes_to_delete.iter().enumerate() {
             check_interrupt_periodic(interrupt, node_count)?;
             let has_edges = graph
                 .graph
                 .edges_directed(node_idx, petgraph::Direction::Outgoing)
-                .next()
-                .is_some()
+                .any(|e| !deleted_edges.contains(&e.id()))
                 || graph
                     .graph
                     .edges_directed(node_idx, petgraph::Direction::Incoming)
-                    .next()
-                    .is_some();
+                    .any(|e| !deleted_edges.contains(&e.id()));
             if has_edges {
                 let name = graph
                     .graph
@@ -1412,7 +1450,12 @@ fn execute_delete(
                     .map(|n| {
                         n.get_field_ref("name")
                             .or_else(|| n.get_field_ref("title"))
-                            .map(|v| format!("{:?}", v))
+                            .map(|v| match v.as_ref() {
+                                // Bare string, not the quoted Display form
+                                // (and never the old Debug `String("…")`).
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
                             .unwrap_or_else(|| format!("index {}", node_idx.index()))
                     })
                     .unwrap_or_else(|| "unknown".to_string());
@@ -1424,17 +1467,9 @@ fn execute_delete(
         }
     }
 
-    // Phase 3a: finish interruption checks and deduplicate every explicit edge
-    // before the first write. The following commit phase is deliberately
+    // Phase 3: infallible commit of the preflighted edge set. Deliberately
     // non-interruptible: once deletion begins, completing it preserves atomic
     // statement semantics without an O(graph) rollback checkpoint.
-    let mut deleted_edges: HashSet<petgraph::graph::EdgeIndex> = HashSet::new();
-    for (edge_count, (_var, edge_index)) in edge_vars_to_delete.iter().enumerate() {
-        check_interrupt_periodic(interrupt, edge_count)?;
-        deleted_edges.insert(*edge_index);
-    }
-
-    // Phase 3b: infallible commit of the preflighted edge set.
     for edge_index in deleted_edges.iter().copied() {
         GraphWrite::remove_edge(&mut graph.graph, edge_index);
         stats.relationships_deleted += 1;
@@ -1500,9 +1535,17 @@ fn execute_remove(
                         return Err("Cannot REMOVE node type".to_string());
                     }
 
-                    let node_idx = row.node_bindings.get(variable).ok_or_else(|| {
-                        format!("Variable '{}' not bound to a node in REMOVE", variable)
-                    })?;
+                    // A null-valued target (OPTIONAL MATCH miss) makes this
+                    // row's REMOVE a no-op per openCypher.
+                    let Some(node_idx) = row.node_bindings.get(variable) else {
+                        if is_null_write_target(row, variable) {
+                            continue;
+                        }
+                        return Err(format!(
+                            "Variable '{}' not bound to a node in REMOVE",
+                            variable
+                        ));
+                    };
 
                     // Read node_type before mutable borrow (for index update)
                     let node_type_str = graph
@@ -1546,9 +1589,16 @@ fn execute_remove(
                     }
                 }
                 RemoveItem::Label { variable, label } => {
-                    let node_idx = *row.node_bindings.get(variable).ok_or_else(|| {
-                        format!("Variable '{}' not bound to a node in REMOVE", variable)
-                    })?;
+                    let Some(&node_idx) = row.node_bindings.get(variable) else {
+                        // Null target (OPTIONAL MATCH miss): no-op for this row.
+                        if is_null_write_target(row, variable) {
+                            continue;
+                        }
+                        return Err(format!(
+                            "Variable '{}' not bound to a node in REMOVE",
+                            variable
+                        ));
+                    };
                     let key = graph.interner.get_or_intern(label);
                     if graph.remove_node_label(node_idx, key)? {
                         stats.properties_removed += 1;

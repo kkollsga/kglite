@@ -108,26 +108,30 @@ impl<'a> CypherExecutor<'a> {
 
         for (row_idx, row) in result_set.rows.iter().enumerate() {
             self.check_interrupt_periodic(row_idx)?;
-            let key_parts: Vec<GroupKeyPart> = strategies
-                .iter()
-                .zip(folded_group_exprs.iter())
-                .map(|(strategy, expr)| match strategy {
+            // Group-key evaluation errors (missing parameter, overflow, …)
+            // must propagate exactly as they would without aggregation.
+            // Legitimate null groups (OPTIONAL MATCH miss, property access
+            // on null) still arrive as `Ok(Value::Null)` from the
+            // evaluator's normal null semantics — an `Err` here is a
+            // genuine error, never a null group.
+            let mut key_parts: Vec<GroupKeyPart> = Vec::with_capacity(strategies.len());
+            for (strategy, expr) in strategies.iter().zip(folded_group_exprs.iter()) {
+                let part = match strategy {
                     GroupExprStrategy::NodeProp { variable, .. } => {
                         if let Some(&idx) = row.node_bindings.get(variable) {
                             GroupKeyPart::NodeProp(idx)
                         } else {
                             // Variable isn't a node binding for this row (e.g.
                             // OPTIONAL MATCH null) — fall back to full evaluation.
-                            GroupKeyPart::Resolved(
-                                self.evaluate_expression(expr, row).unwrap_or(Value::Null),
-                            )
+                            GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
                         }
                     }
-                    GroupExprStrategy::Eval => GroupKeyPart::Resolved(
-                        self.evaluate_expression(expr, row).unwrap_or(Value::Null),
-                    ),
-                })
-                .collect();
+                    GroupExprStrategy::Eval => {
+                        GroupKeyPart::Resolved(self.evaluate_expression(expr, row)?)
+                    }
+                };
+                key_parts.push(part);
+            }
 
             if let Some(&idx) = surrogate_index.get(&key_parts) {
                 surrogate_groups[idx].1.push(row_idx);

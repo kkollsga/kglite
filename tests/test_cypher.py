@@ -2270,4 +2270,235 @@ class TestFusedCountRegressions:
             "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) "
             "WITH n, count(a) AS ca, count(b) AS cb RETURN n.name AS name, ca, cb"
         )
-        assert g.cypher(q).to_list() == g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list()
+        # openCypher join-then-null-pad: the comma patterns succeed or fail
+        # as ONE unit. Pattern (n)-[:Y]->(b) has no match from pid 1, so the
+        # joined expansion is empty and BOTH variables null-pad — ca=0, cb=0
+        # (not the quasi-independent ca=2 the old per-pattern union gave).
+        expected = [{"name": "n1", "ca": 0, "cb": 0}]
+        assert g.cypher(q).to_list() == expected
+        assert g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list() == expected
+
+
+class TestRelationshipIdentityContract:
+    """openCypher: a relationship variable already bound on the row pins a
+    later pattern that re-uses it to exactly that edge (0.12.x fix — the
+    re-MATCH previously enumerated ALL edges and overwrote the binding)."""
+
+    @staticmethod
+    def _two_edge_graph():
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2, 3, 4], "name": ["a", "b", "c", "d"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1, 3], "t": [2, 4], "w": [1, 2]}), "KNOWS", "P", "f", "P", "t")
+        # Second connection type so type-mismatch shapes don't trip the
+        # unknown-label schema warning.
+        g.add_connections(pd.DataFrame({"f": [1], "t": [2]}), "LIKES", "P", "f", "P", "t")
+        return g
+
+    def test_with_rebind_pins_edge(self):
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH ()-[r:KNOWS]->() WITH r, r.w AS orig_w MATCH (a)-[r]->(b) RETURN orig_w, r.w AS w ORDER BY orig_w"
+        ).to_list()
+        assert rows == [{"orig_w": 1, "w": 1}, {"orig_w": 2, "w": 2}]
+
+    def test_unwind_rebind_pins_edge(self):
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH ()-[r0:KNOWS]->() WITH collect(r0) AS rels "
+            "UNWIND rels AS r MATCH (a)-[r]->(b) "
+            "RETURN a.name AS an, b.name AS bn ORDER BY an"
+        ).to_list()
+        assert rows == [{"an": "a", "bn": "b"}, {"an": "c", "bn": "d"}]
+
+    def test_rebind_binds_endpoints_from_stored_edge(self):
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH ()-[r:KNOWS {w: 2}]->() WITH r MATCH (a)-[r]->(b) RETURN a.name AS an, b.name AS bn"
+        ).to_list()
+        assert rows == [{"an": "c", "bn": "d"}]
+
+    def test_rebind_type_mismatch_yields_no_rows(self):
+        g = self._two_edge_graph()
+        rows = g.cypher("MATCH ()-[r:KNOWS {w: 2}]->() WITH r MATCH (a)-[r:LIKES]->(b) RETURN count(*) AS n").to_list()
+        assert rows == [{"n": 0}]
+
+    def test_rebind_direction_flip(self):
+        # The bound edge must satisfy the new pattern's direction: with the
+        # pattern reversed, `x` binds the edge target and `y` its source.
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH ()-[r:KNOWS {w: 1}]->() WITH r MATCH (x)<-[r]-(y) RETURN x.name AS xn, y.name AS yn"
+        ).to_list()
+        assert rows == [{"xn": "b", "yn": "a"}]
+
+    def test_optional_rebind_incompatible_null_pads(self):
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH ()-[r:KNOWS {w: 2}]->() WITH r OPTIONAL MATCH (a)-[r:LIKES]->(b) RETURN a.name AS an, b.name AS bn"
+        ).to_list()
+        assert rows == [{"an": None, "bn": None}]
+
+    def test_null_rel_var_matches_nothing(self):
+        # An OPTIONAL MATCH miss leaves `r` null; a later MATCH re-using it
+        # yields no rows (a null relationship can't match a pattern).
+        g = self._two_edge_graph()
+        rows = g.cypher(
+            "MATCH (n:P {pid: 2}) OPTIONAL MATCH (n)-[r:KNOWS]->(m) WITH r MATCH (a)-[r]->(b) RETURN count(*) AS n"
+        ).to_list()
+        assert rows == [{"n": 0}]
+
+
+class TestRelationshipTrailRule:
+    """openCypher relationship uniqueness: within ONE MATCH clause, two
+    different pattern edges (named or anonymous, across comma patterns)
+    may not bind the same relationship. Separate MATCH clauses may."""
+
+    @staticmethod
+    def _one_edge_graph():
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["a", "b"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [2]}), "R", "P", "f", "P", "t")
+        return g
+
+    def test_named_comma_patterns_cannot_share_edge(self):
+        g = self._one_edge_graph()
+        q = "MATCH (a)-[r1:R]->(b), (c)-[r2:R]->(d) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 0}]
+
+    def test_anonymous_comma_patterns_cannot_share_edge(self):
+        g = self._one_edge_graph()
+        q = "MATCH (a)-[:R]->(b), (c)-[:R]->(d) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 0}]
+
+    def test_var_length_and_fixed_comma_patterns_cannot_share_edge(self):
+        g = self._one_edge_graph()
+        q = "MATCH (a)-[r1:R]->(b), (c)-[r2:R*1..1]->(d) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 0}]
+
+    def test_separate_match_clauses_may_share_edge(self):
+        g = self._one_edge_graph()
+        q = "MATCH (a)-[r1:R]->(b) MATCH (c)-[r2:R]->(d) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 1}]
+
+    def test_three_anonymous_patterns_injective_assignment(self):
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2, 3], "name": ["a", "b", "c"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1, 2, 3], "t": [2, 3, 1]}), "R", "P", "f", "P", "t")
+        # 3 edges into 3 anonymous slots: 3! injective assignments.
+        q = "MATCH ()-[:R]->(), ()-[:R]->(), ()-[:R]->() RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 6}]
+
+    def test_uniqueness_applies_on_joined_subsequent_match(self):
+        # Non-first MATCH clause (upstream WITH) takes the join path —
+        # the trail rule must hold there too.
+        g = self._one_edge_graph()
+        q = "MATCH (p:P {pid: 1}) WITH p MATCH (p)-[r1:R]->(b), (c)-[r2:R]->(d) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 0}]
+
+    def test_empty_comma_pattern_empties_clause(self):
+        # Regression: an earlier pattern with no matches let the next
+        # pattern re-enter the "first pattern" branch and fabricate rows.
+        g = self._one_edge_graph()
+        q = "MATCH (x:P {pid: 999}), (a)-[:R]->(b) RETURN count(*) AS n"
+        assert g.cypher(q).to_list() == [{"n": 0}]
+        q2 = "MATCH (a)-[:R]->(b), (x:P {pid: 999}) RETURN count(*) AS n"
+        assert g.cypher(q2).to_list() == [{"n": 0}]
+
+
+class TestOptionalMatchJoinSemantics:
+    """Multi-pattern OPTIONAL MATCH is join-then-null-pad (openCypher): the
+    comma patterns expand as one joined unit; only when the WHOLE join is
+    empty does the single null-padded row appear. (0.12.x fix — patterns
+    previously expanded independently, unioning per-pattern half-rows.)"""
+
+    @staticmethod
+    def _graph():
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"pid": [1, 2, 3, 4, 5], "name": ["n1", "n2", "n3", "n4", "n5"]}),
+            "P",
+            "pid",
+            "name",
+        )
+        g.add_connections(pd.DataFrame({"f": [1, 1], "t": [2, 3]}), "X", "P", "f", "P", "t")
+        g.add_connections(pd.DataFrame({"f": [1, 1], "t": [4, 5]}), "Y", "P", "f", "P", "t")
+        return g
+
+    def test_one_empty_pattern_null_pads_all_vars(self):
+        g = self._graph()
+        # pid 2 has no X and no Y edges outgoing? n2 has none of either —
+        # use pid 2 for the all-empty case and pid 1 with a Z-less pattern
+        # for the half-empty case below.
+        rows = g.cypher(
+            "MATCH (n:P {pid: 2}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) RETURN a.name AS an, b.name AS bn"
+        ).to_list()
+        assert rows == [{"an": None, "bn": None}]
+
+    def test_half_empty_join_null_pads_all_vars(self):
+        # X matches from pid 1 twice, Y from pid 1... both match; instead
+        # anchor a pattern that cannot match: (n)-[:X]->(a), (a)-[:X]->(b).
+        g = self._graph()
+        rows = g.cypher(
+            "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (a)-[:X]->(b) RETURN a.name AS an, b.name AS bn"
+        ).to_list()
+        # No X edge leaves n2/n3, so the join is empty — `a` must be null
+        # too, not a half-row per X edge.
+        assert rows == [{"an": None, "bn": None}]
+
+    def test_both_match_cross_join(self):
+        g = self._graph()
+        rows = g.cypher(
+            "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) "
+            "RETURN a.name AS an, b.name AS bn ORDER BY an, bn"
+        ).to_list()
+        assert rows == [
+            {"an": "n2", "bn": "n4"},
+            {"an": "n2", "bn": "n5"},
+            {"an": "n3", "bn": "n4"},
+            {"an": "n3", "bn": "n5"},
+        ]
+
+    def test_counts_over_joined_expansion(self):
+        g = self._graph()
+        rows = g.cypher(
+            "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) "
+            "WITH n, count(a) AS ca, count(b) AS cb, count(*) AS c "
+            "RETURN ca, cb, c"
+        ).to_list()
+        assert rows == [{"ca": 4, "cb": 4, "c": 4}]
+
+    def test_count_star_on_failed_join_is_one(self):
+        g = self._graph()
+        rows = g.cypher(
+            "MATCH (n:P {pid: 2}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) "
+            "WITH n, count(a) AS ca, count(*) AS c RETURN ca, c"
+        ).to_list()
+        assert rows == [{"ca": 0, "c": 1}]
+
+
+class TestAggregateGroupKeyErrors:
+    """Group-key evaluation errors must propagate through aggregation the
+    same way they do without it (0.12.x fix — they were swallowed into
+    NULL groups). Legitimate null groups (OPTIONAL miss, property access
+    on null) still group as NULL."""
+
+    @staticmethod
+    def _graph():
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["a", "b"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [2]}), "R", "P", "f", "P", "t")
+        return g
+
+    def test_missing_parameter_group_key_errors(self):
+        g = self._graph()
+        q = "MATCH (n:P) RETURN $missing AS k, count(*) AS c"
+        with pytest.raises(Exception, match="Missing parameter"):
+            g.cypher(q).to_list()
+        # Materialized aggregation path (fused node-scan disabled) agrees.
+        with pytest.raises(Exception, match="Missing parameter"):
+            g.cypher(q, disable_optimizer=True).to_list()
+
+    def test_null_valued_group_keys_still_group(self):
+        g = self._graph()
+        rows = g.cypher("MATCH (n:P {pid: 2}) OPTIONAL MATCH (n)-[:R]->(m) RETURN m.name AS k, count(*) AS c").to_list()
+        assert rows == [{"k": None, "c": 1}]

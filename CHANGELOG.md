@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Relationship variables and multi-pattern MATCH now follow openCypher
+  binding semantics.** A relationship variable carried through `WITH` or
+  `UNWIND` constrains a later `MATCH` to that exact relationship instead of
+  re-enumerating all edges; two relationship variables in one `MATCH` cannot
+  bind the same edge across comma-separated patterns (the trail rule); an
+  empty comma pattern empties the whole match instead of letting the next
+  pattern refill it; and comma-separated `OPTIONAL MATCH` patterns join as
+  one unit that null-pads only when the joined whole fails.
+- **Write clauses follow openCypher null and atomicity semantics.**
+  `SET`/`REMOVE` on a null-valued variable (e.g. from an unmatched
+  `OPTIONAL MATCH`) are per-row no-ops instead of errors, while genuinely
+  undefined names still fail validation; `DELETE r, n` in one statement
+  deletes the relationship before the node's connectivity check; and
+  aggregate group-key evaluation errors (like a missing parameter) propagate
+  instead of silently grouping under null.
 - **Concurrent writes can no longer be silently lost at the C ABI and Bolt
   boundaries.** `kglite_create_edges_batch` now serializes through the
   session transaction path instead of a last-writer-wins commit,
