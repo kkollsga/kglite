@@ -5,7 +5,7 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.15] - 2026-07-11
 
 ### Changed
 
@@ -22,32 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Wheels, source distributions, and every publishable crate carry the MIT
   license, while an all-feature dependency audit requires explicit review of
   new license expressions and Apache/MPL-only packages.
-
-### Fixed
-
-- **Boolean, membership, quantifier, and list expressions now preserve Cypher
-  semantics outside `WHERE`.** `AND`/`OR`/`XOR`/`NOT` parse in projection
-  expressions with the expected precedence, unknown values remain null,
-  `IN` and list quantifiers use three-valued results, `+` composes lists and
-  elements, and list indexes/slice bounds reject non-integer types instead of
-  truncating or silently returning null.
-- **Scope, map mutation, and relationship identity now have explicit
-  contracts.** Undefined variables fail during validation (including names
-  projected out by `WITH`), `MERGE` rejects null property keys before any
-  mutation, `SET entity += map` and `SET entity = map` work for nodes and
-  relationships, and `id(r)` returns the stable relationship identity.
-- **Cypher paths now retain exact relationship identity.** Fixed,
-  variable-length, shortest, and all-shortest path bindings preserve parallel
-  and incoming relationships, `relationships(p)` returns the edges actually
-  matched, and a relationship cannot be reused within one path while nodes may
-  repeat. Fused two-hop counts enforce the same trail rule.
-- **Python, MCP, and Bolt boundaries now expose their declared shapes.** Public
-  session/RDF/open helpers are exported consistently, PyO3 classes identify as
-  `kglite` types, read-only MCP Cypher schemas omit write-only arguments, local
-  workspaces expose one activation tool, and malformed Bolt paths fail instead
-  of inventing a traversal direction.
-
-## [0.12.15] - 2026-07-11
 
 ### Added
 
@@ -75,6 +49,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Boolean, membership, quantifier, and list expressions now preserve Cypher
+  semantics outside `WHERE`.** `AND`/`OR`/`XOR`/`NOT` parse in projection
+  expressions with the expected precedence, unknown values remain null,
+  `IN` and list quantifiers use three-valued results, `+` composes lists and
+  elements, and list indexes/slice bounds reject non-integer types instead of
+  truncating or silently returning null.
+- **Scope, map mutation, and relationship identity now have explicit
+  contracts.** Undefined variables fail during validation (including names
+  projected out by `WITH`), `MERGE` rejects null property keys before any
+  mutation, `SET entity += map` and `SET entity = map` work for nodes and
+  relationships, and `id(r)` returns the stable relationship identity.
+- **Cypher paths now retain exact relationship identity.** Fixed,
+  variable-length, shortest, and all-shortest path bindings preserve parallel
+  and incoming relationships, `relationships(p)` returns the edges actually
+  matched, and a relationship cannot be reused within one path while nodes may
+  repeat. Fused two-hop counts enforce the same trail rule.
+- **Python, MCP, and Bolt boundaries now expose their declared shapes.** Public
+  session/RDF/open helpers are exported consistently, PyO3 classes identify as
+  `kglite` types, read-only MCP Cypher schemas omit write-only arguments, local
+  workspaces expose one activation tool, and malformed Bolt paths fail instead
+  of inventing a traversal direction.
 - **Interned names can no longer silently alias on a hash collision.** Release
   and debug builds detect conflicting strings, ingestion preflights complete
   batches before mutation, Cypher surfaces a typed collision error, and
