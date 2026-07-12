@@ -50,6 +50,215 @@ pub const CODE_TYPES: &[&str] = &[
     "Constant",
 ];
 
+/// Name-matching strategy for [`find_code_entities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeEntityMatch {
+    Exact,
+    Contains,
+    StartsWith,
+}
+
+/// Search code-entity type indices by `name` or `title`.
+///
+/// This is the binding-neutral scan behind the wheel's `find()` method. It
+/// returns typed [`schema::NodeInfo`] values; dict/object marshalling remains
+/// in the consuming wrapper.
+pub fn find_code_entities(
+    dir: &Arc<DirGraph>,
+    name: &str,
+    node_type: Option<&str>,
+    match_type: CodeEntityMatch,
+) -> Vec<schema::NodeInfo> {
+    let _arena_guard = dir.graph.begin_query();
+    let name_lower = name.to_lowercase();
+    let name_value = Value::String(name.to_string());
+    let types_to_search: Vec<&str> = match node_type {
+        Some(nt) => vec![nt],
+        None => CODE_TYPES.to_vec(),
+    };
+
+    let mut results = Vec::new();
+    for node_type in types_to_search {
+        let Some(indices) = dir.type_indices.get(node_type) else {
+            continue;
+        };
+        for index in indices.iter() {
+            let Some(node) = dir.get_node(index) else {
+                continue;
+            };
+            let matches = match match_type {
+                CodeEntityMatch::Contains => {
+                    node.field_contains_ci("name", &name_lower)
+                        || node.field_contains_ci("title", &name_lower)
+                }
+                CodeEntityMatch::StartsWith => {
+                    node.field_starts_with_ci("name", &name_lower)
+                        || node.field_starts_with_ci("title", &name_lower)
+                }
+                CodeEntityMatch::Exact => {
+                    node.get_field_ref("name")
+                        .is_some_and(|value| *value == name_value)
+                        || node
+                            .get_field_ref("title")
+                            .is_some_and(|value| *value == name_value)
+                }
+            };
+            if matches {
+                results.push(node.to_node_info(&dir.interner));
+            }
+        }
+    }
+    results
+}
+
+/// Resolved code-entity neighborhood, kept directional for neutral bindings.
+#[derive(Debug)]
+pub struct CodeEntityContext {
+    pub node: schema::NodeInfo,
+    pub defined_in: Option<String>,
+    pub outgoing: std::collections::HashMap<String, Vec<schema::NodeInfo>>,
+    pub incoming: std::collections::HashMap<String, Vec<schema::NodeInfo>>,
+}
+
+/// Outcome of resolving a code entity for [`code_entity_context`].
+#[derive(Debug)]
+pub enum CodeContextLookup {
+    Found(CodeEntityContext),
+    Ambiguous(Vec<schema::NodeInfo>),
+    NotFound,
+}
+
+/// Resolve a code entity and collect its neighborhood up to `hops` away.
+///
+/// The traversal and edge-type grouping are shared engine logic. Bindings may
+/// flatten or rename the directional groups to suit their native result shape.
+pub fn code_entity_context(
+    dir: &Arc<DirGraph>,
+    name: &str,
+    node_type: Option<&str>,
+    hops: usize,
+) -> CodeContextLookup {
+    let _arena_guard = dir.graph.begin_query();
+    let (resolved, matches) = resolve_code_entity(dir, name, node_type);
+    let Some(target_idx) = resolved else {
+        return if matches.is_empty() {
+            CodeContextLookup::NotFound
+        } else {
+            CodeContextLookup::Ambiguous(matches.into_iter().map(|(_, info)| info).collect())
+        };
+    };
+    let Some(target_node) = dir.get_node(target_idx) else {
+        return CodeContextLookup::NotFound;
+    };
+
+    let neighbor_indices = if hops <= 1 {
+        let mut neighbors = std::collections::HashSet::new();
+        for edge in dir
+            .graph
+            .edges_directed(target_idx, petgraph::Direction::Outgoing)
+        {
+            neighbors.insert(edge.target());
+        }
+        for edge in dir
+            .graph
+            .edges_directed(target_idx, petgraph::Direction::Incoming)
+        {
+            neighbors.insert(edge.source());
+        }
+        neighbors
+    } else {
+        let mut visited = std::collections::HashSet::from([target_idx]);
+        let mut frontier = std::collections::HashSet::from([target_idx]);
+        for _ in 0..hops {
+            let mut next_frontier = std::collections::HashSet::new();
+            for &node in &frontier {
+                for neighbor in dir.graph.neighbors_undirected(node) {
+                    if visited.insert(neighbor) {
+                        next_frontier.insert(neighbor);
+                    }
+                }
+            }
+            if next_frontier.is_empty() {
+                break;
+            }
+            frontier = next_frontier;
+        }
+        visited.remove(&target_idx);
+        visited
+    };
+
+    let mut outgoing_indices: std::collections::HashMap<String, Vec<NodeIndex>> =
+        std::collections::HashMap::new();
+    let mut incoming_indices: std::collections::HashMap<String, Vec<NodeIndex>> =
+        std::collections::HashMap::new();
+    for edge in dir
+        .graph
+        .edges_directed(target_idx, petgraph::Direction::Outgoing)
+    {
+        let target = edge.target();
+        if hops <= 1 || neighbor_indices.contains(&target) {
+            outgoing_indices
+                .entry(edge.weight().connection_type_str(&dir.interner).to_string())
+                .or_default()
+                .push(target);
+        }
+    }
+    for edge in dir
+        .graph
+        .edges_directed(target_idx, petgraph::Direction::Incoming)
+    {
+        let source = edge.source();
+        if hops <= 1 || neighbor_indices.contains(&source) {
+            incoming_indices
+                .entry(edge.weight().connection_type_str(&dir.interner).to_string())
+                .or_default()
+                .push(source);
+        }
+    }
+    if hops > 1 {
+        for &node_idx in &neighbor_indices {
+            for edge in dir
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Outgoing)
+            {
+                let target = edge.target();
+                if target != target_idx && neighbor_indices.contains(&target) {
+                    outgoing_indices
+                        .entry(edge.weight().connection_type_str(&dir.interner).to_string())
+                        .or_default()
+                        .push(target);
+                }
+            }
+        }
+    }
+
+    let materialise_groups = |groups: std::collections::HashMap<String, Vec<NodeIndex>>| {
+        groups
+            .into_iter()
+            .map(|(edge_type, indices)| {
+                let mut seen = std::collections::HashSet::new();
+                let nodes = indices
+                    .into_iter()
+                    .filter(|index| seen.insert(*index))
+                    .filter_map(|index| dir.get_node(index))
+                    .map(|node| node.to_node_info(&dir.interner))
+                    .collect();
+                (edge_type, nodes)
+            })
+            .collect()
+    };
+
+    CodeContextLookup::Found(CodeEntityContext {
+        node: target_node.to_node_info(&dir.interner),
+        defined_in: match target_node.get_field_ref("file_path").as_deref() {
+            Some(Value::String(path)) => Some(path.clone()),
+            _ => None,
+        },
+        outgoing: materialise_groups(outgoing_indices),
+        incoming: materialise_groups(incoming_indices),
+    })
+}
+
 /// Resolve a name (or qualified-name suffix) to a single code-entity
 /// `NodeIndex`. Returns `(Some(idx), Vec::new())` for an unambiguous
 /// match, `(None, matches)` when 0 or >1 candidates matched.
@@ -351,4 +560,94 @@ pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
     let graph = Arc::make_mut(arc);
     graph.bump_version();
     graph
+}
+
+#[cfg(test)]
+mod boundary_lift_tests {
+    use super::*;
+    use crate::graph::session::{execute_mut, ExecuteOptions};
+    use std::collections::HashMap;
+
+    fn code_graph() -> Arc<DirGraph> {
+        let mut graph = DirGraph::new();
+        let params = HashMap::new();
+        execute_mut(
+            &mut graph,
+            "CREATE (a:Function {id:'mod::alpha', title:'alpha', name:'alpha', file_path:'src/a.rs'}), \
+             (b:Function {id:'mod::beta', title:'BetaWorker', name:'BetaWorker', file_path:'src/b.rs'}), \
+             (c:Function {id:'mod::gamma', title:'gamma', name:'gamma', file_path:'src/c.rs'}), \
+             (f:File {id:'src/a.rs', title:'src/a.rs'})",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("fixture nodes");
+        execute_mut(
+            &mut graph,
+            "MATCH (a:Function {id:'mod::alpha'}), (b:Function {id:'mod::beta'}), \
+             (c:Function {id:'mod::gamma'}), (f:File {id:'src/a.rs'}) \
+             CREATE (a)-[:CALLS]->(b), (b)-[:CALLS]->(c), (f)-[:DEFINES]->(a)",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("fixture edges");
+        Arc::new(graph)
+    }
+
+    #[test]
+    fn find_code_entities_supports_match_modes_and_type_filter() {
+        let graph = code_graph();
+        let exact = find_code_entities(&graph, "alpha", Some("Function"), CodeEntityMatch::Exact);
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].id, Value::String("mod::alpha".into()));
+
+        let contains = find_code_entities(&graph, "et", None, CodeEntityMatch::Contains);
+        assert_eq!(contains.len(), 1);
+        assert_eq!(contains[0].id, Value::String("mod::beta".into()));
+
+        let starts_with = find_code_entities(&graph, "bet", None, CodeEntityMatch::StartsWith);
+        assert_eq!(starts_with.len(), 1);
+        assert_eq!(starts_with[0].id, Value::String("mod::beta".into()));
+    }
+
+    #[test]
+    fn code_entity_context_groups_directional_multi_hop_neighbors() {
+        let graph = code_graph();
+        let CodeContextLookup::Found(context) =
+            code_entity_context(&graph, "alpha", Some("Function"), 2)
+        else {
+            panic!("expected resolved context");
+        };
+        assert_eq!(context.defined_in.as_deref(), Some("src/a.rs"));
+        let calls = &context.outgoing["CALLS"];
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .any(|node| node.id == Value::String("mod::beta".into())));
+        assert!(calls
+            .iter()
+            .any(|node| node.id == Value::String("mod::gamma".into())));
+        assert_eq!(context.incoming["DEFINES"].len(), 1);
+    }
+
+    #[test]
+    fn code_entity_context_distinguishes_miss_from_ambiguity() {
+        let mut graph = match Arc::try_unwrap(code_graph()) {
+            Ok(graph) => graph,
+            Err(_) => panic!("expected sole graph owner"),
+        };
+        let params = HashMap::new();
+        execute_mut(
+            &mut graph,
+            "CREATE (:Function {id:'other::alpha', title:'alpha', name:'alpha', file_path:'other.rs'})",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("add ambiguous entity");
+        let graph = Arc::new(graph);
+        assert!(matches!(
+            code_entity_context(&graph, "alpha", Some("Function"), 1),
+            CodeContextLookup::Ambiguous(matches) if matches.len() == 2
+        ));
+        assert!(matches!(
+            code_entity_context(&graph, "missing", None, 1),
+            CodeContextLookup::NotFound
+        ));
+    }
 }

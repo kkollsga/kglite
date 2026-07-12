@@ -268,6 +268,25 @@ pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprin
 pub fn kglite::api::blueprint::from_records(graph: &mut kglite::api::DirGraph, spec: &serde_json::value::Value) -> core::result::Result<kglite::api::blueprint::RecordsReport, alloc::string::String>
 pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> core::result::Result<kglite::api::blueprint::Blueprint, alloc::string::String>
 pub mod kglite::api::code_tree
+pub enum kglite::api::code_tree::CodeContextLookup
+pub kglite::api::code_tree::CodeContextLookup::Ambiguous(alloc::vec::Vec<kglite::api::NodeInfo>)
+pub kglite::api::code_tree::CodeContextLookup::Found(kglite::api::code_tree::CodeEntityContext)
+pub kglite::api::code_tree::CodeContextLookup::NotFound
+impl core::fmt::Debug for kglite::api::code_tree::CodeContextLookup
+pub fn kglite::api::code_tree::CodeContextLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum kglite::api::code_tree::CodeEntityMatch
+pub kglite::api::code_tree::CodeEntityMatch::Contains
+pub kglite::api::code_tree::CodeEntityMatch::Exact
+pub kglite::api::code_tree::CodeEntityMatch::StartsWith
+impl core::clone::Clone for kglite::api::code_tree::CodeEntityMatch
+pub fn kglite::api::code_tree::CodeEntityMatch::clone(&self) -> kglite::api::code_tree::CodeEntityMatch
+impl core::cmp::Eq for kglite::api::code_tree::CodeEntityMatch
+impl core::cmp::PartialEq for kglite::api::code_tree::CodeEntityMatch
+pub fn kglite::api::code_tree::CodeEntityMatch::eq(&self, other: &kglite::api::code_tree::CodeEntityMatch) -> bool
+impl core::fmt::Debug for kglite::api::code_tree::CodeEntityMatch
+pub fn kglite::api::code_tree::CodeEntityMatch::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::code_tree::CodeEntityMatch
+impl core::marker::StructuralPartialEq for kglite::api::code_tree::CodeEntityMatch
 pub enum kglite::api::code_tree::SourceLookup
 pub kglite::api::code_tree::SourceLookup::Ambiguous(alloc::vec::Vec<alloc::string::String>)
 pub kglite::api::code_tree::SourceLookup::Found(kglite::api::code_tree::SourceLocation)
@@ -276,6 +295,13 @@ impl core::clone::Clone for kglite::api::code_tree::SourceLookup
 pub fn kglite::api::code_tree::SourceLookup::clone(&self) -> kglite::api::code_tree::SourceLookup
 impl core::fmt::Debug for kglite::api::code_tree::SourceLookup
 pub fn kglite::api::code_tree::SourceLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::code_tree::CodeEntityContext
+pub kglite::api::code_tree::CodeEntityContext::defined_in: core::option::Option<alloc::string::String>
+pub kglite::api::code_tree::CodeEntityContext::incoming: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
+pub kglite::api::code_tree::CodeEntityContext::node: kglite::api::NodeInfo
+pub kglite::api::code_tree::CodeEntityContext::outgoing: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
+impl core::fmt::Debug for kglite::api::code_tree::CodeEntityContext
+pub fn kglite::api::code_tree::CodeEntityContext::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::code_tree::SourceLocation
 pub kglite::api::code_tree::SourceLocation::end_line: core::option::Option<i64>
 pub kglite::api::code_tree::SourceLocation::file_path: core::option::Option<alloc::string::String>
@@ -291,7 +317,9 @@ pub fn kglite::api::code_tree::SourceLocation::fmt(&self, f: &mut core::fmt::For
 pub const kglite::api::code_tree::CODE_TYPES: &[&str]
 pub fn kglite::api::code_tree::build_code_tree(input: &std::path::Path, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::api::code_tree::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
+pub fn kglite::api::code_tree::code_entity_context(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, hops: usize) -> kglite::api::code_tree::CodeContextLookup
 pub fn kglite::api::code_tree::dedup_revs(revs: &[alloc::string::String]) -> alloc::vec::Vec<alloc::string::String>
+pub fn kglite::api::code_tree::find_code_entities(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, match_type: kglite::api::code_tree::CodeEntityMatch) -> alloc::vec::Vec<kglite::api::NodeInfo>
 pub fn kglite::api::code_tree::language_for_path(path: &std::path::Path) -> core::option::Option<&'static str>
 pub fn kglite::api::code_tree::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
 pub fn kglite::api::code_tree::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_tree::SourceLookup
@@ -487,7 +515,7 @@ pub fn kglite::api::cypher::CypherQuery::fmt(&self, f: &mut core::fmt::Formatter
 pub struct kglite::api::cypher::CypherResult
 pub kglite::api::cypher::CypherResult::columns: alloc::vec::Vec<alloc::string::String>
 pub kglite::api::cypher::CypherResult::diagnostics: core::option::Option<kglite::api::cypher::QueryDiagnostics>
-pub kglite::api::cypher::CypherResult::lazy: core::option::Option<kglite::graph::languages::cypher::result::LazyResultDescriptor>
+pub kglite::api::cypher::CypherResult::lazy: core::option::Option<kglite::api::cypher::LazyResultDescriptor>
 pub kglite::api::cypher::CypherResult::profile: core::option::Option<alloc::vec::Vec<kglite::api::cypher::ClauseStats>>
 pub kglite::api::cypher::CypherResult::rows: alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>
 pub kglite::api::cypher::CypherResult::stats: core::option::Option<kglite::api::cypher::MutationStats>
@@ -505,6 +533,11 @@ pub fn kglite::api::cypher::EdgeBinding::clone(&self) -> kglite::api::cypher::Ed
 impl core::fmt::Debug for kglite::api::cypher::EdgeBinding
 pub fn kglite::api::cypher::EdgeBinding::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for kglite::api::cypher::EdgeBinding
+pub struct kglite::api::cypher::LazyResultDescriptor
+pub kglite::api::cypher::LazyResultDescriptor::pending_rows: alloc::vec::Vec<kglite::api::cypher::ResultRow>
+pub kglite::api::cypher::LazyResultDescriptor::return_items: alloc::vec::Vec<kglite::api::cypher::ReturnItem>
+impl core::fmt::Debug for kglite::api::cypher::LazyResultDescriptor
+pub fn kglite::api::cypher::LazyResultDescriptor::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::cypher::MutationStats
 pub kglite::api::cypher::MutationStats::nodes_created: usize
 pub kglite::api::cypher::MutationStats::nodes_deleted: usize
@@ -564,6 +597,8 @@ pub fn kglite::api::cypher::execute_mutable(graph: &mut kglite::api::DirGraph, q
 pub fn kglite::api::cypher::generate_explain_result(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> kglite::api::cypher::CypherResult
 pub fn kglite::api::cypher::is_mutation_query(query: &kglite::api::cypher::CypherQuery) -> bool
 pub fn kglite::api::cypher::mark_lazy_eligibility(query: &mut kglite::api::cypher::CypherQuery)
+pub fn kglite::api::cypher::materialise_lazy(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph) -> alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>
+pub fn kglite::api::cypher::materialise_lazy_row(descriptor: &kglite::api::cypher::LazyResultDescriptor, graph: &kglite::api::DirGraph, index: usize) -> alloc::vec::Vec<kglite::datatypes::values::Value>
 pub fn kglite::api::cypher::optimize(query: &mut kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>)
 pub fn kglite::api::cypher::parse_cypher(input: &str) -> core::result::Result<kglite::api::cypher::CypherQuery, kglite::error::KgError>
 pub fn kglite::api::cypher::parse_with_mutation_check(query: &str) -> core::result::Result<(kglite::api::cypher::CypherQuery, bool), kglite::error::KgError>
@@ -690,6 +725,20 @@ pub fn kglite::api::fluent::MatchBinding::fmt(&self, f: &mut core::fmt::Formatte
 pub enum kglite::api::fluent::TemporalEdgeFilter
 pub kglite::api::fluent::TemporalEdgeFilter::At(alloc::vec::Vec<kglite::api::TemporalConfig>, chrono::naive::date::NaiveDate)
 pub kglite::api::fluent::TemporalEdgeFilter::During(alloc::vec::Vec<kglite::api::TemporalConfig>, chrono::naive::date::NaiveDate, chrono::naive::date::NaiveDate)
+pub struct kglite::api::fluent::GroupedPropertyStats
+pub kglite::api::fluent::GroupedPropertyStats::count: usize
+pub kglite::api::fluent::GroupedPropertyStats::max: core::option::Option<f64>
+pub kglite::api::fluent::GroupedPropertyStats::mean: core::option::Option<f64>
+pub kglite::api::fluent::GroupedPropertyStats::min: core::option::Option<f64>
+pub kglite::api::fluent::GroupedPropertyStats::std: core::option::Option<f64>
+pub kglite::api::fluent::GroupedPropertyStats::sum: core::option::Option<f64>
+impl core::clone::Clone for kglite::api::fluent::GroupedPropertyStats
+pub fn kglite::api::fluent::GroupedPropertyStats::clone(&self) -> kglite::api::fluent::GroupedPropertyStats
+impl core::cmp::PartialEq for kglite::api::fluent::GroupedPropertyStats
+pub fn kglite::api::fluent::GroupedPropertyStats::eq(&self, other: &kglite::api::fluent::GroupedPropertyStats) -> bool
+impl core::fmt::Debug for kglite::api::fluent::GroupedPropertyStats
+pub fn kglite::api::fluent::GroupedPropertyStats::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for kglite::api::fluent::GroupedPropertyStats
 pub struct kglite::api::fluent::LevelConnections
 pub kglite::api::fluent::LevelConnections::connections: alloc::vec::Vec<kglite::graph::core::data_retrieval::ConnectionInfo>
 pub kglite::api::fluent::LevelConnections::parent_id: core::option::Option<kglite::datatypes::values::Value>
@@ -786,6 +835,7 @@ pub kglite::api::fluent::UniqueValues::values: alloc::vec::Vec<kglite::datatypes
 impl core::fmt::Debug for kglite::api::fluent::UniqueValues
 pub fn kglite::api::fluent::UniqueValues::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub fn kglite::api::fluent::calculate_centroid(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, lat_field: &str, lon_field: &str, geom_fallback: core::option::Option<&str>) -> core::option::Option<(f64, f64)>
+pub fn kglite::api::fluent::calculate_grouped_property_stats(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, property: &str, group_by: &str, level_index: core::option::Option<usize>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::api::fluent::GroupedPropertyStats>
 pub fn kglite::api::fluent::calculate_property_stats(graph: &kglite::api::DirGraph, pairs: &[kglite::graph::core::statistics::ParentChildPair], property: &str) -> alloc::vec::Vec<kglite::api::fluent::PropertyStats>
 pub fn kglite::api::fluent::collect_selected_nodes(selection: &kglite::api::CurrentSelection, level_index: core::option::Option<usize>) -> alloc::vec::Vec<petgraph::graph_impl::NodeIndex>
 pub fn kglite::api::fluent::contains_point(graph: &kglite::api::DirGraph, selection: &kglite::api::CurrentSelection, geometry_field: &str, lat: f64, lon: f64) -> core::result::Result<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>, alloc::string::String>

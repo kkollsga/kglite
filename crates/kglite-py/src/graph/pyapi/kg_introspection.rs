@@ -1188,59 +1188,32 @@ impl KnowledgeGraph {
     ) -> PyResult<Py<PyAny>> {
         // group_by: compute statistics grouped by a property value
         if let Some(group_prop) = group_by {
-            let nodes = kglite_core::api::fluent::collect_selected_nodes(
+            let groups = kglite_core::api::fluent::calculate_grouped_property_stats(
+                &self.inner,
                 &self.cursor.selection,
+                property,
+                group_prop,
                 level_index,
             );
-            let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
-            for idx in nodes {
-                if let Some(node) = self.inner.get_node(idx) {
-                    let nt = node.node_type_str(&self.inner.interner);
-                    let resolved_group = self.inner.resolve_alias(nt, group_prop);
-                    let key = match node.get_field_ref(resolved_group).as_deref() {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(Value::Int64(i)) => i.to_string(),
-                        Some(v) => format!("{:?}", v),
-                        None => "null".to_string(),
-                    };
-                    let resolved_prop = self.inner.resolve_alias(nt, property);
-                    if let Some(val) = node.get_field_ref(resolved_prop) {
-                        let num = match &*val {
-                            Value::Int64(i) => Some(*i as f64),
-                            Value::Float64(f) => Some(*f),
-                            Value::UniqueId(u) => Some(*u as f64),
-                            _ => None,
-                        };
-                        if let Some(n) = num {
-                            groups.entry(key).or_default().push(n);
-                        } else {
-                            groups.entry(key).or_default(); // ensure group exists
-                        }
-                    } else {
-                        groups.entry(key).or_default();
-                    }
-                }
-            }
             return Python::attach(|py| {
                 let result = PyDict::new(py);
-                for (key, values) in &groups {
+                for (key, group) in &groups {
                     let stats = PyDict::new(py);
-                    let count = values.len();
-                    stats.set_item("count", count)?;
-                    if count > 0 {
-                        let sum: f64 = values.iter().sum();
-                        let mean = sum / count as f64;
-                        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-                        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                        stats.set_item("sum", sum)?;
-                        stats.set_item("mean", mean)?;
-                        stats.set_item("min", min)?;
-                        stats.set_item("max", max)?;
-                        if count > 1 {
-                            let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                                / (count - 1) as f64;
-                            stats.set_item("std", variance.sqrt())?;
-                        }
+                    stats.set_item("count", group.count)?;
+                    if let Some(value) = group.sum {
+                        stats.set_item("sum", value)?;
+                    }
+                    if let Some(value) = group.mean {
+                        stats.set_item("mean", value)?;
+                    }
+                    if let Some(value) = group.min {
+                        stats.set_item("min", value)?;
+                    }
+                    if let Some(value) = group.max {
+                        stats.set_item("max", value)?;
+                    }
+                    if let Some(value) = group.std {
+                        stats.set_item("std", value)?;
                     }
                     result.set_item(key, stats)?;
                 }

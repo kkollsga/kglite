@@ -5,6 +5,7 @@ use crate::datatypes::values::Value;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 
 use crate::graph::core::pattern_matching::PathHop;
+use crate::graph::storage::GraphRead;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -259,6 +260,69 @@ pub struct LazyResultDescriptor {
     pub return_items: Vec<super::ast::ReturnItem>,
 }
 
+/// Materialise one pending lazy-result row against `graph`.
+///
+/// Returns engine [`Value`]s; native/wire conversion remains a binding concern.
+pub fn materialise_lazy_row(
+    descriptor: &LazyResultDescriptor,
+    graph: &crate::graph::dir_graph::DirGraph,
+    index: usize,
+) -> Vec<Value> {
+    let pending_row = &descriptor.pending_rows[index];
+    descriptor
+        .return_items
+        .iter()
+        .map(|item| match &item.expression {
+            super::ast::Expression::PropertyAccess { variable, property } => {
+                if let Some(&node_idx) = pending_row.node_bindings.get(variable) {
+                    graph
+                        .graph
+                        .node_weight(node_idx)
+                        .map(|node| {
+                            super::executor::helpers::resolve_node_property(node, property, graph)
+                        })
+                        .unwrap_or(Value::Null)
+                } else if let Some(edge) = pending_row.edge_bindings.get(variable) {
+                    super::executor::helpers::resolve_edge_property(graph, edge, property)
+                } else {
+                    pending_row
+                        .projected
+                        .get(variable)
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                }
+            }
+            super::ast::Expression::Variable(variable) => {
+                if let Some(&node_idx) = pending_row.node_bindings.get(variable) {
+                    // Whole-node lazy projection is currently planner-ineligible;
+                    // retain the wrapper's defensive id fallback.
+                    graph.graph.get_node_id(node_idx).unwrap_or(Value::Null)
+                } else {
+                    pending_row
+                        .projected
+                        .get(variable)
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                }
+            }
+            _ => Value::Null,
+        })
+        .collect()
+}
+
+/// Materialise every row in a lazy descriptor against `graph`.
+///
+/// C-ABI and server consumers can call this before serialising an executor
+/// result whose [`CypherResult::lazy`] field is populated.
+pub fn materialise_lazy(
+    descriptor: &LazyResultDescriptor,
+    graph: &crate::graph::dir_graph::DirGraph,
+) -> Vec<Vec<Value>> {
+    (0..descriptor.pending_rows.len())
+        .map(|index| materialise_lazy_row(descriptor, graph, index))
+        .collect()
+}
+
 /// Final query result returned to Python
 #[derive(Debug)]
 pub struct CypherResult {
@@ -372,5 +436,34 @@ fn csv_value(buf: &mut String, val: &Value) {
             let s = crate::datatypes::values::format_value(val);
             csv_field(buf, &s);
         }
+    }
+}
+
+#[cfg(test)]
+mod lazy_materialisation_tests {
+    use super::*;
+    use crate::graph::dir_graph::DirGraph;
+    use crate::graph::session::{execute_mut, execute_read, ExecuteOptions};
+    use std::collections::HashMap;
+
+    #[test]
+    fn core_materialises_lazy_property_rows() {
+        let mut graph = DirGraph::new();
+        let params = HashMap::new();
+        execute_mut(
+            &mut graph,
+            "CREATE (:Person {id:1, title:'Alice', name:'Alice'})",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("fixture CREATE");
+        let mut opts = ExecuteOptions::eager(&params);
+        opts.lazy_eligible = true;
+        let mut outcome =
+            execute_read(&graph, "MATCH (n:Person) RETURN n.name", &opts).expect("lazy read");
+        let descriptor = outcome.result.lazy.take().expect("lazy descriptor");
+        assert_eq!(
+            materialise_lazy(&descriptor, &graph),
+            vec![vec![Value::String("Alice".into())]]
+        );
     }
 }

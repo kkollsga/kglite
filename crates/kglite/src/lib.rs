@@ -237,7 +237,8 @@ pub mod api {
         };
         // Aggregate statistics over selected nodes.
         pub use crate::graph::core::statistics::{
-            calculate_property_stats, collect_selected_nodes, get_parent_child_pairs, PropertyStats,
+            calculate_grouped_property_stats, calculate_property_stats, collect_selected_nodes,
+            get_parent_child_pairs, GroupedPropertyStats, PropertyStats,
         };
         // Pattern-match execution (shared with Cypher MATCH).
         pub use crate::graph::core::pattern_matching::{
@@ -395,7 +396,10 @@ pub mod api {
         /// `code_tree.build(revs=[...])` and the MCP server's rev-aware
         /// activation hook are its two bindings.
         pub use crate::code_tree::rev::{build_code_tree_revs, dedup_revs};
-        pub use crate::graph::handle::{resolve_code_entity, source_location, CODE_TYPES};
+        pub use crate::graph::handle::{
+            code_entity_context, find_code_entities, resolve_code_entity, source_location,
+            CodeContextLookup, CodeEntityContext, CodeEntityMatch, CODE_TYPES,
+        };
         pub use crate::graph::{SourceLocation, SourceLookup};
     }
 
@@ -430,7 +434,9 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner::mark_lazy_eligibility;
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
-        pub use crate::graph::languages::cypher::result::CypherResult;
+        pub use crate::graph::languages::cypher::result::{
+            materialise_lazy, materialise_lazy_row, CypherResult, LazyResultDescriptor,
+        };
         /// Operator-declared value codecs — position-scoped, bidirectional
         /// literal conversions (`'Q42'` ↔ `42`) bound to a property. Bindings
         /// build a `Vec<ValueCodec>` (e.g. from a YAML manifest) and pass it via

@@ -3,7 +3,7 @@ use crate::datatypes::values::Value;
 use crate::graph::schema::{CurrentSelection, DirGraph, NodeData};
 use petgraph::graph::NodeIndex;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub struct ParentChildPair {
@@ -60,6 +60,97 @@ pub fn collect_selected_nodes(
         .get_level(target_level)
         .map(|level| level.get_all_nodes())
         .unwrap_or_default()
+}
+
+/// Numeric statistics for one group in [`calculate_grouped_property_stats`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupedPropertyStats {
+    pub count: usize,
+    pub sum: Option<f64>,
+    pub mean: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// Sample standard deviation (`n - 1` denominator), absent for 0/1 values.
+    pub std: Option<f64>,
+}
+
+/// Calculate numeric property statistics grouped by another selected-node property.
+///
+/// This backs the existing fluent `statistics(..., group_by=...)` operation.
+/// It accepts only core graph/selection types and returns typed Rust data;
+/// bindings retain responsibility for dict/object marshalling.
+pub fn calculate_grouped_property_stats(
+    graph: &DirGraph,
+    selection: &CurrentSelection,
+    property: &str,
+    group_by: &str,
+    level_index: Option<usize>,
+) -> HashMap<String, GroupedPropertyStats> {
+    let _arena_guard = graph.graph.begin_query();
+    let mut grouped_values: HashMap<String, Vec<f64>> = HashMap::new();
+    for index in collect_selected_nodes(selection, level_index) {
+        let Some(node) = graph.get_node(index) else {
+            continue;
+        };
+        let node_type = node.node_type_str(&graph.interner);
+        let resolved_group = graph.resolve_alias(node_type, group_by);
+        let key = match node.get_field_ref(resolved_group).as_deref() {
+            Some(Value::String(value)) => value.clone(),
+            Some(Value::Int64(value)) => value.to_string(),
+            Some(value) => format!("{:?}", value),
+            None => "null".to_string(),
+        };
+        let values = grouped_values.entry(key).or_default();
+        let resolved_property = graph.resolve_alias(node_type, property);
+        let numeric =
+            node.get_field_ref(resolved_property)
+                .as_deref()
+                .and_then(|value| match value {
+                    Value::Int64(value) => Some(*value as f64),
+                    Value::Float64(value) => Some(*value),
+                    Value::UniqueId(value) => Some(*value as f64),
+                    _ => None,
+                });
+        if let Some(value) = numeric {
+            values.push(value);
+        }
+    }
+
+    grouped_values
+        .into_iter()
+        .map(|(key, values)| {
+            let count = values.len();
+            let stats = if count == 0 {
+                GroupedPropertyStats {
+                    count,
+                    sum: None,
+                    mean: None,
+                    min: None,
+                    max: None,
+                    std: None,
+                }
+            } else {
+                let sum = values.iter().sum::<f64>();
+                let mean = sum / count as f64;
+                let variance = (count > 1).then(|| {
+                    values
+                        .iter()
+                        .map(|value| (value - mean).powi(2))
+                        .sum::<f64>()
+                        / (count - 1) as f64
+                });
+                GroupedPropertyStats {
+                    count,
+                    sum: Some(sum),
+                    mean: Some(mean),
+                    min: Some(values.iter().copied().fold(f64::INFINITY, f64::min)),
+                    max: Some(values.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+                    std: variance.map(f64::sqrt),
+                }
+            };
+            (key, stats)
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -236,4 +327,50 @@ fn try_convert_to_float(value: &Value) -> Option<f64> {
 
 fn get_node_property<'a>(node: &'a NodeData, property: &str) -> Option<Cow<'a, Value>> {
     node.get_property(property)
+}
+
+#[cfg(test)]
+mod grouped_tests {
+    use super::*;
+    use crate::graph::session::{execute_mut, ExecuteOptions};
+
+    #[test]
+    fn grouped_statistics_preserve_empty_groups_and_sample_stddev() {
+        let mut graph = DirGraph::new();
+        let params = HashMap::new();
+        execute_mut(
+            &mut graph,
+            "CREATE (:Item {id:1, title:'one', team:'A', score:1}), \
+             (:Item {id:2, title:'two', team:'A', score:3}), \
+             (:Item {id:3, title:'three', team:'B', score:'n/a'})",
+            &ExecuteOptions::eager(&params),
+        )
+        .expect("fixture CREATE");
+        let indices: Vec<_> = graph
+            .type_indices
+            .get("Item")
+            .expect("Item type index")
+            .iter()
+            .collect();
+        let mut selection = CurrentSelection::new();
+        selection
+            .get_level_mut(0)
+            .expect("root level")
+            .add_selection(None, indices);
+
+        let stats = calculate_grouped_property_stats(&graph, &selection, "score", "team", None);
+        assert_eq!(
+            stats["A"],
+            GroupedPropertyStats {
+                count: 2,
+                sum: Some(4.0),
+                mean: Some(2.0),
+                min: Some(1.0),
+                max: Some(3.0),
+                std: Some(2.0_f64.sqrt()),
+            }
+        );
+        assert_eq!(stats["B"].count, 0);
+        assert_eq!(stats["B"].sum, None);
+    }
 }

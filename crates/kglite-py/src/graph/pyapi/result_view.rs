@@ -12,11 +12,9 @@ use crate::graph::languages::cypher::py_convert::{
     stats_to_py, PreProcessedValue,
 };
 use crate::graph::languages::cypher::{
-    ClauseStats, CypherResult, MutationStats, QueryDiagnostics, ResultRow,
+    ClauseStats, CypherResult, LazyResultDescriptor, MutationStats, QueryDiagnostics,
 };
-use crate::graph::languages::cypher::{Expression, ReturnItem};
 use kglite_core::api::algorithms::CentralityResult;
-use kglite_core::api::GraphRead;
 use kglite_core::api::{DirGraph, NodeData};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice};
@@ -74,8 +72,7 @@ use std::sync::{Arc, Mutex};
 /// the view; the `Mutex<Vec<...>>` caches materialised rows so repeat
 /// access doesn't re-read from disk.
 struct LazyRows {
-    pending: Vec<ResultRow>,
-    return_items: Vec<ReturnItem>,
+    descriptor: LazyResultDescriptor,
     graph: Arc<DirGraph>,
     /// Memoised materialisation. `cache[i]` is `Some(row)` once
     /// `materialise_row(i)` has run for that row index. Mutex (rather than
@@ -154,8 +151,7 @@ impl ResultView {
                 profile: result.profile,
                 diagnostics: result.diagnostics,
                 lazy: Some(LazyRows {
-                    pending: lazy_desc.pending_rows,
-                    return_items: lazy_desc.return_items,
+                    descriptor: lazy_desc,
                     graph,
                     cache,
                 }),
@@ -291,7 +287,7 @@ impl ResultView {
     /// (`self.lazy.pending`) backings without forcing materialisation.
     fn effective_len(&self) -> usize {
         if let Some(lz) = &self.lazy {
-            return lz.pending.len();
+            return lz.descriptor.pending_rows.len();
         }
         self.rows.len()
     }
@@ -310,41 +306,11 @@ impl ResultView {
         if let Some(row) = lz.cache.lock().unwrap().get(index).and_then(|c| c.clone()) {
             return row;
         }
-        let pending_row = &lz.pending[index];
-        let cells: Vec<PreProcessedValue> = lz
-            .return_items
-            .iter()
-            .map(|item| {
-                let val = match &item.expression {
-                    Expression::PropertyAccess { variable, property } => {
-                        if let Some(&node_idx) = pending_row.node_bindings.get(variable) {
-                            resolve_node_property_lazy(&lz.graph, node_idx, property)
-                        } else if let Some(eb) = pending_row.edge_bindings.get(variable) {
-                            // Edge property access — fall through to a generic
-                            // "best effort" via the edge data; rare on lazy
-                            // path because RETURN items here are usually
-                            // node-property reads, but keep it correct.
-                            resolve_edge_property_lazy(&lz.graph, eb, property)
-                        } else if let Some(v) = pending_row.projected.get(variable) {
-                            v.clone()
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    Expression::Variable(v) => {
-                        if let Some(&node_idx) = pending_row.node_bindings.get(v) {
-                            resolve_node_full_lazy(&lz.graph, node_idx)
-                        } else if let Some(val) = pending_row.projected.get(v) {
-                            val.clone()
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    _ => Value::Null,
-                };
-                PreProcessedValue::Plain(val)
-            })
-            .collect();
+        let cells: Vec<PreProcessedValue> =
+            kglite_core::api::cypher::materialise_lazy_row(&lz.descriptor, &lz.graph, index)
+                .into_iter()
+                .map(PreProcessedValue::Plain)
+                .collect();
         // Cache for repeat access.
         if let Some(slot) = lz.cache.lock().unwrap().get_mut(index) {
             *slot = Some(cells.clone());
@@ -419,38 +385,6 @@ impl ResultView {
         }
         Ok(dict.into_any().unbind())
     }
-}
-
-/// Resolve `node_idx . property` against the graph for the lazy path.
-/// Delegates to the same `resolve_node_property` helper the eager
-/// executor uses, so virtual properties (spatial location/geometry,
-/// named points, etc.) and per-type aliases work identically.
-fn resolve_node_property_lazy(
-    graph: &DirGraph,
-    idx: petgraph::graph::NodeIndex,
-    prop: &str,
-) -> Value {
-    use crate::graph::languages::cypher::resolve_node_property;
-    if let Some(node) = graph.graph.node_weight(idx) {
-        return resolve_node_property(node, prop, graph);
-    }
-    Value::Null
-}
-
-fn resolve_edge_property_lazy(
-    graph: &DirGraph,
-    eb: &crate::graph::languages::cypher::EdgeBinding,
-    prop: &str,
-) -> Value {
-    use crate::graph::languages::cypher::resolve_edge_property;
-    resolve_edge_property(graph, eb, prop)
-}
-
-fn resolve_node_full_lazy(graph: &DirGraph, idx: petgraph::graph::NodeIndex) -> Value {
-    // Whole-node Variable access (e.g. `RETURN n` not `n.prop`). The lazy
-    // planner pass currently rejects this shape, so the path is defensive
-    // only — return the node id.
-    graph.graph.get_node_id(idx).unwrap_or(Value::Null)
 }
 
 // ========================================================================

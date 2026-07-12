@@ -16,7 +16,7 @@ use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Map a core `filtering::*` error string into the fluent-API `PyErr`. Shared
@@ -1236,46 +1236,17 @@ impl KnowledgeGraph {
         node_type: Option<&str>,
         match_type: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let match_type = match_type.unwrap_or("exact");
-        let name_lower = name.to_lowercase();
-        let types_to_search: Vec<&str> = match node_type {
-            Some(nt) => vec![nt],
-            None => kglite_core::api::code_tree::CODE_TYPES.to_vec(),
+        let match_type = match match_type.unwrap_or("exact") {
+            "contains" => kglite_core::api::code_tree::CodeEntityMatch::Contains,
+            "starts_with" => kglite_core::api::code_tree::CodeEntityMatch::StartsWith,
+            _ => kglite_core::api::code_tree::CodeEntityMatch::Exact,
         };
-
-        let mut results: Vec<kglite_core::api::NodeInfo> = Vec::new();
-        for nt in &types_to_search {
-            if let Some(indices) = self.inner.type_indices.get(nt) {
-                for idx in indices.iter() {
-                    if let Some(node) = self.inner.get_node(idx) {
-                        let matches = match match_type {
-                            "contains" => {
-                                node.field_contains_ci("name", &name_lower)
-                                    || node.field_contains_ci("title", &name_lower)
-                            }
-                            "starts_with" => {
-                                node.field_starts_with_ci("name", &name_lower)
-                                    || node.field_starts_with_ci("title", &name_lower)
-                            }
-                            _ => {
-                                // "exact" (default)
-                                let name_val = Value::String(name.to_string());
-                                node.get_field_ref("name")
-                                    .map(|v| *v == name_val)
-                                    .unwrap_or(false)
-                                    || node
-                                        .get_field_ref("title")
-                                        .map(|v| *v == name_val)
-                                        .unwrap_or(false)
-                            }
-                        };
-                        if matches {
-                            results.push(node.to_node_info(&self.inner.interner));
-                        }
-                    }
-                }
-            }
-        }
+        let results = kglite_core::api::code_tree::find_code_entities(
+            &self.inner,
+            name,
+            node_type,
+            match_type,
+        );
 
         Python::attach(|py| {
             let list = PyList::empty(py);
@@ -1356,173 +1327,45 @@ impl KnowledgeGraph {
         node_type: Option<&str>,
         hops: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let hops = hops.unwrap_or(1);
-
-        let (resolved, matches) = self.resolve_code_entity(name, node_type);
-
-        let target_idx = match resolved {
-            Some(idx) => idx,
-            None => {
-                return Python::attach(|py| {
-                    let dict = PyDict::new(py);
-                    if matches.is_empty() {
-                        dict.set_item("error", format!("Node not found: {}", name))?;
-                    } else {
-                        dict.set_item("ambiguous", true)?;
-                        let match_list = PyList::empty(py);
-                        for (_, info) in &matches {
-                            let d = py_out::nodeinfo_to_pydict(py, info)?;
-                            match_list.append(d)?;
-                        }
-                        dict.set_item("matches", match_list)?;
-                    }
-                    Ok(dict.into_any().unbind())
-                });
-            }
-        };
-
-        let target_node = self.inner.get_node(target_idx).ok_or_else(|| {
-            crate::error_py::kg_to_pyerr(crate::error::KgError::Argument(
-                "Node disappeared".to_string(),
-            ))
-        })?;
-
-        // Phase 2: Build result dict
+        let lookup = kglite_core::api::code_tree::code_entity_context(
+            &self.inner,
+            name,
+            node_type,
+            hops.unwrap_or(1),
+        );
         Python::attach(|py| {
             let result = PyDict::new(py);
-
-            // Node properties
-            let node_info = target_node.to_node_info(&self.inner.interner);
-            let node_dict = py_out::nodeinfo_to_pydict(py, &node_info)?;
-            result.set_item("node", &node_dict)?;
-
-            // defined_in (file_path shortcut)
-            if let Some(Value::String(fp)) = target_node.get_field_ref("file_path").as_deref() {
-                result.set_item("defined_in", fp)?;
-            }
-
-            // Phase 3: Collect neighbors, grouped by edge type
-            // For hops > 1, do BFS expansion
-            let neighbor_indices = if hops <= 1 {
-                // Direct neighbors only
-                let mut neighbors = HashSet::new();
-                for edge in self
-                    .inner
-                    .graph
-                    .edges_directed(target_idx, petgraph::Direction::Outgoing)
-                {
-                    neighbors.insert(edge.target());
+            let context = match lookup {
+                kglite_core::api::code_tree::CodeContextLookup::NotFound => {
+                    result.set_item("error", format!("Node not found: {}", name))?;
+                    return Ok(result.into_any().unbind());
                 }
-                for edge in self
-                    .inner
-                    .graph
-                    .edges_directed(target_idx, petgraph::Direction::Incoming)
-                {
-                    neighbors.insert(edge.source());
-                }
-                neighbors
-            } else {
-                // BFS expansion for N hops
-                let mut visited = HashSet::new();
-                visited.insert(target_idx);
-                let mut frontier = HashSet::new();
-                frontier.insert(target_idx);
-
-                for _ in 0..hops {
-                    let mut next_frontier = HashSet::new();
-                    for &node in &frontier {
-                        for neighbor in self.inner.graph.neighbors_undirected(node) {
-                            if visited.insert(neighbor) {
-                                next_frontier.insert(neighbor);
-                            }
-                        }
+                kglite_core::api::code_tree::CodeContextLookup::Ambiguous(matches) => {
+                    result.set_item("ambiguous", true)?;
+                    let match_list = PyList::empty(py);
+                    for info in &matches {
+                        match_list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
                     }
-                    if next_frontier.is_empty() {
-                        break;
-                    }
-                    frontier = next_frontier;
+                    result.set_item("matches", match_list)?;
+                    return Ok(result.into_any().unbind());
                 }
-                visited.remove(&target_idx);
-                visited
+                kglite_core::api::code_tree::CodeContextLookup::Found(context) => context,
             };
-
-            // Group outgoing edges by type
-            let mut outgoing_groups: HashMap<String, Vec<NodeIndex>> = HashMap::new();
-            let mut incoming_groups: HashMap<String, Vec<NodeIndex>> = HashMap::new();
-
-            for edge in self
-                .inner
-                .graph
-                .edges_directed(target_idx, petgraph::Direction::Outgoing)
-            {
-                let edge_type = edge
-                    .weight()
-                    .connection_type_str(&self.inner.interner)
-                    .to_string();
-                let target = edge.target();
-                if hops <= 1 || neighbor_indices.contains(&target) {
-                    outgoing_groups.entry(edge_type).or_default().push(target);
-                }
+            result.set_item("node", py_out::nodeinfo_to_pydict(py, &context.node)?)?;
+            if let Some(path) = &context.defined_in {
+                result.set_item("defined_in", path)?;
             }
-
-            for edge in self
-                .inner
-                .graph
-                .edges_directed(target_idx, petgraph::Direction::Incoming)
-            {
-                let edge_type = edge
-                    .weight()
-                    .connection_type_str(&self.inner.interner)
-                    .to_string();
-                let source = edge.source();
-                if hops <= 1 || neighbor_indices.contains(&source) {
-                    incoming_groups.entry(edge_type).or_default().push(source);
-                }
-            }
-
-            // For multi-hop: also collect edges between neighbor nodes
-            if hops > 1 {
-                for &n_idx in &neighbor_indices {
-                    for edge in self
-                        .inner
-                        .graph
-                        .edges_directed(n_idx, petgraph::Direction::Outgoing)
-                    {
-                        let t = edge.target();
-                        if t != target_idx && neighbor_indices.contains(&t) {
-                            let edge_type = edge
-                                .weight()
-                                .connection_type_str(&self.inner.interner)
-                                .to_string();
-                            outgoing_groups.entry(edge_type).or_default().push(t);
-                        }
-                    }
-                }
-            }
-
-            // Convert outgoing groups to Python
-            for (edge_type, indices) in &outgoing_groups {
+            for (edge_type, nodes) in &context.outgoing {
                 let list = PyList::empty(py);
-                let mut seen = HashSet::new();
-                for &idx in indices {
-                    if !seen.insert(idx) {
-                        continue; // deduplicate
-                    }
-                    if let Some(node) = self.inner.get_node(idx) {
-                        let info = node.to_node_info(&self.inner.interner);
-                        let d = py_out::nodeinfo_to_pydict(py, &info)?;
-                        list.append(d)?;
-                    }
+                for info in nodes {
+                    list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
                 }
                 result.set_item(edge_type.as_str(), list)?;
             }
-
-            // Convert incoming groups to Python (prefix with "incoming_" to avoid collision)
-            for (edge_type, indices) in &incoming_groups {
-                let key = if outgoing_groups.contains_key(edge_type) {
+            for (edge_type, nodes) in &context.incoming {
+                let key = if context.outgoing.contains_key(edge_type) {
                     format!("incoming_{}", edge_type)
                 } else {
-                    // Use a readable reverse name for common patterns
                     match edge_type.as_str() {
                         "CALLS" => "called_by".to_string(),
                         "HAS_METHOD" => "method_of".to_string(),
@@ -1534,20 +1377,11 @@ impl KnowledgeGraph {
                     }
                 };
                 let list = PyList::empty(py);
-                let mut seen = HashSet::new();
-                for &idx in indices {
-                    if !seen.insert(idx) {
-                        continue;
-                    }
-                    if let Some(node) = self.inner.get_node(idx) {
-                        let info = node.to_node_info(&self.inner.interner);
-                        let d = py_out::nodeinfo_to_pydict(py, &info)?;
-                        list.append(d)?;
-                    }
+                for info in nodes {
+                    list.append(py_out::nodeinfo_to_pydict(py, info)?)?;
                 }
                 result.set_item(key.as_str(), list)?;
             }
-
             Ok(result.into_any().unbind())
         })
     }
