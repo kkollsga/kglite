@@ -399,6 +399,7 @@ pub kglite::api::cypher::Expression::Case::operand: core::option::Option<alloc::
 pub kglite::api::cypher::Expression::Case::when_clauses: alloc::vec::Vec<(kglite::graph::languages::cypher::ast::CaseCondition, kglite::api::cypher::Expression)>
 pub kglite::api::cypher::Expression::Concat(alloc::boxed::Box<kglite::api::cypher::Expression>, alloc::boxed::Box<kglite::api::cypher::Expression>)
 pub kglite::api::cypher::Expression::CountSubquery
+pub kglite::api::cypher::Expression::CountSubquery::pattern_groups: alloc::vec::Vec<usize>
 pub kglite::api::cypher::Expression::CountSubquery::patterns: alloc::vec::Vec<kglite::graph::core::pattern_matching::pattern::Pattern>
 pub kglite::api::cypher::Expression::CountSubquery::where_clause: core::option::Option<alloc::boxed::Box<kglite::graph::languages::cypher::ast::Predicate>>
 pub kglite::api::cypher::Expression::Divide(alloc::boxed::Box<kglite::api::cypher::Expression>, alloc::boxed::Box<kglite::api::cypher::Expression>)
