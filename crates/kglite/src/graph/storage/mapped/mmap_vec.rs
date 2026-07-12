@@ -22,6 +22,70 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+fn capacity_bytes<T>(count: usize) -> io::Result<usize> {
+    count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mmap element count exceeds addressable byte length",
+        )
+    })
+}
+
+fn file_len(byte_len: usize) -> io::Result<u64> {
+    u64::try_from(byte_len).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mmap byte length exceeds the platform file-size limit",
+        )
+    })
+}
+
+fn grown_capacity<T>(capacity: usize, needed: usize) -> io::Result<(usize, usize)> {
+    let doubled = capacity
+        .checked_mul(2)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "mmap capacity overflow"))?;
+    let new_capacity = needed.max(doubled).max(64);
+    Ok((new_capacity, capacity_bytes::<T>(new_capacity)?))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum FailurePoint {
+    GrowRemap = 1,
+    TrimRemap = 2,
+    TrimSetLen = 4,
+    HeapReserve = 8,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAILURE_POINTS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn fail_next(point: FailurePoint) {
+    FAILURE_POINTS.with(|points| points.set(points.get() | point as u8));
+}
+
+fn injected_failure(_point: u8) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        let should_fail = FAILURE_POINTS.with(|points| {
+            let active = points.get();
+            if active & _point == 0 {
+                false
+            } else {
+                points.set(active & !_point);
+                true
+            }
+        });
+        if should_fail {
+            return Err(io::Error::other("injected mmap failure"));
+        }
+    }
+    Ok(())
+}
+
 // ─── MmapOrVec ──────────────────────────────────────────────────────────────
 
 /// Marker for types that can safely be stored in and reconstructed from an mmap.
@@ -60,7 +124,8 @@ pub enum MmapOrVec<T: MmapPod> {
         data: Vec<T>,
     },
     Mapped {
-        mmap: MmapMut,
+        /// `None` is the valid representation of an exactly empty mapped file.
+        mmap: Option<MmapMut>,
         len: usize,
         capacity: usize, // in elements, not bytes
         file: File,
@@ -93,19 +158,19 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// This avoids the O(N) push loop needed to pre-fill with defaults.
     pub fn mapped_zeroed(path: &Path, count: usize) -> io::Result<Self> {
         let cap = count.max(64);
-        let byte_len = cap * std::mem::size_of::<T>();
+        let byte_len = capacity_bytes::<T>(cap)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len(byte_len as u64)?;
+        file.set_len(file_len(byte_len)?)?;
         // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
         Ok(MmapOrVec::Mapped {
-            mmap,
-            len: cap, // all positions addressable via set()
+            mmap: Some(mmap),
+            len: count, // exactly the requested positions are addressable via set()
             capacity: cap,
             file,
             path: path.to_path_buf(),
@@ -118,7 +183,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// `len` starts at 0 — use `push()` to add elements.
     pub fn mapped(path: &Path, initial_cap: usize) -> io::Result<Self> {
         let cap = initial_cap.max(64); // minimum 64 elements
-        let byte_len = cap * std::mem::size_of::<T>();
+        let byte_len = capacity_bytes::<T>(cap)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -126,13 +191,13 @@ impl<T: MmapPod> MmapOrVec<T> {
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len(byte_len as u64)?;
+        file.set_len(file_len(byte_len)?)?;
 
         // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
         Ok(MmapOrVec::Mapped {
-            mmap,
+            mmap: Some(mmap),
             len: 0,
             capacity: cap,
             file,
@@ -147,7 +212,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// No pre-fill I/O — pages are only allocated when first written.
     pub fn mapped_prefilled(path: &Path, count: usize) -> io::Result<Self> {
         let cap = count.max(64);
-        let byte_len = cap * std::mem::size_of::<T>();
+        let byte_len = capacity_bytes::<T>(cap)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -155,13 +220,13 @@ impl<T: MmapPod> MmapOrVec<T> {
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len(byte_len as u64)?;
+        file.set_len(file_len(byte_len)?)?;
 
         // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
 
         Ok(MmapOrVec::Mapped {
-            mmap,
+            mmap: Some(mmap),
             len: count, // pre-sized — set() works immediately
             capacity: cap,
             file,
@@ -174,7 +239,12 @@ impl<T: MmapPod> MmapOrVec<T> {
     /// `len` is the number of valid elements in the file.
     pub fn load_mapped(path: &Path, len: usize) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let file_len = file.metadata()?.len() as usize;
+        let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mmap file is too large for usize",
+            )
+        })?;
         let elem_size = std::mem::size_of::<T>();
         let capacity = file_len.checked_div(elem_size).unwrap_or(len);
 
@@ -188,8 +258,19 @@ impl<T: MmapPod> MmapOrVec<T> {
             ));
         }
 
+        let needed = capacity_bytes::<T>(len)?;
+        if file_len < needed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mmap file is shorter than its logical element length",
+            ));
+        }
         // SAFETY: file_len verified ≥ len*elem_size above; see module invariants.
-        let mmap = unsafe { MmapOptions::new().len(file_len).map_mut(&file)? };
+        let mmap = if file_len == 0 {
+            None
+        } else {
+            Some(unsafe { MmapOptions::new().len(file_len).map_mut(&file)? })
+        };
 
         Ok(MmapOrVec::Mapped {
             mmap,
@@ -220,7 +301,9 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn advise_willneed(&self) {
         if let MmapOrVec::Mapped { mmap, .. } = self {
             // memmap2's advise method handles the madvise syscall
-            let _ = mmap.advise(memmap2::Advice::WillNeed);
+            if let Some(mmap) = mmap.as_ref() {
+                let _ = mmap.advise(memmap2::Advice::WillNeed);
+            }
         }
     }
 
@@ -234,7 +317,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn advise_sequential(&self) {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
             let byte_len = *len * std::mem::size_of::<T>();
-            if byte_len > 0 {
+            if let Some(mmap) = mmap.as_ref().filter(|_| byte_len > 0) {
                 let _ = mmap.advise(memmap2::Advice::Sequential);
             }
         }
@@ -251,7 +334,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn advise_dontneed(&self) {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
             let byte_len = *len * std::mem::size_of::<T>();
-            if byte_len > 0 {
+            if let Some(mmap) = mmap.as_ref().filter(|_| byte_len > 0) {
                 // SAFETY: MADV_DONTNEED can discard dirty pages, but our
                 // MmapOrVec<T> is only written to via `push`/`set` which
                 // touch pages that are already flushed to the backing file;
@@ -343,7 +426,7 @@ impl<T: MmapPod> MmapOrVec<T> {
     pub fn flush_and_release_pages(&self) -> std::io::Result<()> {
         if let MmapOrVec::Mapped { mmap, len, .. } = self {
             let byte_len = *len * std::mem::size_of::<T>();
-            if byte_len > 0 {
+            if let Some(mmap) = mmap.as_ref().filter(|_| byte_len > 0) {
                 mmap.flush()?;
                 // SAFETY: we just flushed via msync; DONTNEED can only
                 // drop pages that are now identical to disk.
@@ -370,6 +453,7 @@ impl<T: MmapPod> MmapOrVec<T> {
                 let offset = index * std::mem::size_of::<T>();
                 // SAFETY: mmap regions are page-aligned, elements stored contiguously
                 // from the start, so all accesses are naturally aligned.
+                let mmap = mmap.as_ref().expect("non-empty MmapOrVec must be mapped");
                 unsafe { std::ptr::read(mmap.as_ptr().add(offset) as *const T) }
             }
         }
@@ -384,16 +468,34 @@ impl<T: MmapPod> MmapOrVec<T> {
                 let offset = index * std::mem::size_of::<T>();
                 // SAFETY: mmap regions are page-aligned, elements stored contiguously.
                 unsafe {
+                    let mmap = mmap.as_mut().expect("non-empty MmapOrVec must be mapped");
                     std::ptr::write(mmap.as_mut_ptr().add(offset) as *mut T, value);
                 }
             }
         }
     }
 
-    /// Append an element. Grows the buffer if needed.
+    /// Append an element through the legacy infallible storage seam.
+    ///
+    /// Phase 5 migrates bulk/disk callers to [`Self::try_push`] and then
+    /// removes or restricts this wrapper. New fallible code must use
+    /// `try_push` directly.
     pub fn push(&mut self, value: T) {
+        self.try_push(value)
+            .expect("MmapOrVec::push failed; use try_push at fallible boundaries");
+    }
+
+    /// Append an element, growing the backing storage without corrupting the
+    /// existing mapping or logical length when allocation, truncation, or
+    /// remapping fails.
+    pub fn try_push(&mut self, value: T) -> io::Result<()> {
         match self {
-            MmapOrVec::Heap { data } => data.push(value),
+            MmapOrVec::Heap { data } => {
+                injected_failure(8)?;
+                data.try_reserve(1)
+                    .map_err(|error| io::Error::other(format!("heap reserve failed: {error}")))?;
+                data.push(value);
+            }
             MmapOrVec::Mapped {
                 mmap,
                 len,
@@ -402,31 +504,40 @@ impl<T: MmapPod> MmapOrVec<T> {
                 path,
                 ..
             } => {
-                if *len >= *capacity {
-                    // Grow: double capacity
-                    let new_cap = (*capacity * 2).max(64);
-                    let new_byte_len = new_cap * std::mem::size_of::<T>();
-                    file.set_len(new_byte_len as u64).expect("ftruncate failed");
-                    // SAFETY: file just truncated to new_byte_len; see module invariants.
-                    *mmap = unsafe {
+                let needed = len.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "mmap length overflow")
+                })?;
+                if needed > *capacity {
+                    let (new_capacity, new_byte_len) = grown_capacity::<T>(*capacity, needed)?;
+                    file.set_len(file_len(new_byte_len)?)?;
+                    injected_failure(1)?;
+                    // SAFETY: file was extended to new_byte_len above. Build
+                    // the replacement before dropping the still-valid old map.
+                    let new_mmap = unsafe {
                         MmapOptions::new()
                             .len(new_byte_len)
                             .map_mut(&*file)
-                            .unwrap_or_else(|e| {
-                                panic!("mmap remap failed for {}: {}", path.display(), e)
-                            })
+                            .map_err(|error| {
+                                io::Error::new(
+                                    error.kind(),
+                                    format!("mmap remap failed for {}: {error}", path.display()),
+                                )
+                            })?
                     };
-                    *capacity = new_cap;
+                    *mmap = Some(new_mmap);
+                    *capacity = new_capacity;
                 }
                 let offset = *len * std::mem::size_of::<T>();
                 // SAFETY: `*len < *capacity` after the grow branch; `offset`
                 // points at an uninitialised slot within the mapped region.
                 unsafe {
+                    let mmap = mmap.as_mut().expect("positive capacity must be mapped");
                     std::ptr::write(mmap.as_mut_ptr().add(offset) as *mut T, value);
                 }
-                *len += 1;
+                *len = needed;
             }
         }
+        Ok(())
     }
 
     /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
@@ -440,7 +551,9 @@ impl<T: MmapPod> MmapOrVec<T> {
             MmapOrVec::Heap { data } => data.as_mut_slice(),
             // SAFETY: `&mut self` + `*len ≤ capacity`, and the mmap has
             // `capacity * size_of::<T>()` bytes. See module invariants.
+            MmapOrVec::Mapped { mmap, len, .. } if *len == 0 => &mut [],
             MmapOrVec::Mapped { mmap, len, .. } => unsafe {
+                let mmap = mmap.as_mut().expect("non-empty MmapOrVec must be mapped");
                 std::slice::from_raw_parts_mut(mmap.as_mut_ptr() as *mut T, *len)
             },
         }
@@ -457,7 +570,7 @@ impl<T: MmapPod> MmapOrVec<T> {
 
         let len = data.len();
         let cap = len.max(64);
-        let byte_len = cap * std::mem::size_of::<T>();
+        let byte_len = capacity_bytes::<T>(cap)?;
 
         let file = OpenOptions::new()
             .read(true)
@@ -465,7 +578,7 @@ impl<T: MmapPod> MmapOrVec<T> {
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len(byte_len as u64)?;
+        file.set_len(file_len(byte_len)?)?;
 
         // SAFETY: file was just created+truncated to byte_len; see module invariants.
         let mut mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
@@ -481,7 +594,7 @@ impl<T: MmapPod> MmapOrVec<T> {
         mmap.flush_async()?;
 
         *self = MmapOrVec::Mapped {
-            mmap,
+            mmap: Some(mmap),
             len,
             capacity: cap,
             file,
@@ -500,9 +613,14 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
         let data = match self {
             MmapOrVec::Mapped { mmap, len, .. } => {
-                // SAFETY: mmap holds `*len` valid T values (written via
-                // `push`/`set` or loaded from an on-disk image).
-                unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
+                if *len == 0 {
+                    Vec::new()
+                } else {
+                    // SAFETY: mmap holds `*len` valid T values (written via
+                    // `push`/`set` or loaded from an on-disk image).
+                    let mmap = mmap.as_ref().expect("non-empty MmapOrVec must be mapped");
+                    unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
+                }
             }
             _ => unreachable!(),
         };
@@ -530,10 +648,14 @@ impl<T: MmapPod> MmapOrVec<T> {
                 ..
             } => {
                 let file = file.try_clone()?;
-                let byte_len = *capacity * std::mem::size_of::<T>();
+                let byte_len = capacity_bytes::<T>(*capacity)?;
                 // SAFETY: this is a second mapping of the already-validated
                 // file and uses the same element length/capacity invariants.
-                let mmap = unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? };
+                let mmap = if byte_len == 0 {
+                    None
+                } else {
+                    Some(unsafe { MmapOptions::new().len(byte_len).map_mut(&file)? })
+                };
                 Ok(MmapOrVec::Mapped {
                     mmap,
                     len: *len,
@@ -565,7 +687,12 @@ impl<T: MmapPod> MmapOrVec<T> {
                     data.len() * std::mem::size_of::<T>(),
                 )
             },
-            MmapOrVec::Mapped { mmap, len, .. } => &mmap[..*len * std::mem::size_of::<T>()],
+            MmapOrVec::Mapped { len, .. } if *len == 0 => &[],
+            MmapOrVec::Mapped { mmap, len, .. } => {
+                let byte_len = capacity_bytes::<T>(*len)
+                    .expect("validated MmapOrVec length must fit its address space");
+                &mmap.as_ref().expect("non-empty MmapOrVec must be mapped")[..byte_len]
+            }
         }
     }
 
@@ -594,25 +721,36 @@ impl<T: MmapPod> MmapOrVec<T> {
                 path,
                 ..
             } => {
-                mmap.flush()?;
-                let byte_len = *len * std::mem::size_of::<T>();
-                file.set_len(byte_len as u64)?;
-                // Remap to the new file size. `map_mut` with `len == 0`
-                // is undefined behaviour on some platforms; fall back to
-                // a size-1 mapping for empty arrays (the `*len` check on
-                // reads keeps the stale byte inaccessible).
-                let map_len = byte_len.max(1);
-                // SAFETY: file just truncated to byte_len; map_len >= byte_len.
-                *mmap = unsafe {
-                    MmapOptions::new()
-                        .len(map_len)
-                        .map_mut(&*file)
-                        .unwrap_or_else(|e| {
-                            panic!("trim remap failed for {}: {}", path.display(), e)
-                        })
+                if let Some(existing) = mmap.as_ref() {
+                    existing.flush()?;
+                }
+                let byte_len = capacity_bytes::<T>(*len)?;
+                injected_failure(2)?;
+                // Map the shorter view while the file is still at least its
+                // old capacity. A remap failure leaves every field untouched.
+                let replacement = if byte_len == 0 {
+                    None
+                } else {
+                    Some(unsafe {
+                        MmapOptions::new()
+                            .len(byte_len)
+                            .map_mut(&*file)
+                            .map_err(|error| {
+                                io::Error::new(
+                                    error.kind(),
+                                    format!("trim remap failed for {}: {error}", path.display()),
+                                )
+                            })?
+                    })
                 };
+
+                // Dropping the old, longer map before truncation avoids a map
+                // whose range extends beyond EOF. If truncation fails, the
+                // replacement remains coherent against the still-larger file.
+                *mmap = replacement;
                 *capacity = *len;
-                Ok(())
+                injected_failure(4)?;
+                file.set_len(file_len(byte_len)?)
             }
         }
     }
@@ -636,18 +774,24 @@ impl<T: MmapPod> MmapOrVec<T> {
                 mmap, len, file, ..
             } => {
                 // Flush first
-                mmap.flush()?;
-                let byte_len = *len * std::mem::size_of::<T>();
+                if let Some(mmap) = mmap.as_ref() {
+                    mmap.flush()?;
+                }
+                let byte_len = capacity_bytes::<T>(*len)?;
                 // If it's the same file, just flush; otherwise copy
                 let src_path = self.file_path();
                 if let Some(sp) = src_path {
                     if sp == path {
                         // Just truncate to exact size
-                        file.set_len(byte_len as u64)?;
+                        file.set_len(file_len(byte_len)?)?;
                         return Ok(());
                     }
                 }
-                std::fs::write(path, &mmap[..byte_len])
+                let bytes = match mmap.as_ref() {
+                    Some(mmap) => &mmap[..byte_len],
+                    None => &[],
+                };
+                std::fs::write(path, bytes)
             }
         }
     }
@@ -666,8 +810,12 @@ impl<T: MmapPod> MmapOrVec<T> {
         match self {
             MmapOrVec::Heap { data } => data.clone(),
             MmapOrVec::Mapped { mmap, len, .. } => {
+                if *len == 0 {
+                    return Vec::new();
+                }
                 // SAFETY: mmap holds `*len` valid T values (written via
                 // `push`/`set` or loaded from an on-disk image).
+                let mmap = mmap.as_ref().expect("non-empty MmapOrVec must be mapped");
                 unsafe { std::slice::from_raw_parts(mmap.as_ptr() as *const T, *len) }.to_vec()
             }
         }
@@ -1022,6 +1170,21 @@ mod tests {
     }
 
     #[test]
+    fn mapped_zeroed_logical_length_matches_requested_count() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "zeroed.bin");
+        let empty_path = tmp_path(&dir, "zeroed-empty.bin");
+
+        let mut buf = MmapOrVec::<u64>::mapped_zeroed(&path, 2).unwrap();
+        assert_eq!(buf.len(), 2);
+        buf.set(1, 42);
+        assert_eq!(buf.get(1), 42);
+
+        let empty = MmapOrVec::<u64>::mapped_zeroed(&empty_path, 0).unwrap();
+        assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
     fn test_mapped_grow() {
         let dir = TempDir::new().unwrap();
         let path = tmp_path(&dir, "grow.bin");
@@ -1035,6 +1198,147 @@ mod tests {
         for i in 0..200u32 {
             assert_eq!(buf.get(i as usize), i);
         }
+    }
+
+    #[test]
+    fn checked_capacity_arithmetic_rejects_overflow() {
+        assert_eq!(
+            capacity_bytes::<u64>(usize::MAX).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            grown_capacity::<u64>(usize::MAX, usize::MAX)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn heap_reserve_failure_keeps_contents_and_retry_succeeds() {
+        let mut buf = MmapOrVec::from_vec(vec![10u64]);
+        fail_next(FailurePoint::HeapReserve);
+        assert!(buf.try_push(20).is_err());
+        assert_eq!(buf.to_vec(), vec![10]);
+
+        buf.try_push(20).unwrap();
+        assert_eq!(buf.to_vec(), vec![10, 20]);
+    }
+
+    #[test]
+    fn mapped_growth_remap_failure_keeps_state_and_retry_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "grow_remap_failure.bin");
+        let mut buf = MmapOrVec::<u64>::mapped(&path, 1).unwrap();
+        for value in 0..64 {
+            buf.try_push(value).unwrap();
+        }
+
+        fail_next(FailurePoint::GrowRemap);
+        assert!(buf.try_push(64).is_err());
+        assert_eq!(buf.len(), 64);
+        assert_eq!(buf.get(0), 0);
+        assert_eq!(buf.get(63), 63);
+        assert!(matches!(buf, MmapOrVec::Mapped { capacity: 64, .. }));
+
+        buf.try_push(64).unwrap();
+        assert_eq!(buf.len(), 65);
+        assert_eq!(buf.get(64), 64);
+    }
+
+    #[test]
+    fn mapped_growth_truncate_failure_keeps_state() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "grow_truncate_failure.bin");
+        let mut buf = MmapOrVec::<u64>::mapped(&path, 1).unwrap();
+        for value in 0..64 {
+            buf.try_push(value).unwrap();
+        }
+        if let MmapOrVec::Mapped { file, .. } = &mut buf {
+            *file = File::open(&path).unwrap();
+        }
+
+        assert!(buf.try_push(64).is_err());
+        assert_eq!(buf.len(), 64);
+        assert_eq!(buf.get(63), 63);
+        assert!(matches!(buf, MmapOrVec::Mapped { capacity: 64, .. }));
+    }
+
+    #[test]
+    fn trim_remap_failure_leaves_original_mapping_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "trim_remap_failure.bin");
+        let mut buf = MmapOrVec::<u64>::mapped(&path, 1).unwrap();
+        buf.try_push(10).unwrap();
+        buf.try_push(20).unwrap();
+        let original_file_len = std::fs::metadata(&path).unwrap().len();
+
+        fail_next(FailurePoint::TrimRemap);
+        assert!(buf.trim_to_logical_length().is_err());
+        assert_eq!(buf.to_vec(), vec![10, 20]);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), original_file_len);
+        assert!(matches!(buf, MmapOrVec::Mapped { capacity: 64, .. }));
+    }
+
+    #[test]
+    fn trim_truncate_failure_leaves_coherent_short_mapping() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "trim_truncate_failure.bin");
+        let mut buf = MmapOrVec::<u64>::mapped(&path, 1).unwrap();
+        buf.try_push(10).unwrap();
+        buf.try_push(20).unwrap();
+
+        fail_next(FailurePoint::TrimSetLen);
+        assert!(buf.trim_to_logical_length().is_err());
+        assert_eq!(buf.to_vec(), vec![10, 20]);
+        assert!(matches!(buf, MmapOrVec::Mapped { capacity: 2, .. }));
+
+        buf.trim_to_logical_length().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 16);
+        buf.try_push(30).unwrap();
+        assert_eq!(buf.to_vec(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn empty_trim_uses_no_mapping_and_can_grow_again() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "empty_trim.bin");
+        let mut buf = MmapOrVec::<u64>::mapped(&path, 1).unwrap();
+
+        buf.trim_to_logical_length().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(matches!(
+            buf,
+            MmapOrVec::Mapped {
+                mmap: None,
+                len: 0,
+                capacity: 0,
+                ..
+            }
+        ));
+        assert!(buf.as_raw_bytes().is_empty());
+        assert!(buf.as_mut_slice().is_empty());
+
+        buf.try_push(42).unwrap();
+        assert_eq!(buf.to_vec(), vec![42]);
+    }
+
+    #[test]
+    fn empty_file_loads_without_mapping() {
+        let dir = TempDir::new().unwrap();
+        let path = tmp_path(&dir, "empty_load.bin");
+        File::create(&path).unwrap();
+
+        let buf = MmapOrVec::<u64>::load_mapped(&path, 0).unwrap();
+        assert!(matches!(
+            buf,
+            MmapOrVec::Mapped {
+                mmap: None,
+                len: 0,
+                capacity: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
