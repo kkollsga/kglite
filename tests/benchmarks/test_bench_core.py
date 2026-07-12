@@ -91,6 +91,16 @@ def test_bench_cypher_match(benchmark, bench_graph):
 
 
 @pytest.mark.benchmark
+def test_bench_cypher_match_materialized(benchmark, bench_graph):
+    """Simple MATCH consumed into Python rows (includes lazy materialization)."""
+
+    def query_and_consume():
+        return bench_graph.cypher("MATCH (n:Item) RETURN n.title, n.value LIMIT 100").to_list()
+
+    benchmark(query_and_consume)
+
+
+@pytest.mark.benchmark
 def test_bench_cypher_where(benchmark, bench_graph):
     """Filtered MATCH...WHERE...RETURN query."""
     benchmark(bench_graph.cypher, "MATCH (n:Item) WHERE n.value > 500 RETURN n.title, n.value")

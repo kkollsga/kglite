@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Consumed lazy Cypher results batch their safety checks.** `to_list()`,
+  `column()`, `head()`, `tail()`, `repr()`, and DataFrame conversion validate
+  graph provenance once per contiguous batch instead of once per row, while
+  retaining a separate disk-arena guard for every row. A 100-row property
+  projection is 6–10% faster than the pre-hardening implementation on the
+  release benchmark fixture.
 - **Point lookups and cache rebuilds no longer copy the graph or stall other
   threads.** `node()` on a graph with live fluent clones is ~5,400× faster
   (it deep-copied the entire graph through `Arc::make_mut`; now a read-only

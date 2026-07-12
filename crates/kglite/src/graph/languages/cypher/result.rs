@@ -387,9 +387,29 @@ pub fn materialise_lazy(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,
 ) -> Result<Vec<Vec<Value>>, crate::error::KgError> {
+    materialise_lazy_range(descriptor, graph, 0..descriptor.len())
+}
+
+/// Materialise a contiguous range of pending lazy-result rows.
+///
+/// Provenance and bounds are checked once for the whole batch. Disk arena
+/// lifetime is still scoped independently to each row, so large sequential
+/// reads retain the bounded-memory guarantee of [`materialise_lazy_row`].
+pub fn materialise_lazy_range(
+    descriptor: &LazyResultDescriptor,
+    graph: &crate::graph::dir_graph::DirGraph,
+    range: std::ops::Range<usize>,
+) -> Result<Vec<Vec<Value>>, crate::error::KgError> {
     descriptor.validate_graph(graph)?;
-    let mut rows = Vec::with_capacity(descriptor.len());
-    for pending_row in &descriptor.pending_rows {
+    if range.start > range.end || range.end > descriptor.len() {
+        return Err(crate::error::KgError::InvalidArgument {
+            argument: "range".to_string(),
+            expected: format!("a range within 0..{}", descriptor.len()),
+            found: format!("{}..{}", range.start, range.end),
+        });
+    }
+    let mut rows = Vec::with_capacity(range.len());
+    for pending_row in &descriptor.pending_rows[range] {
         // One guard per row bounds sequential disk-arena growth. Each cell is
         // converted to an owned Value before the guard drops.
         let _arena_guard = graph.graph.begin_query();
@@ -591,6 +611,20 @@ mod lazy_materialisation_tests {
         assert!(matches!(
             materialise_lazy(&descriptor, &graph),
             Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "graph"
+        ));
+    }
+
+    #[test]
+    fn lazy_range_materialises_subset_and_rejects_invalid_bounds() {
+        let (graph, _temp) = graph_in_mode(StorageMode::Memory);
+        let descriptor = execute_lazy(&graph);
+        assert_eq!(
+            materialise_lazy_range(&descriptor, &graph, 1..2).unwrap(),
+            vec![vec![Value::String("Bob".into()), Value::Int64(25)]]
+        );
+        assert!(matches!(
+            materialise_lazy_range(&descriptor, &graph, 0..3),
+            Err(crate::error::KgError::InvalidArgument { ref argument, .. }) if argument == "range"
         ));
     }
 

@@ -438,7 +438,8 @@ pub mod api {
         pub use crate::graph::languages::cypher::planner::schema_check::validate_schema;
         pub use crate::graph::languages::cypher::planner::simplification::rewrite_text_score;
         pub use crate::graph::languages::cypher::result::{
-            materialise_lazy, materialise_lazy_row, CypherResult, LazyResultDescriptor,
+            materialise_lazy, materialise_lazy_range, materialise_lazy_row, CypherResult,
+            LazyResultDescriptor,
         };
         /// Operator-declared value codecs — position-scoped, bidirectional
         /// literal conversions (`'Q42'` ↔ `42`) bound to a property. Bindings

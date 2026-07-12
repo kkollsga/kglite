@@ -319,15 +319,53 @@ impl ResultView {
         Ok(cells)
     }
 
+    /// Materialise a contiguous lazy range with one provenance check and one
+    /// cache lock per batch. The core still holds a separate disk arena guard
+    /// for every row, preserving bounded arena lifetime under large reads.
+    fn materialise_lazy_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> PyResult<Vec<Vec<PreProcessedValue>>> {
+        let lz = self
+            .lazy
+            .as_ref()
+            .expect("materialise_lazy_range called without lazy backing");
+        {
+            let cache = lz.cache.lock().unwrap();
+            if !range.is_empty() && range.clone().all(|index| cache[index].is_some()) {
+                return Ok(range.map(|index| cache[index].clone().unwrap()).collect());
+            }
+        }
+
+        let start = range.start;
+        let cells = kglite_core::api::cypher::materialise_lazy_range(
+            &lz.descriptor,
+            &lz.graph,
+            range.clone(),
+        )
+        .map_err(crate::error_py::kg_to_pyerr)?;
+        let processed: Vec<Vec<PreProcessedValue>> = cells
+            .into_iter()
+            .map(|row| row.into_iter().map(PreProcessedValue::Plain).collect())
+            .collect();
+
+        let mut cache = lz.cache.lock().unwrap();
+        for (offset, row) in processed.into_iter().enumerate() {
+            let slot = &mut cache[start + offset];
+            if slot.is_none() {
+                *slot = Some(row);
+            }
+        }
+        Ok(range.map(|index| cache[index].clone().unwrap()).collect())
+    }
+
     /// Force materialisation of every lazy row (or return the existing
     /// eager rows) — used by `to_df` which consumes every cell. Public to
     /// the crate so `kg_core::cypher` can build a DataFrame from a lazy
     /// result without re-implementing the resolver.
     pub fn materialise_all(&self) -> PyResult<Vec<Vec<PreProcessedValue>>> {
         if self.lazy.is_some() {
-            return (0..self.effective_len())
-                .map(|i| self.materialise_lazy_row(i))
-                .collect();
+            return self.materialise_lazy_range(0..self.effective_len());
         }
         Ok(self.rows.clone())
     }
@@ -376,6 +414,14 @@ impl ResultView {
         } else {
             &self.rows[index]
         };
+        Self::row_values_to_py_keyed(py, row, keys)
+    }
+
+    fn row_values_to_py_keyed(
+        py: Python<'_>,
+        row: &[PreProcessedValue],
+        keys: &[pyo3::Bound<'_, pyo3::types::PyString>],
+    ) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for (i, key) in keys.iter().enumerate() {
             if let Some(pv) = row.get(i) {
@@ -480,9 +526,7 @@ impl ResultView {
         // PreProcessedValues. For very large lazy results, callers should
         // use head()/tail() instead of repr.
         if self.lazy.is_some() {
-            let rows: Vec<Vec<PreProcessedValue>> = (0..self.effective_len())
-                .map(|i| self.materialise_lazy_row(i))
-                .collect::<PyResult<_>>()?;
+            let rows = self.materialise_all()?;
             return Ok(format_table(&self.columns, &rows));
         }
         Ok(format_table(&self.columns, &self.rows))
@@ -581,8 +625,14 @@ impl ResultView {
             .iter()
             .map(|c| pyo3::types::PyString::intern(py, c))
             .collect();
-        for i in 0..self.effective_len() {
-            list.append(self.row_to_py_keyed(py, i, &keys)?)?;
+        if self.lazy.is_some() {
+            for row in self.materialise_all()? {
+                list.append(Self::row_values_to_py_keyed(py, &row, &keys)?)?;
+            }
+        } else {
+            for i in 0..self.rows.len() {
+                list.append(self.row_to_py_keyed(py, i, &keys)?)?;
+            }
         }
         Ok(list.into_any().unbind())
     }
@@ -670,11 +720,14 @@ impl ResultView {
             }
         };
         let list = pyo3::types::PyList::empty(py);
+        let lazy_rows = self
+            .lazy
+            .is_some()
+            .then(|| self.materialise_all())
+            .transpose()?;
         for i in 0..self.effective_len() {
-            let owned;
-            let row: &Vec<PreProcessedValue> = if self.lazy.is_some() {
-                owned = self.materialise_lazy_row(i)?;
-                &owned
+            let row: &Vec<PreProcessedValue> = if let Some(rows) = &lazy_rows {
+                &rows[i]
             } else {
                 &self.rows[i]
             };
@@ -702,9 +755,7 @@ impl ResultView {
         // returned view is concrete (head() callers commonly print or
         // sample). The lazy → eager conversion is paid once.
         let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
-            (0..take)
-                .map(|i| self.materialise_lazy_row(i))
-                .collect::<PyResult<_>>()?
+            self.materialise_lazy_range(0..take)?
         } else {
             self.rows[..take].to_vec()
         };
@@ -731,9 +782,7 @@ impl ResultView {
         let len = self.effective_len();
         let start = len.saturating_sub(n);
         let rows: Vec<Vec<PreProcessedValue>> = if self.lazy.is_some() {
-            (start..len)
-                .map(|i| self.materialise_lazy_row(i))
-                .collect::<PyResult<_>>()?
+            self.materialise_lazy_range(start..len)?
         } else {
             self.rows[start..].to_vec()
         };
