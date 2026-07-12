@@ -71,15 +71,12 @@ pub(super) fn create_edges_with_qnum_map(
             let edge = buf.get(i);
             let (src_num, tgt_num, pred_key) = (edge.source_qnum, edge.target_qnum, edge.predicate);
             if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
-                dg.pending_edges
-                    .get_mut()
-                    .push(crate::graph::storage::disk::csr::PendingEdge {
-                        source: src_idx,
-                        target: tgt_idx,
-                        connection_type: pred_key.as_u64(),
-                    });
-                dg.edge_count += 1;
-                dg.next_edge_idx += 1;
+                dg.try_add_pending_edge(
+                    petgraph::graph::NodeIndex::new(src_idx as usize),
+                    petgraph::graph::NodeIndex::new(tgt_idx as usize),
+                    EdgeData::new_interned(pred_key, Vec::new()),
+                )
+                .map_err(|error| format!("append pending N-Triples edge: {error}"))?;
                 conn_types_seen.insert(pred_key);
                 stats.edges_created += 1;
             } else {
@@ -207,15 +204,12 @@ pub(super) fn create_edges_compact(
                 let (src_num, tgt_num, pred_key) =
                     (edge.source_qnum, edge.target_qnum, edge.predicate);
                 if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
-                    dg.pending_edges.get_mut().push(
-                        crate::graph::storage::disk::csr::PendingEdge {
-                            source: src_idx,
-                            target: tgt_idx,
-                            connection_type: pred_key.as_u64(),
-                        },
-                    );
-                    dg.edge_count += 1;
-                    dg.next_edge_idx += 1;
+                    dg.try_add_pending_edge(
+                        petgraph::graph::NodeIndex::new(src_idx as usize),
+                        petgraph::graph::NodeIndex::new(tgt_idx as usize),
+                        EdgeData::new_interned(pred_key, Vec::new()),
+                    )
+                    .map_err(|error| format!("append pending N-Triples edge: {error}"))?;
                     conn_types_seen.insert(pred_key);
                     stats.edges_created += 1;
                 } else {

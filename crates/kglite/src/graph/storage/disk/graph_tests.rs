@@ -12,6 +12,34 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{BTreeMap, HashMap};
 use tempfile::TempDir;
 
+#[test]
+fn pending_edge_failure_is_atomic_and_retryable() {
+    use crate::graph::storage::mapped::mmap_vec::{fail_next, FailurePoint};
+
+    let tmp = TempDir::new().unwrap();
+    let mut interner = StringInterner::new();
+    let mut graph = super::DiskGraph::new_at_path(tmp.path()).unwrap();
+    graph.defer_csr = true;
+    *graph.pending_edges.get_mut() = MmapOrVec::new();
+    let mut edge = || EdgeData::new("LINKS".to_string(), HashMap::new(), &mut interner);
+
+    fail_next(FailurePoint::HeapReserve);
+    assert!(graph
+        .try_add_pending_edge(NodeIndex::new(0), NodeIndex::new(1), edge())
+        .is_err());
+    assert_eq!(graph.pending_edges.get_mut().len(), 0);
+    assert_eq!(graph.edge_count, 0);
+    assert_eq!(graph.next_edge_idx, 0);
+
+    let edge_idx = graph
+        .try_add_pending_edge(NodeIndex::new(0), NodeIndex::new(1), edge())
+        .unwrap();
+    assert_eq!(edge_idx.index(), 0);
+    assert_eq!(graph.pending_edges.get_mut().len(), 1);
+    assert_eq!(graph.edge_count, 1);
+    assert_eq!(graph.next_edge_idx, 1);
+}
+
 fn add_docs(graph: &mut DirGraph, ids: &[i64]) {
     let rows = ids
         .iter()
@@ -515,7 +543,7 @@ fn enumerate_segment_dirs_empty_root_returns_empty() {
 
 #[test]
 fn concat_empty_input_returns_all_empty() {
-    let c = concat_segment_csrs(Vec::new());
+    let c = concat_segment_csrs(Vec::new()).unwrap();
     assert_eq!(c.node_slots.len(), 0);
     assert_eq!(c.out_offsets.len(), 0);
     assert_eq!(c.out_edges.len(), 0);
@@ -546,7 +574,7 @@ fn concat_single_segment_returns_it_unchanged() {
             connection_type: 42,
         }],
     );
-    let c = concat_segment_csrs(vec![s]);
+    let c = concat_segment_csrs(vec![s]).unwrap();
     assert_eq!(c.node_slots.len(), 2);
     assert_eq!(c.out_offsets.len(), 3);
     assert_eq!(c.out_edges.len(), 1);
@@ -616,7 +644,7 @@ fn concat_two_segments_stitches_offsets_and_shifts_edge_idx() {
         ],
     );
 
-    let c = concat_segment_csrs(vec![s0, s1]);
+    let c = concat_segment_csrs(vec![s0, s1]).unwrap();
 
     // Shape.
     assert_eq!(c.node_slots.len(), 4);
@@ -693,7 +721,8 @@ fn concat_three_segments_keeps_offset_chain_consistent() {
         mk_one_node(0, 10),
         mk_one_node(1, 20),
         mk_one_node(2, 30),
-    ]);
+    ])
+    .unwrap();
 
     let out_off: Vec<u64> = (0..c.out_offsets.len())
         .map(|i| c.out_offsets.get(i))
@@ -762,7 +791,7 @@ fn concat_handles_edgeless_segment() {
             connection_type: 3,
         }],
     );
-    let c = concat_segment_csrs(vec![s0, s_empty, s1]);
+    let c = concat_segment_csrs(vec![s0, s_empty, s1]).unwrap();
     let out_off: Vec<u64> = (0..c.out_offsets.len())
         .map(|i| c.out_offsets.get(i))
         .collect();

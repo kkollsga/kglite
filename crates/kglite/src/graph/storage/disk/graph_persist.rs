@@ -696,18 +696,18 @@ impl DiskGraph {
         // ─── node_slots — unchanged: tail only. ───
         let mut node_slots: MmapOrVec<DiskNodeSlot> = MmapOrVec::with_capacity(tail_len);
         for i in 0..tail_len {
-            node_slots.push(self.node_slot(tail_lo as usize + i));
+            node_slots.try_push(self.node_slot(tail_lo as usize + i))?;
         }
 
         // ─── edge_endpoints: global source/target, segment-local
         //     edge_idx 0..n_edges (same as before). ───
         let mut edge_endpoints: MmapOrVec<EdgeEndpoints> = MmapOrVec::with_capacity(n_edges);
         for e in &seal_edges {
-            edge_endpoints.push(EdgeEndpoints {
+            edge_endpoints.try_push(EdgeEndpoints {
                 source: e.src_global,
                 target: e.tgt_global,
                 connection_type: e.conn_type,
-            });
+            })?;
         }
 
         // ─── out_offsets / out_edges: CSR keyed by (segment-local
@@ -727,17 +727,17 @@ impl DiskGraph {
         let mut out_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
         let mut cursor = 0usize;
         for k in 0..(offsets_len - 1) as u32 {
-            out_offsets.push(cursor as u64);
+            out_offsets.try_push(cursor as u64)?;
             while cursor < n_edges && offset_key(seal_edges[cursor].src_global) == k {
                 let e = &seal_edges[cursor];
-                out_edges.push(CsrEdge {
+                out_edges.try_push(CsrEdge {
                     peer: e.tgt_global,
                     edge_idx: cursor as u32,
-                });
+                })?;
                 cursor += 1;
             }
         }
-        out_offsets.push(cursor as u64);
+        out_offsets.try_push(cursor as u64)?;
 
         // ─── in_offsets / in_edges: mirror keyed by target. ───
         let mut by_target: Vec<(u32, u32)> = seal_edges
@@ -751,18 +751,18 @@ impl DiskGraph {
         let mut in_edges: MmapOrVec<CsrEdge> = MmapOrVec::with_capacity(n_edges);
         let mut tcursor = 0usize;
         for k in 0..(offsets_len - 1) as u32 {
-            in_offsets.push(tcursor as u64);
+            in_offsets.try_push(tcursor as u64)?;
             while tcursor < n_edges && offset_key(by_target[tcursor].0) == k {
                 let (_, orig_idx) = by_target[tcursor];
                 let src_peer = seal_edges[orig_idx as usize].src_global;
-                in_edges.push(CsrEdge {
+                in_edges.try_push(CsrEdge {
                     peer: src_peer,
                     edge_idx: orig_idx,
-                });
+                })?;
                 tcursor += 1;
             }
         }
-        in_offsets.push(tcursor as u64);
+        in_offsets.try_push(tcursor as u64)?;
 
         // ─── Persist core CSR to disk. ───
         node_slots.save_to_file(&seg_dir.join("node_slots.bin"))?;
@@ -995,7 +995,7 @@ impl DiskGraph {
                     for (_, sdir) in &segs {
                         loaded.push(SegmentCsr::load_from(sdir, &temp_dir)?);
                     }
-                    let csr = concat_segment_csrs(loaded);
+                    let csr = concat_segment_csrs(loaded)?;
                     (first_dir, csr)
                 }
             }
@@ -1411,9 +1411,9 @@ fn load_with_inferred_len<T: crate::graph::storage::mapped::mmap_vec::MmapPod>(
 ///
 /// Violations produce a garbage combined CSR; the assumptions are
 /// phase 7's contract with phase 8's writer.
-pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
+pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> std::io::Result<SegmentCsr> {
     use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints};
-    match segments.len() {
+    let combined = match segments.len() {
         0 => SegmentCsr {
             node_slots: MmapOrVec::new(),
             out_offsets: MmapOrVec::new(),
@@ -1475,10 +1475,10 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
             // edge-index mapping differs under full-range.
             for seg in &segments {
                 for i in 0..seg.node_slots.len() {
-                    node_slots.push(seg.node_slots.get(i));
+                    node_slots.try_push(seg.node_slots.get(i))?;
                 }
                 for i in 0..seg.edge_endpoints.len() {
-                    edge_endpoints.push(seg.edge_endpoints.get(i));
+                    edge_endpoints.try_push(seg.edge_endpoints.get(i))?;
                 }
             }
 
@@ -1487,8 +1487,8 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
             // node, a segment contributes when:
             //   - segment-local & node id in [node_lo, node_hi)  → key = gid - node_lo
             //   - full-range                                       → key = gid  (cap: offsets len)
-            out_offsets.push(0);
-            in_offsets.push(0);
+            out_offsets.try_push(0)?;
+            in_offsets.try_push(0)?;
             for gid in 0..total_nodes {
                 for (k, seg) in segments.iter().enumerate() {
                     let key: Option<usize> = if is_full[k] {
@@ -1508,11 +1508,11 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
                         for i in start..end {
                             let mut e = seg.out_edges.get(i);
                             e.edge_idx = e.edge_idx.wrapping_add(endpoint_base[k]);
-                            out_edges.push(e);
+                            out_edges.try_push(e)?;
                         }
                     }
                 }
-                out_offsets.push(out_edges.len() as u64);
+                out_offsets.try_push(out_edges.len() as u64)?;
 
                 for (k, seg) in segments.iter().enumerate() {
                     let key: Option<usize> = if is_full[k] {
@@ -1532,11 +1532,11 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
                         for i in start..end {
                             let mut e = seg.in_edges.get(i);
                             e.edge_idx = e.edge_idx.wrapping_add(endpoint_base[k]);
-                            in_edges.push(e);
+                            in_edges.try_push(e)?;
                         }
                     }
                 }
-                in_offsets.push(in_edges.len() as u64);
+                in_offsets.try_push(in_edges.len() as u64)?;
             }
 
             // ─── Phase 5: auxiliary index merge ───────────────────────────
@@ -1545,10 +1545,10 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
             // Each segment's source list is globally sorted (segments own
             // disjoint node ranges); concatenating segments in manifest
             // order preserves ascending global order per type.
-            let (cti_types, cti_offsets, cti_sources) = merge_conn_type_index(&segments);
+            let (cti_types, cti_offsets, cti_sources) = merge_conn_type_index(&segments)?;
 
             // peer_count — sum counts per (type, peer) across segments.
-            let (pc_types, pc_offsets, pc_entries) = merge_peer_count_histogram(&segments);
+            let (pc_types, pc_offsets, pc_entries) = merge_peer_count_histogram(&segments)?;
 
             SegmentCsr {
                 node_slots,
@@ -1565,7 +1565,8 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
                 peer_count_entries: pc_entries,
             }
         }
-    }
+    };
+    Ok(combined)
 }
 
 /// Merge per-segment `conn_type_index_*` into a combined index.
@@ -1575,7 +1576,7 @@ pub(crate) fn concat_segment_csrs(mut segments: Vec<SegmentCsr>) -> SegmentCsr {
 /// locally sorted). Types are unioned and sorted ascending.
 fn merge_conn_type_index(
     segments: &[SegmentCsr],
-) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+) -> std::io::Result<(MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>)> {
     use std::collections::BTreeMap;
     // Per-segment source-id shift: segment-local seals write
     // `conn_type_index_sources` using offset-array indices
@@ -1609,8 +1610,8 @@ fn merge_conn_type_index(
     let mut out_sources: MmapOrVec<u32> = MmapOrVec::with_capacity(total_sources);
     let mut cur_off: u64 = 0;
     for (t, seg_idxs) in &type_to_segs {
-        out_types.push(*t);
-        out_offsets.push(cur_off);
+        out_types.try_push(*t)?;
+        out_offsets.try_push(cur_off)?;
         for &si in seg_idxs {
             let seg = &segments[si];
             let shift = if is_full[si] { 0 } else { node_lo[si] };
@@ -1623,7 +1624,7 @@ fn merge_conn_type_index(
                     let start = seg.conn_type_index_offsets.get(j) as usize;
                     let end = seg.conn_type_index_offsets.get(j + 1) as usize;
                     for k in start..end {
-                        out_sources.push(seg.conn_type_index_sources.get(k) + shift);
+                        out_sources.try_push(seg.conn_type_index_sources.get(k) + shift)?;
                     }
                     cur_off += (end - start) as u64;
                     break;
@@ -1631,15 +1632,15 @@ fn merge_conn_type_index(
             }
         }
     }
-    out_offsets.push(cur_off);
-    (out_types, out_offsets, out_sources)
+    out_offsets.try_push(cur_off)?;
+    Ok((out_types, out_offsets, out_sources))
 }
 
 /// Merge per-segment `peer_count_*` histograms by summing counts for
 /// every `(conn_type, peer)` pair that appears in any segment.
 fn merge_peer_count_histogram(
     segments: &[SegmentCsr],
-) -> (MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>) {
+) -> std::io::Result<(MmapOrVec<u64>, MmapOrVec<u64>, MmapOrVec<u32>)> {
     use std::collections::BTreeMap;
     // type → peer → summed count.
     let mut by_type: BTreeMap<u64, BTreeMap<u32, u64>> = BTreeMap::new();
@@ -1665,17 +1666,17 @@ fn merge_peer_count_histogram(
     let mut out_entries: MmapOrVec<u32> = MmapOrVec::new();
     let mut cur_pairs: u64 = 0;
     for (t, peers) in &by_type {
-        out_types.push(*t);
-        out_offsets.push(cur_pairs);
+        out_types.try_push(*t)?;
+        out_offsets.try_push(cur_pairs)?;
         for (peer, count) in peers {
-            out_entries.push(*peer);
+            out_entries.try_push(*peer)?;
             // u64 count saturates to u32 for the on-disk format; sums
             // across segments in practice fit because per-segment
             // counts are u32 and at most `edge_count`.
-            out_entries.push((*count).min(u32::MAX as u64) as u32);
+            out_entries.try_push((*count).min(u32::MAX as u64) as u32)?;
         }
         cur_pairs += peers.len() as u64;
     }
-    out_offsets.push(cur_pairs);
-    (out_types, out_offsets, out_entries)
+    out_offsets.try_push(cur_pairs)?;
+    Ok((out_types, out_offsets, out_entries))
 }

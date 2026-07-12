@@ -146,11 +146,11 @@ impl DiskGraph {
         for i in 0..pending.len() {
             let edge = pending.get(i);
             let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
-            edge_endpoints_vec.push(EdgeEndpoints {
+            edge_endpoints_vec.try_push(EdgeEndpoints {
                 source: src,
                 target: tgt,
                 connection_type: ct,
-            });
+            })?;
             if (src as usize) < node_bound {
                 out_counts[src as usize] += 1;
             }
@@ -175,13 +175,13 @@ impl DiskGraph {
         let mut out_acc = 0u64;
         let mut in_acc = 0u64;
         for i in 0..node_bound {
-            out_offsets.push(out_acc);
-            in_offsets.push(in_acc);
+            out_offsets.try_push(out_acc)?;
+            in_offsets.try_push(in_acc)?;
             out_acc += out_counts[i];
             in_acc += in_counts[i];
         }
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
+        out_offsets.try_push(out_acc)?;
+        in_offsets.try_push(in_acc)?;
         drop(out_counts);
         drop(in_counts);
         if verbose {
@@ -346,10 +346,10 @@ impl DiskGraph {
 
                 let mut output = MmapOrVec::mapped(&out_dir.join("in_edges.bin"), edge_count)?;
                 for entry in &entries {
-                    output.push(CsrEdge {
+                    output.try_push(CsrEdge {
                         peer: entry.peer,
                         edge_idx: entry.orig_idx,
-                    });
+                    })?;
                 }
                 drop(entries);
                 if verbose {
@@ -386,7 +386,7 @@ impl DiskGraph {
                     let chunk_path = sort_dir.join(format!("chunk_in_{}.bin", c));
                     let mut chunk_mmap = MmapOrVec::mapped(&chunk_path, len)?;
                     for entry in &entries {
-                        chunk_mmap.push(*entry);
+                        chunk_mmap.try_push(*entry)?;
                     }
                     drop(entries);
                     chunk_lens.push(len);
@@ -419,10 +419,10 @@ impl DiskGraph {
                     let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
                     let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
                     positions[best_chunk] += 1;
-                    output.push(CsrEdge {
+                    output.try_push(CsrEdge {
                         peer: entry.peer,
                         edge_idx: entry.orig_idx,
-                    });
+                    })?;
                     if positions[best_chunk] < chunk_lens[best_chunk] {
                         let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
                         heap.push(Reverse((next.key, next.conn_type, best_chunk)));
@@ -874,16 +874,16 @@ pub(super) fn write_conn_type_index(
 
     let mut offset: u64 = 0;
     for &ct in &sorted_types {
-        idx_types.push(ct);
-        idx_offsets.push(offset);
+        idx_types.try_push(ct)?;
+        idx_offsets.try_push(offset)?;
         if let Some(sources) = type_sources.get(&ct) {
             for &src in sources {
-                idx_sources.push(src);
+                idx_sources.try_push(src)?;
             }
             offset += sources.len() as u64;
         }
     }
-    idx_offsets.push(offset);
+    idx_offsets.try_push(offset)?;
 
     // Trim each file to exact element count — `MmapOrVec::mapped` has a
     // 64-element minimum. Phase-7's multi-segment concat uses file-size

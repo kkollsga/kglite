@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mapped growth failures no longer panic or partially append graph data.**
+  Mmap capacity arithmetic, zero-length mappings, growth, and trim operations
+  are checked and retry-safe; disk/N-Triples/subgraph builders propagate I/O
+  errors, and typed columns roll back paired buffers or fall back to heap
+  storage without exposing a partial row.
+
 - **File-freshness stamps are stable, precise, and atomic.** Files are hashed
   in bounded chunks through one descriptor with before/after identity checks
   and bounded retry, duplicate resolved paths are read once, and graph updates

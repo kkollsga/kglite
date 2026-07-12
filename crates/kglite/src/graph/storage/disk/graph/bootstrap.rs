@@ -165,14 +165,14 @@ impl DiskGraph {
                     crate::graph::schema::PropertyStorage::Columnar { row_id, .. } => *row_id,
                     _ => i as u32,
                 };
-                node_slots.push(DiskNodeSlot {
+                node_slots.try_push(DiskNodeSlot {
                     node_type: node.node_type.as_u64(),
                     row_id,
                     flags: DiskNodeSlot::ALIVE_BIT,
-                });
+                })?;
                 node_count += 1;
             } else {
-                node_slots.push(DiskNodeSlot::default()); // dead slot
+                node_slots.try_push(DiskNodeSlot::default())?; // dead slot
             }
         }
 
@@ -193,13 +193,13 @@ impl DiskGraph {
         let mut out_acc = 0u64;
         let mut in_acc = 0u64;
         for i in 0..node_bound {
-            out_offsets.push(out_acc);
-            in_offsets.push(in_acc);
+            out_offsets.try_push(out_acc)?;
+            in_offsets.try_push(in_acc)?;
             out_acc += out_counts[i];
             in_acc += in_counts[i];
         }
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
+        out_offsets.try_push(out_acc)?;
+        in_offsets.try_push(in_acc)?;
 
         // ── Build CSR edge arrays ──
         let mut out_edges = MmapOrVec::mapped(&data_dir.join("out_edges.bin"), edge_count)?;
@@ -210,9 +210,9 @@ impl DiskGraph {
 
         // Initialize edge arrays with enough space
         for _ in 0..edge_count {
-            out_edges.push(CsrEdge::default());
-            in_edges.push(CsrEdge::default());
-            edge_endpoints_vec.push(EdgeEndpoints::default());
+            out_edges.try_push(CsrEdge::default())?;
+            in_edges.try_push(CsrEdge::default())?;
+            edge_endpoints_vec.try_push(EdgeEndpoints::default())?;
         }
 
         // Fill positions: use write cursors per node

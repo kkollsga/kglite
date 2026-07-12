@@ -50,7 +50,7 @@ fn grown_capacity<T>(capacity: usize, needed: usize) -> io::Result<(usize, usize
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum FailurePoint {
+pub(crate) enum FailurePoint {
     GrowRemap = 1,
     TrimRemap = 2,
     TrimSetLen = 4,
@@ -63,7 +63,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn fail_next(point: FailurePoint) {
+pub(crate) fn fail_next(point: FailurePoint) {
     FAILURE_POINTS.with(|points| points.set(points.get() | point as u8));
 }
 
@@ -475,11 +475,9 @@ impl<T: MmapPod> MmapOrVec<T> {
         }
     }
 
-    /// Append an element through the legacy infallible storage seam.
-    ///
-    /// Phase 5 migrates bulk/disk callers to [`Self::try_push`] and then
-    /// removes or restricts this wrapper. New fallible code must use
-    /// `try_push` directly.
+    /// Test-only convenience for fixtures that intentionally unwrap storage
+    /// allocation. Production callers must use [`Self::try_push`].
+    #[cfg(test)]
     pub fn push(&mut self, value: T) {
         self.try_push(value)
             .expect("MmapOrVec::push failed; use try_push at fallible boundaries");
@@ -538,6 +536,16 @@ impl<T: MmapPod> MmapOrVec<T> {
             }
         }
         Ok(())
+    }
+
+    /// Roll back the logical tail without resizing the backing file.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        match self {
+            Self::Heap { data } => data.truncate(len),
+            Self::Mapped {
+                len: current_len, ..
+            } => *current_len = (*current_len).min(len),
+        }
     }
 
     /// Get a mutable slice of the data. Works for both Heap and Mapped variants.
@@ -904,6 +912,16 @@ impl MmapBytes {
         match self {
             MmapBytes::Heap { data } => data.len(),
             MmapBytes::Mapped { len, .. } => *len,
+        }
+    }
+
+    /// Roll back the logical tail without resizing the backing file.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        match self {
+            Self::Heap { data } => data.truncate(len),
+            Self::Mapped {
+                len: current_len, ..
+            } => *current_len = (*current_len).min(len),
         }
     }
 

@@ -99,11 +99,11 @@ pub(super) fn build_csr_files(
     for i in 0..edge_count {
         let edge = pending.get(i);
         let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
-        edge_endpoints.push(EdgeEndpoints {
+        edge_endpoints.try_push(EdgeEndpoints {
             source: src,
             target: tgt,
             connection_type: ct,
-        });
+        })?;
         if (src as usize) < node_bound {
             out_counts[src as usize] += 1;
         }
@@ -128,13 +128,13 @@ pub(super) fn build_csr_files(
     let mut out_acc = 0u64;
     let mut in_acc = 0u64;
     for i in 0..node_bound {
-        out_offsets.push(out_acc);
-        in_offsets.push(in_acc);
+        out_offsets.try_push(out_acc)?;
+        in_offsets.try_push(in_acc)?;
         out_acc += out_counts[i];
         in_acc += in_counts[i];
     }
-    out_offsets.push(out_acc);
-    in_offsets.push(in_acc);
+    out_offsets.try_push(out_acc)?;
+    in_offsets.try_push(in_acc)?;
     drop(out_counts);
     drop(in_counts);
     if verbose {
@@ -236,10 +236,10 @@ fn merge_sort_build(
         let mut output =
             MmapOrVec::mapped(&output_dir.join(format!("{}_edges.bin", label)), edge_count)?;
         for entry in &entries {
-            output.push(CsrEdge {
+            output.try_push(CsrEdge {
                 peer: entry.peer,
                 edge_idx: entry.orig_idx,
-            });
+            })?;
         }
         drop(entries);
         if verbose {
@@ -280,7 +280,7 @@ fn merge_sort_build(
         let path = chunk_dir.join(format!("chunk_{}_{}.bin", label, c));
         let mut mmap: MmapOrVec<MergeSortEntry> = MmapOrVec::mapped(&path, len)?;
         for entry in &chunk {
-            mmap.push(*entry);
+            mmap.try_push(*entry)?;
         }
         chunk_mmaps.push(mmap);
         chunk_lens.push(len);
@@ -313,10 +313,10 @@ fn merge_sort_build(
         let Reverse((_key, _ct, best_chunk)) = heap.pop().unwrap();
         let entry = chunk_mmaps[best_chunk].get(positions[best_chunk]);
         positions[best_chunk] += 1;
-        output.push(CsrEdge {
+        output.try_push(CsrEdge {
             peer: entry.peer,
             edge_idx: entry.orig_idx,
-        });
+        })?;
         if positions[best_chunk] < chunk_lens[best_chunk] {
             let next = chunk_mmaps[best_chunk].get(positions[best_chunk]);
             heap.push(Reverse((next.key, next.conn_type, best_chunk)));

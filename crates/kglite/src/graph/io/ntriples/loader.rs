@@ -1485,11 +1485,12 @@ fn flush_entity(
                 for (pred_label, target_qcode) in acc.outgoing_edges {
                     if let Some(tgt_num) = parse_qcode_number(&target_qcode) {
                         let pred_key = graph.interner.get_or_intern(&pred_label);
-                        buf.push(CompactNTripleEdge {
+                        buf.try_push(CompactNTripleEdge {
                             source_qnum: src_num,
                             target_qnum: tgt_num,
                             predicate: pred_key,
-                        });
+                        })
+                        .map_err(|error| format!("append compact N-Triples edge: {error}"))?;
                     }
                 }
             }

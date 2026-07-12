@@ -9,7 +9,7 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeSchema};
-use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec};
+use crate::graph::storage::mapped::mmap_vec::{MmapBytes, MmapOrVec, MmapPod};
 use crate::graph::storage::packed_codec::{write_packed_values, PackedElement};
 use chrono::NaiveDate;
 use std::collections::HashMap;
@@ -65,6 +65,72 @@ pub enum TypedColumn {
     Mixed { data: Vec<Value> },
 }
 
+#[cfg(test)]
+mod push_failure_tests {
+    use super::*;
+    use std::fs::File;
+
+    #[test]
+    fn typed_push_distinguishes_mismatch_from_storage_and_rolls_back() {
+        let mut mismatch = TypedColumn::from_type_str("int64");
+        assert!(matches!(
+            mismatch.push(&Value::String("wrong".to_string())),
+            Err(ColumnPushError::TypeMismatch)
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("data.bin");
+        let nulls_path = dir.path().join("nulls.bin");
+        let mut data = MmapOrVec::mapped(&data_path, 64).unwrap();
+        let mut nulls = MmapOrVec::mapped(&nulls_path, 64).unwrap();
+        for value in 0..64 {
+            data.try_push(value).unwrap();
+            nulls.try_push(0).unwrap();
+        }
+        if let MmapOrVec::Mapped { file, .. } = &mut nulls {
+            *file = File::open(&nulls_path).unwrap();
+        }
+        let mut column = TypedColumn::Int64 { data, nulls };
+
+        assert!(matches!(
+            column.push(&Value::Int64(64)),
+            Err(ColumnPushError::Storage(_))
+        ));
+        assert_eq!(column.len(), 64);
+        assert_eq!(column.get(63), Some(Value::Int64(63)));
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ColumnPushError {
+    TypeMismatch,
+    Storage(io::Error),
+}
+
+impl std::fmt::Display for ColumnPushError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TypeMismatch => formatter.write_str("column value type mismatch"),
+            Self::Storage(error) => write!(formatter, "column storage append failed: {error}"),
+        }
+    }
+}
+
+fn push_pair<T: MmapPod>(
+    data: &mut MmapOrVec<T>,
+    value: T,
+    nulls: &mut MmapOrVec<u8>,
+    null_flag: u8,
+) -> Result<(), ColumnPushError> {
+    let data_len = data.len();
+    data.try_push(value).map_err(ColumnPushError::Storage)?;
+    if let Err(error) = nulls.try_push(null_flag) {
+        data.truncate(data_len);
+        return Err(ColumnPushError::Storage(error));
+    }
+    Ok(())
+}
+
 /// Number of days from the Unix epoch to chrono's internal epoch.
 /// Column data smaller than this threshold is loaded into heap Vec instead of
 /// being written to a temp file and mmap'd. Avoids file I/O overhead for small columns.
@@ -102,11 +168,7 @@ impl TypedColumn {
                 nulls: MmapOrVec::new(),
             },
             "string" => TypedColumn::Str {
-                offsets: {
-                    let mut o = MmapOrVec::new();
-                    o.push(0u64);
-                    o
-                },
+                offsets: MmapOrVec::from_vec(vec![0u64]),
                 data: MmapBytes::new(),
                 nulls: MmapOrVec::new(),
                 relocated: HashMap::new(),
@@ -130,53 +192,42 @@ impl TypedColumn {
 
     /// Push a value onto this column. Returns Ok(()) on success,
     /// Err(value) if the value type doesn't match (caller should demote to Mixed).
-    pub fn push(&mut self, value: &Value) -> Result<(), ()> {
+    pub(crate) fn push(&mut self, value: &Value) -> Result<(), ColumnPushError> {
         match (self, value) {
             (TypedColumn::Int64 { data, nulls }, Value::Int64(v)) => {
-                data.push(*v);
-                nulls.push(0);
+                push_pair(data, *v, nulls, 0)?;
             }
             (TypedColumn::Int64 { data, nulls }, Value::Null) => {
-                data.push(0);
-                nulls.push(1);
+                push_pair(data, 0, nulls, 1)?;
             }
             (TypedColumn::Float64 { data, nulls }, Value::Float64(v)) => {
-                data.push(*v);
-                nulls.push(0);
+                push_pair(data, *v, nulls, 0)?;
             }
             (TypedColumn::Float64 { data, nulls }, Value::Int64(v)) => {
                 // Allow int→float promotion (common from pandas)
-                data.push(*v as f64);
-                nulls.push(0);
+                push_pair(data, *v as f64, nulls, 0)?;
             }
             (TypedColumn::Float64 { data, nulls }, Value::Null) => {
-                data.push(0.0);
-                nulls.push(1);
+                push_pair(data, 0.0, nulls, 1)?;
             }
             (TypedColumn::UniqueId { data, nulls }, Value::UniqueId(v)) => {
-                data.push(*v);
-                nulls.push(0);
+                push_pair(data, *v, nulls, 0)?;
             }
             (TypedColumn::UniqueId { data, nulls }, Value::Null) => {
-                data.push(0);
-                nulls.push(1);
+                push_pair(data, 0, nulls, 1)?;
             }
             (TypedColumn::Bool { data, nulls }, Value::Boolean(v)) => {
-                data.push(*v as u8);
-                nulls.push(0);
+                push_pair(data, *v as u8, nulls, 0)?;
             }
             (TypedColumn::Bool { data, nulls }, Value::Null) => {
-                data.push(0);
-                nulls.push(1);
+                push_pair(data, 0, nulls, 1)?;
             }
             (TypedColumn::Date { data, nulls }, Value::DateTime(d)) => {
                 let days = (*d - UNIX_EPOCH_DATE).num_days() as i32;
-                data.push(days);
-                nulls.push(0);
+                push_pair(data, days, nulls, 0)?;
             }
             (TypedColumn::Date { data, nulls }, Value::Null) => {
-                data.push(0);
-                nulls.push(1);
+                push_pair(data, 0, nulls, 1)?;
             }
             (
                 TypedColumn::Str {
@@ -190,9 +241,21 @@ impl TypedColumn {
                 // On mmap growth failure, report a failed typed push. The
                 // caller's existing demotion path preserves the logical row
                 // in a heap-backed Mixed column instead of panicking.
-                data.extend(s.as_bytes()).map_err(|_| ())?;
-                offsets.push(data.len() as u64);
-                nulls.push(0);
+                let (data_len, offsets_len, nulls_len) = (data.len(), offsets.len(), nulls.len());
+                let result = (|| {
+                    data.extend(s.as_bytes())
+                        .map_err(ColumnPushError::Storage)?;
+                    offsets
+                        .try_push(data.len() as u64)
+                        .map_err(ColumnPushError::Storage)?;
+                    nulls.try_push(0).map_err(ColumnPushError::Storage)
+                })();
+                if result.is_err() {
+                    data.truncate(data_len);
+                    offsets.truncate(offsets_len);
+                    nulls.truncate(nulls_len);
+                }
+                result?;
             }
             (TypedColumn::Str { offsets, nulls, .. }, Value::Null) => {
                 // Null string: push same offset (zero-length range)
@@ -201,13 +264,17 @@ impl TypedColumn {
                 } else {
                     0
                 };
-                offsets.push(last);
-                nulls.push(1);
+                let offsets_len = offsets.len();
+                offsets.try_push(last).map_err(ColumnPushError::Storage)?;
+                if let Err(error) = nulls.try_push(1) {
+                    offsets.truncate(offsets_len);
+                    return Err(ColumnPushError::Storage(error));
+                }
             }
             (TypedColumn::Mixed { data }, value) => {
                 data.push(value.clone());
             }
-            _ => return Err(()),
+            _ => return Err(ColumnPushError::TypeMismatch),
         }
         Ok(())
     }
@@ -450,7 +517,16 @@ impl TypedColumn {
 
     /// Push a null value for this column type.
     pub fn push_null(&mut self) {
-        let _ = self.push(&Value::Null);
+        if self.push(&Value::Null).is_err() {
+            // Infallible ColumnStore mutation boundary: preserve all existing
+            // values and the new NULL in an explicit heap-backed fallback.
+            let mut mixed = Vec::with_capacity(self.len() + 1);
+            for row in 0..self.len() {
+                mixed.push(self.get(row as u32).unwrap_or(Value::Null));
+            }
+            mixed.push(Value::Null);
+            *self = Self::Mixed { data: mixed };
+        }
     }
 
     /// Whether this column's data is currently file-backed.
@@ -862,7 +938,8 @@ impl ColumnStore {
             .id_column
             .get_or_insert_with(|| TypedColumn::Mixed { data: Vec::new() });
         if col.push(value).is_err() {
-            // Type mismatch — demote to Mixed
+            // Type mismatch or storage growth failure: this API is
+            // intentionally infallible, so fall back to a heap Mixed column.
             let mut mixed = Vec::with_capacity(col.len() + 1);
             for i in 0..col.len() {
                 mixed.push(col.get(i as u32).unwrap_or(Value::Null));
@@ -875,17 +952,13 @@ impl ColumnStore {
     /// Push a node title value into the title column. Creates a Str column if None.
     pub fn push_title(&mut self, value: &Value) {
         let col = self.title_column.get_or_insert_with(|| TypedColumn::Str {
-            offsets: {
-                let mut o = MmapOrVec::new();
-                o.push(0u64);
-                o
-            },
+            offsets: MmapOrVec::from_vec(vec![0u64]),
             data: MmapBytes::new(),
             nulls: MmapOrVec::new(),
             relocated: HashMap::new(),
         });
         if col.push(value).is_err() {
-            // Type mismatch — demote to Mixed
+            // Type mismatch or storage growth failure: explicit heap fallback.
             let mut mixed = Vec::with_capacity(col.len() + 1);
             for i in 0..col.len() {
                 mixed.push(col.get(i as u32).unwrap_or(Value::Null));
@@ -1122,7 +1195,8 @@ impl ColumnStore {
             let col = &mut self.columns[slot];
             if let Some(value) = slot_val {
                 if col.push(value).is_err() {
-                    // Type mismatch — demote column to Mixed and retry
+                    // Type mismatch or storage growth failure: preserve the
+                    // row through the infallible heap-backed fallback.
                     self.demote_to_mixed(slot);
                     let _ = self.columns[slot].push(value);
                 }

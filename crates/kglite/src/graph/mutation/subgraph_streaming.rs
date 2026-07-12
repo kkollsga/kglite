@@ -349,11 +349,13 @@ pub fn pass_a_scan_to_file(
         }
         kept_nodes.set(ep.source as usize);
         kept_nodes.set(ep.target as usize);
-        kept_edges.push(PendingEdge {
-            source: ep.source,
-            target: ep.target,
-            connection_type: ep.connection_type,
-        });
+        kept_edges
+            .try_push(PendingEdge {
+                source: ep.source,
+                target: ep.target,
+                connection_type: ep.connection_type,
+            })
+            .map_err(|error| format!("save_subset: append kept edge: {error}"))?;
         kept_edge_count += 1;
     }
 
@@ -964,12 +966,12 @@ pub fn save_subset_streaming_disk(
                 .map(|cow| cow.into_owned())
                 .unwrap_or_default();
             let edge_data = EdgeData::new_interned(conn_type, props);
-            crate::graph::storage::GraphWrite::add_edge(
-                &mut dest.graph,
-                new_src,
-                new_tgt,
-                edge_data,
-            );
+            let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
+                unreachable!("streaming subset destination is always disk-backed")
+            };
+            dest_disk
+                .try_add_pending_edge(new_src, new_tgt, edge_data)
+                .map_err(|error| format!("save_subset_streaming_disk: append edge: {error}"))?;
         }
     } else {
         // Memory / mapped source: walk via for_each_edge_endpoint_key to
@@ -1003,12 +1005,12 @@ pub fn save_subset_streaming_disk(
                     None => continue,
                 };
                 let edge_data = EdgeData::new_interned(w.connection_type, w.properties.clone());
-                crate::graph::storage::GraphWrite::add_edge(
-                    &mut dest.graph,
-                    new_src,
-                    new_tgt,
-                    edge_data,
-                );
+                let GraphBackend::Disk(ref mut dest_disk) = dest.graph else {
+                    unreachable!("streaming subset destination is always disk-backed")
+                };
+                dest_disk
+                    .try_add_pending_edge(new_src, new_tgt, edge_data)
+                    .map_err(|error| format!("save_subset_streaming_disk: append edge: {error}"))?;
             }
         } else {
             return Err(

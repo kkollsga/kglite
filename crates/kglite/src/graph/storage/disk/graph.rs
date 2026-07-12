@@ -1672,6 +1672,11 @@ impl DiskGraph {
     }
 
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
+        if self.defer_csr {
+            return self
+                .try_add_pending_edge(a, b, data)
+                .expect("deferred bulk callers must use try_add_pending_edge");
+        }
         self.clear_arenas();
         self.metadata_dirty = true;
         let edge_idx = self.next_edge_idx;
@@ -1687,37 +1692,49 @@ impl DiskGraph {
         let tgt = b.index() as u32;
         let ct_u64 = ct.as_u64();
 
-        if self.defer_csr {
-            // Bulk-build mode: accumulate in pending_edges; caller is
-            // responsible for `build_csr_from_pending()` at batch end.
-            // Set explicitly by bulk loaders (ntriples); off by default so
-            // individual Cypher mutations stay visible via overflow.
-            self.pending_edges.get_mut().push(PendingEdge {
-                source: src,
-                target: tgt,
-                connection_type: ct_u64,
-            });
-        } else {
-            // Post-CSR mode: go directly to overflow + edge_endpoints.
-            // This makes new edges immediately visible to queries via
-            // the DiskEdges iterator which merges CSR + overflow.
-            self.appended_edge_endpoints.push(EdgeEndpoints {
-                source: src,
-                target: tgt,
-                connection_type: ct_u64,
-            });
-            self.overflow_out.entry(src).or_default().push(CsrEdge {
-                peer: tgt,
-                edge_idx,
-            });
-            self.overflow_in.entry(tgt).or_default().push(CsrEdge {
-                peer: src,
-                edge_idx,
-            });
-        }
+        // Post-CSR mode: go directly to overflow + edge_endpoints.
+        self.appended_edge_endpoints.push(EdgeEndpoints {
+            source: src,
+            target: tgt,
+            connection_type: ct_u64,
+        });
+        self.overflow_out.entry(src).or_default().push(CsrEdge {
+            peer: tgt,
+            edge_idx,
+        });
+        self.overflow_in.entry(tgt).or_default().push(CsrEdge {
+            peer: src,
+            edge_idx,
+        });
 
         self.edge_count += 1;
         EdgeIndex::new(edge_idx as usize)
+    }
+
+    /// Fallible bulk-build edge append. The mmap write happens before any
+    /// counters, properties, or dirty state change, so callers can retry an
+    /// allocation/I/O failure without observing a partial edge.
+    pub(crate) fn try_add_pending_edge(
+        &mut self,
+        a: NodeIndex,
+        b: NodeIndex,
+        data: EdgeData,
+    ) -> std::io::Result<EdgeIndex> {
+        let edge_idx = self.next_edge_idx;
+        let pending = PendingEdge {
+            source: a.index() as u32,
+            target: b.index() as u32,
+            connection_type: data.connection_type.as_u64(),
+        };
+        self.pending_edges.get_mut().try_push(pending)?;
+
+        self.metadata_dirty = true;
+        if !data.properties.is_empty() {
+            self.edge_properties.insert(edge_idx, data.properties);
+        }
+        self.next_edge_idx += 1;
+        self.edge_count += 1;
+        Ok(EdgeIndex::new(edge_idx as usize))
     }
 
     pub fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
@@ -1960,11 +1977,11 @@ impl DiskGraph {
                 && (ep.target as usize) < node_bound
             {
                 *remap_slot = live_count as u32;
-                new_pending.push(PendingEdge {
+                new_pending.try_push(PendingEdge {
                     source: ep.source,
                     target: ep.target,
                     connection_type: ep.connection_type,
-                });
+                })?;
                 live_count += 1;
             }
         }
