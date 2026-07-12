@@ -10,6 +10,7 @@ pub mod export;
 pub mod file;
 pub mod load_timing;
 pub mod ntriples;
+pub mod open;
 #[cfg(feature = "rdf")]
 pub mod rdf;
 pub mod unified_columns;

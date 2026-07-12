@@ -932,6 +932,7 @@ pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::Dir
 pub fn kglite::api::io::load_file(path: &str) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
+pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)

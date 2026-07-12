@@ -2005,6 +2005,8 @@ dependencies = [
  "clap",
  "kglite",
  "rustls",
+ "sha2",
+ "subtle",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2032,6 +2034,7 @@ dependencies = [
  "kglite",
  "rustyline",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

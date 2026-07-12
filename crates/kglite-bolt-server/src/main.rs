@@ -18,8 +18,8 @@ use boltr::server::BoltServer;
 use clap::{Parser, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use kglite::api::io::load_file;
-use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+use kglite::api::io::open_or_create_graph;
+use kglite::api::storage::StorageMode;
 
 use crate::backend::KgliteBackend;
 
@@ -161,35 +161,27 @@ async fn main() -> Result<()> {
     // (a missing `.kgl` is almost always a typo), unless `--storage` opts in
     // to creating a fresh graph (serve-and-build), mirroring the Python wheel's
     // `kglite.open(path, storage=...)` and the C ABI's create-in-mode.
-    let dir_arc = if cli.graph.exists() {
+    let create_mode = cli
+        .storage
+        .as_deref()
+        .map(StorageMode::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if cli.graph.exists() {
         tracing::info!(path = %cli.graph.display(), "loading graph");
-        // Phase G.3-pre: load_file returns Arc<DirGraph> directly — no
-        // KnowledgeGraph wrapper between us and the engine.
-        let arc = load_file(&cli.graph.to_string_lossy())
-            .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))
-            .with_context(|| format!("loading {}", cli.graph.display()))?;
-        tracing::info!(
-            storage = storage_mode_str(&arc),
-            "graph loaded; constructing Bolt server"
-        );
-        arc
-    } else if let Some(mode_str) = cli.storage.as_deref() {
-        let mode = StorageMode::parse(mode_str).map_err(|e| anyhow::anyhow!(e))?;
-        let path = cli.graph.to_string_lossy().into_owned();
-        let graph = new_dir_graph_in_mode(mode, Some(std::path::Path::new(&path)))
-            .map_err(|e| anyhow::anyhow!(e))?;
+    } else if let Some(mode) = create_mode {
         tracing::info!(
             path = %cli.graph.display(),
             storage = mode.as_str(),
             "created new empty graph; constructing Bolt server"
         );
-        Arc::new(graph)
-    } else {
-        anyhow::bail!(
-            "--graph {} does not exist (pass --storage memory|mapped|disk to create a new graph)",
-            cli.graph.display()
-        );
-    };
+    }
+    let dir_arc = open_or_create_graph(&cli.graph, create_mode)
+        .with_context(|| format!("opening or creating {}", cli.graph.display()))?;
+    tracing::info!(
+        storage = storage_mode_str(&dir_arc),
+        "graph ready; constructing Bolt server"
+    );
 
     // The backend stores the DirGraph behind its own Arc<Mutex<>> for
     // the commit-swap pattern (Phase C.5). Unwrap the Arc — if no

@@ -19,8 +19,8 @@ use kglite::api::cypher::ValueCodec;
 use kglite::api::introspection::{
     compute_description, compute_schema, ConnectionDetail, CypherDetail, FluentDetail,
 };
-use kglite::api::io::load_file;
-use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+use kglite::api::io::open_or_create_graph;
+use kglite::api::storage::StorageMode;
 use kglite::api::{Embedder, KnowledgeGraph, Value};
 use mcp_methods::server::McpServer;
 use serde::{Deserialize, Serialize};
@@ -304,17 +304,7 @@ impl GraphState {
         // wrap into KnowledgeGraph here to preserve ActiveGraph's
         // existing shape (kg.set_embedder_native, kg.source_location,
         // kg.cypher, etc. are still used downstream).
-        let dir = load_file(&path.to_string_lossy())
-            .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))?;
-        let kg = KnowledgeGraph::from_arc(dir);
-        *write_lock(&self.inner) = Some(ActiveGraph {
-            kg,
-            source_path: Some(path.to_path_buf()),
-            root: Some(path.to_path_buf()),
-            revs: None,
-            built_at: SystemTime::now(),
-        });
-        Ok(())
+        self.open_or_create(path, None)
     }
 
     /// Create a fresh, empty graph in `mode` bound to `path` (so `save_graph`
@@ -323,9 +313,13 @@ impl GraphState {
     /// (`new_dir_graph_in_mode`) so the server speaks the same
     /// memory/mapped/disk vocabulary as the wheel and C ABI.
     pub fn create_in_mode(&self, path: &Path, mode: StorageMode) -> Result<()> {
-        let dir = new_dir_graph_in_mode(mode, Some(path))
-            .map_err(|e| anyhow::anyhow!("kglite create-in-mode failed: {}", e))?;
-        let kg = KnowledgeGraph::from_arc(Arc::new(dir));
+        self.open_or_create(path, Some(mode))
+    }
+
+    fn open_or_create(&self, path: &Path, create_mode: Option<StorageMode>) -> Result<()> {
+        let dir = open_or_create_graph(path, create_mode)
+            .map_err(|e| anyhow::anyhow!("kglite graph open/create failed: {e}"))?;
+        let kg = KnowledgeGraph::from_arc(dir);
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),

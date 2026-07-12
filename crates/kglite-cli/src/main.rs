@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kglite::api::introspection::{
     compute_description, ConnectionDetail, CypherDetail, FluentDetail,
 };
-use kglite::api::io::{load_file, save_graph};
+use kglite::api::io::{load_file, open_or_create_graph, save_graph};
 use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
 use kglite::api::{DirGraph, Value};
 
@@ -320,7 +320,11 @@ fn main() -> Result<()> {
             // write here. Tell the user so a typo'd path isn't silently empty.
             let p = path.to_string_lossy().to_string();
             eprintln!("note: {p} does not exist — starting an empty in-memory graph");
-            (Arc::new(fresh_graph()?), None)
+            (
+                open_or_create_graph(path, Some(StorageMode::Memory))
+                    .with_context(|| format!("failed to create {}", path.display()))?,
+                None,
+            )
         }
         None => (Arc::new(fresh_graph()?), None),
     };
@@ -368,10 +372,9 @@ fn run_write(
     } else {
         None
     };
-    let mut graph = if path.exists() {
-        load_graph(path)?
-    } else if persist {
-        Arc::new(fresh_graph()?)
+    let mut graph = if path.exists() || persist {
+        open_or_create_graph(path, persist.then_some(StorageMode::Memory))
+            .with_context(|| format!("failed to open or create {}", path.display()))?
     } else {
         anyhow::bail!(
             "{} does not exist; pass --save to create it after a successful write",
@@ -462,10 +465,9 @@ fn run_session(
     } else {
         None
     };
-    let mut graph = if path.exists() {
-        load_graph(path)?
-    } else if save_on_exit {
-        Arc::new(fresh_graph()?)
+    let mut graph = if path.exists() || save_on_exit {
+        open_or_create_graph(path, save_on_exit.then_some(StorageMode::Memory))
+            .with_context(|| format!("failed to open or create {}", path.display()))?
     } else {
         anyhow::bail!(
             "{} does not exist; pass --save-on-exit to create it when the session exits",
@@ -853,6 +855,9 @@ impl WriteLock {
                     return Ok(Self { path });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    if reclaim_stale_lock(&path)? {
+                        continue;
+                    }
                     if started.elapsed() >= timeout {
                         anyhow::bail!(
                             "timed out waiting for write lock {}; another kglite write may be active",
@@ -888,10 +893,67 @@ fn write_lock_metadata(file: &mut File) -> io::Result<()> {
     writeln!(file, "pid={}", std::process::id())
 }
 
+/// Remove a lock whose recorded owner process is no longer alive. Unknown or
+/// malformed lock metadata is retained conservatively.
+fn reclaim_stale_lock(path: &Path) -> Result<bool> {
+    let metadata = match fs::read_to_string(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "failed to read write lock {}: {e}",
+                path.display()
+            ));
+        }
+    };
+    let Some(pid) = metadata
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    else {
+        return Ok(false);
+    };
+    if process_is_alive(pid) {
+        return Ok(false);
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to reclaim stale write lock {} owned by pid {pid}: {e}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // Signal zero performs existence/permission checking without delivering a
+    // signal. Lock owners are sibling processes of the same user, so success
+    // is the expected live-process result.
+    unsafe { kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Until a native process probe is added for this target, never risk
+    // deleting another process's live lock.
+    true
+}
+
 #[cfg(test)]
 mod tests {
-    use super::lock_path;
+    use super::{lock_path, reclaim_stale_lock, WriteLock};
+    use std::fs;
     use std::path::Path;
+    use std::time::Duration;
 
     #[test]
     fn lock_path_appends_lock_suffix() {
@@ -899,5 +961,42 @@ mod tests {
             lock_path(Path::new("/tmp/demo.kgl")),
             Path::new("/tmp/demo.kgl.lock")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_lock_is_reclaimed_and_replaced_with_current_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("demo.kgl");
+        let lock = lock_path(&graph);
+        fs::write(&lock, "pid=4294967295\n").unwrap();
+
+        let guard = WriteLock::acquire(&graph, Duration::ZERO).unwrap();
+        let metadata = fs::read_to_string(&lock).unwrap();
+        assert_eq!(metadata, format!("pid={}\n", std::process::id()));
+        drop(guard);
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn live_lock_is_not_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("demo.kgl");
+        let lock = lock_path(&graph);
+        fs::write(&lock, format!("pid={}\n", std::process::id())).unwrap();
+
+        assert!(!reclaim_stale_lock(&lock).unwrap());
+        assert!(WriteLock::acquire(&graph, Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn malformed_lock_is_retained_conservatively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = tmp.path().join("demo.kgl");
+        let lock = lock_path(&graph);
+        fs::write(&lock, "owner unknown\n").unwrap();
+
+        assert!(!reclaim_stale_lock(&lock).unwrap());
+        assert!(lock.exists());
     }
 }
