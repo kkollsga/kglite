@@ -116,7 +116,7 @@ fn decode_misaligned<T: PackedElement>(encoded: &[u8], len: usize) -> Vec<T> {
     let mut framed = vec![0xff; encoded.len() + alignment];
     let base = framed.as_ptr() as usize;
     let offset = (0..alignment)
-        .find(|offset| (base + offset) % alignment != 0)
+        .find(|offset| !(base + offset).is_multiple_of(alignment))
         .expect("nontrivial alignment must have a misaligned offset");
     framed[offset..offset + encoded.len()].copy_from_slice(encoded);
     let bytes = &framed[offset..offset + encoded.len()];
