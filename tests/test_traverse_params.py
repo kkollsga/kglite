@@ -1,4 +1,4 @@
-"""Tests for traverse() parameter enhancements: target_type, where alias, where_connection alias."""
+"""Tests for traverse() parameters: target_type, where, where_connection."""
 
 import pandas as pd
 import pytest
@@ -175,47 +175,34 @@ class TestTargetType:
         assert "Carol" in titles
 
 
-class TestWhereAlias:
-    """where= alias for filter_target=."""
+class TestWhere:
+    """where= filters target-node properties."""
 
-    def test_where_same_as_filter_target(self, graph):
-        """where= produces same results as filter_target=."""
-        r1 = graph.select("Person").traverse("AFFILIATED_WITH", filter_target={"city": "Oslo"}).collect()
-        r2 = graph.select("Person").traverse("AFFILIATED_WITH", where={"city": "Oslo"}).collect()
-        assert len(r1) == len(r2)
-        titles1 = sorted([r["title"] for r in r1])
-        titles2 = sorted([r["title"] for r in r2])
-        assert titles1 == titles2
+    def test_where_filters_targets(self, graph):
+        """where= filters traversal targets by node property."""
+        result = graph.select("Person").traverse("AFFILIATED_WITH", where={"city": "Oslo"}).collect()
+        titles = {r["title"] for r in result}
+        # Acme (Oslo, Company) and UiO (Oslo, School) match; Globex/NTNU don't.
+        assert titles == {"Acme", "UiO"}
 
-    def test_both_where_and_filter_target_raises(self, graph):
-        """Using both where= and filter_target= raises ValueError."""
-        with pytest.raises(kglite.KgError, match="alias"):
+    def test_filter_target_kwarg_removed(self, graph):
+        """The pre-0.13 filter_target= alias is gone — unknown kwarg raises TypeError."""
+        with pytest.raises(TypeError, match="filter_target"):
             graph.select("Person").traverse(
                 "AFFILIATED_WITH",
                 filter_target={"city": "Oslo"},
-                where={"city": "Oslo"},
             )
 
 
-class TestWhereConnectionAlias:
-    """where_connection= alias for filter_connection=."""
+class TestWhereConnection:
+    """where_connection= filters edge properties."""
 
-    def test_where_connection_same_as_filter_connection(self, graph):
-        """where_connection= produces same results as filter_connection=."""
-        r1 = graph.select("Person").traverse("RATED", filter_connection={"score": {">": 3}}).collect()
-        r2 = graph.select("Person").traverse("RATED", where_connection={"score": {">": 3}}).collect()
-        assert len(r1) == len(r2)
-        titles1 = sorted([r["title"] for r in r1])
-        titles2 = sorted([r["title"] for r in r2])
-        assert titles1 == titles2
-
-    def test_both_where_connection_and_filter_connection_raises(self, graph):
-        """Using both where_connection= and filter_connection= raises ValueError."""
-        with pytest.raises(kglite.KgError, match="alias"):
+    def test_filter_connection_kwarg_removed(self, graph):
+        """The pre-0.13 filter_connection= alias is gone — unknown kwarg raises TypeError."""
+        with pytest.raises(TypeError, match="filter_connection"):
             graph.select("Person").traverse(
                 "RATED",
                 filter_connection={"score": {">": 3}},
-                where_connection={"score": {">": 3}},
             )
 
     def test_where_connection_filters_edges(self, graph):

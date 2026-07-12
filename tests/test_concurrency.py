@@ -97,6 +97,21 @@ class TestConcurrentReads:
         assert len(results) == 8
         assert all(r == sequential for r in results)
 
+    def test_concurrent_traverse_on_same_selection_uses_shared_borrow(self, large_graph):
+        """Two traversals may overlap while cloning one fluent selection."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        selected = large_graph.select("Person")
+        barrier = threading.Barrier(2)
+
+        def traverse():
+            barrier.wait(timeout=10)
+            return selected.traverse("KNOWS", direction="outgoing").len()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(traverse) for _ in range(2)]
+            assert [future.result(timeout=20) for future in futures] == [4_999, 4_999]
+
     def test_concurrent_reads_result_equivalence(self, large_graph):
         """Phase 10: 4 ThreadPoolExecutor workers returning full result sets
         must equal the sequentially-computed baseline row-for-row."""

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`traverse()` now uses its canonical filter names and supports concurrent
+  read borrows.** The obsolete `filter_target` / `filter_connection` keyword
+  aliases were removed; use `where` / `where_connection`. Read-only traversal
+  no longer requests an exclusive Python borrow.
+
 - **Cypher compatibility claims now have an executable dialect contract.** A
   machine-readable manifest classifies covered, partial, unsupported, extended,
   and intentionally divergent behavior; public docs and agent introspection no
@@ -69,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binding-aware executor.
 
 ### Fixed
+
+- **Python Cypher syntax errors expose structured source positions.**
+  `CypherSyntaxError.line` and `.col` are always present (1-indexed when known,
+  otherwise `None`), file-freshness stamping batches graph updates and safely
+  escapes custom property names, deeply nested outline rendering no longer
+  hits Python's recursion limit, and code-entity searches now match primary
+  titles for exact, substring, and prefix modes.
 
 - **`COUNT { }` subqueries count joined rows.** Comma-separated patterns
   inside `COUNT { }` join with shared-variable compatibility and the

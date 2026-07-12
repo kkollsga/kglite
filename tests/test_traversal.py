@@ -25,29 +25,29 @@ class TestBasicTraversal:
 
 
 class TestTraversalFiltering:
-    def test_filter_target(self, social_graph):
+    def test_where_target(self, social_graph):
         people = social_graph.select("Person")
         old_friends = people.traverse(
             connection_type="KNOWS",
-            filter_target={"age": {">": 35}},
+            where={"age": {">": 35}},
         )
         nodes = old_friends.collect()
         for n in nodes:
             assert n["age"] > 35
 
-    def test_filter_connection_properties(self, petroleum_graph):
+    def test_where_connection_properties(self, petroleum_graph):
         prospects = petroleum_graph.select("Prospect")
         high_share = prospects.traverse(
             connection_type="BECAME_DISCOVERY",
-            filter_connection={"share_pct": {">=": 70.0}},
+            where_connection={"share_pct": {">=": 70.0}},
         )
         assert high_share.len() > 0
 
-    def test_filter_connection_null(self, petroleum_graph):
+    def test_where_connection_null(self, petroleum_graph):
         prospects = petroleum_graph.select("Prospect")
         with_weight = prospects.traverse(
             connection_type="HAS_ESTIMATE",
-            filter_connection={"weight": {"is_not_null": True}},
+            where_connection={"weight": {"is_not_null": True}},
         )
         assert with_weight.len() > 0
 

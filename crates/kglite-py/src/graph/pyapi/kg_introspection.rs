@@ -562,9 +562,6 @@ impl KnowledgeGraph {
     ///     at (str): Temporal point-in-time filter (``'2005'``).
     ///     during (tuple[str,str]): Temporal range filter (``('2000','2010')``).
     ///     temporal (bool): Override temporal filtering (``False`` = off).
-    ///     method: Comparison method — string or dict with settings.
-    ///     filter_target (dict): Deprecated alias for ``where``.
-    ///     filter_connection (dict): Deprecated alias for ``where_connection``.
     ///
     /// Returns:
     ///     New KnowledgeGraph with traversal results selected.
@@ -579,16 +576,14 @@ impl KnowledgeGraph {
     ///     where={'title': 'Equinor Energy AS'})
     /// g.select('Field').traverse('HAS_LICENSEE', at='2005')
     /// ```
-    #[pyo3(signature = (connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, at=None, during=None, temporal=None, target_type=None, r#where=None, where_connection=None))]
+    #[pyo3(signature = (connection_type, level_index=None, direction=None, sort_target=None, limit=None, new_level=None, at=None, during=None, temporal=None, target_type=None, r#where=None, where_connection=None))]
     #[allow(clippy::too_many_arguments)]
     fn traverse(
-        &mut self,
+        &self,
         py: Python<'_>,
         connection_type: String,
         level_index: Option<usize>,
         direction: Option<String>,
-        filter_target: Option<&Bound<'_, PyDict>>,
-        filter_connection: Option<&Bound<'_, PyDict>>,
         sort_target: Option<&Bound<'_, PyAny>>,
         limit: Option<usize>,
         new_level: Option<bool>,
@@ -608,29 +603,6 @@ impl KnowledgeGraph {
             .get_level(new_kg.cursor.selection.get_level_count().saturating_sub(1))
             .map(|l| l.node_count())
             .unwrap_or(0);
-
-        // Resolve where → filter_target alias (error if both provided)
-        let effective_filter_target = match (filter_target, r#where) {
-            (Some(_), Some(_)) => return Err(crate::error_py::kg_to_pyerr(
-                crate::error::KgError::Argument(
-                    "Cannot use both 'filter_target' and 'where' — they are aliases. Use 'where'."
-                        .to_string(),
-                ),
-            )),
-            (Some(ft), None) => Some(ft),
-            (None, Some(w)) => Some(w),
-            (None, None) => None,
-        };
-
-        // Resolve where_connection → filter_connection alias
-        let effective_filter_connection = match (filter_connection, where_connection) {
-            (Some(_), Some(_)) => {
-                return Err(crate::error_py::kg_to_pyerr(crate::error::KgError::Argument("Cannot use both 'filter_connection' and 'where_connection' — they are aliases. Use 'where_connection'.".to_string())))
-            }
-            (Some(fc), None) => Some(fc),
-            (None, Some(wc)) => Some(wc),
-            (None, None) => None,
-        };
 
         // Parse target_type: str → vec![str], list[str] → vec[str]
         let target_types: Option<Vec<String>> = if let Some(tt) = target_type {
@@ -653,13 +625,13 @@ impl KnowledgeGraph {
             None
         };
 
-        let conditions = if let Some(cond) = effective_filter_target {
+        let conditions = if let Some(cond) = r#where {
             Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None
         };
 
-        let conn_conditions = if let Some(cond) = effective_filter_connection {
+        let conn_conditions = if let Some(cond) = where_connection {
             Some(py_in::pydict_to_filter_conditions(cond)?)
         } else {
             None

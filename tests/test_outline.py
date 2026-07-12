@@ -81,3 +81,37 @@ def test_outline_in_list_procedures():
     g = _tree()
     names = {r["name"] for r in g.cypher("CALL list_procedures() YIELD name RETURN name").to_dicts()}
     assert "outline" in names
+
+
+def test_outline_handles_depth_beyond_python_recursion_limit():
+    import pandas as pd
+
+    g = kglite.KnowledgeGraph()
+    depth = 1_050
+    g.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [f"n{i}" for i in range(depth + 1)],
+                "title": [str(i) for i in range(depth + 1)],
+            }
+        ),
+        "T",
+        "id",
+        "title",
+    )
+    g.add_connections(
+        pd.DataFrame(
+            {
+                "source": [f"n{i}" for i in range(depth)],
+                "target": [f"n{i + 1}" for i in range(depth)],
+            }
+        ),
+        "DEP",
+        "T",
+        "source",
+        "T",
+        "target",
+    )
+
+    rendered = kglite.outline(g, "n0", "DEP")
+    assert rendered.splitlines()[-1].strip() == f"- {depth}"

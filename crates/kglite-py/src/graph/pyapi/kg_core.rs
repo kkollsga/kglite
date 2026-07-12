@@ -182,7 +182,7 @@ impl KnowledgeGraph {
             let graph = get_graph_mut(&mut self.inner);
             if let kglite_core::api::storage::GraphBackend::Disk(ref mut dg) = graph.graph {
                 py.detach(|| dg.rebuild_peer_count_histogram())
-                    .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+                    .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))?;
             }
         }
 
@@ -1660,7 +1660,7 @@ impl KnowledgeGraph {
             // returning. No-op for non-durable graphs. (The `graph` borrow
             // above has ended; flush_wal re-borrows self.inner.)
             this.flush_wal()
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+                .map_err(|e| crate::error_py::kg_to_pyerr(crate::error::KgError::FileIo(e)))?;
 
             // Resolve NodeRef values to node titles before Python conversion.
             resolve_noderefs(&this.inner.graph, &mut result.rows);

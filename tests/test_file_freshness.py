@@ -51,3 +51,77 @@ def test_check_is_read_only(tmp_path):
     kglite.check_file_freshness(g, node_type="Artifact")
     after = g.cypher("MATCH (n:Artifact) RETURN count(n) AS c").to_dicts()[0]["c"]
     assert before == after == 2
+
+
+def test_custom_keyword_property_names_are_escaped(tmp_path):
+    artifact = tmp_path / "keyword.txt"
+    artifact.write_text("content")
+    g = kglite.KnowledgeGraph()
+    g.cypher(
+        "CREATE (:Artifact {id: 'x', `order`: $path})",
+        params={"path": str(artifact)},
+    )
+    assert (
+        kglite.stamp_file_freshness(
+            g,
+            node_type="Artifact",
+            path_property="order",
+            mtime_property="contains",
+            hash_property="return",
+        )
+        == 1
+    )
+    assert g.cypher(
+        "MATCH (n:Artifact {id: 'x'}) RETURN n.`contains` IS NOT NULL AS has_mtime, n.`return` IS NOT NULL AS has_hash"
+    ).to_dicts() == [{"has_mtime": True, "has_hash": True}]
+
+
+def test_custom_label_and_property_names_with_spaces(tmp_path):
+    artifact = tmp_path / "spaced.txt"
+    artifact.write_text("content")
+    g = kglite.KnowledgeGraph()
+    g.cypher(
+        "CREATE (:`Build Artifact` {id: 'x', `file path`: $path})",
+        params={"path": str(artifact)},
+    )
+
+    assert (
+        kglite.stamp_file_freshness(
+            g,
+            node_type="Build Artifact",
+            path_property="file path",
+            mtime_property="file mtime",
+            hash_property=None,
+        )
+        == 1
+    )
+    assert g.cypher("MATCH (n:`Build Artifact` {id: 'x'}) RETURN n.`file mtime` IS NOT NULL AS stamped").to_dicts() == [
+        {"stamped": True}
+    ]
+
+
+def test_identifier_with_backtick_is_rejected(tmp_path):
+    g, _, _ = _graph(tmp_path)
+    import pytest
+
+    with pytest.raises(kglite.ArgumentError, match="backtick"):
+        kglite.stamp_file_freshness(g, path_property="file_path` SET n.hacked = true //")
+
+
+def test_stamp_uses_one_batched_mutation_query(tmp_path):
+    g, _, _ = _graph(tmp_path)
+
+    class RecordingGraph:
+        def __init__(self, inner):
+            self.inner = inner
+            self.queries = []
+
+        def cypher(self, query, **kwargs):
+            self.queries.append(query)
+            return self.inner.cypher(query, **kwargs)
+
+    recording = RecordingGraph(g)
+    assert kglite.stamp_file_freshness(recording, node_type="Artifact") == 2
+    mutation_queries = [query for query in recording.queries if " SET " in query]
+    assert len(mutation_queries) == 1
+    assert mutation_queries[0].startswith("UNWIND $rows AS row")

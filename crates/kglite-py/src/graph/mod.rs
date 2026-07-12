@@ -563,10 +563,12 @@ impl KnowledgeGraph {
             }
         };
 
-        let node = self
-            .inner
-            .get_node(target_idx)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Node disappeared"))?;
+        let node = self.inner.get_node(target_idx).ok_or_else(|| {
+            crate::error_py::kg_to_pyerr(crate::error::KgError::Internal {
+                message: "resolved code entity disappeared before projection".to_string(),
+                location: "graph/mod.rs::source_one",
+            })
+        })?;
 
         let dict = PyDict::new(py);
         dict.set_item("type", node.get_node_type_ref(&self.inner.interner))?;

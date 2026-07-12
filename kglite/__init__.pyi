@@ -32,17 +32,26 @@ class CypherError(KgError):
 class CypherSyntaxError(CypherError):
     """Cypher parser / tokenizer rejected the query.
 
-    The Python-side exception message includes line and column when the
-    parser knows them; the underlying Rust ``KgError::CypherSyntax``
-    variant carries them as ``Option<usize>`` fields. A future minor
-    release may expose them as attributes.
+    ``line`` and ``col`` (1-indexed) are always present as attributes;
+    both are ``None`` when the parser couldn't pin the failure to a
+    specific position (e.g. "expected end of input").
     """
+
+    line: int | None
+    col: int | None
 
 class CypherTimeoutError(CypherError):
     """Cypher query exceeded its ``timeout_ms`` budget."""
 
 class CypherExecutionError(CypherError):
-    """Cypher executor failure during query evaluation."""
+    """Cypher executor failure during query evaluation.
+
+    ``line`` and ``col`` (1-indexed) are set as attributes when the
+    failure is pinned to a source position; both are ``None`` otherwise.
+    """
+
+    line: int | None
+    col: int | None
 
 class CypherTypeMismatchError(CypherError):
     """Cypher value-type mismatch (e.g. arithmetic on a String)."""
@@ -2263,8 +2272,6 @@ class KnowledgeGraph:
         connection_type: str,
         level_index: Optional[int] = None,
         direction: Optional[str] = None,
-        filter_target: Optional[dict[str, Any]] = None,
-        filter_connection: Optional[dict[str, Any]] = None,
         sort_target: Optional[Union[str, list[tuple[str, bool]]]] = None,
         limit: Optional[int] = None,
         new_level: Optional[bool] = None,
@@ -2296,8 +2303,6 @@ class KnowledgeGraph:
             temporal: Override temporal filtering. ``False`` = disable.
             level_index: Source level in the hierarchy (advanced).
             new_level: Add targets as new hierarchy level. Default ``True``.
-            filter_target: Alias for ``where``.
-            filter_connection: Alias for ``where_connection``.
 
         Returns:
             A new KnowledgeGraph with traversal results selected.

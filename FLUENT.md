@@ -547,9 +547,6 @@ graph.select('Field').traverse('OF_FIELD', direction='incoming',
     target_type='Wellbore', where={'wlbTotalDepth': {'>': 5000}})
 ```
 
-> **Note:** `filter_target` and `filter_connection` still work as aliases for
-> `where` and `where_connection` respectively.
-
 ### Comparison Operations (`compare()`)
 
 `compare()` finds related nodes by spatial proximity, semantic similarity, or

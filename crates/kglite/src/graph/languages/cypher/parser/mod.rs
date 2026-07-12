@@ -416,8 +416,7 @@ impl CypherParser {
 /// `Result<_, String>` whose message embedded the position. The
 /// position survives the PyO3 boundary and reaches Python consumers
 /// via `kglite.CypherSyntaxError.args[0]` (still in the message for
-/// human display) and — eventually — as dedicated `.line` / `.col`
-/// attributes once PyO3 lands a clean per-exception attribute API.
+/// human display) and as dedicated `.line` / `.col` attributes.
 ///
 /// The internal tokenizer/parser still produce `Result<_, String>`
 /// for ergonomic `?` chains inside the parsing code — only the

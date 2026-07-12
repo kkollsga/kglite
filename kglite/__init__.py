@@ -260,6 +260,21 @@ def to_neo4j(
     return _to_neo4j(graph, uri, **kwargs)
 
 
+def _cypher_identifier(name: str, *, kind: str) -> str:
+    """Quote an interpolated Cypher identifier or reject an unrepresentable one.
+
+    KGLite's tokenizer accepts backtick-delimited identifiers but does not yet
+    implement doubled-backtick escaping. Rejecting an embedded backtick keeps
+    these convenience helpers injection-safe while still supporting spaces,
+    punctuation, and keyword identifiers.
+    """
+    if not isinstance(name, str) or not name:
+        raise ArgumentError(f"{kind} must be a non-empty string")
+    if "`" in name:
+        raise ArgumentError(f"{kind} cannot contain a backtick")
+    return f"`{name}`"
+
+
 def outline(
     graph: "KnowledgeGraph",
     root,
@@ -292,7 +307,7 @@ def outline(
         The outline text (empty string if ``root`` has no node).
     """
     md = "" if max_depth is None else ", max_depth: $md"
-    body_col = f", node.`{body}` AS body" if body else ""
+    body_col = f", node.{_cypher_identifier(body, kind='body property')} AS body" if body else ""
     q = (
         f"CALL outline({{root: $root, edge: $edge{md}}}) "
         "YIELD node, depth, parent_id "
@@ -316,24 +331,28 @@ def outline(
     bodies = {r["id"]: r.get("body") for r in rows} if body else {}
     lines: list = []
 
-    def _walk(node_id, depth: int) -> None:
-        lines.append("  " * depth + f"- {label.get(node_id, node_id)}")
-        prose = bodies.get(node_id)
-        if prose:
-            for prose_line in str(prose).splitlines():
-                lines.append("  " * (depth + 1) + prose_line)
-        for child in sorted(children.get(node_id, []), key=lambda x: str(x["id"])):
-            _walk(child["id"], depth + 1)
-
+    # Iterative depth-first walk — CALL outline yields unbounded depth, so
+    # a recursive renderer would hit RecursionError past ~1000 levels.
     if root_id is not None:
-        _walk(root_id, 0)
+        stack: list = [(root_id, 0)]
+        while stack:
+            node_id, depth = stack.pop()
+            lines.append("  " * depth + f"- {label.get(node_id, node_id)}")
+            prose = bodies.get(node_id)
+            if prose:
+                for prose_line in str(prose).splitlines():
+                    lines.append("  " * (depth + 1) + prose_line)
+            # Push in reverse so children pop in sorted order.
+            for child in sorted(children.get(node_id, []), key=lambda x: str(x["id"]), reverse=True):
+                stack.append((child["id"], depth + 1))
     return "\n".join(lines)
 
 
 def _nodes_with_path(graph, node_type, path_property, extra=""):
-    label = f":{node_type}" if node_type else ""
+    label = f":{_cypher_identifier(node_type, kind='node type')}" if node_type else ""
+    path_ident = _cypher_identifier(path_property, kind="path property")
     return graph.cypher(
-        f"MATCH (n{label}) WHERE n.{path_property} IS NOT NULL RETURN n.id AS id, n.{path_property} AS path{extra}"
+        f"MATCH (n{label}) WHERE n.{path_ident} IS NOT NULL RETURN n.id AS id, n.{path_ident} AS path{extra}"
     ).to_dicts()
 
 
@@ -366,20 +385,25 @@ def stamp_file_freshness(
     import pathlib
 
     rows = _nodes_with_path(graph, node_type, path_property)
-    label = f":{node_type}" if node_type else ""
+    label = f":{_cypher_identifier(node_type, kind='node type')}" if node_type else ""
+    batch: list = []
     for r in rows:
         full = os.path.join(base_dir, r["path"]) if base_dir else r["path"]
-        sets: dict = {mtime_property: None}
-        if hash_property:
-            sets[hash_property] = None
+        row: dict = {"id": r["id"], "mtime": None, "hash": None}
         if os.path.isfile(full):
-            sets[mtime_property] = datetime.datetime.fromtimestamp(os.path.getmtime(full))
+            row["mtime"] = datetime.datetime.fromtimestamp(os.path.getmtime(full))
             if hash_property:
-                sets[hash_property] = hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest()
-        assignments = ", ".join(f"n.`{k}` = ${k}" for k in sets)
+                row["hash"] = hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest()
+        batch.append(row)
+    if batch:
+        assignments = f"n.{_cypher_identifier(mtime_property, kind='mtime property')} = row.mtime"
+        if hash_property:
+            assignments += f", n.{_cypher_identifier(hash_property, kind='hash property')} = row.hash"
+        # One UNWIND round-trip for the whole batch instead of one
+        # point-lookup SET query per node.
         graph.cypher(
-            f"MATCH (n{label}) WHERE n.id = $_id SET {assignments}",
-            params={"_id": r["id"], **sets},
+            f"UNWIND $rows AS row MATCH (n{label}) WHERE n.id = row.id SET {assignments}",
+            params={"rows": batch},
         )
     return len(rows)
 
@@ -404,7 +428,7 @@ def check_file_freshness(
     import os
     import pathlib
 
-    extra = f", n.{hash_property} AS _hash" if hash_property else ""
+    extra = f", n.{_cypher_identifier(hash_property, kind='hash property')} AS _hash" if hash_property else ""
     rows = _nodes_with_path(graph, node_type, path_property, extra)
     drift: list = []
     for r in rows:

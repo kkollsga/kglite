@@ -91,7 +91,7 @@ pyo3::create_exception!(
     kglite,
     CypherSyntaxError,
     CypherError,
-    "Cypher parser / tokenizer rejected the query. Has `.line` and `.col` attributes when known."
+    "Cypher parser / tokenizer rejected the query. Always has `.line` and `.col` attributes (1-indexed); both are `None` when the parser couldn't pin a position."
 );
 
 pyo3::create_exception!(
@@ -105,7 +105,7 @@ pyo3::create_exception!(
     kglite,
     CypherExecutionError,
     CypherError,
-    "Cypher executor failure during query evaluation."
+    "Cypher executor failure during query evaluation. Has `.line` and `.col` attributes when the failure is pinned to a source position."
 );
 
 pyo3::create_exception!(
@@ -230,9 +230,19 @@ pyo3::create_exception!(
 pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
     let message = e.to_string();
     match e {
-        RustKgError::CypherSyntax { .. } => CypherSyntaxError::new_err(message),
+        RustKgError::CypherSyntax { line, col, .. } => {
+            // `.line` / `.col` are always present on CypherSyntaxError —
+            // `None` when the parser couldn't pin a position.
+            with_position_attrs(CypherSyntaxError::new_err(message), line, col)
+        }
         RustKgError::CypherTimeout { .. } => CypherTimeoutError::new_err(message),
-        RustKgError::CypherExecution { .. } => CypherExecutionError::new_err(message),
+        RustKgError::CypherExecution { position, .. } => {
+            let (line, col) = match position {
+                Some((l, c)) => (Some(l), Some(c)),
+                None => (None, None),
+            };
+            with_position_attrs(CypherExecutionError::new_err(message), line, col)
+        }
         RustKgError::CypherTypeMismatch { .. } => CypherTypeMismatchError::new_err(message),
         // Cooperative cancellation (the wheel's Ctrl-C handler flipped the
         // cancel flag mid-query) surfaces as the builtin KeyboardInterrupt,
@@ -263,6 +273,20 @@ pub fn kg_to_pyerr(e: RustKgError) -> PyErr {
 // lives in the kglite engine, PyErr in pyo3). All call sites use
 // `kg_to_pyerr(...)` directly.
 
+/// Set `.line` / `.col` attributes (1-indexed source position) on the
+/// exception *value*. `PyErr::new_err` is lazy, so `err.value(py)`
+/// normalizes the exception first; attribute assignment on an exception
+/// instance can't reasonably fail, but any failure is swallowed rather
+/// than masking the original error.
+fn with_position_attrs(err: PyErr, line: Option<usize>, col: Option<usize>) -> PyErr {
+    Python::attach(|py| {
+        let value = err.value(py);
+        let _ = value.setattr("line", line);
+        let _ = value.setattr("col", col);
+    });
+    err
+}
+
 // ─── Module registration ─────────────────────────────────────────────────────
 
 /// Register every typed exception class on the `kglite` Python module.
@@ -273,6 +297,17 @@ pub(crate) fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     // Cypher pipeline
     m.add("CypherError", py.get_type::<CypherError>())?;
     m.add("CypherSyntaxError", py.get_type::<CypherSyntaxError>())?;
+    // Class-level `.line` / `.col` defaults (None) for the two
+    // position-carrying classes: instances raised with a known position
+    // shadow these with instance attributes (see `with_position_attrs`),
+    // and the attributes stay readable on any instance either way.
+    for cls in [
+        py.get_type::<CypherSyntaxError>(),
+        py.get_type::<CypherExecutionError>(),
+    ] {
+        cls.setattr("line", py.None())?;
+        cls.setattr("col", py.None())?;
+    }
     m.add("CypherTimeoutError", py.get_type::<CypherTimeoutError>())?;
     m.add(
         "CypherExecutionError",

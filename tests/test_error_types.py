@@ -194,6 +194,13 @@ class TestCypherExceptionsCrossMode:
         msg = str(exc_info.value)
         assert "line" in msg.lower() and "col" in msg.lower(), f"expected line/col in message, got: {msg!r}"
 
+    def test_syntax_error_exposes_line_col_attributes(self, small_graph_all_modes):
+        with pytest.raises(kglite.CypherSyntaxError) as exc_info:
+            small_graph_all_modes.cypher("MATCH (n)\nRETURN n INVALID")
+        assert exc_info.value.line == 2
+        assert isinstance(exc_info.value.col, int)
+        assert exc_info.value.col >= 1
+
     def test_missing_parameter_raises_execution_error(self, small_graph_all_modes):
         with pytest.raises(kglite.CypherExecutionError):
             small_graph_all_modes.cypher("MATCH (n:Person) WHERE n.age > $nonexistent RETURN n.name")
