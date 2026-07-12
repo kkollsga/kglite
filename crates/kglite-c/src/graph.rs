@@ -1118,7 +1118,12 @@ mod tests {
 
     #[test]
     fn graphgen_writes_stats() {
-        let dir = std::env::temp_dir().join("kglite_c_graphgen_test");
+        // The full workspace gate can overlap with another cargo test process
+        // (or a previously interrupted run). A process-qualified fixture keeps
+        // one runner's cleanup from deleting another runner's output midway
+        // through graph generation.
+        let dir =
+            std::env::temp_dir().join(format!("kglite_c_graphgen_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let dir_c = CString::new(dir.to_str().unwrap()).unwrap();
         let mut stats: *const c_char = std::ptr::null();
@@ -1135,7 +1140,8 @@ mod tests {
                 &mut err as *mut _,
             )
         };
-        assert_eq!(rc, KgliteStatusCode::Ok);
+        let error = (!err.is_null()).then(|| unsafe { CStr::from_ptr(err).to_string_lossy() });
+        assert_eq!(rc, KgliteStatusCode::Ok, "{error:?}");
         assert!(!stats.is_null());
         let s = unsafe { CStr::from_ptr(stats).to_str().unwrap() };
         let parsed: serde_json::Value = serde_json::from_str(s).unwrap();
