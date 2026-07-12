@@ -10,7 +10,7 @@
 //! has no libpython link at all.
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -28,6 +28,30 @@ use serde::{Deserialize, Serialize};
 const NO_GRAPH: &str =
     "No active graph. Pass --graph X.kgl, or activate one via repo_management('org/repo').";
 
+/// Hot-fail guard for the lazy code-tree rebuild: after this many
+/// consecutive failures for the same target, [`GraphState::ensure_code_tree_fresh`]
+/// stops restoring the dirty marker (no more per-tool-call retries) and
+/// keeps serving the stale graph — with the failure surfaced in tool
+/// output — until a new FS event re-tags the target.
+const MAX_CONSECUTIVE_REBUILD_FAILURES: u32 = 3;
+
+/// Lock the `RwLock` for reading, recovering a poisoned lock instead of
+/// propagating the panic. This is the mcp-server-wide lock policy: every
+/// guarded value in this crate (the active-graph slot, the pending-rebuild
+/// slot, the rebuild status, the watch root) is a swap-in-place
+/// `Option`/`Arc` with no multi-step invariants, so the state a panicking
+/// holder left behind is always coherent. Without recovery, one panic
+/// while holding a lock poisons it and every later MCP request panics —
+/// wedging the server until restart.
+pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Write-lock companion to [`read_lock`] — same poison-recovery policy.
+pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Shared active-graph state. Cloning is cheap (Arc).
 #[derive(Clone, Default)]
 pub struct GraphState {
@@ -39,6 +63,12 @@ pub struct GraphState {
     /// lazily, never on the watcher thread. N FS events between two
     /// tool calls → 1 rebuild (the slot just holds the latest target).
     pending_rebuild: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// Outcome bookkeeping for the lazy rebuild: the last failure (kept
+    /// until the next successful build and surfaced in tool output next
+    /// to the built-at identity) plus a consecutive-failure counter
+    /// implementing the [`MAX_CONSECUTIVE_REBUILD_FAILURES`] hot-fail
+    /// guard.
+    rebuild_status: Arc<RwLock<RebuildStatus>>,
     /// Whether `build_code_tree` also ingests the repo's markdown as
     /// `:Doc` nodes (and links them to code via `MENTIONS`/`DOCUMENTS`).
     /// On for the github-workspace (open-source) mode; off for local /
@@ -51,6 +81,21 @@ pub struct GraphState {
     /// `tools[].cypher` run so the engine decodes query-side literals and
     /// encodes result columns (`'Q42'` ↔ `42`) — safely, after parsing.
     value_codecs: Option<Arc<Vec<ValueCodec>>>,
+}
+
+/// Bookkeeping for lazy code-tree rebuild failures. Reset to default on
+/// the next successful build.
+#[derive(Default)]
+struct RebuildStatus {
+    /// Human-readable description of the last failed rebuild.
+    last_error: Option<String>,
+    /// When that failure happened (for age display).
+    failed_at: Option<SystemTime>,
+    /// Consecutive failures for `failed_target` with no intervening
+    /// success.
+    consecutive_failures: u32,
+    /// The target whose rebuilds keep failing.
+    failed_target: Option<std::path::PathBuf>,
 }
 
 struct ActiveGraph {
@@ -166,7 +211,7 @@ impl GraphState {
     /// [`ensure_code_tree_fresh`].
     pub fn tag_code_tree_dirty(&self, target: std::path::PathBuf) {
         tracing::debug!(target = %target.display(), "code_tree tagged for rebuild");
-        *self.pending_rebuild.write().unwrap() = Some(target);
+        *write_lock(&self.pending_rebuild) = Some(target);
     }
 
     /// Rebuild the code-tree if the watcher tagged it dirty since the
@@ -174,15 +219,83 @@ impl GraphState {
     /// (cypher_query / graph_overview / save_graph / read_code_source
     /// / explore). No-op when nothing's pending.
     ///
-    /// On rebuild failure, logs + clears the flag. Next FS change
-    /// re-tags. (Avoids tight rebuild loops if the source dir is
-    /// permanently broken.)
+    /// **Failure policy.** A failed rebuild must not silently serve a
+    /// stale graph forever: the dirty marker is restored so the next
+    /// tool call retries, and the error is recorded on `rebuild_status`
+    /// (surfaced next to the built-at identity in graph_overview /
+    /// cypher_query output). To avoid a hot retry loop when the source
+    /// dir is permanently broken, after
+    /// [`MAX_CONSECUTIVE_REBUILD_FAILURES`] consecutive failures for the
+    /// same target the marker is NOT restored — the stale graph keeps
+    /// being served (error still surfaced) and the next retry happens
+    /// only when a fresh FS event re-tags the target.
     pub fn ensure_code_tree_fresh(&self) {
-        let target = self.pending_rebuild.write().unwrap().take();
+        let target = write_lock(&self.pending_rebuild).take();
         let Some(target) = target else { return };
         tracing::info!(target = %target.display(), "rebuilding code_tree (lazy, FS changed)");
-        if let Err(e) = self.build_code_tree(&target) {
-            tracing::warn!(error = %e, "lazy code_tree rebuild failed");
+        match self.build_code_tree(&target) {
+            Ok(()) => {
+                *write_lock(&self.rebuild_status) = RebuildStatus::default();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "lazy code_tree rebuild failed");
+                let failures = {
+                    let mut status = write_lock(&self.rebuild_status);
+                    if status.failed_target.as_deref() == Some(target.as_path()) {
+                        status.consecutive_failures += 1;
+                    } else {
+                        status.consecutive_failures = 1;
+                        status.failed_target = Some(target.clone());
+                    }
+                    status.last_error = Some(e.to_string());
+                    status.failed_at = Some(SystemTime::now());
+                    status.consecutive_failures
+                };
+                if failures < MAX_CONSECUTIVE_REBUILD_FAILURES {
+                    // Restore the marker so the next tool call retries —
+                    // without clobbering a newer target the watcher may
+                    // have tagged while this build was running.
+                    let mut slot = write_lock(&self.pending_rebuild);
+                    if slot.is_none() {
+                        *slot = Some(target);
+                    }
+                } else {
+                    tracing::warn!(
+                        target = %target.display(),
+                        failures,
+                        "code_tree rebuild keeps failing — serving the stale \
+                         graph; retrying only on the next FS event"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A one-line warning describing the last failed lazy rebuild, or
+    /// `None` when the last rebuild succeeded (the common case).
+    /// Appended to tool output wherever the graph's built-at identity
+    /// appears, so an agent knows the graph it queries is staler than
+    /// the filesystem.
+    pub fn rebuild_error_note(&self) -> Option<String> {
+        let status = read_lock(&self.rebuild_status);
+        let err = status.last_error.as_ref()?;
+        let age = status
+            .failed_at
+            .map(humanize_age)
+            .unwrap_or_else(|| "?".to_string());
+        Some(format!(
+            "WARNING: code-tree rebuild failed {age} ago ({} consecutive \
+             failure(s)) — the active graph is STALE relative to the \
+             filesystem. Error: {err}",
+            status.consecutive_failures
+        ))
+    }
+
+    /// Append the rebuild-failure warning (if any) to a tool response.
+    fn with_rebuild_warning(&self, body: String) -> String {
+        match self.rebuild_error_note() {
+            Some(note) => format!("{body}\n\n{note}"),
+            None => body,
         }
     }
 
@@ -194,7 +307,7 @@ impl GraphState {
         let dir = load_file(&path.to_string_lossy())
             .map_err(|e| anyhow::anyhow!("kglite::load_file failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir);
-        *self.inner.write().unwrap() = Some(ActiveGraph {
+        *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
             root: Some(path.to_path_buf()),
@@ -213,7 +326,7 @@ impl GraphState {
         let dir = new_dir_graph_in_mode(mode, Some(path))
             .map_err(|e| anyhow::anyhow!("kglite create-in-mode failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(Arc::new(dir));
-        *self.inner.write().unwrap() = Some(ActiveGraph {
+        *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: Some(path.to_path_buf()),
             root: Some(path.to_path_buf()),
@@ -228,7 +341,7 @@ impl GraphState {
     /// the new location. Backs the `save_graph_as` workbench tool. Returns a
     /// human-readable status (node/edge counts) or an error string.
     fn save_as(&self, path: &Path) -> std::result::Result<String, String> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = write_lock(&self.inner);
         let Some(active) = guard.as_mut() else {
             return Err(NO_GRAPH.to_string());
         };
@@ -264,7 +377,7 @@ impl GraphState {
         )
         .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
-        *self.inner.write().unwrap() = Some(ActiveGraph {
+        *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: None,
             root: Some(dir.to_path_buf()),
@@ -304,7 +417,7 @@ impl GraphState {
         )
         .map_err(|e| anyhow::anyhow!("kglite::build_code_tree_revs failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
-        *self.inner.write().unwrap() = Some(ActiveGraph {
+        *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
             source_path: None,
             root: Some(dir.to_path_buf()),
@@ -315,7 +428,7 @@ impl GraphState {
     }
 
     pub fn bind_embedder(&self, embedder: Arc<dyn Embedder>) -> Result<()> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = write_lock(&self.inner);
         let Some(active) = guard.as_mut() else {
             tracing::warn!("embedder loaded before any graph is active; binding deferred");
             return Ok(());
@@ -325,7 +438,7 @@ impl GraphState {
     }
 
     pub fn schema(&self) -> Option<(u64, u64)> {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         let active = guard.as_ref()?;
         let overview = compute_schema(active.kg.dir());
         Some((overview.node_count as u64, overview.edge_count as u64))
@@ -344,7 +457,7 @@ impl GraphState {
     /// says the same thing, but a tool-call *result* is read more reliably than
     /// the handshake `instructions`. `None` when no graph is active.
     pub fn activation_summary(&self) -> Option<String> {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         let active = guard.as_ref()?;
         let overview = compute_schema(active.kg.dir());
         if overview.node_count == 0 {
@@ -413,7 +526,7 @@ impl GraphState {
     /// `graph_has_node_type:` predicate for skill `applies_when:`
     /// gating (0.9.31 / mcp-methods 0.3.36).
     pub fn has_node_type(&self, node_type: &str) -> bool {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         guard
             .as_ref()
             .map(|active| active.kg.dir().has_node_type(node_type))
@@ -426,7 +539,7 @@ impl GraphState {
     /// `graph_has_property:` predicate for skill `applies_when:`
     /// gating.
     pub fn has_property(&self, node_type: &str, prop_name: &str) -> bool {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         guard
             .as_ref()
             .map(|active| {
@@ -444,7 +557,7 @@ impl GraphState {
     where
         F: FnOnce(&ActiveGraph) -> String,
     {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         match guard.as_ref() {
             Some(active) => f(active),
             None => NO_GRAPH.to_string(),
@@ -459,7 +572,7 @@ impl GraphState {
     where
         F: FnOnce(&kglite::api::KnowledgeGraph) -> T,
     {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         guard.as_ref().map(|active| f(&active.kg))
     }
 
@@ -472,7 +585,7 @@ impl GraphState {
     where
         F: FnOnce(&mut ActiveGraph) -> T,
     {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = write_lock(&self.inner);
         guard.as_mut().map(f)
     }
 
@@ -484,7 +597,7 @@ impl GraphState {
         qualified_name: &str,
         node_type: Option<&str>,
     ) -> Result<crate::code_source::SourceLookup, String> {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         let Some(active) = guard.as_ref() else {
             return Err(NO_GRAPH.to_string());
         };
@@ -521,7 +634,7 @@ impl GraphState {
         args: &serde_json::Map<String, serde_json::Value>,
         csv_http: Option<&crate::csv_http::CsvHttpConfig>,
     ) -> String {
-        let guard = self.inner.read().unwrap();
+        let guard = read_lock(&self.inner);
         let Some(active) = guard.as_ref() else {
             return NO_GRAPH.to_string();
         };
@@ -903,26 +1016,29 @@ pub fn register(
             let scope = args.write_scope.clone();
             let git_sha = args.git_sha.clone();
             let modified_by = args.modified_by.clone();
-            s.with_active_mut(|active| {
-                run_cypher_write(
-                    active,
-                    &args.query,
-                    scope.as_deref(),
-                    git_sha.as_deref(),
-                    modified_by.as_deref(),
-                    codecs,
-                    csv.as_deref(),
-                )
-                .unwrap_or_else(|e| cypher_tool_error(&e))
-            })
-            .unwrap_or_else(|| NO_GRAPH.to_string())
+            let body = s
+                .with_active_mut(|active| {
+                    run_cypher_write(
+                        active,
+                        &args.query,
+                        scope.as_deref(),
+                        git_sha.as_deref(),
+                        modified_by.as_deref(),
+                        codecs,
+                        csv.as_deref(),
+                    )
+                    .unwrap_or_else(|e| cypher_tool_error(&e))
+                })
+                .unwrap_or_else(|| NO_GRAPH.to_string());
+            s.with_rebuild_warning(body)
         });
     } else {
         server.register_typed_tool::<ReadCypherArgs, _>("cypher_query", cypher_desc, move |args| {
             let csv = csv.clone();
             s.ensure_code_tree_fresh();
             let codecs = s.value_codecs();
-            s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()))
+            let body = s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()));
+            s.with_rebuild_warning(body)
         });
     }
     let s = state.clone();
@@ -946,7 +1062,8 @@ pub fn register(
                 }
             }
             s.ensure_code_tree_fresh();
-            s.with_active(|g| run_overview(g, &args))
+            let body = s.with_active(|g| run_overview(g, &args));
+            s.with_rebuild_warning(body)
         },
     );
     if builtins.save_graph {
@@ -1242,6 +1359,62 @@ mod tests {
             revs: None,
             built_at: SystemTime::now(),
         }
+    }
+
+    #[test]
+    fn failed_rebuild_restores_marker_then_backs_off_after_cap() {
+        let state = GraphState::new(false);
+        let bad = std::path::PathBuf::from("/nonexistent/kglite-mcp-rebuild-test");
+
+        // A failed rebuild must restore the dirty marker (so the next tool
+        // call retries) and record the error — up to the hot-fail cap.
+        state.tag_code_tree_dirty(bad.clone());
+        for failure in 1..MAX_CONSECUTIVE_REBUILD_FAILURES {
+            state.ensure_code_tree_fresh();
+            assert_eq!(
+                read_lock(&state.pending_rebuild).as_ref(),
+                Some(&bad),
+                "failure {failure} must restore the marker for a retry"
+            );
+            let note = state.rebuild_error_note().expect("error recorded");
+            assert!(note.contains("STALE"), "note flags staleness: {note}");
+        }
+
+        // Failure #cap: stop retrying (marker not restored) — the stale
+        // graph keeps being served with the error surfaced.
+        state.ensure_code_tree_fresh();
+        assert!(
+            read_lock(&state.pending_rebuild).is_none(),
+            "after {MAX_CONSECUTIVE_REBUILD_FAILURES} consecutive failures \
+             the marker must NOT be restored (no hot-fail loop)"
+        );
+        let note = state.rebuild_error_note().expect("error still surfaced");
+        assert!(
+            note.contains(&format!("{MAX_CONSECUTIVE_REBUILD_FAILURES} consecutive")),
+            "note reports the failure count: {note}"
+        );
+        // With no marker, further tool calls are no-ops (no retry storm).
+        state.ensure_code_tree_fresh();
+
+        // A fresh FS event re-tags → exactly one more retry; still failing,
+        // so the marker again stays cleared.
+        state.tag_code_tree_dirty(bad.clone());
+        state.ensure_code_tree_fresh();
+        assert!(read_lock(&state.pending_rebuild).is_none());
+        assert!(state.rebuild_error_note().is_some());
+
+        // A successful rebuild clears the error and resets the counter.
+        let good = std::env::temp_dir().join(format!("kgl_rebuild_ok_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&good);
+        std::fs::write(good.join("m.py"), "def ok():\n    return 1\n").unwrap();
+        state.tag_code_tree_dirty(good.clone());
+        state.ensure_code_tree_fresh();
+        assert!(
+            state.rebuild_error_note().is_none(),
+            "successful rebuild must clear the recorded failure"
+        );
+        assert!(read_lock(&state.pending_rebuild).is_none());
+        let _ = std::fs::remove_dir_all(&good);
     }
 
     #[test]

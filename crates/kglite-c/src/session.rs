@@ -15,7 +15,7 @@ use kglite::api::session::{execute_mut, execute_read, ExecuteOptions, Session};
 use kglite::api::{Embedder, Value};
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Opaque handle for a session. See [`KgliteGraph`](crate::KgliteGraph)
@@ -34,14 +34,20 @@ pub(crate) struct SessionState {
     /// `ExecuteOptions` so `text_score()` and friends work.
     /// Attached via
     /// [`kglite_session_set_embedder`](crate::kglite_session_set_embedder).
-    pub(crate) embedder: Option<Arc<dyn Embedder>>,
+    ///
+    /// Behind a `Mutex` because the ABI documents the session as
+    /// cross-thread safe: `set_embedder` may race with concurrent
+    /// execute calls cloning the field, and a bare `&mut` write
+    /// through the handle would alias those `&` reads (UB). The lock
+    /// is held only for the clone/store — never across a query.
+    pub(crate) embedder: Mutex<Option<Arc<dyn Embedder>>>,
 }
 
 impl SessionState {
     fn into_handle(session: Session) -> *mut KgliteSession {
         let boxed = Box::new(SessionState {
             inner: session,
-            embedder: None,
+            embedder: Mutex::new(None),
         });
         Box::into_raw(boxed).cast::<KgliteSession>()
     }
@@ -50,8 +56,10 @@ impl SessionState {
         unsafe { &*handle.cast::<SessionState>() }
     }
 
-    pub(crate) unsafe fn from_handle_mut<'a>(handle: *mut KgliteSession) -> &'a mut SessionState {
-        unsafe { &mut *handle.cast::<SessionState>() }
+    /// Replace the session's embedder. Interior mutability (see the
+    /// `embedder` field doc) — callers hold only `&SessionState`.
+    pub(crate) fn set_embedder(&self, embedder: Arc<dyn Embedder>) {
+        *self.embedder.lock().unwrap_or_else(PoisonError::into_inner) = Some(embedder);
     }
 
     unsafe fn free_handle(handle: *mut KgliteSession) {
@@ -590,25 +598,16 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
                 Err(rc) => return rc,
             };
             let session_state = unsafe { SessionState::from_handle(session) };
-            let mut tx = session_state.inner.begin();
-            let working = match tx.working_mut() {
-                Ok(w) => w,
-                Err(err) => {
-                    let code = KgliteStatusCode::from_kg_error_code(err.code());
-                    if !out_error_msg.is_null() {
-                        unsafe {
-                            *out_error_msg = alloc_c_string(&err.to_string());
-                        }
-                    }
-                    unsafe {
-                        *out_report_json = std::ptr::null();
-                    }
-                    return code;
-                }
-            };
-            match add_edges_from_specs(working, specs) {
+            // Route through `Session::transact` so the whole batch runs
+            // under the Session write lock: serialized with concurrent
+            // execute_mut writers (no last-writer-wins Arc-swap losing
+            // their commits) and atomic — an error drops the fork with
+            // no partial writes.
+            let transaction: Result<_, String> = session_state
+                .inner
+                .transact(|working| add_edges_from_specs(working, specs));
+            match transaction {
                 Ok(report) => {
-                    let _ = session_state.inner.commit(tx, /*check_occ=*/ false);
                     let json = serde_json::json!({
                         "connections_created": report.connections_created,
                         "skipped_missing_endpoint": report.skipped_missing_endpoint,
@@ -625,7 +624,8 @@ pub unsafe extern "C" fn kglite_create_edges_batch(
                     KgliteStatusCode::Ok
                 }
                 Err(msg) => {
-                    // tx drops uncommitted → none of the batch's edges land.
+                    // transact dropped the fork → none of the batch's
+                    // edges land.
                     unsafe {
                         *out_report_json = std::ptr::null();
                     }
@@ -658,7 +658,11 @@ impl SessionState {
     /// batch paths can't drift on per-call option defaults.
     fn make_opts<'a>(&self, params: &'a HashMap<String, Value>) -> ExecuteOptions<'a> {
         let mut opts = ExecuteOptions::eager(params);
-        opts.embedder = self.embedder.clone();
+        opts.embedder = self
+            .embedder
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         opts
     }
 }
@@ -820,5 +824,162 @@ mod tests {
         let s = CString::new("[1, 2, 3]").unwrap();
         let err = parse_params_json(s.as_ptr()).unwrap_err();
         assert_eq!(err, KgliteStatusCode::InvalidArgument);
+    }
+
+    // ── kglite_create_edges_batch ────────────────────────────────────
+
+    /// Build a session handle around a fresh in-memory graph. Callers
+    /// free it via `kglite_session_free`.
+    fn new_test_session() -> *mut KgliteSession {
+        use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+        let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("memory graph");
+        SessionState::into_handle(Session::new(graph))
+    }
+
+    /// Run one mutating Cypher statement through the C ABI, asserting
+    /// success.
+    fn exec_mut(session: *mut KgliteSession, query: &str) {
+        let q = CString::new(query).unwrap();
+        let mut result: *mut KgliteCypherResult = std::ptr::null_mut();
+        let mut err: *const c_char = std::ptr::null();
+        let status = unsafe {
+            kglite_session_execute_mut(session, q.as_ptr(), std::ptr::null(), &mut result, &mut err)
+        };
+        assert_eq!(status, KgliteStatusCode::Ok, "query failed: {query}");
+        unsafe { crate::kglite_cypher_result_free(result) };
+    }
+
+    /// Count query helper: run `query` (must RETURN a single Int64
+    /// column named anything) and return the first cell.
+    fn count(session: *const KgliteSession, query: &str) -> i64 {
+        let state = unsafe { SessionState::from_handle(session) };
+        let snapshot = state.inner.snapshot();
+        let params = HashMap::new();
+        let opts = state.make_opts(&params);
+        let outcome = execute_read(&snapshot, query, &opts).expect("count query");
+        match outcome.result.rows.first().and_then(|r| r.first()) {
+            Some(Value::Int64(n)) => *n,
+            other => panic!("expected Int64 count, got {other:?}"),
+        }
+    }
+
+    /// Call kglite_create_edges_batch and return (status, report-json,
+    /// error-msg).
+    fn edges_batch(
+        session: *mut KgliteSession,
+        edges_json: &str,
+    ) -> (KgliteStatusCode, Option<serde_json::Value>, Option<String>) {
+        let edges_c = CString::new(edges_json).unwrap();
+        let mut report: *const c_char = std::ptr::null();
+        let mut err: *const c_char = std::ptr::null();
+        let status =
+            unsafe { kglite_create_edges_batch(session, edges_c.as_ptr(), &mut report, &mut err) };
+        let report_json = (!report.is_null()).then(|| {
+            let s = unsafe { CStr::from_ptr(report) }.to_str().unwrap();
+            let v = serde_json::from_str(s).unwrap();
+            unsafe { crate::kglite_free_string(report) };
+            v
+        });
+        let err_msg = (!err.is_null()).then(|| {
+            let s = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+            unsafe { crate::kglite_free_string(err) };
+            s
+        });
+        (status, report_json, err_msg)
+    }
+
+    #[test]
+    fn create_edges_batch_lands_atomically_and_reports_errors() {
+        let session = new_test_session();
+        exec_mut(session, "CREATE (:Src {id: 1})");
+        exec_mut(session, "CREATE (:Dst {id: 2})");
+
+        // One valid edge + one missing endpoint: the valid edge lands,
+        // the other is counted as skipped — one commit.
+        let (status, report, err) = edges_batch(
+            session,
+            r#"[
+                {"src_id": 1, "src_type": "Src", "dst_id": 2, "dst_type": "Dst", "type": "REL"},
+                {"src_id": 99, "src_type": "Src", "dst_id": 2, "dst_type": "Dst", "type": "REL"}
+            ]"#,
+        );
+        assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+        let report = report.expect("report json");
+        assert_eq!(report["connections_created"], 1);
+        assert_eq!(report["skipped_missing_endpoint"], 1);
+        assert_eq!(
+            count(session, "MATCH (:Src)-[r:REL]->(:Dst) RETURN count(r) AS c"),
+            1
+        );
+
+        // Error path: an invalid spec (empty node type) must surface the
+        // engine's error through the ABI error slot — not be discarded —
+        // and land none of the batch.
+        let (status, report, err) = edges_batch(
+            session,
+            r#"[
+                {"src_id": 1, "src_type": "Src", "dst_id": 2, "dst_type": "Dst", "type": "REL2"},
+                {"src_id": 1, "src_type": "", "dst_id": 2, "dst_type": "Dst", "type": "REL2"}
+            ]"#,
+        );
+        assert_eq!(status, KgliteStatusCode::Internal);
+        assert!(report.is_none(), "failed batch must not produce a report");
+        assert!(
+            err.is_some_and(|m| !m.is_empty()),
+            "failed batch must report its error message"
+        );
+        assert_eq!(
+            count(session, "MATCH ()-[r:REL2]->() RETURN count(r) AS c"),
+            0,
+            "failed batch must be atomic — no partial edges"
+        );
+
+        unsafe { kglite_session_free(session) };
+    }
+
+    #[test]
+    fn create_edges_batch_serializes_with_concurrent_execute_mut() {
+        // Regression test for the lost-update bug: create_edges_batch used
+        // begin()+commit(check_occ=false), so its last-writer-wins Arc swap
+        // silently discarded any execute_mut commit that landed between its
+        // begin and commit. Routed through Session::transact, both writers
+        // serialize on the Session lock and every committed write survives.
+        const N: usize = 30;
+        let session = new_test_session();
+        exec_mut(session, "CREATE (:Src {id: 0})");
+        for i in 0..N {
+            exec_mut(session, &format!("CREATE (:Dst {{id: {i}}})"));
+        }
+
+        let addr = session as usize;
+        let writer = std::thread::spawn(move || {
+            let session = addr as *mut KgliteSession;
+            for i in 0..N {
+                exec_mut(session, &format!("CREATE (:P {{id: {i}}})"));
+            }
+        });
+
+        for i in 0..N {
+            let edges = format!(
+                r#"[{{"src_id": 0, "src_type": "Src", "dst_id": {i}, "dst_type": "Dst", "type": "REL"}}]"#
+            );
+            let (status, report, err) = edges_batch(session, &edges);
+            assert_eq!(status, KgliteStatusCode::Ok, "err: {err:?}");
+            assert_eq!(report.expect("report")["connections_created"], 1);
+        }
+        writer.join().expect("writer thread panicked");
+
+        assert_eq!(
+            count(session, "MATCH (n:P) RETURN count(n) AS c"),
+            N as i64,
+            "no execute_mut commit may be lost to a concurrent edge batch"
+        );
+        assert_eq!(
+            count(session, "MATCH ()-[r:REL]->() RETURN count(r) AS c"),
+            N as i64,
+            "no edge batch may be lost to a concurrent execute_mut"
+        );
+
+        unsafe { kglite_session_free(session) };
     }
 }

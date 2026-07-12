@@ -109,9 +109,14 @@ pub unsafe extern "C" fn kglite_session_set_embedder(
             if session.is_null() || embedder.is_null() {
                 return KgliteStatusCode::NullPointer;
             }
-            let session_state = unsafe { SessionState::from_handle_mut(session) };
+            // Shared borrow + interior mutability: a `&mut` reborrow here
+            // would alias concurrent execute calls reading the embedder
+            // through `&SessionState` (the ABI is documented cross-thread
+            // safe), which is UB. The Mutex inside SessionState makes the
+            // swap race-free.
+            let session_state = unsafe { SessionState::from_handle(session) };
             let embedder_state = unsafe { EmbedderState::from_handle(embedder) };
-            session_state.embedder = Some(Arc::clone(&embedder_state.inner));
+            session_state.set_embedder(Arc::clone(&embedder_state.inner));
             KgliteStatusCode::Ok
         },
     )

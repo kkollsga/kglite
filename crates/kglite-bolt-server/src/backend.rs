@@ -9,7 +9,7 @@
 //! introspection procedure pass-through (works via the standard
 //! Cypher CALL pipeline — Phase A.3 added the procs to kglite core).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -98,6 +98,84 @@ struct TxState {
     /// Bolt session that owns this tx — used by `close_session` to
     /// roll back any in-flight tx for a dropped connection.
     session_id: String,
+    /// kglite execution metadata parsed from the BEGIN `extra` dict
+    /// (write_scope / git_sha / modified_by). Applied to every query
+    /// executed inside this transaction.
+    meta: TxMeta,
+}
+
+/// kglite transaction metadata parsed from a BEGIN (or auto-commit RUN)
+/// `extra` dict — the same write-provenance / write-scope options the
+/// CLI (`--write-scope` / `--git-sha` / `--modified-by`) and the MCP
+/// server's `cypher_query` args plumb into `ExecuteOptions`.
+///
+/// **Location**: the Neo4j driver convention nests user transaction
+/// metadata under the `tx_metadata` key of the BEGIN/RUN extra dict
+/// (e.g. `session.begin_transaction(metadata={"write_scope": [...]})`),
+/// so that is checked first; the same keys directly at the top level of
+/// `extra` are accepted as a fallback for hand-rolled Bolt clients.
+///
+/// - `write_scope`: list of strings — node types a `CREATE`/`SET` may
+///   touch; anything else is rejected by the engine.
+/// - `git_sha` / `modified_by`: strings — freshness/actor provenance
+///   stamped on writes to `auto_timestamp` node/edge types.
+#[derive(Clone, Debug, Default)]
+struct TxMeta {
+    write_scope: Option<HashSet<String>>,
+    git_sha: Option<String>,
+    modified_by: Option<String>,
+}
+
+impl TxMeta {
+    fn from_extra(extra: &BoltDict) -> Result<Self, BoltError> {
+        let nested = match extra.get("tx_metadata") {
+            Some(BoltValue::Dict(d)) => Some(d),
+            None | Some(BoltValue::Null) => None,
+            Some(other) => {
+                return Err(BoltError::Protocol(format!(
+                    "tx_metadata must be a map, got {other:?}"
+                )))
+            }
+        };
+        // Nested (driver convention) wins; top-level is the fallback.
+        let lookup = |key: &str| nested.and_then(|d| d.get(key)).or_else(|| extra.get(key));
+        let string_field = |key: &str| -> Result<Option<String>, BoltError> {
+            match lookup(key) {
+                None | Some(BoltValue::Null) => Ok(None),
+                Some(BoltValue::String(s)) => Ok(Some(s.clone())),
+                Some(other) => Err(BoltError::Protocol(format!(
+                    "tx metadata key {key:?} must be a string, got {other:?}"
+                ))),
+            }
+        };
+        let write_scope = match lookup("write_scope") {
+            None | Some(BoltValue::Null) => None,
+            Some(BoltValue::List(items)) => {
+                let mut scope = HashSet::with_capacity(items.len());
+                for item in items {
+                    let BoltValue::String(s) = item else {
+                        return Err(BoltError::Protocol(format!(
+                            "tx metadata key \"write_scope\" must be a list of \
+                             strings, got element {item:?}"
+                        )));
+                    };
+                    scope.insert(s.clone());
+                }
+                Some(scope)
+            }
+            Some(other) => {
+                return Err(BoltError::Protocol(format!(
+                    "tx metadata key \"write_scope\" must be a list of strings, \
+                     got {other:?}"
+                )))
+            }
+        };
+        Ok(Self {
+            write_scope,
+            git_sha: string_field("git_sha")?,
+            modified_by: string_field("modified_by")?,
+        })
+    }
 }
 
 impl KgliteBackend {
@@ -238,7 +316,7 @@ impl BoltBackend for KgliteBackend {
         _session: &SessionHandle,
         query: &str,
         parameters: &HashMap<String, BoltValue>,
-        _extra: &BoltDict,
+        extra: &BoltDict,
         transaction: Option<&TransactionHandle>,
     ) -> Result<ResultStream, BoltError> {
         // Input gates (Phase robustness RB-2). These produce clear
@@ -285,9 +363,13 @@ impl BoltBackend for KgliteBackend {
         // pipeline (parse/plan/execute against the same graph view).
         // Auto-commit takes a momentary snapshot of the backend.
         let (result, type_str) = if let Some(handle) = transaction.map(|t| t.0.clone()) {
+            // Explicit tx: metadata was parsed at BEGIN and lives on the
+            // TxState (Neo4j drivers send tx metadata on BEGIN only).
             self.execute_in_tx(&handle, query, kg_params)?
         } else {
-            self.execute_auto_commit(query, kg_params)?
+            // Auto-commit: drivers attach tx metadata to RUN's extra.
+            let meta = TxMeta::from_extra(extra)?;
+            self.execute_auto_commit(query, kg_params, &meta)?
         };
 
         let elapsed_ms = elapsed_start.elapsed().as_millis() as i64;
@@ -348,18 +430,23 @@ impl BoltBackend for KgliteBackend {
     async fn begin_transaction(
         &self,
         session: &SessionHandle,
-        _extra: &BoltDict,
+        extra: &BoltDict,
     ) -> Result<TransactionHandle, BoltError> {
         if self.readonly {
             return Err(BoltError::Forbidden(
                 "server is read-only — explicit transactions rejected (--readonly flag)".into(),
             ));
         }
+        // kglite execution metadata (write_scope / git_sha / modified_by)
+        // rides on BEGIN's extra — nested under `tx_metadata` per the
+        // Neo4j driver convention, or top-level for raw clients.
+        let meta = TxMeta::from_extra(extra)?;
         let id = self.tx_counter.fetch_add(1, Ordering::Relaxed);
         let handle = TransactionHandle(format!("tx-{id}"));
         let state = TxState {
             inner: Some(self.session.begin()),
             session_id: session.0.clone(),
+            meta,
         };
         // Brief outer-mutex hold to insert. The Arc wrapping the
         // inner Mutex<TxState> is created here so concurrent
@@ -395,18 +482,25 @@ impl BoltBackend for KgliteBackend {
             })?
         };
 
-        // Take the inner state. We hold the only Arc reference now (we
-        // just removed the HashMap entry), so try_unwrap is free.
+        // Take the inner state. We normally hold the only Arc reference
+        // now (we just removed the HashMap entry), so try_unwrap is free.
         let mut state = match Arc::try_unwrap(state_arc) {
             Ok(mutex) => mutex.into_inner().unwrap_or_else(|p| p.into_inner()),
             Err(arc) => {
-                // Defensive: another holder. Drop the tx entirely
-                // (we can't easily extract from a shared Arc).
-                let guard = arc.lock().unwrap_or_else(|p| p.into_inner());
-                TxState {
-                    inner: None,
-                    session_id: guard.session_id.clone(),
-                }
+                // Another holder — e.g. a pipelined RUN still executing
+                // on this tx (`execute_in_tx` clones the Arc). Committing
+                // here would drop the real transaction and report SUCCESS
+                // while silently losing its writes. Re-insert the entry
+                // and error instead; the client can retry COMMIT once the
+                // in-flight query completes.
+                let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+                txs.insert(transaction.0.clone(), arc);
+                return Err(BoltError::Transaction(format!(
+                    "commit: transaction {} has a query in flight — cannot \
+                     COMMIT while a RUN is executing on this transaction; \
+                     retry after it completes",
+                    transaction.0
+                )));
             }
         };
 
@@ -499,15 +593,28 @@ impl BoltBackend for KgliteBackend {
                 transaction.0, session.0
             )));
         }
-        // Delegate to session::Session::rollback. With Arc::try_unwrap
-        // we extract the inner tx; on shared-Arc fallback we drop
-        // (which is a rollback anyway since the Transaction's Drop
-        // releases the snapshot Arc).
-        if let Ok(mutex) = Arc::try_unwrap(state_arc) {
-            if let Ok(mut state) = mutex.into_inner() {
+        // Delegate to session::Session::rollback via Arc::try_unwrap.
+        // A shared Arc means a pipelined RUN is still executing on this
+        // tx — rolling back under it would leave that query running on a
+        // zombie transaction while reporting SUCCESS. Symmetric with
+        // commit: re-insert and error; the client retries once the
+        // in-flight query completes.
+        match Arc::try_unwrap(state_arc) {
+            Ok(mutex) => {
+                let mut state = mutex.into_inner().unwrap_or_else(|p| p.into_inner());
                 if let Some(tx) = state.inner.take() {
                     self.session.rollback(tx);
                 }
+            }
+            Err(arc) => {
+                let mut txs = self.transactions.lock().unwrap_or_else(|p| p.into_inner());
+                txs.insert(transaction.0.clone(), arc);
+                return Err(BoltError::Transaction(format!(
+                    "rollback: transaction {} has a query in flight — cannot \
+                     ROLLBACK while a RUN is executing on this transaction; \
+                     retry after it completes",
+                    transaction.0
+                )));
             }
         }
         tracing::debug!(
@@ -627,6 +734,7 @@ impl KgliteBackend {
     fn execute_opts<'a>(
         &self,
         kg_params: &'a HashMap<String, Value>,
+        meta: &'a TxMeta,
     ) -> kglite::api::session::ExecuteOptions<'a> {
         // Eager rows — bolt-server materializes every result into
         // BoltRecords before handing back to boltr; no lazy
@@ -635,7 +743,14 @@ impl KgliteBackend {
         // `text_score()` isn't wired here either (embedder = None
         // in the defaults); text-score queries are rejected at the
         // session level.
-        kglite::api::session::ExecuteOptions::eager(kg_params)
+        let mut opts = kglite::api::session::ExecuteOptions::eager(kg_params);
+        // Transaction metadata parity with the CLI / MCP surfaces:
+        // write_scope gates mutations; git_sha / modified_by stamp
+        // write provenance. All no-ops on reads.
+        opts.write_scope = meta.write_scope.as_ref();
+        opts.git_sha = meta.git_sha.as_deref();
+        opts.modified_by = meta.modified_by.as_deref();
+        opts
     }
 
     /// Auto-commit path: take a snapshot, delegate to
@@ -646,6 +761,7 @@ impl KgliteBackend {
         &self,
         query: &str,
         kg_params: HashMap<String, Value>,
+        meta: &TxMeta,
     ) -> Result<(cypher::CypherResult, &'static str), BoltError> {
         // Pre-parse to decide whether this is a mutation (so we can
         // reject auto-commit mutations with a Bolt-specific error
@@ -669,7 +785,7 @@ impl KgliteBackend {
         }
 
         let snapshot = self.session.snapshot();
-        let opts = self.execute_opts(&kg_params);
+        let opts = self.execute_opts(&kg_params, meta);
         let outcome =
             kglite::api::session::execute_read(&snapshot, query, &opts).map_err(kg_to_bolt)?;
         Ok((outcome.result, "r"))
@@ -703,6 +819,9 @@ impl KgliteBackend {
         // Step 2: Take inner per-tx mutex for the entire pipeline.
         // Other sessions' tx operations are now unblocked.
         let mut state = state_arc.lock().unwrap_or_else(|p| p.into_inner());
+        // Clone the BEGIN-time metadata out before mutably borrowing the
+        // inner tx (small: an optional set + two optional strings).
+        let meta = state.meta.clone();
         let tx_inner = state.inner.as_mut().ok_or_else(|| {
             BoltError::Transaction(format!("tx {handle} already committed or rolled back"))
         })?;
@@ -720,7 +839,7 @@ impl KgliteBackend {
             ));
         }
 
-        let opts = self.execute_opts(&kg_params);
+        let opts = self.execute_opts(&kg_params, &meta);
 
         if is_mutation {
             // Materialize working on first mutation via session::Transaction.
@@ -796,20 +915,206 @@ mod tests {
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 2})", true).await;
         mutate_and_finish(&backend, &session, "CREATE (:Person {id: 3})", false).await;
 
-        let snapshot = backend.session.snapshot();
-        let params = HashMap::new();
-        let opts = backend.execute_opts(&params);
-        let result = kglite::api::session::execute_read(
-            &snapshot,
-            "MATCH (n:Person) RETURN count(n) AS count",
-            &opts,
-        )
-        .expect("count committed disk nodes")
-        .result;
-        assert_eq!(result.rows, vec![vec![Value::Int64(2)]]);
+        assert_eq!(count_nodes(&backend, "Person"), 2);
 
-        drop(snapshot);
         drop(backend);
         std::fs::remove_dir_all(path).expect("remove disk transaction fixture");
+    }
+
+    /// Count committed nodes of `node_type` on the backend's live graph.
+    fn count_nodes(backend: &KgliteBackend, node_type: &str) -> i64 {
+        let snapshot = backend.session.snapshot();
+        let params = HashMap::new();
+        let meta = TxMeta::default();
+        let opts = backend.execute_opts(&params, &meta);
+        let result = kglite::api::session::execute_read(
+            &snapshot,
+            &format!("MATCH (n:{node_type}) RETURN count(n) AS count"),
+            &opts,
+        )
+        .expect("count query")
+        .result;
+        match result.rows.first().and_then(|r| r.first()) {
+            Some(Value::Int64(n)) => *n,
+            other => panic!("expected Int64 count, got {other:?}"),
+        }
+    }
+
+    fn memory_backend() -> KgliteBackend {
+        let graph = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create memory graph");
+        KgliteBackend::new(graph, false, "127.0.0.1:0".into())
+    }
+
+    #[tokio::test]
+    async fn commit_with_query_in_flight_errors_instead_of_dropping_writes() {
+        let backend = memory_backend();
+        let session = SessionHandle("s".into());
+        let tx = backend
+            .begin_transaction(&session, &BoltDict::new())
+            .await
+            .expect("begin");
+        backend
+            .execute_in_tx(&tx.0, "CREATE (:Person {id: 1})", HashMap::new())
+            .expect("tx mutation");
+
+        // Simulate a pipelined RUN still executing on this tx: hold a
+        // second Arc reference to the per-tx state, exactly as
+        // execute_in_tx does for the duration of a query.
+        let in_flight = {
+            let txs = backend.transactions.lock().unwrap();
+            Arc::clone(txs.get(&tx.0).expect("tx registered"))
+        };
+
+        let err = backend
+            .commit(&session, &tx)
+            .await
+            .expect_err("COMMIT with a query in flight must fail, not silently drop the tx");
+        assert!(
+            matches!(&err, BoltError::Transaction(msg) if msg.contains("in flight")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            count_nodes(&backend, "Person"),
+            0,
+            "failed COMMIT must not have committed anything"
+        );
+
+        // Once the in-flight query completes (its Arc clone drops), the
+        // transaction is still alive and COMMIT succeeds with its writes.
+        drop(in_flight);
+        backend
+            .commit(&session, &tx)
+            .await
+            .expect("retry COMMIT after the in-flight query completes");
+        assert_eq!(count_nodes(&backend, "Person"), 1);
+    }
+
+    #[tokio::test]
+    async fn rollback_with_query_in_flight_errors_and_keeps_tx() {
+        let backend = memory_backend();
+        let session = SessionHandle("s".into());
+        let tx = backend
+            .begin_transaction(&session, &BoltDict::new())
+            .await
+            .expect("begin");
+        backend
+            .execute_in_tx(&tx.0, "CREATE (:Person {id: 1})", HashMap::new())
+            .expect("tx mutation");
+
+        let in_flight = {
+            let txs = backend.transactions.lock().unwrap();
+            Arc::clone(txs.get(&tx.0).expect("tx registered"))
+        };
+
+        let err = backend
+            .rollback(&session, &tx)
+            .await
+            .expect_err("ROLLBACK with a query in flight must fail");
+        assert!(
+            matches!(&err, BoltError::Transaction(msg) if msg.contains("in flight")),
+            "unexpected error: {err:?}"
+        );
+
+        drop(in_flight);
+        backend
+            .rollback(&session, &tx)
+            .await
+            .expect("retry ROLLBACK after the in-flight query completes");
+        assert_eq!(count_nodes(&backend, "Person"), 0);
+    }
+
+    #[tokio::test]
+    async fn begin_tx_metadata_write_scope_gates_mutations() {
+        let backend = memory_backend();
+        let session = SessionHandle("s".into());
+        // Driver convention: metadata nests under `tx_metadata`.
+        let extra = BoltDict::from([(
+            "tx_metadata".to_string(),
+            BoltValue::Dict(BoltDict::from([
+                (
+                    "write_scope".to_string(),
+                    BoltValue::List(vec![BoltValue::String("Plan".into())]),
+                ),
+                ("git_sha".to_string(), BoltValue::String("abc123".into())),
+                (
+                    "modified_by".to_string(),
+                    BoltValue::String("test-agent".into()),
+                ),
+            ])),
+        )]);
+        let tx = backend
+            .begin_transaction(&session, &extra)
+            .await
+            .expect("begin with tx_metadata");
+
+        let err = backend
+            .execute_in_tx(&tx.0, "CREATE (:Person {id: 1})", HashMap::new())
+            .expect_err("out-of-scope CREATE must be rejected");
+        assert!(
+            format!("{err:?}").contains("write scope"),
+            "expected a write-scope violation, got: {err:?}"
+        );
+
+        backend
+            .execute_in_tx(&tx.0, "CREATE (:Plan {id: 1})", HashMap::new())
+            .expect("in-scope CREATE");
+        backend.commit(&session, &tx).await.expect("commit");
+        assert_eq!(count_nodes(&backend, "Plan"), 1);
+        assert_eq!(count_nodes(&backend, "Person"), 0);
+    }
+
+    #[test]
+    fn tx_meta_parses_nested_and_top_level_locations() {
+        // Nested under tx_metadata (driver convention).
+        let extra = BoltDict::from([(
+            "tx_metadata".to_string(),
+            BoltValue::Dict(BoltDict::from([
+                (
+                    "write_scope".to_string(),
+                    BoltValue::List(vec![
+                        BoltValue::String("Plan".into()),
+                        BoltValue::String("Task".into()),
+                    ]),
+                ),
+                ("git_sha".to_string(), BoltValue::String("deadbeef".into())),
+            ])),
+        )]);
+        let meta = TxMeta::from_extra(&extra).expect("nested parse");
+        assert_eq!(
+            meta.write_scope,
+            Some(HashSet::from(["Plan".to_string(), "Task".to_string()]))
+        );
+        assert_eq!(meta.git_sha.as_deref(), Some("deadbeef"));
+        assert_eq!(meta.modified_by, None);
+
+        // Top-level fallback for raw Bolt clients.
+        let extra = BoltDict::from([
+            (
+                "modified_by".to_string(),
+                BoltValue::String("agent-7".into()),
+            ),
+            ("git_sha".to_string(), BoltValue::String("cafe".into())),
+        ]);
+        let meta = TxMeta::from_extra(&extra).expect("top-level parse");
+        assert_eq!(meta.modified_by.as_deref(), Some("agent-7"));
+        assert_eq!(meta.git_sha.as_deref(), Some("cafe"));
+        assert_eq!(meta.write_scope, None);
+
+        // No metadata at all → all None.
+        let meta = TxMeta::from_extra(&BoltDict::new()).expect("empty parse");
+        assert_eq!(meta.write_scope, None);
+        assert_eq!(meta.git_sha, None);
+        assert_eq!(meta.modified_by, None);
+
+        // Type errors are rejected loudly, not ignored.
+        let extra = BoltDict::from([(
+            "write_scope".to_string(),
+            BoltValue::String("not-a-list".into()),
+        )]);
+        assert!(TxMeta::from_extra(&extra).is_err());
+        let extra = BoltDict::from([("git_sha".to_string(), BoltValue::Integer(7))]);
+        assert!(TxMeta::from_extra(&extra).is_err());
+        let extra = BoltDict::from([("tx_metadata".to_string(), BoltValue::Integer(1))]);
+        assert!(TxMeta::from_extra(&extra).is_err());
     }
 }

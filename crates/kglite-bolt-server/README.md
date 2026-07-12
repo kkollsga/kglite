@@ -36,6 +36,30 @@ documented Cypher dialect against the loaded `.kgl` graph.
   runtime required. `cargo tree -p kglite-bolt-server | grep
   pyo3` returns empty.
 
+## Transaction metadata (`write_scope` / `git_sha` / `modified_by`)
+
+KGLite's write-scope and write-provenance options ride on Bolt
+transaction metadata, at parity with the CLI and MCP surfaces:
+
+```python
+with driver.session() as session:
+    tx = session.begin_transaction(metadata={
+        "write_scope": ["Plan", "Task"],   # node types CREATE/SET may touch
+        "git_sha": "0f3a9c1",              # provenance stamped on writes
+        "modified_by": "planning-agent",   # actor stamped alongside git_sha
+    })
+    tx.run("CREATE (:Plan {id: 1})")
+    tx.commit()
+```
+
+Drivers send this under the `tx_metadata` key of BEGIN's `extra`
+dict (auto-commit runs: RUN's `extra`); hand-rolled Bolt clients may
+also place the same keys at the top level of `extra`. A `CREATE`/`SET`
+touching a node type outside `write_scope` fails the query; `git_sha` /
+`modified_by` are stamped on writes to `auto_timestamp` types. All
+three are ignored by reads. Malformed values (non-list `write_scope`,
+non-string `git_sha`) fail the BEGIN/RUN with a client error.
+
 ## CLI
 
 ```

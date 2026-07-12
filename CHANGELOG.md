@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent writes can no longer be silently lost at the C ABI and Bolt
+  boundaries.** `kglite_create_edges_batch` now serializes through the
+  session transaction path instead of a last-writer-wins commit,
+  `kglite_session_set_embedder` is safe against concurrent query execution,
+  and a Bolt `COMMIT`/`ROLLBACK` racing a pipelined `RUN` returns a retryable
+  transaction error instead of dropping the transaction and reporting
+  success. Bolt transactions also accept `write_scope`, `git_sha`, and
+  `modified_by` via `tx_metadata`, matching the CLI and MCP surfaces.
+- **The MCP server recovers from internal panics and failed rebuilds.**
+  Poisoned graph-state locks no longer wedge every subsequent request, and a
+  failed lazy code-tree rebuild restores its dirty marker, retries with a
+  bounded backoff, and surfaces the error plus a staleness warning in tool
+  output instead of silently serving a stale graph.
 - **Fused and DISTINCT-optimized query paths now agree with the materialized
   executor.** A residual `WHERE` between `MATCH` and `RETURN DISTINCT` is no
   longer dropped by the distinct pushdown; fused `OPTIONAL MATCH` counts

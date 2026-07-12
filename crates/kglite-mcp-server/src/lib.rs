@@ -539,9 +539,9 @@ fn bind_mode(
             let gs = graph_state.clone();
             let active_root_for_hook = local_active_root.clone();
             let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
-                if let Ok(mut guard) = active_root_for_hook.write() {
-                    *guard = Some(path.to_path_buf());
-                }
+                // Poison-recovering lock policy (see tools::read_lock) — a
+                // panicked holder must not silently stop root updates.
+                *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
                 tracing::info!(repo = name, "code_tree::build on local-workspace activate");
                 // Surface a build failure instead of leaving the tools to
                 // report a bare "No active graph" (operator ask, 2026-06-23).
@@ -566,9 +566,7 @@ fn bind_mode(
             let gs_revs = graph_state.clone();
             let active_root_for_revs_hook = local_active_root.clone();
             let revs_hook: PostActivateRevsHook = Arc::new(move |path, name, revs| {
-                if let Ok(mut guard) = active_root_for_revs_hook.write() {
-                    *guard = Some(path.to_path_buf());
-                }
+                *tools::write_lock(&active_root_for_revs_hook) = Some(path.to_path_buf());
                 tracing::info!(
                     repo = name,
                     revs = ?revs,
@@ -913,10 +911,7 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
             let gs = graph_state.clone();
             let active_root_for_watch = local_active_root.clone();
             let cb: watch::ChangeHandler = Arc::new(move |paths| {
-                let active = match active_root_for_watch.read() {
-                    Ok(g) => g.clone(),
-                    Err(_) => return,
-                };
+                let active = tools::read_lock(&active_root_for_watch).clone();
                 let Some(active) = active else {
                     // No `set_root_dir` yet; nothing to rebuild.
                     return;
