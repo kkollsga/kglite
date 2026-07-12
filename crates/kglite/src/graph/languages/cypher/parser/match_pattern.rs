@@ -313,10 +313,25 @@ impl CypherParser {
                 break;
             }
 
-            // Stop at AND/OR at top level (boolean operators in WHERE)
+            // Stop at tokens that legitimately *follow* a pattern expression
+            // at top level: boolean operators (AND/OR/XOR in WHERE), `AS`
+            // (RETURN/WITH alias), CASE keywords (THEN/ELSE/END), and the
+            // comprehension/reduce separator `|`. Inside parens/brackets the
+            // soft-keyword ones (AS, XOR) still round-trip as property keys
+            // via the keyword_name_token arm below.
             if paren_depth == 0
                 && bracket_depth == 0
-                && (self.check(&CypherToken::And) || self.check(&CypherToken::Or))
+                && matches!(
+                    self.peek(),
+                    Some(CypherToken::And)
+                        | Some(CypherToken::Or)
+                        | Some(CypherToken::Xor)
+                        | Some(CypherToken::As)
+                        | Some(CypherToken::Then)
+                        | Some(CypherToken::Else)
+                        | Some(CypherToken::End)
+                        | Some(CypherToken::Pipe)
+                )
             {
                 break;
             }

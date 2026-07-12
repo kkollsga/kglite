@@ -56,6 +56,20 @@ def test_boolean_operator_precedence(grid, where, expected):
     assert got == expected, f"`WHERE {where}` returned {got}, expected {expected} (openCypher NOT>AND>OR)"
 
 
+def test_unary_minus_binds_looser_than_subscript():
+    """`-l[0]` is `-(l[0])`, not `(-l)[0]` — postfix (indexing, slicing,
+    property access) binds tighter than unary minus. The inverted form
+    silently returned null (negating a list yields null, indexing null
+    yields null)."""
+    g = KnowledgeGraph()
+    assert g.cypher("WITH [1, 2] AS l RETURN -l[0] AS x").scalar() == -1
+    assert g.cypher("RETURN -[1, 2][0] AS x").scalar() == -1
+    assert g.cypher("RETURN -$p[0] AS x", params={"p": [7, 8]}).scalar() == -7
+    assert g.cypher("WITH [3] AS l RETURN -head(l) AS x").scalar() == -3
+    # chained unary minus
+    assert g.cypher("RETURN - -3 AS x").scalar() == 3
+
+
 def test_reported_not_and_string_shape():
     """The exact shape from the bug report (string equality + AND), confirmed
     to parse as `(NOT level='hoyesterett') AND year=2024` — i.e. it excludes

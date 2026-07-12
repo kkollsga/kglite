@@ -53,6 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Cypher parser rejects invalid input cleanly instead of surprising or
+  crashing.** Variable-length bounds validate (`*5..2` errors; `*11..` means
+  eleven-or-more instead of silently matching nothing; the default 10-hop cap
+  on bare `*` is documented as an intentional divergence with executable
+  cases), expression nesting has a 512-level budget that returns a normal
+  syntax error instead of overflowing the stack, subtraction accepts any
+  valid operand shape (`5 - $p`, `5 - CASE ... END`, `5 - -3`),
+  `-list[0]` negates the element rather than the list, `EXISTS { ... }` and
+  label predicates work in projection position (the WHERE and expression
+  parsers now share one tower), soft keywords work as map keys, and a
+  trailing `AS`/`XOR` after an inline pattern expression is no longer
+  swallowed.
 - **Query-derived DataFrames no longer corrupt or discard values.**
   `add_connections(query=...)` column types now promote across the whole
   result column instead of locking to the first non-null value: mixed

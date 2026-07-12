@@ -1005,6 +1005,13 @@ graph.cypher("MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) WHERE a.name = 'Alice' 
 graph.cypher("MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN a.name, b.name")
 ```
 
+Open-ended forms (`*`, `*N..`) default the upper bound to **10 hops**
+as a runaway-query guard — an intentional divergence from openCypher's
+unbounded `*` (recorded as `pattern.var_length_default_cap` in the dialect
+manifest). An explicit lower bound above 10 (`*11..`) raises the ceiling to
+that bound, and a range whose minimum exceeds its maximum (`*5..2`) is a
+parse error. Spell out `*1..N` when you need more than 10 hops.
+
 ## WHERE EXISTS
 
 Check for subpattern existence. Brace `{ }`, parenthesis `(( ))`, and inline pattern syntax are all supported:

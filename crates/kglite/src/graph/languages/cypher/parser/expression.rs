@@ -52,7 +52,7 @@ impl CypherParser {
     fn parse_boolean_not_expression(&mut self) -> Result<Expression, String> {
         if self.check(&CypherToken::Not) {
             self.advance();
-            let inner = self.parse_boolean_not_expression()?;
+            let inner = self.descend(Self::parse_boolean_not_expression)?;
             return Ok(Expression::PredicateExpr(Box::new(Predicate::Not(
                 Box::new(Self::expression_as_predicate(inner)),
             ))));
@@ -60,7 +60,7 @@ impl CypherParser {
         self.parse_comparison_expression()
     }
 
-    fn expression_as_predicate(expr: Expression) -> Predicate {
+    pub(super) fn expression_as_predicate(expr: Expression) -> Predicate {
         match expr {
             Expression::PredicateExpr(predicate) => *predicate,
             Expression::IsNull(inner) => Predicate::IsNull(*inner),
@@ -74,7 +74,49 @@ impl CypherParser {
     }
 
     fn parse_comparison_expression(&mut self) -> Result<Expression, String> {
+        // Inline pattern predicate: `(n)-[:REL]->(m)` — desugar to
+        // EXISTS { pattern }, exactly like the WHERE position always has.
+        // (This level is shared by WHERE, RETURN, WITH, CASE, etc., so the
+        // capability set cannot drift between predicate and expression
+        // positions.)
+        if self.check(&CypherToken::LParen) && self.looks_like_pattern_start() {
+            let pattern_str = self.extract_pattern_string()?;
+            let pattern = crate::graph::core::pattern_matching::parse_pattern(&pattern_str)?;
+            return Ok(Expression::PredicateExpr(Box::new(Predicate::Exists {
+                patterns: vec![pattern],
+                where_clause: None,
+            })));
+        }
+
         let expr = self.parse_expression()?;
+
+        // Label-check predicate: `n:Label` (and chained `n:A:B` = AND).
+        // Only applies when the LHS is a bare variable — `count(n):Foo`
+        // isn't valid.
+        if self.check(&CypherToken::Colon) {
+            if let Expression::Variable(var) = &expr {
+                let var = var.clone();
+                self.advance(); // consume :
+                let first_label = self.expect_name("label name after ':'")?;
+                let mut pred = Predicate::LabelCheck {
+                    variable: var.clone(),
+                    label: first_label,
+                };
+                while self.check(&CypherToken::Colon) {
+                    self.advance();
+                    let next_label = self.expect_name("label name after ':'")?;
+                    pred = Predicate::And(
+                        Box::new(pred),
+                        Box::new(Predicate::LabelCheck {
+                            variable: var.clone(),
+                            label: next_label,
+                        }),
+                    );
+                }
+                return Ok(Expression::PredicateExpr(Box::new(pred)));
+            }
+        }
+
         // Check for trailing comparison/predicate operators
         match self.peek() {
             Some(CypherToken::Equals)
@@ -175,29 +217,26 @@ impl CypherParser {
                     left = Expression::Add(Box::new(left), Box::new(right));
                 }
                 Some(CypherToken::Dash) => {
-                    // Dash could be subtraction or edge syntax - only treat as subtraction
-                    // if we're in an expression context (not at clause boundary)
-                    // Heuristic: if next token after dash is a number, identifier, or '(',
-                    // it's subtraction. Otherwise, stop.
-                    if self.peek_at(1).is_some_and(|t| {
-                        matches!(
-                            t,
-                            CypherToken::IntLit(_)
-                                | CypherToken::FloatLit(_)
-                                | CypherToken::Identifier(_)
-                                | CypherToken::LParen
-                        )
-                    }) {
-                        // But check it's not an edge pattern (dash followed by bracket)
-                        if self.peek_at(1) == Some(&CypherToken::LBracket) {
-                            break;
+                    // Dash is ambiguous between subtraction and relationship
+                    // pattern syntax (e.g. inside `size((a)-->(b))`). Treat
+                    // it as an edge continuation — and stop the expression —
+                    // only when the following tokens actually look like one:
+                    // `-[` (detailed edge) or `-->` (abbreviated edge).
+                    // Everything else is subtraction; a semantically invalid
+                    // RHS (e.g. `5 - 'x'`) errors at evaluation, not parse.
+                    let is_edge_continuation = match self.peek_at(1) {
+                        Some(CypherToken::LBracket) => true,
+                        Some(CypherToken::Dash) => {
+                            self.peek_at(2) == Some(&CypherToken::GreaterThan)
                         }
-                        self.advance();
-                        let right = self.parse_multiplicative_expression()?;
-                        left = Expression::Subtract(Box::new(left), Box::new(right));
-                    } else {
+                        _ => false,
+                    };
+                    if is_edge_continuation {
                         break;
                     }
+                    self.advance();
+                    let right = self.parse_multiplicative_expression()?;
+                    left = Expression::Subtract(Box::new(left), Box::new(right));
                 }
                 Some(CypherToken::DoublePipe) => {
                     self.advance();
@@ -239,13 +278,15 @@ impl CypherParser {
     }
 
     pub(super) fn parse_unary_expression(&mut self) -> Result<Expression, String> {
-        let expr = if self.check(&CypherToken::Dash) {
+        if self.check(&CypherToken::Dash) {
             self.advance();
-            let inner = self.parse_primary_expression()?;
-            Expression::Negate(Box::new(inner))
-        } else {
-            self.parse_primary_expression()?
-        };
+            // Recurse (so `- -x` chains work) and wrap the *fully
+            // postfix-resolved* operand: subscripting binds tighter than
+            // negation, so `-list[0]` is `-(list[0])`, not `(-list)[0]`.
+            let inner = self.descend(Self::parse_unary_expression)?;
+            return Ok(Expression::Negate(Box::new(inner)));
+        }
+        let expr = self.parse_primary_expression()?;
         self.parse_postfix(expr)
     }
 
@@ -302,6 +343,13 @@ impl CypherParser {
     }
 
     pub(super) fn parse_primary_expression(&mut self) -> Result<Expression, String> {
+        // Every nested expression form (parens, lists, maps, function args,
+        // CASE, comprehensions, EXISTS bodies) recurses through here, so a
+        // single depth guard at this chokepoint bounds parser stack use.
+        self.descend(Self::parse_primary_expression_inner)
+    }
+
+    fn parse_primary_expression_inner(&mut self) -> Result<Expression, String> {
         match self.peek().cloned() {
             // Numeric literals
             Some(CypherToken::IntLit(n)) => {
@@ -514,6 +562,15 @@ impl CypherParser {
                 self.parse_function_call("contains".to_string())
             }
 
+            // EXISTS { pattern [WHERE pred] } / EXISTS((pattern)) — shares
+            // the WHERE position's handler so the two positions cannot
+            // diverge. Yields a boolean (Kleene) value in expression position.
+            Some(CypherToken::Exists) => {
+                self.advance(); // consume EXISTS
+                let pred = self.parse_exists_predicate()?;
+                Ok(Expression::PredicateExpr(Box::new(pred)))
+            }
+
             Some(t) => Err(format!("Unexpected token in expression: {:?}", t)),
             None => Err("Unexpected end of query in expression".to_string()),
         }
@@ -640,7 +697,7 @@ impl CypherParser {
     /// Parse `count { <pattern(s)> [WHERE <pred>] }` after the `count`
     /// identifier has been consumed; LBrace is next. Mirrors the
     /// `EXISTS { ... }` parse body in
-    /// [`super::predicate::parse_comparison_predicate`], but wrapped
+    /// [`CypherParser::parse_exists_predicate`], but wrapped
     /// as an [`Expression::CountSubquery`] for use in WITH / RETURN /
     /// ORDER BY etc.
     pub(super) fn parse_count_subquery(&mut self) -> Result<Expression, String> {
@@ -678,30 +735,19 @@ impl CypherParser {
             // Check for .property shorthand or .* all-properties
             if self.check(&CypherToken::Dot) {
                 self.advance(); // consume dot
-                match self.advance().cloned() {
-                    Some(CypherToken::Identifier(prop)) => {
-                        items.push(MapProjectionItem::Property(prop));
-                    }
-                    Some(CypherToken::Star) => {
-                        items.push(MapProjectionItem::AllProperties);
-                    }
-                    _ => {
-                        return Err(
-                            "Expected property name or '*' after '.' in map projection".into()
-                        )
-                    }
+                if self.check(&CypherToken::Star) {
+                    self.advance();
+                    items.push(MapProjectionItem::AllProperties);
+                } else {
+                    // expect_name also accepts soft-reservable keywords
+                    // (`.order`) per KG-2, matching map-literal keys.
+                    let prop =
+                        self.expect_name("property name or '*' after '.' in map projection")?;
+                    items.push(MapProjectionItem::Property(prop));
                 }
             } else {
-                // alias: expression
-                let key = match self.advance().cloned() {
-                    Some(CypherToken::Identifier(name)) => name,
-                    other => {
-                        return Err(format!(
-                            "Expected property name or .property in map projection, got {:?}",
-                            other
-                        ))
-                    }
-                };
+                // alias: expression — soft keywords allowed as keys (KG-2)
+                let key = self.expect_name("property name or .property in map projection")?;
                 self.expect(&CypherToken::Colon)?;
                 let expr = self.parse_expression()?;
                 items.push(MapProjectionItem::Alias { key, expr });
@@ -720,12 +766,10 @@ impl CypherParser {
 
         if !self.check(&CypherToken::RBrace) {
             loop {
-                let key = match self.advance().cloned() {
-                    Some(CypherToken::Identifier(name)) => name,
-                    other => {
-                        return Err(format!("Expected key name in map literal, got {:?}", other))
-                    }
-                };
+                // expect_name accepts soft-reservable keywords as keys
+                // (`{order: 1}`, `{contains: 2}`) per KG-2, canonicalised
+                // to their uppercase word — same as pattern property maps.
+                let key = self.expect_name("key name in map literal")?;
                 self.expect(&CypherToken::Colon)?;
                 let expr = self.parse_expression()?;
                 entries.push((key, expr));

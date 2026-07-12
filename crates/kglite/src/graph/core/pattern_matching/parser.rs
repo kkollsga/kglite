@@ -539,6 +539,14 @@ impl Parser {
 
     /// Parse variable-length specification: *, *2, *1..3, *..5, *2..
     /// Returns (min_hops, max_hops)
+    ///
+    /// Open-ended forms (`*`, `*N..`) default the upper bound to
+    /// `DEFAULT_MAX_HOPS` as a runaway-query guard — a deliberate,
+    /// documented divergence from openCypher's unbounded `*` (recorded in
+    /// `tests/api-baselines/cypher-dialect.json` as
+    /// `pattern.var_length_default_cap`). An explicit lower bound above the
+    /// default (`*11..`) raises the ceiling to that bound so the range is
+    /// never silently empty.
     fn parse_var_length(&mut self) -> Result<(usize, usize), String> {
         self.expect(&Token::Star)?;
 
@@ -564,10 +572,19 @@ impl Parser {
                         } else {
                             return Err("Expected max hop count after '..'. Examples: *1..3 (1 to 3 hops), *2.. (2 or more hops)".to_string());
                         };
+                        if min > max {
+                            return Err(format!(
+                                "Invalid variable-length range *{}..{}: minimum hop count ({}) \
+                                 exceeds maximum ({}). Use *{}..{} instead.",
+                                min, max, min, max, max, min
+                            ));
+                        }
                         Ok((min, max))
                     } else {
-                        // *N.. means N to default max
-                        Ok((min, DEFAULT_MAX_HOPS))
+                        // *N.. means "N or more", capped at the engine's
+                        // default ceiling — but never an empty range: an
+                        // explicit minimum above the default raises the cap.
+                        Ok((min, min.max(DEFAULT_MAX_HOPS)))
                     }
                 } else {
                     // *N means exactly N hops

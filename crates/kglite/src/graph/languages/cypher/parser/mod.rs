@@ -30,11 +30,51 @@ pub mod predicate;
 pub struct CypherParser {
     tokens: Vec<CypherToken>,
     pos: usize,
+    /// Current recursion depth of the expression/predicate parser. Guarded by
+    /// [`Self::descend`] so pathologically nested input (thousands of nested
+    /// parens/lists/`NOT`s) returns a parse error instead of overflowing the
+    /// stack and aborting the process.
+    depth: usize,
 }
+
+/// Maximum expression-nesting depth accepted by the parser.
+///
+/// The recursive-descent expression parser, the planner's expression walkers,
+/// and the executor's `evaluate_expression` all recurse once per nesting
+/// level, so this budget bounds stack use across the whole pipeline (parse →
+/// plan → execute → drop). 512 levels is far beyond any legitimate query
+/// while keeping worst-case stack depth comfortably inside default thread
+/// stacks even in debug builds.
+const MAX_EXPRESSION_DEPTH: usize = 512;
 
 impl CypherParser {
     pub fn new(tokens: Vec<CypherToken>) -> Self {
-        CypherParser { tokens, pos: 0 }
+        CypherParser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Run `f` one expression-nesting level deeper, failing with a clean
+    /// parse error once [`MAX_EXPRESSION_DEPTH`] is exceeded. Every
+    /// self-recursive entry point of the expression parser (primary
+    /// expressions, `NOT` chains, unary minus chains) must route through
+    /// this guard.
+    pub(super) fn descend<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.depth >= MAX_EXPRESSION_DEPTH {
+            return Err(format!(
+                "Expression nesting exceeds {} levels; simplify the query",
+                MAX_EXPRESSION_DEPTH
+            ));
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
     }
 
     // ========================================================================
