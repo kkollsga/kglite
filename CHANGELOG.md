@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Query-derived DataFrames no longer corrupt or discard values.**
+  `add_connections(query=...)` column types now promote across the whole
+  result column instead of locking to the first non-null value: mixed
+  int/float widens to float (previously `1.5` was truncated to `1`), ids
+  that overflow the compact id type widen instead of wrapping, `datetime()`
+  columns round-trip natively (previously an entire column silently became
+  null), and incompatible mixes serialize as text instead of nulling.
+  `DataFrame` lookups return an optional instead of panicking on a missing
+  column, and non-rectangular column adds are rejected.
 - **Relationship variables and multi-pattern MATCH now follow openCypher
   binding semantics.** A relationship variable carried through `WITH` or
   `UNWIND` constrains a later `MATCH` to that exact relationship instead of

@@ -3257,7 +3257,7 @@ pub fn kglite::datatypes::values::DataFrame::column_count(&self) -> usize
 pub fn kglite::datatypes::values::DataFrame::from_cypher_rows(columns: alloc::vec::Vec<alloc::string::String>, rows: alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>) -> core::result::Result<Self, alloc::string::String>
 pub fn kglite::datatypes::values::DataFrame::get_column_index(&self, name: &str) -> core::option::Option<usize>
 pub fn kglite::datatypes::values::DataFrame::get_column_names(&self) -> alloc::vec::Vec<alloc::string::String>
-pub fn kglite::datatypes::values::DataFrame::get_column_type(&self, col_name: &str) -> kglite::datatypes::values::ColumnType
+pub fn kglite::datatypes::values::DataFrame::get_column_type(&self, col_name: &str) -> core::option::Option<kglite::datatypes::values::ColumnType>
 pub fn kglite::datatypes::values::DataFrame::get_value(&self, row: usize, column: &str) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::datatypes::values::DataFrame::get_value_by_index(&self, row_idx: usize, col_idx: usize) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::datatypes::values::DataFrame::new(columns: alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::ColumnType)>) -> Self
@@ -3389,7 +3389,7 @@ pub fn kglite::datatypes::values::DataFrame::column_count(&self) -> usize
 pub fn kglite::datatypes::values::DataFrame::from_cypher_rows(columns: alloc::vec::Vec<alloc::string::String>, rows: alloc::vec::Vec<alloc::vec::Vec<kglite::datatypes::values::Value>>) -> core::result::Result<Self, alloc::string::String>
 pub fn kglite::datatypes::values::DataFrame::get_column_index(&self, name: &str) -> core::option::Option<usize>
 pub fn kglite::datatypes::values::DataFrame::get_column_names(&self) -> alloc::vec::Vec<alloc::string::String>
-pub fn kglite::datatypes::values::DataFrame::get_column_type(&self, col_name: &str) -> kglite::datatypes::values::ColumnType
+pub fn kglite::datatypes::values::DataFrame::get_column_type(&self, col_name: &str) -> core::option::Option<kglite::datatypes::values::ColumnType>
 pub fn kglite::datatypes::values::DataFrame::get_value(&self, row: usize, column: &str) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::datatypes::values::DataFrame::get_value_by_index(&self, row_idx: usize, col_idx: usize) -> core::option::Option<kglite::datatypes::values::Value>
 pub fn kglite::datatypes::values::DataFrame::new(columns: alloc::vec::Vec<(alloc::string::String, kglite::datatypes::values::ColumnType)>) -> Self

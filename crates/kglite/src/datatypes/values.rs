@@ -519,7 +519,13 @@ impl Column {
     }
 
     fn len(&self) -> usize {
-        match &self.data {
+        self.data.len()
+    }
+}
+
+impl ColumnData {
+    fn len(&self) -> usize {
+        match self {
             ColumnData::UniqueId(vec) => vec.len(),
             ColumnData::Int64(vec) => vec.len(),
             ColumnData::Float64(vec) => vec.len(),
@@ -588,6 +594,13 @@ impl DataFrame {
     }
 
     pub fn row_count(&self) -> usize {
+        // Rectangularity is enforced at construction (`add_column` rejects
+        // length mismatches; `from_cypher_rows` validates row width), so any
+        // column's length is the frame's row count.
+        debug_assert!(
+            self.columns.windows(2).all(|w| w[0].len() == w[1].len()),
+            "DataFrame invariant violated: columns have differing lengths"
+        );
         self.columns.first().map_or(0, |col| col.len())
     }
 
@@ -599,12 +612,11 @@ impl DataFrame {
         self.columns.iter().map(|col| col.name.clone()).collect()
     }
 
-    pub fn get_column_type(&self, col_name: &str) -> ColumnType {
+    pub fn get_column_type(&self, col_name: &str) -> Option<ColumnType> {
         self.column_indices
             .get(col_name)
             .and_then(|&idx| self.columns.get(idx))
             .map(|col| col.col_type.clone())
-            .unwrap_or_else(|| panic!("Column {} not found", col_name))
     }
 
     pub fn add_column(
@@ -631,6 +643,20 @@ impl DataFrame {
             _ => return Err(format!("Data type mismatch for column {}", name)),
         }
 
+        // Enforce rectangularity: every column must have the same length.
+        // (The first column defines the frame's row count.)
+        if !self.columns.is_empty() {
+            let expected = self.row_count();
+            if data.len() != expected {
+                return Err(format!(
+                    "Column {} has {} rows but the DataFrame has {} rows",
+                    name,
+                    data.len(),
+                    expected
+                ));
+            }
+        }
+
         let idx = self.columns.len();
         self.column_indices.insert(name.clone(), idx);
         self.columns.push(Column {
@@ -647,20 +673,16 @@ impl DataFrame {
     /// Converts row-oriented `Vec<Vec<Value>>` (from CypherResult) into the
     /// columnar DataFrame format used by `add_connections` and other fluent APIs.
     ///
-    /// Type inference: scans each column for the first non-Null value to determine
-    /// ColumnType. All-null columns default to Int64.
+    /// Type inference scans **every** value in each column and promotes to the
+    /// narrowest lossless common type (see [`resolve_column_type`]): mixed
+    /// Int64/Float64 becomes Float64, a UniqueId column containing an Int64
+    /// that doesn't fit `u32` widens to Int64, any List makes the column List
+    /// (non-list cells wrap as 1-element lists), and any other heterogeneous
+    /// mix falls back to String with each value in its natural text form —
+    /// never silently coerced or nulled. All-null columns default to Int64.
     pub fn from_cypher_rows(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Result<Self, String> {
         let num_cols = columns.len();
         let num_rows = rows.len();
-
-        if num_rows == 0 {
-            // Empty result: create DataFrame with Int64 columns (no rows)
-            let col_specs: Vec<(String, ColumnType)> = columns
-                .into_iter()
-                .map(|name| (name, ColumnType::Int64))
-                .collect();
-            return Ok(DataFrame::new(col_specs));
-        }
 
         // Validate row width
         for (i, row) in rows.iter().enumerate() {
@@ -674,51 +696,26 @@ impl DataFrame {
             }
         }
 
-        // Infer column types from first non-null value in each column
-        let mut col_types = vec![None; num_cols];
+        // Whole-column type scan: one cheap O(rows × cols) pass recording
+        // which value kinds each column contains (bitmask, no allocation),
+        // plus whether every Int64 fits u32 (decides UniqueId vs Int64 for
+        // id-shaped columns).
+        let mut kinds = vec![0u16; num_cols];
+        let mut ints_fit_u32 = vec![true; num_cols];
         for row in &rows {
             for (col_idx, val) in row.iter().enumerate() {
-                if col_types[col_idx].is_some() {
-                    continue;
-                }
-                col_types[col_idx] = match val {
-                    Value::UniqueId(_) => Some(ColumnType::UniqueId),
-                    Value::Int64(_) => Some(ColumnType::Int64),
-                    Value::Float64(_) => Some(ColumnType::Float64),
-                    Value::String(_) => Some(ColumnType::String),
-                    Value::Boolean(_) => Some(ColumnType::Boolean),
-                    Value::DateTime(_) => Some(ColumnType::DateTime),
-                    // Timestamp has no dedicated DataFrame column; serialize
-                    // via the String column as ISO 8601 (round-trips as text).
-                    Value::Timestamp(_) => Some(ColumnType::String),
-                    Value::Point { .. } => Some(ColumnType::String), // Serialize as WKT
-                    // Durations are query-time-only — never persisted as
-                    // a column (Cluster 2). Serialize via the String column.
-                    Value::Duration { .. } => Some(ColumnType::String),
-                    // Lists and maps get a dedicated columnar shape so they
-                    // round-trip structurally (UNWIND/IN, `m['k']`/`m.k`), not
-                    // as stringified JSON. This carries `from_records` dict
-                    // fields — `json_to_value` already builds `Value::Map`, and
-                    // this keeps it a map instead of dropping it to null.
-                    Value::List(_) => Some(ColumnType::List),
-                    Value::Map(_) => Some(ColumnType::Map),
-                    // The remaining graph-entity variants don't fit columnar;
-                    // serialise via the String column (JSON-ish).
-                    Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
-                        Some(ColumnType::String)
+                kinds[col_idx] |= value_kind_bit(val);
+                if let Value::Int64(v) = val {
+                    if *v < 0 || *v > u32::MAX as i64 {
+                        ints_fit_u32[col_idx] = false;
                     }
-                    Value::Null | Value::NodeRef(_) => None,
-                };
-            }
-            if col_types.iter().all(|t| t.is_some()) {
-                break;
+                }
             }
         }
-
-        // Default all-null columns to Int64
-        let col_types: Vec<ColumnType> = col_types
-            .into_iter()
-            .map(|t| t.unwrap_or(ColumnType::Int64))
+        let col_types: Vec<ColumnType> = kinds
+            .iter()
+            .zip(&ints_fit_u32)
+            .map(|(&k, &fits)| resolve_column_type(k, fits))
             .collect();
 
         // Build columnar data by transposing rows
@@ -737,70 +734,60 @@ impl DataFrame {
             })
             .collect();
 
+        // Fill pass. The promotion above guarantees every non-null,
+        // non-NodeRef value has a lossless representation in its column, so
+        // the residual `_ => None` arms below are reachable only for
+        // Value::Null and the internal Value::NodeRef.
         for row in rows {
             for (col_idx, val) in row.into_iter().enumerate() {
                 match &mut col_data[col_idx] {
                     ColumnData::UniqueId(vec) => match val {
                         Value::UniqueId(v) => vec.push(Some(v)),
-                        Value::Int64(v) => vec.push(Some(v as u32)),
-                        Value::Null => vec.push(None),
+                        // In range by promotion (the column would be Int64
+                        // otherwise); try_from is belt-and-braces.
+                        Value::Int64(v) => vec.push(u32::try_from(v).ok()),
                         _ => vec.push(None),
                     },
                     ColumnData::Int64(vec) => match val {
                         Value::Int64(v) => vec.push(Some(v)),
                         Value::UniqueId(v) => vec.push(Some(v as i64)),
-                        Value::Float64(v) => vec.push(Some(v as i64)),
-                        Value::Null => vec.push(None),
                         _ => vec.push(None),
                     },
                     ColumnData::Float64(vec) => match val {
                         Value::Float64(v) => vec.push(Some(v)),
                         Value::Int64(v) => vec.push(Some(v as f64)),
                         Value::UniqueId(v) => vec.push(Some(v as f64)),
-                        Value::Null => vec.push(None),
                         _ => vec.push(None),
                     },
-                    ColumnData::String(vec) => match val {
-                        Value::String(v) => vec.push(Some(v)),
-                        Value::Point { lat, lon } => {
-                            vec.push(Some(format!("POINT({} {})", lon, lat)))
-                        }
-                        Value::Int64(v) => vec.push(Some(v.to_string())),
-                        Value::Float64(v) => vec.push(Some(v.to_string())),
-                        Value::UniqueId(v) => vec.push(Some(v.to_string())),
-                        Value::Boolean(v) => vec.push(Some(v.to_string())),
-                        Value::DateTime(v) => vec.push(Some(v.to_string())),
-                        Value::Null => vec.push(None),
-                        _ => vec.push(None),
-                    },
+                    // Total over every Value variant (only Null/NodeRef → None).
+                    ColumnData::String(vec) => vec.push(value_to_text(val)),
                     ColumnData::Boolean(vec) => match val {
                         Value::Boolean(v) => vec.push(Some(v)),
-                        Value::Null => vec.push(None),
                         _ => vec.push(None),
                     },
                     ColumnData::DateTime(vec) => match val {
                         Value::DateTime(v) => vec.push(Some(v)),
-                        Value::Null => vec.push(None),
                         _ => vec.push(None),
                     },
                     ColumnData::Timestamp(vec) => match val {
                         Value::Timestamp(v) => vec.push(Some(v)),
-                        Value::Null => vec.push(None),
+                        // Date-only value in a mixed DateTime/Timestamp
+                        // column: midnight is the lossless embedding.
+                        Value::DateTime(d) => vec.push(d.and_hms_opt(0, 0, 0)),
                         _ => vec.push(None),
                     },
                     ColumnData::List(vec) => match val {
                         Value::List(v) => vec.push(Some(v)),
-                        Value::Null => vec.push(None),
-                        // A non-list value in an inferred-list column is a
-                        // heterogeneous mix; store it as a 1-element list so it
-                        // isn't silently dropped.
+                        Value::Null | Value::NodeRef(_) => vec.push(None),
+                        // A non-list value in a list column is a heterogeneous
+                        // mix; store it as a 1-element list so it isn't
+                        // silently dropped.
                         other => vec.push(Some(vec![other])),
                     },
                     ColumnData::Map(vec) => match val {
                         Value::Map(m) => vec.push(Some(m)),
-                        Value::Null => vec.push(None),
-                        // A non-map value in an inferred-map column: no faithful
-                        // map form. Null rather than a stringified surprise.
+                        // Promotion routes map/non-map mixes to String, so
+                        // only Null/NodeRef reach here.
                         _ => vec.push(None),
                     },
                 }
@@ -900,6 +887,103 @@ impl DataFrame {
             }
         };
         self.add_column(name, col_type, data)
+    }
+}
+
+/// Value-kind bits for the whole-column type scan in
+/// [`DataFrame::from_cypher_rows`]. `Point`, `Duration`, `Node`,
+/// `Relationship`, and `Path` don't fit columnar storage and always
+/// serialise via the String column, so they share [`kind::TEXTUAL`].
+mod kind {
+    pub const UNIQUE_ID: u16 = 1 << 0;
+    pub const INT64: u16 = 1 << 1;
+    pub const FLOAT64: u16 = 1 << 2;
+    pub const STRING: u16 = 1 << 3;
+    pub const BOOLEAN: u16 = 1 << 4;
+    pub const DATE: u16 = 1 << 5;
+    pub const TIMESTAMP: u16 = 1 << 6;
+    pub const LIST: u16 = 1 << 7;
+    pub const MAP: u16 = 1 << 8;
+    /// Point / Duration / Node / Relationship / Path — String-serialised.
+    pub const TEXTUAL: u16 = 1 << 9;
+}
+
+/// Kind bit contributed by one value. `Null` and the internal `NodeRef`
+/// contribute nothing (they stay null in any column).
+fn value_kind_bit(val: &Value) -> u16 {
+    match val {
+        Value::UniqueId(_) => kind::UNIQUE_ID,
+        Value::Int64(_) => kind::INT64,
+        Value::Float64(_) => kind::FLOAT64,
+        Value::String(_) => kind::STRING,
+        Value::Boolean(_) => kind::BOOLEAN,
+        Value::DateTime(_) => kind::DATE,
+        Value::Timestamp(_) => kind::TIMESTAMP,
+        // Lists and maps get a dedicated columnar shape so they round-trip
+        // structurally (UNWIND/IN, `m['k']`/`m.k`), not as stringified JSON.
+        Value::List(_) => kind::LIST,
+        Value::Map(_) => kind::MAP,
+        Value::Point { .. }
+        | Value::Duration { .. }
+        | Value::Node(_)
+        | Value::Relationship(_)
+        | Value::Path(_) => kind::TEXTUAL,
+        Value::Null | Value::NodeRef(_) => 0,
+    }
+}
+
+/// Promote a column's observed kind set to the narrowest lossless
+/// ColumnType. Promotion matrix:
+///
+/// - all-null → Int64 (historic default)
+/// - single kind → its natural column type (TEXTUAL → String)
+/// - UniqueId + Int64 → UniqueId if every Int64 fits `u32`, else Int64
+/// - {UniqueId, Int64} + Float64 → Float64
+/// - DateTime + Timestamp → Timestamp (dates embed as midnight)
+/// - any mix containing a List → List (non-list cells wrap as 1-element lists)
+/// - anything else → String, each value in its natural text form
+fn resolve_column_type(kinds: u16, ints_fit_u32: bool) -> ColumnType {
+    const NUMERIC: u16 = kind::UNIQUE_ID | kind::INT64 | kind::FLOAT64;
+    match kinds {
+        0 => ColumnType::Int64,
+        k if k == kind::UNIQUE_ID => ColumnType::UniqueId,
+        k if k == kind::INT64 => ColumnType::Int64,
+        k if k == kind::UNIQUE_ID | kind::INT64 => {
+            if ints_fit_u32 {
+                ColumnType::UniqueId
+            } else {
+                ColumnType::Int64
+            }
+        }
+        k if k & !NUMERIC == 0 => ColumnType::Float64, // numeric mix with Float64
+        k if k == kind::STRING => ColumnType::String,
+        k if k == kind::BOOLEAN => ColumnType::Boolean,
+        k if k == kind::DATE => ColumnType::DateTime,
+        k if k & !(kind::DATE | kind::TIMESTAMP) == 0 => ColumnType::Timestamp,
+        k if k & kind::LIST != 0 => ColumnType::List,
+        k if k == kind::MAP => ColumnType::Map,
+        _ => ColumnType::String,
+    }
+}
+
+/// Natural, unquoted text form for a value landing in a String column —
+/// total over every variant so nothing inferred can silently fall to null
+/// (only `Null` and the internal `NodeRef` map to `None`).
+fn value_to_text(val: Value) -> Option<String> {
+    match val {
+        Value::Null | Value::NodeRef(_) => None,
+        Value::String(v) => Some(v),
+        Value::Int64(v) => Some(v.to_string()),
+        Value::UniqueId(v) => Some(v.to_string()),
+        Value::Float64(v) => Some(v.to_string()),
+        Value::Boolean(v) => Some(v.to_string()),
+        Value::DateTime(v) => Some(v.format("%Y-%m-%d").to_string()),
+        // ISO 8601 — round-trips as text.
+        Value::Timestamp(v) => Some(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        // WKT, matching add_constant_column's Point form.
+        Value::Point { lat, lon } => Some(format!("POINT({} {})", lon, lat)),
+        // Display forms for the query-time-only / structural variants.
+        other => Some(format_value(&other)),
     }
 }
 
@@ -1259,8 +1343,9 @@ mod tests {
             ("id".to_string(), ColumnType::Int64),
             ("name".to_string(), ColumnType::String),
         ]);
-        assert_eq!(df.get_column_type("id"), ColumnType::Int64);
-        assert_eq!(df.get_column_type("name"), ColumnType::String);
+        assert_eq!(df.get_column_type("id"), Some(ColumnType::Int64));
+        assert_eq!(df.get_column_type("name"), Some(ColumnType::String));
+        assert_eq!(df.get_column_type("missing"), None);
     }
 
     #[test]
@@ -1295,6 +1380,221 @@ mod tests {
             ColumnData::String(vec![]),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dataframe_add_column_length_mismatch() {
+        let mut df = DataFrame::new(vec![]);
+        df.add_column(
+            "a".to_string(),
+            ColumnType::Int64,
+            ColumnData::Int64(vec![Some(1), Some(2)]),
+        )
+        .unwrap();
+        // Wrong length → rejected.
+        let result = df.add_column(
+            "b".to_string(),
+            ColumnType::String,
+            ColumnData::String(vec![Some("x".to_string())]),
+        );
+        assert!(result.is_err(), "non-rectangular add must fail");
+        assert_eq!(df.column_count(), 1);
+        // Matching length → accepted.
+        df.add_column(
+            "b".to_string(),
+            ColumnType::String,
+            ColumnData::String(vec![Some("x".to_string()), None]),
+        )
+        .unwrap();
+        assert_eq!(df.row_count(), 2);
+    }
+
+    // ========================================================================
+    // from_cypher_rows — whole-column type promotion
+    // ========================================================================
+
+    fn one_col(rows: Vec<Value>) -> DataFrame {
+        DataFrame::from_cypher_rows(
+            vec!["c".to_string()],
+            rows.into_iter().map(|v| vec![v]).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_promotion_int_then_float_becomes_float() {
+        let df = one_col(vec![Value::Int64(1), Value::Float64(1.5)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Float64));
+        assert_eq!(df.get_value(0, "c"), Some(Value::Float64(1.0)));
+        assert_eq!(df.get_value(1, "c"), Some(Value::Float64(1.5)));
+    }
+
+    #[test]
+    fn test_promotion_float_then_int_becomes_float() {
+        let df = one_col(vec![Value::Float64(2.5), Value::Int64(7)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Float64));
+        assert_eq!(df.get_value(1, "c"), Some(Value::Float64(7.0)));
+    }
+
+    #[test]
+    fn test_promotion_uniqueid_with_big_int64_widens_to_int64() {
+        let big = u32::MAX as i64 + 1_000;
+        let df = one_col(vec![Value::UniqueId(7), Value::Int64(big)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Int64));
+        assert_eq!(df.get_value(0, "c"), Some(Value::Int64(7)));
+        assert_eq!(df.get_value(1, "c"), Some(Value::Int64(big)));
+    }
+
+    #[test]
+    fn test_promotion_uniqueid_with_negative_int64_widens_to_int64() {
+        let df = one_col(vec![Value::UniqueId(7), Value::Int64(-1)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Int64));
+        assert_eq!(df.get_value(1, "c"), Some(Value::Int64(-1)));
+    }
+
+    #[test]
+    fn test_promotion_uniqueid_with_small_int64_stays_uniqueid() {
+        let df = one_col(vec![Value::UniqueId(7), Value::Int64(42)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::UniqueId));
+        assert_eq!(df.get_value(1, "c"), Some(Value::UniqueId(42)));
+    }
+
+    #[test]
+    fn test_promotion_bool_and_int_becomes_string() {
+        let df = one_col(vec![Value::Boolean(true), Value::Int64(3)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::String));
+        assert_eq!(df.get_value(0, "c"), Some(Value::String("true".into())));
+        assert_eq!(df.get_value(1, "c"), Some(Value::String("3".into())));
+    }
+
+    #[test]
+    fn test_promotion_all_null_defaults_to_int64() {
+        let df = one_col(vec![Value::Null, Value::Null]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Int64));
+        assert_eq!(df.get_value(0, "c"), None);
+    }
+
+    #[test]
+    fn test_promotion_null_interleaved_does_not_disturb_type() {
+        let df = one_col(vec![Value::Null, Value::Int64(1), Value::Float64(0.5)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Float64));
+        assert_eq!(df.get_value(0, "c"), None);
+        assert_eq!(df.get_value(2, "c"), Some(Value::Float64(0.5)));
+    }
+
+    #[test]
+    fn test_promotion_list_mix_wraps_scalars() {
+        let df = one_col(vec![
+            Value::Int64(5),
+            Value::List(vec![Value::Int64(1), Value::Int64(2)]),
+        ]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::List));
+        assert_eq!(
+            df.get_value(0, "c"),
+            Some(Value::List(vec![Value::Int64(5)]))
+        );
+    }
+
+    #[test]
+    fn test_promotion_date_and_timestamp_becomes_timestamp() {
+        use chrono::NaiveDate;
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let ts = date.and_hms_opt(10, 30, 45).unwrap();
+        let df = one_col(vec![Value::DateTime(date), Value::Timestamp(ts)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Timestamp));
+        assert_eq!(
+            df.get_value(0, "c"),
+            Some(Value::Timestamp(date.and_hms_opt(0, 0, 0).unwrap()))
+        );
+        assert_eq!(df.get_value(1, "c"), Some(Value::Timestamp(ts)));
+    }
+
+    #[test]
+    fn test_promotion_map_and_scalar_becomes_string() {
+        let mut m = BTreeMap::new();
+        m.insert("k".to_string(), Value::Int64(1));
+        let df = one_col(vec![Value::Map(m), Value::Int64(2)]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::String));
+        assert_eq!(df.get_value(0, "c"), Some(Value::String("{k: 1}".into())));
+        assert_eq!(df.get_value(1, "c"), Some(Value::String("2".into())));
+    }
+
+    #[test]
+    fn test_timestamp_column_roundtrip() {
+        use chrono::NaiveDate;
+        let ts = NaiveDate::from_ymd_opt(2024, 3, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        let df = one_col(vec![Value::Timestamp(ts), Value::Null]);
+        assert_eq!(df.get_column_type("c"), Some(ColumnType::Timestamp));
+        assert_eq!(df.get_value(0, "c"), Some(Value::Timestamp(ts)));
+        assert_eq!(df.get_value(1, "c"), None);
+    }
+
+    /// Every persistable Value variant, fed as a single-value column, must
+    /// come back non-null: no inference arm may point at a fill arm that
+    /// drops it (`Null` and the internal `NodeRef` are the only variants
+    /// allowed to read back as None).
+    #[test]
+    fn test_every_variant_survives_single_column() {
+        use chrono::NaiveDate;
+        let date = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let node = NodeValue {
+            id: 1,
+            labels: vec!["L".to_string()],
+            properties: BTreeMap::new(),
+        };
+        let rel = RelValue {
+            id: 1,
+            start_id: 1,
+            end_id: 2,
+            rel_type: "R".to_string(),
+            properties: BTreeMap::new(),
+        };
+        let representatives = vec![
+            Value::UniqueId(1),
+            Value::Int64(-5),
+            Value::Float64(1.5),
+            Value::String("s".to_string()),
+            Value::Boolean(false),
+            Value::DateTime(date),
+            Value::Timestamp(date.and_hms_opt(1, 2, 3).unwrap()),
+            Value::Point { lat: 1.0, lon: 2.0 },
+            Value::Duration {
+                months: 1,
+                days: 2,
+                seconds: 3,
+            },
+            Value::List(vec![Value::Int64(1)]),
+            Value::Map(BTreeMap::new()),
+            Value::Node(Box::new(node)),
+            Value::Relationship(Box::new(rel.clone())),
+            Value::Path(Box::new(PathValue {
+                nodes: vec![],
+                rels: vec![rel],
+            })),
+        ];
+        for val in representatives {
+            let name = val.type_name();
+            let df = one_col(vec![val]);
+            let got = df.get_value(0, "c");
+            assert!(
+                !matches!(got, None | Some(Value::Null)),
+                "single-column {} value read back as null (got {:?})",
+                name,
+                got
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_cypher_rows_empty_defaults_int64() {
+        let df =
+            DataFrame::from_cypher_rows(vec!["a".to_string(), "b".to_string()], vec![]).unwrap();
+        assert_eq!(df.row_count(), 0);
+        assert_eq!(df.get_column_type("a"), Some(ColumnType::Int64));
+        assert_eq!(df.get_column_type("b"), Some(ColumnType::Int64));
     }
 
     #[test]

@@ -27,8 +27,10 @@ fn check_data_validity(df_data: &DataFrame, unique_id_field: &str) -> Result<(),
 fn get_column_types(df_data: &DataFrame) -> HashMap<String, String> {
     let mut types = HashMap::new();
     for col_name in df_data.get_column_names() {
-        let col_type = df_data.get_column_type(&col_name);
-        types.insert(col_name.clone(), col_type.to_string());
+        // Names come from get_column_names(), so the lookup always succeeds.
+        if let Some(col_type) = df_data.get_column_type(&col_name) {
+            types.insert(col_name.clone(), col_type.to_string());
+        }
     }
     types
 }

@@ -365,3 +365,132 @@ class TestQueryModeParamValidation:
                 query="MATCH (a:Node {id: 1}), (b:Node {id: 2}) RETURN a.id AS src, b.id AS tgt",
                 column_types={"src": "integer"},
             )
+
+
+class TestQueryDerivedConnectionProps:
+    """Round-trip fidelity for add_connections(query=...) edge properties.
+
+    Exercises DataFrame::from_cypher_rows' whole-column type promotion:
+    a mixed Int64/Float64 column must come back as floats (not truncated
+    ints), datetime() values must survive (previously an entire datetime
+    column silently became null), and large integers must never be
+    narrowed to u32.
+    """
+
+    def _graph(self):
+        graph = KnowledgeGraph()
+        nodes = pd.DataFrame({"id": [1, 2, 3], "name": ["A", "B", "C"]})
+        graph.add_nodes(nodes, "P", "id", "name")
+        return graph
+
+    def test_mixed_int_float_weights_promote_to_float(self):
+        graph = self._graph()
+        graph.cypher("MATCH (a:P {id: 1}), (b:P {id: 2}) CREATE (a)-[:R {w: 1}]->(b)")
+        graph.cypher("MATCH (a:P {id: 2}), (b:P {id: 3}) CREATE (a)-[:R {w: 1.5}]->(b)")
+        graph.add_connections(
+            None,
+            "DERIVED",
+            "P",
+            "src",
+            "P",
+            "tgt",
+            query="MATCH (a:P)-[r:R]->(b:P) RETURN a.id AS src, b.id AS tgt, r.w AS w",
+        )
+        result = graph.cypher("MATCH (:P)-[d:DERIVED]->(:P) RETURN d.w AS w ORDER BY w")
+        assert [row["w"] for row in result] == [1.0, 1.5]
+
+    def test_datetime_column_roundtrips(self):
+        from datetime import datetime
+
+        graph = self._graph()
+        graph.cypher("MATCH (a:P {id: 1}) SET a.ts = datetime('2024-03-15T10:30:45')")
+        graph.add_connections(
+            None,
+            "TS",
+            "P",
+            "src",
+            "P",
+            "tgt",
+            query=("MATCH (a:P {id: 1}), (b:P {id: 2}) RETURN a.id AS src, b.id AS tgt, a.ts AS ts"),
+        )
+        result = graph.cypher("MATCH (:P)-[e:TS]->(:P) RETURN e.ts AS ts")
+        assert len(result) == 1
+        assert result[0]["ts"] == datetime(2024, 3, 15, 10, 30, 45)
+
+    def test_large_ints_not_narrowed(self):
+        big = 5_000_000_000  # > u32::MAX
+        graph = self._graph()
+        graph.cypher(f"MATCH (a:P {{id: 1}}) SET a.big = {big}")
+        graph.cypher("MATCH (a:P {id: 2}) SET a.big = 7")
+        graph.add_connections(
+            None,
+            "BIG",
+            "P",
+            "src",
+            "P",
+            "tgt",
+            query=("MATCH (a:P), (b:P {id: 3}) WHERE a.big IS NOT NULL RETURN a.id AS src, b.id AS tgt, a.big AS big"),
+        )
+        result = graph.cypher("MATCH (:P)-[e:BIG]->(:P) RETURN e.big AS big ORDER BY big")
+        assert [row["big"] for row in result] == [7, big]
+
+    def test_mixed_bool_int_promotes_to_string_not_null(self):
+        graph = self._graph()
+        graph.cypher("MATCH (a:P {id: 1}) SET a.flag = true")
+        graph.cypher("MATCH (a:P {id: 2}) SET a.flag = 3")
+        graph.add_connections(
+            None,
+            "FLAG",
+            "P",
+            "src",
+            "P",
+            "tgt",
+            query=(
+                "MATCH (a:P), (b:P {id: 3}) WHERE a.flag IS NOT NULL "
+                "RETURN a.id AS src, b.id AS tgt, a.flag AS flag ORDER BY a.id"
+            ),
+        )
+        result = graph.cypher("MATCH (:P)-[e:FLAG]->(:P) RETURN e.flag AS flag ORDER BY flag")
+        # No lossless common type for bool+int: values survive as strings.
+        assert [row["flag"] for row in result] == ["3", "true"]
+
+
+class TestConnectionListColumnRegression:
+    """Regression: a pandas list-valued column through add_connections must
+    reach the edge intact (dev-docs 2026-07-09 reported it arriving as None
+    while the same column through add_nodes survived; fixed in 10c6dbe1)."""
+
+    def _graph(self):
+        graph = KnowledgeGraph()
+        nodes = pd.DataFrame({"id": [1, 2], "name": ["A", "B"]})
+        graph.add_nodes(nodes, "Person", "id", "name")
+        return graph
+
+    def test_list_column_survives_add_connections(self):
+        graph = self._graph()
+        edges = pd.DataFrame({"src": [1], "tgt": [2], "tags": [["x", "y", "z"]], "weight": [0.5]})
+        graph.add_connections(edges, "KNOWS", "Person", "src", "Person", "tgt")
+        result = graph.cypher("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.tags AS tags, r.weight AS w")
+        assert len(result) == 1
+        assert result[0]["tags"] == ["x", "y", "z"]
+        assert result[0]["w"] == 0.5
+
+    def test_list_column_edges_match_nodes_path(self):
+        graph = self._graph()
+        # Same list through the nodes path...
+        nodes = pd.DataFrame({"id": [10], "tags": [[1, 2, 3]]})
+        graph.add_nodes(nodes, "Thing", "id")
+        # ...and the edges path.
+        edges = pd.DataFrame({"src": [1], "tgt": [2], "tags": [[1, 2, 3]]})
+        graph.add_connections(edges, "KNOWS", "Person", "src", "Person", "tgt")
+        node_tags = graph.cypher("MATCH (t:Thing) RETURN t.tags AS tags")[0]["tags"]
+        edge_tags = graph.cypher("MATCH ()-[r:KNOWS]->() RETURN r.tags AS tags")[0]["tags"]
+        assert node_tags == edge_tags == [1, 2, 3]
+
+    def test_list_column_with_leading_null(self):
+        graph = self._graph()
+        edges = pd.DataFrame({"src": [1, 2], "tgt": [2, 1], "tags": [None, ["x", "y"]]})
+        graph.add_connections(edges, "KNOWS", "Person", "src", "Person", "tgt")
+        result = graph.cypher("MATCH (a:Person)-[r:KNOWS]->(:Person) RETURN a.id AS s, r.tags AS tags ORDER BY s")
+        assert result[0]["tags"] is None
+        assert result[1]["tags"] == ["x", "y"]
