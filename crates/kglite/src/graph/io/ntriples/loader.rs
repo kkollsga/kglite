@@ -22,7 +22,7 @@ use std::time::Instant;
 use super::column_builder::ColumnTypeMeta;
 use super::parser::{
     extract_lang_text, language_matches, parse_line, parse_qcode_number, typed_literal_to_value,
-    EdgeBuffer, EntityAccumulator, Object, Predicate, Subject,
+    CompactNTripleEdge, EdgeBuffer, EntityAccumulator, Object, Predicate, Subject,
 };
 use super::writer::{create_edges_from_buffer, create_edges_with_qnum_map};
 use super::{
@@ -1485,7 +1485,11 @@ fn flush_entity(
                 for (pred_label, target_qcode) in acc.outgoing_edges {
                     if let Some(tgt_num) = parse_qcode_number(&target_qcode) {
                         let pred_key = graph.interner.get_or_intern(&pred_label);
-                        buf.push((src_num, tgt_num, pred_key));
+                        buf.push(CompactNTripleEdge {
+                            source_qnum: src_num,
+                            target_qnum: tgt_num,
+                            predicate: pred_key,
+                        });
                     }
                 }
             }
@@ -1615,10 +1619,7 @@ mod tests {
     #[test]
     fn test_edge_buffer_compact_size() {
         // Verify compact edge buffer entry is much smaller than string-based
-        assert_eq!(
-            std::mem::size_of::<(u32, u32, InternedKey)>(),
-            16 // 4 + 4 + 8
-        );
+        assert_eq!(std::mem::size_of::<CompactNTripleEdge>(), 16);
         // String tuple is at least 72 bytes on stack (3 × 24 for String)
         assert!(std::mem::size_of::<(String, String, String)>() >= 72);
     }

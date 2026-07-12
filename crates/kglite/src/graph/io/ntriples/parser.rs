@@ -94,8 +94,29 @@ pub(super) enum EdgeBuffer {
     Strings(Vec<(String, String, String)>),
     /// Mapped mode: (source_qnum, target_qnum, interned_predicate) — 16 bytes each.
     /// File-backed (MmapOrVec) in disk mode to avoid holding ~14 GB in RAM.
-    Compact(MmapOrVec<(u32, u32, InternedKey)>),
+    Compact(MmapOrVec<CompactNTripleEdge>),
 }
+
+/// Transient compact edge produced during N-Triples phase 1 and consumed in
+/// phase 2. The named C layout avoids relying on Rust tuple layout for the
+/// mmap-backed `edges.bin` spill file.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub(super) struct CompactNTripleEdge {
+    pub(super) source_qnum: u32,
+    pub(super) target_qnum: u32,
+    pub(super) predicate: InternedKey,
+}
+
+const _: () = assert!(std::mem::size_of::<CompactNTripleEdge>() == 16);
+const _: () = assert!(std::mem::align_of::<CompactNTripleEdge>() == 8);
+const _: () = assert!(std::mem::offset_of!(CompactNTripleEdge, source_qnum) == 0);
+const _: () = assert!(std::mem::offset_of!(CompactNTripleEdge, target_qnum) == 4);
+const _: () = assert!(std::mem::offset_of!(CompactNTripleEdge, predicate) == 8);
+
+// SAFETY: repr(C), the asserted field offsets cover all 16 bytes without
+// padding, and InternedKey is repr(transparent) over u64.
+unsafe impl crate::graph::storage::mapped::mmap_vec::MmapPod for CompactNTripleEdge {}
 
 impl EdgeBuffer {
     pub(super) fn len(&self) -> usize {
@@ -429,5 +450,36 @@ mod miri_tests {
         let (_, predicate, object) = parse_line(line).expect("valid UTF-8 literal");
         assert!(matches!(predicate, Predicate::Label));
         assert!(matches!(object, Object::LangLiteral(value, "de") if value == "München"));
+    }
+
+    #[test]
+    fn compact_edge_raw_bytes_round_trip_heap_and_mapped() {
+        let record = CompactNTripleEdge {
+            source_qnum: 0x1122_3344,
+            target_qnum: 0x5566_7788,
+            predicate: InternedKey::from_u64(0x99aa_bbcc_ddee_ff00),
+        };
+        let expected = [
+            record.source_qnum.to_ne_bytes().as_slice(),
+            record.target_qnum.to_ne_bytes().as_slice(),
+            record.predicate.as_u64().to_ne_bytes().as_slice(),
+        ]
+        .concat();
+
+        let heap = MmapOrVec::from_vec(vec![record]);
+        assert_eq!(heap.as_raw_bytes(), expected);
+        assert_eq!(heap.get(0), record);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mapped_path = dir.path().join("compact-edge.mmap");
+        let saved_path = dir.path().join("compact-edge.raw");
+        let mut mapped = MmapOrVec::mapped(&mapped_path, 1).unwrap();
+        mapped.push(record);
+        assert_eq!(mapped.as_raw_bytes(), expected);
+        mapped.save_to_file(&saved_path).unwrap();
+
+        let reloaded = MmapOrVec::<CompactNTripleEdge>::load_mapped(&saved_path, 1).unwrap();
+        assert_eq!(reloaded.as_raw_bytes(), expected);
+        assert_eq!(reloaded.get(0), record);
     }
 }

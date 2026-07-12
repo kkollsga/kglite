@@ -7,7 +7,7 @@ use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use crate::graph::storage::{GraphRead, GraphWrite};
 use std::collections::{HashMap, HashSet};
 
-use super::parser::{parse_qcode_number, EdgeBuffer};
+use super::parser::{parse_qcode_number, CompactNTripleEdge, EdgeBuffer};
 use super::{Cancelled, NTriplesStats, ProgressEvent, ProgressSink, ProgressValue as PV};
 
 /// Edges between Phase 2 progress callbacks. Roughly ~200 ms apart at
@@ -68,11 +68,16 @@ pub(super) fn create_edges_with_qnum_map(
 
     if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
         for i in 0..buf_len {
-            let (src_num, tgt_num, pred_key) = buf.get(i);
+            let edge = buf.get(i);
+            let (src_num, tgt_num, pred_key) = (edge.source_qnum, edge.target_qnum, edge.predicate);
             if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
                 dg.pending_edges
                     .get_mut()
-                    .push((src_idx, tgt_idx, pred_key.as_u64()));
+                    .push(crate::graph::storage::disk::csr::PendingEdge {
+                        source: src_idx,
+                        target: tgt_idx,
+                        connection_type: pred_key.as_u64(),
+                    });
                 dg.edge_count += 1;
                 dg.next_edge_idx += 1;
                 conn_types_seen.insert(pred_key);
@@ -112,12 +117,12 @@ pub(super) fn create_edges_from_buffer(
     }
 }
 
-/// Compact path: edges stored as (u32, u32, InternedKey).
+/// Compact path: edges stored as [`CompactNTripleEdge`].
 /// Uses dense Vec lookup (not HashMap) for cache-friendly O(1) access.
 /// Streams edges directly — no intermediate allocation.
 pub(super) fn create_edges_compact(
     graph: &mut DirGraph,
-    buf: &MmapOrVec<(u32, u32, InternedKey)>,
+    buf: &MmapOrVec<CompactNTripleEdge>,
     stats: &mut NTriplesStats,
     sink: Option<&dyn ProgressSink>,
 ) -> Result<(), String> {
@@ -198,11 +203,17 @@ pub(super) fn create_edges_compact(
         // Keep this loop LEAN — no random I/O per edge.
         if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
             for i in 0..buf_len {
-                let (src_num, tgt_num, pred_key) = buf.get(i);
+                let edge = buf.get(i);
+                let (src_num, tgt_num, pred_key) =
+                    (edge.source_qnum, edge.target_qnum, edge.predicate);
                 if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
-                    dg.pending_edges
-                        .get_mut()
-                        .push((src_idx, tgt_idx, pred_key.as_u64()));
+                    dg.pending_edges.get_mut().push(
+                        crate::graph::storage::disk::csr::PendingEdge {
+                            source: src_idx,
+                            target: tgt_idx,
+                            connection_type: pred_key.as_u64(),
+                        },
+                    );
                     dg.edge_count += 1;
                     dg.next_edge_idx += 1;
                     conn_types_seen.insert(pred_key);
@@ -223,7 +234,8 @@ pub(super) fn create_edges_compact(
     } else {
         // Standard path for petgraph: per-edge add_edge
         for i in 0..buf_len {
-            let (src_num, tgt_num, pred_key) = buf.get(i);
+            let edge = buf.get(i);
+            let (src_num, tgt_num, pred_key) = (edge.source_qnum, edge.target_qnum, edge.predicate);
             if let (Some(src_idx), Some(tgt_idx)) = (lookup(src_num), lookup(tgt_num)) {
                 let src = petgraph::graph::NodeIndex::new(src_idx as usize);
                 let tgt = petgraph::graph::NodeIndex::new(tgt_idx as usize);

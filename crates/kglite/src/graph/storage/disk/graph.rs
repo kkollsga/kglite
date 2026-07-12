@@ -22,7 +22,7 @@ use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, TOMBSTONE_EDGE};
+use super::csr::{CsrEdge, DiskNodeSlot, EdgeEndpoints, PendingEdge, TOMBSTONE_EDGE};
 use super::edge_properties::EdgePropertyStore;
 use super::property_index;
 
@@ -180,7 +180,7 @@ pub struct DiskGraph {
     // (add_edge with defer_csr, build_csr_from_pending, compact) — see the
     // struct-level SAFETY block for the full accounting of interior-mutability
     // fields.
-    pub(crate) pending_edges: UnsafeCell<MmapOrVec<(u32, u32, u64)>>,
+    pub(crate) pending_edges: UnsafeCell<MmapOrVec<PendingEdge>>,
 
     // ── Mutation overflow (for incremental edges after CSR) ──
     pub(super) overflow_out: HashMap<u32, Vec<CsrEdge>>,
@@ -1692,7 +1692,11 @@ impl DiskGraph {
             // responsible for `build_csr_from_pending()` at batch end.
             // Set explicitly by bulk loaders (ntriples); off by default so
             // individual Cypher mutations stay visible via overflow.
-            self.pending_edges.get_mut().push((src, tgt, ct_u64));
+            self.pending_edges.get_mut().push(PendingEdge {
+                source: src,
+                target: tgt,
+                connection_type: ct_u64,
+            });
         } else {
             // Post-CSR mode: go directly to overflow + edge_endpoints.
             // This makes new edges immediately visible to queries via
@@ -1942,7 +1946,7 @@ impl DiskGraph {
         let total_endpoints = self.next_edge_idx as usize;
 
         let pending_path = self.active_write_dir().join("_compact_pending.bin");
-        let mut new_pending: MmapOrVec<(u32, u32, u64)> =
+        let mut new_pending: MmapOrVec<PendingEdge> =
             MmapOrVec::mapped(&pending_path, total_endpoints)?;
 
         // Edge index remapping: old_idx → new_idx
@@ -1956,7 +1960,11 @@ impl DiskGraph {
                 && (ep.target as usize) < node_bound
             {
                 *remap_slot = live_count as u32;
-                new_pending.push((ep.source, ep.target, ep.connection_type));
+                new_pending.push(PendingEdge {
+                    source: ep.source,
+                    target: ep.target,
+                    connection_type: ep.connection_type,
+                });
                 live_count += 1;
             }
         }

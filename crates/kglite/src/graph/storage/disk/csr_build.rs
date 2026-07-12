@@ -1,5 +1,5 @@
 //! CSR construction primitives — extracted from `builder.rs` so the
-//! merge-sort pipeline can be driven from any `MmapOrVec<(u32, u32, u64)>`
+//! merge-sort pipeline can be driven from any `MmapOrVec<PendingEdge>`
 //! source (the existing `pending_edges` build path, or the streaming
 //! subgraph filter that ships in a later phase).
 //!
@@ -12,14 +12,14 @@
 //!
 //! Design notes:
 //! - Reads `pending` three times (degree count + out merge sort + in merge
-//!   sort). All three are sequential; mmap'd `MmapOrVec<(u32, u32, u64)>`
+//!   sort). All three are sequential; mmap'd `MmapOrVec<PendingEdge>`
 //!   means the OS handles paging.
 //! - Writes `edge_endpoints.bin`, `out_offsets.bin`, `in_offsets.bin`,
 //!   `out_edges.bin`, `in_edges.bin` into `build_dir`.
 //! - Uses `tmp_dir` for sort spill chunks (`chunk_<label>_<n>.bin`); chunk
 //!   files are removed at the end of each merge phase.
 
-use super::csr::{CsrEdge, EdgeEndpoints, MergeSortEntry};
+use super::csr::{CsrEdge, EdgeEndpoints, MergeSortEntry, PendingEdge};
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use std::collections::HashMap;
 use std::path::Path;
@@ -82,7 +82,7 @@ pub(super) struct CsrArtifacts {
 /// `tmp_dir` holds spill chunks during the merge phase. Both directories
 /// must already exist; this function does not create them.
 pub(super) fn build_csr_files(
-    pending: &MmapOrVec<(u32, u32, u64)>,
+    pending: &MmapOrVec<PendingEdge>,
     edge_count: usize,
     node_bound: usize,
     build_dir: &Path,
@@ -97,7 +97,8 @@ pub(super) fn build_csr_files(
     let mut in_counts = vec![0u64; node_bound];
     let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
     for i in 0..edge_count {
-        let (src, tgt, ct) = pending.get(i);
+        let edge = pending.get(i);
+        let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
         edge_endpoints.push(EdgeEndpoints {
             source: src,
             target: tgt,
@@ -184,7 +185,7 @@ pub(super) fn build_csr_files(
 /// at the end.
 #[allow(clippy::too_many_arguments)]
 fn merge_sort_build(
-    pending: &MmapOrVec<(u32, u32, u64)>,
+    pending: &MmapOrVec<PendingEdge>,
     edge_count: usize,
     by_source: bool,
     chunk_dir: &Path,
@@ -217,7 +218,8 @@ fn merge_sort_build(
         let step = std::time::Instant::now();
         let mut entries: Vec<MergeSortEntry> = Vec::with_capacity(edge_count);
         for i in 0..edge_count {
-            let (src, tgt, ct) = pending.get(i);
+            let edge = pending.get(i);
+            let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
             let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
             entries.push(MergeSortEntry {
                 key,
@@ -262,7 +264,8 @@ fn merge_sort_build(
 
         let mut chunk: Vec<MergeSortEntry> = Vec::with_capacity(len);
         for i in start..end {
-            let (src, tgt, ct) = pending.get(i);
+            let edge = pending.get(i);
+            let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
             let (key, peer) = if by_source { (src, tgt) } else { (tgt, src) };
             chunk.push(MergeSortEntry {
                 key,

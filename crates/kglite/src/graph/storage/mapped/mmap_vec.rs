@@ -45,21 +45,6 @@ macro_rules! impl_mmap_pod_primitive {
 
 impl_mmap_pod_primitive!(u8, u32, u64, i32, i64, f64);
 
-// These two tuple layouts predate the marker trait and are persisted as
-// fixed-size scratch/disk records. Compile-time layout checks keep a compiler
-// change from silently introducing padding; every component accepts all bits.
-const _: () = assert!(std::mem::size_of::<(u32, u32, u64)>() == 16);
-const _: () = assert!(std::mem::align_of::<(u32, u32, u64)>() == 8);
-// SAFETY: layout is asserted above; u32/u64 are plain old data.
-unsafe impl MmapPod for (u32, u32, u64) {}
-
-const _: () =
-    assert!(std::mem::size_of::<(u32, u32, crate::graph::storage::interner::InternedKey)>() == 16);
-const _: () =
-    assert!(std::mem::align_of::<(u32, u32, crate::graph::storage::interner::InternedKey)>() == 8);
-// SAFETY: layout is asserted above; InternedKey is a transparent u64 value.
-unsafe impl MmapPod for (u32, u32, crate::graph::storage::interner::InternedKey) {}
-
 /// A resizable buffer of [`MmapPod`] values, optionally file-backed.
 ///
 /// - `Heap` variant: plain `Vec<T>` — default, no file I/O.

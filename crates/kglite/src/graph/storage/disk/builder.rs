@@ -144,7 +144,8 @@ impl DiskGraph {
         let mut in_counts = vec![0u64; node_bound];
         let mut edge_type_counts: HashMap<u64, usize> = HashMap::new();
         for i in 0..pending.len() {
-            let (src, tgt, ct) = pending.get(i);
+            let edge = pending.get(i);
+            let (src, tgt, ct) = (edge.source, edge.target, edge.connection_type);
             edge_endpoints_vec.push(EdgeEndpoints {
                 source: src,
                 target: tgt,

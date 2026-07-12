@@ -15,7 +15,7 @@
 //! sequential — no per-node random edge lookups.
 
 use crate::graph::schema::{CowSelection, DirGraph, InternedKey};
-use crate::graph::storage::disk::csr::TOMBSTONE_EDGE;
+use crate::graph::storage::disk::csr::{PendingEdge, TOMBSTONE_EDGE};
 use crate::graph::storage::disk::graph::DiskGraph;
 use crate::graph::storage::mapped::mmap_vec::MmapOrVec;
 use std::path::Path;
@@ -272,9 +272,9 @@ pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult {
 // ── Pass A with file output — Phase 4 ──────────────────────────────────────
 //
 // Same sequential scan as `pass_a_scan` but also spills the kept edges to
-// a `MmapOrVec<(u32, u32, u64)>` at `kept_edges_path`. The on-disk record
+// a `MmapOrVec<PendingEdge>` at `kept_edges_path`. The on-disk record
 // shape matches the existing CSR builder's input
-// (`csr_build::build_csr_files` consumes `&MmapOrVec<(u32, u32, u64)>`),
+// (`csr_build::build_csr_files` consumes `&MmapOrVec<PendingEdge>`),
 // so a later phase can drive the merge sort over this file by translating
 // `(src, tgt)` via the rank index in the iterator.
 //
@@ -331,7 +331,7 @@ pub fn pass_a_scan_to_file(
         }
     }
 
-    let mut kept_edges: MmapOrVec<(u32, u32, u64)> = MmapOrVec::mapped(kept_edges_path, n_edges)
+    let mut kept_edges: MmapOrVec<PendingEdge> = MmapOrVec::mapped(kept_edges_path, n_edges)
         .unwrap_or_else(|_| MmapOrVec::with_capacity(n_edges));
 
     source.edge_endpoints.advise_sequential();
@@ -349,7 +349,11 @@ pub fn pass_a_scan_to_file(
         }
         kept_nodes.set(ep.source as usize);
         kept_nodes.set(ep.target as usize);
-        kept_edges.push((ep.source, ep.target, ep.connection_type));
+        kept_edges.push(PendingEdge {
+            source: ep.source,
+            target: ep.target,
+            connection_type: ep.connection_type,
+        });
         kept_edge_count += 1;
     }
 
