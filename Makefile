@@ -141,6 +141,7 @@ check-api-chokepoint:
 ## Run all lint checks (Rust + Python + stubs) — use before pushing
 lint: check-api-chokepoint
 	$(ACTIVATE) && python scripts/check_cypher_clean_room.py
+	$(ACTIVATE) && python scripts/check_dependency_licenses.py
 	cargo fmt -- --check
 	cargo clippy --all-targets -- -D warnings
 	$(ACTIVATE) && ruff format --check . && ruff check .

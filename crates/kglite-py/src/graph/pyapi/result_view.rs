@@ -83,7 +83,7 @@ struct LazyRows {
     cache: Mutex<Vec<Option<Vec<PreProcessedValue>>>>,
 }
 
-#[pyclass(name = "ResultView", frozen)]
+#[pyclass(name = "ResultView", module = "kglite", frozen)]
 pub struct ResultView {
     columns: Vec<String>,
     rows: Vec<Vec<PreProcessedValue>>,
@@ -882,7 +882,7 @@ impl ResultView {
 // ========================================================================
 
 /// Iterator for ResultView. Converts one row per __next__ call.
-#[pyclass(name = "ResultIter")]
+#[pyclass(name = "ResultIter", module = "kglite")]
 pub struct ResultIter {
     view: Py<ResultView>,
     index: usize,

@@ -234,19 +234,10 @@ fn path_to_bolt_path(p: &kglite::api::PathValue) -> Result<BoltPath, BoltError> 
         } else if rel.start_id == node_after.id && rel.end_id == node_before.id {
             -rel_idx_1based // incoming (traversed in reverse)
         } else {
-            // Rel doesn't connect the surrounding nodes — corrupt path
-            // produced by the executor. Best-effort: assume outgoing
-            // and let the client see what we have. Logging would be
-            // nice; deferred (the bolt-server already wires tracing).
-            tracing::warn!(
-                rel_id = rel.id,
-                rel_start = rel.start_id,
-                rel_end = rel.end_id,
-                path_node_before = node_before.id,
-                path_node_after = node_after.id,
-                "path rel doesn't connect surrounding nodes — defaulting to outgoing direction"
-            );
-            rel_idx_1based
+            return Err(BoltError::Backend(format!(
+                "kglite PathValue relationship {} ({} -> {}) does not connect path nodes {} -> {}",
+                rel.id, rel.start_id, rel.end_id, node_before.id, node_after.id
+            )));
         };
         indices.push(signed_rel);
         indices.push((i + 1) as i64); // 0-based next-node index
@@ -391,5 +382,68 @@ pub fn from_bolt(value: &BoltValue) -> Result<Value, BoltError> {
              cannot be a standalone parameter"
                 .into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use kglite::api::{NodeValue, PathValue, RelValue};
+
+    use super::*;
+
+    fn node(id: u32) -> NodeValue {
+        NodeValue {
+            id,
+            labels: vec!["N".into()],
+            properties: BTreeMap::new(),
+        }
+    }
+
+    fn rel(id: u32, start_id: u32, end_id: u32) -> RelValue {
+        RelValue {
+            id,
+            start_id,
+            end_id,
+            rel_type: "R".into(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn path_adapter_preserves_reverse_traversal_direction() {
+        let path = PathValue {
+            nodes: vec![node(2), node(1)],
+            rels: vec![rel(7, 1, 2)],
+        };
+
+        let encoded = path_to_bolt_path(&path).expect("valid reverse path");
+        assert_eq!(encoded.indices, vec![-1, 1]);
+    }
+
+    #[test]
+    fn path_adapter_rejects_relationship_disconnected_from_segment() {
+        let path = PathValue {
+            nodes: vec![node(1), node(2)],
+            rels: vec![rel(7, 3, 4)],
+        };
+
+        let error = path_to_bolt_path(&path).expect_err("disconnected relationship must fail");
+        assert!(error
+            .to_string()
+            .contains("does not connect path nodes 1 -> 2"));
+    }
+
+    #[test]
+    fn path_adapter_rejects_non_linear_shape() {
+        let path = PathValue {
+            nodes: vec![node(1)],
+            rels: vec![rel(7, 1, 2)],
+        };
+
+        let error =
+            path_to_bolt_path(&path).expect_err("invalid node/relationship count must fail");
+        assert!(error.to_string().contains("invariant violated"));
     }
 }

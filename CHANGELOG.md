@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedures also accept canonical `kglite.*` names while existing flat names
   remain equivalent. The compatibility surface is locked by independently
   authored MIT-licensed behavioral cases and an artifact-provenance gate.
+- **Public distribution interfaces and license metadata are now executable
+  contracts.** Reviewed snapshots lock Python exports and signatures, MCP tool
+  schemas by server mode, Bolt columns and graph values, and CLI help/errors.
+  Wheels, source distributions, and every publishable crate carry the MIT
+  license, while an all-feature dependency audit requires explicit review of
+  new license expressions and Apache/MPL-only packages.
 
 ### Fixed
 
@@ -35,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and incoming relationships, `relationships(p)` returns the edges actually
   matched, and a relationship cannot be reused within one path while nodes may
   repeat. Fused two-hop counts enforce the same trail rule.
+- **Python, MCP, and Bolt boundaries now expose their declared shapes.** Public
+  session/RDF/open helpers are exported consistently, PyO3 classes identify as
+  `kglite` types, read-only MCP Cypher schemas omit write-only arguments, local
+  workspaces expose one activation tool, and malformed Bolt paths fail instead
+  of inventing a traversal direction.
 
 ## [0.12.15] - 2026-07-11
 

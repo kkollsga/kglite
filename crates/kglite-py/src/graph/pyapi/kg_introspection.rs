@@ -1520,7 +1520,7 @@ impl KnowledgeGraph {
     /// ``types=[...]`` to narrow the inventory.
     ///
     /// When `type_search`, `connections`, `cypher`, or `fluent` is set, only those tracks are returned.
-    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None, sample_truncate=Some(40)))]
+    #[pyo3(signature = (types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None, sample_truncate=40))]
     #[allow(clippy::too_many_arguments)]
     fn describe(
         &self,

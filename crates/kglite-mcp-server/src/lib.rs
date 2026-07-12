@@ -814,6 +814,12 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     let csv_http_arc = csv_http_cfg.map(Arc::new);
 
     let mut server = McpServer::new(options);
+    if matches!(mode, Mode::LocalWorkspace { .. }) {
+        // Local workspaces activate a directory with `set_root_dir`; the
+        // GitHub clone-oriented `repo_management` tool is mutually exclusive
+        // and would steer agents toward the wrong activation protocol.
+        server.tool_router_mut().remove_route("repo_management");
+    }
     tools::register(
         &mut server,
         graph_state.clone(),

@@ -66,6 +66,11 @@ def _canonical_cell(value):
             "type": value.type,
             "properties": dict(value),
         }
+    elif isinstance(value, neo4j.graph.Path):
+        value = {
+            "nodes": list(value.nodes),
+            "relationships": list(value.relationships),
+        }
     elif isinstance(value, (neo4j.time.Date, neo4j.time.Time, neo4j.time.DateTime)):
         return value.iso_format()
 

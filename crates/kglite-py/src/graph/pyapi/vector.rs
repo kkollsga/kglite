@@ -282,7 +282,7 @@ impl KnowledgeGraph {
     ///     metric; properties read live so a hit is identical before/after
     ///     save/reload). With ``returning=[...]`` each has ``id`` + ``score`` +
     ///     the requested fields only.
-    #[pyo3(signature = (text_column, query_vector, top_k=None, metric=None, to_df=None, returning=None, exact=None))]
+    #[pyo3(signature = (text_column, query_vector, top_k=10, metric=None, to_df=false, returning=None, exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn vector_search(
         &self,
@@ -1032,7 +1032,7 @@ impl KnowledgeGraph {
     /// Returns:
     ///     Dict with ``embedded``, ``skipped``, ``skipped_existing``,
     ///     ``reembedded_changed``, and ``dimension``.
-    #[pyo3(signature = (node_type, text_column, batch_size=None, show_progress=None, replace=None, mode=None))]
+    #[pyo3(signature = (node_type, text_column, batch_size=256, show_progress=true, replace=false, mode=None))]
     #[allow(clippy::too_many_arguments)]
     fn embed_texts(
         &mut self,
@@ -1278,7 +1278,7 @@ impl KnowledgeGraph {
     ///
     /// Returns:
     ///     Same format as ``vector()`` — list of dicts or DataFrame.
-    #[pyo3(signature = (text_column, query, top_k=None, metric=None, to_df=None, returning=None, exact=None))]
+    #[pyo3(signature = (text_column, query, top_k=10, metric=None, to_df=false, returning=None, exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn search_text(
         &self,

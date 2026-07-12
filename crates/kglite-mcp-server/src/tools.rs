@@ -741,6 +741,12 @@ fn push_value_repr(out: &mut String, val: &Value) {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
+struct ReadCypherArgs {
+    /// Cypher query string. Append `FORMAT CSV` for CSV-encoded output.
+    pub query: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct CypherArgs {
     /// Cypher query string. Append `FORMAT CSV` for CSV-encoded output.
     pub query: String,
@@ -762,6 +768,13 @@ struct CypherArgs {
     pub modified_by: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum DetailSelection {
+    Enabled(bool),
+    Topics(Vec<String>),
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct OverviewArgs {
     /// Drill into specific node types (e.g. `["Person", "Document"]`).
@@ -769,10 +782,10 @@ struct OverviewArgs {
     pub types: Option<Vec<String>>,
     /// `true` for all connection types; or `["CALLS"]` for a deep-dive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connections: Option<serde_json::Value>,
+    pub connections: Option<DetailSelection>,
     /// `true` for the Cypher language reference; or `["MATCH","WHERE"]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cypher: Option<serde_json::Value>,
+    pub cypher: Option<DetailSelection>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -786,13 +799,31 @@ struct LoadGraphArgs {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum StorageArg {
+    Memory,
+    Mapped,
+    Disk,
+}
+
+impl StorageArg {
+    fn mode(&self) -> StorageMode {
+        match self {
+            Self::Memory => StorageMode::Memory,
+            Self::Mapped => StorageMode::Mapped,
+            Self::Disk => StorageMode::Disk,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 struct CreateGraphArgs {
     /// Path the new empty graph is bound to (its `save_graph` target).
     pub path: String,
     /// Storage mode: `memory` (default), `mapped`, or `disk`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<String>,
+    pub storage: Option<StorageArg>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
@@ -864,15 +895,11 @@ pub fn register(
              full results to a CSV string."
         }
     };
-    server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
-        let csv = csv.clone();
-        // Lazy rebuild: if the watcher tagged the graph dirty
-        // since the last call, rebuild now before serving the query.
-        s.ensure_code_tree_fresh();
-        // extensions.value_codecs: passed via ExecuteOptions (decoded after
-        // parsing), not by rewriting the query text. No-op when unconfigured.
-        let codecs = s.value_codecs();
-        if writable {
+    if writable {
+        server.register_typed_tool::<CypherArgs, _>("cypher_query", cypher_desc, move |args| {
+            let csv = csv.clone();
+            s.ensure_code_tree_fresh();
+            let codecs = s.value_codecs();
             let scope = args.write_scope.clone();
             let git_sha = args.git_sha.clone();
             let modified_by = args.modified_by.clone();
@@ -889,10 +916,15 @@ pub fn register(
                 .unwrap_or_else(|e| cypher_tool_error(&e))
             })
             .unwrap_or_else(|| NO_GRAPH.to_string())
-        } else {
+        });
+    } else {
+        server.register_typed_tool::<ReadCypherArgs, _>("cypher_query", cypher_desc, move |args| {
+            let csv = csv.clone();
+            s.ensure_code_tree_fresh();
+            let codecs = s.value_codecs();
             s.with_active(|g| run_cypher_tool(g, &args.query, codecs, csv.as_deref()))
-        }
-    });
+        });
+    }
     let s = state.clone();
     let cleanup_temp = builtins.temp_cleanup_on_overview;
     let temp_dir = builtins.temp_dir.clone();
@@ -954,13 +986,10 @@ pub fn register(
              make it active. storage = memory (default) | mapped | disk. Write-enabled \
              servers only.",
             move |args| {
-                let mode = match args.storage.as_deref() {
-                    None | Some("") | Some("memory") => StorageMode::Memory,
-                    Some(other) => match StorageMode::parse(other) {
-                        Ok(m) => m,
-                        Err(e) => return format!("create_graph error: invalid storage: {e}"),
-                    },
-                };
+                let mode = args
+                    .storage
+                    .as_ref()
+                    .map_or(StorageMode::Memory, StorageArg::mode);
                 match s.create_in_mode(Path::new(&args.path), mode) {
                     Ok(()) => format!("Created empty graph at {} (active).", args.path),
                     Err(e) => format!("create_graph error: {e}"),
@@ -1144,45 +1173,33 @@ fn run_overview(graph: &ActiveGraph, args: &OverviewArgs) -> String {
     }
 }
 
-fn parse_connection_detail(v: Option<&serde_json::Value>) -> ConnectionDetail {
-    use serde_json::Value;
+fn parse_connection_detail(v: Option<&DetailSelection>) -> ConnectionDetail {
     match v {
-        None | Some(Value::Null) => ConnectionDetail::Off,
-        Some(Value::Bool(false)) => ConnectionDetail::Off,
-        Some(Value::Bool(true)) => ConnectionDetail::Overview,
-        Some(Value::Array(items)) => {
-            let names: Vec<String> = items
-                .iter()
-                .filter_map(|i| i.as_str().map(String::from))
-                .collect();
+        None | Some(DetailSelection::Enabled(false)) => ConnectionDetail::Off,
+        Some(DetailSelection::Enabled(true)) => ConnectionDetail::Overview,
+        Some(DetailSelection::Topics(items)) => {
+            let names = items.clone();
             if names.is_empty() {
                 ConnectionDetail::Overview
             } else {
                 ConnectionDetail::Topics(names)
             }
         }
-        Some(_) => ConnectionDetail::Overview,
     }
 }
 
-fn parse_cypher_detail(v: Option<&serde_json::Value>) -> CypherDetail {
-    use serde_json::Value;
+fn parse_cypher_detail(v: Option<&DetailSelection>) -> CypherDetail {
     match v {
-        None | Some(Value::Null) => CypherDetail::Off,
-        Some(Value::Bool(false)) => CypherDetail::Off,
-        Some(Value::Bool(true)) => CypherDetail::Overview,
-        Some(Value::Array(items)) => {
-            let names: Vec<String> = items
-                .iter()
-                .filter_map(|i| i.as_str().map(String::from))
-                .collect();
+        None | Some(DetailSelection::Enabled(false)) => CypherDetail::Off,
+        Some(DetailSelection::Enabled(true)) => CypherDetail::Overview,
+        Some(DetailSelection::Topics(items)) => {
+            let names = items.clone();
             if names.is_empty() {
                 CypherDetail::Overview
             } else {
                 CypherDetail::Topics(names)
             }
         }
-        Some(_) => CypherDetail::Overview,
     }
 }
 

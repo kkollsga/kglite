@@ -58,7 +58,7 @@ use std::sync::Arc;
 ///     clone). All reads + writes run against it.
 ///
 /// `inner` is `None` after `commit()` / `rollback()` — any further use errors.
-#[pyclass]
+#[pyclass(module = "kglite")]
 pub struct Transaction {
     /// Back-reference to the owning KnowledgeGraph (for commit).
     pub(crate) owner: Py<KnowledgeGraph>,

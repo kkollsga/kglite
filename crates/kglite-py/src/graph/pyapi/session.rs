@@ -62,7 +62,7 @@ use kglite_core::api::GraphRead;
 /// Build or load a graph with a `KnowledgeGraph`, call `.session()`, then
 /// share the `Session` across threads: concurrent `cypher()` reads run
 /// lock-free; `execute()` writes serialise behind the Session's writer lock.
-#[pyclass(frozen)]
+#[pyclass(module = "kglite", frozen)]
 pub struct Session {
     pub(crate) inner: CoreSession,
     pub(crate) embedder: Option<Arc<dyn crate::graph::embedder::Embedder>>,

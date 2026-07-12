@@ -1,0 +1,1590 @@
+{
+  "graph_readonly": [
+    {
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "query": {
+            "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "ReadCypherArgs",
+        "type": "object"
+      },
+      "name": "cypher_query"
+    },
+    {
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "inputSchema": {
+        "properties": {
+          "include_source": {
+            "description": "Whether to include grouped source slices for the entry points. Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_depth": {
+            "description": "Hops for the neighborhood traversal. Default 2.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_entities": {
+            "description": "Top N entry points after lexical ranking. Default 10.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "explore"
+    },
+    {
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "inputSchema": {
+        "$defs": {
+          "DetailSelection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for all connection types; or `[\"CALLS\"]` for a deep-dive."
+          },
+          "cypher": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for the Cypher language reference; or `[\"MATCH\",\"WHERE\"]`."
+          },
+          "types": {
+            "description": "Drill into specific node types (e.g. `[\"Person\", \"Document\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "OverviewArgs",
+        "type": "object"
+      },
+      "name": "graph_overview"
+    },
+    {
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "case_insensitive": {
+            "default": false,
+            "description": "Case-insensitive matching.",
+            "type": "boolean"
+          },
+          "context": {
+            "default": 0,
+            "description": "Lines of context around each match (default 0).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "description": "File-name glob (e.g. ``\"*.py\"``). Defaults to all files.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_results": {
+            "description": "Cap the number of matches (default 50; pass null/None for unlimited).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Regex pattern (Rust regex syntax).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "GrepArgs",
+        "type": "object"
+      },
+      "name": "grep"
+    },
+    {
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "description": "Recursion depth (1 = flat ls; 2+ = tree).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dirs_only": {
+            "default": false,
+            "description": "Show only directories.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Glob filter for entry names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": ".",
+            "description": "Subdirectory relative to the source root (default ``\".\"``).",
+            "type": "string"
+          }
+        },
+        "title": "ListSourceArgs",
+        "type": "object"
+      },
+      "name": "list_source"
+    },
+    {
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "description": "Optional message to echo back. Defaults to \"pong\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "PingArgs",
+        "type": "object"
+      },
+      "name": "ping"
+    },
+    {
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "inputSchema": {
+        "properties": {
+          "end_line": {
+            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "node_type": {
+            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualified_name": {
+            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "qualified_name"
+        ],
+        "type": "object"
+      },
+      "name": "read_code_source"
+    },
+    {
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_line": {
+            "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_path": {
+            "description": "File path relative to the configured source root(s).",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_matches": {
+            "description": "Cap the number of matches returned.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "description": "Read the file at this git revision (tag, branch, or commit SHA)\nvia `git show` instead of the working tree. Requires the active\nsource root to be a git repository. All other options\n(`start_line`/`grep`/`max_chars`/\u2026) apply to the historical\ncontent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "Start line (1-indexed). Defaults to start-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "title": "ReadSourceArgs",
+        "type": "object"
+      },
+      "name": "read_source"
+    }
+  ],
+  "graph_writable": [
+    {
+      "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Write-enabled servers only.",
+      "inputSchema": {
+        "$defs": {
+          "StorageArg": {
+            "enum": [
+              "memory",
+              "mapped",
+              "disk"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path the new empty graph is bound to (its `save_graph` target).",
+            "type": "string"
+          },
+          "storage": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StorageArg"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Storage mode: `memory` (default), `mapped`, or `disk`."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "CreateGraphArgs",
+        "type": "object"
+      },
+      "name": "create_graph"
+    },
+    {
+      "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "git_sha": {
+            "description": "Freshness provenance for this write (write-enabled servers only): the git\ncommit SHA the agent is working against, stamped as `updated_at`'s\ncompanion on writes to `auto_timestamp` node/edge types \u2014 so a node can\nrecord \"describes the code as of sha X\". Optional; ignored on reads.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modified_by": {
+            "description": "Optional actor id stamped alongside `git_sha` (e.g. the agent/session\nname). Same gating as `git_sha`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
+            "type": "string"
+          },
+          "write_scope": {
+            "description": "Role-scoped write whitelist (write-enabled servers only). When set, a\n`CREATE`/`SET` whose node type is not in this list is rejected \u2014 so an\nagent can plan in its own types (`[\"Plan\",\"Task\"]`) without touching\nresearch-owned ones. Ignored on read-only servers.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "CypherArgs",
+        "type": "object"
+      },
+      "name": "cypher_query"
+    },
+    {
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "inputSchema": {
+        "properties": {
+          "include_source": {
+            "description": "Whether to include grouped source slices for the entry points. Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_depth": {
+            "description": "Hops for the neighborhood traversal. Default 2.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_entities": {
+            "description": "Top N entry points after lexical ranking. Default 10.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "explore"
+    },
+    {
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "inputSchema": {
+        "$defs": {
+          "DetailSelection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for all connection types; or `[\"CALLS\"]` for a deep-dive."
+          },
+          "cypher": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for the Cypher language reference; or `[\"MATCH\",\"WHERE\"]`."
+          },
+          "types": {
+            "description": "Drill into specific node types (e.g. `[\"Person\", \"Document\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "OverviewArgs",
+        "type": "object"
+      },
+      "name": "graph_overview"
+    },
+    {
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "case_insensitive": {
+            "default": false,
+            "description": "Case-insensitive matching.",
+            "type": "boolean"
+          },
+          "context": {
+            "default": 0,
+            "description": "Lines of context around each match (default 0).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "description": "File-name glob (e.g. ``\"*.py\"``). Defaults to all files.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_results": {
+            "description": "Cap the number of matches (default 50; pass null/None for unlimited).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Regex pattern (Rust regex syntax).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "GrepArgs",
+        "type": "object"
+      },
+      "name": "grep"
+    },
+    {
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "description": "Recursion depth (1 = flat ls; 2+ = tree).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dirs_only": {
+            "default": false,
+            "description": "Show only directories.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Glob filter for entry names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": ".",
+            "description": "Subdirectory relative to the source root (default ``\".\"``).",
+            "type": "string"
+          }
+        },
+        "title": "ListSourceArgs",
+        "type": "object"
+      },
+      "name": "list_source"
+    },
+    {
+      "description": "Load a .kgl file as the new active graph (replaces the current one \u2014 save_graph first to keep unsaved changes). Write-enabled servers only.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path to a `.kgl` file (or disk-graph directory) to load as the new\nactive graph, replacing the current one. Unsaved in-memory changes to\nthe previous graph are discarded \u2014 call `save_graph` first to keep them.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "LoadGraphArgs",
+        "type": "object"
+      },
+      "name": "load_graph"
+    },
+    {
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "description": "Optional message to echo back. Defaults to \"pong\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "PingArgs",
+        "type": "object"
+      },
+      "name": "ping"
+    },
+    {
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "inputSchema": {
+        "properties": {
+          "end_line": {
+            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "node_type": {
+            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualified_name": {
+            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "qualified_name"
+        ],
+        "type": "object"
+      },
+      "name": "read_code_source"
+    },
+    {
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_line": {
+            "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_path": {
+            "description": "File path relative to the configured source root(s).",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_matches": {
+            "description": "Cap the number of matches returned.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "description": "Read the file at this git revision (tag, branch, or commit SHA)\nvia `git show` instead of the working tree. Requires the active\nsource root to be a git repository. All other options\n(`start_line`/`grep`/`max_chars`/\u2026) apply to the historical\ncontent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "Start line (1-indexed). Defaults to start-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "title": "ReadSourceArgs",
+        "type": "object"
+      },
+      "name": "read_source"
+    },
+    {
+      "description": "Persist the active graph to its source .kgl file (single-graph mode only).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SaveGraphArgs",
+        "type": "object"
+      },
+      "name": "save_graph"
+    },
+    {
+      "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Path to save the active graph to; also becomes the new `save_graph`\ntarget.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "SaveGraphAsArgs",
+        "type": "object"
+      },
+      "name": "save_graph_as"
+    }
+  ],
+  "local_workspace": [
+    {
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "query": {
+            "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "ReadCypherArgs",
+        "type": "object"
+      },
+      "name": "cypher_query"
+    },
+    {
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "inputSchema": {
+        "properties": {
+          "include_source": {
+            "description": "Whether to include grouped source slices for the entry points. Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_depth": {
+            "description": "Hops for the neighborhood traversal. Default 2.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_entities": {
+            "description": "Top N entry points after lexical ranking. Default 10.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "explore"
+    },
+    {
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "inputSchema": {
+        "$defs": {
+          "DetailSelection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for all connection types; or `[\"CALLS\"]` for a deep-dive."
+          },
+          "cypher": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for the Cypher language reference; or `[\"MATCH\",\"WHERE\"]`."
+          },
+          "types": {
+            "description": "Drill into specific node types (e.g. `[\"Person\", \"Document\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "OverviewArgs",
+        "type": "object"
+      },
+      "name": "graph_overview"
+    },
+    {
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "case_insensitive": {
+            "default": false,
+            "description": "Case-insensitive matching.",
+            "type": "boolean"
+          },
+          "context": {
+            "default": 0,
+            "description": "Lines of context around each match (default 0).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "description": "File-name glob (e.g. ``\"*.py\"``). Defaults to all files.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_results": {
+            "description": "Cap the number of matches (default 50; pass null/None for unlimited).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Regex pattern (Rust regex syntax).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "GrepArgs",
+        "type": "object"
+      },
+      "name": "grep"
+    },
+    {
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "description": "Recursion depth (1 = flat ls; 2+ = tree).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dirs_only": {
+            "default": false,
+            "description": "Show only directories.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Glob filter for entry names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": ".",
+            "description": "Subdirectory relative to the source root (default ``\".\"``).",
+            "type": "string"
+          }
+        },
+        "title": "ListSourceArgs",
+        "type": "object"
+      },
+      "name": "list_source"
+    },
+    {
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "description": "Optional message to echo back. Defaults to \"pong\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "PingArgs",
+        "type": "object"
+      },
+      "name": "ping"
+    },
+    {
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "inputSchema": {
+        "properties": {
+          "end_line": {
+            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "node_type": {
+            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualified_name": {
+            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "qualified_name"
+        ],
+        "type": "object"
+      },
+      "name": "read_code_source"
+    },
+    {
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_line": {
+            "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_path": {
+            "description": "File path relative to the configured source root(s).",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_matches": {
+            "description": "Cap the number of matches returned.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "description": "Read the file at this git revision (tag, branch, or commit SHA)\nvia `git show` instead of the working tree. Requires the active\nsource root to be a git repository. All other options\n(`start_line`/`grep`/`max_chars`/\u2026) apply to the historical\ncontent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "Start line (1-indexed). Defaults to start-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "title": "ReadSourceArgs",
+        "type": "object"
+      },
+      "name": "read_source"
+    },
+    {
+      "description": "Swap the active source root (local-workspace mode only). Pass `path` to a directory; the framework canonicalises it, rebinds the source tools (`read_source`, `grep`, `list_source`), and fires the post-activate hook so any downstream graph rebuilds against the new root. Pass `revs` (an integer N, or a list of git revspecs) to load multiple revisions of the root into one graph \u2014 N loads the newest N stable release tags of the dominant tag family plus HEAD (prereleases and unrelated tag families skipped); requires the root to be a git repo. Inventory persists across swaps; SHA-gating skips rebuilds when the same root is re-bound with no content changes.",
+      "inputSchema": {
+        "$defs": {
+          "RevsRequest": {
+            "anyOf": [
+              {
+                "description": "Last `n` **stable** release tags of the repo's dominant tag family,\nordered oldest\u2192newest with `HEAD` appended. Tags are classified\ninto `(prefix, version, is_prerelease)` and grouped by prefix; the\nfamily with the most stable tags wins, so on a repo with several\ntag families (e.g. `apache-arrow-*`, `go/v*`, `r-*`) the release\nline is chosen, not an unrelated package family. Prereleases (rc,\nalpha, beta, dev, pre, preview) and non-version tags (e.g.\n`r-universe-release`) are excluded. See [`Workspace::resolve_revs`]\nfor the full selection + fallback semantics.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "description": "Explicit git revspecs (tags, branches, or SHAs), used as given.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "A revisions request carried by the activation tools. `Count(n)`\nresolves to the newest `n` **stable release** tags of the repo's\ndominant tag family (plus `HEAD`); `List(revs)` is an explicit set of\ngit revspecs used verbatim. The untagged deserialization maps a JSON\ninteger to `Count` and a JSON array of strings to `List`, so the tool\narg accepts `int | [str]`. Resolution happens at activate time \u2014 see\n[`Workspace::resolve_revs`]."
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "path": {
+            "description": "Absolute or relative path to bind as the new source root.",
+            "type": "string"
+          },
+          "revs": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RevsRequest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optionally load multiple git revisions of the new root into one\ngraph. An integer N loads the newest N stable release tags of the\nrepo's dominant tag family plus HEAD (prereleases like rc/dev and\nunrelated tag families are skipped); a list of strings uses those\ngit revspecs (tags, branches, or SHAs) verbatim. Requires the root\nto be a git repo. Omit for the default single-revision (working\ntree) activation."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "SetRootDirArgs",
+        "type": "object"
+      },
+      "name": "set_root_dir"
+    }
+  ],
+  "manifest_tool": [
+    {
+      "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "query": {
+            "description": "Cypher query string. Append `FORMAT CSV` for CSV-encoded output.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "ReadCypherArgs",
+        "type": "object"
+      },
+      "name": "cypher_query"
+    },
+    {
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "inputSchema": {
+        "properties": {
+          "include_source": {
+            "description": "Whether to include grouped source slices for the entry points. Default true.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_depth": {
+            "description": "Hops for the neighborhood traversal. Default 2.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_entities": {
+            "description": "Top N entry points after lexical ranking. Default 10.",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Free-text topic. Matched against Function/Class names, signatures, and docstrings \u2014 exact name matches rank highest. Pass a symbol or a short phrase, not a sentence.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "explore"
+    },
+    {
+      "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
+      "inputSchema": {
+        "$defs": {
+          "DetailSelection": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for all connection types; or `[\"CALLS\"]` for a deep-dive."
+          },
+          "cypher": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DetailSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`true` for the Cypher language reference; or `[\"MATCH\",\"WHERE\"]`."
+          },
+          "types": {
+            "description": "Drill into specific node types (e.g. `[\"Person\", \"Document\"]`).",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "OverviewArgs",
+        "type": "object"
+      },
+      "name": "graph_overview"
+    },
+    {
+      "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "case_insensitive": {
+            "default": false,
+            "description": "Case-insensitive matching.",
+            "type": "boolean"
+          },
+          "context": {
+            "default": 0,
+            "description": "Lines of context around each match (default 0).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "glob": {
+            "description": "File-name glob (e.g. ``\"*.py\"``). Defaults to all files.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_results": {
+            "description": "Cap the number of matches (default 50; pass null/None for unlimited).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Regex pattern (Rust regex syntax).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "GrepArgs",
+        "type": "object"
+      },
+      "name": "grep"
+    },
+    {
+      "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "description": "Recursion depth (1 = flat ls; 2+ = tree).",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dirs_only": {
+            "default": false,
+            "description": "Show only directories.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Glob filter for entry names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": ".",
+            "description": "Subdirectory relative to the source root (default ``\".\"``).",
+            "type": "string"
+          }
+        },
+        "title": "ListSourceArgs",
+        "type": "object"
+      },
+      "name": "list_source"
+    },
+    {
+      "description": "Find people in one city.",
+      "inputSchema": {
+        "city": {
+          "description": "Exact city name.",
+          "required": true,
+          "type": "string"
+        }
+      },
+      "name": "people_in_city"
+    },
+    {
+      "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "message": {
+            "description": "Optional message to echo back. Defaults to \"pong\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "PingArgs",
+        "type": "object"
+      },
+      "name": "ping"
+    },
+    {
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "inputSchema": {
+        "properties": {
+          "end_line": {
+            "description": "Override the entity's end line (1-indexed, inclusive). Defaults to the entity's defined end.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "node_type": {
+            "description": "Optional node-type hint when the qualified name is ambiguous (e.g. 'Function', 'Struct').",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qualified_name": {
+            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "Override the entity's start line (1-indexed). Defaults to the entity's defined start.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "qualified_name"
+        ],
+        "type": "object"
+      },
+      "name": "read_code_source"
+    },
+    {
+      "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "end_line": {
+            "description": "End line (1-indexed, inclusive). Defaults to end-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "file_path": {
+            "description": "File path relative to the configured source root(s).",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Regex pattern to filter lines. Returns matching lines plus context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grep_context": {
+            "description": "Lines of context around each grep match (default 2).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_chars": {
+            "description": "Cap output size in characters.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_matches": {
+            "description": "Cap the number of matches returned.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "description": "Read the file at this git revision (tag, branch, or commit SHA)\nvia `git show` instead of the working tree. Requires the active\nsource root to be a git repository. All other options\n(`start_line`/`grep`/`max_chars`/\u2026) apply to the historical\ncontent unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_line": {
+            "description": "Start line (1-indexed). Defaults to start-of-file.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "title": "ReadSourceArgs",
+        "type": "object"
+      },
+      "name": "read_source"
+    }
+  ]
+}

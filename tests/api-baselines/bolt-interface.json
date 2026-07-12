@@ -1,0 +1,191 @@
+{
+  "alias_order": {
+    "keys": [
+      "z",
+      "a",
+      "m"
+    ],
+    "rows": [
+      [
+        1,
+        "x",
+        null
+      ]
+    ]
+  },
+  "empty_result": {
+    "keys": [
+      "id",
+      "name"
+    ],
+    "rows": []
+  },
+  "procedure_columns": {
+    "keys": [
+      "kind"
+    ],
+    "rows": [
+      [
+        "N"
+      ]
+    ]
+  },
+  "typed_path": {
+    "keys": [
+      "source",
+      "edge",
+      "path"
+    ],
+    "rows": [
+      [
+        {
+          "id": 0,
+          "kind": "node",
+          "labels": [
+            "N"
+          ],
+          "properties": {
+            "id": 1,
+            "name": "a",
+            "title": "a",
+            "type": "N"
+          }
+        },
+        {
+          "end": 1,
+          "id": 0,
+          "kind": "relationship",
+          "properties": {
+            "tag": "first"
+          },
+          "start": 0,
+          "type": "R"
+        },
+        {
+          "kind": "path",
+          "nodes": [
+            {
+              "id": 0,
+              "kind": "node",
+              "labels": [
+                "N"
+              ],
+              "properties": {
+                "id": 1,
+                "name": "a",
+                "title": "a",
+                "type": "N"
+              }
+            },
+            {
+              "id": 1,
+              "kind": "node",
+              "labels": [
+                "N"
+              ],
+              "properties": {
+                "id": 2,
+                "name": "b",
+                "title": "b",
+                "type": "N"
+              }
+            }
+          ],
+          "relationships": [
+            {
+              "end": 1,
+              "id": 0,
+              "kind": "relationship",
+              "properties": {
+                "tag": "first"
+              },
+              "start": 0,
+              "type": "R"
+            }
+          ]
+        }
+      ],
+      [
+        {
+          "id": 0,
+          "kind": "node",
+          "labels": [
+            "N"
+          ],
+          "properties": {
+            "id": 1,
+            "name": "a",
+            "title": "a",
+            "type": "N"
+          }
+        },
+        {
+          "end": 1,
+          "id": 1,
+          "kind": "relationship",
+          "properties": {
+            "tag": "second"
+          },
+          "start": 0,
+          "type": "R"
+        },
+        {
+          "kind": "path",
+          "nodes": [
+            {
+              "id": 0,
+              "kind": "node",
+              "labels": [
+                "N"
+              ],
+              "properties": {
+                "id": 1,
+                "name": "a",
+                "title": "a",
+                "type": "N"
+              }
+            },
+            {
+              "id": 1,
+              "kind": "node",
+              "labels": [
+                "N"
+              ],
+              "properties": {
+                "id": 2,
+                "name": "b",
+                "title": "b",
+                "type": "N"
+              }
+            }
+          ],
+          "relationships": [
+            {
+              "end": 1,
+              "id": 1,
+              "kind": "relationship",
+              "properties": {
+                "tag": "second"
+              },
+              "start": 0,
+              "type": "R"
+            }
+          ]
+        }
+      ]
+    ]
+  },
+  "union_columns": {
+    "keys": [
+      "value"
+    ],
+    "rows": [
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ]
+  }
+}

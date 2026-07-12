@@ -594,6 +594,13 @@ def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
     """
     ...
 
+def repo_tree(repo: str, **kwargs: Any) -> KnowledgeGraph:
+    """Clone a GitHub repository and build its code knowledge graph.
+
+    Public convenience alias for :func:`kglite.code_tree.repo_tree`.
+    """
+    ...
+
 def graphgen(
     scale: str = "medium",
     *,
@@ -3516,6 +3523,17 @@ class KnowledgeGraph:
         """
         ...
 
+    def shortest_path_lengths_batch(
+        self,
+        node_type: str,
+        pairs: list[tuple[Any, Any]],
+    ) -> list[int | None]:
+        """Return shortest-path lengths for ID pairs of one node type.
+
+        Results preserve input order; unreachable pairs produce ``None``.
+        """
+        ...
+
     def shortest_path_ids(
         self,
         source_type: str,
@@ -4784,7 +4802,7 @@ class KnowledgeGraph:
         text_column: str,
         query_vector: list[float],
         top_k: int = 10,
-        metric: str = "cosine",
+        metric: str | None = None,
         to_df: bool = False,
         returning: list[str] | None = None,
         exact: bool = False,
@@ -5123,7 +5141,7 @@ class KnowledgeGraph:
         text_column: str,
         query: str,
         top_k: int = 10,
-        metric: str = "cosine",
+        metric: str | None = None,
         to_df: bool = False,
         returning: list[str] | None = None,
         exact: bool = False,

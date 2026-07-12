@@ -1,0 +1,1354 @@
+{
+  "exports": [
+    "__version__",
+    "KnowledgeGraph",
+    "FrozenGraph",
+    "Transaction",
+    "Session",
+    "ResultView",
+    "ResultIter",
+    "load",
+    "load_rdf",
+    "open",
+    "open_session",
+    "from_bytes",
+    "cypher_pass_names",
+    "from_blueprint",
+    "from_records",
+    "build_code_tree",
+    "repo_tree",
+    "graphgen",
+    "outline",
+    "stamp_file_freshness",
+    "check_file_freshness",
+    "to_neo4j",
+    "from_networkx",
+    "Agg",
+    "Spatial",
+    "KgError",
+    "CypherError",
+    "CypherSyntaxError",
+    "CypherTimeoutError",
+    "CypherExecutionError",
+    "CypherTypeMismatchError",
+    "SchemaError",
+    "ValidationError",
+    "ExprError",
+    "NodeNotFoundError",
+    "ConnectionNotFoundError",
+    "PropertyNotFoundError",
+    "FileError",
+    "FileFormatError",
+    "FileIoError",
+    "ArgumentError",
+    "MissingArgumentError",
+    "InternerCollisionError",
+    "InternalError"
+  ],
+  "non_exported_runtime": {
+    "from_blueprint_rust": "builtin_function_or_method",
+    "from_records_rust": "builtin_function_or_method",
+    "graphgen_to_dir": "builtin_function_or_method"
+  },
+  "objects": {
+    "Agg": {
+      "bases": [
+        "object"
+      ],
+      "constructible": true,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "collect": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        },
+        "count": {
+          "kind": "method",
+          "signature": "() -> str"
+        },
+        "max": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        },
+        "mean": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        },
+        "min": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        },
+        "std": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        },
+        "sum": {
+          "kind": "method",
+          "signature": "(prop: str) -> str"
+        }
+      },
+      "module": "kglite"
+    },
+    "ArgumentError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ConnectionNotFoundError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "CypherError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "CypherExecutionError": {
+      "bases": [
+        "CypherError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "CypherSyntaxError": {
+      "bases": [
+        "CypherError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "CypherTimeoutError": {
+      "bases": [
+        "CypherError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "CypherTypeMismatchError": {
+      "bases": [
+        "CypherError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ExprError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "FileError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "FileFormatError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "FileIoError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "FrozenGraph": {
+      "bases": [
+        "object"
+      ],
+      "constructible": false,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "cypher": {
+          "kind": "method",
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None)"
+        },
+        "node_count": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "node_types": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        }
+      },
+      "module": "kglite"
+    },
+    "InternalError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "InternerCollisionError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "KgError": {
+      "bases": [
+        "Exception"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "KnowledgeGraph": {
+      "bases": [
+        "object"
+      ],
+      "constructible": true,
+      "constructor": "(*, storage=None, path=None)",
+      "kind": "class",
+      "members": {
+        "__enter__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "__exit__": {
+          "kind": "method",
+          "signature": "(self, /, exc_type, _exc_value, _traceback)"
+        },
+        "__len__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "add_connections": {
+          "kind": "method",
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None)"
+        },
+        "add_connections_bulk": {
+          "kind": "method",
+          "signature": "(self, /, connections)"
+        },
+        "add_connections_from_source": {
+          "kind": "method",
+          "signature": "(self, /, connections)"
+        },
+        "add_connections_internal": {
+          "kind": "method",
+          "signature": "(self, /, connections, filter_to_loaded)"
+        },
+        "add_embeddings": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column, embeddings, metric=None)"
+        },
+        "add_label": {
+          "kind": "method",
+          "signature": "(self, /, node_type, ids, label)"
+        },
+        "add_nodes": {
+          "kind": "method",
+          "signature": "(self, /, data, node_type, unique_id_field, node_title_field=None, columns=None, conflict_handling=None, skip_columns=None, column_types=None, timeseries=None, nullable_int_downcast=False, labels=None, managed_reload=False)"
+        },
+        "add_nodes_bulk": {
+          "kind": "method",
+          "signature": "(self, /, nodes)"
+        },
+        "add_properties": {
+          "kind": "method",
+          "signature": "(self, /, properties, keep_selection=None)"
+        },
+        "add_timeseries": {
+          "kind": "method",
+          "signature": "(self, /, node_type, *, data, fk, time_key, channels, resolution=None, units=None)"
+        },
+        "add_ts_channel": {
+          "kind": "method",
+          "signature": "(self, /, node_id, channel_name, values)"
+        },
+        "all_paths": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id, max_hops=None, max_results=None, connection_types=None, via_types=None, timeout_ms=None)"
+        },
+        "are_connected": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id)"
+        },
+        "begin": {
+          "kind": "method",
+          "signature": "(self, /, timeout_ms=None)"
+        },
+        "begin_read": {
+          "kind": "method",
+          "signature": "(self, /, timeout_ms=None)"
+        },
+        "betweenness_centrality": {
+          "kind": "method",
+          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+        },
+        "bounds": {
+          "kind": "method",
+          "signature": "(self, /, lat_field=None, lon_field=None, as_shapely=False)"
+        },
+        "bug_report": {
+          "kind": "method",
+          "signature": "(self, /, query, result, expected, description, path=None)"
+        },
+        "build_id_indices": {
+          "kind": "method",
+          "signature": "(self, /, node_types=None)"
+        },
+        "build_vector_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column, m=None, ef_construction=None, ef_search=None, metric=None)"
+        },
+        "calculate": {
+          "kind": "method",
+          "signature": "(self, /, expression, level_index=None, store_as=None, keep_selection=None, aggregate_connections=None)"
+        },
+        "centroid": {
+          "kind": "method",
+          "signature": "(self, /, lat_field=None, lon_field=None, as_shapely=False)"
+        },
+        "clear": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "clear_schema": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "close": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "closeness_centrality": {
+          "kind": "method",
+          "signature": "(self, /, normalized=None, sample_size=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+        },
+        "collect": {
+          "kind": "method",
+          "signature": "(self, /, limit=None)"
+        },
+        "collect_children": {
+          "kind": "method",
+          "signature": "(self, /, property=None, where=None, sort=None, limit=None, store_as=None, max_length=None, keep_selection=None)"
+        },
+        "collect_grouped": {
+          "kind": "method",
+          "signature": "(self, /, group_by, *, parent_info=False, flatten_single_parent=True, limit=None)"
+        },
+        "compact": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "compare": {
+          "kind": "method",
+          "signature": "(self, /, target_type, method, *, filter=None, sort=None, limit=None, level_index=None, new_level=None)"
+        },
+        "composite_index_stats": {
+          "kind": "method",
+          "signature": "(self, /, node_type, properties)"
+        },
+        "connected_components": {
+          "kind": "method",
+          "signature": "(self, /, weak=None, titles_only=None)"
+        },
+        "connection_types": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "connections": {
+          "kind": "method",
+          "signature": "(self, /, indices=None, parent_info=None, include_node_properties=None, flatten_single_parent=True)"
+        },
+        "contains_point": {
+          "kind": "method",
+          "signature": "(self, /, lat, lon, geometry_field=None)"
+        },
+        "context": {
+          "kind": "method",
+          "signature": "(self, /, name, node_type=None, hops=None)"
+        },
+        "copy": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "copy_embeddings_from": {
+          "kind": "method",
+          "signature": "(self, /, other)"
+        },
+        "count": {
+          "kind": "method",
+          "signature": "(self, /, level_index=None, group_by_parent=None, store_as=None, keep_selection=None, group_by=None)"
+        },
+        "create_composite_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, properties)"
+        },
+        "create_connections": {
+          "kind": "method",
+          "signature": "(self, /, connection_type, keep_selection=None, conflict_handling=None, properties=None, source_type=None, target_type=None)"
+        },
+        "create_global_index": {
+          "kind": "method",
+          "signature": "(self, /, property)"
+        },
+        "create_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "create_range_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "cypher": {
+          "kind": "method",
+          "signature": "(self, /, query, *, to_df=False, params=None, timeout_ms=None, max_rows=None, streaming=True, disable_optimizer=False, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None)"
+        },
+        "date": {
+          "kind": "method",
+          "signature": "(self, /, date_str=None, end_str=None)"
+        },
+        "define_schema": {
+          "kind": "method",
+          "signature": "(self, /, schema_dict)"
+        },
+        "degree_centrality": {
+          "kind": "method",
+          "signature": "(self, /, normalized=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+        },
+        "degrees": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "describe": {
+          "kind": "method",
+          "signature": "(self, /, types=None, type_search=None, connections=None, cypher=None, fluent=None, max_pairs=None, sample_truncate=40)"
+        },
+        "difference": {
+          "kind": "method",
+          "signature": "(self, /, other)"
+        },
+        "disable_columnar": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "drop_composite_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, properties)"
+        },
+        "drop_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "drop_range_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "drop_vector_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
+        },
+        "embed_texts": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column, batch_size=256, show_progress=True, replace=False, mode=None)"
+        },
+        "embedding": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column, node_id)"
+        },
+        "embedding_diagnostics": {
+          "kind": "method",
+          "signature": "(self, /, node_type=None)"
+        },
+        "embedding_dim": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
+        },
+        "embedding_info": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
+        },
+        "embeddings": {
+          "kind": "method",
+          "signature": "(self, /, node_type_or_text_column, text_column=None)"
+        },
+        "enable_columnar": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "enable_disk_mode": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "exists": {
+          "kind": "method",
+          "signature": "(self, /, node_type, unique_id)"
+        },
+        "expand": {
+          "kind": "method",
+          "signature": "(self, /, hops=None)"
+        },
+        "explain": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "explain_mcp": {
+          "kind": "method",
+          "signature": "()"
+        },
+        "explore": {
+          "kind": "method",
+          "signature": "(self, /, query, max_entities=10, max_depth=2, include_source=True, source_roots=None)"
+        },
+        "export": {
+          "kind": "method",
+          "signature": "(self, /, path, format=None, selection_only=None)"
+        },
+        "export_csv": {
+          "kind": "method",
+          "signature": "(self, /, path, selection_only=None, verbose=False)"
+        },
+        "export_embeddings": {
+          "kind": "method",
+          "signature": "(self, /, path, node_types=None)"
+        },
+        "export_string": {
+          "kind": "method",
+          "signature": "(self, /, format, selection_only=None)"
+        },
+        "extend": {
+          "kind": "method",
+          "signature": "(self, /, other, conflict_handling=None)"
+        },
+        "find": {
+          "kind": "method",
+          "signature": "(self, /, name, node_type=None, match_type=None)"
+        },
+        "freeze": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "get_default_max_rows": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "get_default_timeout": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "get_properties": {
+          "kind": "method",
+          "signature": "(self, /, properties, limit=None, indices=None, flatten_single_parent=None)"
+        },
+        "graph_info": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "has_composite_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, properties)"
+        },
+        "has_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "has_schema": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "has_vector_index": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
+        },
+        "ids": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "import_embeddings": {
+          "kind": "method",
+          "signature": "(self, /, path)"
+        },
+        "index_stats": {
+          "kind": "method",
+          "signature": "(self, /, node_type, property)"
+        },
+        "indexes": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "indices": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "intersection": {
+          "kind": "method",
+          "signature": "(self, /, other)"
+        },
+        "intersects_geometry": {
+          "kind": "method",
+          "signature": "(self, /, query_wkt, geometry_field=None)"
+        },
+        "is_columnar": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "label_pair_counts": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "label_propagation": {
+          "kind": "method",
+          "signature": "(self, /, max_iterations=None, connection_types=None, timeout_ms=None)"
+        },
+        "last_mutation_stats": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "last_report": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "len": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "limit": {
+          "kind": "method",
+          "signature": "(self, /, max_per_group)"
+        },
+        "list_composite_indexes": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "list_embeddings": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "list_indexes": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "load_ntriples": {
+          "kind": "method",
+          "signature": "(self, /, path, *, predicates=None, languages=None, node_types=None, predicate_labels=None, max_entities=None, max_triples=None, verbose=False, progress=None)"
+        },
+        "lock_schema": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "louvain_communities": {
+          "kind": "method",
+          "signature": "(self, /, weight_property=None, resolution=None, connection_types=None, timeout_ms=None)"
+        },
+        "match_pattern": {
+          "kind": "method",
+          "signature": "(self, /, pattern, max_matches=None)"
+        },
+        "near_point": {
+          "kind": "method",
+          "signature": "(self, /, center_lat, center_lon, max_distance, lat_field=None, lon_field=None)"
+        },
+        "near_point_m": {
+          "kind": "method",
+          "signature": "(self, /, center_lat, center_lon, max_distance_m, lat_field=None, lon_field=None)"
+        },
+        "neighbors_schema": {
+          "kind": "method",
+          "signature": "(self, /, node_type)"
+        },
+        "node": {
+          "kind": "method",
+          "signature": "(self, /, node_type, node_id)"
+        },
+        "node_type_counts": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "node_types": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "offset": {
+          "kind": "method",
+          "signature": "(self, /, n)"
+        },
+        "operation_index": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "pagerank": {
+          "kind": "method",
+          "signature": "(self, /, damping_factor=None, max_iterations=None, tolerance=None, connection_types=None, top_k=None, as_dict=None, timeout_ms=None, to_df=None)"
+        },
+        "properties": {
+          "kind": "method",
+          "signature": "(self, /, node_type, max_values=20)"
+        },
+        "purge_provisional": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "read_only": {
+          "kind": "method",
+          "signature": "(self, /, enabled=None)"
+        },
+        "rebuild_caches": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "rebuild_indexes": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "reindex": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "remove_embeddings": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column)"
+        },
+        "remove_label": {
+          "kind": "method",
+          "signature": "(self, /, node_type, ids, label)"
+        },
+        "replace_connections": {
+          "kind": "method",
+          "signature": "(self, /, data, connection_type, source_type, source_id_field, target_type, target_id_field, source_title_field=None, target_title_field=None, columns=None, skip_columns=None, conflict_handling=None, column_types=None, query=None, extra_properties=None)"
+        },
+        "report_history": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "sample": {
+          "kind": "method",
+          "signature": "(self, /, node_type_or_n=None, n=None)"
+        },
+        "save": {
+          "kind": "method",
+          "signature": "(self, /, path=None, *, fsync=True)"
+        },
+        "save_subset": {
+          "kind": "method",
+          "signature": "(self, /, path)"
+        },
+        "schema": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "schema_definition": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "schema_locked": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "schema_text": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "search": {
+          "kind": "method",
+          "signature": "(self, /, text, *, property='title', limit=10)"
+        },
+        "search_text": {
+          "kind": "method",
+          "signature": "(self, /, text_column, query, top_k=10, metric=None, to_df=False, returning=None, exact=False)"
+        },
+        "select": {
+          "kind": "method",
+          "signature": "(self, /, node_type, sort=None, limit=None, temporal=None, include_secondary=False)"
+        },
+        "selection": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "session": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "set_auto_vacuum": {
+          "kind": "method",
+          "signature": "(self, /, threshold)"
+        },
+        "set_default_max_rows": {
+          "kind": "method",
+          "signature": "(self, /, max_rows=None)"
+        },
+        "set_default_timeout": {
+          "kind": "method",
+          "signature": "(self, /, timeout_ms=None)"
+        },
+        "set_embedder": {
+          "kind": "method",
+          "signature": "(self, /, model)"
+        },
+        "set_embeddings": {
+          "kind": "method",
+          "signature": "(self, /, node_type, text_column, embeddings, metric=None)"
+        },
+        "set_instructions": {
+          "kind": "method",
+          "signature": "(self, /, text, *, channel=None)"
+        },
+        "set_memory_limit": {
+          "kind": "method",
+          "signature": "(self, /, limit_bytes, spill_dir=None)"
+        },
+        "set_parent_type": {
+          "kind": "method",
+          "signature": "(self, /, node_type, parent_type)"
+        },
+        "set_spatial": {
+          "kind": "method",
+          "signature": "(self, /, node_type, *, location=None, geometry=None, points=None, shapes=None)"
+        },
+        "set_temporal": {
+          "kind": "method",
+          "signature": "(self, /, type_name, valid_from, valid_to)"
+        },
+        "set_time_index": {
+          "kind": "method",
+          "signature": "(self, /, node_id, keys)"
+        },
+        "set_timeseries": {
+          "kind": "method",
+          "signature": "(self, /, node_type, *, resolution, channels=None, units=None, bin_type=None)"
+        },
+        "shape": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "shortest_path": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, weight_property=None, timeout_ms=None)"
+        },
+        "shortest_path_ids": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)"
+        },
+        "shortest_path_indices": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id, connection_types=None, via_types=None, timeout_ms=None)"
+        },
+        "shortest_path_length": {
+          "kind": "method",
+          "signature": "(self, /, source_type, source_id, target_type, target_id, weight_property=None)"
+        },
+        "shortest_path_lengths_batch": {
+          "kind": "method",
+          "signature": "(self, /, node_type, pairs)"
+        },
+        "show": {
+          "kind": "method",
+          "signature": "(self, /, columns=None, limit=200)"
+        },
+        "sort": {
+          "kind": "method",
+          "signature": "(self, /, sort, ascending=None)"
+        },
+        "source": {
+          "kind": "method",
+          "signature": "(self, /, name, node_type=None)"
+        },
+        "spatial": {
+          "kind": "method",
+          "signature": "(self, /, node_type=None)"
+        },
+        "statistics": {
+          "kind": "method",
+          "signature": "(self, /, property, level_index=None, group_by=None)"
+        },
+        "subgraph_stats": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "symmetric_difference": {
+          "kind": "method",
+          "signature": "(self, /, other)"
+        },
+        "time_index": {
+          "kind": "method",
+          "signature": "(self, /, node_id)"
+        },
+        "timeseries": {
+          "kind": "method",
+          "signature": "(self, /, node_id, channel=None, start=None, end=None)"
+        },
+        "timeseries_config": {
+          "kind": "method",
+          "signature": "(self, /, node_type=None)"
+        },
+        "titles": {
+          "kind": "method",
+          "signature": "(self, /, limit=None, indices=None, flatten_single_parent=None)"
+        },
+        "to_bytes": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "to_df": {
+          "kind": "method",
+          "signature": "(self, /, *, include_type=True, include_id=True)"
+        },
+        "to_networkx": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "to_str": {
+          "kind": "method",
+          "signature": "(self, /, limit=50)"
+        },
+        "to_subgraph": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "to_text": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "toc": {
+          "kind": "method",
+          "signature": "(self, /, file_path)"
+        },
+        "traverse": {
+          "kind": "method",
+          "signature": "(self, /, connection_type, level_index=None, direction=None, filter_target=None, filter_connection=None, sort_target=None, limit=None, new_level=None, at=None, during=None, temporal=None, target_type=None, where=None, where_connection=None)"
+        },
+        "union": {
+          "kind": "method",
+          "signature": "(self, /, other)"
+        },
+        "unique_values": {
+          "kind": "method",
+          "signature": "(self, /, property, group_by_parent=None, level_index=None, indices=None, store_as=None, max_length=None, keep_selection=None)"
+        },
+        "unlock_schema": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "unspill": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "update": {
+          "kind": "method",
+          "signature": "(self, /, properties, keep_selection=None)"
+        },
+        "vacuum": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "valid_at": {
+          "kind": "method",
+          "signature": "(self, /, date=None, date_from_field=None, date_to_field=None)"
+        },
+        "valid_during": {
+          "kind": "method",
+          "signature": "(self, /, start_date, end_date, date_from_field=None, date_to_field=None)"
+        },
+        "validate_schema": {
+          "kind": "method",
+          "signature": "(self, /, strict=None)"
+        },
+        "vector_search": {
+          "kind": "method",
+          "signature": "(self, /, text_column, query_vector, top_k=10, metric=None, to_df=False, returning=None, exact=False)"
+        },
+        "where": {
+          "kind": "method",
+          "signature": "(self, /, conditions, sort=None, limit=None)"
+        },
+        "where_any": {
+          "kind": "method",
+          "signature": "(self, /, conditions, sort=None, limit=None)"
+        },
+        "where_connected": {
+          "kind": "method",
+          "signature": "(self, /, connection_type, direction=None)"
+        },
+        "where_orphans": {
+          "kind": "method",
+          "signature": "(self, /, include_orphans=None, sort=None, limit=None)"
+        },
+        "within_bounds": {
+          "kind": "method",
+          "signature": "(self, /, min_lat, max_lat, min_lon, max_lon, lat_field=None, lon_field=None)"
+        },
+        "wkt_centroid": {
+          "kind": "method",
+          "signature": "(self, /, wkt_string, as_shapely=False)"
+        }
+      },
+      "module": "kglite"
+    },
+    "MissingArgumentError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "NodeNotFoundError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "PropertyNotFoundError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "ResultIter": {
+      "bases": [
+        "object"
+      ],
+      "constructible": false,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "__iter__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "__next__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        }
+      },
+      "module": "kglite"
+    },
+    "ResultView": {
+      "bases": [
+        "object"
+      ],
+      "constructible": false,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "__iter__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "__len__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "column": {
+          "kind": "method",
+          "signature": "(self, /, name)"
+        },
+        "columns": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "diagnostics": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "head": {
+          "kind": "method",
+          "signature": "(self, /, n=5)"
+        },
+        "one": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "profile": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "scalar": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "stats": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "tail": {
+          "kind": "method",
+          "signature": "(self, /, n=5)"
+        },
+        "to_df": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "to_dicts": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "to_gdf": {
+          "kind": "method",
+          "signature": "(self, /, geometry_column='geometry', crs=None)"
+        },
+        "to_list": {
+          "kind": "method",
+          "signature": "(self, /)"
+        }
+      },
+      "module": "kglite"
+    },
+    "SchemaError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "Session": {
+      "bases": [
+        "object"
+      ],
+      "constructible": false,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "cursor": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "cypher": {
+          "kind": "method",
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None)"
+        },
+        "execute": {
+          "kind": "method",
+          "signature": "(self, /, query, to_df=False, params=None, timeout_ms=None, max_rows=None, write_scope=None)"
+        },
+        "node_count": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "node_types": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "snapshot": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "version": {
+          "kind": "method",
+          "signature": "(self, /)"
+        }
+      },
+      "module": "kglite"
+    },
+    "Spatial": {
+      "bases": [
+        "object"
+      ],
+      "constructible": true,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "area": {
+          "kind": "method",
+          "signature": "() -> str"
+        },
+        "centroid_lat": {
+          "kind": "method",
+          "signature": "() -> str"
+        },
+        "centroid_lon": {
+          "kind": "method",
+          "signature": "() -> str"
+        },
+        "distance": {
+          "kind": "method",
+          "signature": "() -> str"
+        },
+        "perimeter": {
+          "kind": "method",
+          "signature": "() -> str"
+        }
+      },
+      "module": "kglite"
+    },
+    "Transaction": {
+      "bases": [
+        "object"
+      ],
+      "constructible": false,
+      "constructor": "()",
+      "kind": "class",
+      "members": {
+        "__enter__": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "__exit__": {
+          "kind": "method",
+          "signature": "(self, /, exc_type, _exc_val, _exc_tb)"
+        },
+        "commit": {
+          "kind": "method",
+          "signature": "(self, /)"
+        },
+        "cypher": {
+          "kind": "method",
+          "signature": "(self, /, query, params=None, to_df=False, timeout_ms=None, max_rows=None, write_scope=None)"
+        },
+        "is_read_only": {
+          "kind": "attribute",
+          "type": "getset_descriptor"
+        },
+        "rollback": {
+          "kind": "method",
+          "signature": "(self, /)"
+        }
+      },
+      "module": "kglite"
+    },
+    "ValidationError": {
+      "bases": [
+        "KgError"
+      ],
+      "constructible": true,
+      "constructor": null,
+      "kind": "class",
+      "members": {},
+      "module": "kglite"
+    },
+    "__version__": {
+      "kind": "constant",
+      "type": "str"
+    },
+    "build_code_tree": {
+      "kind": "function",
+      "signature": "(path: str, **kwargs) -> 'KnowledgeGraph'"
+    },
+    "check_file_freshness": {
+      "kind": "function",
+      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> list"
+    },
+    "cypher_pass_names": {
+      "kind": "function",
+      "signature": "()"
+    },
+    "from_blueprint": {
+      "kind": "function",
+      "signature": "(blueprint_path: 'Union[str, Path]', *, verbose: 'bool' = False, save: 'bool' = True, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
+    },
+    "from_bytes": {
+      "kind": "function",
+      "signature": "(data)"
+    },
+    "from_networkx": {
+      "kind": "function",
+      "signature": "(nx_graph, *, default_node_type: str = 'Node', default_edge_type: str = 'RELATED') -> 'KnowledgeGraph'"
+    },
+    "from_records": {
+      "kind": "function",
+      "signature": "(spec: 'Union[dict, str]', *, save: 'Optional[str]' = None, lock_schema: 'bool' = False, storage: 'str' = 'default', path: 'Optional[str]' = None) -> 'KnowledgeGraph'"
+    },
+    "graphgen": {
+      "kind": "function",
+      "signature": "(scale: str = 'medium', *, persons: 'int | None' = None, seed: int = 1234, knows_per: int = 8, degree_dist: str = 'zipf', zipf_exp: float = 1.6, out: 'str | None' = None)"
+    },
+    "load": {
+      "kind": "function",
+      "signature": "(path)"
+    },
+    "load_rdf": {
+      "kind": "function",
+      "signature": "(path, *, languages=None, label_predicates=None, keep_full_iris=False, default_type=None, max_triples=None)"
+    },
+    "open": {
+      "kind": "function",
+      "signature": "(path, *, storage=None, durable=False)"
+    },
+    "open_session": {
+      "kind": "function",
+      "signature": "(path)"
+    },
+    "outline": {
+      "kind": "function",
+      "signature": "(graph: 'KnowledgeGraph', root, edge: str, *, max_depth: int | None = None, body: str | None = None) -> str"
+    },
+    "repo_tree": {
+      "kind": "function",
+      "signature": "(repo: str, **kwargs) -> 'KnowledgeGraph'"
+    },
+    "stamp_file_freshness": {
+      "kind": "function",
+      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', mtime_property: str = 'file_mtime', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> int"
+    },
+    "to_neo4j": {
+      "kind": "function",
+      "signature": "(graph: 'KnowledgeGraph', uri: str, **kwargs) -> dict"
+    }
+  },
+  "schema_version": 1
+}

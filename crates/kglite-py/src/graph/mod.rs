@@ -174,7 +174,7 @@ impl CursorState {
 /// All read methods take `&self`; mutations use `Arc::make_mut` for copy-on-write.
 /// Supports Cypher queries, property filtering, traversals, graph algorithms,
 /// and code entity exploration methods (`find`, `source`, `context`, `toc`).
-#[pyclass(skip_from_py_object)]
+#[pyclass(module = "kglite", skip_from_py_object)]
 pub struct KnowledgeGraph {
     pub(crate) inner: Arc<DirGraph>,
     /// Per-caller fluent cursor state — see [`CursorState`].

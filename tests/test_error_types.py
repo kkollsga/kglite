@@ -41,6 +41,7 @@ class TestExports:
             "FileIoError",
             "ArgumentError",
             "MissingArgumentError",
+            "InternerCollisionError",
             "InternalError",
         ],
     )
@@ -79,6 +80,7 @@ class TestHierarchy:
             kglite.FileIoError,
             kglite.ArgumentError,
             kglite.MissingArgumentError,
+            kglite.InternerCollisionError,
             kglite.InternalError,
         ]
         for cls in typed:
