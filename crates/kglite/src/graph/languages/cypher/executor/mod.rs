@@ -895,6 +895,17 @@ impl<'a> CypherExecutor<'a> {
                     // First pattern - create initial rows
                     // limit_hint is safe for edge patterns: PatternExecutor
                     // only enforces max_matches at the last hop.
+                    // When a residual (non-pushable) WHERE is fused into this
+                    // MATCH, the matcher's per-target dedup must NOT run: it
+                    // keeps one arbitrary representative per distinct target,
+                    // which may fail the predicate while a suppressed match
+                    // with the same target would have passed. Filter first,
+                    // dedup after (in the loop below) instead.
+                    let matcher_distinct_target = if inline_where.is_none() {
+                        clause.distinct_node_hint.clone()
+                    } else {
+                        None
+                    };
                     let executor = PatternExecutor::new_lightweight_with_params(
                         self.graph,
                         pattern_limit,
@@ -902,37 +913,57 @@ impl<'a> CypherExecutor<'a> {
                     )
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel)
-                    .set_distinct_target(clause.distinct_node_hint.clone());
+                    .set_distinct_target(matcher_distinct_target);
                     let matches = executor.execute(pattern)?;
                     self.budget.check_work(matches.len(), "MATCH expansion")?;
 
                     // When distinct_node_hint is set, pre-dedup by NodeIndex to avoid
                     // creating ResultRows for matches that would be DISTINCT-removed later.
                     if let Some(ref dedup_var) = clause.distinct_node_hint {
+                        use crate::graph::core::pattern_matching::MatchBinding;
                         let mut seen: rustc_hash::FxHashSet<_> =
                             rustc_hash::FxHashSet::with_capacity_and_hasher(
                                 matches.len().min(10000),
                                 Default::default(),
                             );
                         for m in matches {
-                            // Check if this match's dedup variable is a node we've seen
-                            let dominated = m
+                            // Resolve the dedup variable's node index first so an
+                            // already-kept target is skipped before row conversion.
+                            let dedup_idx = m
                                 .bindings
                                 .iter()
                                 .find(|(name, _)| name == dedup_var)
-                                .is_some_and(|(_, b)| match b {
-                                    crate::graph::core::pattern_matching::MatchBinding::Node {
-                                        index,
-                                        ..
-                                    } => !seen.insert(*index),
-                                    crate::graph::core::pattern_matching::MatchBinding::NodeRef(
-                                        index,
-                                    ) => !seen.insert(*index),
-                                    _ => false,
+                                .and_then(|(_, b)| match b {
+                                    MatchBinding::Node { index, .. } => Some(*index),
+                                    MatchBinding::NodeRef(index) => Some(*index),
+                                    _ => None,
                                 });
-                            if !dominated {
-                                self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
-                                all_rows.push(self.pattern_match_to_row(m));
+                            if let Some(idx) = dedup_idx {
+                                if seen.contains(&idx) {
+                                    continue;
+                                }
+                            }
+                            let row = self.pattern_match_to_row(m);
+                            // Residual WHERE fused into this MATCH: filter BEFORE
+                            // the dedup insert so the kept representative is a row
+                            // that passed the predicate (filter-then-dedup).
+                            if let Some(pred) = inline_where {
+                                match self.evaluate_predicate(pred, &row) {
+                                    Ok(true) => {}
+                                    Ok(false) => continue,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            if let Some(idx) = dedup_idx {
+                                seen.insert(idx);
+                            }
+                            self.budget.reserve_rows(all_rows.len(), 1, "MATCH")?;
+                            all_rows.push(row);
+                            // Stop after limit matching rows (not candidates)
+                            if let Some(limit) = limit_hint {
+                                if all_rows.len() >= limit {
+                                    break;
+                                }
                             }
                         }
                     } else {

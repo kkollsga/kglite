@@ -2193,3 +2193,81 @@ class TestMapSubscriptAccess:
         assert cypher_graph.cypher("RETURN [1, 2, 3][0] AS r")[0]["r"] == 1
         assert cypher_graph.cypher("RETURN [1, 2, 3][-1] AS r")[0]["r"] == 3
         assert cypher_graph.cypher("RETURN [1, 2, 3][9] AS r")[0]["r"] is None
+
+
+class TestFusedCountRegressions:
+    """Exact-value regressions for three fused/hinted count bugs (0.12.x).
+
+    A. push_distinct_into_match: the executor's distinct-dedup branch
+       skipped the residual (non-pushable) WHERE fused into the MATCH.
+    B. try_count_simple_pattern slow path: missing connection-type
+       post-filter on memory/mapped storage counted edges of OTHER
+       connection types.
+    C. fused OPTIONAL MATCH aggregate: count(*) returned 0 for unmatched
+       upstream rows instead of 1 (the null-padded row counts).
+
+    The matching differential-corpus entries assert optimized == naive;
+    these tests pin the actual correct values.
+    """
+
+    def test_distinct_hint_respects_residual_where(self):
+        # Pair sums: A->B = 30, A->C = 40, C->B = 50, D->B = 65.
+        # Only D->B passes `a.age + b.age > 50`.
+        g = KnowledgeGraph()
+        g.add_nodes(
+            pd.DataFrame({"pid": [1, 2, 3, 4], "name": ["A", "B", "C", "D"], "age": [10, 20, 30, 45]}),
+            "Person",
+            "pid",
+            "name",
+        )
+        g.add_connections(pd.DataFrame({"f": [1, 1, 3, 4], "t": [2, 3, 2, 2]}), "KNOWS", "Person", "f", "Person", "t")
+        q = "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age + b.age > 50 RETURN DISTINCT b.name AS n"
+        assert sorted(r["n"] for r in g.cypher(q).to_list()) == ["B"]
+        # The pass disabled must agree (guards the executor-side fix).
+        assert sorted(r["n"] for r in g.cypher(q, disabled_passes=["push_distinct_into_match"]).to_list()) == ["B"]
+
+    def test_fused_optional_count_filters_connection_type(self):
+        # a has BOTH an R and an S edge to the same peer (which passes the
+        # property filter) — only the R edge may be counted.
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1], "name": ["a"]}), "P", "pid", "name")
+        g.add_nodes(pd.DataFrame({"pid": [10], "name": ["b"], "y": [2]}), "Q", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [10]}), "R", "P", "f", "Q", "t")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [10]}), "S", "P", "f", "Q", "t")
+        q = "MATCH (a:P) OPTIONAL MATCH (a)-[:R]->(b {y: 2}) WITH a, count(b) AS c RETURN a.name AS n, c"
+        assert g.cypher(q).to_list() == [{"n": "a", "c": 1}]
+        assert g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list() == [{"n": "a", "c": 1}]
+
+    def test_fused_optional_count_star_null_padded_row(self):
+        # y has no outgoing R edge: OPTIONAL MATCH emits one null-padded
+        # row, so count(*) = 1 while count(m) = 0.
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2], "name": ["x", "y"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1], "t": [2]}), "R", "P", "f", "P", "t")
+        q = (
+            "MATCH (n:P) OPTIONAL MATCH (n)-[r:R]->(m) "
+            "WITH n, count(*) AS c, count(m) AS cm, count(*) - count(m) AS diff "
+            "RETURN n.name AS name, c, cm, diff ORDER BY name"
+        )
+        expected = [
+            {"name": "x", "c": 1, "cm": 1, "diff": 0},
+            {"name": "y", "c": 1, "cm": 0, "diff": 1},
+        ]
+        assert g.cypher(q).to_list() == expected
+        assert g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list() == expected
+
+    def test_fused_optional_multi_pattern_not_fused(self):
+        # The fused operator computes ONE match_count summed across
+        # patterns; per-variable counts over a multi-pattern OPTIONAL
+        # MATCH can't be derived from it, so the fusion gate must bail.
+        # Optimized and naive must agree (exact multi-pattern OPTIONAL
+        # semantics are the materialized executor's contract).
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"pid": [1, 2, 3, 4], "name": ["n1", "n2", "n3", "n4"]}), "P", "pid", "name")
+        g.add_connections(pd.DataFrame({"f": [1, 1], "t": [2, 3]}), "X", "P", "f", "P", "t")
+        g.add_connections(pd.DataFrame({"f": [2], "t": [4]}), "Y", "P", "f", "P", "t")
+        q = (
+            "MATCH (n:P {pid: 1}) OPTIONAL MATCH (n)-[:X]->(a), (n)-[:Y]->(b) "
+            "WITH n, count(a) AS ca, count(b) AS cb RETURN n.name AS name, ca, cb"
+        )
+        assert g.cypher(q).to_list() == g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list()

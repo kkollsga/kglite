@@ -1495,6 +1495,56 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "RETURN p.name AS pn, oldest ORDER BY pn",
         None,
     ),
+    # ── fused count / distinct-hint regression shapes (0.12.x) ──────────
+    (
+        # push_distinct_into_match with a residual (multi-variable) WHERE:
+        # `a.age + b.age > 50` can't be pushed into the pattern, so it is
+        # fused into the MATCH as an inline predicate. The distinct-dedup
+        # branch of execute_match previously skipped that predicate
+        # entirely — the WHERE was silently dropped.
+        "distinct_hint_residual_where",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age + b.age > 50 RETURN DISTINCT b.name AS n",
+        None,
+    ),
+    (
+        # Fused OPTIONAL MATCH count with a property-filtered peer, on a
+        # node that ALSO has edges of another connection type whose peer
+        # passes the property filter (Person_1: KNOWS→Person_2 with
+        # age=22, plus a WORKS_AT edge). try_count_simple_pattern's slow
+        # path previously trusted edges_directed_filtered to filter the
+        # connection type — a no-op on memory/mapped storage — so the
+        # KNOWS edge was counted under the :WORKS_AT pattern.
+        "optional_count_conn_type_postfilter",
+        "social_graph",
+        "MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(x {age: 22}) "
+        "WITH p, count(x) AS c RETURN p.name AS n, c ORDER BY n",
+        None,
+    ),
+    (
+        # Fused OPTIONAL MATCH aggregate + count(*) with unmatched rows:
+        # Person_20 has no outgoing KNOWS, so OPTIONAL MATCH emits one
+        # null-padded row — count(*) must be 1, count(m) must be 0. The
+        # fused operator previously returned match_count (0) for both.
+        "optional_count_star_unmatched",
+        "social_graph",
+        "MATCH (n:Person) OPTIONAL MATCH (n)-[r:KNOWS]->(m) "
+        "WITH n, count(*) AS c, count(m) AS cm, count(*) - count(m) AS diff "
+        "RETURN n.name AS name, c, cm, diff ORDER BY name",
+        None,
+    ),
+    (
+        # Multi-pattern OPTIONAL MATCH + per-variable counts: the fused
+        # operator computes ONE match_count summed across patterns, which
+        # can't represent per-pattern counts — the fusion gate must bail
+        # and leave this to the materialized executor.
+        "optional_multi_pattern_count_vars",
+        "social_graph",
+        "MATCH (n:Person {person_id: 1}) "
+        "OPTIONAL MATCH (n)-[:KNOWS]->(a), (n)-[:WORKS_AT]->(b) "
+        "WITH n, count(a) AS ca, count(b) AS cb RETURN n.name AS name, ca, cb",
+        None,
+    ),
 ]
 
 

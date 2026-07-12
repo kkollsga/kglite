@@ -76,6 +76,13 @@ impl<'a> CypherExecutor<'a> {
                 }
             }
 
+            // OPTIONAL MATCH semantics: an upstream row with zero pattern
+            // matches still emits one null-padded row, so `count(*)` is
+            // max(match_count, 1), while `count(var)` — over a variable
+            // bound only by this OPTIONAL MATCH — counts non-null bindings,
+            // which is exactly match_count.
+            let star_count = match_count.max(1);
+
             // Build projected values for this row
             let mut projected = Bindings::with_capacity(
                 group_key_indices.len() + count_items.len() + derived_items.len(),
@@ -96,19 +103,20 @@ impl<'a> CypherExecutor<'a> {
             // already in scope.
             for &(_, item) in &derived_items {
                 let key = return_item_column_name(item);
-                let substituted = substitute_count_with_value(&item.expression, match_count);
+                let substituted =
+                    substitute_count_with_value(&item.expression, star_count, match_count);
                 let val = self.evaluate_expression(&substituted, row)?;
                 projected.insert(key, val);
             }
 
-            // Count aggregates
+            // Count aggregates: count(*) vs count(var) per item (see above)
             for &(_, item) in &count_items {
                 let key = return_item_column_name(item);
-
-                // count(*) counts all, count(var) counts non-null matches
-                // For OPTIONAL MATCH fusion, match_count already reflects compatible matches
-                // count(*) = match_count, count(var) = match_count (matched vars are non-null)
-                projected.insert(key, Value::Int64(match_count));
+                let value = match &item.expression {
+                    Expression::FunctionCall { args, .. } if count_call_is_star(args) => star_count,
+                    _ => match_count,
+                };
+                projected.insert(key, Value::Int64(value));
             }
 
             // Create result row preserving bindings for group-key variables

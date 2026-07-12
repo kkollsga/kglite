@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Fused and DISTINCT-optimized query paths now agree with the materialized
+  executor.** A residual `WHERE` between `MATCH` and `RETURN DISTINCT` is no
+  longer dropped by the distinct pushdown; fused `OPTIONAL MATCH` counts
+  post-filter by connection type on in-memory/mapped storage, report
+  `count(*)` as 1 (not 0) for unmatched rows, and bail to the materialized
+  executor for comma-separated multi-pattern shapes whose per-variable counts
+  a single summed match count cannot represent. The duplicated count helpers
+  that allowed these paths to drift are consolidated.
 - **Boolean, membership, quantifier, and list expressions now preserve Cypher
   semantics outside `WHERE`.** `AND`/`OR`/`XOR`/`NOT` parse in projection
   expressions with the expected precedence, unknown values remain null,

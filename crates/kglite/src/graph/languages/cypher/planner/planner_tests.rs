@@ -1202,3 +1202,57 @@ fn test_desugar_skips_when_multiple_group_vars() {
         "multi-group-variable RETURN must not be auto-rewritten"
     );
 }
+
+#[test]
+fn test_fuse_optional_match_aggregate_single_pattern_fires() {
+    let mut query = parse_cypher(
+        "MATCH (n:Person) \
+         OPTIONAL MATCH (n)-[r:KNOWS]->(m) \
+         WITH n, count(*) AS c \
+         RETURN n.title, c",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let fused_count = query
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. }))
+        .count();
+    assert_eq!(
+        fused_count, 1,
+        "single-pattern OPTIONAL MATCH + WITH count(*) must fuse"
+    );
+}
+
+#[test]
+fn test_fuse_optional_match_aggregate_bails_on_multi_pattern() {
+    // The fused executor computes ONE per-row match_count by summing
+    // pattern counts — wrong for comma-separated multi-pattern OPTIONAL
+    // MATCH (row count is the patterns' join; per-variable counts differ
+    // per pattern). The gate must leave this to the materialized path.
+    let mut query = parse_cypher(
+        "MATCH (n:Person) \
+         OPTIONAL MATCH (n)-[:KNOWS]->(a), (n)-[:WORKS_AT]->(b) \
+         WITH n, count(a) AS ca, count(b) AS cb \
+         RETURN n.title, ca, cb",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    let fused_count = query
+        .clauses
+        .iter()
+        .filter(|c| matches!(c, Clause::FusedOptionalMatchAggregate { .. }))
+        .count();
+    assert_eq!(
+        fused_count, 0,
+        "multi-pattern OPTIONAL MATCH must not fuse into FusedOptionalMatchAggregate"
+    );
+}

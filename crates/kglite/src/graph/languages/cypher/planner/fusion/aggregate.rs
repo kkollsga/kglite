@@ -23,11 +23,20 @@ pub(crate) fn fuse_optional_match_aggregate(query: &mut CypherQuery) {
     while i + 1 < query.clauses.len() {
         // Note: unlike fuse_match_*_aggregate, this fused executor correctly
         // iterates over existing rows from prior clauses, so no i > 0 guard needed.
-        let can_fuse = matches!(
-            (&query.clauses[i], &query.clauses[i + 1]),
-            (Clause::OptionalMatch(_), Clause::With(_))
-                | (Clause::OptionalMatch(_), Clause::Return(_))
-        );
+        //
+        // Single-pattern only: the fused executor computes ONE per-row
+        // match_count by SUMMING pattern counts, but a comma-separated
+        // multi-pattern OPTIONAL MATCH row count is the join of the
+        // patterns' matches, and per-variable counts differ per pattern
+        // (`count(a)` vs `count(b)` over different patterns) — summing
+        // silently returns wrong counts. Multi-pattern shapes take the
+        // materialized executor.
+        let can_fuse = match (&query.clauses[i], &query.clauses[i + 1]) {
+            (Clause::OptionalMatch(m), Clause::With(_) | Clause::Return(_)) => {
+                m.patterns.len() == 1
+            }
+            _ => false,
+        };
 
         if !can_fuse {
             i += 1;

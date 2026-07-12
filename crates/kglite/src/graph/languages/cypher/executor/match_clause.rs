@@ -15,41 +15,40 @@ use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 
+/// True when a `count(...)` call is `count(*)` (or the empty-arg form,
+/// treated as star elsewhere in the fused paths too). `count(var)`
+/// returns false. The two forms diverge on unmatched upstream rows
+/// under OPTIONAL MATCH: the null-padded row counts for `count(*)`
+/// but not for `count(var)`.
+fn count_call_is_star(args: &[Expression]) -> bool {
+    args.is_empty() || matches!(args[0], Expression::Star)
+}
+
 /// Replace every `count(...)` function-call sub-tree in `expr` with a
-/// literal `Value::Int64(value)`. Used by the fused OPTIONAL MATCH
-/// path to evaluate derived expressions like `total - count(rp)`
-/// against a per-upstream-row count without re-running the OPTIONAL
-/// expansion. Only count() is substituted because that's the only
-/// aggregate the fused path computes inline; other aggregates are
-/// rejected upstream by `is_fusable_*_clause`.
-fn substitute_count_with_value(expr: &Expression, value: i64) -> Expression {
+/// literal: `count(*)` becomes `star_value`, `count(var)` becomes
+/// `var_value`. Used by the fused OPTIONAL MATCH path to evaluate
+/// derived expressions like `total - count(rp)` against a
+/// per-upstream-row count without re-running the OPTIONAL expansion.
+/// Only count() is substituted because that's the only aggregate the
+/// fused path computes inline; other aggregates are rejected upstream
+/// by `is_fusable_*_clause`.
+fn substitute_count_with_value(expr: &Expression, star_value: i64, var_value: i64) -> Expression {
+    let subst = |e: &Expression| Box::new(substitute_count_with_value(e, star_value, var_value));
     match expr {
-        Expression::FunctionCall { name, .. } if name == "count" => {
+        Expression::FunctionCall { name, args, .. } if name == "count" => {
+            let value = if count_call_is_star(args) {
+                star_value
+            } else {
+                var_value
+            };
             Expression::Literal(Value::Int64(value))
         }
-        Expression::Add(l, r) => Expression::Add(
-            Box::new(substitute_count_with_value(l, value)),
-            Box::new(substitute_count_with_value(r, value)),
-        ),
-        Expression::Subtract(l, r) => Expression::Subtract(
-            Box::new(substitute_count_with_value(l, value)),
-            Box::new(substitute_count_with_value(r, value)),
-        ),
-        Expression::Multiply(l, r) => Expression::Multiply(
-            Box::new(substitute_count_with_value(l, value)),
-            Box::new(substitute_count_with_value(r, value)),
-        ),
-        Expression::Divide(l, r) => Expression::Divide(
-            Box::new(substitute_count_with_value(l, value)),
-            Box::new(substitute_count_with_value(r, value)),
-        ),
-        Expression::Modulo(l, r) => Expression::Modulo(
-            Box::new(substitute_count_with_value(l, value)),
-            Box::new(substitute_count_with_value(r, value)),
-        ),
-        Expression::Negate(inner) => {
-            Expression::Negate(Box::new(substitute_count_with_value(inner, value)))
-        }
+        Expression::Add(l, r) => Expression::Add(subst(l), subst(r)),
+        Expression::Subtract(l, r) => Expression::Subtract(subst(l), subst(r)),
+        Expression::Multiply(l, r) => Expression::Multiply(subst(l), subst(r)),
+        Expression::Divide(l, r) => Expression::Divide(subst(l), subst(r)),
+        Expression::Modulo(l, r) => Expression::Modulo(subst(l), subst(r)),
+        Expression::Negate(inner) => Expression::Negate(subst(inner)),
         // Concat / Case / etc. — leave alone; the gating function only
         // accepts shapes this helper covers, so the fall-through path
         // never sees a containing aggregate.
@@ -546,10 +545,45 @@ impl<'a> CypherExecutor<'a> {
         Some(Ok(false)) // No match found
     }
 
+    /// Count matches of a simple 3-element `Node-Edge-Node` pattern from a
+    /// bound endpoint, without materializing rows. Multi-edges between the
+    /// same pair each count. Returns `Ok(None)` when the pattern shape isn't
+    /// supported (caller falls back to the full PatternExecutor).
     pub(super) fn try_count_simple_pattern(
         &self,
         pattern: &crate::graph::core::pattern_matching::Pattern,
         bindings: &Bindings<NodeIndex>,
+    ) -> Result<Option<i64>, String> {
+        self.count_simple_pattern_from_bound(pattern, bindings, false)
+    }
+
+    /// Distinct-peer variant of `try_count_simple_pattern`: returns the number
+    /// of distinct peer NodeIndices reachable along the edge from the bound
+    /// node, instead of the raw edge count. Used for `count(DISTINCT v)`
+    /// where `v` is the unbound node variable. Multi-edges between the same
+    /// pair collapse to one. Undirected `[r]-` patterns dedup peers across
+    /// both directions (a node reachable both ways counts once).
+    pub(super) fn try_count_distinct_peers(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        bindings: &Bindings<NodeIndex>,
+    ) -> Result<Option<i64>, String> {
+        self.count_simple_pattern_from_bound(pattern, bindings, true)
+    }
+
+    /// Shared implementation behind [`Self::try_count_simple_pattern`]
+    /// (`distinct_peers = false`, raw edge count) and
+    /// [`Self::try_count_distinct_peers`] (`distinct_peers = true`, distinct
+    /// peer count). Exactly one copy of the direction mapping and filter
+    /// plumbing lives here — the two pre-unification copies had drifted:
+    /// one post-filtered `connection_type`, the other trusted
+    /// `edges_directed_filtered` to do it and silently over-counted edges
+    /// of other connection types on memory/mapped storage.
+    fn count_simple_pattern_from_bound(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        bindings: &Bindings<NodeIndex>,
+        distinct_peers: bool,
     ) -> Result<Option<i64>, String> {
         // Only handle simple 3-element patterns: Node-Edge-Node
         if pattern.elements.len() != 3 {
@@ -574,11 +608,6 @@ impl<'a> CypherExecutor<'a> {
             return Ok(None);
         }
 
-        // Don't use fast-path if the bound (group-key) node has property filters
-        // — the caller already filtered it. The unbound node's properties are
-        // checked inline during counting (supports WHERE push-down on target).
-        // Both nodes having properties is rare and we fall back for it.
-
         // Determine which end is bound
         let a_bound = node_a
             .variable
@@ -590,8 +619,8 @@ impl<'a> CypherExecutor<'a> {
             .and_then(|v| bindings.get(v).copied());
 
         // We need exactly one end bound for the fast-path to help.
-        // Undirected `[r]-` patterns count both incoming and outgoing — the
-        // fast path issues two `count_edges_filtered` calls and sums.
+        // Undirected `[r]-` patterns count both incoming and outgoing —
+        // both directions are swept and summed (dedup'd for distinct peers).
         //
         // Contract: the caller guarantees that the bound NodeIndex satisfies
         // any property filter on the bound side of the pattern (the upstream
@@ -631,13 +660,14 @@ impl<'a> CypherExecutor<'a> {
         let interned_conn = conn_type.map(InternedKey::from_str);
         let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
 
-        // Fast path: when no property filters on the unbound node *and*
-        // no inline edge filter, use count_edges_filtered which avoids
-        // EdgeData materialization entirely. On disk with sorted CSR:
-        // binary search + sequential count (zero allocations). When an
-        // edge_filter is set we fall through — the slow loop below
-        // checks each edge's predicate without ever building a row.
-        if other_props.is_none() && edge.edge_filter.is_none() {
+        // Fast path (raw counts only): when no property filters on the
+        // unbound node *and* no inline edge filter, use count_edges_filtered
+        // which avoids EdgeData materialization entirely. On disk with
+        // sorted CSR: binary search + sequential count (zero allocations).
+        // Distinct-peer counting can't use it (needs peer identity, not an
+        // edge count); when a filter is set we fall through — the slow loop
+        // below checks each edge without ever building a row.
+        if !distinct_peers && other_props.is_none() && edge.edge_filter.is_none() {
             let mut count: usize = 0;
             for &dir in traverse_dirs {
                 count = count.saturating_add(self.graph.graph.count_edges_filtered(
@@ -651,18 +681,17 @@ impl<'a> CypherExecutor<'a> {
             return Ok(Some(count as i64));
         }
 
-        // Slow path: property filters require per-node property access.
-        // This loop can iterate millions of edges for hub nodes (Q5 has ~40 M
-        // incoming P31 edges), so check the deadline every 1 M iterations.
-        // For undirected `[r]-` patterns we sweep both directions and sum.
+        // Slow path: iterate incident edges. This loop can cover millions of
+        // edges for hub nodes (Q5 has ~40 M incoming P31 edges), so check the
+        // deadline every 1 M iterations. For undirected `[r]-` patterns we
+        // sweep both directions.
         let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
         let mut count: i64 = 0;
+        let mut peers: HashSet<NodeIndex> = HashSet::new();
         let mut iter: usize = 0;
         // The inline filter (if any) was pushed by the planner from a
         // downstream WHERE; apply it per edge so the count reflects the
-        // post-filter row set. AnchorSide::Source assumption matches
-        // `try_count_simple_pattern`'s `(Some(a_idx), None)` arm — the
-        // bound side is the pattern's left endpoint.
+        // post-filter row set.
         let edge_filter = edge.edge_filter.as_ref();
 
         for &dir in traverse_dirs {
@@ -694,164 +723,11 @@ impl<'a> CypherExecutor<'a> {
                 if iter.is_multiple_of(1 << 20) {
                     self.check_deadline()?;
                 }
-                // Connection type already filtered by edges_directed_filtered
-                let other_idx = if dir == Direction::Outgoing {
-                    edge_ref.target()
-                } else {
-                    edge_ref.source()
-                };
-
-                if let Some(required_type) = interned_other_type {
-                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                        if nt != required_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-
-                if let Some(filter) = edge_filter {
-                    let edge_data = edge_ref.weight();
-                    let conn_ty = edge_data.connection_type;
-                    let edge_source = edge_ref.source();
-                    let edge_target = edge_ref.target();
-                    if !filter.predicate.eval(
-                        conn_ty,
-                        peer_is_start,
-                        edge_source,
-                        edge_target,
-                        &|prop: &str| edge_data.get_property(prop).cloned(),
-                    ) {
-                        continue;
-                    }
-                }
-
-                if let Some(ref props) = other_props {
-                    if !pe.node_matches_properties_pub(other_idx, props) {
-                        continue;
-                    }
-                }
-
-                count += 1;
-            }
-        }
-
-        Ok(Some(count))
-    }
-
-    /// Distinct-peer variant of `try_count_simple_pattern`: returns the number
-    /// of distinct peer NodeIndices reachable along the edge from the bound
-    /// node, instead of the raw edge count. Used for `count(DISTINCT v)`
-    /// where `v` is the unbound node variable. Multi-edges between the same
-    /// pair collapse to one. Undirected `[r]-` patterns dedup peers across
-    /// both directions (a node reachable both ways counts once).
-    pub(super) fn try_count_distinct_peers(
-        &self,
-        pattern: &crate::graph::core::pattern_matching::Pattern,
-        bindings: &Bindings<NodeIndex>,
-    ) -> Result<Option<i64>, String> {
-        if pattern.elements.len() != 3 {
-            return Ok(None);
-        }
-
-        let node_a = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(None),
-        };
-        let edge = match &pattern.elements[1] {
-            PatternElement::Edge(ep) => ep,
-            _ => return Ok(None),
-        };
-        let node_b = match &pattern.elements[2] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(None),
-        };
-
-        if edge.var_length.is_some() || edge.properties.is_some() {
-            return Ok(None);
-        }
-
-        let a_bound = node_a
-            .variable
-            .as_ref()
-            .and_then(|v| bindings.get(v).copied());
-        let b_bound = node_b
-            .variable
-            .as_ref()
-            .and_then(|v| bindings.get(v).copied());
-
-        // Same shape as `try_count_simple_pattern`'s `CountFastPath` alias —
-        // and the same caller-guarantees contract: the bound NodeIndex
-        // already satisfies any bound-side property filter, so we ignore
-        // `node_a.properties` / `node_b.properties` for the bound side and
-        // only consult `other_props` for the unbound peer.
-        type CountFastPath<'p> = (
-            NodeIndex,
-            &'p Option<String>,
-            &'p Option<HashMap<String, PropertyMatcher>>,
-            &'p [Direction],
-        );
-        let (bound_idx, other_type, other_props, traverse_dirs): CountFastPath =
-            match (a_bound, b_bound) {
-                (None, Some(b_idx)) => {
-                    let dirs: &[Direction] = match edge.direction {
-                        EdgeDirection::Outgoing => &[Direction::Incoming],
-                        EdgeDirection::Incoming => &[Direction::Outgoing],
-                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
-                    };
-                    (b_idx, &node_a.node_type, &node_a.properties, dirs)
-                }
-                (Some(a_idx), None) => {
-                    let dirs: &[Direction] = match edge.direction {
-                        EdgeDirection::Outgoing => &[Direction::Outgoing],
-                        EdgeDirection::Incoming => &[Direction::Incoming],
-                        EdgeDirection::Both => &[Direction::Outgoing, Direction::Incoming],
-                    };
-                    (a_idx, &node_b.node_type, &node_b.properties, dirs)
-                }
-                _ => return Ok(None),
-            };
-
-        let conn_type = edge.connection_type.as_deref();
-        let interned_conn = conn_type.map(InternedKey::from_str);
-        let interned_other_type = other_type.as_ref().map(|t| InternedKey::from_str(t));
-
-        // Always iterate edges and collect peers into a HashSet — there's no
-        // pre-built "distinct peers" index. The edge-count fast path
-        // (`count_edges_filtered`) doesn't help here because we need
-        // peer-uniqueness, not edge count. Polling the deadline every 1 M
-        // iterations matches the surrounding helpers.
-        let pe = PatternExecutor::new_lightweight_with_params(self.graph, None, self.params);
-        let mut peers: HashSet<NodeIndex> = HashSet::new();
-        let mut iter: usize = 0;
-        let edge_filter = edge.edge_filter.as_ref();
-
-        for &dir in traverse_dirs {
-            let peer_is_start = if let Some(f) = edge_filter {
-                use crate::graph::core::pattern_matching::pattern::AnchorSide;
-                match (f.anchor, dir) {
-                    (AnchorSide::Source, Direction::Outgoing) => false,
-                    (AnchorSide::Source, Direction::Incoming) => true,
-                    (AnchorSide::Target, Direction::Outgoing) => true,
-                    (AnchorSide::Target, Direction::Incoming) => false,
-                }
-            } else {
-                false
-            };
-
-            for edge_ref in self
-                .graph
-                .graph
-                .edges_directed_filtered(bound_idx, dir, interned_conn)
-            {
-                iter += 1;
-                if iter.is_multiple_of(1 << 20) {
-                    self.check_deadline()?;
-                }
-                // `edges_directed_filtered` is a hint — the in-memory backend
-                // returns every edge in the given direction regardless of
-                // `interned_conn`, so we must post-filter by connection type.
+                // `edges_directed_filtered` is a hint — the disk backend
+                // pre-filters by connection type, but the memory/mapped
+                // backends return every edge in the given direction (see
+                // the trait contract in storage/mod.rs), so we must
+                // post-filter on `connection_type` here.
                 if let Some(required_conn) = interned_conn {
                     if edge_ref.weight().connection_type != required_conn {
                         continue;
@@ -862,9 +738,22 @@ impl<'a> CypherExecutor<'a> {
                 } else {
                     edge_ref.source()
                 };
-                if peers.contains(&other_idx) {
+                // Distinct peers: a peer that already passed all filters via
+                // another edge is settled — skip the filter work.
+                if distinct_peers && peers.contains(&other_idx) {
                     continue;
                 }
+
+                if let Some(required_type) = interned_other_type {
+                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
+                        if nt != required_type {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+
                 if let Some(filter) = edge_filter {
                     let edge_data = edge_ref.weight();
                     let conn_ty = edge_data.connection_type;
@@ -880,25 +769,26 @@ impl<'a> CypherExecutor<'a> {
                         continue;
                     }
                 }
-                if let Some(required_type) = interned_other_type {
-                    if let Some(nt) = self.graph.graph.node_type_of(other_idx) {
-                        if nt != required_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
+
                 if let Some(ref props) = other_props {
                     if !pe.node_matches_properties_pub(other_idx, props) {
                         continue;
                     }
                 }
-                peers.insert(other_idx);
+
+                if distinct_peers {
+                    peers.insert(other_idx);
+                } else {
+                    count += 1;
+                }
             }
         }
 
-        Ok(Some(peers.len() as i64))
+        Ok(Some(if distinct_peers {
+            peers.len() as i64
+        } else {
+            count
+        }))
     }
 
     /// Count matches for a 5-element pattern (a)-[e1]->(b)<-[e2]-(c)
@@ -909,10 +799,49 @@ impl<'a> CypherExecutor<'a> {
         pattern: &crate::graph::core::pattern_matching::Pattern,
         first_idx: NodeIndex,
     ) -> Result<i64, String> {
+        self.count_two_hop_from_anchor(pattern, first_idx, false)
+    }
+
+    /// Count matches for a 5-element pattern traversed in reverse:
+    /// (a)-[e1]->(b)-[e2]->(c) counted from c (position 4) backward.
+    /// Reads elements [3],[2],[1],[0] with flipped edge directions.
+    pub(super) fn count_two_hop_pattern_reverse(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        last_idx: NodeIndex,
+    ) -> Result<i64, String> {
+        self.count_two_hop_from_anchor(pattern, last_idx, true)
+    }
+
+    /// Shared implementation behind [`Self::count_two_hop_pattern`]
+    /// (`reverse = false`, anchored at element 0) and
+    /// [`Self::count_two_hop_pattern_reverse`] (`reverse = true`, anchored
+    /// at element 4 with both edge directions flipped). One copy of the
+    /// direction mapping and connection-type post-filtering.
+    fn count_two_hop_from_anchor(
+        &self,
+        pattern: &crate::graph::core::pattern_matching::Pattern,
+        anchor_idx: NodeIndex,
+        reverse: bool,
+    ) -> Result<i64, String> {
         use petgraph::Direction;
 
-        // Extract pattern elements
-        let edge1 = match &pattern.elements[1] {
+        // Extract pattern elements. Hop 1 leaves the anchor; hop 2 reaches
+        // the far endpoint whose type is checked per counted match.
+        let (hop1_elem, hop2_elem, end_elem) = if reverse {
+            (
+                &pattern.elements[3],
+                &pattern.elements[1],
+                &pattern.elements[0],
+            )
+        } else {
+            (
+                &pattern.elements[1],
+                &pattern.elements[3],
+                &pattern.elements[4],
+            )
+        };
+        let hop1_edge = match hop1_elem {
             PatternElement::Edge(ep) => ep,
             _ => return Ok(0),
         };
@@ -920,40 +849,66 @@ impl<'a> CypherExecutor<'a> {
             PatternElement::Node(np) => np,
             _ => return Ok(0),
         };
-        let edge2 = match &pattern.elements[3] {
+        let hop2_edge = match hop2_elem {
             PatternElement::Edge(ep) => ep,
             _ => return Ok(0),
         };
-        let last_node = match &pattern.elements[4] {
+        let end_node = match end_elem {
             PatternElement::Node(np) => np,
             _ => return Ok(0),
         };
 
-        let dir1 = match edge1.direction {
-            EdgeDirection::Outgoing => Direction::Outgoing,
-            EdgeDirection::Incoming => Direction::Incoming,
-            EdgeDirection::Both => return Ok(0), // unsupported in fused path
+        // Traversal direction of each hop; a reversed traversal flips the
+        // pattern's edge directions. `Both` is unsupported in this fused path.
+        let map_dir = |d: EdgeDirection| -> Option<Direction> {
+            match d {
+                EdgeDirection::Outgoing if reverse => Some(Direction::Incoming),
+                EdgeDirection::Outgoing => Some(Direction::Outgoing),
+                EdgeDirection::Incoming if reverse => Some(Direction::Outgoing),
+                EdgeDirection::Incoming => Some(Direction::Incoming),
+                EdgeDirection::Both => None,
+            }
         };
-        let interned_conn1 = edge1.connection_type.as_deref().map(InternedKey::from_str);
+        let Some(dir1) = map_dir(hop1_edge.direction) else {
+            return Ok(0);
+        };
+        let Some(dir2) = map_dir(hop2_edge.direction) else {
+            return Ok(0);
+        };
+        let interned_conn1 = hop1_edge
+            .connection_type
+            .as_deref()
+            .map(InternedKey::from_str);
+        let interned_conn2 = hop2_edge
+            .connection_type
+            .as_deref()
+            .map(InternedKey::from_str);
 
-        let dir2 = match edge2.direction {
-            EdgeDirection::Outgoing => Direction::Outgoing,
-            EdgeDirection::Incoming => Direction::Incoming,
-            EdgeDirection::Both => return Ok(0),
+        // Node-type check without materialization (O(1) mmap read on disk).
+        let node_type_matches = |idx: NodeIndex, want: &Option<String>| -> bool {
+            match want {
+                None => true,
+                Some(want_ty) => self
+                    .graph
+                    .graph
+                    .node_type_of(idx)
+                    .is_some_and(|nt| self.graph.interner.resolve(nt) == *want_ty),
+            }
         };
-        let interned_conn2 = edge2.connection_type.as_deref().map(InternedKey::from_str);
 
         let mut total: i64 = 0;
         let mut work = 0usize;
 
-        // First hop: first_idx --e1--> middle nodes
+        // First hop: anchor --hop1--> middle nodes
         for e1_ref in self
             .graph
             .graph
-            .edges_directed_filtered(first_idx, dir1, interned_conn1)
+            .edges_directed_filtered(anchor_idx, dir1, interned_conn1)
         {
             self.check_interrupt_periodic(work)?;
             work = work.saturating_add(1);
+            // `edges_directed_filtered` is a hint (see storage/mod.rs) —
+            // post-filter connection type for memory/mapped backends.
             if let Some(ik) = interned_conn1 {
                 if e1_ref.weight().connection_type != ik {
                     continue;
@@ -964,18 +919,11 @@ impl<'a> CypherExecutor<'a> {
             } else {
                 e1_ref.source()
             };
-            // Check middle node type (O(1) mmap read, no materialization)
-            if let Some(ref mid_type) = mid_node.node_type {
-                if let Some(nt) = self.graph.graph.node_type_of(mid_idx) {
-                    if self.graph.interner.resolve(nt) != mid_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
+            if !node_type_matches(mid_idx, &mid_node.node_type) {
+                continue;
             }
 
-            // Second hop: mid_idx --e2--> last nodes (just count)
+            // Second hop: mid_idx --hop2--> end nodes (just count)
             for e2_ref in self
                 .graph
                 .graph
@@ -991,134 +939,13 @@ impl<'a> CypherExecutor<'a> {
                 if e2_ref.id() == e1_ref.id() {
                     continue;
                 }
-                let last_idx = if dir2 == Direction::Outgoing {
+                let end_idx = if dir2 == Direction::Outgoing {
                     e2_ref.target()
                 } else {
                     e2_ref.source()
                 };
-                // Check last node type (O(1) mmap read, no materialization)
-                if let Some(ref last_type) = last_node.node_type {
-                    if let Some(nt) = self.graph.graph.node_type_of(last_idx) {
-                        if self.graph.interner.resolve(nt) != last_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-                total += 1;
-            }
-        }
-
-        Ok(total)
-    }
-
-    /// Count matches for a 5-element pattern traversed in reverse:
-    /// (a)-[e1]->(b)-[e2]->(c) counted from c (position 4) backward.
-    /// Reads elements [3],[2],[1],[0] with flipped edge directions.
-    pub(super) fn count_two_hop_pattern_reverse(
-        &self,
-        pattern: &crate::graph::core::pattern_matching::Pattern,
-        last_idx: NodeIndex,
-    ) -> Result<i64, String> {
-        use petgraph::Direction;
-
-        // Read pattern elements in reverse
-        let edge2 = match &pattern.elements[3] {
-            PatternElement::Edge(ep) => ep,
-            _ => return Ok(0),
-        };
-        let mid_node = match &pattern.elements[2] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(0),
-        };
-        let edge1 = match &pattern.elements[1] {
-            PatternElement::Edge(ep) => ep,
-            _ => return Ok(0),
-        };
-        let first_node = match &pattern.elements[0] {
-            PatternElement::Node(np) => np,
-            _ => return Ok(0),
-        };
-
-        // Flip edge2 direction (we're traversing from c back toward b)
-        let dir2 = match edge2.direction {
-            EdgeDirection::Outgoing => Direction::Incoming,
-            EdgeDirection::Incoming => Direction::Outgoing,
-            EdgeDirection::Both => return Ok(0),
-        };
-        let interned_conn2 = edge2.connection_type.as_deref().map(InternedKey::from_str);
-
-        // Flip edge1 direction (from b back toward a)
-        let dir1 = match edge1.direction {
-            EdgeDirection::Outgoing => Direction::Incoming,
-            EdgeDirection::Incoming => Direction::Outgoing,
-            EdgeDirection::Both => return Ok(0),
-        };
-        let interned_conn1 = edge1.connection_type.as_deref().map(InternedKey::from_str);
-
-        let mut total: i64 = 0;
-        let mut work = 0usize;
-
-        // First hop: last_idx --reverse(e2)--> middle nodes
-        for e2_ref in self
-            .graph
-            .graph
-            .edges_directed_filtered(last_idx, dir2, interned_conn2)
-        {
-            self.check_interrupt_periodic(work)?;
-            work = work.saturating_add(1);
-            if let Some(ik) = interned_conn2 {
-                if e2_ref.weight().connection_type != ik {
+                if !node_type_matches(end_idx, &end_node.node_type) {
                     continue;
-                }
-            }
-            let mid_idx = if dir2 == Direction::Outgoing {
-                e2_ref.target()
-            } else {
-                e2_ref.source()
-            };
-            // Check middle node type (O(1) mmap read, no materialization)
-            if let Some(ref mid_type) = mid_node.node_type {
-                if let Some(nt) = self.graph.graph.node_type_of(mid_idx) {
-                    if self.graph.interner.resolve(nt) != mid_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-
-            // Second hop: mid_idx --reverse(e1)--> first nodes (just count)
-            for e1_ref in self
-                .graph
-                .graph
-                .edges_directed_filtered(mid_idx, dir1, interned_conn1)
-            {
-                self.check_interrupt_periodic(work)?;
-                work = work.saturating_add(1);
-                if let Some(ik) = interned_conn1 {
-                    if e1_ref.weight().connection_type != ik {
-                        continue;
-                    }
-                }
-                if e1_ref.id() == e2_ref.id() {
-                    continue;
-                }
-                let first_idx = if dir1 == Direction::Outgoing {
-                    e1_ref.target()
-                } else {
-                    e1_ref.source()
-                };
-                // Check first node type (O(1) mmap read, no materialization)
-                if let Some(ref first_type) = first_node.node_type {
-                    if let Some(nt) = self.graph.graph.node_type_of(first_idx) {
-                        if self.graph.interner.resolve(nt) != first_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
                 }
                 total += 1;
             }
