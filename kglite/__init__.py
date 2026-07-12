@@ -352,8 +352,127 @@ def _nodes_with_path(graph, node_type, path_property, extra=""):
     label = f":{_cypher_identifier(node_type, kind='node type')}" if node_type else ""
     path_ident = _cypher_identifier(path_property, kind="path property")
     return graph.cypher(
-        f"MATCH (n{label}) WHERE n.{path_ident} IS NOT NULL RETURN n.id AS id, n.{path_ident} AS path{extra}"
-    ).to_dicts()
+        f"MATCH (n{label}) WHERE n.{path_ident} IS NOT NULL "
+        f"RETURN labels(n)[0] AS node_type, n.id AS id, n.{path_ident} AS path{extra}"
+    )
+
+
+_FILE_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+_FILE_SNAPSHOT_ATTEMPTS = 3
+_FILE_SNAPSHOT_CACHE_SIZE = 4096
+_FRESHNESS_UPDATE_BATCH_SIZE = 1000
+
+
+def _resolved_file_path(path, base_dir):
+    import pathlib
+
+    candidate = pathlib.Path(base_dir, path) if base_dir else pathlib.Path(path)
+    return candidate.expanduser().resolve(strict=False)
+
+
+def _stat_signature(info):
+    """Fields that must remain fixed while one descriptor is being read."""
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _mtime_utc_ns(mtime_ns):
+    """Lossless, timezone-explicit filesystem timestamp (RFC 3339, 9 digits)."""
+    import datetime
+
+    seconds, nanos = divmod(mtime_ns, 1_000_000_000)
+    utc = datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
+    return f"{utc:%Y-%m-%dT%H:%M:%S}.{nanos:09d}Z"
+
+
+def _snapshot_file(path, *, include_hash):
+    """Read a stable regular-file snapshot through one open descriptor.
+
+    A rename can leave an open descriptor pointing at the old file, while an
+    in-place writer can change bytes during hashing. Both cases retry from a
+    fresh descriptor; after the bounded retry budget they fail explicitly.
+    """
+    import hashlib
+    import os
+    import stat
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    for _attempt in range(_FILE_SNAPSHOT_ATTEMPTS):
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                return None
+
+            digest = hashlib.sha256() if include_hash else None
+            if digest is not None:
+                while chunk := os.read(descriptor, _FILE_SNAPSHOT_CHUNK_BYTES):
+                    digest.update(chunk)
+
+            after = os.fstat(descriptor)
+            try:
+                at_path = os.stat(path)
+            except FileNotFoundError:
+                continue
+
+            descriptor_stable = _stat_signature(before) == _stat_signature(after)
+            path_still_names_descriptor = (after.st_dev, after.st_ino) == (at_path.st_dev, at_path.st_ino)
+            path_metadata_matches = _stat_signature(after) == _stat_signature(at_path)
+            if descriptor_stable and path_still_names_descriptor and path_metadata_matches:
+                return {
+                    "mtime": _mtime_utc_ns(after.st_mtime_ns),
+                    "hash": digest.hexdigest() if digest is not None else None,
+                }
+        finally:
+            os.close(descriptor)
+
+    raise RuntimeError(f"File remained unstable across {_FILE_SNAPSHOT_ATTEMPTS} snapshot attempts: {path}")
+
+
+def _cached_file_snapshot(cache, resolved, *, include_hash):
+    """Reuse recent snapshots without retaining one entry per graph node."""
+    if resolved in cache:
+        cache.move_to_end(resolved)
+        return cache[resolved]
+    snapshot = _snapshot_file(resolved, include_hash=include_hash)
+    cache[resolved] = snapshot
+    if len(cache) > _FILE_SNAPSHOT_CACHE_SIZE:
+        cache.popitem(last=False)
+    return snapshot
+
+
+def _freshness_chunks(rows, *, base_dir, include_hash, batch_size):
+    """Yield bounded mutation batches while caching duplicate resolved paths."""
+    from collections import OrderedDict
+
+    snapshots = OrderedDict()
+    batch = []
+    for row in rows:
+        resolved = _resolved_file_path(row["path"], base_dir)
+        snapshot = _cached_file_snapshot(snapshots, resolved, include_hash=include_hash)
+        batch.append(
+            {
+                "node_type": row["node_type"],
+                "id": row["id"],
+                "mtime": snapshot["mtime"] if snapshot is not None else None,
+                "hash": snapshot["hash"] if snapshot is not None else None,
+            }
+        )
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def stamp_file_freshness(
@@ -364,48 +483,44 @@ def stamp_file_freshness(
     mtime_property: str = "file_mtime",
     hash_property: str | None = "content_hash",
     base_dir: str | None = None,
+    batch_size: int = _FRESHNESS_UPDATE_BATCH_SIZE,
 ) -> int:
     """Capture each node's linked-file state into properties — the binding-layer
     answer to "auto-stamp file freshness" (the engine never reads the
-    filesystem). For every node carrying ``path_property``, stat the file and SET
-    ``mtime_property`` (a Timestamp) and, unless ``hash_property`` is None, its
-    sha256. A missing file sets both to null. Run after a build/write; pair with
+    filesystem). For every node carrying ``path_property``, snapshot the file
+    through one descriptor and SET ``mtime_property`` (a nanosecond UTC RFC 3339
+    string) and, unless ``hash_property`` is None, its sha256. A missing file
+    sets both to null. Run after a build/write; pair with
     :func:`check_file_freshness` to detect later drift.
 
     Args:
         node_type: restrict to one type (default: all nodes with the property).
         base_dir: prefix for relative ``path_property`` values.
+        batch_size: maximum rows passed to each transaction query. All batches
+            still commit atomically.
 
     Returns:
         The number of nodes stamped.
     """
-    import datetime
-    import hashlib
-    import os
-    import pathlib
-
+    if batch_size <= 0:
+        raise ArgumentError("batch_size must be greater than zero")
     rows = _nodes_with_path(graph, node_type, path_property)
-    label = f":{_cypher_identifier(node_type, kind='node type')}" if node_type else ""
-    batch: list = []
-    for r in rows:
-        full = os.path.join(base_dir, r["path"]) if base_dir else r["path"]
-        row: dict = {"id": r["id"], "mtime": None, "hash": None}
-        if os.path.isfile(full):
-            row["mtime"] = datetime.datetime.fromtimestamp(os.path.getmtime(full))
-            if hash_property:
-                row["hash"] = hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest()
-        batch.append(row)
-    if batch:
-        assignments = f"n.{_cypher_identifier(mtime_property, kind='mtime property')} = row.mtime"
-        if hash_property:
-            assignments += f", n.{_cypher_identifier(hash_property, kind='hash property')} = row.hash"
-        # One UNWIND round-trip for the whole batch instead of one
-        # point-lookup SET query per node.
-        graph.cypher(
-            f"UNWIND $rows AS row MATCH (n{label}) WHERE n.id = row.id SET {assignments}",
-            params={"rows": batch},
-        )
-    return len(rows)
+    assignments = f"n.{_cypher_identifier(mtime_property, kind='mtime property')} = row.mtime"
+    if hash_property is not None:
+        assignments += f", n.{_cypher_identifier(hash_property, kind='hash property')} = row.hash"
+    query = f"UNWIND $rows AS row MATCH (n) WHERE labels(n)[0] = row.node_type AND n.id = row.id SET {assignments}"
+
+    stamped = 0
+    with graph.begin() as transaction:
+        for batch in _freshness_chunks(
+            rows,
+            base_dir=base_dir,
+            include_hash=hash_property is not None,
+            batch_size=batch_size,
+        ):
+            transaction.cypher(query, params={"rows": batch})
+            stamped += len(batch)
+    return stamped
 
 
 def check_file_freshness(
@@ -413,32 +528,37 @@ def check_file_freshness(
     *,
     node_type: str | None = None,
     path_property: str = "file_path",
+    mtime_property: str = "file_mtime",
     hash_property: str | None = "content_hash",
     base_dir: str | None = None,
 ) -> list:
     """Read-only drift check (binding layer): for each node with ``path_property``,
-    re-stat the file and compare against the stored ``hash_property`` (from
+    snapshot the file and compare against the stored ``hash_property`` (from
     :func:`stamp_file_freshness`). Returns the drifted nodes as
     ``[{"id", "path", "status"}]`` where ``status`` is ``"missing"`` (the file is
     gone — the stale-Artifact-pointing-at-a-deleted-crate case) or ``"changed"``
     (its sha256 differs from what was stamped). Nodes that still match are
     omitted. Replaces an ad-hoc ``os.path.exists`` gate; never mutates the graph.
     """
-    import hashlib
-    import os
-    import pathlib
-
-    extra = f", n.{_cypher_identifier(hash_property, kind='hash property')} AS _hash" if hash_property else ""
+    if hash_property is not None:
+        extra = f", n.{_cypher_identifier(hash_property, kind='hash property')} AS _hash"
+    else:
+        extra = f", n.{_cypher_identifier(mtime_property, kind='mtime property')} AS _mtime"
     rows = _nodes_with_path(graph, node_type, path_property, extra)
     drift: list = []
+    from collections import OrderedDict
+
+    snapshots = OrderedDict()
     for r in rows:
-        full = os.path.join(base_dir, r["path"]) if base_dir else r["path"]
-        if not os.path.isfile(full):
+        resolved = _resolved_file_path(r["path"], base_dir)
+        snapshot = _cached_file_snapshot(snapshots, resolved, include_hash=hash_property is not None)
+        if snapshot is None:
             drift.append({"id": r["id"], "path": r["path"], "status": "missing"})
             continue
-        if hash_property and r.get("_hash") is not None:
-            if hashlib.sha256(pathlib.Path(full).read_bytes()).hexdigest() != r["_hash"]:
-                drift.append({"id": r["id"], "path": r["path"], "status": "changed"})
+        stored = r.get("_hash") if hash_property is not None else r.get("_mtime")
+        current = snapshot["hash"] if hash_property is not None else snapshot["mtime"]
+        if stored is None or current != stored:
+            drift.append({"id": r["id"], "path": r["path"], "status": "changed"})
     return drift
 
 

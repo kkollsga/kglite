@@ -914,11 +914,14 @@ def stamp_file_freshness(
     mtime_property: str = "file_mtime",
     hash_property: Optional[str] = "content_hash",
     base_dir: Optional[str] = None,
+    batch_size: int = 1000,
 ) -> int:
     """Capture each node's linked-file state into properties (binding-layer; the
     engine never reads the filesystem). For every node with ``path_property``,
-    stat the file and SET ``mtime_property`` (a Timestamp) and, unless
-    ``hash_property`` is None, its sha256; a missing file sets both null. Run
+    snapshot the file through one descriptor and SET ``mtime_property`` (a
+    nanosecond UTC RFC 3339 string) and, unless ``hash_property`` is None, its
+    sha256; a missing file sets both null. Resolved duplicate paths are read
+    once. Updates run in bounded batches inside one atomic transaction. Run
     after a build; pair with :func:`check_file_freshness`. Returns the count
     stamped.
     """
@@ -929,11 +932,14 @@ def check_file_freshness(
     *,
     node_type: Optional[str] = None,
     path_property: str = "file_path",
+    mtime_property: str = "file_mtime",
     hash_property: Optional[str] = "content_hash",
     base_dir: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Read-only drift check (binding-layer): re-stat each node's ``path_property``
-    and compare to the stored ``hash_property``. Returns the drifted nodes as
+    """Read-only drift check (binding-layer): snapshot each node's
+    ``path_property`` and compare to the stored ``hash_property``. When
+    ``hash_property`` is None, compare the nanosecond ``mtime_property`` instead.
+    Returns the drifted nodes as
     ``[{"id", "path", "status"}]`` (status ``"missing"`` or ``"changed"``);
     matching nodes are omitted. Never mutates the graph.
     """

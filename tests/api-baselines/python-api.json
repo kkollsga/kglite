@@ -1309,7 +1309,7 @@
     },
     "check_file_freshness": {
       "kind": "function",
-      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> list"
+      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', mtime_property: str = 'file_mtime', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> list"
     },
     "cypher_pass_names": {
       "kind": "function",
@@ -1361,7 +1361,7 @@
     },
     "stamp_file_freshness": {
       "kind": "function",
-      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', mtime_property: str = 'file_mtime', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> int"
+      "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', mtime_property: str = 'file_mtime', hash_property: str | None = 'content_hash', base_dir: str | None = None, batch_size: int = 1000) -> int"
     },
     "to_neo4j": {
       "kind": "function",

@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **File-freshness stamps are stable, precise, and atomic.** Files are hashed
+  in bounded chunks through one descriptor with before/after identity checks
+  and bounded retry, duplicate resolved paths are read once, and graph updates
+  use primary type plus ID in bounded batches inside one transaction. Mtimes
+  are stored as nanosecond UTC RFC 3339 strings; passing `hash_property=None`
+  now performs useful drift checks against the configured mtime property.
+
 - **Python Cypher syntax errors expose structured source positions.**
   `CypherSyntaxError.line` and `.col` are always present (1-indexed when known,
   otherwise `None`), file-freshness stamping batches graph updates and safely
