@@ -41,6 +41,89 @@ def bench_graph():
     return graph
 
 
+@pytest.fixture(scope="module")
+def grouped_count_graph():
+    """10k+10k nodes and 30k edges for grouped-count top-k regressions.
+
+    Both endpoints intentionally repeat their grouping property across many
+    nodes. This keeps the benchmark honest: the fast path must aggregate by
+    the resolved property value, not by node identity.
+    """
+    graph = KnowledgeGraph()
+    n = 10_000
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "sid": list(range(n)),
+                "name": [f"Source_{i}" for i in range(n)],
+                "bucket": [f"source_bucket_{i % 100}" for i in range(n)],
+            }
+        ),
+        "Source",
+        "sid",
+        "name",
+    )
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "gid": list(range(n)),
+                "name": [f"Group_{i}" for i in range(n)],
+                "bucket": [f"target_bucket_{i % 100}" for i in range(n)],
+            }
+        ),
+        "Group",
+        "gid",
+        "name",
+    )
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "source": [i % n for i in range(3 * n)],
+                "target": [(i * 13 + (i // n) * 997 + 7) % n for i in range(3 * n)],
+            }
+        ),
+        "RELATES_TO",
+        "Source",
+        "source",
+        "Group",
+        "target",
+    )
+    return graph
+
+
+@pytest.fixture(scope="module")
+def wide_edge_count_graph():
+    """One million homogeneous edges, matching the reported legal graph scale."""
+    graph = KnowledgeGraph()
+    node_count = 20_000
+    edge_count = 1_000_000
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": list(range(node_count)),
+                "name": [f"Node_{i}" for i in range(node_count)],
+            }
+        ),
+        "Item",
+        "nid",
+        "name",
+    )
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "source": [i % node_count for i in range(edge_count)],
+                "target": [(i * 13 + 7) % node_count for i in range(edge_count)],
+            }
+        ),
+        "LINKS",
+        "Item",
+        "source",
+        "Item",
+        "target",
+    )
+    return graph
+
+
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
@@ -104,6 +187,64 @@ def test_bench_cypher_match_materialized(benchmark, bench_graph):
 def test_bench_cypher_where(benchmark, bench_graph):
     """Filtered MATCH...WHERE...RETURN query."""
     benchmark(bench_graph.cypher, "MATCH (n:Item) WHERE n.value > 500 RETURN n.title, n.value")
+
+
+@pytest.mark.benchmark
+def test_bench_grouped_count_top_k_target_property(benchmark, grouped_count_graph):
+    """User shape: count incoming rows, group on target property, order + limit."""
+
+    def query_and_consume():
+        return grouped_count_graph.cypher(
+            "MATCH (s:Source)-[:RELATES_TO]->(g:Group) "
+            "RETURN g.bucket AS bucket, count(s) AS uses "
+            "ORDER BY uses DESC LIMIT 10"
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert len(result) == 10
+    assert all(row["uses"] == 300 for row in result)
+
+
+@pytest.mark.benchmark
+def test_bench_grouped_count_top_k_source_property(benchmark, grouped_count_graph):
+    """User shape: count outgoing rows, group on source property, order + limit."""
+
+    def query_and_consume():
+        return grouped_count_graph.cypher(
+            "MATCH (s:Source)-[:RELATES_TO]->(g:Group) "
+            "RETURN s.bucket AS bucket, count(g) AS uses "
+            "ORDER BY uses DESC LIMIT 10"
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert len(result) == 10
+    assert all(row["uses"] == 300 for row in result)
+
+
+@pytest.mark.benchmark
+def test_bench_untyped_edge_count_1m(benchmark, wide_edge_count_graph):
+    """Wide `MATCH ()-[r]->()` count used by graph inventory interfaces."""
+
+    def query_and_consume():
+        return wide_edge_count_graph.cypher("MATCH ()-[r]->() RETURN count(r) AS edges").to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"edges": 1_000_000}]
+
+
+@pytest.mark.benchmark
+def test_bench_two_edge_distinct_filtered_path(benchmark, grouped_count_graph):
+    """Two-edge filtered path with DISTINCT+LIMIT, mirroring legal graph lookups."""
+
+    def query_and_consume():
+        return grouped_count_graph.cypher(
+            "MATCH (g:Group)<-[:RELATES_TO]-(s:Source)-[:RELATES_TO]->(peer:Group) "
+            "WHERE g.name CONTAINS 'Group_1' "
+            "RETURN DISTINCT peer.bucket AS bucket LIMIT 20"
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert 1 <= len(result) <= 20
 
 
 @pytest.mark.benchmark

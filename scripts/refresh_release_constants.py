@@ -12,7 +12,7 @@ nobody updates them at release time:
      baseline — the release-built ``libkglite`` size, +10% over baseline.
 
   3. ``tests/benchmarks/baselines/<version>.json`` — pytest-benchmark
-     JSON for the 11 tracked benchmarks. ``current.json`` is a copy.
+     JSON for the tracked core benchmarks. ``current.json`` is a copy.
 
   4. ``tests/api-baselines/kglite.txt`` — the ``kglite`` public API
      surface (cargo-public-api on the pinned nightly). Drifts whenever
@@ -217,7 +217,7 @@ def refresh_binary_size(version: str, current_size: int) -> tuple[bool, str]:
 
 
 def refresh_perf_baseline(version: str) -> tuple[bool, str]:
-    """Capture pytest-benchmark JSON for the 11 tracked core benchmarks
+    """Capture pytest-benchmark JSON for the tracked core benchmarks
     and slim the per-iteration ``data`` field out of the result.
 
     Per-platform — Linux runners are ~2-3x slower than Apple Silicon for
@@ -331,7 +331,7 @@ def main() -> int:
     if args.skip_benchmarks:
         print("3. perf baseline — skipped (--skip-benchmarks).\n")
     else:
-        print("3. perf baseline (running 11 tracked benchmarks, ~15s)…")
+        print("3. perf baseline (running tracked core benchmarks)…")
         changed, msg = refresh_perf_baseline(version)
         print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 
