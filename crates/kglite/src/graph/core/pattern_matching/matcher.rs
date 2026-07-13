@@ -745,11 +745,14 @@ impl<'a> PatternExecutor<'a> {
         }
 
         if let Some(ref node_type) = pattern.node_type {
-            let secondary = self
-                .graph
-                .secondary_label_index
-                .get(&InternedKey::from_str(node_type))
-                .filter(|bucket| !bucket.is_empty());
+            let secondary = if self.graph.has_secondary_labels {
+                self.graph
+                    .secondary_label_index
+                    .get(&InternedKey::from_str(node_type))
+                    .filter(|bucket| !bucket.is_empty())
+            } else {
+                None
+            };
 
             // Primary-type indexes remain complete even when another label
             // elsewhere in the graph has secondary carriers. If this queried
@@ -786,6 +789,9 @@ impl<'a> PatternExecutor<'a> {
             }
             if candidates.is_empty() {
                 return Ok(Vec::new());
+            }
+            if pattern.properties.is_none() && extra_keys.is_empty() {
+                return Ok(candidates);
             }
             self.filter_node_candidates(candidates, pattern.properties.as_ref(), &extra_keys)
         } else if let Some(ref props) = pattern.properties {

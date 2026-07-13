@@ -286,6 +286,18 @@ pub(super) fn estimate_node_selectivity(
 /// Runs *before* `optimize_pattern_start_node` so subsequent reversal
 /// sees the new clause order and accumulates `bound_vars` correctly.
 pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
+    // The overwhelmingly common query has one MATCH followed by RETURN. Keep
+    // that hot path cheaper than even consulting graph statistics, and avoid
+    // entering the span scanner unless an adjacent eligible pair exists.
+    if query.clauses.len() < 3
+        || !query.clauses.windows(2).any(|pair| {
+            matches!(&pair[0], Clause::Match(m) if m.path_assignments.is_empty())
+                && matches!(&pair[1], Clause::Match(m) if m.path_assignments.is_empty())
+        })
+    {
+        return;
+    }
+
     let edge_counts = graph
         .has_edge_type_counts_cache()
         .then(|| graph.get_edge_type_counts());
