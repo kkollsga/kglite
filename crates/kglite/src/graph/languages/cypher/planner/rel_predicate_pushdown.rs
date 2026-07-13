@@ -29,8 +29,19 @@ use crate::graph::core::pattern_matching::pattern::{
 use crate::graph::schema::InternedKey;
 use std::collections::HashMap;
 
-/// Run the pushdown across every `MATCH … WHERE` pair in `query`.
-pub fn extract_pushable_rel_predicates(query: &mut CypherQuery, params: &HashMap<String, Value>) {
+/// Run literal-only pushdown across every `MATCH … WHERE` pair in `query`.
+///
+/// This public planner primitive retains its parameter-free contract. The
+/// normal optimizer pipeline calls the internal parameter-aware variant.
+pub fn extract_pushable_rel_predicates(query: &mut CypherQuery) {
+    extract_pushable_rel_predicates_with_params(query, &HashMap::new());
+}
+
+/// Parameter-aware relationship pushdown used by the registered planner pass.
+pub(super) fn extract_pushable_rel_predicates_with_params(
+    query: &mut CypherQuery,
+    params: &HashMap<String, Value>,
+) {
     // We need to inspect a MATCH clause and its (optional) trailing
     // WHERE clause together. Walk by index so we can mutate both
     // sides in place.

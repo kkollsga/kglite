@@ -38,7 +38,7 @@ use join_order::{
     optimize_pattern_start_node, reorder_cyclic_pattern_edges, reorder_match_clauses,
     reorder_match_patterns,
 };
-use rel_predicate_pushdown::extract_pushable_rel_predicates;
+use rel_predicate_pushdown::extract_pushable_rel_predicates_with_params;
 use simplification::{
     desugar_multi_match_return_aggregate, fold_or_to_in, fold_pass_through_with,
     push_distinct_into_match, push_limit_into_aggregate, push_limit_into_match,
@@ -540,7 +540,7 @@ fn pass_rewrite_count_bound_var_to_star(query: &mut CypherQuery, _ctx: &PassCtx)
 /// matcher applies them during expansion, before per-edge bindings are
 /// allocated. WHY-BAIL: predicates referencing unbound vars stay in WHERE.
 fn pass_extract_pushable_rel_predicates(query: &mut CypherQuery, ctx: &PassCtx) {
-    extract_pushable_rel_predicates(query, ctx.params)
+    extract_pushable_rel_predicates_with_params(query, ctx.params)
 }
 
 /// **Pass:** `fold_pass_through_with` — Strip `WITH x AS x` /
