@@ -112,12 +112,20 @@ pub(super) fn estimate_node_selectivity(
     np: &crate::graph::core::pattern_matching::NodePattern,
     graph: &DirGraph,
 ) -> usize {
-    let type_count = np
-        .node_type
-        .as_ref()
-        .and_then(|t| graph.type_indices.get(t))
-        .map(|idx| idx.len())
-        .unwrap_or(GraphRead::node_count(&graph.graph));
+    let (type_count, secondary_count) = np.node_type.as_ref().map_or_else(
+        || (GraphRead::node_count(&graph.graph), 0),
+        |node_type| {
+            let primary = graph
+                .type_indices
+                .get(node_type)
+                .map_or(0, |indices| indices.len());
+            let secondary = graph
+                .secondary_label_index
+                .get(&crate::graph::schema::InternedKey::from_str(node_type))
+                .map_or(0, Vec::len);
+            (primary.saturating_add(secondary), secondary)
+        },
+    );
 
     // Unconstrained nodes (no type, no properties) match every node in the
     // graph — they represent the *worst* possible start node. Returning
@@ -141,7 +149,9 @@ pub(super) fn estimate_node_selectivity(
             for (prop, matcher) in props {
                 if prop == "id" {
                     match matcher {
-                        PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_) => return 1,
+                        PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_) => {
+                            return 1usize.saturating_add(secondary_count);
+                        }
                         PropertyMatcher::In(vals) => {
                             if vals.is_empty() {
                                 return 0;
@@ -154,7 +164,7 @@ pub(super) fn estimate_node_selectivity(
                                         graph.lookup_by_id_readonly(node_type, value)
                                     })
                                     .collect();
-                                return hits.len();
+                                return hits.len().saturating_add(secondary_count);
                             }
                             return unique.len();
                         }
@@ -170,7 +180,7 @@ pub(super) fn estimate_node_selectivity(
                             let key = (nt.clone(), prop.clone());
                             if graph.property_indices.contains_key(&key) {
                                 if let Some(results) = graph.lookup_by_index(nt, prop, val) {
-                                    return results.len().max(1);
+                                    return results.len().saturating_add(secondary_count).max(1);
                                 }
                                 return 1;
                             }
@@ -187,7 +197,7 @@ pub(super) fn estimate_node_selectivity(
                                         hits.extend(indices);
                                     }
                                 }
-                                return hits.len();
+                                return hits.len().saturating_add(secondary_count);
                             }
                         }
                         _ => {}

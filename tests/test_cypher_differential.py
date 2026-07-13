@@ -1319,6 +1319,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "ml_secondary_label_property_filter",
+        "multi_label_graph",
+        "MATCH (n:VIP {name: 'Acme'}) RETURN n.id AS id",
+        None,
+    ),
+    (
         "ml_edge_aggregate_secondary_peer",
         "multi_label_graph",
         "MATCH (a:Person)-[:KNOWS]->(b:VIP) RETURN a.id AS a, count(b) AS c ORDER BY a",

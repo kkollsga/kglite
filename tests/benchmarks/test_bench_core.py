@@ -118,6 +118,35 @@ def indexed_node_scan_graph():
 
 
 @pytest.fixture(scope="module")
+def indexed_graph_with_unrelated_secondary_label():
+    """100k indexed nodes plus a secondary label on another type."""
+    graph = KnowledgeGraph()
+    n = 100_000
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": list(range(n)),
+                "name": [f"Item_{i}" for i in range(n)],
+                "code": [f"code_{i}" for i in range(n)],
+            }
+        ),
+        "Item",
+        "nid",
+        "name",
+        columns=["code"],
+    )
+    graph.add_nodes(
+        pd.DataFrame({"oid": [0], "name": ["Other"]}),
+        "Other",
+        "oid",
+        "name",
+        labels=["Unrelated"],
+    )
+    graph.create_index("Item", "code")
+    return graph
+
+
+@pytest.fixture(scope="module")
 def in_selectivity_graph():
     """Dense pattern with a non-indexed IN side and an ID anchor."""
     graph = KnowledgeGraph()
@@ -384,6 +413,18 @@ def test_bench_nonindexed_in_vs_id_anchor(benchmark, in_selectivity_graph):
 
     result = benchmark(query_and_consume)
     assert result == [{"n": 1}]
+
+
+@pytest.mark.benchmark
+def test_bench_index_with_unrelated_secondary_label(benchmark, indexed_graph_with_unrelated_secondary_label):
+    """A secondary label on another type must not force an indexed type scan."""
+    query = "MATCH (n:Item {code: $code}) RETURN n.id AS id"
+
+    def query_and_consume():
+        return indexed_graph_with_unrelated_secondary_label.cypher(query, params={"code": "code_54321"}).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"id": 54_321}]
 
 
 @pytest.mark.benchmark

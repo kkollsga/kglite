@@ -619,6 +619,32 @@ fn test_empty_in_parameter_pushes_known_empty_matcher() {
 }
 
 #[test]
+fn test_label_cardinality_includes_secondary_carriers() {
+    let query = parse_cypher("MATCH (n:Item) RETURN n").unwrap();
+    let Clause::Match(match_clause) = &query.clauses[0] else {
+        panic!("expected MATCH clause");
+    };
+    let PatternElement::Node(node) = &match_clause.patterns[0].elements[0] else {
+        panic!("expected node pattern");
+    };
+    let mut graph = DirGraph::new();
+    graph
+        .type_indices
+        .entry_or_default("Item".to_string())
+        .extend((0..3).map(petgraph::graph::NodeIndex::new));
+    graph.secondary_label_index.insert(
+        crate::graph::schema::InternedKey::from_str("Item"),
+        vec![
+            petgraph::graph::NodeIndex::new(3),
+            petgraph::graph::NodeIndex::new(4),
+        ],
+    );
+    graph.has_secondary_labels = true;
+
+    assert_eq!(join_order::estimate_node_selectivity(node, &graph), 5);
+}
+
+#[test]
 fn test_undirected_pattern_no_reverse_when_first_is_anchor() {
     // Reverse case: anchor is already first — no reversal expected.
     let mut query =

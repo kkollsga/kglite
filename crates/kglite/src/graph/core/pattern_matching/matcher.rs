@@ -700,13 +700,11 @@ impl<'a> PatternExecutor<'a> {
 
     /// Find all nodes matching a node pattern
     fn find_matching_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
-        // Multi-label aware: when the pattern carries secondary labels
-        // OR the graph has secondary labels in play, take a slower
-        // union path that consults both `type_indices` (primary) and
-        // `secondary_label_index`. Single-label graphs hit the
-        // unchanged hot path.
-        let needs_secondary_path = !pattern.extra_labels.is_empty()
-            || (pattern.node_type.is_some() && self.graph.has_secondary_labels);
+        let extra_keys: Vec<InternedKey> = pattern
+            .extra_labels
+            .iter()
+            .map(|label| InternedKey::from_str(label))
+            .collect();
 
         // If variable is pre-bound, return only that node (if it matches filters)
         if let Some(ref var) = pattern.variable {
@@ -747,92 +745,49 @@ impl<'a> PatternExecutor<'a> {
         }
 
         if let Some(ref node_type) = pattern.node_type {
-            // Try property index acceleration when we have both type and properties.
-            // Skip the shortcuts when we need the secondary-label path —
-            // property_indices is keyed by primary type, so it misses
-            // multi-labelled nodes whose secondary is the queried label.
-            if !needs_secondary_path {
-                if let Some(ref props) = pattern.properties {
-                    if let Some(indexed) = self.try_index_lookup(node_type, props) {
-                        return Ok(indexed);
+            let secondary = self
+                .graph
+                .secondary_label_index
+                .get(&InternedKey::from_str(node_type))
+                .filter(|bucket| !bucket.is_empty());
+
+            // Primary-type indexes remain complete even when another label
+            // elsewhere in the graph has secondary carriers. If this queried
+            // label itself has secondary carriers, union their filtered scan
+            // with the indexed primary hits instead of scanning every primary.
+            if let Some(ref props) = pattern.properties {
+                if let Some(indexed) = self
+                    .try_index_lookup(node_type, props)
+                    .or_else(|| self.try_global_index_lookup_typed(node_type, props))
+                {
+                    let mut out = self.filter_node_candidates(indexed, None, &extra_keys)?;
+                    if let Some(secondary) = secondary {
+                        out.extend(self.filter_node_candidates(
+                            secondary.iter().copied(),
+                            Some(props),
+                            &extra_keys,
+                        )?);
                     }
-                    if let Some(indexed) = self.try_global_index_lookup_typed(node_type, props) {
-                        return Ok(indexed);
-                    }
+                    return Ok(out);
                 }
             }
 
             // Gather candidates: primary type_indices ∪ secondary_label_index.
             // The choke-point API forbids primary==secondary on the same
             // node, so the union has no duplicates.
-            let candidates: Vec<NodeIndex> = if needs_secondary_path {
-                let primary = self
-                    .graph
-                    .type_indices
-                    .get(node_type)
-                    .map(|v| v.to_vec())
-                    .unwrap_or_default();
-                let key = InternedKey::from_str(node_type);
-                let secondary = self
-                    .graph
-                    .secondary_label_index
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default();
-                if primary.is_empty() && secondary.is_empty() {
-                    return Ok(vec![]);
-                }
-                let mut out = primary;
-                out.extend(secondary);
-                out
-            } else {
-                match self.graph.type_indices.get(node_type) {
-                    Some(indices) => indices.to_vec(),
-                    None => return Ok(vec![]),
-                }
-            };
-
-            // AND-intersect extra labels (Cypher `MATCH (n:A:B:C)` semantics).
-            let filter_extras = !pattern.extra_labels.is_empty();
-            let extra_keys: Vec<InternedKey> = if filter_extras {
-                pattern
-                    .extra_labels
-                    .iter()
-                    .map(|s| InternedKey::from_str(s))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            if let Some(ref props) = pattern.properties {
-                let mut out = Vec::new();
-                for (i, idx) in candidates.iter().copied().enumerate() {
-                    if i & 0xFFF == 0 {
-                        self.check_scan_deadline()?;
-                    }
-                    if filter_extras {
-                        let labels = self.graph.node_labels(idx);
-                        if !extra_keys.iter().all(|k| labels.contains(k)) {
-                            continue;
-                        }
-                    }
-                    if self.node_matches_properties(idx, props) {
-                        out.push(idx);
-                    }
-                }
-                Ok(out)
-            } else if filter_extras {
-                let out = candidates
-                    .into_iter()
-                    .filter(|&idx| {
-                        let labels = self.graph.node_labels(idx);
-                        extra_keys.iter().all(|k| labels.contains(k))
-                    })
-                    .collect();
-                Ok(out)
-            } else {
-                Ok(candidates)
+            let mut candidates = self
+                .graph
+                .type_indices
+                .get(node_type)
+                .map(|indices| indices.to_vec())
+                .unwrap_or_default();
+            if let Some(secondary) = secondary {
+                candidates.extend(secondary.iter().copied());
             }
+            if candidates.is_empty() {
+                return Ok(Vec::new());
+            }
+            self.filter_node_candidates(candidates, pattern.properties.as_ref(), &extra_keys)
         } else if let Some(ref props) = pattern.properties {
             // Fast path: untyped node with {id: X} — cross-type id lookup.
             // Tries lookup_by_id_readonly on each type. When id_indices are built,
@@ -933,6 +888,34 @@ impl<'a> PatternExecutor<'a> {
             }
             Ok(out)
         }
+    }
+
+    /// Apply label intersections and any properties not already covered by an
+    /// index to a candidate stream. The shared loop keeps deadline/cancellation
+    /// checks identical for primary scans and secondary-label fallbacks.
+    fn filter_node_candidates(
+        &self,
+        candidates: impl IntoIterator<Item = NodeIndex>,
+        props: Option<&HashMap<String, PropertyMatcher>>,
+        extra_keys: &[InternedKey],
+    ) -> Result<Vec<NodeIndex>, String> {
+        let mut out = Vec::new();
+        for (i, idx) in candidates.into_iter().enumerate() {
+            if i & 0xFFF == 0 {
+                self.check_scan_deadline()?;
+            }
+            if !extra_keys.is_empty()
+                && !extra_keys
+                    .iter()
+                    .all(|&key| self.graph.node_has_label(idx, key))
+            {
+                continue;
+            }
+            if props.is_none_or(|properties| self.node_matches_properties(idx, properties)) {
+                out.push(idx);
+            }
+        }
+        Ok(out)
     }
 
     /// Deadline check used by all full-type / unanchored scans in this

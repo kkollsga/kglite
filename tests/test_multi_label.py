@@ -371,6 +371,66 @@ def test_mapped_full_multi_label(tmp_path: Path):
     assert set(rows[1]["labels"]) == {"Agent", "Reviewer"}
 
 
+@pytest.mark.parametrize("storage", [None, "mapped", "disk"])
+def test_unrelated_secondary_label_preserves_typed_index(storage, tmp_path: Path):
+    """An unrelated secondary label must not disable a primary-type index."""
+    kwargs = {} if storage is None else {"storage": storage}
+    if storage == "disk":
+        kwargs["path"] = str(tmp_path / "unrelated-secondary-disk")
+    graph = KnowledgeGraph(**kwargs)
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "name": ["One", "Two", "Three"],
+                "code": ["one", "two", "three"],
+            }
+        ),
+        "Item",
+        "id",
+        "name",
+        columns=["code"],
+    )
+    graph.add_nodes(
+        pd.DataFrame({"id": [10], "name": ["Other"]}),
+        "Other",
+        "id",
+        "name",
+        labels=["Unrelated"],
+    )
+    graph.create_index("Item", "code")
+
+    assert graph.cypher("MATCH (n:Item {code: 'two'}) RETURN n.id AS id").to_list() == [{"id": 2}]
+
+
+@pytest.mark.parametrize("storage", [None, "mapped", "disk"])
+def test_indexed_primary_hits_union_queried_secondary_carriers(storage, tmp_path: Path):
+    """A typed index covers primaries; matching secondary carriers are unioned."""
+    kwargs = {} if storage is None else {"storage": storage}
+    if storage == "disk":
+        kwargs["path"] = str(tmp_path / "queried-secondary-disk")
+    graph = KnowledgeGraph(**kwargs)
+    graph.add_nodes(
+        pd.DataFrame({"id": [1], "name": ["Primary"], "code": ["hit"]}),
+        "Item",
+        "id",
+        "name",
+        columns=["code"],
+    )
+    graph.add_nodes(
+        pd.DataFrame({"id": [2], "name": ["Secondary"], "code": ["hit"]}),
+        "Other",
+        "id",
+        "name",
+        columns=["code"],
+        labels=["Item"],
+    )
+    graph.create_index("Item", "code")
+
+    rows = graph.cypher("MATCH (n:Item {code: 'hit'}) RETURN n.id AS id ORDER BY id").to_list()
+    assert rows == [{"id": 1}, {"id": 2}]
+
+
 def test_single_label_save_load_unchanged(g, tmp_path: Path):
     """Graphs without secondary labels should save/load identically to
     0.10.4 (modulo the wire-format shift; the digest already accounted
