@@ -214,6 +214,11 @@ jobs:
         # reads the cdylib's file size, so we must materialise it.
         run: cargo build --release -p kglite-mcp-server -p kglite-bolt-server -p kglite
 
+      - name: Prefetch all-feature dependency metadata
+        # The dependency-license contract deliberately reruns metadata offline.
+        # Populate crates used only by optional features before that gate runs.
+        run: cargo metadata --format-version 1 --locked --all-features > /dev/null
+
       - name: Run Python tests
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
 
