@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unconstrained global edge counts are constant-time.**
   `MATCH ()-[r]->() RETURN count(r)` reads the backend's live edge cardinality
   directly while constrained and undirected patterns retain exact matching.
+- **Typed fixed-length paths avoid unnecessary trail bookkeeping.**
+  Single-pattern traversals whose relationship types cannot overlap skip exact
+  path cloning while assigned, untyped, overlapping, and multi-pattern paths
+  retain relationship-identity checks.
 
 ### Fixed
 

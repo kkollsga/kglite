@@ -35,7 +35,7 @@ fn reuses_bound_relationship(current: &PatternMatch, candidate: &MatchBinding) -
     let fixed_path_uses = |edge| {
         current
             .exact_path
-            .as_ref()
+            .as_deref()
             .is_some_and(|(_, path)| path.iter().any(|hop| hop.edge == edge))
     };
     let candidate_edges = match candidate {
@@ -85,12 +85,12 @@ fn extend_fixed_trail(current: &mut PatternMatch, candidate: &MatchBinding) {
         connection_type: *connection_type,
     };
 
-    if let Some((_, path)) = &mut current.exact_path {
-        path.push(hop);
+    if let Some(exact_path) = &mut current.exact_path {
+        exact_path.1.push(hop);
         return;
     }
 
-    current.exact_path = Some((*source, vec![hop]));
+    current.exact_path = Some(Box::new((*source, vec![hop])));
 }
 
 /// Return the ordered list of index-name candidates to try when the
@@ -428,7 +428,7 @@ impl<'a> PatternExecutor<'a> {
                 && edge_pattern.var_length.is_some())
             .then(|| format!("__anon_vlpath_{i}"));
             let track_fixed_trail =
-                edge_pattern.var_length.is_none() && (edge_pattern.needs_path_info || !is_last_hop);
+                edge_pattern.var_length.is_none() && edge_pattern.needs_path_info;
 
             // Expand each current match
             let (mut new_matches, mut new_indices) = if matches.len() >= EXPANSION_RAYON_THRESHOLD

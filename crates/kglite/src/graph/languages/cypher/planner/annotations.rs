@@ -3,6 +3,7 @@
 use super::{Clause, CypherQuery, Expression, PassCtx};
 use crate::graph::core::pattern_matching::PatternElement;
 use crate::graph::schema::DirGraph;
+use std::collections::HashSet;
 
 /// **Pass:** `mark_fast_var_length_paths` — When a variable-length
 /// edge `[:T*1..N]` has no path assignment and no edge variable AND
@@ -16,6 +17,17 @@ use crate::graph::schema::DirGraph;
 /// path BFS — correct, just not as fast.
 pub(super) fn pass_mark_fast_var_length_paths(query: &mut CypherQuery, _ctx: &PassCtx) {
     mark_fast_var_length_paths(query)
+}
+
+/// **Pass:** `mark_disjoint_fixed_trails` — When a MATCH has one
+/// unassigned fixed-length pattern whose relationship type sets are
+/// pairwise disjoint, mark its edges `needs_path_info=false`. A relationship
+/// cannot occur twice when every hop accepts a different type, so retaining
+/// and cloning the exact trail cannot affect Cypher's relationship-uniqueness
+/// rule. WHY-BAIL: path assignments, comma patterns, variable-length,
+/// untyped, or overlapping-type edges keep full trail tracking.
+pub(super) fn pass_mark_disjoint_fixed_trails(query: &mut CypherQuery, _ctx: &PassCtx) {
+    mark_disjoint_fixed_trails(query)
 }
 
 /// **Pass:** `mark_skip_target_type_check` — When connection-type
@@ -70,6 +82,62 @@ fn mark_fast_var_length_paths(query: &mut CypherQuery) {
             }
         }
     }
+}
+
+/// Remove fixed-trail bookkeeping when relationship reuse is impossible by type.
+fn mark_disjoint_fixed_trails(query: &mut CypherQuery) {
+    for clause in &mut query.clauses {
+        let mc = match clause {
+            Clause::Match(mc) | Clause::OptionalMatch(mc) => mc,
+            _ => continue,
+        };
+        if !mc.path_assignments.is_empty() || mc.patterns.len() != 1 {
+            continue;
+        }
+
+        let pattern = &mut mc.patterns[0];
+        if !fixed_edge_types_are_pairwise_disjoint(pattern) {
+            continue;
+        }
+        for element in &mut pattern.elements {
+            if let PatternElement::Edge(edge) = element {
+                edge.needs_path_info = false;
+            }
+        }
+    }
+}
+
+/// True when every edge is fixed-length, typed, and accepts no type accepted
+/// by any other edge in the same pattern.
+fn fixed_edge_types_are_pairwise_disjoint(
+    pattern: &crate::graph::core::pattern_matching::Pattern,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut edge_count = 0usize;
+
+    for element in &pattern.elements {
+        let PatternElement::Edge(edge) = element else {
+            continue;
+        };
+        edge_count += 1;
+        if edge.var_length.is_some() {
+            return false;
+        }
+
+        if let Some(types) = &edge.connection_types {
+            if types.is_empty() || types.iter().any(|ty| !seen.insert(ty.as_str())) {
+                return false;
+            }
+        } else if let Some(ty) = &edge.connection_type {
+            if !seen.insert(ty.as_str()) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    edge_count > 0
 }
 
 /// Returns true iff the query's first downstream projection collapses
@@ -208,6 +276,34 @@ fn mark_skip_target_type_check(query: &mut CypherQuery, graph: &DirGraph) {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixed_edge_types_are_pairwise_disjoint;
+    use crate::graph::core::pattern_matching::parse_pattern;
+
+    #[test]
+    fn disjoint_fixed_edge_types_need_no_trail() {
+        let pattern = parse_pattern("(a)-[:JUDGED_BY]-(b)-[:CITES]->(c)").unwrap();
+        assert!(fixed_edge_types_are_pairwise_disjoint(&pattern));
+
+        let single = parse_pattern("(a)-[:CITES]->(b)").unwrap();
+        assert!(fixed_edge_types_are_pairwise_disjoint(&single));
+    }
+
+    #[test]
+    fn overlapping_or_unbounded_edge_types_keep_trail() {
+        for text in [
+            "(a)-[:CITES]->(b)-[:CITES]->(c)",
+            "(a)-[:CITES|REFERS_TO]->(b)-[:REFERS_TO]->(c)",
+            "(a)-->(b)-[:CITES]->(c)",
+            "(a)-[:CITES*1..2]->(b)-[:REFERS_TO]->(c)",
+        ] {
+            let pattern = parse_pattern(text).unwrap();
+            assert!(!fixed_edge_types_are_pairwise_disjoint(&pattern), "{text}");
         }
     }
 }

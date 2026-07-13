@@ -22,7 +22,10 @@ pub mod rel_predicate_pushdown;
 pub mod schema_check;
 pub mod simplification;
 
-use annotations::{pass_mark_fast_var_length_paths, pass_mark_skip_target_type_check};
+use annotations::{
+    pass_mark_disjoint_fixed_trails, pass_mark_fast_var_length_paths,
+    pass_mark_skip_target_type_check,
+};
 use cost_model::reorder_predicates_by_cost;
 use fusion::{
     fuse_anchored_edge_count, fuse_count_short_circuits, fuse_match_return_aggregate,
@@ -91,7 +94,7 @@ type PassFn = fn(&mut CypherQuery, &PassCtx);
 /// | `fuse_node_scan_aggregate` / `fuse_node_scan_top_k` | safe-by-shape | Match `Match → [Where] → Return [→ OrderBy → Limit]` adjacency. |
 /// | `fuse_vector_score_order_limit` / `fuse_order_by_top_k` | safe-by-shape | Match `(Return, OrderBy, Limit)` adjacency; a CallSubquery breaks it. |
 /// | `reorder_predicates_by_cost` | safe-by-shape | Reorders predicates WITHIN one WHERE. |
-/// | `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
+/// | `mark_disjoint_fixed_trails` / `mark_fast_var_length_paths` / `mark_skip_target_type_check` | safe-by-shape | Mark flags on edge elements WITHIN MATCH clauses; CallSubquery hits `_ => continue`. The downstream-dedup-safety scan stops at the first Return/With, which a CallSubquery is not. |
 ///
 /// When in doubt the rule is: correctness beats optimization — a pass
 /// that can't confidently reason about a CallSubquery should bail on any
@@ -173,6 +176,10 @@ pub const PASSES: &[(&str, PassFn)] = &[
     (
         "mark_fast_var_length_paths",
         pass_mark_fast_var_length_paths,
+    ),
+    (
+        "mark_disjoint_fixed_trails",
+        pass_mark_disjoint_fixed_trails,
     ),
     (
         "mark_skip_target_type_check",

@@ -61,9 +61,10 @@ pub struct EdgePattern {
     /// Variable-length path configuration: (min_hops, max_hops)
     /// None means exactly 1 hop (normal edge)
     pub var_length: Option<(usize, usize)>,
-    /// When false, variable-length expansion skips path tracking and uses
-    /// global BFS dedup.  Set by the query planner when the query doesn't
-    /// reference path info (no `p = ...` assignment, no named edge variable).
+    /// Whether the matcher must retain path identity. When false,
+    /// variable-length expansion may use global BFS dedup and fixed-length
+    /// expansion omits its exact-trail allocation. Set false only when the
+    /// planner proves the surrounding query does not consume path identity.
     pub needs_path_info: bool,
     /// When true, the connection type metadata guarantees the target node
     /// matches the pattern's type, so the node_weight() lookup can be skipped.
@@ -327,9 +328,11 @@ pub enum PropertyMatcher {
 pub struct PatternMatch {
     pub bindings: Vec<(String, MatchBinding)>,
     /// Exact fixed-length trail, stored outside named bindings so anonymous
-    /// hops do not allocate synthetic variable names.
+    /// hops do not allocate synthetic variable names. Boxed so matches whose
+    /// planner proves that trail tracking is unnecessary carry only one
+    /// pointer of overhead rather than an inline `Vec` payload.
     #[doc(hidden)]
-    pub exact_path: Option<(NodeIndex, Vec<PathHop>)>,
+    pub exact_path: Option<Box<(NodeIndex, Vec<PathHop>)>>,
 }
 
 /// One exact hop in a matched path.

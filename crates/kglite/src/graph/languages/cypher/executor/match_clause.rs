@@ -29,7 +29,7 @@ pub(super) fn match_edge_indices(m: &PatternMatch, out: &mut Vec<EdgeIndex>) {
             out.push(edge);
         }
     };
-    if let Some((_, path)) = &m.exact_path {
+    if let Some((_, path)) = m.exact_path.as_deref() {
         for hop in path {
             push(hop.edge, out);
         }
@@ -316,7 +316,8 @@ impl<'a> CypherExecutor<'a> {
         let binding_count = bindings.len();
         let mut row = ResultRow::with_capacity(binding_count, binding_count / 2, 0);
 
-        if let Some((source, path)) = exact_path {
+        if let Some(exact_path) = exact_path {
+            let (source, path) = *exact_path;
             row.path_bindings.insert(
                 "__fixed_path".to_string(),
                 PathBinding {
@@ -466,7 +467,7 @@ impl<'a> CypherExecutor<'a> {
 
     /// Merge a PatternMatch's bindings into an existing ResultRow
     pub(super) fn merge_match_into_row(&self, row: &mut ResultRow, m: &PatternMatch) {
-        if let Some((source, path)) = &m.exact_path {
+        if let Some((source, path)) = m.exact_path.as_deref() {
             row.path_bindings.insert(
                 "__fixed_path".to_string(),
                 PathBinding {

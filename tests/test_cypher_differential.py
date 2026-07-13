@@ -1706,6 +1706,14 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        # Pairwise-disjoint fixed relationship types cannot reuse an edge, so
+        # the planner may omit exact-trail bookkeeping for this shape.
+        "disjoint_fixed_relationship_types",
+        "social_graph",
+        "MATCH (a:Person {person_id: 1})-[:KNOWS]->(b)-[:WORKS_AT]->(c) RETURN DISTINCT c.name",
+        None,
+    ),
+    (
         # Comma patterns join: an empty pattern empties the whole clause.
         # (Regression: the first-MATCH loop re-entered the "first pattern"
         # branch when an earlier pattern produced no rows, fabricating rows
@@ -1872,6 +1880,10 @@ PASS_TRIGGER_CASES: dict[str, tuple[str, str]] = {
     "fuse_order_by_top_k": ("differential", "trigger_generic_top_k"),
     "reorder_predicates_by_cost": ("differential", "trigger_predicate_reorder"),
     "mark_fast_var_length_paths": ("differential", "var_length_no_var_distinct"),
+    "mark_disjoint_fixed_trails": (
+        "differential",
+        "disjoint_fixed_relationship_types",
+    ),
     "mark_skip_target_type_check": ("differential", "anchored_three_hop"),
 }
 
