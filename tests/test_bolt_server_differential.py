@@ -89,9 +89,9 @@ def _canonical_row(row) -> tuple:
 def _normalize_rows(rows: list) -> list:
     """Normalize a row list for comparison. The corpus's queries don't
     all pin ordering, so we sort canonicalised rows for a deterministic
-    comparison (dict-valued cells are not orderable raw — see
-    `_canonical_cell`)."""
-    return sorted(_canonical_row(row) for row in rows)
+    comparison. ``repr`` supplies one total ordering across mixed scalar
+    types such as the NULL/string keys produced by property grouping."""
+    return sorted((_canonical_row(row) for row in rows), key=repr)
 
 
 def _direct_run(query: str, params: dict | None, fixture_name: str) -> list:
