@@ -75,6 +75,26 @@ def test_typed_property_text_filter(mode, tmp_path, predicate, params, expected)
 
 
 @pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_fused_indexed_node_aggregate(mode, tmp_path):
+    g = _make_graph(mode, tmp_path)
+    _seed(g)
+    g.create_index("Person", "city")
+    rows = g.cypher("MATCH (p:Person {city: 'Oslo'}) RETURN p.city AS city, count(*) AS n").to_list()
+    assert rows == [{"city": "Oslo", "n": 3}]
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
+def test_fused_indexed_node_top_k(mode, tmp_path):
+    g = _make_graph(mode, tmp_path)
+    _seed(g)
+    g.create_index("Person", "city")
+    rows = g.cypher(
+        "MATCH (p:Person {city: 'Oslo'}) RETURN p.name AS name, p.age AS age ORDER BY age DESC LIMIT 2"
+    ).to_list()
+    assert rows == [{"name": "Carol", "age": 41}, {"name": "Alice", "age": 28}]
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
 def test_cross_type_property_equality(mode, tmp_path):
     g = _make_graph(mode, tmp_path)
     _seed(g)

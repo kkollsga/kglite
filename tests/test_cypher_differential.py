@@ -188,9 +188,21 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("trigger_node_scan_aggregate", "social_graph", "MATCH (p:Person) RETURN sum(p.age) AS total", None),
     (
+        "fused_property_node_scan_aggregate",
+        "social_graph",
+        "MATCH (p:Person {city: 'Oslo'}) RETURN p.city AS city, count(*) AS n",
+        None,
+    ),
+    (
         "trigger_node_scan_top_k",
         "social_graph",
         "MATCH (p:Person) RETURN p.name AS name ORDER BY p.age DESC LIMIT 3",
+        None,
+    ),
+    (
+        "fused_property_node_scan_top_k",
+        "social_graph",
+        "MATCH (p:Person {city: 'Oslo'}) RETURN p.name AS name, p.age AS age ORDER BY age DESC LIMIT 2",
         None,
     ),
     ("trigger_generic_top_k", "small_graph", "UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2", None),

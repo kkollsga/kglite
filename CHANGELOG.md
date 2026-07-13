@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix, substring, and suffix predicates plus parameterized relationship
   comparisons now discard non-matching edges before downstream bindings and
   hops are materialized.
+- **Fused node scans reuse property indexes.** Single-node aggregate and
+  top-K operators now share the normal candidate-discovery path instead of
+  scanning an entire label bucket and rechecking indexed properties row by
+  row.
 
 ## [0.13.1] - 2026-07-13
 

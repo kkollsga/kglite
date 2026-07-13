@@ -96,6 +96,21 @@ class TestExplainOptimizations:
         ops = [r["operation"] for r in result.to_list()]
         assert any("TopK" in op for op in ops)
 
+    def test_indexed_property_shapes_keep_node_scan_fusions(self, graph):
+        graph.create_index("Person", "age")
+        aggregate_ops = {
+            row["operation"]
+            for row in graph.cypher("EXPLAIN MATCH (n:Person {age: 30}) RETURN count(*) AS n").to_list()
+        }
+        top_k_ops = {
+            row["operation"]
+            for row in graph.cypher(
+                "EXPLAIN MATCH (n:Person {age: 30}) RETURN n.name AS name ORDER BY n.name LIMIT 1"
+            ).to_list()
+        }
+        assert "FusedNodeScanAggregate" in aggregate_ops
+        assert any(operation.startswith("FusedNodeScanTopK") for operation in top_k_ops)
+
     def test_explain_reports_only_applied_optimizer_passes(self, graph):
         query = "EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT 1"
         rows = graph.cypher(query).to_list()

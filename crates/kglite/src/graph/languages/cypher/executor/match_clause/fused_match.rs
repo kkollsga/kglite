@@ -1232,39 +1232,15 @@ impl<'a> CypherExecutor<'a> {
         })
     }
 
-    /// Candidate node indices for a fused single-node scan, multi-label
-    /// aware. Mirrors `PatternExecutor::find_matching_nodes`'s
-    /// `needs_secondary_path`: unions the primary type bucket with the
-    /// secondary-label index for the node type, then AND-intersects any
-    /// extra labels (`MATCH (n:A:B)`). A `None` node type yields a full
-    /// node scan. The choke-point API (`DirGraph::add_node_label`) forbids
-    /// a node holding the same key as both primary and secondary, so the
-    /// union is duplicate-free.
-    ///
-    /// Without this, the fused scan paths would miss secondary-only-labelled
-    /// nodes (`MATCH (n:SecLabel)`) and over-include when extra labels are
-    /// meant to narrow the match (`MATCH (n:Type:SecLabel)`).
-    fn fused_scan_candidates(&self, node_pattern: &NodePattern) -> Vec<NodeIndex> {
-        let Some(nt) = node_pattern.node_type.as_deref() else {
-            return self.graph.graph.node_indices().collect();
-        };
-        let candidates = self.graph.nodes_with_label(nt);
-        if node_pattern.extra_labels.is_empty() {
-            return candidates;
-        }
-        let extra_keys: Vec<InternedKey> = node_pattern
-            .extra_labels
-            .iter()
-            .map(|s| InternedKey::from_str(s))
-            .collect();
-        candidates
-            .into_iter()
-            .filter(|&idx| {
-                extra_keys
-                    .iter()
-                    .all(|&k| self.graph.node_has_label(idx, k))
-            })
-            .collect()
+    /// Discover fused-scan candidates through the shared pattern matcher.
+    /// This preserves multi-label semantics while reusing id, equality, IN,
+    /// range, prefix, global, and backend-specific indexes. The fused operator
+    /// still owns expression evaluation and aggregation/top-K maintenance.
+    fn fused_scan_candidates(&self, node_pattern: &NodePattern) -> Result<Vec<NodeIndex>, String> {
+        PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+            .set_deadline(self.deadline)
+            .set_cancel(self.cancel)
+            .find_matching_nodes_pub(node_pattern)
     }
 
     /// Fused MATCH (n:Type) [WHERE ...] RETURN group_keys, agg_funcs(...)
@@ -1287,7 +1263,7 @@ impl<'a> CypherExecutor<'a> {
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
 
         // Get candidate node indices (multi-label aware).
-        let node_indices = self.fused_scan_candidates(node_pattern);
+        let node_indices = self.fused_scan_candidates(node_pattern)?;
 
         // Classify RETURN items into group keys and aggregates
         let mut group_key_indices = Vec::new();
@@ -1328,17 +1304,6 @@ impl<'a> CypherExecutor<'a> {
             .node_bindings
             .insert(node_var.to_string(), petgraph::graph::NodeIndex::new(0));
 
-        // Create PatternExecutor once for property matching (if needed)
-        let pattern_executor = if node_pattern.properties.is_some() {
-            Some(PatternExecutor::new_lightweight_with_params(
-                self.graph,
-                None,
-                self.params,
-            ))
-        } else {
-            None
-        };
-
         // Inline accumulators for aggregation during scan
         struct InlineAccumulators {
             counts: Vec<i64>,
@@ -1365,17 +1330,6 @@ impl<'a> CypherExecutor<'a> {
             if scan_count % 10_000 == 0 && scan_count > 0 {
                 self.check_deadline()?;
             }
-            // Check pattern properties using PatternExecutor's matching logic
-            if let Some(ref props) = node_pattern.properties {
-                if !pattern_executor
-                    .as_ref()
-                    .expect("invariant: pattern_executor is Some when node has property filters")
-                    .node_matches_properties_pub(node_idx, props)
-                {
-                    continue;
-                }
-            }
-
             // Set the node binding for expression evaluation
             *eval_row
                 .node_bindings
@@ -1678,18 +1632,7 @@ impl<'a> CypherExecutor<'a> {
         let node_var = node_pattern.variable.as_deref().unwrap_or("_n");
 
         // Get candidate node indices (multi-label aware).
-        let node_indices = self.fused_scan_candidates(node_pattern);
-
-        // Pattern property filter
-        let pattern_executor = if node_pattern.properties.is_some() {
-            Some(PatternExecutor::new_lightweight_with_params(
-                self.graph,
-                None,
-                self.params,
-            ))
-        } else {
-            None
-        };
+        let node_indices = self.fused_scan_candidates(node_pattern)?;
 
         // Pre-fold expressions
         let folded_sort = self.fold_constants_expr(sort_expression);
@@ -1709,17 +1652,6 @@ impl<'a> CypherExecutor<'a> {
             // Periodic deadline check
             if scan_count.is_multiple_of(10000) {
                 self.check_deadline()?;
-            }
-
-            // Pattern property filter
-            if let Some(ref props) = node_pattern.properties {
-                if !pattern_executor
-                    .as_ref()
-                    .expect("invariant: pattern_executor is Some when node has property filters")
-                    .node_matches_properties_pub(node_idx, props)
-                {
-                    continue;
-                }
             }
 
             // Set node binding for expression evaluation

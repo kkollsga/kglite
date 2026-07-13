@@ -94,6 +94,30 @@ def grouped_count_graph():
 
 
 @pytest.fixture(scope="module")
+def indexed_node_scan_graph():
+    """100k nodes with a unique equality index for fused-scan routing."""
+    graph = KnowledgeGraph()
+    n = 100_000
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "nid": list(range(n)),
+                "name": [f"Item_{i}" for i in range(n)],
+                "code": [f"code_{i}" for i in range(n)],
+                "bucket": [f"bucket_{i % 100}" for i in range(n)],
+                "score": list(range(n)),
+            }
+        ),
+        "Item",
+        "nid",
+        "name",
+        columns=["code", "bucket", "score"],
+    )
+    graph.create_index("Item", "code")
+    return graph
+
+
+@pytest.fixture(scope="module")
 def wide_edge_count_graph():
     """One million homogeneous edges, matching the reported legal graph scale."""
     graph = KnowledgeGraph()
@@ -272,6 +296,34 @@ def test_bench_two_edge_relationship_text_filter(benchmark, grouped_count_graph,
 
     result = benchmark(query_and_consume)
     assert len(result) == expected_rows
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            "MATCH (n:Item {code: $code}) RETURN count(*) AS n",
+            [{"n": 1}],
+        ),
+        (
+            "MATCH (n:Item) WHERE n.code = $code RETURN n.bucket AS bucket, count(*) AS n",
+            [{"bucket": "bucket_21", "n": 1}],
+        ),
+        (
+            "MATCH (n:Item {code: $code}) RETURN n.code AS code, n.score AS score ORDER BY n.score DESC LIMIT 5",
+            [{"code": "code_54321", "score": 54321}],
+        ),
+    ],
+)
+def test_bench_fused_indexed_node_scan(benchmark, indexed_node_scan_graph, query, expected):
+    """Fused aggregate/top-K operators must reuse the unique property index."""
+
+    def query_and_consume():
+        return indexed_node_scan_graph.cypher(query, params={"code": "code_54321"}).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == expected
 
 
 @pytest.mark.benchmark
