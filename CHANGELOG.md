@@ -5,6 +5,14 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+
+- **Property-grouped Cypher counts avoid materializing one row per edge.**
+  Direct property keys are resolved once per endpoint and merged by value
+  before `ORDER BY ... LIMIT`, preserving duplicate and null group semantics.
+
 ## [0.13.0] - 2026-07-13
 
 ### Added

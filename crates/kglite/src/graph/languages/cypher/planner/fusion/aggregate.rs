@@ -538,7 +538,7 @@ fn distinct_fusable_3elem_with_constrained_group(
 /// 1. `clauses[i]` is `Match` with exactly 1 pattern of 3 elements (node-edge-node)
 /// 2. `clauses[i+1]` is `Return` with at least one `count()` aggregate
 /// 3. The RETURN is either a lone `count(*)`, or all non-aggregate items group
-///    by one endpoint node variable
+///    by one endpoint node variable or direct properties of that variable
 /// 4. All `count()` args reference the second node variable (or `*`)
 /// 5. `count(DISTINCT v)` is allowed when `v` is the OTHER node variable AND
 ///    the group node is type/property constrained (see
@@ -721,19 +721,23 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                 let mut has_count = false;
                 let mut all_valid = true;
                 let mut group_var: Option<&str> = None;
+                let mut property_grouping = false;
+                let mut node_grouping = false;
                 let mut count_var_ok = true;
                 let mut saw_distinct = false;
 
                 // First pass: identify which variable group-by items reference
                 for item in &r.items {
                     if !is_aggregate_expression(&item.expression) {
-                        // The fused executor groups by NodeIndex. A property
-                        // expression groups by the property's VALUE instead,
-                        // so two nodes with the same value must collapse into
-                        // one group. Until the fused accumulator can re-bucket
-                        // by resolved values, admit only the node variable.
                         let refs_var = match &item.expression {
-                            Expression::Variable(v) => Some(v.as_str()),
+                            Expression::Variable(v) => {
+                                node_grouping = true;
+                                Some(v.as_str())
+                            }
+                            Expression::PropertyAccess { variable, .. } => {
+                                property_grouping = true;
+                                Some(variable.as_str())
+                            }
                             _ => None,
                         };
                         match refs_var {
@@ -765,6 +769,19 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                     } else {
                         all_valid = false; // no group keys found
                     }
+                }
+
+                // Property-valued groups are merged by their resolved Value
+                // tuple in the fused executor. Keep the first implementation
+                // deliberately narrow: a single edge pattern and additive
+                // (non-DISTINCT) counts. DISTINCT peer/edge sets cannot be
+                // summed after multiple nodes collapse to one property value.
+                let property_pattern_is_three = matches!(
+                    &query.clauses[i],
+                    Clause::Match(m) if m.patterns[0].elements.len() == 3
+                );
+                if property_grouping && (node_grouping || !property_pattern_is_three) {
+                    all_valid = false;
                 }
 
                 // Second pass: check count() aggregates
@@ -834,6 +851,10 @@ pub(crate) fn fuse_match_return_aggregate(query: &mut CypherQuery, has_secondary
                             }
                         }
                     }
+                }
+
+                if property_grouping && saw_distinct {
+                    all_valid = false;
                 }
 
                 (has_count && all_valid && count_var_ok, saw_distinct)

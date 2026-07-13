@@ -121,7 +121,33 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "property_grouping_duplicate_values",
         "social_graph",
-        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.city AS city, count(b) AS n",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.city AS city, count(b) AS n ORDER BY n DESC LIMIT 10",
+        None,
+    ),
+    (
+        "property_grouping_missing_values",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.email AS email, count(b) AS n ORDER BY n DESC LIMIT 30",
+        None,
+    ),
+    (
+        "property_grouping_target_value",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.city AS city, count(a) AS n ORDER BY n DESC LIMIT 10",
+        None,
+    ),
+    (
+        "property_grouping_other_endpoint_filter",
+        "social_graph",
+        "MATCH (a:Person {city: 'Oslo'})-[:KNOWS]->(b:Person) "
+        "RETURN b.city AS city, count(a) AS n ORDER BY n DESC LIMIT 10",
+        None,
+    ),
+    (
+        "property_grouping_relationship_filter",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.since >= 2010 "
+        "RETURN b.city AS city, count(r) AS n ORDER BY n DESC LIMIT 10",
         None,
     ),
     (

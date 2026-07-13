@@ -797,6 +797,54 @@ fn test_fuse_match_return_aggregate_count_distinct() {
 }
 
 #[test]
+fn test_fuse_match_return_aggregate_property_group_topk() {
+    let mut query = parse_cypher(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+         RETURN a.city AS city, count(b) AS n \
+         ORDER BY n DESC LIMIT 10",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(
+        matches!(
+            query.clauses.as_slice(),
+            [Clause::FusedMatchReturnAggregate {
+                top_k: Some((_, true, 10)),
+                distinct_count: false,
+                ..
+            }]
+        ),
+        "direct property grouping must merge values inside fused top-k: {:#?}",
+        query.clauses
+    );
+}
+
+#[test]
+fn test_property_grouped_distinct_count_is_not_fused() {
+    let mut query = parse_cypher(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+         RETURN a.city AS city, count(DISTINCT b) AS n",
+    )
+    .unwrap();
+
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+
+    assert!(
+        !query
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::FusedMatchReturnAggregate { .. })),
+        "distinct peer sets cannot be summed after nodes collapse by property value"
+    );
+}
+
+#[test]
 fn test_fuse_match_return_aggregate_global_two_hop_count() {
     let mut query = parse_cypher(
         "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \

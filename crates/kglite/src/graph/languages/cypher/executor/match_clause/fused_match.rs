@@ -386,7 +386,117 @@ impl<'a> CypherExecutor<'a> {
                 Ok(new_row)
             };
 
-        let result_rows = if let Some(&(_, descending, limit)) = top_k.as_ref() {
+        let property_grouping = group_key_indices.iter().all(|&idx| {
+            matches!(
+                return_clause.items[idx].expression,
+                Expression::PropertyAccess { .. }
+            )
+        });
+
+        // Property grouping cannot accumulate by NodeIndex: two distinct
+        // endpoints with the same property value (including missing values,
+        // which resolve to NULL) form one Cypher group. Count each matching
+        // endpoint without materialising edge rows, resolve its key tuple
+        // once, and merge the additive counts by Value before top-K.
+        let result_rows = if property_grouping {
+            let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
+                elements: vec![pattern.elements[group_elem_idx].clone()],
+            };
+            let executor =
+                PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+                    .set_deadline(self.deadline)
+                    .set_cancel(self.cancel);
+            let group_matches = executor.execute(&group_only_pattern)?;
+
+            // (resolved group values, representative node, merged count)
+            let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex, i64)> = Vec::new();
+            let mut group_index: FxHashMap<Vec<Value>, usize> = FxHashMap::default();
+            let mut eval_row = ResultRow::new();
+            eval_row
+                .node_bindings
+                .insert(group_var.to_string(), petgraph::graph::NodeIndex::new(0));
+
+            for (scan_count, matched) in group_matches.iter().enumerate() {
+                if scan_count.is_multiple_of(2048) {
+                    self.check_deadline()?;
+                }
+                let Some(node_idx) = extract_node_idx(matched) else {
+                    continue;
+                };
+                let match_count = count_for_node(node_idx)?;
+                if match_count == 0 {
+                    continue;
+                }
+                *eval_row
+                    .node_bindings
+                    .get_mut(group_var)
+                    .expect("group binding inserted before property aggregation") = node_idx;
+                let mut key = Vec::with_capacity(group_key_indices.len());
+                for &idx in &group_key_indices {
+                    key.push(self.evaluate_expression(
+                        &return_clause.items[idx].expression,
+                        &eval_row,
+                    )?);
+                }
+                if let Some(&group_idx) = group_index.get(&key) {
+                    groups[group_idx].2 = groups[group_idx]
+                        .2
+                        .checked_add(match_count)
+                        .ok_or("count overflow while merging property groups")?;
+                } else {
+                    let group_idx = groups.len();
+                    group_index.insert(key.clone(), group_idx);
+                    groups.push((key, node_idx, match_count));
+                }
+            }
+
+            if let Some(&(_, descending, limit)) = top_k.as_ref() {
+                if descending {
+                    groups.sort_unstable_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+                } else {
+                    groups.sort_unstable_by(|a, b| a.2.cmp(&b.2).then_with(|| a.1.cmp(&b.1)));
+                }
+                groups.truncate(limit);
+            } else if let Some(&(_, descending, limit)) = candidate_emit.as_ref() {
+                let mut counts: Vec<i64> = groups.iter().map(|group| group.2).collect();
+                if descending {
+                    counts.sort_unstable_by(|a, b| b.cmp(a));
+                } else {
+                    counts.sort_unstable();
+                }
+                if let Some(&threshold) = counts.get(limit.saturating_sub(1)) {
+                    groups.retain(|group| {
+                        if descending {
+                            group.2 >= threshold
+                        } else {
+                            group.2 <= threshold
+                        }
+                    });
+                }
+            }
+
+            let mut rows = Vec::with_capacity(groups.len());
+            for (values, representative, count) in groups {
+                let mut projected = Bindings::with_capacity(return_clause.items.len());
+                for (&idx, value) in group_key_indices.iter().zip(values) {
+                    projected.insert(
+                        return_item_column_name(&return_clause.items[idx]),
+                        value,
+                    );
+                }
+                for &idx in &count_indices {
+                    projected.insert(
+                        return_item_column_name(&return_clause.items[idx]),
+                        Value::Int64(count),
+                    );
+                }
+                let mut row = ResultRow::from_projected(projected);
+                row.node_bindings
+                    .insert(group_var.to_string(), representative);
+                rows.push(row);
+            }
+            rows
+        } else if let Some(&(_, descending, limit)) = top_k.as_ref() {
             use std::cmp::Reverse;
             use std::collections::BinaryHeap;
 
