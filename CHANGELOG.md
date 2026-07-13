@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negating a comparison against a missing or NULL property no longer admits
   that relationship.
 
+### Performance
+
+- **Node text filters run before relationship expansion.** Positive
+  `STARTS WITH`, `CONTAINS`, and `ENDS WITH` predicates, including string
+  parameters, now narrow node candidates before multi-hop traversal. Typed
+  `STARTS WITH` queries also reach persistent prefix indexes correctly.
+
 ## [0.13.1] - 2026-07-13
 
 ### Performance

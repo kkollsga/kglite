@@ -120,6 +120,71 @@ fn test_predicate_pushdown_keeps_second_same_direction_bound_in_where() {
 }
 
 #[test]
+fn test_text_predicate_pushdown_literals_and_parameters() {
+    let cases = [
+        (
+            "MATCH (n:Person) WHERE n.name STARTS WITH 'Ali' RETURN n",
+            "starts",
+        ),
+        (
+            "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n",
+            "contains",
+        ),
+        (
+            "MATCH (n:Person) WHERE n.name ENDS WITH $suffix RETURN n",
+            "ends",
+        ),
+    ];
+    let mut params = HashMap::new();
+    params.insert("suffix".to_string(), Value::String("ice".to_string()));
+
+    for (cypher, expected) in cases {
+        let mut query = parse_cypher(cypher).unwrap();
+        push_where_into_match(&mut query, &params);
+
+        let Clause::Match(m) = &query.clauses[0] else {
+            panic!("expected MATCH clause");
+        };
+        let PatternElement::Node(node) = &m.patterns[0].elements[0] else {
+            panic!("expected node pattern");
+        };
+        let matcher = node
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("name"));
+        assert!(match expected {
+            "starts" =>
+                matches!(matcher, Some(PropertyMatcher::StartsWith(value)) if value == "Ali"),
+            "contains" =>
+                matches!(matcher, Some(PropertyMatcher::Contains(value)) if value == "lic"),
+            "ends" => matches!(matcher, Some(PropertyMatcher::EndsWith(value)) if value == "ice"),
+            _ => unreachable!(),
+        });
+        assert!(matches!(query.clauses[1], Clause::Where(_)));
+    }
+}
+
+#[test]
+fn test_text_predicate_pushdown_rejects_unsafe_shapes() {
+    for cypher in [
+        "MATCH (n:Person) WHERE n.name CONTAINS '' RETURN n",
+        "MATCH (n:Person) WHERE n.name ENDS WITH $missing RETURN n",
+        "MATCH (n:Person) WHERE NOT (n.name STARTS WITH 'Ali') RETURN n",
+    ] {
+        let mut query = parse_cypher(cypher).unwrap();
+        push_where_into_match(&mut query, &HashMap::new());
+
+        let Clause::Match(m) = &query.clauses[0] else {
+            panic!("expected MATCH clause");
+        };
+        let PatternElement::Node(node) = &m.patterns[0].elements[0] else {
+            panic!("expected node pattern");
+        };
+        assert!(node.properties.is_none());
+    }
+}
+
+#[test]
 fn test_comparison_pushdown() {
     let mut query = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n").unwrap();
 

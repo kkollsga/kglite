@@ -233,18 +233,23 @@ def test_bench_untyped_edge_count_1m(benchmark, wide_edge_count_graph):
 
 
 @pytest.mark.benchmark
-def test_bench_two_edge_distinct_filtered_path(benchmark, grouped_count_graph):
-    """Two-edge filtered path with DISTINCT+LIMIT, mirroring legal graph lookups."""
+@pytest.mark.parametrize(
+    ("operator", "needle", "expected_rows"),
+    [("CONTAINS", "Group_1", 20), ("ENDS WITH", "_1", 4)],
+)
+def test_bench_two_edge_distinct_filtered_path(benchmark, grouped_count_graph, operator, needle, expected_rows):
+    """Consumed two-edge text-filter path, covering substring and suffix routing."""
 
     def query_and_consume():
         return grouped_count_graph.cypher(
-            "MATCH (g:Group)<-[:RELATES_TO]-(s:Source)-[:RELATES_TO]->(peer:Group) "
-            "WHERE g.name CONTAINS 'Group_1' "
-            "RETURN DISTINCT peer.bucket AS bucket LIMIT 20"
+            f"MATCH (g:Group)<-[:RELATES_TO]-(s:Source)-[:RELATES_TO]->(peer:Group) "
+            f"WHERE g.name {operator} $needle "
+            "RETURN DISTINCT peer.bucket AS bucket LIMIT 20",
+            params={"needle": needle},
         ).to_list()
 
     result = benchmark(query_and_consume)
-    assert 1 <= len(result) <= 20
+    assert len(result) == expected_rows
 
 
 @pytest.mark.benchmark

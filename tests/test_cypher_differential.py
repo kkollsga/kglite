@@ -646,6 +646,20 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("starts_with", "social_graph", "MATCH (p:Person) WHERE p.name STARTS WITH 'Person_1' RETURN p.name AS n", None),
     ("contains", "social_graph", "MATCH (p:Person) WHERE p.name CONTAINS '_1' RETURN p.name AS n", None),
     ("ends_with", "social_graph", "MATCH (p:Person) WHERE p.name ENDS WITH '_5' RETURN p.name AS n", None),
+    (
+        "multi_hop_contains_distinct",
+        "social_graph",
+        "MATCH (j:Person)<-[:KNOWS]-(d:Person)-[:WORKS_AT]->(c:Company) "
+        "WHERE j.name CONTAINS '_1' RETURN DISTINCT c.name AS company",
+        None,
+    ),
+    (
+        "multi_hop_ends_with_param_distinct",
+        "social_graph",
+        "MATCH (j:Person)<-[:KNOWS]-(d:Person)-[:WORKS_AT]->(c:Company) "
+        "WHERE j.name ENDS WITH $suffix RETURN DISTINCT c.name AS company",
+        {"suffix": "_5"},
+    ),
     ("not_equal", "social_graph", "MATCH (p:Person) WHERE p.city <> 'Oslo' RETURN count(p) AS n", None),
     (
         "range_predicate",

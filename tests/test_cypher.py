@@ -161,6 +161,36 @@ class TestWhereClause:
         assert "Charlie" in names
 
 
+class TestNodeTextPredicatePushdown:
+    @pytest.mark.parametrize(
+        ("predicate", "params", "expected"),
+        [
+            (
+                "j.name CONTAINS '_1'",
+                None,
+                ["AILabs", "CloudSoft", "DataInc", "DevHouse", "TechCorp"],
+            ),
+            (
+                "j.name ENDS WITH $suffix",
+                {"suffix": "_5"},
+                ["AILabs", "CloudSoft", "DataInc"],
+            ),
+            (
+                "j.name STARTS WITH $prefix",
+                {"prefix": "Person_1"},
+                ["AILabs", "CloudSoft", "DataInc", "DevHouse", "TechCorp"],
+            ),
+        ],
+    )
+    def test_multi_hop_distinct_text_filter(self, social_graph, predicate, params, expected):
+        query = (
+            "MATCH (j:Person)<-[:KNOWS]-(d:Person)-[:WORKS_AT]->(c:Company) "
+            f"WHERE {predicate} RETURN DISTINCT c.name AS company ORDER BY company"
+        )
+        rows = social_graph.cypher(query, params=params or {}).to_list()
+        assert [row["company"] for row in rows] == expected
+
+
 class TestOrderByLimitSkip:
     def test_order_by_asc(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) RETURN n.title, n.age ORDER BY n.age")

@@ -55,7 +55,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             pushable_cmp,
             pushable_var,
             pushable_nodeprop,
-            pushable_prefix,
+            pushable_text,
             remaining,
         } = extract_pushable_equalities(
             &where_pred,
@@ -72,7 +72,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             || !pushable_cmp.is_empty()
             || !pushable_var.is_empty()
             || !pushable_nodeprop.is_empty()
-            || !pushable_prefix.is_empty()
+            || !pushable_text.is_empty()
         {
             let patterns = match &mut query.clauses[i] {
                 Clause::Match(ref mut m) => &mut m.patterns,
@@ -102,8 +102,9 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                 all_applied &=
                     apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
             }
-            for (var_name, property, prefix) in pushable_prefix {
-                all_applied &= apply_prefix_to_patterns(patterns, &var_name, &property, prefix);
+            for (var_name, property, matcher) in pushable_text {
+                all_applied &=
+                    apply_text_matcher_to_patterns(patterns, &var_name, &property, matcher);
             }
 
             // Update WHERE clause with remaining predicates.
@@ -229,8 +230,8 @@ pub(super) struct PushableResult {
     pub pushable_cmp: Vec<(String, String, ComparisonOp, Value)>,
     pub pushable_var: Vec<(String, String, String)>,
     pub pushable_nodeprop: Vec<(String, String, String, String)>,
-    /// `(var, property, prefix)` — pushed from `WHERE n.prop STARTS WITH 'X'`.
-    pub pushable_prefix: Vec<(String, String, String)>,
+    /// `(var, property, matcher)` for positive STARTS/CONTAINS/ENDS predicates.
+    pub pushable_text: Vec<(String, String, PropertyMatcher)>,
     pub remaining: Option<Predicate>,
 }
 
@@ -240,7 +241,7 @@ pub(super) struct PushableResult {
 /// - `variable.property = literal_value` / `= $param` (equality)
 /// - `variable.property IN [literal, ...]` (IN list)
 /// - `variable.property > literal_value` (and >=, <, <=)
-/// - `variable.property STARTS WITH 'prefix'` (string prefix)
+/// - `variable.property STARTS WITH/CONTAINS/ENDS WITH <string>`
 /// - `variable.property = other_variable` when `other_variable` is a scalar
 ///   from a prior WITH/UNWIND  →  EqualsVar
 /// - `variable.property = other_var.other_prop` when `other_var` is a node
@@ -260,7 +261,7 @@ pub(super) fn extract_pushable_equalities(
     let mut pushable_cmp = Vec::new();
     let mut pushable_var = Vec::new();
     let mut pushable_nodeprop = Vec::new();
-    let mut pushable_prefix = Vec::new();
+    let mut pushable_text = Vec::new();
     let mut reservations: HashMap<(String, String), PropertyReservation> = occupied_properties
         .into_iter()
         .map(|key| (key, PropertyReservation::Exclusive))
@@ -276,7 +277,7 @@ pub(super) fn extract_pushable_equalities(
         &mut pushable_cmp,
         &mut pushable_var,
         &mut pushable_nodeprop,
-        &mut pushable_prefix,
+        &mut pushable_text,
         &mut reservations,
     );
     PushableResult {
@@ -285,7 +286,7 @@ pub(super) fn extract_pushable_equalities(
         pushable_cmp,
         pushable_var,
         pushable_nodeprop,
-        pushable_prefix,
+        pushable_text,
         remaining,
     }
 }
@@ -294,6 +295,23 @@ pub(super) fn extract_pushable_equalities(
 enum PropertyReservation {
     Exclusive,
     RangeBounds { lower: bool, upper: bool },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TextPredicateKind {
+    StartsWith,
+    Contains,
+    EndsWith,
+}
+
+impl TextPredicateKind {
+    fn into_matcher(self, needle: String) -> PropertyMatcher {
+        match self {
+            Self::StartsWith => PropertyMatcher::StartsWith(needle),
+            Self::Contains => PropertyMatcher::Contains(needle),
+            Self::EndsWith => PropertyMatcher::EndsWith(needle),
+        }
+    }
 }
 
 fn reserve_exclusive(
@@ -358,7 +376,7 @@ pub(super) fn extract_from_predicate(
     pushable_cmp: &mut Vec<(String, String, ComparisonOp, Value)>,
     pushable_var: &mut Vec<(String, String, String)>,
     pushable_nodeprop: &mut Vec<(String, String, String, String)>,
-    pushable_prefix: &mut Vec<(String, String, String)>,
+    pushable_text: &mut Vec<(String, String, PropertyMatcher)>,
     reservations: &mut HashMap<(String, String), PropertyReservation>,
 ) -> Option<Predicate> {
     match pred {
@@ -471,22 +489,30 @@ pub(super) fn extract_from_predicate(
             }
             Some(pred.clone())
         }
-        Predicate::StartsWith { expr, pattern } => {
-            // Push `variable.property STARTS WITH 'literal'` into MATCH
-            // so the persistent prefix index can route the scan.
-            if let (
-                Expression::PropertyAccess { variable, property },
-                Expression::Literal(Value::String(prefix)),
-            ) = (expr, pattern)
-            {
-                if match_vars.iter().any(|(v, _)| v == variable) && !prefix.is_empty() {
-                    if reserve_exclusive(reservations, variable, property) {
-                        pushable_prefix.push((variable.clone(), property.clone(), prefix.clone()));
-                        return None;
+        Predicate::StartsWith { expr, pattern }
+        | Predicate::Contains { expr, pattern }
+        | Predicate::EndsWith { expr, pattern } => {
+            let kind = match pred {
+                Predicate::StartsWith { .. } => TextPredicateKind::StartsWith,
+                Predicate::Contains { .. } => TextPredicateKind::Contains,
+                Predicate::EndsWith { .. } => TextPredicateKind::EndsWith,
+                _ => unreachable!("text predicate match arm"),
+            };
+            if let Expression::PropertyAccess { variable, property } = expr {
+                if match_vars.iter().any(|(v, _)| v == variable) {
+                    if let Some(needle) = resolve_non_empty_string(pattern, params) {
+                        if reserve_exclusive(reservations, variable, property) {
+                            pushable_text.push((
+                                variable.clone(),
+                                property.clone(),
+                                kind.into_matcher(needle),
+                            ));
+                        }
                     }
-                    return Some(pred.clone());
                 }
             }
+            // Text pushdown is an early candidate filter. Retain the original
+            // WHERE predicate as a semantic safety net for every backend.
             Some(pred.clone())
         }
         Predicate::And(left, right) => {
@@ -501,7 +527,7 @@ pub(super) fn extract_from_predicate(
                 pushable_cmp,
                 pushable_var,
                 pushable_nodeprop,
-                pushable_prefix,
+                pushable_text,
                 reservations,
             );
             let right_remaining = extract_from_predicate(
@@ -515,7 +541,7 @@ pub(super) fn extract_from_predicate(
                 pushable_cmp,
                 pushable_var,
                 pushable_nodeprop,
-                pushable_prefix,
+                pushable_text,
                 reservations,
             );
 
@@ -552,6 +578,18 @@ fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Opt
         None
     } else {
         Some(items)
+    }
+}
+
+fn resolve_non_empty_string(expr: &Expression, params: &HashMap<String, Value>) -> Option<String> {
+    let value = match expr {
+        Expression::Literal(value) => value,
+        Expression::Parameter(name) => params.get(name.as_str())?,
+        _ => return None,
+    };
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value.clone()),
+        _ => None,
     }
 }
 
@@ -872,15 +910,14 @@ pub(super) fn apply_property_to_patterns(
     false
 }
 
-/// Apply a string-prefix matcher (`STARTS WITH`) to the matching node
-/// pattern. The pattern executor's `try_index_lookup` routes this to
-/// `GraphRead::lookup_by_property_prefix` on the disk backend and to a
-/// linear filter on in-memory.
-pub(super) fn apply_prefix_to_patterns(
+/// Apply a positive string matcher to the matching node pattern. STARTS WITH
+/// can use a persistent prefix index; CONTAINS and ENDS WITH linearly filter
+/// the node candidates before any relationship expansion.
+pub(super) fn apply_text_matcher_to_patterns(
     patterns: &mut [crate::graph::core::pattern_matching::Pattern],
     var_name: &str,
     property: &str,
-    prefix: String,
+    matcher: PropertyMatcher,
 ) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
@@ -890,7 +927,7 @@ pub(super) fn apply_prefix_to_patterns(
                     if props.contains_key(property) {
                         return false;
                     }
-                    props.insert(property.to_string(), PropertyMatcher::StartsWith(prefix));
+                    props.insert(property.to_string(), matcher);
                     return true;
                 }
             }

@@ -359,6 +359,10 @@ pub enum PropertyMatcher {
     /// String prefix matcher — pushed from `WHERE n.prop STARTS WITH 'X'`.
     /// Enables persistent prefix index acceleration on disk graphs.
     StartsWith(String),
+    /// String substring matcher — evaluated while discovering node candidates.
+    Contains(String),
+    /// String suffix matcher — evaluated while discovering node candidates.
+    EndsWith(String),
 }
 
 // ============================================================================

@@ -57,6 +57,24 @@ def test_typed_property_starts_with(mode, tmp_path):
 
 
 @pytest.mark.parametrize("mode", STORAGE_MODES)
+@pytest.mark.parametrize(
+    ("predicate", "params", "expected"),
+    [
+        ("p.name CONTAINS 'li'", {}, ["Alice"]),
+        ("p.name ENDS WITH $suffix", {"suffix": "m"}, ["Bertram"]),
+    ],
+)
+def test_typed_property_text_filter(mode, tmp_path, predicate, params, expected):
+    g = _make_graph(mode, tmp_path)
+    _seed(g)
+    df = g.cypher(
+        f"MATCH (p:Person) WHERE {predicate} RETURN p.name AS name ORDER BY name",
+        params=params,
+    ).to_df()
+    assert list(df["name"]) == expected
+
+
+@pytest.mark.parametrize("mode", STORAGE_MODES)
 def test_cross_type_property_equality(mode, tmp_path):
     g = _make_graph(mode, tmp_path)
     _seed(g)

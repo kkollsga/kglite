@@ -1090,7 +1090,10 @@ impl<'a> PatternExecutor<'a> {
             )
         });
 
-        if equality_props.is_empty() && !has_comparison {
+        let has_prefix = props
+            .values()
+            .any(|matcher| matches!(matcher, PropertyMatcher::StartsWith(_)));
+        if equality_props.is_empty() && !has_comparison && !has_prefix {
             return None;
         }
 
@@ -1469,6 +1472,14 @@ impl<'a> PatternExecutor<'a> {
             }
             PropertyMatcher::StartsWith(prefix) => match value {
                 Value::String(s) => s.starts_with(prefix.as_str()),
+                _ => false,
+            },
+            PropertyMatcher::Contains(needle) => match value {
+                Value::String(s) => s.contains(needle.as_str()),
+                _ => false,
+            },
+            PropertyMatcher::EndsWith(suffix) => match value {
+                Value::String(s) => s.ends_with(suffix.as_str()),
                 _ => false,
             },
         }
