@@ -1682,6 +1682,21 @@ class TestBugNullComparison:
         assert rows[0]["result"] is None
 
 
+class TestRelationshipPredicateNullSemantics:
+    @pytest.mark.parametrize(
+        "predicate",
+        [
+            "NOT (r.tag = 'foo')",
+            "NOT (r.tag <> 'foo')",
+            "NOT (r.tag = 'foo' AND r.since > 0)",
+        ],
+    )
+    def test_missing_relationship_property_stays_unknown_under_not(self, social_graph, predicate):
+        query = f"MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE {predicate} RETURN p.name AS p, q.name AS q"
+        assert social_graph.cypher(query).to_list() == []
+        assert social_graph.cypher(query, disable_optimizer=True).to_list() == []
+
+
 class TestThreeValuedNullSemantics:
     """B1 + B2: WHERE predicates propagate NULL (Kleene three-valued logic).
 

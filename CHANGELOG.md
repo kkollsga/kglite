@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predicates that target an already-constrained inline pattern property, or a
   property already reserved by another pushed predicate, remain as residual
   filters instead of being silently discarded.
+- **Relationship filters preserve NULL through boolean composition.** Pushed
+  relationship-property predicates now use Cypher three-valued logic, so
+  negating a comparison against a missing or NULL property no longer admits
+  that relationship.
 
 ## [0.13.1] - 2026-07-13
 

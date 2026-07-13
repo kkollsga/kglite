@@ -192,7 +192,8 @@ impl RelEdgePredicate {
     /// boolean (the matcher computes this once per edge using the
     /// stored [`AnchorSide`]).
     ///
-    /// Returns `true` to keep the edge, `false` to skip.
+    /// Returns `true` only when the predicate evaluates to Cypher `true`.
+    /// Both `false` and `null` reject the edge in a WHERE context.
     #[inline]
     pub fn eval(
         &self,
@@ -202,68 +203,111 @@ impl RelEdgePredicate {
         edge_target: NodeIndex,
         get_prop: &impl Fn(&str) -> Option<Value>,
     ) -> bool {
+        self.eval_nullable(
+            connection_type,
+            peer_is_start,
+            edge_source,
+            edge_target,
+            get_prop,
+        ) == Some(true)
+    }
+
+    /// Evaluate with Cypher's three-valued boolean semantics.
+    ///
+    /// `None` represents `null`/unknown. Keeping this state through boolean
+    /// composition is essential: `NOT null` is still `null`, while
+    /// `false AND null` is `false` and `true OR null` is `true`.
+    #[inline]
+    fn eval_nullable(
+        &self,
+        connection_type: InternedKey,
+        peer_is_start: bool,
+        edge_source: NodeIndex,
+        edge_target: NodeIndex,
+        get_prop: &impl Fn(&str) -> Option<Value>,
+    ) -> Option<bool> {
         match self {
-            RelEdgePredicate::True => true,
-            RelEdgePredicate::False => false,
-            RelEdgePredicate::TypeIn(types) => types.contains(&connection_type),
-            RelEdgePredicate::Property { prop, op, value } => {
-                match get_prop(prop) {
-                    Some(v) => match op {
-                        PropOp::Eq => crate::graph::core::filtering::values_equal(&v, value),
-                        PropOp::Ne => !crate::graph::core::filtering::values_equal(&v, value),
-                        PropOp::Gt => matches!(
-                            crate::graph::core::filtering::compare_values(&v, value),
-                            Some(std::cmp::Ordering::Greater)
-                        ),
-                        PropOp::Ge => matches!(
-                            crate::graph::core::filtering::compare_values(&v, value),
-                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                        ),
-                        PropOp::Lt => matches!(
-                            crate::graph::core::filtering::compare_values(&v, value),
-                            Some(std::cmp::Ordering::Less)
-                        ),
-                        PropOp::Le => matches!(
-                            crate::graph::core::filtering::compare_values(&v, value),
-                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                        ),
-                    },
-                    // Cypher: missing property → predicate is unknown,
-                    // not true. Equality and `<` of a missing prop both
-                    // discard the edge, matching the materialized
-                    // evaluator's behaviour.
-                    None => false,
+            RelEdgePredicate::True => Some(true),
+            RelEdgePredicate::False => Some(false),
+            RelEdgePredicate::TypeIn(types) => Some(types.contains(&connection_type)),
+            RelEdgePredicate::Property { prop, op, value } => match get_prop(prop) {
+                Some(Value::Null) | None => None,
+                Some(v) => Some(match op {
+                    PropOp::Eq => crate::graph::core::filtering::values_equal(&v, value),
+                    PropOp::Ne => !crate::graph::core::filtering::values_equal(&v, value),
+                    PropOp::Gt => matches!(
+                        crate::graph::core::filtering::compare_values(&v, value),
+                        Some(std::cmp::Ordering::Greater)
+                    ),
+                    PropOp::Ge => matches!(
+                        crate::graph::core::filtering::compare_values(&v, value),
+                        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                    ),
+                    PropOp::Lt => matches!(
+                        crate::graph::core::filtering::compare_values(&v, value),
+                        Some(std::cmp::Ordering::Less)
+                    ),
+                    PropOp::Le => matches!(
+                        crate::graph::core::filtering::compare_values(&v, value),
+                        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    ),
+                }),
+            },
+            RelEdgePredicate::StartNodeIsPeer => Some(peer_is_start),
+            RelEdgePredicate::EndNodeIsPeer => Some(!peer_is_start),
+            RelEdgePredicate::StartNodeIs(idx) => Some(edge_source == *idx),
+            RelEdgePredicate::EndNodeIs(idx) => Some(edge_target == *idx),
+            RelEdgePredicate::And(items) => {
+                let mut saw_unknown = false;
+                for predicate in items {
+                    match predicate.eval_nullable(
+                        connection_type,
+                        peer_is_start,
+                        edge_source,
+                        edge_target,
+                        get_prop,
+                    ) {
+                        Some(false) => return Some(false),
+                        None => saw_unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                if saw_unknown {
+                    None
+                } else {
+                    Some(true)
                 }
             }
-            RelEdgePredicate::StartNodeIsPeer => peer_is_start,
-            RelEdgePredicate::EndNodeIsPeer => !peer_is_start,
-            RelEdgePredicate::StartNodeIs(idx) => edge_source == *idx,
-            RelEdgePredicate::EndNodeIs(idx) => edge_target == *idx,
-            RelEdgePredicate::And(items) => items.iter().all(|p| {
-                p.eval(
+            RelEdgePredicate::Or(items) => {
+                let mut saw_unknown = false;
+                for predicate in items {
+                    match predicate.eval_nullable(
+                        connection_type,
+                        peer_is_start,
+                        edge_source,
+                        edge_target,
+                        get_prop,
+                    ) {
+                        Some(true) => return Some(true),
+                        None => saw_unknown = true,
+                        Some(false) => {}
+                    }
+                }
+                if saw_unknown {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            RelEdgePredicate::Not(inner) => inner
+                .eval_nullable(
                     connection_type,
                     peer_is_start,
                     edge_source,
                     edge_target,
                     get_prop,
                 )
-            }),
-            RelEdgePredicate::Or(items) => items.iter().any(|p| {
-                p.eval(
-                    connection_type,
-                    peer_is_start,
-                    edge_source,
-                    edge_target,
-                    get_prop,
-                )
-            }),
-            RelEdgePredicate::Not(inner) => !inner.eval(
-                connection_type,
-                peer_is_start,
-                edge_source,
-                edge_target,
-                get_prop,
-            ),
+                .map(|value| !value),
         }
     }
 }
@@ -379,4 +423,59 @@ pub enum MatchBinding {
         /// Exact hops, excluding `source` and including `target`.
         path: Vec<PathHop>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn property(op: PropOp) -> RelEdgePredicate {
+        RelEdgePredicate::Property {
+            prop: "tag".to_string(),
+            op,
+            value: Value::String("foo".to_string()),
+        }
+    }
+
+    fn eval_with(predicate: &RelEdgePredicate, get_prop: &impl Fn(&str) -> Option<Value>) -> bool {
+        predicate.eval(
+            InternedKey::from_str("R"),
+            true,
+            NodeIndex::new(0),
+            NodeIndex::new(1),
+            get_prop,
+        )
+    }
+
+    #[test]
+    fn relationship_not_preserves_missing_property_unknown() {
+        for op in [PropOp::Eq, PropOp::Ne] {
+            let negated = RelEdgePredicate::Not(Box::new(property(op)));
+            assert!(!eval_with(&negated, &|_| None));
+            assert!(!eval_with(&negated, &|_| Some(Value::Null)));
+        }
+    }
+
+    #[test]
+    fn relationship_boolean_composition_uses_kleene_logic() {
+        assert!(!eval_with(
+            &RelEdgePredicate::And(vec![RelEdgePredicate::False, property(PropOp::Eq),]),
+            &|_| None,
+        ));
+        assert!(eval_with(
+            &RelEdgePredicate::Or(vec![RelEdgePredicate::True, property(PropOp::Eq),]),
+            &|_| None,
+        ));
+        assert!(!eval_with(
+            &RelEdgePredicate::Not(Box::new(RelEdgePredicate::Or(vec![
+                RelEdgePredicate::False,
+                property(PropOp::Eq),
+            ]))),
+            &|_| None,
+        ));
+        assert!(!eval_with(
+            &RelEdgePredicate::And(vec![RelEdgePredicate::False, property(PropOp::Eq),]),
+            &|_| Some(Value::Null)
+        ));
+    }
 }

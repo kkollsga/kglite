@@ -248,6 +248,25 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.since > 2017 RETURN p.name AS p, q.name AS q",
         None,
     ),
+    (
+        "rel_missing_property_not_equals",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.tag = 'foo') RETURN p.name AS p, q.name AS q",
+        None,
+    ),
+    (
+        "rel_null_not_equals_under_not",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.tag <> 'foo') RETURN p.name AS p, q.name AS q",
+        None,
+    ),
+    (
+        "rel_unknown_nested_boolean",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) "
+        "WHERE NOT (r.tag = 'foo' AND r.since > 0) RETURN p.name AS p, q.name AS q",
+        None,
+    ),
     # ── fold_pass_through_with ──
     (
         "pass_through_with",
