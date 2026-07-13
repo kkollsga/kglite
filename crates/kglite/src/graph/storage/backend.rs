@@ -11,6 +11,7 @@ use crate::graph::storage::{GraphRead, GraphWrite, MappedGraph, MemoryGraph};
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::stable_graph::StableDiGraph;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::Arc;
 
 use crate::graph::storage::disk::graph::{DiskGraph, DiskQueryGuard};
 
@@ -251,6 +252,29 @@ impl GraphBackend {
             }
         }
     }
+
+    /// Borrow the default heap backend's immutable peer-count histogram.
+    /// Other backends keep their existing owned-result fallback.
+    pub(crate) fn cached_edge_counts_grouped_by_peer(
+        &self,
+        conn_type: InternedKey,
+        dir: petgraph::Direction,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<Arc<HashMap<u32, i64>>>, String> {
+        Ok(match self {
+            GraphBackend::Memory(graph) => {
+                let counts = graph.ensure_peer_counts_with_deadline(conn_type, deadline)?;
+                Some(match dir {
+                    petgraph::Direction::Outgoing => Arc::clone(&counts.by_target),
+                    petgraph::Direction::Incoming => Arc::clone(&counts.by_source),
+                })
+            }
+            GraphBackend::Recording(graph) => graph
+                .inner()
+                .cached_edge_counts_grouped_by_peer(conn_type, dir, deadline)?,
+            GraphBackend::Mapped(_) | GraphBackend::Disk(_) => None,
+        })
+    }
 }
 
 // -- Index traits --
@@ -318,7 +342,7 @@ impl Serialize for GraphBackend {
 impl<'de> Deserialize<'de> for GraphBackend {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let g = StableDiGraph::<NodeData, EdgeData>::deserialize(deserializer)?;
-        Ok(GraphBackend::Memory(MemoryGraph(g)))
+        Ok(GraphBackend::Memory(MemoryGraph::from_graph(g)))
     }
 }
 

@@ -24,6 +24,7 @@ pub mod lookups;
 pub mod mapped;
 pub mod mapped_graph_impl;
 pub mod memory;
+mod memory_graph_impl;
 pub mod mode;
 pub mod overflow;
 mod packed_codec;
@@ -496,8 +497,20 @@ pub trait GraphWrite: GraphRead {
 
 /// Heap-resident in-memory graph backend. Wraps `StableDiGraph` and
 /// `Deref`s to it so existing petgraph call sites compile unchanged.
-#[derive(Clone, Debug, Default)]
-pub struct MemoryGraph(pub(crate) StableDiGraph<NodeData, EdgeData>);
+#[derive(Debug, Default)]
+pub struct MemoryGraph {
+    pub(crate) inner: StableDiGraph<NodeData, EdgeData>,
+    /// Lazy per-connection-type peer counts used by grouped Cypher
+    /// aggregations. Derived state: empty on clone/load and invalidated by
+    /// every edge mutation.
+    pub(crate) peer_counts: RwLock<HashMap<u64, Arc<MemoryPeerCounts>>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MemoryPeerCounts {
+    pub(crate) by_target: Arc<HashMap<u32, i64>>,
+    pub(crate) by_source: Arc<HashMap<u32, i64>>,
+}
 
 /// Memory-mapped in-memory graph backend — Phase 5 promoted this to a
 /// distinct struct (previously a type alias for [`MemoryGraph`]) so
@@ -626,23 +639,40 @@ impl Clone for MappedGraph {
     }
 }
 
+impl Clone for MemoryGraph {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            peer_counts: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
 impl MemoryGraph {
     #[inline]
     pub fn new() -> Self {
-        Self(StableDiGraph::new())
+        Self::from_graph(StableDiGraph::new())
+    }
+
+    #[inline]
+    pub(crate) fn from_graph(inner: StableDiGraph<NodeData, EdgeData>) -> Self {
+        Self {
+            inner,
+            peer_counts: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Borrow the inner `StableDiGraph`. Shared with [`MappedGraph`]
     /// for match arms that need the heap backend's petgraph view.
     #[inline]
     pub fn inner(&self) -> &StableDiGraph<NodeData, EdgeData> {
-        &self.0
+        &self.inner
     }
 
     /// Mutable borrow of the inner `StableDiGraph`.
     #[inline]
     pub fn inner_mut(&mut self) -> &mut StableDiGraph<NodeData, EdgeData> {
-        &mut self.0
+        &mut self.inner
     }
 }
 
@@ -681,7 +711,7 @@ impl Deref for MemoryGraph {
     type Target = StableDiGraph<NodeData, EdgeData>;
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
@@ -697,13 +727,13 @@ impl Deref for MappedGraph {
 // is unchanged between this refactor and pre-refactor code.
 impl serde::Serialize for MemoryGraph {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(ser)
+        self.inner.serialize(ser)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for MemoryGraph {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        StableDiGraph::deserialize(de).map(MemoryGraph)
+        StableDiGraph::deserialize(de).map(MemoryGraph::from_graph)
     }
 }
 

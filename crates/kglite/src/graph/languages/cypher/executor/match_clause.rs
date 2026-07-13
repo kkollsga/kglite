@@ -14,6 +14,7 @@ use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::Direction;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Collect the edge indices a [`PatternMatch`] consumed, deduplicated into
 /// `out`. Fixed-length hops live on the compact `exact_path` trail (named

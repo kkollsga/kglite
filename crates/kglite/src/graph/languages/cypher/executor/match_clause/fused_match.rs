@@ -399,14 +399,170 @@ impl<'a> CypherExecutor<'a> {
         // endpoint without materialising edge rows, resolve its key tuple
         // once, and merge the additive counts by Value before top-K.
         let result_rows = if property_grouping {
-            let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
-                elements: vec![pattern.elements[group_elem_idx].clone()],
+            let group_candidate_count = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(node) => node
+                    .node_type
+                    .as_deref()
+                    .and_then(|node_type| self.graph.type_indices.get(node_type))
+                    .map_or_else(|| self.graph.graph.node_count(), |nodes| nodes.len()),
+                _ => 0,
             };
-            let executor =
-                PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
-                    .set_deadline(self.deadline)
-                    .set_cancel(self.cancel);
-            let group_matches = executor.execute(&group_only_pattern)?;
+            // Peer-count aggregation removes one adjacency lookup per
+            // candidate. Use it only once candidate
+            // cardinality is material relative to graph size; small SODIR
+            // types are much faster through direct degree probes.
+            let peer_counts_worthwhile = group_candidate_count.saturating_mul(100)
+                >= self.graph.graph.edge_count();
+            // Heap backends cache these counts by relationship type after the
+            // first scan. Exactness requires either an unconstrained opposite
+            // endpoint or schema metadata proving its primary label for every
+            // edge of this type. More complex endpoint/relationship predicates
+            // bail to the node-centric counter below.
+            let peer_counts = if !distinct_count
+                && pattern.elements.len() == 3
+                && peer_counts_worthwhile
+                && (self.graph.graph.is_memory() || self.graph.graph.is_mapped())
+            {
+                let edge = match &pattern.elements[1] {
+                    PatternElement::Edge(edge)
+                        if edge.var_length.is_none()
+                            && edge.connection_types.is_none()
+                            && edge.properties.as_ref().is_none_or(|props| props.is_empty())
+                            && edge.edge_filter.is_none() =>
+                    {
+                        Some(edge)
+                    }
+                    _ => None,
+                };
+                let other_elem_idx = if group_elem_idx == 0 { 2 } else { 0 };
+                let other = match &pattern.elements[other_elem_idx] {
+                    PatternElement::Node(node)
+                        if node.extra_labels.is_empty()
+                            && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
+                    {
+                        Some(node)
+                    }
+                    _ => None,
+                };
+
+                if let (Some(edge), Some(other), Some(conn_type)) =
+                    (edge, other, edge.and_then(|edge| edge.connection_type.as_ref()))
+                {
+                    let group_is_target = matches!(
+                        (group_elem_idx, edge.direction),
+                        (2, EdgeDirection::Outgoing) | (0, EdgeDirection::Incoming)
+                    );
+                    let group_is_source = matches!(
+                        (group_elem_idx, edge.direction),
+                        (0, EdgeDirection::Outgoing) | (2, EdgeDirection::Incoming)
+                    );
+                    let other_type_guaranteed = match other.node_type.as_deref() {
+                        None => true,
+                        Some(expected) => self
+                            .graph
+                            .connection_type_metadata
+                            .get(conn_type)
+                            .is_some_and(|info| {
+                                let endpoint_types = if group_is_target {
+                                    &info.source_types
+                                } else {
+                                    &info.target_types
+                                };
+                                endpoint_types.len() == 1 && endpoint_types.contains(expected)
+                            }),
+                    };
+                    if (group_is_target || group_is_source) && other_type_guaranteed {
+                        let conn_key = InternedKey::from_str(conn_type);
+                        let direction = if group_is_target {
+                            Direction::Outgoing
+                        } else {
+                            Direction::Incoming
+                        };
+                        Some(match self
+                            .graph
+                            .graph
+                            .cached_edge_counts_grouped_by_peer(
+                                conn_key,
+                                direction,
+                                self.deadline,
+                            )?
+                        {
+                            Some(counts) => counts,
+                            None => Arc::new(self.graph.graph.count_edges_grouped_by_peer(
+                                conn_key,
+                                direction,
+                                self.deadline,
+                            )?),
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // A plain typed endpoint already has an exact node list. Reading
+            // that list directly avoids allocating one PatternMatch plus a
+            // String binding for every candidate before aggregation.
+            let direct_group_nodes = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(node)
+                    if node.extra_labels.is_empty()
+                        && node.properties.as_ref().is_none_or(|props| props.is_empty()) =>
+                {
+                    node.node_type
+                        .as_deref()
+                        .and_then(|node_type| self.graph.type_indices.get(node_type))
+                        .map(|nodes| nodes.to_vec())
+                }
+                _ => None,
+            };
+            let group_matches = if direct_group_nodes.is_none() {
+                let group_only_pattern = crate::graph::core::pattern_matching::Pattern {
+                    elements: vec![pattern.elements[group_elem_idx].clone()],
+                };
+                let executor =
+                    PatternExecutor::new_lightweight_with_params(self.graph, None, self.params)
+                        .set_deadline(self.deadline)
+                        .set_cancel(self.cancel);
+                Some(executor.execute(&group_only_pattern)?)
+            } else {
+                None
+            };
+            let group_node_indices = direct_group_nodes.unwrap_or_else(|| {
+                group_matches
+                    .as_ref()
+                    .expect("fallback group matches built")
+                    .iter()
+                    .filter_map(&extract_node_idx)
+                    .collect()
+            });
+
+            let group_node_type = match &pattern.elements[group_elem_idx] {
+                PatternElement::Node(node) => node.node_type.as_deref(),
+                _ => None,
+            };
+            // A typed group has one alias table for every candidate. Resolve
+            // aliases once here instead of repeating two String-keyed lookups
+            // for every peer (notably `name` on Keyword/Judge/Function).
+            let direct_group_properties: Vec<(String, bool)> = group_key_indices
+                .iter()
+                .map(|&idx| match &return_clause.items[idx].expression {
+                    Expression::PropertyAccess { property, .. } => {
+                        if let Some(node_type) = group_node_type {
+                            (
+                                self.graph.resolve_alias(node_type, property).to_string(),
+                                true,
+                            )
+                        } else {
+                            (property.clone(), false)
+                        }
+                    }
+                    _ => unreachable!("property_grouping checked every group expression"),
+                })
+                .collect();
 
             // (resolved group values, representative node, merged count)
             let mut groups: Vec<(Vec<Value>, petgraph::graph::NodeIndex, i64)> = Vec::new();
@@ -416,28 +572,46 @@ impl<'a> CypherExecutor<'a> {
                 .node_bindings
                 .insert(group_var.to_string(), petgraph::graph::NodeIndex::new(0));
 
-            for (scan_count, matched) in group_matches.iter().enumerate() {
+            for (scan_count, node_idx) in group_node_indices.into_iter().enumerate() {
                 if scan_count.is_multiple_of(2048) {
                     self.check_deadline()?;
                 }
-                let Some(node_idx) = extract_node_idx(matched) else {
-                    continue;
+                let match_count = if let Some(counts) = &peer_counts {
+                    counts.get(&(node_idx.index() as u32)).copied().unwrap_or(0)
+                } else {
+                    count_for_node(node_idx)?
                 };
-                let match_count = count_for_node(node_idx)?;
                 if match_count == 0 {
                     continue;
                 }
-                *eval_row
-                    .node_bindings
-                    .get_mut(group_var)
-                    .expect("group binding inserted before property aggregation") = node_idx;
-                let mut key = Vec::with_capacity(group_key_indices.len());
-                for &idx in &group_key_indices {
-                    key.push(self.evaluate_expression(
-                        &return_clause.items[idx].expression,
-                        &eval_row,
-                    )?);
-                }
+                let key = if !self.graph.graph.is_disk() {
+                    let node = self.graph.graph.node_weight(node_idx);
+                    direct_group_properties
+                        .iter()
+                        .map(|(property, pre_resolved)| match node {
+                            Some(node) if *pre_resolved => resolve_node_property_unaliased(
+                                node,
+                                property,
+                                self.graph,
+                            ),
+                            Some(node) => resolve_node_property(node, property, self.graph),
+                            None => Value::Null,
+                        })
+                        .collect()
+                } else {
+                    *eval_row
+                        .node_bindings
+                        .get_mut(group_var)
+                        .expect("group binding inserted before property aggregation") = node_idx;
+                    let mut key = Vec::with_capacity(group_key_indices.len());
+                    for &idx in &group_key_indices {
+                        key.push(self.evaluate_expression(
+                            &return_clause.items[idx].expression,
+                            &eval_row,
+                        )?);
+                    }
+                    key
+                };
                 if let Some(&group_idx) = group_index.get(&key) {
                     groups[group_idx].2 = groups[group_idx]
                         .2

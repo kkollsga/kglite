@@ -203,34 +203,23 @@ macro_rules! impl_heap_graph_read {
                 GraphNeighbors::InMemory(self.inner().neighbors_undirected(idx))
             }
 
-            // sources_for_conn_type_bounded / lookup_peer_counts —
-            // default `None` from the trait (disk-only inverted indexes).
+            fn lookup_peer_counts(&self, conn_type: InternedKey) -> Option<HashMap<u32, i64>> {
+                let counts = self.ensure_peer_counts(conn_type);
+                Some((*counts.by_target).clone())
+            }
 
             fn count_edges_grouped_by_peer(
                 &self,
                 conn_type: InternedKey,
                 dir: Direction,
-                deadline: Option<Instant>,
+                _deadline: Option<Instant>,
             ) -> Result<HashMap<u32, i64>, String> {
-                let mut counts: HashMap<u32, i64> = HashMap::new();
-                for (i, edge) in self.inner().edge_references().enumerate() {
-                    if i.is_multiple_of(1 << 20) {
-                        if let Some(dl) = deadline {
-                            if Instant::now() > dl {
-                                return Err("Query timed out".to_string());
-                            }
-                        }
-                    }
-                    if edge.weight().connection_type != conn_type {
-                        continue;
-                    }
-                    let peer = match dir {
-                        Direction::Outgoing => edge.target().index() as u32,
-                        Direction::Incoming => edge.source().index() as u32,
-                    };
-                    *counts.entry(peer).or_insert(0) += 1;
-                }
-                Ok(counts)
+                let counts = self.ensure_peer_counts(conn_type);
+                let selected = match dir {
+                    Direction::Outgoing => &counts.by_target,
+                    Direction::Incoming => &counts.by_source,
+                };
+                Ok((**selected).clone())
             }
 
             fn count_edges_filtered(
@@ -290,6 +279,7 @@ macro_rules! impl_heap_graph_write {
 
             #[inline]
             fn edge_weight_mut(&mut self, idx: EdgeIndex) -> Option<&mut EdgeData> {
+                self.invalidate_peer_counts();
                 self.inner_mut().edge_weight_mut(idx)
             }
 
@@ -300,16 +290,19 @@ macro_rules! impl_heap_graph_write {
 
             #[inline]
             fn remove_node(&mut self, idx: NodeIndex) -> Option<NodeData> {
+                self.invalidate_peer_counts();
                 self.inner_mut().remove_node(idx)
             }
 
             #[inline]
             fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, data: EdgeData) -> EdgeIndex {
+                self.invalidate_peer_counts();
                 self.inner_mut().add_edge(a, b, data)
             }
 
             #[inline]
             fn remove_edge(&mut self, idx: EdgeIndex) -> Option<EdgeData> {
+                self.invalidate_peer_counts();
                 self.inner_mut().remove_edge(idx)
             }
 

@@ -40,6 +40,24 @@ class TestDeferredGroupByCorrectness:
         by_name = {r["name"]: r["n"] for r in rows}
         assert by_name == {"Alice": 2, "Bob": 1}
 
+    def test_relationship_count_cache_tracks_create_and_delete(self):
+        """A warmed grouped-count cache must never survive edge mutations."""
+        g = KnowledgeGraph()
+        g.cypher("CREATE (:Source {sid: 1}), (:Source {sid: 2})")
+        g.cypher("CREATE (:Group {gid: 1, name: 'A'}), (:Group {gid: 2, name: 'B'})")
+        g.cypher("MATCH (s:Source {sid: 1}), (t:Group {gid: 1}) CREATE (s)-[:RELATES_TO]->(t)")
+
+        query = "MATCH (s:Source)-[:RELATES_TO]->(t:Group) RETURN t.name AS name, count(s) AS n ORDER BY n DESC"
+        assert g.cypher(query).to_dicts() == [{"name": "A", "n": 1}]
+        # The second read is served by the warmed per-type histogram.
+        assert g.cypher(query).to_dicts() == [{"name": "A", "n": 1}]
+
+        g.cypher("MATCH (s:Source {sid: 2}), (t:Group {gid: 1}) CREATE (s)-[:RELATES_TO]->(t)")
+        assert g.cypher(query).to_dicts() == [{"name": "A", "n": 2}]
+
+        g.cypher("MATCH (:Source {sid: 2})-[r:RELATES_TO]->(:Group {gid: 1}) DELETE r")
+        assert g.cypher(query).to_dicts() == [{"name": "A", "n": 1}]
+
     def test_optional_match_null_groups_under_null_key(self):
         """Variable that's null for some rows (OPTIONAL MATCH) must group as Null.
 

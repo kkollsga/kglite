@@ -2353,7 +2353,7 @@ impl DirGraph {
         }
 
         // Replace graph storage
-        self.graph = GraphBackend::Memory(MemoryGraph(new_graph));
+        self.graph = GraphBackend::Memory(MemoryGraph::from_graph(new_graph));
 
         // Remap embedding stores to use new node indices (see embedding_carry.rs).
         self.remap_embedding_slots(&old_to_new);
