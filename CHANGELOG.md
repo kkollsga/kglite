@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-K operators now share the normal candidate-discovery path instead of
   scanning an entire label bucket and rechecking indexed properties row by
   row.
+- **`IN` planning distinguishes lookups from scans.** Empty lists now become
+  immediate empty candidate sets, indexed `IN` predicates use actual hit
+  counts, and non-indexed `IN` predicates no longer tie constant-time ID
+  anchors in join ordering.
 
 ## [0.13.1] - 2026-07-13
 

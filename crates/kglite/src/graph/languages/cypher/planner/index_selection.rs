@@ -564,8 +564,8 @@ pub(super) fn extract_from_predicate(
 /// that the Python binding currently uses for list params — so the *same*
 /// element parsing drives the index pushdown here and the WHERE safety-net
 /// filter at run time. Returns `None` for anything not known at plan time
-/// (e.g. a correlated sub-expression) or an empty list, leaving the predicate
-/// in the WHERE clause. (A bracket list `IN [a, b]` parses to `Predicate::In`,
+/// (e.g. a correlated sub-expression). Empty lists are returned as a known
+/// empty candidate set. (A bracket list `IN [a, b]` parses to `Predicate::In`,
 /// not `InExpression`, and is handled separately.)
 fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Option<Vec<Value>> {
     let val = match expr {
@@ -573,12 +573,7 @@ fn resolve_value_list(expr: &Expression, params: &HashMap<String, Value>) -> Opt
         Expression::Literal(v) => v,
         _ => return None,
     };
-    let items = super::super::executor::helpers::parse_list_value(val);
-    if items.is_empty() {
-        None
-    } else {
-        Some(items)
-    }
+    Some(super::super::executor::helpers::parse_list_value(val))
 }
 
 fn resolve_non_empty_string(expr: &Expression, params: &HashMap<String, Value>) -> Option<String> {

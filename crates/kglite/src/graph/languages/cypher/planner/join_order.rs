@@ -142,7 +142,22 @@ pub(super) fn estimate_node_selectivity(
                 if prop == "id" {
                     match matcher {
                         PropertyMatcher::Equals(_) | PropertyMatcher::EqualsParam(_) => return 1,
-                        PropertyMatcher::In(vals) => return vals.len(),
+                        PropertyMatcher::In(vals) => {
+                            if vals.is_empty() {
+                                return 0;
+                            }
+                            let unique: HashSet<_> = vals.iter().collect();
+                            if let Some(node_type) = np.node_type.as_deref() {
+                                let hits: HashSet<_> = unique
+                                    .into_iter()
+                                    .filter_map(|value| {
+                                        graph.lookup_by_id_readonly(node_type, value)
+                                    })
+                                    .collect();
+                                return hits.len();
+                            }
+                            return unique.len();
+                        }
                         _ => {}
                     }
                 }
@@ -160,7 +175,21 @@ pub(super) fn estimate_node_selectivity(
                                 return 1;
                             }
                         }
-                        PropertyMatcher::In(vals) => return vals.len(),
+                        PropertyMatcher::In(vals) => {
+                            if vals.is_empty() {
+                                return 0;
+                            }
+                            let key = (nt.clone(), prop.clone());
+                            if graph.property_indices.contains_key(&key) {
+                                let mut hits = HashSet::new();
+                                for value in vals {
+                                    if let Some(indices) = graph.lookup_by_index(nt, prop, value) {
+                                        hits.extend(indices);
+                                    }
+                                }
+                                return hits.len();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -185,6 +214,29 @@ pub(super) fn estimate_node_selectivity(
                             Some(ndv) => est /= ndv.max(1),
                             None => est /= 100,
                         }
+                    }
+                    PropertyMatcher::In(values) => {
+                        if values.is_empty() {
+                            return 0;
+                        }
+                        let unique_count = values.iter().collect::<HashSet<_>>().len();
+                        let reduced = match np
+                            .node_type
+                            .as_ref()
+                            .and_then(|nt| graph.property_ndv(nt, prop))
+                        {
+                            Some(ndv) => est
+                                .saturating_mul(unique_count.min(ndv))
+                                .div_ceil(ndv.max(1)),
+                            None => est / 10,
+                        };
+                        // Match cardinality is not the whole start-node cost:
+                        // without an index, finding those matches still scans
+                        // the type. Retain a conservative fraction of that
+                        // scan cost so a unique-looking IN value cannot tie an
+                        // O(1) id/index anchor and suppress pattern reversal.
+                        let scan_cost_floor = type_count.div_ceil(10);
+                        est = reduced.max(scan_cost_floor).max(1);
                     }
                     _ => est /= 10,
                 }

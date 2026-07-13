@@ -795,6 +795,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ),
     ("in_list", "social_graph", "MATCH (p:Person) WHERE p.city IN ['Oslo', 'Bergen'] RETURN count(p) AS n", None),
     (
+        "empty_in_parameter",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.city IN $cities RETURN count(p) AS n",
+        {"cities": []},
+    ),
+    (
+        "nonindexed_in_opposite_id_anchor",
+        "social_graph",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person {id: 2}) WHERE a.city IN ['Oslo'] RETURN a.name AS a, b.name AS b",
+        None,
+    ),
+    (
         "predicate_stack",
         "social_graph",
         "MATCH (p:Person) WHERE (p.age > 25 AND p.city = 'Oslo') "

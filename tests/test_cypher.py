@@ -143,6 +143,16 @@ class TestWhereClause:
         rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.city IN ['Oslo', 'Bergen'] RETURN n.title")
         assert len(rows) == 5
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (n:Person) WHERE n.city IN $values RETURN count(n) AS n",
+            "MATCH (n) WHERE n.city IN $values RETURN count(n) AS n",
+        ],
+    )
+    def test_empty_in_parameter_returns_without_matches(self, cypher_graph, query):
+        assert cypher_graph.cypher(query, params={"values": []}).to_list() == [{"n": 0}]
+
     def test_contains(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.title CONTAINS 'li' RETURN n.title")
         names = {r["n.title"] for r in rows}

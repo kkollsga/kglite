@@ -565,6 +565,60 @@ fn test_undirected_pattern_reversed_by_selectivity() {
 }
 
 #[test]
+fn test_nonindexed_in_does_not_tie_id_anchor() {
+    let mut query = parse_cypher(
+        "MATCH (a:Broad)-[:R]->(b:Anchor {id: 7}) \
+         WHERE a.code IN ['code_7'] RETURN a, b",
+    )
+    .unwrap();
+    let mut graph = DirGraph::new();
+    graph
+        .type_indices
+        .entry_or_default("Broad".to_string())
+        .extend((0..100).map(petgraph::graph::NodeIndex::new));
+    graph
+        .type_indices
+        .entry_or_default("Anchor".to_string())
+        .extend((100..200).map(petgraph::graph::NodeIndex::new));
+
+    optimize(&mut query, &graph, &HashMap::new());
+
+    let match_clause = query
+        .clauses
+        .iter()
+        .find_map(|clause| match clause {
+            Clause::Match(m) => Some(m),
+            _ => None,
+        })
+        .expect("expected MATCH clause");
+    let PatternElement::Node(first) = &match_clause.patterns[0].elements[0] else {
+        panic!("expected start node");
+    };
+    assert_eq!(first.variable.as_deref(), Some("b"));
+}
+
+#[test]
+fn test_empty_in_parameter_pushes_known_empty_matcher() {
+    let mut query = parse_cypher("MATCH (n:Item) WHERE n.code IN $codes RETURN n").unwrap();
+    let params = HashMap::from([("codes".to_string(), Value::List(Vec::new()))]);
+
+    push_where_into_match(&mut query, &params);
+
+    let Clause::Match(match_clause) = &query.clauses[0] else {
+        panic!("expected MATCH clause");
+    };
+    let PatternElement::Node(node) = &match_clause.patterns[0].elements[0] else {
+        panic!("expected node pattern");
+    };
+    assert!(matches!(
+        node.properties
+            .as_ref()
+            .and_then(|properties| properties.get("code")),
+        Some(PropertyMatcher::In(values)) if values.is_empty()
+    ));
+}
+
+#[test]
 fn test_undirected_pattern_no_reverse_when_first_is_anchor() {
     // Reverse case: anchor is already first — no reversal expected.
     let mut query =

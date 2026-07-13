@@ -118,6 +118,51 @@ def indexed_node_scan_graph():
 
 
 @pytest.fixture(scope="module")
+def in_selectivity_graph():
+    """Dense pattern with a non-indexed IN side and an ID anchor."""
+    graph = KnowledgeGraph()
+    n = 10_000
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "bid": list(range(n)),
+                "name": [f"Broad_{i}" for i in range(n)],
+                "code": [f"code_{i}" for i in range(n)],
+            }
+        ),
+        "Broad",
+        "bid",
+        "name",
+        columns=["code"],
+    )
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "aid": list(range(n)),
+                "name": [f"Anchor_{i}" for i in range(n)],
+            }
+        ),
+        "Anchor",
+        "aid",
+        "name",
+    )
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "source": [i % n for i in range(30 * n)],
+                "target": [(i % n + i // n) % n for i in range(30 * n)],
+            }
+        ),
+        "LINK",
+        "Broad",
+        "source",
+        "Anchor",
+        "target",
+    )
+    return graph
+
+
+@pytest.fixture(scope="module")
 def wide_edge_count_graph():
     """One million homogeneous edges, matching the reported legal graph scale."""
     graph = KnowledgeGraph()
@@ -324,6 +369,21 @@ def test_bench_fused_indexed_node_scan(benchmark, indexed_node_scan_graph, query
 
     result = benchmark(query_and_consume)
     assert result == expected
+
+
+@pytest.mark.benchmark
+def test_bench_nonindexed_in_vs_id_anchor(benchmark, in_selectivity_graph):
+    """A linear-scan IN predicate must not tie an O(1) endpoint ID anchor."""
+    query = "MATCH (a:Broad)-[:LINK]->(b:Anchor {id: $anchor}) WHERE a.code IN $codes RETURN count(*) AS n"
+
+    def query_and_consume():
+        return in_selectivity_graph.cypher(
+            query,
+            params={"anchor": 7_321, "codes": ["code_7321"]},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"n": 1}]
 
 
 @pytest.mark.benchmark

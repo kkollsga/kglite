@@ -738,6 +738,14 @@ impl<'a> PatternExecutor<'a> {
             }
         }
 
+        if pattern.properties.as_ref().is_some_and(|properties| {
+            properties
+                .values()
+                .any(|matcher| matches!(matcher, PropertyMatcher::In(values) if values.is_empty()))
+        }) {
+            return Ok(Vec::new());
+        }
+
         if let Some(ref node_type) = pattern.node_type {
             // Try property index acceleration when we have both type and properties.
             // Skip the shortcuts when we need the secondary-label path —
@@ -1027,6 +1035,15 @@ impl<'a> PatternExecutor<'a> {
         node_type: &str,
         props: &HashMap<String, PropertyMatcher>,
     ) -> Option<Vec<NodeIndex>> {
+        // A known-empty IN list is an immediate empty candidate set even when
+        // the property has no index. Avoid falling through to a full type scan.
+        if props
+            .values()
+            .any(|matcher| matches!(matcher, PropertyMatcher::In(values) if values.is_empty()))
+        {
+            return Some(Vec::new());
+        }
+
         // Fast path: IN on id field — O(k) lookups via id index
         if let Some(PropertyMatcher::In(values)) = props.get("id") {
             let mut result = Vec::with_capacity(values.len());
