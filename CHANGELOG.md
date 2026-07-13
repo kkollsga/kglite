@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Direct property keys are resolved once per endpoint and merged by value
   before `ORDER BY ... LIMIT`, preserving duplicate and null group semantics.
 
+### Fixed
+
+- **Fused grouped counts honor constraints on both endpoints and relationships.**
+  Histogram shortcuts now defer to exact counting when the opposite endpoint
+  or a pushed relationship predicate filters the matched edges.
+
 ## [0.13.0] - 2026-07-13
 
 ### Added

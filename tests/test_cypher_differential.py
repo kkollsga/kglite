@@ -151,6 +151,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "node_grouping_other_endpoint_filter",
+        "social_graph",
+        "MATCH (a:Person {city: 'Oslo'})-[:KNOWS]->(b:Person) RETURN b, count(a) AS n",
+        None,
+    ),
+    (
+        "node_grouping_relationship_filter",
+        "social_graph",
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.since >= 2010 RETURN b, count(r) AS n",
+        None,
+    ),
+    (
         "trigger_match_return_aggregate",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(b) AS n",

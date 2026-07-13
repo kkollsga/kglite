@@ -525,11 +525,30 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Node(np) => np.node_type.as_deref(),
                 _ => None,
             };
-            if let (false, 3, Some(ct_str), None) = (
+            let other_elem_idx = if group_elem_idx == 0 {
+                last_elem_idx
+            } else {
+                0
+            };
+            let other_node_unconstrained = matches!(
+                &pattern.elements[other_elem_idx],
+                PatternElement::Node(np)
+                    if np.node_type.is_none()
+                        && np.extra_labels.is_empty()
+                        && np.properties.as_ref().is_none_or(|props| props.is_empty())
+            );
+            let edge_histogram_safe = matches!(
+                &pattern.elements[1],
+                PatternElement::Edge(ep)
+                    if ep.connection_types.is_none() && ep.edge_filter.is_none()
+            );
+            if let (false, 3, Some(ct_str), None, true, true) = (
                 distinct_count,
                 pattern.elements.len(),
                 edge_conn_type,
                 group_node_props.as_ref(),
+                other_node_unconstrained,
+                edge_histogram_safe,
             ) {
                 let conn_key = InternedKey::from_str(ct_str);
                 // Determine whether `group` is the SEMANTIC TARGET of the edge.
@@ -842,6 +861,23 @@ impl<'a> CypherExecutor<'a> {
                 PatternElement::Node(np) => np.node_type.as_deref(),
                 _ => None,
             };
+            let other_elem_idx_nontopk = if group_elem_idx == 0 {
+                last_elem_idx
+            } else {
+                0
+            };
+            let other_node_unconstrained_nontopk = matches!(
+                &pattern.elements[other_elem_idx_nontopk],
+                PatternElement::Node(np)
+                    if np.node_type.is_none()
+                        && np.extra_labels.is_empty()
+                        && np.properties.as_ref().is_none_or(|props| props.is_empty())
+            );
+            let edge_histogram_safe_nontopk = matches!(
+                &pattern.elements[1],
+                PatternElement::Edge(ep)
+                    if ep.connection_types.is_none() && ep.edge_filter.is_none()
+            );
             // Same direction-aware "group is target" predicate as the top-K
             // branch (see comment there for the post-reversal case). Pre-fix
             // this read `, 2` against group_elem_idx, which silently bailed
@@ -852,12 +888,14 @@ impl<'a> CypherExecutor<'a> {
                 (group_elem_idx, edge_direction_nontopk),
                 (2, Some(EdgeDirection::Outgoing)) | (0, Some(EdgeDirection::Incoming))
             );
-            let edge_centric_rows = if let (false, 3, Some(ct_str), None, true) = (
+            let edge_centric_rows = if let (false, 3, Some(ct_str), None, true, true, true) = (
                 distinct_count,
                 pattern.elements.len(),
                 edge_conn_type,
                 group_node_props_nontopk.as_ref(),
                 group_is_target_nontopk,
+                other_node_unconstrained_nontopk,
+                edge_histogram_safe_nontopk,
             ) {
                 let conn_key = InternedKey::from_str(ct_str);
                 self.check_deadline()?;
