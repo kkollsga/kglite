@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::core::pattern_matching::pattern::{PropOp, RelEdgePredicate};
 use crate::graph::core::pattern_matching::PropertyMatcher;
 use crate::graph::languages::cypher::parser::parse_cypher;
 
@@ -181,6 +182,90 @@ fn test_text_predicate_pushdown_rejects_unsafe_shapes() {
             panic!("expected node pattern");
         };
         assert!(node.properties.is_none());
+    }
+}
+
+#[test]
+fn test_relationship_text_and_parameter_pushdown() {
+    let cases = [
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.tag STARTS WITH 'pre' RETURN b",
+            PropOp::StartsWith,
+            Value::String("pre".to_string()),
+        ),
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.tag CONTAINS $needle RETURN b",
+            PropOp::Contains,
+            Value::String("mid".to_string()),
+        ),
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.tag ENDS WITH 'end' RETURN b",
+            PropOp::EndsWith,
+            Value::String("end".to_string()),
+        ),
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.score = $score RETURN b",
+            PropOp::Eq,
+            Value::Int64(7),
+        ),
+    ];
+    let mut params = HashMap::new();
+    params.insert("needle".to_string(), Value::String("mid".to_string()));
+    params.insert("score".to_string(), Value::Int64(7));
+
+    for (cypher, expected_op, expected_value) in cases {
+        let mut query = parse_cypher(cypher).unwrap();
+        optimize(&mut query, &DirGraph::new(), &params);
+
+        let filter = query
+            .clauses
+            .iter()
+            .filter_map(|clause| match clause {
+                Clause::Match(m) => Some(m),
+                _ => None,
+            })
+            .flat_map(|m| &m.patterns)
+            .flat_map(|pattern| &pattern.elements)
+            .find_map(|element| match element {
+                PatternElement::Edge(edge) => edge.edge_filter.as_ref(),
+                _ => None,
+            })
+            .expect("expected pushed relationship filter");
+        assert!(matches!(
+            &filter.predicate,
+            RelEdgePredicate::Property { op, value, .. }
+                if *op == expected_op && *value == expected_value
+        ));
+    }
+}
+
+#[test]
+fn test_relationship_text_pushdown_rejects_missing_or_wrong_typed_params() {
+    for (cypher, params) in [
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.tag CONTAINS $missing RETURN b",
+            HashMap::new(),
+        ),
+        (
+            "MATCH (a:A)-[r:R]->(b:B) WHERE r.tag ENDS WITH $suffix RETURN b",
+            HashMap::from([("suffix".to_string(), Value::Int64(7))]),
+        ),
+    ] {
+        let mut query = parse_cypher(cypher).unwrap();
+        optimize(&mut query, &DirGraph::new(), &params);
+        assert!(query.clauses.iter().all(|clause| match clause {
+            Clause::Match(m) => m.patterns.iter().all(|pattern| {
+                pattern.elements.iter().all(|element| match element {
+                    PatternElement::Edge(edge) => edge.edge_filter.is_none(),
+                    _ => true,
+                })
+            }),
+            _ => true,
+        }));
+        assert!(query
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::Where(_))));
     }
 }
 

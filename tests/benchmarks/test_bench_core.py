@@ -80,6 +80,7 @@ def grouped_count_graph():
             {
                 "source": [i % n for i in range(3 * n)],
                 "target": [(i * 13 + (i // n) * 997 + 7) % n for i in range(3 * n)],
+                "tag": [f"Edge_{i}" for i in range(3 * n)],
             }
         ),
         "RELATES_TO",
@@ -87,6 +88,7 @@ def grouped_count_graph():
         "source",
         "Group",
         "target",
+        columns=["tag"],
     )
     return graph
 
@@ -244,6 +246,26 @@ def test_bench_two_edge_distinct_filtered_path(benchmark, grouped_count_graph, o
         return grouped_count_graph.cypher(
             f"MATCH (g:Group)<-[:RELATES_TO]-(s:Source)-[:RELATES_TO]->(peer:Group) "
             f"WHERE g.name {operator} $needle "
+            "RETURN DISTINCT peer.bucket AS bucket LIMIT 20",
+            params={"needle": needle},
+        ).to_list()
+
+    result = benchmark(query_and_consume)
+    assert len(result) == expected_rows
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("operator", "needle", "expected_rows"),
+    [("CONTAINS", "Edge_12345", 2), ("ENDS WITH", "_1", 2)],
+)
+def test_bench_two_edge_relationship_text_filter(benchmark, grouped_count_graph, operator, needle, expected_rows):
+    """Consumed two-hop relationship-text filter, including parameter routing."""
+
+    def query_and_consume():
+        return grouped_count_graph.cypher(
+            "MATCH (g:Group)<-[r:RELATES_TO]-(s:Source)-[:RELATES_TO]->(peer:Group) "
+            f"WHERE r.tag {operator} $needle "
             "RETURN DISTINCT peer.bucket AS bucket LIMIT 20",
             params={"needle": needle},
         ).to_list()

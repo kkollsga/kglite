@@ -180,6 +180,9 @@ pub enum PropOp {
     Ge,
     Lt,
     Le,
+    StartsWith,
+    Contains,
+    EndsWith,
 }
 
 impl RelEdgePredicate {
@@ -250,6 +253,18 @@ impl RelEdgePredicate {
                     PropOp::Le => matches!(
                         crate::graph::core::filtering::compare_values(&v, value),
                         Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                    ),
+                    PropOp::StartsWith => matches!(
+                        (&v, value),
+                        (Value::String(text), Value::String(prefix)) if text.starts_with(prefix)
+                    ),
+                    PropOp::Contains => matches!(
+                        (&v, value),
+                        (Value::String(text), Value::String(needle)) if text.contains(needle)
+                    ),
+                    PropOp::EndsWith => matches!(
+                        (&v, value),
+                        (Value::String(text), Value::String(suffix)) if text.ends_with(suffix)
                     ),
                 }),
             },
@@ -481,5 +496,22 @@ mod tests {
             &RelEdgePredicate::And(vec![RelEdgePredicate::False, property(PropOp::Eq),]),
             &|_| Some(Value::Null)
         ));
+    }
+
+    #[test]
+    fn relationship_text_predicates_match_strings_and_reject_nulls() {
+        for (op, text) in [
+            (PropOp::StartsWith, "foobar"),
+            (PropOp::Contains, "xfooy"),
+            (PropOp::EndsWith, "barfoo"),
+        ] {
+            let predicate = property(op);
+            assert!(eval_with(&predicate, &|_| Some(Value::String(
+                text.to_string()
+            ))));
+            assert!(!eval_with(&predicate, &|_| None));
+            assert!(!eval_with(&predicate, &|_| Some(Value::Null)));
+            assert!(!eval_with(&predicate, &|_| Some(Value::Int64(7))));
+        }
     }
 }

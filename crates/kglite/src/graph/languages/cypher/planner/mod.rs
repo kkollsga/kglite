@@ -539,8 +539,8 @@ fn pass_rewrite_count_bound_var_to_star(query: &mut CypherQuery, _ctx: &PassCtx)
 /// peer`) from a trailing WHERE into the edge's `rel_predicate`. The
 /// matcher applies them during expansion, before per-edge bindings are
 /// allocated. WHY-BAIL: predicates referencing unbound vars stay in WHERE.
-fn pass_extract_pushable_rel_predicates(query: &mut CypherQuery, _ctx: &PassCtx) {
-    extract_pushable_rel_predicates(query)
+fn pass_extract_pushable_rel_predicates(query: &mut CypherQuery, ctx: &PassCtx) {
+    extract_pushable_rel_predicates(query, ctx.params)
 }
 
 /// **Pass:** `fold_pass_through_with` — Strip `WITH x AS x` /

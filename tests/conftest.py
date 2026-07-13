@@ -288,9 +288,25 @@ def build_social_graph() -> KnowledgeGraph:
     knows_edges = []
     for i in range(1, 21):
         for j in range(i + 1, min(i + 4, 21)):
-            knows_edges.append({"from_id": i, "to_id": j, "since": 2015 + (i % 5)})
+            edge_index = len(knows_edges)
+            knows_edges.append(
+                {
+                    "from_id": i,
+                    "to_id": j,
+                    "since": 2015 + (i % 5),
+                    "tag": f"knows_{edge_index}" if edge_index % 4 else None,
+                }
+            )
     knows_df = pd.DataFrame(knows_edges)
-    graph.add_connections(knows_df, "KNOWS", "Person", "from_id", "Person", "to_id", columns=["since"])
+    graph.add_connections(
+        knows_df,
+        "KNOWS",
+        "Person",
+        "from_id",
+        "Person",
+        "to_id",
+        columns=["since", "tag"],
+    )
 
     works_at = pd.DataFrame(
         {
@@ -311,7 +327,7 @@ def social_graph():
     Persons: Person_1..Person_20, age=21..40, city in [Oslo, Bergen, Stavanger, Trondheim]
              email is None for odd-numbered persons (nullable field)
     Companies: TechCorp, DataInc, CloudSoft, AILabs, DevHouse
-    KNOWS: each person knows next 3 persons (with 'since' property)
+    KNOWS: each person knows next 3 persons (with 'since' and nullable 'tag' properties)
     WORKS_AT: each person works at one company (with 'start_year' property)
     """
     return build_social_graph()

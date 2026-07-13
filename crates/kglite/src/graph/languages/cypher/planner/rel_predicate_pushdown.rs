@@ -13,6 +13,7 @@
 //! # Recognized predicate shapes
 //! - `type(r) = 'X'`, `type(r) IN [...]`
 //! - `r.<prop> OP <literal>` for `=`, `<>`, `<`, `<=`, `>`, `>=`
+//! - `r.<prop> STARTS WITH/CONTAINS/ENDS WITH <string>`
 //! - `startNode(r) = <peer>`, `endNode(r) = <peer>` where `<peer>` is
 //!   the structural peer of `r` in the same pattern
 //! - `AND` / `OR` / `NOT` compositions of the above
@@ -26,9 +27,10 @@ use crate::graph::core::pattern_matching::pattern::{
     AnchorSide, PatternElement, PropOp, RelEdgeFilter, RelEdgePredicate,
 };
 use crate::graph::schema::InternedKey;
+use std::collections::HashMap;
 
 /// Run the pushdown across every `MATCH … WHERE` pair in `query`.
-pub fn extract_pushable_rel_predicates(query: &mut CypherQuery) {
+pub fn extract_pushable_rel_predicates(query: &mut CypherQuery, params: &HashMap<String, Value>) {
     // We need to inspect a MATCH clause and its (optional) trailing
     // WHERE clause together. Walk by index so we can mutate both
     // sides in place.
@@ -83,7 +85,7 @@ pub fn extract_pushable_rel_predicates(query: &mut CypherQuery) {
             };
             let mut filters: Vec<(String, RelEdgePredicate, AnchorSide)> = Vec::new();
             for (edge_var, peer_var, anchor) in &edges_with_peers {
-                let (pushed, remaining) = split_predicate(new_pred, edge_var, peer_var);
+                let (pushed, remaining) = split_predicate(new_pred, edge_var, peer_var, params);
                 if !matches!(pushed, RelEdgePredicate::True) {
                     filters.push((edge_var.clone(), pushed, *anchor));
                 }
@@ -202,18 +204,19 @@ fn split_predicate(
     pred: Predicate,
     edge_var: &str,
     peer_var: &str,
+    params: &HashMap<String, Value>,
 ) -> (RelEdgePredicate, Predicate) {
     match pred {
         Predicate::And(l, r) => {
-            let (lp, lr) = split_predicate(*l, edge_var, peer_var);
-            let (rp, rr) = split_predicate(*r, edge_var, peer_var);
+            let (lp, lr) = split_predicate(*l, edge_var, peer_var, params);
+            let (rp, rr) = split_predicate(*r, edge_var, peer_var, params);
             (and_predicates(lp, rp), and_remaining(lr, rr))
         }
         // For OR / NOT / Or-of-leaves we need the *entire* sub-tree to
         // be pushable — partial pushdown changes semantics. Try the
         // whole-tree compile first and fall through to "no push" on
         // failure.
-        ref _other => match try_compile_full(&pred, edge_var, peer_var) {
+        ref _other => match try_compile_full(&pred, edge_var, peer_var, params) {
             Some(pushed) => (pushed, true_predicate()),
             None => (RelEdgePredicate::True, pred),
         },
@@ -223,20 +226,25 @@ fn split_predicate(
 /// Attempt to compile a predicate as a fully pushable
 /// [`RelEdgePredicate`]. Returns `None` if any leaf is not pushable
 /// or references variables outside `{edge_var, peer_var}`.
-fn try_compile_full(pred: &Predicate, edge_var: &str, peer_var: &str) -> Option<RelEdgePredicate> {
+fn try_compile_full(
+    pred: &Predicate,
+    edge_var: &str,
+    peer_var: &str,
+    params: &HashMap<String, Value>,
+) -> Option<RelEdgePredicate> {
     match pred {
         Predicate::And(l, r) => {
-            let lp = try_compile_full(l, edge_var, peer_var)?;
-            let rp = try_compile_full(r, edge_var, peer_var)?;
+            let lp = try_compile_full(l, edge_var, peer_var, params)?;
+            let rp = try_compile_full(r, edge_var, peer_var, params)?;
             Some(and_predicates(lp, rp))
         }
         Predicate::Or(l, r) => {
-            let lp = try_compile_full(l, edge_var, peer_var)?;
-            let rp = try_compile_full(r, edge_var, peer_var)?;
+            let lp = try_compile_full(l, edge_var, peer_var, params)?;
+            let rp = try_compile_full(r, edge_var, peer_var, params)?;
             Some(or_predicates(lp, rp))
         }
         Predicate::Not(inner) => {
-            let p = try_compile_full(inner, edge_var, peer_var)?;
+            let p = try_compile_full(inner, edge_var, peer_var, params)?;
             Some(RelEdgePredicate::Not(Box::new(p)))
         }
         Predicate::Xor(_, _) | Predicate::IsNull(_) | Predicate::IsNotNull(_) => None,
@@ -244,16 +252,22 @@ fn try_compile_full(pred: &Predicate, edge_var: &str, peer_var: &str) -> Option<
             left,
             operator,
             right,
-        } => compile_comparison(left, *operator, right, edge_var, peer_var),
+        } => compile_comparison(left, *operator, right, edge_var, peer_var, params),
         Predicate::In { expr, list } => compile_type_in(expr, list, edge_var),
         Predicate::InLiteralSet { expr, values } => {
             compile_type_in_literal_set(expr, values, edge_var)
         }
+        Predicate::StartsWith { expr, pattern } => {
+            compile_text_predicate(expr, pattern, edge_var, params, PropOp::StartsWith)
+        }
+        Predicate::Contains { expr, pattern } => {
+            compile_text_predicate(expr, pattern, edge_var, params, PropOp::Contains)
+        }
+        Predicate::EndsWith { expr, pattern } => {
+            compile_text_predicate(expr, pattern, edge_var, params, PropOp::EndsWith)
+        }
         // The streaming path doesn't yet handle these; leave to materialized.
-        Predicate::StartsWith { .. }
-        | Predicate::EndsWith { .. }
-        | Predicate::Contains { .. }
-        | Predicate::Exists { .. }
+        Predicate::Exists { .. }
         | Predicate::InExpression { .. }
         | Predicate::LabelCheck { .. } => None,
     }
@@ -265,10 +279,11 @@ fn compile_comparison(
     right: &Expression,
     edge_var: &str,
     peer_var: &str,
+    params: &HashMap<String, Value>,
 ) -> Option<RelEdgePredicate> {
     // Try both `<expr> OP <literal>` and `<literal> OP <expr>`. The
     // latter requires inverting the operator.
-    if let Some(p) = compile_lhs_rhs(left, op, right, edge_var, peer_var) {
+    if let Some(p) = compile_lhs_rhs(left, op, right, edge_var, peer_var, params) {
         return Some(p);
     }
     let inverted = match op {
@@ -280,7 +295,7 @@ fn compile_comparison(
         ComparisonOp::GreaterThanEq => ComparisonOp::LessThanEq,
         ComparisonOp::RegexMatch => return None,
     };
-    compile_lhs_rhs(right, inverted, left, edge_var, peer_var)
+    compile_lhs_rhs(right, inverted, left, edge_var, peer_var, params)
 }
 
 fn compile_lhs_rhs(
@@ -289,10 +304,11 @@ fn compile_lhs_rhs(
     rhs: &Expression,
     edge_var: &str,
     peer_var: &str,
+    params: &HashMap<String, Value>,
 ) -> Option<RelEdgePredicate> {
     // type(r) = 'X' / type(r) <> 'X'
     if is_type_call_on(lhs, edge_var) {
-        let val = literal(rhs)?;
+        let val = literal_or_param(rhs, params)?;
         match op {
             ComparisonOp::Equals => match val {
                 Value::String(s) => Some(RelEdgePredicate::TypeIn(vec![InternedKey::from_str(&s)])),
@@ -309,7 +325,10 @@ fn compile_lhs_rhs(
     }
     // r.<prop> OP <literal>
     else if let Some(prop) = is_edge_property(lhs, edge_var) {
-        let val = literal(rhs)?;
+        let val = literal_or_param(rhs, params)?;
+        if matches!(val, Value::Null) {
+            return None;
+        }
         let op_kind = match op {
             ComparisonOp::Equals => PropOp::Eq,
             ComparisonOp::NotEquals => PropOp::Ne,
@@ -341,6 +360,27 @@ fn compile_lhs_rhs(
     } else {
         None
     }
+}
+
+fn compile_text_predicate(
+    expr: &Expression,
+    pattern: &Expression,
+    edge_var: &str,
+    params: &HashMap<String, Value>,
+    op: PropOp,
+) -> Option<RelEdgePredicate> {
+    let prop = is_edge_property(expr, edge_var)?;
+    let Value::String(needle) = literal_or_param(pattern, params)? else {
+        return None;
+    };
+    if needle.is_empty() {
+        return None;
+    }
+    Some(RelEdgePredicate::Property {
+        prop,
+        op,
+        value: Value::String(needle),
+    })
 }
 
 fn compile_type_in(
@@ -428,6 +468,14 @@ fn is_edge_property(expr: &Expression, edge_var: &str) -> Option<String> {
 fn literal(expr: &Expression) -> Option<Value> {
     match expr {
         Expression::Literal(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn literal_or_param(expr: &Expression, params: &HashMap<String, Value>) -> Option<Value> {
+    match expr {
+        Expression::Literal(value) => Some(value.clone()),
+        Expression::Parameter(name) => params.get(name.as_str()).cloned(),
         _ => None,
     }
 }

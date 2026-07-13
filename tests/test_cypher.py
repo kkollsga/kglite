@@ -1716,15 +1716,78 @@ class TestRelationshipPredicateNullSemantics:
     @pytest.mark.parametrize(
         "predicate",
         [
-            "NOT (r.tag = 'foo')",
-            "NOT (r.tag <> 'foo')",
-            "NOT (r.tag = 'foo' AND r.since > 0)",
+            "NOT (r.missing_tag = 'foo')",
+            "NOT (r.missing_tag <> 'foo')",
+            "NOT (r.missing_tag = 'foo' AND r.since > 0)",
         ],
     )
     def test_missing_relationship_property_stays_unknown_under_not(self, social_graph, predicate):
         query = f"MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE {predicate} RETURN p.name AS p, q.name AS q"
         assert social_graph.cypher(query).to_list() == []
         assert social_graph.cypher(query, disable_optimizer=True).to_list() == []
+
+
+class TestRelationshipTextPredicatePushdown:
+    @pytest.mark.parametrize(
+        ("predicate", "params", "expected"),
+        [
+            (
+                "r.tag CONTAINS $needle",
+                {"needle": "knows_1"},
+                [
+                    "Person_10",
+                    "Person_11",
+                    "Person_12",
+                    "Person_4",
+                    "Person_5",
+                    "Person_6",
+                    "Person_7",
+                    "Person_8",
+                    "Person_9",
+                ],
+            ),
+            (
+                "r.tag ENDS WITH $suffix",
+                {"suffix": "_1"},
+                ["Person_4", "Person_5", "Person_6"],
+            ),
+            (
+                "r.tag STARTS WITH 'knows_1'",
+                {},
+                [
+                    "Person_10",
+                    "Person_11",
+                    "Person_12",
+                    "Person_4",
+                    "Person_5",
+                    "Person_6",
+                    "Person_7",
+                    "Person_8",
+                    "Person_9",
+                ],
+            ),
+        ],
+    )
+    def test_two_hop_relationship_text_filter(self, social_graph, predicate, params, expected):
+        query = (
+            "MATCH (p:Person)-[r:KNOWS]->(q:Person)-[:KNOWS]->(z:Person) "
+            f"WHERE {predicate} RETURN DISTINCT z.name AS n ORDER BY n"
+        )
+        rows = social_graph.cypher(query, params=params).to_list()
+        assert [row["n"] for row in rows] == expected
+
+    def test_parameterized_relationship_equality(self, social_graph):
+        query = "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.since = $year RETURN count(r) AS n"
+        assert social_graph.cypher(query, params={"year": 2016}).to_list() == [{"n": 12}]
+
+    def test_wrong_typed_text_parameter_stays_residual(self, social_graph):
+        query = "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.tag CONTAINS $needle RETURN count(r) AS n"
+        expected = social_graph.cypher(query, params={"needle": 7}, disable_optimizer=True).to_list()
+        assert social_graph.cypher(query, params={"needle": 7}).to_list() == expected
+
+    def test_negated_text_filter_preserves_nullable_edge_property(self, social_graph):
+        query = "MATCH (p)-[r:KNOWS]->(q) WHERE NOT (r.tag CONTAINS 'never') RETURN count(r) AS n"
+        assert social_graph.cypher(query).to_list() == [{"n": 40}]
 
 
 class TestThreeValuedNullSemantics:

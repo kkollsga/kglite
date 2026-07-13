@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `STARTS WITH`, `CONTAINS`, and `ENDS WITH` predicates, including string
   parameters, now narrow node candidates before multi-hop traversal. Typed
   `STARTS WITH` queries also reach persistent prefix indexes correctly.
+- **Relationship text and parameter filters run during expansion.** String
+  prefix, substring, and suffix predicates plus parameterized relationship
+  comparisons now discard non-matching edges before downstream bindings and
+  hops are materialized.
 
 ## [0.13.1] - 2026-07-13
 

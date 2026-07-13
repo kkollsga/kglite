@@ -251,20 +251,46 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     (
         "rel_missing_property_not_equals",
         "social_graph",
-        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.tag = 'foo') RETURN p.name AS p, q.name AS q",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.missing_tag = 'foo') RETURN p.name AS p, q.name AS q",
         None,
     ),
     (
         "rel_null_not_equals_under_not",
         "social_graph",
-        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.tag <> 'foo') RETURN p.name AS p, q.name AS q",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE NOT (r.missing_tag <> 'foo') RETURN p.name AS p, q.name AS q",
         None,
     ),
     (
         "rel_unknown_nested_boolean",
         "social_graph",
         "MATCH (p:Person)-[r:KNOWS]->(q:Person) "
-        "WHERE NOT (r.tag = 'foo' AND r.since > 0) RETURN p.name AS p, q.name AS q",
+        "WHERE NOT (r.missing_tag = 'foo' AND r.since > 0) RETURN p.name AS p, q.name AS q",
+        None,
+    ),
+    (
+        "rel_contains_param_two_hop",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person)-[:KNOWS]->(z:Person) "
+        "WHERE r.tag CONTAINS $needle RETURN DISTINCT z.name AS n",
+        {"needle": "knows_1"},
+    ),
+    (
+        "rel_ends_with_param_two_hop",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person)-[:KNOWS]->(z:Person) "
+        "WHERE r.tag ENDS WITH $suffix RETURN DISTINCT z.name AS n",
+        {"suffix": "_1"},
+    ),
+    (
+        "rel_equality_param",
+        "social_graph",
+        "MATCH (p:Person)-[r:KNOWS]->(q:Person) WHERE r.since = $year RETURN count(r) AS n",
+        {"year": 2016},
+    ),
+    (
+        "rel_not_contains_nullable",
+        "social_graph",
+        "MATCH (p)-[r:KNOWS]->(q) WHERE NOT (r.tag CONTAINS 'never') RETURN count(r) AS n",
         None,
     ),
     # ── fold_pass_through_with ──
