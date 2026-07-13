@@ -180,6 +180,10 @@ pub enum Clause {
     FusedCountAll {
         alias: String,
     },
+    /// Optimizer-generated: MATCH ()-[r]->() RETURN count(r) → graph.edge_count() in O(1).
+    FusedCountAllEdges {
+        alias: String,
+    },
     /// Optimizer-generated: MATCH (n) RETURN n.type, count(n) → iterate type_indices in O(types).
     FusedCountByType {
         type_alias: String,

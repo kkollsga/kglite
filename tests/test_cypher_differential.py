@@ -119,6 +119,12 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("trigger_anchored_edge_count", "social_graph", "MATCH ({id: 1})-[:KNOWS]->(p) RETURN count(*) AS n", None),
     ("trigger_count_short_circuit", "social_graph", "MATCH (p:Person) RETURN count(*) AS n", None),
     (
+        "count_all_edges_untyped",
+        "social_graph",
+        "MATCH ()-[r]->() RETURN count(r) AS n",
+        None,
+    ),
+    (
         "property_grouping_duplicate_values",
         "social_graph",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.city AS city, count(b) AS n ORDER BY n DESC LIMIT 10",

@@ -201,6 +201,7 @@ pub fn clause_display_name(clause: &Clause) -> String {
         Clause::FusedMatchWithAggregate { .. } => "FusedMatchWithAggregate".into(),
         Clause::FusedOrderByTopK { .. } => "FusedOrderByTopK".into(),
         Clause::FusedCountAll { .. } => "FusedCountAll".into(),
+        Clause::FusedCountAllEdges { .. } => "FusedCountAllEdges".into(),
         Clause::FusedCountByType { .. } => "FusedCountByType".into(),
         Clause::FusedCountEdgesByType { .. } => "FusedCountEdgesByType".into(),
         Clause::FusedCountTypedNode { node_type, .. } => {

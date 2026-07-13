@@ -77,6 +77,11 @@ class TestExplainOptimizations:
         ops = [r["operation"] for r in result.to_list()]
         assert any("FusedOptionalMatchAggregate" in op for op in ops)
 
+    def test_explain_shows_untyped_edge_count_fusion(self, graph):
+        rows = graph.cypher("EXPLAIN MATCH ()-[r]->() RETURN count(r) AS n").to_list()
+        fused = [row for row in rows if row["operation"] == "FusedCountAllEdges"]
+        assert fused == [{"step": 1, "operation": "FusedCountAllEdges", "estimated_rows": 1}]
+
     def test_explain_shows_projection(self, graph):
         """Return step exists in plan."""
         result = graph.cypher("EXPLAIN MATCH (n:Person) RETURN n.name AS name, n.age AS age")

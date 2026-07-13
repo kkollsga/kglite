@@ -182,8 +182,11 @@ pub(crate) fn fuse_count_short_circuits(
         return;
     };
 
-    // No DISTINCT on RETURN
-    if return_clause.distinct {
+    // Aggregation modifiers and path assignments require the general executor.
+    if return_clause.distinct
+        || return_clause.having.is_some()
+        || !match_clause.path_assignments.is_empty()
+    {
         return;
     }
 
@@ -296,8 +299,10 @@ pub(crate) fn fuse_count_short_circuits(
 
         // Both nodes must be anonymous/unfiltered
         if src_node.node_type.is_some()
+            || !src_node.extra_labels.is_empty()
             || src_node.properties.is_some()
             || tgt_node.node_type.is_some()
+            || !tgt_node.extra_labels.is_empty()
             || tgt_node.properties.is_some()
         {
             return;
@@ -306,9 +311,28 @@ pub(crate) fn fuse_count_short_circuits(
         // Edge must have no property filters or var_length, and must be directed
         if edge.properties.is_some()
             || edge.var_length.is_some()
+            || edge.connection_types.is_some()
+            || edge.edge_filter.is_some()
             || edge.direction == EdgeDirection::Both
         {
             return;
+        }
+
+        // Re-used names impose identity constraints (`(a)-[r]->(a)` matches
+        // self-loops only). A global edge count is valid only when the three
+        // pattern elements are independent.
+        let mut variables = std::collections::HashSet::new();
+        for variable in [
+            src_node.variable.as_deref(),
+            edge.variable.as_deref(),
+            tgt_node.variable.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !variables.insert(variable) {
+                return;
+            }
         }
 
         let edge_var = edge.variable.as_deref();
@@ -332,7 +356,22 @@ pub(crate) fn fuse_count_short_circuits(
             return;
         }
 
-        // Sub-pattern C2: Untyped edge count by type — MATCH ()-[r]->() RETURN type(r), count(*)
+        // Sub-pattern C2: untyped global edge count. Every live directed
+        // edge contributes exactly one row, including parallel edges and
+        // self-loops. The strict guards above exclude all filters and
+        // identity constraints, so GraphRead::edge_count() is exact.
+        if return_clause.items.len() == 1
+            && is_count_of_var_or_star(&return_clause.items[0].expression, edge_var)
+        {
+            let alias = return_item_column_name(&return_clause.items[0]);
+            query.clauses.drain(0..2);
+            query
+                .clauses
+                .insert(0, Clause::FusedCountAllEdges { alias });
+            return;
+        }
+
+        // Sub-pattern C3: Untyped edge count by type — MATCH ()-[r]->() RETURN type(r), count(*)
         if return_clause.items.len() != 2 {
             return;
         }

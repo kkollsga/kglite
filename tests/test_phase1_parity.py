@@ -231,14 +231,16 @@ def test_connection_metadata_parity(graphs):
 
 
 def test_edge_count_per_type_parity(graphs):
-    """Total RELATED + ABOUT edge counts identical."""
+    """Typed and untyped edge counts are identical across storage modes."""
     q_related = "MATCH ()-[r:RELATED]->() RETURN count(r) AS c"
     q_about = "MATCH ()-[r:ABOUT]->() RETURN count(r) AS c"
+    q_all = "MATCH ()-[r]->() RETURN count(r) AS c"
     per_mode = {}
     for mode in STORAGE_MODES:
         r = _rows(graphs[mode].cypher(q_related))[0]["c"]
         a = _rows(graphs[mode].cypher(q_about))[0]["c"]
-        per_mode[mode] = (int(r), int(a))
+        total = _rows(graphs[mode].cypher(q_all))[0]["c"]
+        per_mode[mode] = (int(r), int(a), int(total))
     ref = per_mode["memory"]
     for mode in ("mapped", "disk"):
         assert per_mode[mode] == ref, f"edge counts diverged in {mode}: {per_mode[mode]} vs memory {ref}"

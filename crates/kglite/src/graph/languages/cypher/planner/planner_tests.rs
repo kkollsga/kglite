@@ -797,6 +797,42 @@ fn test_fuse_match_return_aggregate_count_distinct() {
 }
 
 #[test]
+fn test_fuse_untyped_global_edge_count() {
+    let mut query = parse_cypher("MATCH ()-[r]->() RETURN count(r) AS n").unwrap();
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    optimize(&mut query, &graph, &params);
+    assert!(matches!(
+        query.clauses.as_slice(),
+        [Clause::FusedCountAllEdges { alias }] if alias == "n"
+    ));
+}
+
+#[test]
+fn test_untyped_global_edge_count_rejects_constrained_shapes() {
+    let queries = [
+        "MATCH ()-[r]-() RETURN count(r) AS n",
+        "MATCH (a)-[r]->(a) RETURN count(r) AS n",
+        "MATCH (:Person)-[r]->() RETURN count(r) AS n",
+        "MATCH ()-[r:R|S]->() RETURN count(r) AS n",
+        "MATCH p = ()-[r]->() RETURN count(r) AS n",
+    ];
+    let graph = DirGraph::new();
+    let params = HashMap::new();
+    for source in queries {
+        let mut query = parse_cypher(source).unwrap();
+        optimize(&mut query, &graph, &params);
+        assert!(
+            !query
+                .clauses
+                .iter()
+                .any(|clause| matches!(clause, Clause::FusedCountAllEdges { .. })),
+            "constrained edge count must not use global count: {source}"
+        );
+    }
+}
+
+#[test]
 fn test_fuse_match_return_aggregate_property_group_topk() {
     let mut query = parse_cypher(
         "MATCH (a:Person)-[:KNOWS]->(b:Person) \

@@ -1431,6 +1431,7 @@ fn collect_clause_variables(clause: &Clause, out: &mut HashSet<String>) {
         | Clause::FusedMatchWithAggregate { .. }
         | Clause::FusedOrderByTopK { .. }
         | Clause::FusedCountAll { .. }
+        | Clause::FusedCountAllEdges { .. }
         | Clause::FusedCountByType { .. }
         | Clause::FusedCountEdgesByType { .. }
         | Clause::FusedCountTypedNode { .. }

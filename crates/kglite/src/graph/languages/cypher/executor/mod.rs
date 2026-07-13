@@ -557,6 +557,19 @@ impl<'a> CypherExecutor<'a> {
                     lazy_return_items: None,
                 })
             }
+            Clause::FusedCountAllEdges { alias } => {
+                let edge_count = self.graph.graph.edge_count();
+                self.budget.check_work(edge_count, "fused all-edge count")?;
+                let count = i64::try_from(edge_count)
+                    .map_err(|_| "edge count exceeds Cypher integer range".to_string())?;
+                let mut projected = Bindings::with_capacity(1);
+                projected.insert(alias.clone(), Value::Int64(count));
+                Ok(ResultSet {
+                    rows: vec![ResultRow::from_projected(projected)],
+                    columns: vec![alias.clone()],
+                    lazy_return_items: None,
+                })
+            }
             Clause::FusedCountByType {
                 type_alias,
                 count_alias,

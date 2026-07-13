@@ -2378,6 +2378,30 @@ class TestFusedCountRegressions:
         assert g.cypher(q).to_list() == [{"n": "a", "c": 1}]
         assert g.cypher(q, disabled_passes=["fuse_optional_match_aggregate"]).to_list() == [{"n": "a", "c": 1}]
 
+    def test_untyped_edge_count_includes_parallel_edges_and_self_loops(self):
+        g = KnowledgeGraph()
+        g.add_nodes(pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]}), "N", "id", "name")
+        g.add_connections(
+            pd.DataFrame({"source": [1, 1, 2], "target": [2, 2, 2]}),
+            "R",
+            "N",
+            "source",
+            "N",
+            "target",
+        )
+        g.add_connections(
+            pd.DataFrame({"source": [2], "target": [3]}),
+            "S",
+            "N",
+            "source",
+            "N",
+            "target",
+        )
+        query = "MATCH ()-[r]->() RETURN count(r) AS n"
+        assert g.cypher(query).to_list() == [{"n": 4}]
+        assert g.cypher(query, disabled_passes=["fuse_count_short_circuits"]).to_list() == [{"n": 4}]
+        assert KnowledgeGraph().cypher(query).to_list() == [{"n": 0}]
+
     def test_fused_optional_count_star_null_padded_row(self):
         # y has no outgoing R edge: OPTIONAL MATCH emits one null-padded
         # row, so count(*) = 1 while count(m) = 0.

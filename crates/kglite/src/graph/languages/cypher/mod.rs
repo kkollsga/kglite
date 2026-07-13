@@ -115,6 +115,7 @@ pub fn generate_explain_result(query: &CypherQuery, graph: &DirGraph) -> result:
                 .map(|e| Value::Int64(e as i64))
                 .unwrap_or(Value::Null),
             Clause::FusedCountAll { .. }
+            | Clause::FusedCountAllEdges { .. }
             | Clause::FusedMatchReturnAggregate { .. }
             | Clause::FusedOptionalMatchAggregate { .. }
             | Clause::FusedCountTypedEdge { .. }

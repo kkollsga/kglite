@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Property-grouped Cypher counts avoid materializing one row per edge.**
   Direct property keys are resolved once per endpoint and merged by value
   before `ORDER BY ... LIMIT`, preserving duplicate and null group semantics.
+- **Unconstrained global edge counts are constant-time.**
+  `MATCH ()-[r]->() RETURN count(r)` reads the backend's live edge cardinality
+  directly while constrained and undirected patterns retain exact matching.
 
 ### Fixed
 
