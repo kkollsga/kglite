@@ -20,10 +20,9 @@ The summary table is always printed so a passing gate still gives an
 "at-a-glance, am I trending in the right direction" view. `--quiet` drops
 it.
 
-A benchmark present in only one file (added or removed) is treated as
-informational, not a failure — the gate cares about regressions of the
-contract surface that exists in both. New benchmarks land green; deleted
-ones emit a warning.
+A benchmark newly present in the current file is informational until the next
+baseline refresh. A benchmark present in the baseline but missing from the
+current run fails the gate: benchmark coverage must not disappear silently.
 """
 
 from __future__ import annotations
@@ -66,7 +65,7 @@ def main() -> int:
     only_current = sorted(set(current) - set(baseline))
 
     if only_baseline:
-        print(f"warning: {len(only_baseline)} benchmark(s) in baseline but not in current — removed?:")
+        print(f"error: {len(only_baseline)} benchmark(s) in baseline but not in current:")
         for name in only_baseline:
             print(f"  - {name}")
     if only_current:
@@ -98,6 +97,14 @@ def main() -> int:
             flag = " ←" if delta > args.threshold else ""
             print(f"  {name:<{name_w}}  {b:>14.3e}  {c:>14.3e}  {delta:>+7.1f}%{flag}")
 
+    if regressions or only_baseline:
+        if only_baseline:
+            print(
+                f"\nFAIL: {len(only_baseline)} tracked benchmark(s) were not collected. "
+                "Restore them or intentionally refresh the baseline."
+            )
+            for name in only_baseline:
+                print(f"  - {name}")
     if regressions:
         print(f"\nFAIL: {len(regressions)} benchmark(s) regressed > {args.threshold:+.1f}% on {args.metric}:")
         for name, _, _, delta in regressions:
@@ -107,6 +114,7 @@ def main() -> int:
             "refresh the baseline via `make refresh-release-constants` and explain in "
             "the CHANGELOG entry. Otherwise investigate before merging."
         )
+    if regressions or only_baseline:
         return 1
 
     print(f"\nOK: no regressions > {args.threshold:+.1f}% on {args.metric} across {len(common)} benchmark(s).")
