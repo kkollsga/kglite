@@ -35,6 +35,11 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                 continue;
             }
         };
+        let occupied_properties = match &query.clauses[i] {
+            Clause::Match(m) => collect_pattern_property_keys(&m.patterns),
+            Clause::OptionalMatch(m) => collect_pattern_property_keys(&m.patterns),
+            _ => unreachable!("MATCH/OPTIONAL MATCH checked above"),
+        };
 
         // Collect vars bound by prior clauses (for correlated-equality pushdown).
         // Node vars come from earlier MATCH/OPTIONAL MATCH patterns; scalar vars
@@ -58,6 +63,7 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             &prior_node_vars,
             &prior_scalar_vars,
             params,
+            occupied_properties,
         );
 
         // Apply pushable conditions to MATCH/OPTIONAL MATCH patterns
@@ -76,23 +82,28 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
                     continue;
                 }
             };
-            for (var_name, property, value) in &pushable {
-                apply_property_to_patterns(patterns, var_name, property, value.clone());
+            let mut all_applied = true;
+            for (var_name, property, value) in pushable {
+                all_applied &= apply_property_to_patterns(patterns, &var_name, &property, value);
             }
             for (var_name, property, values) in pushable_in {
-                apply_in_property_to_patterns(patterns, &var_name, &property, values);
+                all_applied &=
+                    apply_in_property_to_patterns(patterns, &var_name, &property, values);
             }
             for (var_name, property, op, value) in pushable_cmp {
-                apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
+                all_applied &=
+                    apply_comparison_to_patterns(patterns, &var_name, &property, op, value);
             }
             for (var_name, property, ref_name) in pushable_var {
-                apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
+                all_applied &=
+                    apply_var_property_to_patterns(patterns, &var_name, &property, ref_name);
             }
             for (var_name, property, ref_var, ref_prop) in pushable_nodeprop {
-                apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
+                all_applied &=
+                    apply_nodeprop_to_patterns(patterns, &var_name, &property, ref_var, ref_prop);
             }
             for (var_name, property, prefix) in pushable_prefix {
-                apply_prefix_to_patterns(patterns, &var_name, &property, prefix);
+                all_applied &= apply_prefix_to_patterns(patterns, &var_name, &property, prefix);
             }
 
             // Update WHERE clause with remaining predicates.
@@ -101,7 +112,11 @@ pub(super) fn push_where_into_match(query: &mut CypherQuery, params: &HashMap<St
             // predicates provide fast-path filtering in the pattern matcher,
             // but the WHERE clause must survive for correctness (e.g. when
             // fuse_match_return_aggregate rejects patterns with properties).
-            if let Some(pred) = remaining {
+            if !all_applied {
+                query.clauses[i + 1] = Clause::Where(WhereClause {
+                    predicate: where_pred,
+                });
+            } else if let Some(pred) = remaining {
                 query.clauses[i + 1] = Clause::Where(WhereClause { predicate: pred });
             }
         }
@@ -135,6 +150,28 @@ fn collect_prior_node_vars(
         }
     }
     out
+}
+
+fn collect_pattern_property_keys(
+    patterns: &[crate::graph::core::pattern_matching::Pattern],
+) -> HashSet<(String, String)> {
+    let mut keys = HashSet::new();
+    for pattern in patterns {
+        for element in &pattern.elements {
+            let PatternElement::Node(node) = element else {
+                continue;
+            };
+            let (Some(variable), Some(properties)) = (&node.variable, &node.properties) else {
+                continue;
+            };
+            keys.extend(
+                properties
+                    .keys()
+                    .map(|property| (variable.clone(), property.clone())),
+            );
+        }
+    }
+    keys
 }
 
 /// Collect scalar names projected by WITH/UNWIND clauses.
@@ -216,6 +253,7 @@ pub(super) fn extract_pushable_equalities(
     prior_node_vars: &HashSet<String>,
     prior_scalar_vars: &HashSet<String>,
     params: &HashMap<String, Value>,
+    occupied_properties: HashSet<(String, String)>,
 ) -> PushableResult {
     let mut pushable = Vec::new();
     let mut pushable_in = Vec::new();
@@ -223,6 +261,10 @@ pub(super) fn extract_pushable_equalities(
     let mut pushable_var = Vec::new();
     let mut pushable_nodeprop = Vec::new();
     let mut pushable_prefix = Vec::new();
+    let mut reservations: HashMap<(String, String), PropertyReservation> = occupied_properties
+        .into_iter()
+        .map(|key| (key, PropertyReservation::Exclusive))
+        .collect();
     let remaining = extract_from_predicate(
         pred,
         match_vars,
@@ -235,6 +277,7 @@ pub(super) fn extract_pushable_equalities(
         &mut pushable_var,
         &mut pushable_nodeprop,
         &mut pushable_prefix,
+        &mut reservations,
     );
     PushableResult {
         pushable,
@@ -244,6 +287,60 @@ pub(super) fn extract_pushable_equalities(
         pushable_nodeprop,
         pushable_prefix,
         remaining,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PropertyReservation {
+    Exclusive,
+    RangeBounds { lower: bool, upper: bool },
+}
+
+fn reserve_exclusive(
+    reservations: &mut HashMap<(String, String), PropertyReservation>,
+    variable: &str,
+    property: &str,
+) -> bool {
+    use std::collections::hash_map::Entry;
+
+    match reservations.entry((variable.to_string(), property.to_string())) {
+        Entry::Vacant(entry) => {
+            entry.insert(PropertyReservation::Exclusive);
+            true
+        }
+        Entry::Occupied(_) => false,
+    }
+}
+
+fn reserve_comparison(
+    reservations: &mut HashMap<(String, String), PropertyReservation>,
+    variable: &str,
+    property: &str,
+    op: ComparisonOp,
+) -> bool {
+    use std::collections::hash_map::Entry;
+
+    let is_lower = matches!(op, ComparisonOp::GreaterThan | ComparisonOp::GreaterThanEq);
+    match reservations.entry((variable.to_string(), property.to_string())) {
+        Entry::Vacant(entry) => {
+            entry.insert(PropertyReservation::RangeBounds {
+                lower: is_lower,
+                upper: !is_lower,
+            });
+            true
+        }
+        Entry::Occupied(mut entry) => match entry.get_mut() {
+            PropertyReservation::Exclusive => false,
+            PropertyReservation::RangeBounds { lower, upper } => {
+                let slot = if is_lower { lower } else { upper };
+                if *slot {
+                    false
+                } else {
+                    *slot = true;
+                    true
+                }
+            }
+        },
     }
 }
 
@@ -262,6 +359,7 @@ pub(super) fn extract_from_predicate(
     pushable_var: &mut Vec<(String, String, String)>,
     pushable_nodeprop: &mut Vec<(String, String, String, String)>,
     pushable_prefix: &mut Vec<(String, String, String)>,
+    reservations: &mut HashMap<(String, String), PropertyReservation>,
 ) -> Option<Predicate> {
     match pred {
         Predicate::Comparison {
@@ -271,22 +369,31 @@ pub(super) fn extract_from_predicate(
         } => {
             // 1) Try literal/param equality first (fully resolved at plan time)
             if let Some((var, prop, val)) = try_extract_equality(left, right, match_vars, params) {
-                pushable.push((var, prop, val));
-                return None;
+                if reserve_exclusive(reservations, &var, &prop) {
+                    pushable.push((var, prop, val));
+                    return None;
+                }
+                return Some(pred.clone());
             }
             // 2) Try correlated node-prop equality: cur.prop = prior.other_prop
             if let Some((var, prop, ref_var, ref_prop)) =
                 try_extract_correlated_nodeprop(left, right, match_vars, prior_node_vars)
             {
-                pushable_nodeprop.push((var, prop, ref_var, ref_prop));
-                return None;
+                if reserve_exclusive(reservations, &var, &prop) {
+                    pushable_nodeprop.push((var, prop, ref_var, ref_prop));
+                    return None;
+                }
+                return Some(pred.clone());
             }
             // 3) Try scalar-var equality: cur.prop = scalar_var
             if let Some((var, prop, ref_name)) =
                 try_extract_scalar_var(left, right, match_vars, prior_scalar_vars)
             {
-                pushable_var.push((var, prop, ref_name));
-                return None;
+                if reserve_exclusive(reservations, &var, &prop) {
+                    pushable_var.push((var, prop, ref_name));
+                    return None;
+                }
+                return Some(pred.clone());
             }
             Some(pred.clone())
         }
@@ -302,8 +409,12 @@ pub(super) fn extract_from_predicate(
             if let Some((var, prop, op, val)) =
                 try_extract_comparison(left, right, *op, match_vars, params)
             {
-                pushable_cmp.push((var, prop, op, val));
-                None
+                if reserve_comparison(reservations, &var, &prop, op) {
+                    pushable_cmp.push((var, prop, op, val));
+                    None
+                } else {
+                    Some(pred.clone())
+                }
             } else {
                 Some(pred.clone())
             }
@@ -323,8 +434,11 @@ pub(super) fn extract_from_predicate(
                         })
                         .collect();
                     if let Some(values) = all_literals {
-                        pushable_in.push((variable.clone(), property.clone(), values));
-                        return None; // Fully consumed
+                        if reserve_exclusive(reservations, variable, property) {
+                            pushable_in.push((variable.clone(), property.clone(), values));
+                            return None; // Fully consumed
+                        }
+                        return Some(pred.clone());
                     }
                 }
             }
@@ -339,6 +453,9 @@ pub(super) fn extract_from_predicate(
             if let Expression::PropertyAccess { variable, property } = expr {
                 if match_vars.iter().any(|(v, _)| v == variable) {
                     if let Some(values) = resolve_value_list(list_expr, params) {
+                        if !reserve_exclusive(reservations, variable, property) {
+                            return Some(pred.clone());
+                        }
                         pushable_in.push((variable.clone(), property.clone(), values.clone()));
                         // The pushdown anchors the scan (e.g. via the id index).
                         // Replace the surviving WHERE with the O(1) HashSet form
@@ -363,8 +480,11 @@ pub(super) fn extract_from_predicate(
             ) = (expr, pattern)
             {
                 if match_vars.iter().any(|(v, _)| v == variable) && !prefix.is_empty() {
-                    pushable_prefix.push((variable.clone(), property.clone(), prefix.clone()));
-                    return None;
+                    if reserve_exclusive(reservations, variable, property) {
+                        pushable_prefix.push((variable.clone(), property.clone(), prefix.clone()));
+                        return None;
+                    }
+                    return Some(pred.clone());
                 }
             }
             Some(pred.clone())
@@ -382,6 +502,7 @@ pub(super) fn extract_from_predicate(
                 pushable_var,
                 pushable_nodeprop,
                 pushable_prefix,
+                reservations,
             );
             let right_remaining = extract_from_predicate(
                 right,
@@ -395,6 +516,7 @@ pub(super) fn extract_from_predicate(
                 pushable_var,
                 pushable_nodeprop,
                 pushable_prefix,
+                reservations,
             );
 
             match (left_remaining, right_remaining) {
@@ -646,7 +768,7 @@ pub(super) fn apply_comparison_to_patterns(
     property: &str,
     op: ComparisonOp,
     value: Value,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
@@ -656,22 +778,24 @@ pub(super) fn apply_comparison_to_patterns(
                     if let Some(existing) = props.get(property) {
                         if let Some(merged) = merge_comparison(existing, op, &value) {
                             props.insert(property.to_string(), merged);
-                            return;
+                            return true;
                         }
+                        return false;
                     }
                     let matcher = match op {
                         ComparisonOp::GreaterThan => PropertyMatcher::GreaterThan(value),
                         ComparisonOp::GreaterThanEq => PropertyMatcher::GreaterOrEqual(value),
                         ComparisonOp::LessThan => PropertyMatcher::LessThan(value),
                         ComparisonOp::LessThanEq => PropertyMatcher::LessOrEqual(value),
-                        _ => return,
+                        _ => return false,
                     };
                     props.insert(property.to_string(), matcher);
-                    return;
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Merge two comparison matchers on the same property into a Range.
@@ -729,21 +853,23 @@ pub(super) fn apply_property_to_patterns(
     var_name: &str,
     property: &str,
     value: Value,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
                     // Don't overwrite an existing matcher (e.g. IN or Range)
-                    props
-                        .entry(property.to_string())
-                        .or_insert(PropertyMatcher::Equals(value));
-                    return;
+                    if props.contains_key(property) {
+                        return false;
+                    }
+                    props.insert(property.to_string(), PropertyMatcher::Equals(value));
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Apply a string-prefix matcher (`STARTS WITH`) to the matching node
@@ -755,20 +881,22 @@ pub(super) fn apply_prefix_to_patterns(
     var_name: &str,
     property: &str,
     prefix: String,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
-                    props
-                        .entry(property.to_string())
-                        .or_insert(PropertyMatcher::StartsWith(prefix));
-                    return;
+                    if props.contains_key(property) {
+                        return false;
+                    }
+                    props.insert(property.to_string(), PropertyMatcher::StartsWith(prefix));
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Apply an IN-list property condition to the matching node pattern in MATCH
@@ -777,18 +905,22 @@ pub(super) fn apply_in_property_to_patterns(
     var_name: &str,
     property: &str,
     values: Vec<Value>,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
+                    if props.contains_key(property) {
+                        return false;
+                    }
                     props.insert(property.to_string(), PropertyMatcher::In(values));
-                    return;
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Apply a scalar-var reference (EqualsVar) to the matching node pattern.
@@ -798,20 +930,22 @@ pub(super) fn apply_var_property_to_patterns(
     var_name: &str,
     property: &str,
     ref_name: String,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
-                    props
-                        .entry(property.to_string())
-                        .or_insert(PropertyMatcher::EqualsVar(ref_name));
-                    return;
+                    if props.contains_key(property) {
+                        return false;
+                    }
+                    props.insert(property.to_string(), PropertyMatcher::EqualsVar(ref_name));
+                    return true;
                 }
             }
         }
     }
+    false
 }
 
 /// Apply a correlated node-prop reference (EqualsNodeProp) to the matching
@@ -823,21 +957,26 @@ pub(super) fn apply_nodeprop_to_patterns(
     property: &str,
     ref_var: String,
     ref_prop: String,
-) {
+) -> bool {
     for pattern in patterns.iter_mut() {
         for element in &mut pattern.elements {
             if let PatternElement::Node(ref mut np) = element {
                 if np.variable.as_deref() == Some(var_name) {
                     let props = np.properties.get_or_insert_with(Default::default);
-                    props
-                        .entry(property.to_string())
-                        .or_insert(PropertyMatcher::EqualsNodeProp {
+                    if props.contains_key(property) {
+                        return false;
+                    }
+                    props.insert(
+                        property.to_string(),
+                        PropertyMatcher::EqualsNodeProp {
                             var: ref_var,
                             prop: ref_prop,
-                        });
-                    return;
+                        },
+                    );
+                    return true;
                 }
             }
         }
     }
+    false
 }

@@ -56,6 +56,70 @@ fn test_predicate_pushdown_partial() {
 }
 
 #[test]
+fn test_predicate_pushdown_keeps_inline_property_collision_in_where() {
+    let mut query = parse_cypher(
+        "MATCH (n:Person {name: 'Alice'}) \
+         WHERE n.name = 'Bob' AND size(n.name) > 0 RETURN n",
+    )
+    .unwrap();
+
+    push_where_into_match(&mut query, &HashMap::new());
+
+    let Clause::Match(m) = &query.clauses[0] else {
+        panic!("expected MATCH clause");
+    };
+    let PatternElement::Node(node) = &m.patterns[0].elements[0] else {
+        panic!("expected node pattern");
+    };
+    assert!(matches!(
+        node.properties.as_ref().and_then(|props| props.get("name")),
+        Some(PropertyMatcher::Equals(Value::String(value))) if value == "Alice"
+    ));
+
+    let Clause::Where(where_clause) = &query.clauses[1] else {
+        panic!("expected residual WHERE clause");
+    };
+    let Predicate::And(left, _) = &where_clause.predicate else {
+        panic!("expected both the collision and non-pushable residual");
+    };
+    assert!(matches!(
+        left.as_ref(),
+        Predicate::Comparison {
+            left: Expression::PropertyAccess { property, .. },
+            operator: ComparisonOp::Equals,
+            right: Expression::Literal(Value::String(value)),
+        } if property == "name" && value == "Bob"
+    ));
+}
+
+#[test]
+fn test_predicate_pushdown_keeps_second_same_direction_bound_in_where() {
+    let mut query = parse_cypher(
+        "MATCH (n:Person) \
+         WHERE n.age > 35 AND n.age > 38 AND size(n.name) > 0 RETURN n",
+    )
+    .unwrap();
+
+    push_where_into_match(&mut query, &HashMap::new());
+
+    let Clause::Match(m) = &query.clauses[0] else {
+        panic!("expected MATCH clause");
+    };
+    let PatternElement::Node(node) = &m.patterns[0].elements[0] else {
+        panic!("expected node pattern");
+    };
+    assert!(matches!(
+        node.properties.as_ref().and_then(|props| props.get("age")),
+        Some(PropertyMatcher::GreaterThan(Value::Int64(35)))
+    ));
+
+    let Clause::Where(where_clause) = &query.clauses[1] else {
+        panic!("expected residual WHERE clause");
+    };
+    assert!(matches!(where_clause.predicate, Predicate::And(_, _)));
+}
+
+#[test]
 fn test_comparison_pushdown() {
     let mut query = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n").unwrap();
 

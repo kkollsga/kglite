@@ -204,6 +204,36 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("where_eq", "social_graph", "MATCH (p:Person) WHERE p.city = 'Oslo' RETURN p.name AS n", None),
     ("where_gt", "social_graph", "MATCH (p:Person) WHERE p.age > 30 RETURN p.name AS n", None),
     ("where_and", "social_graph", "MATCH (p:Person) WHERE p.age > 30 AND p.city = 'Bergen' RETURN p.name AS n", None),
+    (
+        "where_inline_equality_collision",
+        "social_graph",
+        "MATCH (p:Person {city: 'Oslo'}) WHERE p.city = 'Bergen' AND size(p.name) > 0 RETURN p.name AS n",
+        None,
+    ),
+    (
+        "where_inline_prefix_collision",
+        "social_graph",
+        "MATCH (p:Person {name: 'Person_1'}) WHERE p.name STARTS WITH 'Nope' AND size(p.name) > 0 RETURN p.name AS n",
+        None,
+    ),
+    (
+        "where_inline_in_collision",
+        "social_graph",
+        "MATCH (p:Person {city: 'Oslo'}) WHERE p.city IN ['Bergen'] AND size(p.name) > 0 RETURN p.name AS n",
+        None,
+    ),
+    (
+        "where_inline_range_collision",
+        "social_graph",
+        "MATCH (p:Person {age: 30}) WHERE p.age > 31 AND size(p.name) > 0 RETURN p.name AS n",
+        None,
+    ),
+    (
+        "where_same_direction_bound_collision",
+        "social_graph",
+        "MATCH (p:Person) WHERE p.age > 35 AND p.age > 38 AND size(p.name) > 0 RETURN p.name AS n",
+        None,
+    ),
     # ── fold_or_to_in ──
     (
         "or_chain_to_in",

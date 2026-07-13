@@ -102,6 +102,25 @@ class TestWhereClause:
         for row in rows:
             assert row["n.title"] in ["Alice", "Charlie", "Eve"]
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "MATCH (n:Person {city: 'Oslo'}) WHERE n.city = 'Bergen' AND size(n.name) > 0 RETURN n.name AS name",
+            "MATCH (n:Person {name: 'Alice'}) WHERE n.name STARTS WITH 'B' AND size(n.name) > 0 RETURN n.name AS name",
+            "MATCH (n:Person {city: 'Oslo'}) WHERE n.city IN ['Bergen'] AND size(n.name) > 0 RETURN n.name AS name",
+            "MATCH (n:Person {age: 30}) WHERE n.age > 31 AND size(n.name) > 0 RETURN n.name AS name",
+        ],
+    )
+    def test_pushdown_keeps_conflicting_inline_matcher(self, cypher_graph, query):
+        assert cypher_graph.cypher(query).to_list() == []
+        assert cypher_graph.cypher(query, disable_optimizer=True).to_list() == []
+
+    def test_pushdown_keeps_second_same_direction_bound(self, cypher_graph):
+        query = "MATCH (n:Person) WHERE n.age > 35 AND n.age > 38 AND size(n.name) > 0 RETURN n.name AS name"
+        expected = [{"name": "Eve"}]
+        assert cypher_graph.cypher(query).to_list() == expected
+        assert cypher_graph.cypher(query, disable_optimizer=True).to_list() == expected
+
     def test_or(self, cypher_graph):
         rows = cypher_graph.cypher("MATCH (n:Person) WHERE n.age < 26 OR n.age > 39 RETURN n.title")
         names = {r["n.title"] for r in rows}
