@@ -157,8 +157,8 @@ jobs:
       id-token: write
     steps:
       # Gate on the main CI being green (the cli is exercised by the workspace
-      # tests). Poll the Checks API directly — the `CI success` aggregate
-      # registers late, past lewagon/wait-on-check's discovery window.
+      # tests). Poll the push-triggered CI workflow directly so a same-SHA
+      # pull-request run cannot be mistaken for the release gate.
       - name: Wait for CI to pass
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -168,8 +168,8 @@ jobs:
           set -uo pipefail
           deadline=$(( $(date +%s) + 2700 ))
           while :; do
-            line=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
-              -q '.check_runs[] | select(.name=="CI success") | "\(.status) \(.conclusion // "")"' \
+            line=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=10" \
+              -q '.workflow_runs[0] | "\(.status) \(.conclusion // "")"' \
               2>/dev/null | head -n1 || true)
             status=${line%% *}; conclusion=${line#* }
             if [ "$status" = "completed" ]; then

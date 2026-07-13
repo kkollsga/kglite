@@ -54,10 +54,9 @@ jobs:
       # per-check allowlist — any new/failing CI job now blocks the release
       # automatically, instead of slipping through because it wasn't listed.
       #
-      # Poll the Checks API directly: `CI success` `needs` every CI job so it
-      # only registers minutes in, past lewagon/wait-on-check's ~60s discovery
-      # window (which exited "the requested check was never run against this ref"
-      # and failed every real publish — first hit on 0.11.7). Waits up to 45 min.
+      # Poll the push-triggered CI workflow run directly. A commit can also
+      # have a pull-request CI run with the same check names, so selecting a
+      # commit-level check is ambiguous. Waits up to 45 min.
       - name: Wait for CI to pass
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,8 +66,8 @@ jobs:
           set -uo pipefail
           deadline=$(( $(date +%s) + 2700 ))
           while :; do
-            line=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" \
-              -q '.check_runs[] | select(.name=="CI success") | "\(.status) \(.conclusion // "")"' \
+            line=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=10" \
+              -q '.workflow_runs[0] | "\(.status) \(.conclusion // "")"' \
               2>/dev/null | head -n1 || true)
             status=${line%% *}
             conclusion=${line#* }
@@ -80,10 +79,10 @@ jobs:
               echo "🔴 CI success concluded: $conclusion"
               exit 1
             fi
-            [ -n "$status" ] && echo "CI success: $status…" \
-              || echo "CI success check not registered yet…"
+            [ -n "$status" ] && echo "Main CI: $status…" \
+              || echo "Main CI run not registered yet…"
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::timed out waiting for the 'CI success' check"
+              echo "::error::timed out waiting for the main CI run"
               exit 1
             fi
             sleep 20
