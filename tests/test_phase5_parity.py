@@ -186,7 +186,7 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 41_234_896,  # 0.12.15 darwin baseline
+    "darwin": 41_334_128,  # 0.13.0 darwin baseline
     "linux": 64_656_000,  # 0.10.26 estimate: 0.9.52 Linux .so (59,529,016) scaled by
     # the same +8.6% as the macOS recapture. Linux has no strip so the bundled
     # server likely adds more in absolute terms — refresh with the real value on
@@ -227,12 +227,12 @@ def test_binary_size_regression():
                       (mcp-methods, rmcp, hyper/hyper-util, clap,
                       tracing-subscriber) into the cdylib: ~3 MB net on
                       macOS after strip, more on Linux (no strip).
-
-
-      - 0.12.15:       41,234,896 bytes (≈39.3 MB, macOS .dylib).
-                      Hardening added checked persistence decoders, disk
-                      generation/session ownership paths, complete C-ABI
-                      panic boundaries, and bounded executor guards (+4.9%).
+      - 0.13.0:       41,334,128 bytes (≈39.4 MB, macOS .dylib).
+                      Checked persistence decoders, disk generation and
+                      snapshot ownership, writer leases, complete C-ABI panic
+                      boundaries, bounded executor guards, and guarded lazy
+                      result materialization account for the growth since the
+                      prior published baseline.
 
     Raising the baseline is a deliberate act — every bump should
     be accompanied by an updated growth note above. For a precise
@@ -261,7 +261,7 @@ def test_binary_size_regression():
     gate = int(baseline * 1.10)
     assert size <= gate, (
         f"{bin_path.name} = {size:,} bytes > gate {gate:,} "
-        f"(+10% over 0.12.15 {platform_key} baseline {baseline:,}). "
+        f"(+10% over 0.13.0 {platform_key} baseline {baseline:,}). "
         "Investigate what grew before raising the gate — see the "
         "growth note in this test's docstring for the breakdown shape."
     )

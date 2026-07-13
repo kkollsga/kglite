@@ -45,7 +45,7 @@ mcp-methods = { version = "0.3.50", default-features = false, features = ["serve
 # `okf`: enables the code_tree docs pass (ingest a repo's markdown as :Doc
 # nodes + link them to code) so the open-source workspace can build with
 # include_docs=true.
-kglite = { version = "0.12", path = "../kglite", default-features = false, features = ["okf"] }
+kglite = { version = "0.13", path = "../kglite", default-features = false, features = ["okf"] }
 
 # rmcp re-export for the dynamic tool registration path.
 rmcp = { version = "1.6", features = ["server", "macros", "transport-io", "schemars"] }

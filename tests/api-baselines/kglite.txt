@@ -675,10 +675,10 @@ pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&s
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
 pub struct kglite::api::durable::Wal
 impl kglite::api::durable::Wal
-pub fn kglite::api::durable::Wal::append(&mut self, frame: &kglite::api::durable::WalFrame) -> std::io::error::Result<()>
-pub fn kglite::api::durable::Wal::open(path: std::path::PathBuf) -> std::io::error::Result<Self>
+pub fn kglite::api::durable::Wal::append(&mut self, frame: &kglite::api::durable::WalFrame) -> core::io::error::Result<()>
+pub fn kglite::api::durable::Wal::open(path: std::path::PathBuf) -> core::io::error::Result<Self>
 pub fn kglite::api::durable::Wal::path(&self) -> &std::path::Path
-pub fn kglite::api::durable::Wal::reset(&mut self) -> std::io::error::Result<()>
+pub fn kglite::api::durable::Wal::reset(&mut self) -> core::io::error::Result<()>
 impl core::fmt::Debug for kglite::api::durable::Wal
 pub fn kglite::api::durable::Wal::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct kglite::api::durable::WalFrame
@@ -696,7 +696,7 @@ pub fn kglite::api::durable::WalFrame::serialize<__S>(&self, __serializer: __S) 
 impl<'de> serde_core::de::Deserialize<'de> for kglite::api::durable::WalFrame
 pub fn kglite::api::durable::WalFrame::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub fn kglite::api::durable::apply_frames(graph: &mut kglite::api::DirGraph, frames: &[kglite::api::durable::WalFrame], after_lsn: u64) -> core::result::Result<u64, alloc::string::String>
-pub fn kglite::api::durable::recover(path: &std::path::Path) -> std::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
+pub fn kglite::api::durable::recover(path: &std::path::Path) -> core::io::error::Result<alloc::vec::Vec<kglite::api::durable::WalFrame>>
 pub fn kglite::api::durable::resolve_ops(raw: &[kglite::graph::storage::recording::RawOp], graph: &impl kglite::api::GraphRead, interner: &kglite::api::StringInterner) -> alloc::vec::Vec<kglite::graph::wal::MutationOp>
 pub fn kglite::api::durable::wal_path(checkpoint: &std::path::Path) -> std::path::PathBuf
 pub mod kglite::api::fluent
@@ -959,7 +959,7 @@ pub kglite::api::io::ProgressValue::U64(u64)
 pub struct kglite::api::io::Cancelled
 pub struct kglite::api::io::GraphFileIdentity
 impl kglite::api::io::GraphFileIdentity
-pub fn kglite::api::io::GraphFileIdentity::capture(path: &std::path::Path) -> std::io::error::Result<Self>
+pub fn kglite::api::io::GraphFileIdentity::capture(path: &std::path::Path) -> core::io::error::Result<Self>
 impl core::clone::Clone for kglite::api::io::GraphFileIdentity
 pub fn kglite::api::io::GraphFileIdentity::clone(&self) -> kglite::api::io::GraphFileIdentity
 impl core::cmp::Eq for kglite::api::io::GraphFileIdentity
@@ -970,7 +970,7 @@ pub fn kglite::api::io::GraphFileIdentity::fmt(&self, f: &mut core::fmt::Formatt
 impl core::marker::StructuralPartialEq for kglite::api::io::GraphFileIdentity
 pub struct kglite::api::io::GraphWriterLease
 impl kglite::api::io::GraphWriterLease
-pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> std::io::error::Result<Self>
+pub fn kglite::api::io::GraphWriterLease::acquire(graph_path: &std::path::Path, timeout: core::time::Duration) -> core::io::error::Result<Self>
 impl core::ops::drop::Drop for kglite::api::io::GraphWriterLease
 pub fn kglite::api::io::GraphWriterLease::drop(&mut self)
 pub struct kglite::api::io::ImportStats
@@ -1012,12 +1012,12 @@ impl core::fmt::Debug for kglite::api::io::SubsetSpec
 pub fn kglite::api::io::SubsetSpec::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub trait kglite::api::io::ProgressSink: core::marker::Send + core::marker::Sync
 pub fn kglite::api::io::ProgressSink::emit(&self, event: kglite::api::io::ProgressEvent<'_>) -> core::result::Result<(), kglite::api::io::Cancelled>
-pub fn kglite::api::io::export_embeddings_to_file(graph: &kglite::api::DirGraph, path: &str, filter: core::option::Option<&kglite::api::io::EmbeddingExportFilter>) -> std::io::error::Result<kglite::graph::io::file::vector_persistence::ExportStats>
-pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::DirGraph, path: &str) -> std::io::error::Result<kglite::api::io::ImportStats>
-pub fn kglite::api::io::load_file(path: &str) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
-pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> std::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
+pub fn kglite::api::io::export_embeddings_to_file(graph: &kglite::api::DirGraph, path: &str, filter: core::option::Option<&kglite::api::io::EmbeddingExportFilter>) -> core::io::error::Result<kglite::graph::io::file::vector_persistence::ExportStats>
+pub fn kglite::api::io::import_embeddings_from_file(graph: &mut kglite::api::DirGraph, path: &str) -> core::io::error::Result<kglite::api::io::ImportStats>
+pub fn kglite::api::io::load_file(path: &str) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
+pub fn kglite::api::io::load_kgl_bytes(data: &[u8]) -> core::io::error::Result<alloc::sync::Arc<kglite::api::DirGraph>>
 pub fn kglite::api::io::load_ntriples(graph: &mut kglite::api::DirGraph, path: &str, config: &kglite::api::io::NTriplesConfig) -> core::result::Result<kglite::graph::io::ntriples::NTriplesStats, alloc::string::String>
-pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> std::io::error::Result<kglite::api::io::OpenGraphResult>
+pub fn kglite::api::io::open_or_create_graph(path: &std::path::Path, create_mode: core::option::Option<kglite::api::storage::StorageMode>) -> core::io::error::Result<kglite::api::io::OpenGraphResult>
 pub fn kglite::api::io::pass_a_scan(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec) -> kglite::graph::mutation::subgraph_streaming::PassAResult
 pub fn kglite::api::io::pass_a_scan_to_file(source: &kglite::api::storage::DiskGraph, spec: &kglite::api::io::SubsetSpec, kept_edges_path: &std::path::Path) -> core::result::Result<kglite::graph::mutation::subgraph_streaming::PassAFileResult, alloc::string::String>
 pub fn kglite::api::io::prepare_save(graph: &mut alloc::sync::Arc<kglite::api::DirGraph>)
@@ -1031,9 +1031,9 @@ pub fn kglite::api::io::to_d3_json(graph: &kglite::api::DirGraph, selection: cor
 pub fn kglite::api::io::to_gexf(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_graphml(graph: &kglite::api::DirGraph, selection: core::option::Option<&kglite::api::CurrentSelection>) -> core::result::Result<alloc::string::String, alloc::string::String>
 pub fn kglite::api::io::to_text(graph: &kglite::api::DirGraph) -> alloc::string::String
-pub fn kglite::api::io::write_kgl(graph: &kglite::api::DirGraph, path: &str) -> std::io::error::Result<()>
-pub fn kglite::api::io::write_kgl_to<W: std::io::Write>(graph: &kglite::api::DirGraph, writer: &mut W) -> std::io::error::Result<()>
-pub fn kglite::api::io::write_kgl_with(graph: &kglite::api::DirGraph, path: &str, fsync: bool) -> std::io::error::Result<()>
+pub fn kglite::api::io::write_kgl(graph: &kglite::api::DirGraph, path: &str) -> core::io::error::Result<()>
+pub fn kglite::api::io::write_kgl_to<W: std::io::Write>(graph: &kglite::api::DirGraph, writer: &mut W) -> core::io::error::Result<()>
+pub fn kglite::api::io::write_kgl_with(graph: &kglite::api::DirGraph, path: &str, fsync: bool) -> core::io::error::Result<()>
 pub mod kglite::api::mutation
 pub enum kglite::api::mutation::OperationReport
 pub kglite::api::mutation::OperationReport::CalculationOperation(kglite::graph::introspection::reporting::CalculationOperationReport)
@@ -1285,9 +1285,9 @@ pub struct kglite::api::storage::DiskGraph
 impl kglite::api::storage::DiskGraph
 pub fn kglite::api::storage::DiskGraph::add_edge(&mut self, a: petgraph::graph_impl::NodeIndex, b: petgraph::graph_impl::NodeIndex, data: kglite::graph::schema::EdgeData) -> petgraph::graph_impl::EdgeIndex
 pub fn kglite::api::storage::DiskGraph::add_node(&mut self, data: kglite::api::NodeData) -> petgraph::graph_impl::NodeIndex
-pub fn kglite::api::storage::DiskGraph::build_csr_from_pending(&mut self) -> std::io::error::Result<()>
+pub fn kglite::api::storage::DiskGraph::build_csr_from_pending(&mut self) -> core::io::error::Result<()>
 pub fn kglite::api::storage::DiskGraph::column_stores_iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&kglite::api::InternedKey, &alloc::sync::Arc<kglite::graph::storage::column_store::ColumnStore>)>
-pub fn kglite::api::storage::DiskGraph::compact(&mut self) -> std::io::error::Result<usize>
+pub fn kglite::api::storage::DiskGraph::compact(&mut self) -> core::io::error::Result<usize>
 pub fn kglite::api::storage::DiskGraph::count_edges_filtered(&self, node: petgraph::graph_impl::NodeIndex, dir: petgraph::Direction, conn_type: core::option::Option<u64>, other_node_type: core::option::Option<kglite::api::InternedKey>, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<usize, alloc::string::String>
 pub fn kglite::api::storage::DiskGraph::count_edges_grouped_by_peer(&self, conn_type: u64, dir: petgraph::Direction, deadline: core::option::Option<std::time::Instant>) -> core::result::Result<std::collections::hash::map::HashMap<u32, i64>, alloc::string::String>
 pub fn kglite::api::storage::DiskGraph::edge_count(&self) -> usize
@@ -1328,23 +1328,23 @@ pub fn kglite::api::storage::DiskGraph::sources_for_conn_type(&self, conn_type: 
 pub fn kglite::api::storage::DiskGraph::sources_for_conn_type_bounded(&self, conn_type: u64, max: core::option::Option<usize>) -> core::option::Option<alloc::vec::Vec<u32>>
 pub fn kglite::api::storage::DiskGraph::update_row_id(&mut self, node_idx: petgraph::graph_impl::NodeIndex, row_id: u32)
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::build_global_property_index(&mut self, property: &str) -> std::io::error::Result<usize>
-pub fn kglite::api::storage::DiskGraph::build_property_index(&mut self, node_type: &str, property: &str) -> std::io::error::Result<usize>
-pub fn kglite::api::storage::DiskGraph::drop_property_index(&mut self, node_type: &str, property: &str) -> std::io::error::Result<bool>
+pub fn kglite::api::storage::DiskGraph::build_global_property_index(&mut self, property: &str) -> core::io::error::Result<usize>
+pub fn kglite::api::storage::DiskGraph::build_property_index(&mut self, node_type: &str, property: &str) -> core::io::error::Result<usize>
+pub fn kglite::api::storage::DiskGraph::drop_property_index(&mut self, node_type: &str, property: &str) -> core::io::error::Result<bool>
 pub fn kglite::api::storage::DiskGraph::has_property_index(&self, node_type: &str, property: &str) -> bool
 pub fn kglite::api::storage::DiskGraph::lookup_global_eq(&self, property: &str, value: &str) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::storage::DiskGraph::lookup_global_prefix(&self, property: &str, prefix: &str, limit: usize) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::storage::DiskGraph::lookup_property_eq(&self, node_type: &str, property: &str, value: &str) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 pub fn kglite::api::storage::DiskGraph::lookup_property_prefix(&self, node_type: &str, property: &str, prefix: &str, limit: usize) -> core::option::Option<alloc::vec::Vec<petgraph::graph_impl::NodeIndex>>
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::from_stable_digraph(graph: &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>, root_dir: &std::path::Path) -> std::io::error::Result<Self>
-pub fn kglite::api::storage::DiskGraph::new_at_path(root_dir: &std::path::Path) -> std::io::error::Result<Self>
+pub fn kglite::api::storage::DiskGraph::from_stable_digraph(graph: &mut petgraph::graph_impl::stable_graph::StableDiGraph<kglite::api::NodeData, kglite::graph::schema::EdgeData>, root_dir: &std::path::Path) -> core::io::error::Result<Self>
+pub fn kglite::api::storage::DiskGraph::new_at_path(root_dir: &std::path::Path) -> core::io::error::Result<Self>
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::load_from_dir(dir: &std::path::Path, interner: &mut kglite::api::StringInterner) -> std::io::error::Result<(Self, std::path::PathBuf)>
-pub fn kglite::api::storage::DiskGraph::save_to_dir(&mut self, target_dir: &std::path::Path, _interner: &kglite::api::StringInterner) -> std::io::error::Result<()>
-pub fn kglite::api::storage::DiskGraph::seal_to_new_segment(&mut self, root: &std::path::Path) -> std::io::error::Result<u32>
+pub fn kglite::api::storage::DiskGraph::load_from_dir(dir: &std::path::Path, interner: &mut kglite::api::StringInterner) -> core::io::error::Result<(Self, std::path::PathBuf)>
+pub fn kglite::api::storage::DiskGraph::save_to_dir(&mut self, target_dir: &std::path::Path, _interner: &kglite::api::StringInterner) -> core::io::error::Result<()>
+pub fn kglite::api::storage::DiskGraph::seal_to_new_segment(&mut self, root: &std::path::Path) -> core::io::error::Result<u32>
 impl kglite::api::storage::DiskGraph
-pub fn kglite::api::storage::DiskGraph::rebuild_peer_count_histogram(&mut self) -> std::io::error::Result<()>
+pub fn kglite::api::storage::DiskGraph::rebuild_peer_count_histogram(&mut self) -> core::io::error::Result<()>
 impl core::clone::Clone for kglite::api::storage::DiskGraph
 pub fn kglite::api::storage::DiskGraph::clone(&self) -> Self
 impl core::fmt::Debug for kglite::api::storage::DiskGraph
@@ -1598,7 +1598,7 @@ pub kglite::api::KgError::Expr(kglite::graph::blueprint::expr::ExprError)
 pub kglite::api::KgError::FileFormat
 pub kglite::api::KgError::FileFormat::message: alloc::string::String
 pub kglite::api::KgError::FileFormat::path: std::path::PathBuf
-pub kglite::api::KgError::FileIo(std::io::error::Error)
+pub kglite::api::KgError::FileIo(core::io::error::Error)
 pub kglite::api::KgError::FileNotFound(std::path::PathBuf)
 pub kglite::api::KgError::Internal
 pub kglite::api::KgError::Internal::location: &'static str
@@ -1622,14 +1622,14 @@ pub kglite::api::KgError::Validation(kglite::api::ValidationError)
 impl kglite::error::KgError
 pub fn kglite::error::KgError::code(&self) -> kglite::error::KgErrorCode
 pub fn kglite::error::KgError::position(&self) -> core::option::Option<(usize, usize)>
+impl core::convert::From<core::io::error::Error> for kglite::error::KgError
+pub fn kglite::error::KgError::from(e: core::io::error::Error) -> Self
 impl core::convert::From<kglite::api::InternerCollision> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::InternerCollision) -> Self
 impl core::convert::From<kglite::api::ValidationError> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::ValidationError) -> Self
 impl core::convert::From<kglite::api::cypher::planner::schema_check::SchemaError> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::cypher::planner::schema_check::SchemaError) -> Self
-impl core::convert::From<std::io::error::Error> for kglite::error::KgError
-pub fn kglite::error::KgError::from(e: std::io::error::Error) -> Self
 impl core::error::Error for kglite::error::KgError
 pub fn kglite::error::KgError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for kglite::error::KgError
@@ -2503,7 +2503,7 @@ pub fn kglite::api::durable::RecordingGraph<G>::sources_for_conn_type_bounded(&s
 pub fn kglite::api::durable::RecordingGraph<G>::str_prop_eq(&self, idx: petgraph::graph_impl::NodeIndex, key: kglite::api::InternedKey, target: &str) -> core::option::Option<bool>
 pub fn kglite::api::discover_property_keys_from_data(nodes: &[(&str, &kglite::api::NodeData)], interner: &kglite::api::StringInterner) -> alloc::vec::Vec<alloc::string::String>
 pub fn kglite::api::explore_markdown(dir: &kglite::api::DirGraph, query: &str, opts: &kglite::api::ExploreOptions, source_roots: &[std::path::PathBuf]) -> alloc::string::String
-pub fn kglite::api::graphgen(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> std::io::error::Result<kglite::graphgen::GraphGenStats>
+pub fn kglite::api::graphgen(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> core::io::error::Result<kglite::graphgen::GraphGenStats>
 pub fn kglite::api::infer_selection_node_type(selection: &kglite::api::CowSelection, dir: &alloc::sync::Arc<kglite::api::DirGraph>) -> core::option::Option<alloc::string::String>
 pub fn kglite::api::make_dir_graph_mut(arc: &mut alloc::sync::Arc<kglite::api::DirGraph>) -> &mut kglite::api::DirGraph
 pub fn kglite::api::parse_spatial_column_types_from_pairs(pairs: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>) -> core::result::Result<(core::option::Option<kglite::api::SpatialConfig>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>), alloc::string::String>
@@ -3510,7 +3510,7 @@ pub kglite::error::KgError::Expr(kglite::graph::blueprint::expr::ExprError)
 pub kglite::error::KgError::FileFormat
 pub kglite::error::KgError::FileFormat::message: alloc::string::String
 pub kglite::error::KgError::FileFormat::path: std::path::PathBuf
-pub kglite::error::KgError::FileIo(std::io::error::Error)
+pub kglite::error::KgError::FileIo(core::io::error::Error)
 pub kglite::error::KgError::FileNotFound(std::path::PathBuf)
 pub kglite::error::KgError::Internal
 pub kglite::error::KgError::Internal::location: &'static str
@@ -3534,14 +3534,14 @@ pub kglite::error::KgError::Validation(kglite::api::ValidationError)
 impl kglite::error::KgError
 pub fn kglite::error::KgError::code(&self) -> kglite::error::KgErrorCode
 pub fn kglite::error::KgError::position(&self) -> core::option::Option<(usize, usize)>
+impl core::convert::From<core::io::error::Error> for kglite::error::KgError
+pub fn kglite::error::KgError::from(e: core::io::error::Error) -> Self
 impl core::convert::From<kglite::api::InternerCollision> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::InternerCollision) -> Self
 impl core::convert::From<kglite::api::ValidationError> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::ValidationError) -> Self
 impl core::convert::From<kglite::api::cypher::planner::schema_check::SchemaError> for kglite::error::KgError
 pub fn kglite::error::KgError::from(e: kglite::api::cypher::planner::schema_check::SchemaError) -> Self
-impl core::convert::From<std::io::error::Error> for kglite::error::KgError
-pub fn kglite::error::KgError::from(e: std::io::error::Error) -> Self
 impl core::error::Error for kglite::error::KgError
 pub fn kglite::error::KgError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for kglite::error::KgError
@@ -3634,7 +3634,7 @@ pub kglite::graphgen::NodeType::name: &'static str
 pub kglite::graphgen::NodeType::title_column: &'static str
 pub const kglite::graphgen::EDGE_TYPES: &[kglite::graphgen::EdgeType]
 pub const kglite::graphgen::NODE_TYPES: &[kglite::graphgen::NodeType]
-pub fn kglite::graphgen::generate_to_dir(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> std::io::error::Result<kglite::graphgen::GraphGenStats>
+pub fn kglite::graphgen::generate_to_dir(cfg: &kglite::graphgen::GraphGenConfig, out_dir: &std::path::Path) -> core::io::error::Result<kglite::graphgen::GraphGenStats>
 pub mod kglite::param
 pub fn kglite::param::json_object_to_value_map(map: &serde_json::map::Map<alloc::string::String, serde_json::value::Value>) -> std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>
 pub fn kglite::param::json_value_to_kglite_value(v: &serde_json::value::Value) -> kglite::datatypes::values::Value

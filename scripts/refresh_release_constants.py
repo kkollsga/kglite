@@ -54,7 +54,7 @@ BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
 API_BASELINE = REPO_ROOT / "tests" / "api-baselines" / "kglite.txt"
 # Pinned nightly for cargo-public-api. Keep in sync with the public-api job in
 # .github/workflows/ci.yml and KGLITE_API_NIGHTLY in the Makefile.
-PUBLIC_API_NIGHTLY = "nightly-2026-01-09"
+PUBLIC_API_NIGHTLY = "nightly-2026-07-01"
 
 
 def read_version() -> str:

@@ -174,7 +174,9 @@ def test_concurrent_write_save_serializes(tmp_path):
 
     rows = kglite.load(str(p)).cypher("MATCH (t:Task) RETURN t.id AS id ORDER BY id").to_dicts()
     assert rows == [{"id": "a"}, {"id": "b"}]
-    assert not (tmp_path / "shared.kgl.lock").exists()
+    # The sibling file persists so every contender locks the same inode; only
+    # the OS advisory lock is released. Its text is diagnostic, not liveness.
+    assert (tmp_path / "shared.kgl.lock").read_text().startswith("pid=")
 
 
 def test_ready_set_subcommand(tmp_path):

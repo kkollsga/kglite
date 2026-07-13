@@ -97,7 +97,7 @@ refresh-release-constants:
 ## with the public-api job in .github/workflows/ci.yml. One-time setup:
 ##   rustup toolchain install $(KGLITE_API_NIGHTLY)
 ##   cargo install cargo-public-api --locked --version 0.49.0
-KGLITE_API_NIGHTLY ?= nightly-2026-01-09
+KGLITE_API_NIGHTLY ?= nightly-2026-07-01
 refresh-api-baseline:
 	RUSTUP_TOOLCHAIN=$(KGLITE_API_NIGHTLY) cargo public-api -p kglite -ss > tests/api-baselines/kglite.txt
 	@echo "refreshed tests/api-baselines/kglite.txt ($(KGLITE_API_NIGHTLY))"

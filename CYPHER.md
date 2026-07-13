@@ -1764,7 +1764,7 @@ RETURN n.contains, n.order                     // … and in property access
 Keyword names are **case-preserving**: the stored name is the exact source
 spelling (`{order: 1}` stores the key `order`; `[:contains]` creates the
 relationship type `contains`), and names are case-sensitive — `n.ORDER` and
-`n.order` are different keys. (Releases up to 0.12.15 canonicalized keyword
+`n.order` are different keys. (Releases up to 0.12.14 canonicalized keyword
 names to uppercase, so a graph written by an older release may store `ORDER`
 where a lowercase source now reads `order`; backticks reach the old spelling.)
 

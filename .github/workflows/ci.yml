@@ -373,7 +373,7 @@ jobs:
     # release time (see CLAUDE.md "Captured-constant refresh"). Keep
     # KGLITE_API_NIGHTLY in sync with the Makefile + refresh_release_constants.py.
     env:
-      KGLITE_API_NIGHTLY: nightly-2026-01-09
+      KGLITE_API_NIGHTLY: nightly-2026-07-01
       KGLITE_PUBLIC_API_VERSION: 0.49.0
     steps:
       - uses: actions/checkout@v7

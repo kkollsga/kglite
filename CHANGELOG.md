@@ -5,308 +5,80 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.15] - 2026-07-11
-
-### Changed
-
-- **`traverse()` now uses its canonical filter names and supports concurrent
-  read borrows.** The obsolete `filter_target` / `filter_connection` keyword
-  aliases were removed; use `where` / `where_connection`. Read-only traversal
-  no longer requests an exclusive Python borrow.
-
-- **Cypher compatibility claims now have an executable dialect contract.** A
-  machine-readable manifest classifies covered, partial, unsupported, extended,
-  and intentionally divergent behavior; public docs and agent introspection no
-  longer imply complete openCypher or Neo4j compatibility. KGLite functions and
-  procedures also accept canonical `kglite.*` names while existing flat names
-  remain equivalent. The compatibility surface is locked by independently
-  authored MIT-licensed behavioral cases and an artifact-provenance gate.
-  Every covered or partial dialect feature now cites the behavioral case ids
-  that exercise it (manifest `schema_version` 2), the contract test verifies
-  the cited cases exist and execute, and the clean-room checker declares the
-  guarded-vs-reviewed conformance-suite boundary explicitly.
-- **Public distribution interfaces and license metadata are now executable
-  contracts.** Reviewed snapshots lock Python exports and signatures, MCP tool
-  schemas by server mode, Bolt columns and graph values, and CLI help/errors.
-  Wheels, source distributions, and every publishable crate carry the MIT
-  license, while an all-feature dependency audit requires explicit review of
-  new license expressions and Apache/MPL-only packages.
-
-- **Soft keywords used as names keep their verbatim case.** `{order: 1}`
-  stores the key `order` (previously `ORDER`), `SET n.contains` writes
-  `contains`, and `AS Order` names the column `Order`, matching Neo4j.
-  Graphs written by earlier versions store the canonical-uppercase form;
-  reach those keys with backticks (`` n.`ORDER` ``). Documented in CYPHER.md
-  and the dialect manifest.
+## [0.13.0] - 2026-07-13
 
 ### Added
 
-- **`EXPLAIN` now reports which optimizer passes actually changed the plan.**
-  `OptimizerPass <name>` rows follow the physical plan and disappear when the
-  corresponding pass is disabled, providing a deterministic rewrite oracle.
+- **Cypher behavior is now defined by an executable dialect contract.** The
+  contract distinguishes supported, partial, extended, and intentionally
+  divergent behavior, and is reflected in the public documentation and agent
+  introspection.
+- **`EXPLAIN` reports optimizer activity.** Plans include the optimizer passes
+  that changed them, making rewrites observable and easier to diagnose.
+- **Disk saves use immutable generations and cross-process writer leases.**
+  Readers remain on one consistent snapshot, interrupted saves leave the prior
+  generation intact, and competing writers fail instead of overwriting one
+  another.
+
+### Changed
+
+- **`traverse()` uses only the canonical `where` and
+  `where_connection` filters.** The obsolete `filter_target` and
+  `filter_connection` aliases have been removed.
+- **Cypher names and compatibility reporting are more precise.** KGLite
+  functions and procedures accept canonical `kglite.*` names, while soft
+  keywords used as property or result names retain their original case.
+  Properties written by older releases with canonical-uppercase names remain
+  accessible with backticks.
+- **Execution limits cover the complete query.** `max_rows`, timeout, and
+  cancellation checks now apply across expansion, aggregation, subqueries,
+  procedures, result conversion, and mutations; interrupted writes roll back.
+- **Public Python, MCP, Bolt, CLI, C ABI, package metadata, and license surfaces
+  are checked as release contracts.**
 
 ### Performance
 
-- **Consumed lazy Cypher results batch their safety checks.** `to_list()`,
-  `column()`, `head()`, `tail()`, `repr()`, and DataFrame conversion validate
-  graph provenance once per contiguous batch instead of once per row, while
-  retaining a separate disk-arena guard for every row. A 100-row property
-  projection is 4–9% faster than the pre-hardening implementation on the
-  release benchmark fixture.
-- **Point lookups and cache rebuilds no longer copy the graph or stall other
-  threads.** `node()` on a graph with live fluent clones is ~5,400× faster
-  (it deep-copied the entire graph through `Arc::make_mut`; now a read-only
-  index lookup), `build_id_indices()` pre-warms without copying,
-  `rebuild_caches()` and bulk `add_nodes`/`add_connections`/`traverse` run
-  their pure-Rust phases off the GIL so other Python threads keep making
-  progress, the MCP server saves through the live graph instead of
-  deep-cloning it on every save, and the pattern matcher no longer clones
-  every matched edge's property map into a field nothing read (−29% on
-  relationship-property projections).
-- **Trivial in-memory writes no longer clone the entire graph for rollback.**
-  Standalone single-node `CREATE` and terminal variable-only `DELETE` complete
-  all validation and interruption checks before entering an infallible commit
-  phase. On the 50k-node regression fixture, a CREATE+DELETE cycle falls from
-  milliseconds to single-digit microseconds while complex, budgeted, mapped,
-  disk, and durable mutations retain their full atomic checkpoint.
-- **`LIMIT` now caps unfiltered node-only cartesian matches before expansion.**
-  A representative 10k-node two-label query returning 20 rows falls from
-  roughly 2.8 seconds to 10 µs. Correlated, filtered, ordered, multi-MATCH,
-  and relationship patterns retain the conservative materialized path.
-- **Ungrouped one- and two-hop `count(*)` queries now count paths directly.**
-  The aggregate planner reuses the exact per-endpoint counters instead of
-  materializing every matched path. A 30k-node, 90k-edge two-hop count falls
-  from roughly 41 ms to 3.4 ms while repeated-variable patterns retain the
-  binding-aware executor.
+- **Common in-memory operations avoid unnecessary graph copies and GIL
+  stalls.** Point lookup, cache rebuilding, bulk mutation, traversal, and MCP
+  persistence now retain shared read behavior where possible.
+- **The planner has fast paths for safe `LIMIT`, one- and two-hop
+  `count(*)`, and trivial `CREATE`/`DELETE` cases.** Representative
+  workloads improve from milliseconds or seconds to microseconds without
+  weakening rollback guarantees on complex writes.
+- **Lazy result consumption batches provenance checks.** Materializing,
+  slicing, representing, or converting a result validates each contiguous
+  batch once while retaining per-row disk-arena guards; the release fixture is
+  4–9% faster than the pre-hardening implementation.
 
 ### Fixed
 
-- **Mapped growth failures no longer panic or partially append graph data.**
-  Mmap capacity arithmetic, zero-length mappings, growth, and trim operations
-  are checked and retry-safe; disk/N-Triples/subgraph builders propagate I/O
-  errors, and typed columns roll back paired buffers or fall back to heap
-  storage without exposing a partial row.
-
-- **File-freshness stamps are stable, precise, and atomic.** Files are hashed
-  in bounded chunks through one descriptor with before/after identity checks
-  and bounded retry, duplicate resolved paths are read once, and graph updates
-  use primary type plus ID in bounded batches inside one transaction. Mtimes
-  are stored as nanosecond UTC RFC 3339 strings; passing `hash_property=None`
-  now performs useful drift checks against the configured mtime property.
-
-- **Python Cypher syntax errors expose structured source positions.**
-  `CypherSyntaxError.line` and `.col` are always present (1-indexed when known,
-  otherwise `None`), file-freshness stamping batches graph updates and safely
-  escapes custom property names, deeply nested outline rendering no longer
-  hits Python's recursion limit, and code-entity searches now match primary
-  titles for exact, substring, and prefix modes.
-
-- **`COUNT { }` subqueries count joined rows.** Comma-separated patterns
-  inside `COUNT { }` join with shared-variable compatibility and the
-  relationship-uniqueness rule (matching `EXISTS { }` and `MATCH`) instead
-  of summing per-pattern counts.
-- **N-Triples disk builds reload correctly without an intervening save.**
-  Build finalisation never flushed appended node slots and wrote the graph
-  sidecars into the segment directory the loader doesn't read — large
-  builds failed to reload and small builds silently reloaded with dead node
-  data. Both finalisation gaps are fixed and pinned by reload regressions.
-- **numpy array cells become native list properties.** A numpy array in a
-  DataFrame cell round-trips as a list (nested for multi-dimensional)
-  through `add_nodes` and `add_connections` instead of stringifying.
-- **Node identity, EXISTS uniqueness, CASE positions, and aggregate errors
-  follow openCypher semantics; abbreviated edges parse.** A node carried
-  through `collect()`/`UNWIND` constrains a later `MATCH` to that exact node
-  (matching the relationship-identity contract); comma patterns inside
-  `EXISTS { }` enforce relationship uniqueness per clause; comparisons and
-  pattern expressions work in CASE operand/WHEN/THEN/ELSE positions;
-  aggregate argument evaluation errors propagate on the fused and streaming
-  paths (previously only the fully-materialized path errored); and the
-  abbreviated edge forms `-->`, `<--`, and `--` are accepted everywhere
-  patterns parse. Disk-mode arena reads are now guarded engine-wide — both
-  query executors hold the read guard for their lifetime, enforced by a
-  debug assertion across the whole workspace test suite.
-- **Corrupted graph files fail loudly instead of silently degrading.** A
-  disk-graph sidecar (embeddings, timeseries, secondary labels) that exists
-  but fails to decode now fails the load with an error naming the file,
-  while genuinely absent sidecars stay optional; sidecar decompression is
-  bounded; mapped string columns are UTF-8-and-boundary validated once at
-  load (skippable via `KGLITE_SKIP_UTF8_VALIDATION=1` for very large trusted
-  graphs); a corrupt WAL length prefix can no longer trigger a giant
-  allocation, torn WAL headers are repaired when provably frameless and
-  refused otherwise, WAL creation fsyncs its parent directory, and
-  `save(fsync=False)` on a durable graph warns and fsyncs anyway. The
-  overflow property codec is unified into one module — timestamps
-  round-trip through the mapped borrowed decoder, and an unknown tag skips
-  one value instead of dropping the rest of the row's properties. The
-  N-Triples label journal truncates at character boundaries and
-  distinguishes torn records from clean end-of-file.
-- **The Cypher parser rejects invalid input cleanly instead of surprising or
-  crashing.** Variable-length bounds validate (`*5..2` errors; `*11..` means
-  eleven-or-more instead of silently matching nothing; the default 10-hop cap
-  on bare `*` is documented as an intentional divergence with executable
-  cases), expression nesting has a 512-level budget that returns a normal
-  syntax error instead of overflowing the stack, subtraction accepts any
-  valid operand shape (`5 - $p`, `5 - CASE ... END`, `5 - -3`),
-  `-list[0]` negates the element rather than the list, `EXISTS { ... }` and
-  label predicates work in projection position (the WHERE and expression
-  parsers now share one tower), soft keywords work as map keys, and a
-  trailing `AS`/`XOR` after an inline pattern expression is no longer
-  swallowed.
-- **Query-derived DataFrames no longer corrupt or discard values.**
-  `add_connections(query=...)` column types now promote across the whole
-  result column instead of locking to the first non-null value: mixed
-  int/float widens to float (previously `1.5` was truncated to `1`), ids
-  that overflow the compact id type widen instead of wrapping, `datetime()`
-  columns round-trip natively (previously an entire column silently became
-  null), and incompatible mixes serialize as text instead of nulling.
-  `DataFrame` lookups return an optional instead of panicking on a missing
-  column, and non-rectangular column adds are rejected.
-- **Relationship variables and multi-pattern MATCH now follow openCypher
-  binding semantics.** A relationship variable carried through `WITH` or
-  `UNWIND` constrains a later `MATCH` to that exact relationship instead of
-  re-enumerating all edges; two relationship variables in one `MATCH` cannot
-  bind the same edge across comma-separated patterns (the trail rule); an
-  empty comma pattern empties the whole match instead of letting the next
-  pattern refill it; and comma-separated `OPTIONAL MATCH` patterns join as
-  one unit that null-pads only when the joined whole fails.
-- **Write clauses follow openCypher null and atomicity semantics.**
-  `SET`/`REMOVE` on a null-valued variable (e.g. from an unmatched
-  `OPTIONAL MATCH`) are per-row no-ops instead of errors, while genuinely
-  undefined names still fail validation; `DELETE r, n` in one statement
-  deletes the relationship before the node's connectivity check; and
-  aggregate group-key evaluation errors (like a missing parameter) propagate
-  instead of silently grouping under null.
-- **Concurrent writes can no longer be silently lost at the C ABI and Bolt
-  boundaries.** `kglite_create_edges_batch` now serializes through the
-  session transaction path instead of a last-writer-wins commit,
-  `kglite_session_set_embedder` is safe against concurrent query execution,
-  and a Bolt `COMMIT`/`ROLLBACK` racing a pipelined `RUN` returns a retryable
-  transaction error instead of dropping the transaction and reporting
-  success. Bolt transactions also accept `write_scope`, `git_sha`, and
-  `modified_by` via `tx_metadata`, matching the CLI and MCP surfaces.
-- **The MCP server recovers from internal panics and failed rebuilds.**
-  Poisoned graph-state locks no longer wedge every subsequent request, and a
-  failed lazy code-tree rebuild restores its dirty marker, retries with a
-  bounded backoff, and surfaces the error plus a staleness warning in tool
-  output instead of silently serving a stale graph.
-- **Fused and DISTINCT-optimized query paths now agree with the materialized
-  executor.** A residual `WHERE` between `MATCH` and `RETURN DISTINCT` is no
-  longer dropped by the distinct pushdown; fused `OPTIONAL MATCH` counts
-  post-filter by connection type on in-memory/mapped storage, report
-  `count(*)` as 1 (not 0) for unmatched rows, and bail to the materialized
-  executor for comma-separated multi-pattern shapes whose per-variable counts
-  a single summed match count cannot represent. The duplicated count helpers
-  that allowed these paths to drift are consolidated.
-- **Boolean, membership, quantifier, and list expressions now preserve Cypher
-  semantics outside `WHERE`.** `AND`/`OR`/`XOR`/`NOT` parse in projection
-  expressions with the expected precedence, unknown values remain null,
-  `IN` and list quantifiers use three-valued results, `+` composes lists and
-  elements, and list indexes/slice bounds reject non-integer types instead of
-  truncating or silently returning null.
-- **Scope, map mutation, and relationship identity now have explicit
-  contracts.** Undefined variables fail during validation (including names
-  projected out by `WITH`), `MERGE` rejects null property keys before any
-  mutation, `SET entity += map` and `SET entity = map` work for nodes and
-  relationships, and `id(r)` returns the stable relationship identity.
-- **Cypher paths now retain exact relationship identity.** Fixed,
-  variable-length, shortest, and all-shortest path bindings preserve parallel
-  and incoming relationships, `relationships(p)` returns the edges actually
-  matched, and a relationship cannot be reused within one path while nodes may
-  repeat. Fused two-hop counts enforce the same trail rule.
-- **Python, MCP, and Bolt boundaries now expose their declared shapes.** Public
-  session/RDF/open helpers are exported consistently, PyO3 classes identify as
-  `kglite` types, read-only MCP Cypher schemas omit write-only arguments, local
-  workspaces expose one activation tool, and malformed Bolt paths fail instead
-  of inventing a traversal direction.
-- **Interned names can no longer silently alias on a hash collision.** Release
-  and debug builds detect conflicting strings, ingestion preflights complete
-  batches before mutation, Cypher surfaces a typed collision error, and
-  malformed persisted interners fail as file-format errors. The deterministic
-  FNV u64 representation and ordinary saved-file bytes remain unchanged.
-- **Python edge ingestion now preserves properties by default, and vector
-  DataFrame results propagate conversion failures.** `add_connections` and
-  `replace_connections` without `columns=` retain all non-skipped DataFrame
-  columns, matching `add_nodes`; vector search no longer substitutes `None`
-  when Python value conversion or dictionary insertion fails.
-- **NetworkX export now preserves columnar node properties and same-type
-  parallel edges.** Mapped/disk and reloaded graphs export custom attributes,
-  while duplicate endpoint/type edges receive collision-safe keys instead of
-  overwriting each other in `MultiDiGraph`.
-- **C ABI failures now produce deterministic outputs and cannot unwind into
-  host runtimes.** Every export initializes its output slots before validation;
-  valid-call Rust panics map to `Internal` with owned error text, while direct
-  accessors and destructors return their documented fallback without aborting.
-- **Session writes now use real ownership-aware copy-on-write.** Unique
-  memory/mapped Session writes mutate without the previously inevitable
-  transaction fork; held readers retain their stable snapshot, and concurrent
-  C auto-commit writers serialize without losing updates.
-- **Disk-backed Session and explicit transaction writes now work after prior
-  mutations.** Transaction forks retain their writer lineage, use distinct
-  overlay workspaces, and remap immutable CSR arrays instead of copying an
-  entire disk graph into heap memory.
-- **Fused top-K operators now preserve stable ordering at equal-score cutoffs.**
-  Vector, text-score, and generic top-K plans retain the earlier input row when
-  values tie, matching the unfused stable `ORDER BY ... LIMIT` result.
-- **Property-valued grouping no longer enters a node-keyed aggregate fusion.**
-  `MATCH ... RETURN n.property, count(...)` now stays on the value-grouping
-  path, so equal values across distinct nodes collapse into one correctly
-  counted group instead of producing duplicate under-counted rows.
-
-- **Concurrent disk-backed Cypher reads no longer invalidate each other's
-  materialized nodes or edges.** Disk arena reclamation is now tied to the
-  complete query lifetime and deferred while overlapping or nested readers are
-  active, preventing incorrect rows and use-after-free failures under load.
-- **Packed typed columns are now alignment-safe and portable.** Fixed-width
-  values are decoded from arbitrary byte slices using checked little-endian
-  primitives rather than aligned native pointer reads, and saves emit canonical
-  little-endian bytes on every architecture.
-- **Malformed `.kgl` files now fail safely and predictably.** Section sizes and
-  offsets use checked slicing, decompression has a bounded streaming limit,
-  column row counts must agree with topology, string offsets and UTF-8 are
-  validated, and serialized names can no longer influence temporary paths.
-- **Disk index files are now fully validated before use.** Type, ID, legacy,
-  and property indexes reject malformed headers, counts, variants, ranges,
-  ordering, duplicates, invalid text, and corrupt general-index payloads;
-  integer arrays are read and written as alignment-independent little-endian
-  bytes on every architecture.
-- **N-Triples input failures can no longer masquerade as clean EOF.** Reader
-  and decompressor errors, invalid UTF-8 in accepted entity lines, and reader
-  or parallel-bzip2 worker panics now propagate as load errors instead of
-  returning success with a partial import.
-- **Disk persistence now reports artifact failures instead of publishing an
-  incomplete save.** CSR construction and swapping, auxiliary indexes,
-  sidecars, trims, N-Triples finalisation, and property-index rebuilds now
-  propagate write errors; graph completion metadata is published last and a
-  failed save remains dirty and retryable.
-- **Disk saves now publish immutable generations atomically.** Readers resolve
-  one `CURRENT` snapshot for their lifetime, mutations use private overlays,
-  and an exclusive cross-process writer lease prevents concurrent writers from
-  altering or publishing over one another. Interrupted saves leave the prior
-  generation selected and retry safely without exposing partial artifacts.
-- **Persistent property-index names are now collision-resistant and exact.**
-  SHA-256-addressed bundles carry validated type/property identities, so
-  punctuation, Unicode, underscores, and case-distinct names no longer
-  overwrite or masquerade as one another. Legacy bundles remain readable by
-  exact request, and dropping a disk index is persisted in a new generation.
-- **`max_rows` now guards the complete Cypher execution, including writes.**
-  UNWIND, UNION/set operations, CALL procedures and subqueries, joins, fused
-  and streaming plans, and retained aggregate collections share one execution
-  budget. Exceeding it raises an error without truncation and rolls back the
-  whole mutation statement. Python transactions and the C ABI now expose the
-  same bounded-write behavior.
-- **Range and temporal arithmetic now reject unsafe magnitudes cleanly.**
-  `range()` preflights inclusive cardinality, allocation size, execution
-  budget, and integer stepping before materializing. Date/calendar shifts
-  return NULL when unrepresentable, while Duration construction, addition,
-  subtraction, and integer scaling use checked components and raise a typed
-  Cypher error instead of narrowing, wrapping, panicking, or exhausting memory.
-- **Regex evaluation and long-running Cypher loops are now resource-bounded.**
-  Both `=~` and `text_match_regex()` share a poison-tolerant 128-entry cache;
-  regex programs have a 2 MiB compiled-size limit and misses compile outside
-  the lock. Range/UNWIND expansion, aggregation, set operations, subquery joins,
-  fused two-hop counts, clustering/property procedures, result conversion, and
-  mutation row loops now poll timeout and cancellation at least every 4,096
-  work units. Interrupted session mutations still roll back atomically.
+- **Cypher matching and expression semantics are substantially more
+  consistent.** Relationship and path identity, trail uniqueness,
+  multi-pattern and optional joins, scope validation, map updates, null writes,
+  three-valued boolean/list expressions, stable top-K ties, and aggregate
+  grouping now agree across optimized and materialized execution paths.
+- **Parser and resource failures are bounded and typed.** Invalid variable
+  ranges, excessive nesting, unsafe numeric or temporal magnitudes, oversized
+  regexes, missing parameters, and malformed expressions return normal Cypher
+  errors rather than wrapping, exhausting memory, or panicking. Python syntax
+  errors expose `line` and `col`.
+- **Disk, mapped, and N-Triples storage fail atomically.** Growth and write
+  errors propagate without partial rows or published saves; corrupt or
+  truncated files, indexes, WAL records, sidecars, and compressed input are
+  rejected explicitly. Fixed-width storage is alignment-safe and uses portable
+  little-endian encoding.
+- **Concurrent and lazy operations retain valid ownership.** Overlapping
+  disk-backed reads no longer invalidate materialized values, Session and
+  transaction writers preserve their lineage, and C ABI, Bolt, and MCP
+  boundaries serialize or report conflicting work instead of losing updates.
+- **Python data interchange preserves values and declared shapes.** DataFrame
+  ingestion promotes whole columns correctly, NumPy arrays become native list
+  properties, connection properties are retained by default, vector conversion
+  errors propagate, and NetworkX export keeps columnar attributes and parallel
+  edges.
+- **File-freshness stamping is precise and atomic.** Files are read in bounded
+  chunks from stable descriptors, duplicate paths are processed once, updates
+  commit in one transaction, and timestamps use nanosecond UTC precision.
 
 ## [0.12.14] - 2026-07-10
 

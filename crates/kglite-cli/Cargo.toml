@@ -20,7 +20,7 @@ path = "src/main.rs"
 # in the resulting binary. Mirrors the kglite-bolt-server / kglite-mcp-server
 # pattern: path dep locally, version requirement on `cargo publish`. Version
 # kept in sync with crates/kglite/Cargo.toml's package.version each release.
-kglite = { version = "0.12", path = "../kglite", default-features = false }
+kglite = { version = "0.13", path = "../kglite", default-features = false }
 
 # Line editor: prompt, history, Emacs/Vi keybindings, Ctrl-C/Ctrl-D handling.
 # The standard Rust REPL choice; not otherwise a workspace dep.
