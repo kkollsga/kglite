@@ -334,6 +334,13 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
         None,
     ),
     (
+        "later_shared_id_anchor",
+        "social_graph",
+        "MATCH (p:Person)-[:WORKS_AT]->(c:Company) MATCH (p)-[:KNOWS]->(q:Person {id: 2}) "
+        "RETURN p.name AS p, c.name AS c, q.name AS q",
+        None,
+    ),
+    (
         "anchored_three_hop",
         "social_graph",
         "MATCH (a:Person {person_id: 1})-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) "

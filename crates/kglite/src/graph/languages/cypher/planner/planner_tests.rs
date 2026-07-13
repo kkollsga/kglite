@@ -964,6 +964,89 @@ fn test_reorder_match_clauses_picks_rare_edge_first() {
 }
 
 #[test]
+fn test_reorder_match_clauses_promotes_later_id_anchor_without_cache() {
+    let mut query = parse_cypher(
+        "MATCH (h:Hub)-[:WIDE]->(leaf:Leaf) \
+         MATCH (h)-[:ANCHORED]->(anchor:Anchor {id: 7}) \
+         RETURN h, leaf",
+    )
+    .unwrap();
+    let graph = DirGraph::new();
+
+    optimize(&mut query, &graph, &HashMap::new());
+
+    let edge_types: Vec<_> = query
+        .clauses
+        .iter()
+        .filter_map(|clause| match clause {
+            Clause::Match(m) => m.patterns[0]
+                .elements
+                .iter()
+                .find_map(|element| match element {
+                    PatternElement::Edge(edge) => edge.connection_type.as_deref(),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(edge_types, ["ANCHORED", "WIDE"]);
+    assert!(!graph.has_edge_type_counts_cache());
+}
+
+#[test]
+fn test_reorder_match_clauses_anchor_partition_is_stable() {
+    let mut query = parse_cypher(
+        "MATCH (h)-[:WIDE]->(leaf) \
+         MATCH (h)-[:FIRST_ANCHOR]->({id: 1}) \
+         MATCH (h)-[:SECOND_ANCHOR]->({id: 2}) \
+         RETURN h",
+    )
+    .unwrap();
+
+    optimize(&mut query, &DirGraph::new(), &HashMap::new());
+
+    let edge_types: Vec<_> = query
+        .clauses
+        .iter()
+        .filter_map(|clause| match clause {
+            Clause::Match(m) => m.patterns[0]
+                .elements
+                .iter()
+                .find_map(|element| match element {
+                    PatternElement::Edge(edge) => edge.connection_type.as_deref(),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(edge_types, ["FIRST_ANCHOR", "SECOND_ANCHOR", "WIDE"]);
+}
+
+#[test]
+fn test_reorder_match_clauses_does_not_move_independent_anchor() {
+    let mut query = parse_cypher(
+        "MATCH (h)-[:WIDE]->(leaf) \
+         MATCH (other)-[:ANCHORED]->({id: 1}) \
+         RETURN h, other",
+    )
+    .unwrap();
+
+    optimize(&mut query, &DirGraph::new(), &HashMap::new());
+
+    let first_edge_type = query.clauses.iter().find_map(|clause| match clause {
+        Clause::Match(m) => m.patterns[0]
+            .elements
+            .iter()
+            .find_map(|element| match element {
+                PatternElement::Edge(edge) => edge.connection_type.as_deref(),
+                _ => None,
+            }),
+        _ => None,
+    });
+    assert_eq!(first_edge_type, Some("WIDE"));
+}
+
+#[test]
 fn test_reorder_match_clauses_skips_when_cache_missing() {
     // Same query shape as above, but no edge_type_counts_cache populated.
     // The reorder pass must bail (avoid triggering an O(E) cache build

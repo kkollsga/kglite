@@ -256,14 +256,12 @@ pub(super) fn estimate_node_selectivity(
     }
 }
 
-/// Reorder consecutive MATCH clauses by edge-type total-count cost.
+/// Reorder consecutive MATCH clauses by clear anchors, then edge cost.
 ///
-/// For a span of `MATCH … MATCH …` clauses where every clause has an
-/// `{id: X}` anchor on one endpoint and a known connection type, drive
-/// the cheaper one first. The cost proxy is the connection type's total
-/// edge count from `edge_type_counts_cache` — O(1) per clause when the
-/// cache is populated (always for graphs loaded from disk; warmed during
-/// build for in-memory graphs that exercise it).
+/// For a span of `MATCH … MATCH …` clauses sharing a variable, stably promote
+/// clauses with an `{id: X}` endpoint before unanchored clauses. If every
+/// clause is anchored and cached connection cardinalities are available,
+/// retain the existing finer edge-count ordering within that anchored span.
 ///
 /// **The motivating case (Wikidata, 124M nodes / 861M edges):**
 /// ```cypher
@@ -278,23 +276,19 @@ pub(super) fn estimate_node_selectivity(
 /// Safety conditions (any miss → no reorder):
 /// - At least 2 consecutive `Match` clauses (not OPTIONAL, no path
 ///   assignments).
-/// - `edge_type_counts_cache` is populated (avoids triggering a fresh
-///   O(E) scan at plan time).
-/// - Every clause in the span has an `{id: X}` anchor on at least one
-///   endpoint of every pattern, AND a connection type whose total-edge
-///   count is known. This restricts us to queries where the proxy is a
-///   real upper bound on expansion size.
 /// - All clauses in the span share at least one variable (otherwise no
 ///   join, no benefit).
+/// - Anchor promotion is stable within anchored/unanchored classes. Edge-cost
+///   sorting additionally requires a populated cache and every clause to be
+///   anchorable/scorable; otherwise only the stable promotion is used.
 /// - The cost ordering would actually change.
 ///
 /// Runs *before* `optimize_pattern_start_node` so subsequent reversal
 /// sees the new clause order and accumulates `bound_vars` correctly.
 pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
-    if !graph.has_edge_type_counts_cache() {
-        return;
-    }
-    let edge_counts = graph.get_edge_type_counts();
+    let edge_counts = graph
+        .has_edge_type_counts_cache()
+        .then(|| graph.get_edge_type_counts());
 
     // 0.9.35 (AgensGraph-inspired): when the label-pair connectivity
     // cache is also populated, use the per-triple `(src_type, edge_type,
@@ -305,7 +299,7 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
     // Gating on `has_type_connectivity_cache()` mirrors the existing
     // `has_edge_type_counts_cache()` gate so plan-time stays O(1).
     let triple_counts: Option<HashMap<(String, String, String), usize>> =
-        if graph.has_type_connectivity_cache() {
+        if edge_counts.is_some() && graph.has_type_connectivity_cache() {
             graph.get_type_connectivity().map(|triples| {
                 triples
                     .into_iter()
@@ -333,52 +327,62 @@ pub(super) fn reorder_match_clauses(query: &mut CypherQuery, graph: &DirGraph) {
             continue;
         }
 
-        // Estimate cost for each MATCH in the span. Bail on the whole span
-        // if any clause is unscoreable — partial knowledge could mislead
-        // a sort.
-        let mut costs: Vec<usize> = Vec::with_capacity(j - i);
-        let mut all_scored = true;
-        for k in i..j {
-            let m = match &query.clauses[k] {
-                Clause::Match(m) => m,
-                _ => unreachable!(),
-            };
-            match estimate_match_edge_cost(m, &edge_counts, triple_counts.as_ref()) {
-                Some(c) => costs.push(c),
-                None => {
-                    all_scored = false;
-                    break;
-                }
-            }
-        }
-        if !all_scored {
-            i = j;
-            continue;
-        }
-
         if !shares_variable_across(&query.clauses[i..j]) {
             i = j;
             continue;
         }
 
-        // Stable sort by (cost, original_index) so equal costs preserve
-        // textual order (no churn).
-        let mut order: Vec<(usize, usize)> = costs.iter().copied().enumerate().collect();
-        order.sort_by_key(|&(orig, c)| (c, orig));
+        // Prefer the existing, more precise edge-count ordering when every
+        // clause is scoreable. Mixed anchored/unanchored spans deliberately
+        // fall back to a two-class stable partition: it is safe, predictable,
+        // and avoids pretending an unanchored scan has a trustworthy cost.
+        let costs = edge_counts.as_ref().and_then(|counts| {
+            (i..j)
+                .map(|k| match &query.clauses[k] {
+                    Clause::Match(m) => estimate_match_edge_cost(m, counts, triple_counts.as_ref()),
+                    _ => unreachable!(),
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let mut order: Vec<usize> = (i..j).collect();
+        if let Some(costs) = costs {
+            order.sort_by_key(|&absolute| (costs[absolute - i], absolute));
+        } else {
+            order.sort_by_key(|&absolute| {
+                let Clause::Match(m) = &query.clauses[absolute] else {
+                    unreachable!()
+                };
+                (!match_is_id_anchored(m), absolute)
+            });
+        }
 
         let already_sorted = order
             .iter()
             .enumerate()
-            .all(|(pos, &(orig, _))| pos == orig);
+            .all(|(offset, &absolute)| i + offset == absolute);
         if !already_sorted {
             let extracted: Vec<Clause> = query.clauses.drain(i..j).collect();
-            for (offset, &(orig, _)) in order.iter().enumerate() {
-                query.clauses.insert(i + offset, extracted[orig].clone());
+            for (offset, &absolute) in order.iter().enumerate() {
+                query
+                    .clauses
+                    .insert(i + offset, extracted[absolute - i].clone());
             }
         }
 
         i = j;
     }
+}
+
+/// True when every pattern in a MATCH has a literal/parameter ID anchor on an
+/// endpoint. This is intentionally narrower than general selectivity: it is
+/// the only mixed-clause promotion shape this pass can prove independently of
+/// graph statistics.
+fn match_is_id_anchored(m: &MatchClause) -> bool {
+    !m.patterns.is_empty()
+        && m.patterns.iter().all(|pattern| {
+            pattern.elements.first().is_some_and(is_id_anchored)
+                || pattern.elements.last().is_some_and(is_id_anchored)
+        })
 }
 
 /// Cost proxy for a MATCH clause: sum of total edge counts (over all

@@ -192,6 +192,47 @@ def in_selectivity_graph():
 
 
 @pytest.fixture(scope="module")
+def consecutive_match_anchor_graph():
+    """Broad first MATCH followed by a shared-variable ID anchor."""
+    graph = KnowledgeGraph()
+    n = 10_000
+    for label in ("Hub", "Leaf", "Anchor"):
+        graph.add_nodes(
+            pd.DataFrame(
+                {
+                    "id": list(range(n)),
+                    "name": [f"{label}_{i}" for i in range(n)],
+                }
+            ),
+            label,
+            "id",
+            "name",
+        )
+    graph.add_connections(
+        pd.DataFrame(
+            {
+                "source": [i % n for i in range(30 * n)],
+                "target": [(i % n + i // n) % n for i in range(30 * n)],
+            }
+        ),
+        "WIDE",
+        "Hub",
+        "source",
+        "Leaf",
+        "target",
+    )
+    graph.add_connections(
+        pd.DataFrame({"source": list(range(n)), "target": list(range(n))}),
+        "ANCHORED",
+        "Hub",
+        "source",
+        "Anchor",
+        "target",
+    )
+    return graph
+
+
+@pytest.fixture(scope="module")
 def wide_edge_count_graph():
     """One million homogeneous edges, matching the reported legal graph scale."""
     graph = KnowledgeGraph()
@@ -425,6 +466,22 @@ def test_bench_index_with_unrelated_secondary_label(benchmark, indexed_graph_wit
 
     result = benchmark(query_and_consume)
     assert result == [{"id": 54_321}]
+
+
+@pytest.mark.benchmark
+def test_bench_consecutive_match_id_anchor(benchmark, consecutive_match_anchor_graph):
+    """A later shared-variable ID anchor should drive a broad MATCH span."""
+    query = """
+        MATCH (h:Hub)-[:WIDE]->(leaf:Leaf)
+        MATCH (h)-[:ANCHORED]->(anchor:Anchor {id: $anchor})
+        RETURN count(*) AS n
+    """
+
+    def query_and_consume():
+        return consecutive_match_anchor_graph.cypher(query, params={"anchor": 7_321}).to_list()
+
+    result = benchmark(query_and_consume)
+    assert result == [{"n": 30}]
 
 
 @pytest.mark.benchmark

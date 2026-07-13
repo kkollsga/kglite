@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Secondary labels no longer disable unrelated typed indexes.** Candidate
   routing now checks the queried label, retaining primary index lookups and
   unioning only matching secondary-label carriers when needed.
+- **Later ID anchors can drive consecutive `MATCH` clauses.** Within a safe
+  shared-variable span, clearly ID-anchored clauses are now stably promoted
+  ahead of broad clauses before expansion.
 
 ## [0.13.1] - 2026-07-13
 
