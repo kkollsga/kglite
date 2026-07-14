@@ -18,6 +18,7 @@ myst_enable_extensions = [
     "deflist",
     "fieldlist",
 ]
+myst_heading_anchors = 6
 
 # -- Sphinx-AutoAPI settings --------------------------------------------------
 # Parses .pyi stubs directly — no need to import the Rust extension module.
@@ -31,17 +32,16 @@ autoapi_options = [
     "undoc-members",
     "show-inheritance",
     "show-module-summary",
-    "imported-members",
 ]
 autoapi_add_toctree_entry = True
 autoapi_keep_files = False
 autoapi_python_class_content = "both"  # show class docstring + __init__ docstring
 autoapi_member_order = "groupwise"
 
-# Suppress warnings about not being able to import the Rust extension
-# and cross-reference warnings from included markdown files (CYPHER.md, FLUENT.md)
-# whose relative links target GitHub paths that don't exist in the Sphinx tree.
-suppress_warnings = ["autoapi.python_import_resolution", "myst.xref_missing"]
+# AutoAPI reads stubs without importing the compiled extension. The Cypher
+# Pygments lexer does not recognize every supported KGLite expression, so keep
+# that presentation-only warning narrow; broken MyST references remain fatal.
+suppress_warnings = ["autoapi.python_import_resolution", "misc.highlighting_failure"]
 
 # -- General settings ---------------------------------------------------------
 

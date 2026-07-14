@@ -136,7 +136,7 @@ graph.timeseries(node_id, start='2020', end='2020')
 
 ---
 
-# Time-travel queries (temporal validity)
+## Time-travel queries (temporal validity)
 
 Timeseries (above) attaches numeric channels to a node. *Temporal validity* is
 a different axis: nodes and edges that carry a validity interval — a role held

@@ -1872,7 +1872,7 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 ## Cypher Dialect Contract
 
 The machine-readable source of truth is
-[`tests/api-baselines/cypher-dialect.json`](tests/api-baselines/cypher-dialect.json).
+[`tests/api-baselines/cypher-dialect.json`](https://github.com/kkollsga/kglite/blob/main/tests/api-baselines/cypher-dialect.json).
 KGLite is not a complete openCypher or Neo4j implementation.
 `Covered` below means the stated behavior is implemented and locked by local,
 independently authored tests. It is not a claim that every grammar production
@@ -1902,7 +1902,7 @@ claimed openCypher-compatible subset.
 | `PROFILE` | Extension | KGLite-specific per-clause execution statistics |
 | `HAVING` | Extension | Post-aggregation filter on `RETURN`/`WITH` |
 | `CALL ... YIELD` | Extension | Namespaced KGLite procedures plus `db.*` discovery procedures |
-| `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See [`CALL { ... }` Subqueries](#call----subqueries) |
+| `CALL { ... }` subqueries | Partial | Uncorrelated + correlated (importing `WITH`) read subqueries. v1 excludes writes in the body, unit (no-`RETURN`) subqueries, `UNION` inside the body, and `IN TRANSACTIONS`. See the `CALL { ... }` Subqueries section. |
 | `FOREACH` | Covered | Updating bodies, including nested `FOREACH` |
 | `LOAD CSV` | Unsupported | Use Python, Rust, or blueprint ingestion APIs |
 

@@ -444,7 +444,7 @@ this much faster than the original "~3-5 days" estimate).
 
 OCC version checking deferred (`DirGraph::version` is `pub(crate)`;
 needs api exposure). Listed as one of the 7 known limitations
-([see below](#known-limitations-as-of-shipped-c6--robustness-pass)).
+(see the known-limitations section below).
 
 Retires: `test_bolt_transaction_commit_and_rollback`,
 `test_bolt_rejects_writes_when_readonly`. **Actual time ~3 hours.**
@@ -528,7 +528,7 @@ hardening fixes informed by broad-probe testing.
 - NaN / ±Infinity float parameters → `BoltError::Protocol`
 
 **Operator documentation:**
-[`docs/explanation/bolt-server.md`](docs/explanation/bolt-server.md)
+[`docs/operators/bolt-server.md`](../operators/bolt-server.md)
 ships ~220 lines covering CLI reference, connection URLs, auth
 modes, tracing, known limitations, driver compatibility matrix,
 common error symptoms, and performance shape from the 6 Bolt-

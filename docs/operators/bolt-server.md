@@ -206,6 +206,6 @@ server, one driver, fresh 10k-Person + 30k-KNOWS graph:
   `Arc<DirGraph>` + GIL-release model.
 - [`bolt-implementation.md`](../history/bolt-implementation.md) — Phase
   plan and status, including the boltr v0.2 dependency rationale.
-- [`tests/test_bolt_server_*.py`](../../tests) — the 226+ tests
+- [`tests/test_bolt_server_*.py`](https://github.com/kkollsga/kglite/tree/main/tests) — the 226+ tests
   exercising the server (smoke / correctness / transactions /
   concurrency / robustness / differential).

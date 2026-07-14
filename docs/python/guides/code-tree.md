@@ -319,7 +319,7 @@ g.cypher("""
 """)
 ```
 
-`rev_diff` classifies each entity between the two revs by anti-joining `revs` and comparing the aligned `rev_fp` (present at `from` only → `removed`; at `to` only → `added`; both with a divergent fingerprint → `changed`). It reports *that* an entity changed plus its current value — never re-parsing source — matching the `diff` contract. Optional `{node_type}` scoping; it errors clearly on a non-multi-rev graph or an unknown rev. `describe()` lists the loaded revs and teaches the `WHERE '<rev>' IN n.revs` scoping idiom. (See the [Cypher reference](../../../CYPHER.md) for the full `rev_diff` semantics.)
+`rev_diff` classifies each entity between the two revs by anti-joining `revs` and comparing the aligned `rev_fp` (present at `from` only → `removed`; at `to` only → `added`; both with a divergent fingerprint → `changed`). It reports *that* an entity changed plus its current value — never re-parsing source — matching the `diff` contract. Optional `{node_type}` scoping; it errors clearly on a non-multi-rev graph or an unknown rev. `describe()` lists the loaded revs and teaches the `WHERE '<rev>' IN n.revs` scoping idiom. (See the [Cypher reference](../../reference/cypher-reference.md) for the full `rev_diff` semantics.)
 
 Each rev is a full parse, so a merged build costs ≈ N × a single build; the working (uncommitted) tree is not a rev — to include it, `diff` a plain `build(path)` graph against a rev build.
 

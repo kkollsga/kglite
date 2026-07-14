@@ -15,6 +15,7 @@ CI_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 CI_TEXT = CI_PATH.read_text()
 
 REQUIRED_JOBS = {
+    "docs",
     "storage-parity",
     "disk-concurrency",
     "loom-session",
@@ -81,3 +82,10 @@ def test_live_github_smoke_requires_explicit_opt_in() -> None:
     assert 'os.environ.get("KGLITE_GITHUB_INTEGRATION") == "1"' in smoke
     assert "and GITHUB_TOKEN is not None" in smoke
     assert smoke.count("not _github_live_enabled()") == 2
+
+
+def test_docs_job_checks_generated_facts_and_warnings() -> None:
+    docs = _job_block("docs")
+    assert "python scripts/render_docs_facts.py --check" in docs
+    assert "sphinx-build -W --keep-going -b html docs docs/_build/html" in docs
+    assert "myst.xref_missing" not in (REPO_ROOT / "docs" / "conf.py").read_text()

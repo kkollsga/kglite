@@ -1329,7 +1329,7 @@ neo4j source tree.
 
 ### Benchmarks / docs
 
-- **A linkable, reproducible benchmark table — [`BENCHMARKS.md`](BENCHMARKS.md).**
+- **A linkable, reproducible benchmark table — [`BENCHMARKS.md`](https://github.com/kkollsga/kglite/blob/main/BENCHMARKS.md).**
   Wall-to-wall time per category — **26 sub-benchmarks across 9 categories**:
   scan & lookup / filter & aggregate / traversal / pathfinding / **multi-type
   queries** / graph algorithms / **community detection** / mutations, plus the
@@ -5008,7 +5008,7 @@ needs rebuilding.
 
 ### Showcase notebook
 
-[`examples/sec_to_claude_mcp.ipynb`](examples/sec_to_claude_mcp.ipynb)
+[`examples/sec_to_claude_mcp.ipynb`](https://github.com/kkollsga/kglite/blob/main/examples/sec_to_claude_mcp.ipynb)
 demonstrates the schema with 7 queries that have no clean SQL
 equivalent — multi-role insider unification, board interlocks,
 sector-cohort sells, fund-as-issuer, 8-K → Form 4 proximity,
@@ -9923,7 +9923,7 @@ each addition; none are domain-specific.
   missing-inbound-edge, and duplicate titles. `g.describe()` surfaces
   a `<rule_packs>` block so agents discover packs through the same
   XML they consume for schema. See
-  [`docs/guides/rules.md`](docs/guides/rules.md). Reports are lazy:
+  [Cypher guide](https://github.com/kkollsga/kglite/blob/main/docs/python/guides/cypher.md). Reports are lazy:
   `.summary` returns counts without materialising rows, and runs are
   cached per `(pack_name, params, graph)`. New runtime dependency:
   `pyyaml>=6.0`.

@@ -2743,10 +2743,8 @@ class KnowledgeGraph:
             row order matters.
 
         Example:
-            ```python
-            for src, edge, tgt, count in graph.label_pair_counts():
-                print(f"{src} -[:{edge}]-> {tgt}: {count}")
-            ```
+            Iterate over the cached triples with
+            ``for src, edge, tgt, count in graph.label_pair_counts(): ...``.
         """
         ...
 

@@ -159,8 +159,8 @@ target_id_field`), the keyword surface:
 
 `source_type` and `target_type` each refer to a single node type.
 To connect same-type nodes (org charts, taxonomies), set both to
-the same value — see the [Hierarchies](#hierarchies-explicit-edges-vs-set_parent_type)
-section for when this is the right move.
+the same value — see the Hierarchies section below for when this is the
+right move.
 
 ### `replace_connections` — atomic edge upsert
 

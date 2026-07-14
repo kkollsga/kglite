@@ -77,7 +77,7 @@ completeness would be similar size.
 
 For the smaller-bridge approach (just the engine, no ergonomics) the
 crate is more like 1k lines — see the `cgo sketch` in
-[embedding.md](embedding.md#cgo-sketch-go).
+[embedding.md](embedding.md#non-rust-bindings-via-the-c-abi).
 
 ### Option 3 — Use the `kglite-c` crate (the canonical non-Rust path)
 

@@ -138,12 +138,9 @@ body = okf.source("~/.claude/.../memory/some-fact.md")
 
 ## API
 
-```{eval-rst}
-.. autofunction:: kglite.okf.build
-.. autofunction:: kglite.okf.source
-```
-
-`build(path, *, dialect="okf", with_body=False, embed=False)` returns a
+The generated API reference documents {func}`kglite.okf.build` and
+{func}`kglite.okf.source` from the package stubs. `build(path, *,
+dialect="okf", with_body=False, embed=False)` returns a
 {class}`~kglite.KnowledgeGraph`. `dialect` is `"okf"` (default) or
 `"loose"`/`"obsidian"`. `source(path)` returns a concept's markdown body with
 the frontmatter stripped.

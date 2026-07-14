@@ -596,7 +596,7 @@ YIELD bucket, type, qualified_name, name, file, line
 RETURN bucket, type, qualified_name, file, line
 ```
 
-See the [Cypher reference](../../../CYPHER.md) `rev_diff` entry and the
+See the [Cypher reference](../../reference/cypher-reference.md) `rev_diff` entry and the
 [code-tree guide](code-tree.md) for the full semantics.
 
 **Two operator caveats:**

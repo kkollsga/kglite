@@ -3,16 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - 'docs/**'
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - 'docs/**'
   schedule:
     # Heavy race/stress verification stays off the per-PR critical path.
     - cron: '23 3 * * 1'
@@ -21,6 +13,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install documentation dependencies
+        run: pip install -r docs/requirements.txt
+      - name: Check generated documentation facts
+        run: python scripts/render_docs_facts.py --check
+      - name: Build HTML documentation with warnings as errors
+        run: sphinx-build -W --keep-going -b html docs docs/_build/html
+
   rust-checks:
     name: Rust checks
     runs-on: ubuntu-latest
@@ -545,6 +553,7 @@ jobs:
     # `if: always()` makes this run after every dependency regardless of their
     # outcome, so it always produces a definitive pass/fail check to wait on.
     needs:
+      - docs
       - rust-checks
       - kglite-c
       - python-lint

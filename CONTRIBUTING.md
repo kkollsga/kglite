@@ -17,7 +17,7 @@ maturin develop --release
 Release builds are required for performance measurements. Ordinary correctness
 work may use `make dev`, but rebuild release mode before trusting timings.
 
-The generated [project facts](docs/_generated/project-facts.md) list the exact
+The generated [project facts](https://github.com/kkollsga/kglite/blob/main/docs/_generated/project-facts.md) list the exact
 workspace members, supported Python metadata, active wheel targets, storage
 modes, and captured benchmark environment. Refresh them with `make docs-facts`;
 `make check-docs-facts` fails if they drift.
@@ -41,7 +41,7 @@ tests/                         Python, parity, contract, and benchmark suites
 docs/                          Sphinx/MyST documentation
 ```
 
-Read [the boundary principle](docs/rust/boundary-principle.md) before changing
+Read [the boundary principle](https://github.com/kkollsga/kglite/blob/main/docs/rust/boundary-principle.md) before changing
 `kglite::api`, the C ABI, or adding a binding. Reusable graph behavior belongs
 in the core. PyO3 values, protocol wire values, async runtimes, and display
 behavior stay in their wrapper.

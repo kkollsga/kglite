@@ -1230,7 +1230,7 @@ store.cursor().select('Doc').where({'team': 'A'}).to_df()  # per-thread fluent c
 `FrozenGraph` is read-only — mutations (`CREATE`/`SET`/`DELETE`/`REMOVE`/`MERGE`)
 raise; semantic search works via `text_score()`/`vector_score()` in `cypher()`.
 For the full model — write composition, snapshot isolation, cost — see
-[`docs/concepts/concurrency.md`](docs/concepts/concurrency.md).
+[concurrency guide](https://github.com/kkollsga/kglite/blob/main/docs/concepts/concurrency.md).
 
 ---
 
