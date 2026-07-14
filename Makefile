@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -101,6 +101,12 @@ KGLITE_API_NIGHTLY ?= nightly-2026-07-01
 refresh-api-baseline:
 	RUSTUP_TOOLCHAIN=$(KGLITE_API_NIGHTLY) cargo public-api -p kglite -ss > tests/api-baselines/kglite.txt
 	@echo "refreshed tests/api-baselines/kglite.txt ($(KGLITE_API_NIGHTLY))"
+
+docs-facts:
+	$(ACTIVATE) && python scripts/render_docs_facts.py
+
+check-docs-facts:
+	$(ACTIVATE) && python scripts/render_docs_facts.py --check
 
 ## On-demand openCypher conformance check vs Neo4j. Not part of CI.
 ## See docs/concepts/cypher-conformance.md for the full workflow.
