@@ -68,6 +68,40 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+  rust-core-coverage:
+    name: Rust core coverage (report only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable with coverage tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install pinned cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+
+      - name: Cache cargo registry and coverage target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-core-coverage
+          workspaces: ". -> target"
+
+      - name: Measure kglite core with default features
+        run: cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' --lcov --output-path rust-core-coverage.lcov
+
+      - name: Upload report-only Rust core coverage
+        uses: codecov/codecov-action@v7
+        with:
+          files: rust-core-coverage.lcov
+          flags: rust-core
+          name: rust-core
+          disable_search: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   kglite-c:
     name: kglite-c (C ABI)
     runs-on: ubuntu-latest
@@ -558,6 +592,7 @@ jobs:
     needs:
       - docs
       - rust-checks
+      - rust-core-coverage
       - kglite-c
       - python-lint
       - python-tests

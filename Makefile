@@ -168,6 +168,10 @@ lint: check-api-chokepoint
 cov:
 	$(ACTIVATE) && pytest tests/ -v --cov=kglite --cov-branch --cov-config=pyproject.toml --cov-report=term-missing
 
+## Report-only coverage for the kglite core crate with default features
+cov-rust-core:
+	cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' --lcov --output-path rust-core-coverage.lcov
+
 ## Verify type stubs match runtime (requires built extension)
 stubtest:
 	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt

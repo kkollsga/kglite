@@ -52,6 +52,7 @@ __pycache__/
 # Coverage data
 .coverage
 coverage.xml
+rust-core-coverage.lcov
 
 # Generated graph files
 *.kgl

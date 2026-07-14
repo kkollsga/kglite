@@ -16,6 +16,7 @@ CI_TEXT = CI_PATH.read_text()
 
 REQUIRED_JOBS = {
     "docs",
+    "rust-core-coverage",
     "storage-parity",
     "disk-concurrency",
     "loom-session",

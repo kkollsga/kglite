@@ -2,7 +2,7 @@
 //! `KGLITE_SEC_INTEGRATION_TEST` env var so the default `cargo test`
 //! doesn't hit the network.
 //!
-//! Run with: `KGLITE_SEC_INTEGRATION_TEST=1 cargo test -p kglite-sec --test test_fetch_live`
+//! Run with: `KGLITE_SEC_INTEGRATION_TEST=1 cargo test -p kglite --features sec --test datasets_sec_fetch_live`
 
 use std::env;
 use std::path::PathBuf;

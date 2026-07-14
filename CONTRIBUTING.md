@@ -12,6 +12,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install maturin pytest pandas hypothesis networkx neo4j ruff mypy
 pip install -r requirements/coverage.txt
+cargo install cargo-llvm-cov --version 0.8.7 --locked
 maturin develop --release
 ```
 
@@ -54,6 +55,7 @@ make test        # Rust + default Python markers
 make test-full   # Rust + Python parity and Bolt markers
 make lint        # local format, lint, clean-room, license, and stub gates
 make cov         # pinned line + branch coverage for Python production modules
+make cov-rust-core  # report-only default-feature kglite core coverage
 ```
 
 The default Python configuration skips benchmark, parity, stress,
@@ -64,6 +66,14 @@ Python coverage uses the versions pinned in `requirements/coverage.txt` and
 the settings in `pyproject.toml`. The report measures `kglite/` production
 modules with branch coverage, excludes package-local test fixtures under
 `kglite/**/tests/`, and uploads the Python component separately from Rust.
+
+Rust coverage is intentionally component-scoped. `make cov-rust-core` measures
+the `kglite` core crate's library and tests with default features and writes
+`rust-core-coverage.lcov`; CI uploads it under the `rust-core` flag without a
+threshold. It does not claim coverage for the PyO3 Rust wrapper, C ABI,
+MCP/Bolt/CLI crates, or optional dataset, RDF, parallel-decoder, and embedder
+features. Those components need their own representative harnesses before
+their denominators can be reported honestly.
 
 CI also checks surfaces not covered by `make lint`:
 

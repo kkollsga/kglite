@@ -6,6 +6,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
+CORE_MANIFEST = tomllib.loads((ROOT / "crates" / "kglite" / "Cargo.toml").read_text())
 CI_TEXT = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 
 
@@ -32,3 +33,21 @@ def test_ci_uses_the_pinned_branch_coverage_contract() -> None:
     assert "flags: python" in CI_TEXT
     assert "name: python" in CI_TEXT
     assert "disable_search: true" in CI_TEXT
+
+
+def test_rust_coverage_is_component_scoped_and_report_only() -> None:
+    assert "tool: cargo-llvm-cov@0.8.7" in CI_TEXT
+    command = (
+        "cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' "
+        "--lcov --output-path rust-core-coverage.lcov"
+    )
+    assert command in CI_TEXT
+    assert command in (ROOT / "Makefile").read_text()
+    assert "flags: rust-core" in CI_TEXT
+    assert "name: rust-core" in CI_TEXT
+    assert "--fail-under" not in CI_TEXT
+
+
+def test_default_feature_coverage_excludes_sec_only_live_test() -> None:
+    live_test = next(target for target in CORE_MANIFEST["test"] if target["name"] == "datasets_sec_fetch_live")
+    assert live_test["required-features"] == ["sec"]

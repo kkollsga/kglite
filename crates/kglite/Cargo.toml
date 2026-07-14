@@ -43,6 +43,10 @@ required-features = ["parallel-bz2"]
 name = "code_tree_stats"
 path = "src/bin/code_tree_stats.rs"
 
+[[test]]
+name = "datasets_sec_fetch_live"
+required-features = ["sec"]
+
 [features]
 default = []
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
