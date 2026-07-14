@@ -173,7 +173,7 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install dependencies
-        run: pip install maturin pytest pytest-cov pandas hypothesis
+        run: pip install maturin pytest pandas hypothesis -r requirements/coverage.txt
 
       - name: Install pyarrow for the coexistence canary (newest-python leg only)
         # Only the newest-python leg installs pyarrow, so tests/test_pyarrow_coexistence.py
@@ -222,7 +222,7 @@ jobs:
         run: cargo metadata --format-version 1 --locked --all-features > /dev/null
 
       - name: Run Python tests
-        run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
+        run: pytest tests/ -v --tb=short --cov=kglite --cov-branch --cov-config=pyproject.toml --cov-report=xml:coverage.xml
 
       - name: Run Bolt smoke + correctness + robustness tests
         # Covers handshake, scalars, params, Node/Rel, transactions, auth,
@@ -254,6 +254,9 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: coverage.xml
+          flags: python
+          name: python
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
 
   free-threading:

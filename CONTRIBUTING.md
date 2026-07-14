@@ -10,7 +10,8 @@ git clone https://github.com/kkollsga/kglite.git
 cd kglite
 python3 -m venv .venv
 source .venv/bin/activate
-pip install maturin pytest pytest-cov pandas hypothesis networkx neo4j ruff mypy
+pip install maturin pytest pandas hypothesis networkx neo4j ruff mypy
+pip install -r requirements/coverage.txt
 maturin develop --release
 ```
 
@@ -52,11 +53,17 @@ behavior stay in their wrapper.
 make test        # Rust + default Python markers
 make test-full   # Rust + Python parity and Bolt markers
 make lint        # local format, lint, clean-room, license, and stub gates
+make cov         # pinned line + branch coverage for Python production modules
 ```
 
 The default Python configuration skips benchmark, parity, stress,
 model-download, binary-size, Bolt, and Bolt-stress markers. `make test-full`
 adds parity and Bolt while keeping expensive/host-specific markers excluded.
+
+Python coverage uses the versions pinned in `requirements/coverage.txt` and
+the settings in `pyproject.toml`. The report measures `kglite/` production
+modules with branch coverage, excludes package-local test fixtures under
+`kglite/**/tests/`, and uploads the Python component separately from Rust.
 
 CI also checks surfaces not covered by `make lint`:
 

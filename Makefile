@@ -166,7 +166,7 @@ lint: check-api-chokepoint
 
 ## Run tests with coverage report
 cov:
-	$(ACTIVATE) && pytest tests/ -v --cov=kglite --cov-report=term-missing
+	$(ACTIVATE) && pytest tests/ -v --cov=kglite --cov-branch --cov-config=pyproject.toml --cov-report=term-missing
 
 ## Verify type stubs match runtime (requires built extension)
 stubtest:

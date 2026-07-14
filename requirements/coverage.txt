@@ -1,0 +1,4 @@
+# Keep Python coverage reports comparable across local and CI runs.
+# pytest-cov 7.1.0 requires coverage[toml]>=7.10.6.
+coverage[toml]==7.10.7
+pytest-cov==7.1.0

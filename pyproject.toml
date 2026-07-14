@@ -137,6 +137,9 @@ ignore_errors = true
 
 [tool.coverage.run]
 source = ["kglite"]
+branch = true
+relative_files = true
+omit = ["kglite/**/tests/**"]
 
 [tool.coverage.report]
 exclude_lines = ["if __name__", "pragma: no cover", "raise NotImplementedError"]
