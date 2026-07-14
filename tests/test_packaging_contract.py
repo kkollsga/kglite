@@ -89,3 +89,11 @@ def test_cp310_abi3_policy_does_not_claim_pypy_compatibility() -> None:
 def test_bundled_mcp_entry_point_stays_declared() -> None:
     pyproject = PYPROJECT.read_text(encoding="utf-8")
     assert 'kglite-mcp-server = "kglite.mcp_server:main"' in pyproject
+
+
+def test_ci_compiles_packaged_optional_features_outside_workspace() -> None:
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    script = (REPO_ROOT / "scripts" / "check_packaged_features.sh").read_text(encoding="utf-8")
+    assert "bash scripts/check_packaged_features.sh" in ci
+    assert "cargo package -p kglite" in script
+    assert "--features parallel-bz2" in script

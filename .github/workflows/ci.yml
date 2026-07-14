@@ -68,6 +68,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+      - name: Verify published optional features outside the workspace
+        run: bash scripts/check_packaged_features.sh
+
   rust-core-coverage:
     name: Rust core coverage (report only)
     runs-on: ubuntu-latest

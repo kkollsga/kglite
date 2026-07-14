@@ -209,9 +209,8 @@ jobs:
 
       # 1. Publish kglite (the core crate).
       # `--locked` honours Cargo.lock for reproducibility.
-      # The workspace `[patch.crates-io]` (for the bzip2-rs git fork
-      # used by parallel-bz2) is stripped from the published manifest
-      # automatically — confirmed via `cargo publish --dry-run`.
+      # CI has already unpacked the generated crate outside the workspace and
+      # compiled its public `parallel-bz2` feature against registry deps.
       - name: Publish kglite
         if: needs.version-check.outputs.should_publish_kglite == 'true'
         env:

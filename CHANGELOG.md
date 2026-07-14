@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Strong connected components retain their directed semantics on disk.**
   `connected_components(weak=False)` now computes SCCs across memory, mapped,
   and disk storage instead of degrading to weak components on disk.
+- **The published `parallel-bz2` Cargo feature is self-contained.** It now
+  resolves entirely from crates.io while retaining bounded, CRC-verified
+  block-parallel decoding for single-stream Wikidata dumps.
 - **The `networkx` extra installs the complete bridge dependency set.** A
   clean `pip install 'kglite[networkx]'` now includes pandas, which
   `from_networkx()` uses internally.

@@ -28,7 +28,7 @@ name = "kglite"
 doctest = false
 
 # Standalone perf microbench for the bz2 decoder. Requires the
-# `parallel-bz2` feature because it calls `bzip2_rs` directly. Run
+# `parallel-bz2` feature because it calls the optional decoder directly. Run
 # with `cargo run -p kglite --bin bz2_bench --release --features
 # parallel-bz2 -- <path>`.
 [[bin]]
@@ -59,27 +59,14 @@ default = []
 # search without a Python embedder.
 fastembed = ["dep:fastembed"]
 # Block-level parallel decoder for single-stream `.bz2` files (the
-# Wikidata `latest-truthy.nt.bz2` shape). Off by default because the
-# implementation depends on `bzip2-rs` with its `rayon` Cargo
-# feature — that feature is only available in the paolobarbolini
-# git fork (see the dep block below), not on the crates.io
-# `bzip2-rs = 0.1.x` release. With this feature off the loader
+# Wikidata `latest-truthy.nt.bz2` shape). With this feature off the loader
 # still parallelises multi-stream pbzip2-produced files; only the
 # single-stream block-level path falls back to sequential
 # `bzip2::read::MultiBzDecoder`. Wikidata-scale ingest is the only
 # workload that actually benefits — opt in if you're decompressing
 # > 50 GB single-stream files. The `bz2_bench` binary requires this
 # feature.
-# `bzip2-rs/rayon` is intentionally omitted here even though the
-# code path uses `bzip2_rs::RayonThreadPool`. Cargo's publish-time
-# manifest resolver checks that *every* feature can be enabled
-# against crates.io versions of every dep, and bzip2-rs 0.1.x on
-# crates.io has no `rayon` feature. Consumers who enable
-# `parallel-bz2` are expected to also pull a bzip2-rs version that
-# has the `rayon` feature, via their own `[patch.crates-io]`
-# pointing at the paolobarbolini fork (the workspace root does
-# this automatically for local development).
-parallel-bz2 = ["dep:bzip2-rs"]
+parallel-bz2 = ["dep:parallel-bz2-redux"]
 
 # Pre-packaged dataset loaders. Polars-io style: opt in to only the
 # loaders you actually use. Phase G.3a folded the standalone
@@ -104,16 +91,9 @@ okf = ["dep:yaml-rust2"]
 wikidata = [
     "dep:thiserror",
     "dep:ureq",
-    # `wikidata` does NOT imply `parallel-bz2` even though Wikidata's
-    # `latest-truthy.nt.bz2` is the canonical workload for the
-    # parallel decoder. Reason: `parallel-bz2` depends on the
-    # paolobarbolini bzip2-rs git fork, which docs.rs (building
-    # from crates.io) can't see. If `wikidata` implied
-    # `parallel-bz2`, `[package.metadata.docs.rs]` couldn't enable
-    # `wikidata` to surface its API docs → broken docs.rs page on
-    # publish. The sequential `MultiBzDecoder` fallback handles
-    # wikidata correctly (just slower); opt into `parallel-bz2`
-    # explicitly for the ~10× speedup on M-series hardware.
+    # `wikidata` intentionally does not imply `parallel-bz2`: the sequential
+    # fallback remains the minimal dependency path, while callers loading the
+    # 50+ GB truthy dump can opt into block-parallel decompression explicitly.
 ]
 # General-purpose RDF loader (Turtle / N-Triples / N-Quads / TriG via
 # the oxttl parser family). Off by default so the bare crate pulls no
@@ -144,17 +124,10 @@ zstd = "0.13"
 memmap2 = "0.9"
 libc = "0.2"
 bzip2 = "0.6"
-# Optional — gated behind the `parallel-bz2` Cargo feature. The
-# `rayon` feature on bzip2-rs lives only on the paolobarbolini git
-# fork, not on crates.io `bzip2-rs = 0.1.x`. The
-# workspace-root `[patch.crates-io]` points local builds at the
-# fork so `parallel-bz2` works during development; on `cargo
-# publish` the patch isn't carried into the published manifest, so
-# crates.io consumers who enable `parallel-bz2` need to add a
-# matching `[patch.crates-io]` in their own workspace. Default-off
-# so the headline crates.io build resolves cleanly without needing
-# the patch.
-bzip2-rs = { version = "0.1", optional = true }
+# Published, bounded-memory block-parallel decoder for both ordinary
+# single-stream and concatenated `.bz2` data. Optional so graph-only users do
+# not pull its scanner/pipeline dependencies.
+parallel-bz2-redux = { version = "1.1.1", optional = true }
 tree-sitter = "0.26.8"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
@@ -227,13 +200,8 @@ loom = "0.7"
 
 # docs.rs builds with these features so the published API page covers
 # the dataset loaders + fastembed adapter, which would otherwise be
-# missing (defaults are intentionally empty). `parallel-bz2` is
-# excluded deliberately — it depends on the paolobarbolini bzip2-rs
-# git fork, which docs.rs (building from the crates.io registry)
-# can't resolve. `all-features = true` would pull `parallel-bz2` in
-# transitively and break the docs.rs build → broken
-# docs.rs/kglite badge in the README. `rustdoc-args` enables doc-cfg
+# missing (defaults are intentionally empty). `rustdoc-args` enables doc-cfg
 # annotations so feature-gated APIs are visually marked on the page.
 [package.metadata.docs.rs]
-features = ["sec", "sodir", "wikidata", "fastembed", "okf"]
+features = ["sec", "sodir", "wikidata", "fastembed", "okf", "parallel-bz2"]
 rustdoc-args = ["--cfg", "docsrs"]

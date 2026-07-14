@@ -10,9 +10,9 @@
 //!   default output): a single bz2 stream consists of independently
 //!   compressed blocks separated by bit-aligned 48-bit magics
 //!   (`0x314159265359`). Block-level parallelism is delegated to
-//!   `bzip2_rs::ParallelDecoderReader`, which scans the bitstream for
+//!   `parallel_bz2_redux::ParBz2Decoder`, which scans the bitstream for
 //!   block magics and decodes each block on a rayon worker. See
-//!   `paolobarbolini/bzip2-rs` (MIT/Apache-2.0).
+//!   `parallel-bz2-redux` (CC0-1.0).
 //!
 //! This module exposes a single entry point — [`open`] — that returns a
 //! `Box<dyn Read + Send>` and picks the right backend automatically.
@@ -27,16 +27,6 @@
 //! is ~ 1 / 2^48, so a single byte-by-byte scan is sufficient — no
 //! decompress probe needed.
 //!
-//! ## Format notes
-//!
-//! A bz2 stream begins with a 4-byte file header `BZh[1-9]` followed
-//! immediately (byte-aligned) by a 48-bit block magic
-//! `0x31 0x41 0x59 0x26 0x53 0x59` (regular block) or
-//! `0x17 0x72 0x45 0x38 0x50 0x90` (stream-end marker for an empty
-//! stream). Probability of a 10-byte false positive in random payload
-//! is ~ 1 / 2^48, so a single byte-by-byte scan is sufficient — no
-//! decompress probe needed.
-
 use bzip2::read::BzDecoder;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -44,31 +34,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-
-/// Local impl of `bzip2_rs::ThreadPool` that dispatches on rayon's
-/// global pool — equivalent to `bzip2_rs::RayonThreadPool` but
-/// doesn't require the `bzip2-rs/rayon` Cargo feature (which lives
-/// only on the paolobarbolini fork). Kglite already depends on
-/// `rayon`, so we use it directly. Only present when
-/// `parallel-bz2` is on.
-#[cfg(feature = "parallel-bz2")]
-#[derive(Debug)]
-struct KglRayonPool;
-
-#[cfg(feature = "parallel-bz2")]
-impl bzip2_rs::ThreadPool for KglRayonPool {
-    fn spawn<F>(&self, func: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        rayon::spawn_fifo(func);
-    }
-
-    fn max_threads(&self) -> std::num::NonZeroUsize {
-        std::num::NonZeroUsize::new(rayon::current_num_threads())
-            .unwrap_or_else(|| std::num::NonZeroUsize::new(1).unwrap())
-    }
-}
 
 /// Soft ceiling on bytes held in flight across workers and the
 /// channel. pbzip2 ties its in-flight count to a memory budget rather
@@ -106,30 +71,20 @@ pub fn open(path: &Path) -> io::Result<Box<dyn Read + Send>> {
 
     if offsets.len() == 1 {
         // Single-stream path. With the `parallel-bz2` Cargo feature
-        // on, we use `bzip2_rs::ParallelDecoderReader` (from the
-        // paolobarbolini git fork) to scan the bitstream for 48-bit
-        // block magics (`0x314159265359`) and decode blocks on rayon
-        // workers — needed for Wikidata-scale single-stream `.bz2`.
-        // We implement `bzip2_rs::ThreadPool` ourselves against the
-        // kglite-local `rayon` dep instead of using
-        // `bzip2_rs::RayonThreadPool` (which is gated on the fork's
-        // own `rayon` Cargo feature — that feature doesn't exist on
-        // the crates.io `bzip2-rs = 0.1.x` release, and we need
-        // `cargo publish -p kglite` to resolve cleanly without the
-        // fork). Without the feature (the default), we fall back to
-        // sequential `bzip2::read::MultiBzDecoder`.
-        let file = File::open(path)?;
-        let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+        // on, the published `parallel-bz2-redux` decoder scans for 48-bit
+        // block magics (`0x314159265359`), decodes blocks on rayon workers,
+        // verifies block + stream CRCs, and streams them through bounded
+        // channels. Without the feature, fall back to sequential libbzip2.
         #[cfg(feature = "parallel-bz2")]
         {
-            return Ok(Box::new(bzip2_rs::ParallelDecoderReader::new(
-                reader,
-                KglRayonPool,
-                DEFAULT_BUDGET_BYTES,
-            )));
+            let decoder = parallel_bz2_redux::ParBz2Decoder::open(path)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            return Ok(Box::new(decoder));
         }
         #[cfg(not(feature = "parallel-bz2"))]
         {
+            let file = File::open(path)?;
+            let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
             return Ok(Box::new(bzip2::read::MultiBzDecoder::new(reader)));
         }
     }
@@ -584,11 +539,7 @@ mod tests {
         // decompressed each. With a 256 MB budget the in-flight slot
         // count should drop to MIN_IN_FLIGHT, not balloon with cores.
         let s = Sizing::compute(800 * 1024 * 1024, 8, 256 * 1024 * 1024);
-        assert!(
-            s.n_workers + s.channel_cap <= MIN_IN_FLIGHT.max(s.n_workers + s.channel_cap),
-            "in-flight cap respected: {:?}",
-            s
-        );
+        assert_eq!(s.n_workers + s.channel_cap, MIN_IN_FLIGHT, "{s:?}");
         assert!(s.n_workers >= 2);
         assert!(s.channel_cap >= 2);
     }
@@ -608,15 +559,16 @@ mod tests {
     }
 
     #[test]
-    fn truncated_stream_errors_at_read_time() {
+    fn truncated_stream_errors_on_open_or_read() {
         let full = compress(b"some payload that we will then truncate");
         let truncated = &full[..full.len() / 2];
         let tmp = write_tmp(truncated);
 
-        // The header still scans as a stream start, so `open` succeeds.
-        let mut reader = open(tmp.path()).unwrap();
-        let mut out = Vec::new();
-        let result = reader.read_to_end(&mut out);
-        assert!(result.is_err(), "truncated stream must error on read");
+        // Decoders may validate the missing end marker eagerly or discover the
+        // truncation while reading; either way partial input must not succeed.
+        if let Ok(mut reader) = open(tmp.path()) {
+            let mut out = Vec::new();
+            assert!(reader.read_to_end(&mut out).is_err());
+        }
     }
 }

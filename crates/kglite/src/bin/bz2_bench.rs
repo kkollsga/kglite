@@ -1,60 +1,31 @@
-//! Pure bzip2-rs throughput microbench. Decompresses `<path>` to a
+//! Parallel bzip2 throughput microbench. Decompresses `<path>` to a
 //! `/dev/null` sink with **zero parsing or scanning overhead** — tells
 //! us the raw ceiling we're up against vs. the loader's observed rate.
 //!
 //! Usage:
-//!     cargo run --bin bz2_bench --release -- <path-to-bz2> [preread-mb] [decompressed-cap-mb]
+//!     cargo run --bin bz2_bench --release -- <path-to-bz2> [decompressed-cap-mb]
 //!
-//!     preread-mb       — bzip2-rs `max_preread_len` in MB (default 256, matches
-//!                        loader's current `DEFAULT_BUDGET_BYTES`)
 //!     decompressed-cap-mb — stop after this many MB of decompressed output
 //!                          (default: read the whole file)
 //!
-//! We call `bzip2_rs::ParallelDecoderReader` directly instead of going
+//! We call `parallel_bz2_redux::ParBz2Decoder` directly instead of going
 //! through `parallel_bz2::open` so we sidestep the stream-boundary
 //! pre-scan — that's a separate concern, and we want the steady-state
 //! number, not startup time.
-use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Instant;
-
-/// Local `bzip2_rs::ThreadPool` impl on top of rayon. Mirrors
-/// `kglite::graph::io::ntriples::parallel_bz2::KglRayonPool` — we
-/// can't import that one (it's a private item in the lib) so we
-/// re-implement the 6-line shim here. Both exist because the
-/// `bzip2_rs::RayonThreadPool` helper requires the fork's `rayon`
-/// Cargo feature, which we can't depend on from a published
-/// manifest.
-#[derive(Debug)]
-struct RayonPool;
-
-impl bzip2_rs::ThreadPool for RayonPool {
-    fn spawn<F>(&self, func: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        rayon::spawn_fifo(func);
-    }
-
-    fn max_threads(&self) -> std::num::NonZeroUsize {
-        std::num::NonZeroUsize::new(rayon::current_num_threads())
-            .unwrap_or_else(|| std::num::NonZeroUsize::new(1).unwrap())
-    }
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: bz2_bench <path-to-bz2> [preread-mb=256] [decompressed-cap-mb=full]");
+        eprintln!("usage: bz2_bench <path-to-bz2> [decompressed-cap-mb=full]");
         std::process::exit(2);
     }
     let path = Path::new(&args[1]);
-    let preread_mb: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
-    let preread_bytes = preread_mb * 1024 * 1024;
 
     let cap_bytes: Option<u64> = args
-        .get(3)
+        .get(2)
         .and_then(|s| s.parse::<u64>().ok())
         .map(|mb| mb * 1024 * 1024);
 
@@ -65,14 +36,11 @@ fn main() {
         path.display(),
         file_size as f64 / 1e9,
     );
-    eprintln!("  preread:  {} MB ({}B)", preread_mb, preread_bytes,);
     if let Some(c) = cap_bytes {
         eprintln!("  cap:      {:.2} GB decompressed", c as f64 / 1e9);
     }
 
-    let file = File::open(path).expect("open file");
-    let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-    let mut decoder = bzip2_rs::ParallelDecoderReader::new(reader, RayonPool, preread_bytes);
+    let mut decoder = parallel_bz2_redux::ParBz2Decoder::open(path).expect("open decoder");
 
     let start = Instant::now();
     let mut buf = vec![0u8; 8 * 1024 * 1024];
@@ -114,7 +82,6 @@ fn main() {
 
     println!();
     println!("=== BZ2 BENCHMARK ===");
-    println!("  preread:         {} MB", preread_mb);
     println!(
         "  decompressed:    {:.2} GB ({:.0} bytes)",
         total as f64 / 1e9,
