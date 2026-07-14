@@ -26,7 +26,9 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
   - `Development Status :: 4 - Beta`
   - `Intended Audience :: Developers`
   - `Intended Audience :: Science/Research`
-  - `Operating System :: OS Independent`
+  - `Operating System :: MacOS`
+  - `Operating System :: Microsoft :: Windows`
+  - `Operating System :: POSIX :: Linux`
   - `Programming Language :: Python :: 3`
   - `Programming Language :: Python :: 3.10`
   - `Programming Language :: Python :: 3.11`
@@ -35,7 +37,6 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
   - `Programming Language :: Python :: 3.14`
   - `Programming Language :: Rust`
   - `Programming Language :: Python :: Implementation :: CPython`
-  - `Programming Language :: Python :: Implementation :: PyPy`
   - `Topic :: Database`
   - `Topic :: Scientific/Engineering`
   - `Topic :: Software Development :: Libraries :: Python Modules`

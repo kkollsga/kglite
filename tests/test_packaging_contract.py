@@ -7,6 +7,7 @@ real wheel in a clean environment to prove the declared dependencies work.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import re
 
@@ -48,3 +49,43 @@ def test_ci_only_installs_declared_project_extras() -> None:
 def test_ci_exercises_networkx_bridge_dependencies() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert ".[neo4j,networkx]" in ci
+
+
+def test_classifiers_match_native_cpython_artifacts() -> None:
+    text = PYPROJECT.read_text(encoding="utf-8")
+    block = re.search(r"(?ms)^classifiers\s*=\s*(\[.*?\])", text)
+    assert block is not None
+    classifiers = set(ast.literal_eval(block.group(1)))
+    assert "Programming Language :: Python :: Implementation :: CPython" in classifiers
+    assert "Programming Language :: Python :: Implementation :: PyPy" not in classifiers
+    assert "Operating System :: OS Independent" not in classifiers
+    assert {
+        "Operating System :: MacOS",
+        "Operating System :: Microsoft :: Windows",
+        "Operating System :: POSIX :: Linux",
+    } <= classifiers
+
+
+def test_wheel_policy_and_support_page_match_workflow() -> None:
+    workflow = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
+    support = (REPO_ROOT / "docs" / "python" / "platform-support.md").read_text(encoding="utf-8")
+    targets = set(re.findall(r"(?m)^\s+(?:-\s+)?target:\s+([\w-]+)\s*$", workflow))
+    assert targets
+    assert all(f"`{target}`" in support for target in targets)
+    assert "continue-on-error: true" in workflow
+    assert "uploads platform wheels" in support
+    assert "source distribution" in support
+    assert "dist/*.tar.gz" not in workflow
+
+
+def test_cp310_abi3_policy_does_not_claim_pypy_compatibility() -> None:
+    cargo = (REPO_ROOT / "crates" / "kglite-py" / "Cargo.toml").read_text(encoding="utf-8")
+    support = (REPO_ROOT / "docs" / "python" / "platform-support.md").read_text(encoding="utf-8")
+    assert 'abi3 = ["pyo3/abi3-py310"]' in cargo
+    assert "PyPy is not a supported published-artifact target" in support
+    assert "requires a `pp310`-compatible artifact" in support
+
+
+def test_bundled_mcp_entry_point_stays_declared() -> None:
+    pyproject = PYPROJECT.read_text(encoding="utf-8")
+    assert 'kglite-mcp-server = "kglite.mcp_server:main"' in pyproject

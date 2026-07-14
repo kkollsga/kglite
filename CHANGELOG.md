@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `networkx` extra installs the complete bridge dependency set.** A
   clean `pip install 'kglite[networkx]'` now includes pandas, which
   `from_networkx()` uses internally.
+- **Package classifiers match the artifacts actually published.** Metadata no
+  longer claims PyPy or OS-independent installation for the native extension;
+  macOS, Linux, Windows, and CPython are declared explicitly.
 
 ## [0.13.2] - 2026-07-13
 

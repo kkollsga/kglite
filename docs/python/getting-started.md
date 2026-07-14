@@ -15,7 +15,12 @@ Optional extras:
 ```bash
 pip install fastembed        # or sentence-transformers — embedding models for semantic search (bring your own)
 pip install "kglite[neo4j]"  # round-trip with Neo4j
+pip install "kglite[networkx]"  # NetworkX import/export (includes pandas)
 ```
+
+Published wheels target CPython. See [Platform and artifact
+support](platform-support.md) for the exact OS/architecture tiers, PyPy status,
+and what to do when no wheel matches.
 
 ## Quick Start — DataFrames in, queries out
 

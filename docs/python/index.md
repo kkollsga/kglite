@@ -54,6 +54,8 @@ guides/sec
   hierarchy (`KgError` + 16 subclasses).
 - **[Value projection](value-projection.md)** — NULL handling,
   CASE branches, optional property semantics.
+- **[Platform and artifact support](platform-support.md)** — runtime-tested,
+  release-built, and best-effort targets; wheel and source-build policy.
 
 ## Migrations
 
@@ -72,6 +74,7 @@ core-concepts
 transactions
 error-handling
 value-projection
+platform-support
 migrations/neo4j-to-kglite
 migrations/mcp-0.6-to-0.9
 migrations/mcp-pre-0.9.20

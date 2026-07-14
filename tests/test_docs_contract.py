@@ -94,15 +94,18 @@ def test_retired_architecture_claims_do_not_return() -> None:
     architecture = (REPO_ROOT / "docs" / "concepts" / "architecture.md").read_text()
     decisions = (REPO_ROOT / "docs" / "concepts" / "design-decisions.md").read_text()
     contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text()
+    readme = (REPO_ROOT / "README.md").read_text()
     retired = {
         "architecture": ["There is no R-tree", "RGF\\x02", "Gzip-compressed"],
         "design decisions": ["Single-process only", "Memory-bound", "Why no R-tree"],
         "contributing": ["src/                          # Rust core", "no enforced formatter"],
+        "readme": ["KGLite is `v0.11.x`", "pandas >= 1.5"],
     }
     for label, text in {
         "architecture": architecture,
         "design decisions": decisions,
         "contributing": contributing,
+        "readme": readme,
     }.items():
         assert not [claim for claim in retired[label] if claim in text]
 

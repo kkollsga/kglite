@@ -632,18 +632,23 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 
 ## Requirements
 
-Python 3.10+ (CPython) | macOS (ARM), Linux (x86_64/aarch64), Windows (x86_64) | `pandas >= 1.5`
+CPython 3.10+ | macOS (arm64/x86_64), Linux (glibc/musl; x86_64 and
+best-effort aarch64), Windows (x86_64). The base wheel has no Python runtime
+dependencies; integrations install their named extras. See the
+[artifact support policy](https://kglite.readthedocs.io/en/latest/python/platform-support.html)
+for the tested/build-only tiers, libc floors, PyPy status, and source-build
+fallback.
 
 ## Stability
 
-KGLite is `v0.11.x` (Beta), versioned under [SemVer](https://semver.org/).
+KGLite is Beta software, versioned under [SemVer](https://semver.org/).
 The Python API surface and the supported Cypher dialect have been
 largely stable across the `0.9` → `0.10` line; the occasional breaking
 change (e.g. the `0.10.10` node-id semantics unification) is called out
 prominently in the changelog. The Beta label reflects API maturity, not
 engine reliability — the storage and query engine are covered by parity
-oracles and a differential Cypher corpus on every change. Deprecations
-and breaking changes are announced in
+oracles and a differential Cypher corpus on every change. Breaking changes
+are announced in
 [CHANGELOG.md](https://github.com/kkollsga/kglite/blob/main/CHANGELOG.md).
 
 ## License
