@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::loader::format_count;
-use super::{ProgressEvent, ProgressSink};
+use super::{Cancelled, ProgressEvent, ProgressSink};
 
 macro_rules! eplog {
     ($($arg:tt)*) => {
@@ -198,6 +198,17 @@ const PHASE1B_TICK: u64 = 250_000;
 #[cfg(test)]
 const PHASE1B_TICK: u64 = 2;
 
+pub(super) enum BuildColumnsError {
+    Cancelled,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for BuildColumnsError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 pub(super) fn build_columns_direct(
     graph: &mut DirGraph,
     log_path: &std::path::Path,
@@ -205,7 +216,7 @@ pub(super) fn build_columns_direct(
     type_rename_map: &HashMap<String, String>,
     verbose: bool,
     progress: Option<&dyn ProgressSink>,
-) -> std::io::Result<()> {
+) -> Result<(), BuildColumnsError> {
     use crate::graph::storage::column_store::ColumnStore;
     use crate::graph::storage::mapped::column_store::{
         ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
@@ -896,17 +907,17 @@ pub(super) fn build_columns_direct(
                 write_start.elapsed().as_secs_f64(),
             );
         }
-        // Phase 1b internal progress: keep tqdm bar live + responsive.
-        // Cancel-check is best-effort here — the function's signature is
-        // io::Result, so we swallow Cancelled rather than propagate (a
-        // future change could thread Cancelled through).
+        // Phase 1b internal progress: keep tqdm live and propagate a caller's
+        // cooperative cancellation at the next progress safe point. Earlier
+        // column writes are intentionally not rolled back.
         if entity_count.is_multiple_of(PHASE1B_TICK) {
             if let Some(s) = progress {
-                let _ = s.emit(ProgressEvent::Update {
+                s.emit(ProgressEvent::Update {
                     phase: "phase1b",
                     current: entity_count,
                     fields: &[],
-                });
+                })
+                .map_err(|Cancelled| BuildColumnsError::Cancelled)?;
             }
         }
 

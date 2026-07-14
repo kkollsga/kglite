@@ -823,18 +823,26 @@ pub fn load_ntriples(
         let log_path = log_writer
             .finish()
             .map_err(|e| format!("Failed to finish property log: {}", e))?;
-        super::column_builder::build_columns_direct(
+        let build_result = super::column_builder::build_columns_direct(
             graph,
             &log_path,
             &type_meta,
             &type_rename_map,
             build_debug(),
             sink,
-        )
-        .map_err(|e| format!("Failed to build columns: {}", e))?;
+        );
         let _ = std::fs::remove_file(&log_path);
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::remove_dir(parent);
+        }
+        match build_result {
+            Ok(()) => {}
+            Err(super::column_builder::BuildColumnsError::Cancelled) => {
+                return Err(CANCELLED_TOKEN.to_string());
+            }
+            Err(super::column_builder::BuildColumnsError::Io(error)) => {
+                return Err(format!("Failed to build columns: {error}"));
+            }
         }
         let phase1b_elapsed = conv_start.elapsed().as_secs_f64();
         if config.verbose {
@@ -1680,6 +1688,25 @@ mod tests {
         }
     }
 
+    struct PoisonColumnBuildSink {
+        data_dir: std::path::PathBuf,
+    }
+
+    impl ProgressSink for PoisonColumnBuildSink {
+        fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled> {
+            if matches!(
+                event,
+                ProgressEvent::Start {
+                    phase: "phase1b",
+                    ..
+                }
+            ) {
+                std::fs::create_dir_all(self.data_dir.join("columns.bin")).unwrap();
+            }
+            Ok(())
+        }
+    }
+
     fn graph_for_mode(mode: StorageMode, root: &Path) -> DirGraph {
         let mut graph =
             new_dir_graph_in_mode(mode, (mode == StorageMode::Disk).then_some(root)).unwrap();
@@ -1940,7 +1967,7 @@ mod tests {
     }
 
     #[test]
-    fn phase1b_update_cancellation_is_currently_ignored() {
+    fn phase1b_update_cancellation_stops_before_edges_or_completion_publish() {
         let fixture = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(fixture.path(), TWO_ENTITY_FIXTURE).unwrap();
 
@@ -1954,13 +1981,46 @@ mod tests {
                 cancel_on: Some("update:phase1b"),
             }));
 
-            load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config).unwrap();
-            assert!(events.lock().unwrap().iter().any(|e| e == "update:phase1b"));
+            let error = match load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config) {
+                Ok(_) => panic!("mode={mode:?} ignored phase1b cancellation"),
+                Err(error) => error,
+            };
+            assert_eq!(error, CANCELLED_TOKEN, "mode={mode:?}");
+            assert_eq!(
+                *events.lock().unwrap(),
+                [
+                    "start:phase1",
+                    "complete:phase1",
+                    "start:phase1b",
+                    "update:phase1b",
+                ],
+                "mode={mode:?}"
+            );
             assert_eq!(graph.graph.node_count(), 2);
+            assert_eq!(graph.graph.edge_count(), 0);
             if mode == StorageMode::Disk {
-                assert!(root.path().join("metadata.json").exists());
+                assert!(!root.path().join("metadata.json").exists());
             }
         }
+    }
+
+    #[test]
+    fn phase1b_io_failure_keeps_its_io_classification() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), TWO_ENTITY_FIXTURE).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = graph_for_mode(StorageMode::Mapped, root.path());
+        let mut config = test_config();
+        config.progress = Some(Box::new(PoisonColumnBuildSink {
+            data_dir: graph.spill_dir.clone().unwrap(),
+        }));
+
+        let error = match load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config) {
+            Ok(_) => panic!("poisoned columns.bin path must fail"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("Failed to build columns: "), "{error}");
+        assert_ne!(error, CANCELLED_TOKEN);
     }
 
     struct ErrorAfterData {
