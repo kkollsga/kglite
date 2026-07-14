@@ -70,10 +70,17 @@ pub extern "C" fn kglite_memory_stats() -> KgMemStats {
             peak_bytes: 0,
             total_allocs: 0,
         },
-        || KgMemStats {
-            current_bytes: CURRENT.load(Ordering::Relaxed),
-            peak_bytes: PEAK.load(Ordering::Relaxed),
-            total_allocs: TOTAL_ALLOCS.load(Ordering::Relaxed),
+        || {
+            let current_bytes = CURRENT.load(Ordering::Relaxed);
+            // Another thread can be between CURRENT.fetch_add and PEAK.fetch_max.
+            // Fold this observation into PEAK so every returned snapshot preserves
+            // the public peak >= current invariant without serializing allocations.
+            let peak_bytes = PEAK.fetch_max(current_bytes, Ordering::Relaxed);
+            KgMemStats {
+                current_bytes,
+                peak_bytes: peak_bytes.max(current_bytes),
+                total_allocs: TOTAL_ALLOCS.load(Ordering::Relaxed),
+            }
         },
     )
 }
