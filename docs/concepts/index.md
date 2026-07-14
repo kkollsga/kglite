@@ -21,6 +21,8 @@ or [Rust guide](../rust/index.md).
 - **[Concurrency](concurrency.md)** — the single-owner contract,
   `freeze()` snapshots for lock-free concurrent reads, `Arc<DirGraph>`
   mutation semantics, and GIL handling.
+- **[Generated project facts](../_generated/project-facts.md)** — workspace,
+  package, CI, storage, format, and benchmark facts derived from source.
 
 ## Extending
 
@@ -40,4 +42,5 @@ cypher-conformance
 concurrency
 adding-a-storage-backend
 adding-a-query-language
+../_generated/project-facts
 ```

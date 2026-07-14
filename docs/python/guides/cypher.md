@@ -1,6 +1,6 @@
 # Cypher Queries
 
-KGLite supports a substantial Cypher subset. This page covers the essentials — see the [full Cypher reference](../reference/cypher-reference.md) for complete documentation of every clause and function.
+KGLite supports a substantial Cypher subset. This page covers the essentials — see the [full Cypher reference](../../reference/cypher-reference.md) for complete documentation of every clause and function.
 
 ```{note}
 **Label model:** Each node has one immutable **primary** type plus optional secondary labels (multi-label since 0.10.5). `CREATE (n:A:B)`, `SET n:B`, `REMOVE n:B`, and `MATCH (n:A:B)` all work; `labels(n)` returns a list with the primary type first. Change the primary type via `SET n.type = 'NewType'`.
@@ -434,4 +434,4 @@ g.describe(cypher=['orphan_node'])
 g.describe(cypher=['missing_required_edge'])
 ```
 
-See the [full Cypher reference](../reference/cypher-reference.md) for detailed examples of every feature.
+See the [full Cypher reference](../../reference/cypher-reference.md) for detailed examples of every feature.

@@ -1,170 +1,173 @@
 # Architecture
 
-How KGLite works under the hood. This page explains the internal design —
-you don't need any of this to *use* KGLite, but it helps if you're
-contributing, debugging performance, or curious about the tradeoffs.
+KGLite is an embedded Rust graph engine with several thin delivery surfaces.
+This page describes the current source layout and runtime boundaries. The
+[generated project facts](../_generated/project-facts.md) page records facts
+that come directly from Cargo metadata, packaging metadata, active workflows,
+and source constants.
 
 ## Layer diagram
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│  Python API                                                 │
-│  kglite.KnowledgeGraph  (thin PyO3 wrapper)                 │
-├─────────────────────────────────────────────────────────────┤
-│  Rust core                                                  │
-│  ┌──────────────────────────┐  ┌──────────────────────────┐ │
-│  │  Cypher engine           │  │  Fluent API              │ │
-│  │  tokenizer → parser →    │  │  select → where →        │ │
-│  │  AST → planner →         │  │  traverse → collect      │ │
-│  │  executor                │  │                          │ │
-│  └──────────┬───────────────┘  └──────────┬───────────────┘ │
-│             │                             │                 │
-│  ┌──────────▼─────────────────────────────▼───────────────┐ │
-│  │  DirGraph                                              │ │
-│  │  petgraph::StableDiGraph + indexes + metadata          │ │
-│  └────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+ Python                Rust applications          Non-Rust applications
+ kglite-py (PyO3)      kglite-mcp-server          kglite-c (C ABI)
+                       kglite-bolt-server                 │
+          └──────────────────┬────────────────────────────┘
+                             ▼
+                    kglite::api boundary
+           lifecycle · query execution · errors · storage
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+     Cypher parser/planner/executor   Shared graph primitives
+              └──────────────┬──────────────┘
+                             ▼
+              DirGraph metadata and indexes
+                             │
+                       GraphBackend
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+        MemoryGraph      MappedGraph      DiskGraph
+        StableDiGraph    graph + mmap     CSR + mmap
 ```
 
-## Graph storage
+The core crate stays synchronous. Python owns GIL handling and Python object
+conversion; protocol servers own their async runtimes, wire formats, logging,
+and connection lifecycle. Rust-side wrappers call `kglite::api` directly.
+Other languages use the C ABI rather than reaching into graph internals. See
+the [boundary principle](../rust/boundary-principle.md) for the full rule.
 
-The core data structure is `DirGraph`, which wraps a
-[petgraph](https://github.com/petgraph/petgraph) `StableDiGraph`.
-"Stable" means node indices remain valid even after deletions — important
-for long-lived graphs with incremental updates.
+## Workspace
 
-Each node stores:
-- **Type** (string-interned for memory efficiency)
-- **Title** (display name)
-- **ID** (unique within type)
-- **Properties** as a `Vec<Value>` keyed by a shared `TypeSchema`
+The six crates have distinct responsibilities:
 
-The `TypeSchema` pattern means that nodes of the same type share a single
-schema reference (`Arc<TypeSchema>`), so adding 100k nodes of the same
-type only stores the property names once.
+- `kglite` — engine, storage, Cypher, code-tree parsing, and shared API.
+- `kglite-py` — PyO3 classes and Python-specific conversion.
+- `kglite-c` — stable C ABI for non-Rust bindings.
+- `kglite-mcp-server` — MCP protocol adapter over the core.
+- `kglite-bolt-server` — Bolt protocol adapter over the core.
+- `kglite-cli` — command-line client.
+
+The exact member paths and shared version are generated on the
+[project-facts page](../_generated/project-facts.md).
+
+## Graph container and storage backends
+
+`DirGraph` owns graph-wide metadata: schemas, string interning, index
+definitions, secondary labels, embeddings, temporal/spatial configuration,
+transaction versioning, and caches. Its topology is behind `GraphBackend`,
+which implements the `GraphRead` and `GraphWrite` traits.
+
+The three user-selectable modes are:
+
+| Mode | Topology and properties | Persistence role |
+|---|---|---|
+| `memory` | Heap-resident `StableDiGraph`; fastest default | Saves to a `.kgl` snapshot |
+| `mapped` | Petgraph topology with property columns forced to mmap spill during build | Saves to a `.kgl` snapshot |
+| `disk` | CSR topology and mmap-backed stores in a directory | The directory is the graph |
+
+`RecordingGraph` is an internal test wrapper, not a fourth user mode. It logs
+trait-path operations to verify that new backends can stay behind the storage
+interface.
+
+In-memory performance is the product gate. Disk-specific safety or scale work
+must remain gated to disk mode or large graphs rather than slowing ordinary
+in-memory queries.
 
 ### Indexes
 
-DirGraph maintains several index structures, all rebuilt automatically on load:
+`DirGraph` coordinates several index families. Their physical representation
+can differ by backend:
 
-| Index type | Data structure | Purpose |
-|---|---|---|
-| Type index | `HashMap<String, Vec<NodeIndex>>` | O(1) lookup by node type |
-| ID index | `HashMap<String, HashMap<Value, NodeIndex>>` | O(1) lookup by (type, id) |
-| Property index | `HashMap<IndexKey, HashMap<Value, Vec<NodeIndex>>>` | Equality filters |
-| Range index | `BTreeMap<Value, Vec<NodeIndex>>` | Range queries (`>`, `<`, `BETWEEN`) |
-| Composite index | Multi-key hash map | Multi-property lookups |
+| Index | Purpose |
+|---|---|
+| Type and secondary-label indexes | Candidate discovery by label |
+| ID index | Lookup by `(primary type, id)` |
+| Property index | Equality and `IN` lookup |
+| Range index | Ordered comparisons and ranges |
+| Composite index | Multi-property lookup |
+| Disk prefix/property bundles | Persistent disk-mode candidate routing |
 
-Indexes are opt-in via `create_index()`. The Cypher planner automatically
-uses them when available.
+Index definitions are explicit. The planner estimates and chooses among
+available routes; a missing optional index falls back to scanning candidates.
 
-## Cypher engine
+## Query execution
 
-The Cypher engine is a 4-stage pipeline:
+The Cypher path is:
 
 ```text
-Query string → Tokenizer → Parser → AST → Planner → Executor → ResultView
+query → tokenizer → parser/AST → ordered planner passes → executor → CypherResult
 ```
 
-1. **Tokenizer** (`tokenizer.rs`): Splits the query into tokens (keywords,
-   operators, literals, identifiers).
+- The ordered optimizer registry in
+  `crates/kglite/src/graph/languages/cypher/planner/mod.rs` is the source of
+  truth for pass order and stable pass names.
+- Shared matching, filtering, and traversal primitives live under
+  `crates/kglite/src/graph/core/` so Cypher and the fluent API do not grow
+  separate engines.
+- The executor runs synchronously against `GraphRead`/`GraphWrite` and enforces
+  query deadline, cancellation, and work/row budgets.
 
-2. **Parser** (`parser.rs`): Recursive descent parser that builds a
-   `CypherQuery` AST. Pattern matching (e.g., `(a:Person)-[:KNOWS]->(b)`)
-   is delegated to a specialized pattern parser.
+`ResultView` is lazy at the Python boundary for eligible projections: the
+executor can retain row bindings and materialize cells on demand. Other query
+shapes hold already-computed Rust values. Either way, conversion into Python
+objects is deferred until rows are accessed; this is not a promise that every
+query operator streams without intermediate Rust rows.
 
-3. **Planner** (`planner.rs`): Rewrites and optimizes the AST:
-   - Predicate pushdown (move WHERE conditions closer to MATCH)
-   - Fused operations (OPTIONAL MATCH + COUNT, RETURN + ORDER BY + LIMIT)
-   - `text_score()` → `vector_score()` rewriting (triggers embedding)
+## Concurrency and snapshots
 
-4. **Executor** (`executor.rs`): Walks the optimized plan, evaluates
-   pattern matches, filters rows, computes aggregations, and streams
-   results into a `ResultView`.
+Graph state is shared through `Arc<DirGraph>`:
 
-### ResultView (lazy evaluation)
+- `KnowledgeGraph` is a single-owner Python handle. Concurrent reads are safe;
+  overlapping mutation on the same Python object is rejected.
+- `FrozenGraph` is an immutable O(1) snapshot for parallel readers.
+- `Session` is the shareable server handle. Reads take momentary snapshots and
+  run without holding the session lock; writes serialize and atomically swap
+  the committed `Arc`.
+- Mutating a graph while another snapshot exists can trigger an
+  `Arc::make_mut` copy. This is the cost of snapshot isolation.
 
-`ResultView` is a lazy iterator. Rows are converted from Rust to Python
-one at a time, so a `MATCH...RETURN` over 100k nodes doesn't allocate
-100k Python dicts upfront. Call `to_df=True` to materialize into a
-DataFrame, or iterate row-by-row.
+Disk readers resolve `CURRENT` once and retain the selected immutable mmap
+generation. A retained cross-process writer lease prevents two writers from
+publishing concurrently. Readers do not take that writer lock. The detailed
+contract and verification matrix live in [Concurrency](concurrency.md).
 
-## PyO3 bridge
+## Spatial execution
 
-KGLite uses [PyO3](https://pyo3.rs) to expose Rust types to Python:
-
-- **`KnowledgeGraph`**: The main class. Read methods take `&self`;
-  mutations use `Arc::make_mut` for copy-on-write semantics.
-- **`ResultView`**: Lazy result container. Implements `__iter__` and
-  `__len__` for Python iteration.
-- **`Transaction`**: Snapshot isolation via `Arc` cloning — the
-  transaction gets a cheap copy of the graph state.
-
-All value conversion (Python → Rust → Python) goes through
-`py_in::value_from_py()` and `py_out::value_to_py()`.
-
-## Vector search
-
-Embeddings are stored in a columnar `EmbeddingStore` — a dense `Vec<f32>`
-per (node_type, text_column) pair. The search is brute-force with
-optimizations:
-
-- **Top-k via min-heap**: O(n log k) instead of O(n log n) sort
-- **Parallel search**: Uses Rayon when candidates exceed 10k
-- **SIMD-friendly cosine**: 4-way parallel accumulators, chunks of 8 for
-  auto-vectorization (SSE2/AVX2/NEON)
-
-Supported metrics: cosine (default), dot product, euclidean.
-
-The embedding model itself lives in Python (any object with an `embed()`
-method). KGLite calls it via PyO3 when `embed_texts()` is invoked,
-then stores the resulting vectors in Rust.
-
-## Spatial operations
-
-Spatial data uses the `geo` crate for geometry operations:
-
-- **Points**: Lat/lon pairs stored as node properties
-- **Polygons**: WKT strings parsed and cached as `geo::Geometry`
-- **Filtering**: Bounding-box rejection first, then precise
-  point-in-polygon or distance checks
-
-There is no R-tree — spatial queries use config-driven resolution
-(which properties hold lat/lon or WKT) with bounding-box pre-filtering.
+Spatial values are represented with the `geo`/WKT stack. The fused spatial
+join builds an `rstar::RTree` for one side of the current query, queries its
+envelopes for candidates, and then applies the precise geometry predicate.
+The tree is a per-query acceleration structure, not a persistent graph index;
+other spatial expressions can still use bounding-box rejection and cached WKT
+parsing.
 
 ## Persistence
 
-Graphs serialize to `.kgl` files with a versioned binary format:
+`.kgl` snapshots use the RGF v4 container:
 
 ```text
-[0..4]    Magic bytes: "RGF\x02"
-[4..8]    Format version (u32)
-[8..12]   Metadata length (u32)
-[12..N]   JSON metadata (schema, configs, index keys)
-[N..]     Gzip-compressed bincode (graph + embeddings + timeseries)
+magic RGF\x04
+core-data version (u32 LE)
+JSON metadata length + metadata
+zstd-compressed topology section
+zstd-compressed column sections by node type
+optional embeddings, timeseries, and secondary-label sections
 ```
 
-Key design choices:
-- **String interning** during serialization reduces file size
-- **Indexes are NOT persisted** — only index keys are saved; indexes
-  rebuild on load (faster than deserializing large hash maps)
-- **Backward compatible** — metadata uses `#[serde(default)]` so older
-  files load in newer versions
-- The embedding model is NOT serialized — call `set_embedder()` again
-  after loading
+Container and core-data versions are separate. RGF v3 is detected and refused
+with a rebuild message; it is not silently interpreted as v4. Within v4,
+metadata additions use serde defaults where compatible, while incompatible
+embedded cache layouts are detected explicitly. Index definitions are stored
+so non-persistent index structures can be rebuilt on load.
 
-## Memory model
+Disk mode uses a different lifecycle: writers build a staged generation,
+write completion metadata, rename it into `generations/`, then atomically
+replace `CURRENT`. A failed or incomplete stage is never selected by a new
+reader. Existing readers keep their old immutable generation alive.
 
-KGLite uses copy-on-write (`Arc::make_mut`) throughout:
+## Code-tree ingestion
 
-- **Cheap cloning**: `graph.clone()` shares the underlying data via `Arc`
-- **Transactions**: `begin()` creates a snapshot by cloning the `Arc`
-- **Fluent chains**: Each method returns a new `KnowledgeGraph` with a
-  modified selection but the same underlying graph data
-- **Mutations**: Only the mutating operation pays the copy cost (and only
-  if there are other references)
-- **Immutable snapshots** (0.11.0): `graph.freeze()` returns a `FrozenGraph` —
-  a read-only view sharing the graph's data via an O(1) `Arc` clone, with no
-  mutating methods. Many threads can `FrozenGraph.cypher()` concurrently and
-  lock-free; the snapshot stays on the original data even if the source is
-  mutated afterwards (copy-on-write). See [concurrency.md](concurrency.md).
+Code-tree parsers and graph construction are Rust-core functionality under
+`crates/kglite/src/code_tree/`. Tree-sitter grammars are compiled into the
+extension/core build. The Python package supplies the ergonomic entry points,
+not a second Python parser implementation.

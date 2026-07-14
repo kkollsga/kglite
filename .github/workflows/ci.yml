@@ -187,16 +187,8 @@ jobs:
         run: pip install -e '.[neo4j,networkx]'
 
       - name: Build kglite-mcp-server + kglite-bolt-server binaries + kglite cdylib
-        # 0.9.45+: kglite-mcp-server binary is needed by
-        # tests/test_mcp_server_smoke.py, which is
-        # `pytest.mark.skipif(not BINARY.exists())`. Without this step
-        # the smoke test silently skips in CI — it's how the Rust
-        # save_graph dispatch regression (0.9.20→0.9.44) went undetected.
-        #
-        # 0.10.x+: kglite-bolt-server binary built for the same reason —
-        # tests/test_bolt_server_smoke.py has the same skipif-not-exists
-        # gate. Phase C sub-phases will turn xfail → pass as they land;
-        # without the binary built here, that signal would be invisible.
+        # Both protocol smoke suites skip when their standalone binary is
+        # absent, so materialize the current MCP and Bolt adapters explicitly.
         #
         # `-p kglite` (in addition to the server binaries) explicitly
         # forces the libkglite cdylib to build. Cargo only needs the
@@ -225,10 +217,8 @@ jobs:
         run: pytest tests/ -v --tb=short --cov=kglite --cov-report=xml
 
       - name: Run Bolt smoke + correctness + robustness tests
-        # Post-Phase-C: the original "failing-by-design" xfail-strict
-        # tests pass cleanly; the bolt suite is real coverage now
-        # (handshake, scalars, params, Node/Rel, transactions, auth,
-        # FAILURE mapping, robustness). `not benchmark` excludes the
+        # Covers handshake, scalars, params, Node/Rel, transactions, auth,
+        # FAILURE mapping, and robustness. `not benchmark` excludes the
         # dual-marked `bolt+benchmark` perf suite at
         # `tests/benchmarks/test_bench_bolt.py` — those need the
         # `pytest-benchmark` plugin which CI doesn't install (perf

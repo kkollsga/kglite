@@ -19,6 +19,11 @@ def _active_markdown() -> list[Path]:
     return [REPO_ROOT / "README.md", REPO_ROOT / "CONTRIBUTING.md", *docs]
 
 
+def _prose_without_code(text: str) -> str:
+    text = re.sub(r"(?ms)^```.*?^```\s*$", "", text)
+    return re.sub(r"`[^`\n]+`", "", text)
+
+
 def test_generated_project_facts_are_current() -> None:
     subprocess.run([sys.executable, RENDER, "--check"], cwd=REPO_ROOT, check=True)
 
@@ -70,6 +75,36 @@ def test_documented_make_commands_are_real_targets() -> None:
     for path in _active_markdown():
         documented.update(re.findall(r"(?m)^\s*(?:\$\s*)?make\s+([A-Za-z0-9_.-]+)", path.read_text()))
     assert documented <= targets, f"docs name missing Make targets: {sorted(documented - targets)}"
+
+
+def test_active_markdown_local_links_resolve() -> None:
+    missing: list[str] = []
+    for path in _active_markdown():
+        prose = _prose_without_code(path.read_text(encoding="utf-8"))
+        for target in re.findall(r"!?\[[^]]*\]\(([^)]+)\)", prose):
+            target = target.split("#", maxsplit=1)[0]
+            if not target or "://" in target or target.startswith(("mailto:", "{")):
+                continue
+            if not (path.parent / target).resolve().exists():
+                missing.append(f"{path.relative_to(REPO_ROOT)} -> {target}")
+    assert not missing, "active docs contain broken local links:\n" + "\n".join(missing)
+
+
+def test_retired_architecture_claims_do_not_return() -> None:
+    architecture = (REPO_ROOT / "docs" / "concepts" / "architecture.md").read_text()
+    decisions = (REPO_ROOT / "docs" / "concepts" / "design-decisions.md").read_text()
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text()
+    retired = {
+        "architecture": ["There is no R-tree", "RGF\\x02", "Gzip-compressed"],
+        "design decisions": ["Single-process only", "Memory-bound", "Why no R-tree"],
+        "contributing": ["src/                          # Rust core", "no enforced formatter"],
+    }
+    for label, text in {
+        "architecture": architecture,
+        "design decisions": decisions,
+        "contributing": contributing,
+    }.items():
+        assert not [claim for claim in retired[label] if claim in text]
 
 
 @pytest.mark.parametrize(

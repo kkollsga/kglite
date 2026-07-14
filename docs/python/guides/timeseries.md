@@ -132,7 +132,7 @@ graph.timeseries(node_id, channel="oil")
 graph.timeseries(node_id, start='2020', end='2020')
 ```
 
-**Available functions:** `ts_at`, `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_first`, `ts_last`, `ts_series`, `ts_delta`. See the [Cypher reference](../reference/cypher-reference.md) for the full documentation.
+**Available functions:** `ts_at`, `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_first`, `ts_last`, `ts_series`, `ts_delta`. See the [Cypher reference](../../reference/cypher-reference.md) for the full documentation.
 
 ---
 
@@ -185,6 +185,6 @@ graph.cypher("""
 
 Both accept a date string or a `date(...)` value for the query date, and
 treat an open/sentinel upper bound (e.g. `'9999-12-31'`) as "still valid". Pair
-them with [date functions](../reference/cypher-reference.md) — `date()`,
+them with [date functions](../../reference/cypher-reference.md) — `date()`,
 `add_days(date(), 30)` — to express relative windows like "active in the next
 30 days".

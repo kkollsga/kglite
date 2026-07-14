@@ -91,9 +91,9 @@ jobs:
   # Windows + macOS build natively (one abi3 wheel per target). macOS
   # builds both arm64 (native on the arm runner) and x86_64 (cross —
   # Apple ships both SDKs, so `--target x86_64-apple-darwin` just works).
-  # 0.9.20: the bundled binary was retired for a Python entry point, so
-  # the abi3-py310 cdylib serves all Python 3.10+ — one wheel per target,
-  # no per-Python matrix. See docs/guides/mcp-servers.md.
+  # The abi3-py310 extension and its bundled MCP entry point serve all
+  # Python 3.10+ versions — one wheel per target, no per-Python matrix.
+  # See docs/python/guides/mcp-servers.md.
   build-native:
     name: Build wheel - ${{ matrix.os }} - ${{ matrix.target }}
     # Build in PARALLEL with CI (don't wait on ci-gate). The `publish` job

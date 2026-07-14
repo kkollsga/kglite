@@ -1,128 +1,137 @@
 # Contributing to KGLite
 
-## Development Setup
+## Development setup
+
+KGLite is a Rust workspace with a PyO3 wheel. Use a virtual environment so the
+extension under test is always the one built from your checkout.
 
 ```bash
-# Clone and set up
 git clone https://github.com/kkollsga/kglite.git
 cd kglite
 python3 -m venv .venv
 source .venv/bin/activate
-pip install maturin pytest pandas
-
-# Build the Rust extension into the venv
-make dev          # or: maturin develop
-
-# Run tests
-make test         # Rust + Python
-make test-rust    # Rust only
-make test-py      # Python only
+pip install maturin pytest pytest-cov pandas hypothesis networkx neo4j ruff mypy
+maturin develop --release
 ```
 
-The code tree parser ships with the default install — the
-tree-sitter grammars are bundled into the Rust extension, so a plain
-`pip install .` is all you need to work on it.
+Release builds are required for performance measurements. Ordinary correctness
+work may use `make dev`, but rebuild release mode before trusting timings.
 
-## Project Structure
+The generated [project facts](docs/_generated/project-facts.md) list the exact
+workspace members, supported Python metadata, active wheel targets, storage
+modes, and captured benchmark environment. Refresh them with `make docs-facts`;
+`make check-docs-facts` fails if they drift.
 
-```
-src/                          # Rust core (PyO3 bindings)
-  graph/
-    mod.rs                    # KnowledgeGraph struct + Python methods
-    schema.rs                 # DirGraph, NodeData, EdgeData
-    cypher/                   # Cypher query engine (parser, AST, executor)
-    introspection.rs          # describe() output
-    ...
-kglite/                       # Python package
-  __init__.pyi                # Type stubs for the Rust extension
-  code_tree/                  # Tree-sitter based code parser
-    builder.py                # Graph construction from parsed results
-    parsers/                  # Language-specific parsers (rust.py, python.py, ...)
-examples/
-  mcp_server.py               # MCP server exposing the graph to AI agents
-tests/                        # Python test suite
-Cargo.toml                    # Rust dependencies + version (single source of truth)
-pyproject.toml                # Python packaging (version is dynamic from Cargo.toml)
-```
+## Repository structure
 
-## Making Changes
-
-1. **Create a branch** from `main`
-2. **Make your changes** — prefer editing existing files over creating new ones
-3. **Run tests** — `make test` (or at minimum `make check` for a quick compile check)
-4. **Update the changelog** — see below
-5. **Commit** with a descriptive message — see below
-6. **Open a PR** against `main`
-
-## Commit Messages
-
-Use this format:
-
-```
-type: short description
-
-Optional longer explanation.
+```text
+crates/kglite/                 Rust engine and shared API
+  src/graph/core/              Shared matching/filtering/traversal primitives
+  src/graph/languages/cypher/  Tokenizer, parser, planner, executor
+  src/graph/storage/           Memory, mapped, and disk backends
+  src/code_tree/               Rust tree-sitter parsers and graph builder
+crates/kglite-py/              PyO3 wrapper
+  src/graph/pyapi/             All #[pymethods] blocks
+crates/kglite-c/               C ABI and generated public header
+crates/kglite-mcp-server/      MCP adapter and bundled server
+crates/kglite-bolt-server/     Bolt adapter
+crates/kglite-cli/             Command-line client
+kglite/                        Python package, stubs, and thin helpers
+tests/                         Python, parity, contract, and benchmark suites
+docs/                          Sphinx/MyST documentation
 ```
 
-Types:
+Read [the boundary principle](docs/rust/boundary-principle.md) before changing
+`kglite::api`, the C ABI, or adding a binding. Reusable graph behavior belongs
+in the core. PyO3 values, protocol wire values, async runtimes, and display
+behavior stay in their wrapper.
 
-| Type | When to use |
-|------|-------------|
-| `feat` | New feature or capability |
-| `fix` | Bug fix |
-| `docs` | Documentation only |
-| `refactor` | Code restructuring without behavior change |
-| `test` | Adding or updating tests |
-| `chore` | Build, CI, dependency updates |
+## Build and test commands
 
-Examples:
-
-```
-feat: add toc() method for file table of contents
-fix: resolve qualified_name lookup for structs with :: separator
-docs: update README code tree examples
-refactor: extract resolve_code_entity helper from find/source/context
+```bash
+make test        # Rust + default Python markers
+make test-full   # Rust + Python parity and Bolt markers
+make lint        # local format, lint, clean-room, license, and stub gates
 ```
 
-This is a convention, not enforced by tooling. The goal is readable git history.
+The default Python configuration skips benchmark, parity, stress,
+model-download, binary-size, Bolt, and Bolt-stress markers. `make test-full`
+adds parity and Bolt while keeping expensive/host-specific markers excluded.
 
-## Updating the Changelog
+CI also checks surfaces not covered by `make lint`:
 
-**Rule**: if your change is visible to users (new feature, bug fix, breaking change, deprecation), add an entry to the `[Unreleased]` section of `CHANGELOG.md` before committing.
+- public Rust API against `tests/api-baselines/kglite.txt` on the pinned nightly;
+- `kglite-c` all-feature clippy/tests and generated-header drift;
+- storage parity, disk concurrency, Loom, Miri, sanitizers, free-threading,
+  binary size, and release performance contracts.
 
-Use the appropriate category:
+Run the focused suite for the code you touched before the broad gates. Storage
+changes must keep `tests/test_storage_parity.py` and the phase parity suites
+green. Planner changes must add a triggering query to
+`tests/test_cypher_differential.py::DIFFERENTIAL_QUERIES` and register their
+stable pass name in the planner's `PASSES` table.
 
-- **Added** — new features or capabilities
-- **Changed** — changes to existing functionality
-- **Fixed** — bug fixes
-- **Removed** — removed features
-- **Deprecated** — features that will be removed in a future version
-- **Security** — vulnerability fixes
+## Python API changes
 
-You do **not** need a changelog entry for:
+When a `#[pymethods]` function changes, inspect all five consumers:
 
-- Internal refactors with no user-visible effect
-- CI/CD pipeline changes
-- Test-only changes
-- Code style / formatting fixes
+1. implementation under `crates/kglite-py/src/graph/pyapi/`;
+2. `kglite/__init__.pyi`, which is the API-doc source of truth;
+3. agent introspection under `crates/kglite/src/graph/introspection/`;
+4. MCP tool exposure in `crates/kglite-mcp-server/src/tools.rs`;
+5. `[Unreleased]` in `CHANGELOG.md` when users can observe the change.
 
-## Release Process
+The project removes obsolete code APIs with their replacement. Do not add
+deprecated aliases or compatibility wrappers. Persisted data is different:
+keep a read-compatible path or detect an incompatible format and return a
+specific rebuild/migration error.
 
-1. Update the version in `Cargo.toml` (this is the single source of truth — `pyproject.toml` reads it dynamically)
-2. Move the `[Unreleased]` section in `CHANGELOG.md` to a new version heading:
-   ```markdown
-   ## [0.5.33] - 2025-06-01
+## Code health
 
-   ### Added
-   - ...
-   ```
-3. Add a new empty `[Unreleased]` section at the top
-4. Update the comparison links at the bottom of `CHANGELOG.md`
-5. Commit: `chore: release v0.5.33`
-6. Push to `main` — CI will build wheels, publish to PyPI, and create a GitHub Release
+- Leave a touched file more compartmentalized than you found it. Extract
+  functions that exceed roughly 80 lines or mix three unrelated concerns.
+- Confirm a suspected defect against current source, docs, and tests before
+  changing it. When fixing one instance, scan for the same bug class.
+- Preserve in-memory performance when large-graph storage needs a special
+  path. Benchmark the default mode before merging shared executor/planner work.
+- Rust formatting and Clippy, Ruff format/check, and stubtest are enforced.
+- Do not refresh a baseline merely to hide a regression.
 
-## Code Style
+## Documentation
 
-- **Rust**: `cargo fmt` and `cargo clippy -- -D warnings` must pass (enforced by CI)
-- **Python**: no enforced formatter currently — follow existing code style
-- **Type stubs**: update `kglite/__init__.pyi` when adding or changing Python-facing methods
+API reference is generated from `kglite/__init__.pyi`. Cypher and fluent
+references live in `CYPHER.md` and `FLUENT.md`; guides live under `docs/`.
+Keep `README.md` as a landing page rather than duplicating guides.
+
+Machine-derived facts belong in `docs/_generated/project-facts.md`, generated
+from authoritative files. Prefer executable behavior tests for semantics and
+link the prose to those contracts instead of copying implementation details.
+
+## Commits and changelog
+
+Use `type: short description`, where the usual types are `feat`, `fix`,
+`docs`, `refactor`, `test`, and `chore`. Keep messages mechanical and public:
+describe what the diff does, not sensitive motivation.
+
+Add user-visible changes to the top `[Unreleased]` section of `CHANGELOG.md`.
+Internal refactors, CI-only work, tests, and formatting do not need entries.
+
+For a multi-phase change, make one green commit per phase. Each phase must pass
+`cargo build --lib`, its focused tests, and `make lint` before committing.
+
+## Maintainer release checklist
+
+The workspace version in the root `Cargo.toml` is the single version source.
+A release commit promotes `[Unreleased]`, bumps that one version, and refreshes
+the version-coupled constants:
+
+```bash
+maturin develop --release
+make refresh-release-constants
+make test-full
+make lint
+```
+
+Review retained-format, interface, and performance gates before the release
+commit. A push to `main` triggers CI-gated crate and wheel publication; never
+publish a new version merely to account for unpushed follow-up work.

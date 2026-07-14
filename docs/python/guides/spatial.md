@@ -1,6 +1,6 @@
 # Spatial Operations
 
-> Spatial queries are also available in Cypher via `distance()`, `contains()`, `intersects()`, `centroid()`, `area()`, `perimeter()`, and `point()`. See the [Cypher reference](../reference/cypher-reference.md) for details.
+> Spatial queries are also available in Cypher via `distance()`, `contains()`, `intersects()`, `centroid()`, `area()`, `perimeter()`, and `point()`. See the [Cypher reference](../../reference/cypher-reference.md) for details.
 
 ## Spatial Types
 
