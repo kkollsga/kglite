@@ -33,6 +33,8 @@ use std::io::BufRead;
 
 use crate::datasets::sec::error::{Result, SecError};
 
+use super::{append_unescaped_text, append_xml_reference};
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Holding {
     pub name_of_issuer: String,
@@ -64,7 +66,9 @@ pub struct Holding {
 /// Parse a 13F-HR information table XML stream → list of holdings.
 pub fn parse_13f_info_table<R: BufRead>(reader: R) -> Result<Vec<Holding>> {
     let mut xml = Reader::from_reader(reader);
-    xml.config_mut().trim_text(true);
+    // Entity references are separate events in quick-xml 0.41. Trimming each
+    // fragment would collapse spaces around `&amp;`; trim the assembled value.
+    xml.config_mut().trim_text(false);
 
     let mut holdings = Vec::new();
     let mut current: Option<Holding> = None;
@@ -84,16 +88,16 @@ pub fn parse_13f_info_table<R: BufRead>(reader: R) -> Result<Vec<Holding>> {
                 }
             }
             Ok(Event::Text(t)) => {
-                let s = t
-                    .unescape()
-                    .map_err(|err| SecError::Decode(format!("13F text: {err}")))?;
-                text.push_str(&s);
+                append_unescaped_text(&mut text, &t, "13F text")?;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                append_xml_reference(&mut text, &reference, "13F text")?;
             }
             Ok(Event::End(e)) => {
                 let name =
                     local_name(&e.name()).ok_or_else(|| SecError::Decode("13F end tag".into()))?;
                 if let Some(h) = current.as_mut() {
-                    apply(h, &name, &path, &text);
+                    apply(h, &name, &path, text.trim());
                 }
                 if name == "infoTable" {
                     if let Some(h) = current.take() {

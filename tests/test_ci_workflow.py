@@ -23,6 +23,8 @@ REQUIRED_JOBS = {
     "loom-session",
     "miri-loaders",
     "address-sanitizer",
+    "dependency-maintenance",
+    "scheduled-concurrency-stress",
 }
 
 
@@ -107,6 +109,35 @@ def test_source_quality_runs_once_in_its_own_required_job() -> None:
     assert "python scripts/check_source_quality.py" in source_quality
     assert "python scripts/check_lint_allowances.py --self-test" in source_quality
     assert "python scripts/check_lint_allowances.py" in source_quality
+    assert "python scripts/check_rustsec_advisories.py --policy-only" in source_quality
     python_tests = _job_block("python-tests")
     assert "check_source_quality.py" not in python_tests
     assert "check_lint_allowances.py" not in python_tests
+
+
+def test_every_ci_job_has_a_wall_clock_timeout() -> None:
+    jobs = re.findall(r"(?m)^  ([a-zA-Z0-9_-]+):\n", CI_TEXT.split("jobs:\n", maxsplit=1)[1])
+    assert jobs
+    for job in jobs:
+        assert "timeout-minutes:" in _job_block(job), f"CI job has no timeout: {job}"
+
+
+def test_scheduled_dependency_maintenance_is_report_first() -> None:
+    dependabot = (REPO_ROOT / ".github" / "dependabot.yml").read_text()
+    assert 'package-ecosystem: "cargo"' in dependabot
+
+    maintenance = _job_block("dependency-maintenance")
+    assert "if: github.event_name == 'schedule'" in maintenance
+    assert "cargo-audit@0.22.2" in maintenance
+    assert "cargo update --workspace --dry-run" in maintenance
+    assert maintenance.count("continue-on-error: true") == 2
+    assert "python scripts/check_rustsec_advisories.py" in maintenance
+
+
+def test_scheduled_stress_is_bounded_and_excludes_large_runner_case() -> None:
+    stress = _job_block("scheduled-concurrency-stress")
+    assert "tests/test_session_stress.py -m stress" in stress
+    assert "tests/test_bolt_server_concurrency.py -m bolt_stress" in stress
+    assert "tests/test_stress.py" not in stress
+    large = (REPO_ROOT / "tests" / "test_stress.py").read_text()
+    assert "manual/large-runner" in large

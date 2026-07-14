@@ -18,3 +18,12 @@ updates:
     groups:
       pip-deps:
         patterns: ["*"]
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "chore"
+    groups:
+      cargo-deps:
+        patterns: ["*"]

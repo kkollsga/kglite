@@ -16,6 +16,7 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -32,6 +33,7 @@ jobs:
   rust-checks:
     name: Rust checks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -74,6 +76,7 @@ jobs:
   rust-core-coverage:
     name: Rust core coverage (report only)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -108,6 +111,7 @@ jobs:
   source-quality:
     name: Production source quality
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -126,10 +130,13 @@ jobs:
         run: |
           python scripts/check_source_quality.py
           python scripts/check_lint_allowances.py
+      - name: Validate temporary RustSec exception policy
+        run: python scripts/check_rustsec_advisories.py --policy-only
 
   kglite-c:
     name: kglite-c (C ABI)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -187,6 +194,7 @@ jobs:
   python-lint:
     name: Python lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -202,6 +210,7 @@ jobs:
   python-tests:
     name: Python tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -321,6 +330,7 @@ jobs:
   free-threading:
     name: Free-threading (no-GIL) smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -369,6 +379,7 @@ jobs:
   perf-regression:
     name: Perf regression gate
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -428,6 +439,7 @@ jobs:
   public-api:
     name: Public API gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Locks the public API surface of the `kglite` core crate (api:: + every
     # other `pub` item) against accidental signature changes that would break
     # downstream Rust embedders / the C ABI. Complements check_api_chokepoint.sh
@@ -474,6 +486,7 @@ jobs:
   storage-parity:
     name: Cross-storage parity
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -503,6 +516,7 @@ jobs:
   disk-concurrency:
     name: Disk concurrency regressions
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -532,6 +546,7 @@ jobs:
   native-lifecycle-locks:
     name: Native lifecycle locks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -553,6 +568,7 @@ jobs:
   loom-session:
     name: Loom Session model
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -566,6 +582,7 @@ jobs:
   miri-loaders:
     name: Miri unsafe loader checks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -582,6 +599,7 @@ jobs:
   address-sanitizer:
     name: AddressSanitizer disk arenas
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -597,6 +615,7 @@ jobs:
     name: Scheduled ThreadSanitizer Session checks
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -605,6 +624,54 @@ jobs:
           RUSTFLAGS: -Zsanitizer=thread
           RUSTDOCFLAGS: -Zsanitizer=thread
         run: cargo test -p kglite --lib --target x86_64-unknown-linux-gnu graph::session
+
+  dependency-maintenance:
+    name: Scheduled dependency advisory report
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Validate temporary advisory exceptions
+        run: python scripts/check_rustsec_advisories.py --policy-only
+      - name: Report compatible lockfile updates
+        continue-on-error: true
+        run: cargo update --workspace --dry-run
+      - name: Report RustSec advisories
+        continue-on-error: true
+        run: python scripts/check_rustsec_advisories.py
+
+  scheduled-concurrency-stress:
+    name: Scheduled bounded Session and Bolt stress
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scheduled-concurrency-stress
+          workspaces: ". -> target"
+      - name: Build release extension and Bolt server
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest pandas neo4j
+          .venv/bin/maturin develop --release
+          cargo build --release -p kglite-bolt-server
+      - name: Run bounded Session stress
+        run: .venv/bin/pytest tests/test_session_stress.py -m stress -v --tb=short
+      - name: Run bounded Bolt stress
+        run: .venv/bin/pytest tests/test_bolt_server_concurrency.py -m bolt_stress -v --tb=short
 
   ci-success:
     name: CI success
@@ -634,8 +701,11 @@ jobs:
       - miri-loaders
       - address-sanitizer
       - scheduled-thread-sanitizer
+      - dependency-maintenance
+      - scheduled-concurrency-stress
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Verify all CI jobs passed
         run: |

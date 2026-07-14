@@ -6,6 +6,10 @@ cover the scale envelope — a multi-GB mapped graph and a 10k-hop chain
 entirely outside regression detection.
 
 Run: ``pytest -m stress tests/test_stress.py``
+
+The 30 GB case remains manual/large-runner coverage. Scheduled CI runs the
+bounded Session and Bolt stress suites instead; do not add this file to a
+GitHub-hosted runner without first provisioning its disk and time budget.
 """
 
 from __future__ import annotations

@@ -19,6 +19,8 @@ use std::io::BufRead;
 
 use crate::datasets::sec::error::{Result, SecError};
 
+use super::{append_unescaped_text, append_xml_reference};
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Form144 {
     pub filer_name: String,
@@ -61,7 +63,7 @@ pub struct HistoricalSale {
 /// Parse one Form 144 XML document.
 pub fn parse_form144<R: BufRead>(reader: R) -> Result<Form144> {
     let mut xml = Reader::from_reader(reader);
-    xml.config_mut().trim_text(true);
+    xml.config_mut().trim_text(false);
 
     let mut out = Form144::default();
     let mut path: Vec<String> = Vec::new();
@@ -85,10 +87,10 @@ pub fn parse_form144<R: BufRead>(reader: R) -> Result<Form144> {
                 }
             }
             Ok(Event::Text(t)) => {
-                let s = t
-                    .unescape()
-                    .map_err(|err| SecError::Decode(format!("Form 144 text: {err}")))?;
-                text.push_str(&s);
+                append_unescaped_text(&mut text, &t, "Form 144 text")?;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                append_xml_reference(&mut text, &reference, "Form 144 text")?;
             }
             Ok(Event::End(e)) => {
                 let name = std::str::from_utf8(e.name().as_ref())
@@ -97,7 +99,7 @@ pub fn parse_form144<R: BufRead>(reader: R) -> Result<Form144> {
                 apply(
                     &name,
                     &path,
-                    &text,
+                    text.trim(),
                     &mut out,
                     current_planned.as_mut(),
                     current_hist.as_mut(),

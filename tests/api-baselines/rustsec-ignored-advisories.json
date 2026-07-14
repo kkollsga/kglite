@@ -1,0 +1,23 @@
+{
+  "_comment": "Temporary RustSec exceptions only. Each entry needs an advisory id, a concrete justification, and a review window of at most 90 days. Expired entries fail the policy gate.",
+  "ignored": [
+    {
+      "id": "RUSTSEC-2023-0089",
+      "reason": "atomic-polyfill is pulled only by geo-types compatibility features through heapless 0.7; the notice reports maintenance status, not a vulnerability, and KGLite does not call it directly.",
+      "reviewed": "2026-07-14",
+      "expires": "2026-10-12"
+    },
+    {
+      "id": "RUSTSEC-2024-0436",
+      "reason": "paste is a compile-time transitive dependency of the optional fastembed/tokenizers stack; the notice reports maintenance status, not a vulnerability, and no compatible upstream replacement is available here.",
+      "reviewed": "2026-07-14",
+      "expires": "2026-10-12"
+    },
+    {
+      "id": "RUSTSEC-2025-0141",
+      "reason": "bincode 1 encodes persisted graph, WAL, and overflow data; moving to bincode 2 requires an explicit data-format compatibility migration. The notice reports maintenance status, not a vulnerability.",
+      "reviewed": "2026-07-14",
+      "expires": "2026-10-12"
+    }
+  ]
+}

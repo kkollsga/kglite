@@ -11,6 +11,8 @@ use std::io::BufRead;
 
 use crate::datasets::sec::error::{Result, SecError};
 
+use super::{append_unescaped_text, append_xml_reference};
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FormD {
     pub issuer_cik: String,
@@ -44,7 +46,7 @@ pub struct FormD {
 
 pub fn parse_formd<R: BufRead>(reader: R) -> Result<FormD> {
     let mut xml = Reader::from_reader(reader);
-    xml.config_mut().trim_text(true);
+    xml.config_mut().trim_text(false);
 
     let mut out = FormD::default();
     let mut path: Vec<String> = Vec::new();
@@ -61,16 +63,16 @@ pub fn parse_formd<R: BufRead>(reader: R) -> Result<FormD> {
                 text.clear();
             }
             Ok(Event::Text(t)) => {
-                let s = t
-                    .unescape()
-                    .map_err(|err| SecError::Decode(format!("Form D text: {err}")))?;
-                text.push_str(&s);
+                append_unescaped_text(&mut text, &t, "Form D text")?;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                append_xml_reference(&mut text, &reference, "Form D text")?;
             }
             Ok(Event::End(e)) => {
                 let name = std::str::from_utf8(e.name().as_ref())
                     .map_err(|err| SecError::Decode(format!("Form D end tag: {err}")))?
                     .to_string();
-                apply(&name, &path, &text, &mut out);
+                apply(&name, &path, text.trim(), &mut out);
                 path.pop();
                 text.clear();
             }

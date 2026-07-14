@@ -62,6 +62,8 @@ use std::io::BufRead;
 
 use crate::datasets::sec::error::{Result, SecError};
 
+use super::{append_unescaped_text, append_xml_reference};
+
 /// Parsed ownershipDocument — used for Form 3 (initial), Form 4
 /// (changes), Form 5 (annual reconciliation), and their /A
 /// amendments. All four share the XSD; `document_type` distinguishes
@@ -131,7 +133,7 @@ pub struct InsiderTransaction {
 /// malformed XML.
 pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
     let mut xml = Reader::from_reader(reader);
-    xml.config_mut().trim_text(true);
+    xml.config_mut().trim_text(false);
 
     let mut out = Form4::default();
     let mut path: Vec<String> = Vec::new();
@@ -218,10 +220,10 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                 }
             }
             Ok(Event::Text(t)) => {
-                let s = t
-                    .unescape()
-                    .map_err(|err| SecError::Decode(format!("Form 4 text: {err}")))?;
-                current_text.push_str(&s);
+                append_unescaped_text(&mut current_text, &t, "Form 4 text")?;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                append_xml_reference(&mut current_text, &reference, "Form 4 text")?;
             }
             Ok(Event::End(e)) => {
                 let name = std::str::from_utf8(e.name().as_ref())
@@ -229,13 +231,13 @@ pub fn parse_form4<R: BufRead>(reader: R) -> Result<Form4> {
                     .to_string();
                 if name == "footnote" {
                     if let Some(id) = current_footnote_id.take() {
-                        footnotes.insert(id, current_text.clone());
+                        footnotes.insert(id, current_text.trim().to_string());
                     }
                 }
                 handle_end(
                     &name,
                     &path,
-                    &current_text,
+                    current_text.trim(),
                     &mut out,
                     &mut current_txn,
                     &mut current_holding,
@@ -645,7 +647,7 @@ mod tests {
     <periodOfReport>2025-11-14</periodOfReport>
     <issuer>
         <issuerCik>0000059478</issuerCik>
-        <issuerName>ELI LILLY &amp; Co</issuerName>
+        <issuerName>ELI&#32;LILLY &amp; Co</issuerName>
         <issuerTradingSymbol>LLY</issuerTradingSymbol>
     </issuer>
     <reportingOwner>
@@ -684,6 +686,7 @@ mod tests {
     #[test]
     fn footnote_override_fixes_missing_decimal_typo() {
         let f4 = parse_form4(Cursor::new(LILLY_TYPO_FORM4)).unwrap();
+        assert_eq!(f4.issuer_name, "ELI LILLY & Co");
         assert_eq!(f4.transactions.len(), 1);
         let t = &f4.transactions[0];
         // Raw <value> was 1031414 (missing decimal); footnote midpoint

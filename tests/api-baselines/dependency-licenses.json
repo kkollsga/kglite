@@ -21,6 +21,7 @@
     "CDLA-Permissive-2.0",
     "ISC",
     "ISC AND (Apache-2.0 OR ISC)",
+    "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
     "ISC AND (Apache-2.0 OR ISC) AND OpenSSL",
     "MIT",
     "MIT OR Apache-2.0",
@@ -39,10 +40,12 @@
     "Apache-2.0",
     "Apache-2.0 AND ISC",
     "Apache-2.0 WITH LLVM-exception",
+    "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
     "MPL-2.0"
   ],
   "reviewed_packages": [
     ["approx", "0.5.1", "Apache-2.0", "runtime geometry dependency"],
+    ["aws-lc-sys", "0.42.0", "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)", "runtime TLS cryptography implementation"],
     ["cbindgen", "0.27.0", "MPL-2.0", "build-only C header generator"],
     ["esaxx-rs", "0.1.10", "Apache-2.0", "optional tokenizer dependency"],
     ["fastembed", "5.13.4", "Apache-2.0", "optional embedding backend"],

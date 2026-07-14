@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Native and XML dependencies include current upstream fixes.** PyO3,
+  quick-xml, AWS-LC, crossbeam, anyhow, and memmap2 were refreshed; SEC XML
+  parsing continues to decode escaped and numeric entities after the parser
+  API update.
 - **Installation, exception, and MCP quickstart contracts match runtime behavior.**
   DataFrame workflows have a named `pandas` extra, NetworkX guidance uses its
   complete extra, `KgError` is documented as the typed engine-error base, and

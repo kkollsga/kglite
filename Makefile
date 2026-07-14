@@ -4,7 +4,7 @@
 SHELL := /bin/bash
 ACTIVATE := unset CONDA_PREFIX && source .venv/bin/activate
 
-.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py source-quality cov stubtest
+.PHONY: dev dev-with-bin bundle-bin test test-full test-rust test-py bench bench-save bench-compare bench-check bench-check-v090 refresh-release-constants refresh-api-baseline docs-facts check-docs-facts neo4j-up neo4j-down neo4j-conformance bolt-conformance check clean fmt fmt-py clippy lint lint-py source-quality rustsec-policy cov stubtest
 
 ## Build and install the package into the local .venv
 dev:
@@ -159,7 +159,7 @@ check-lint-allowances:
 	python scripts/check_lint_allowances.py
 
 ## Run all lint checks (Rust + Python + stubs) — use before pushing
-lint: check-api-chokepoint check-lint-allowances source-quality
+lint: check-api-chokepoint check-lint-allowances source-quality rustsec-policy
 	$(ACTIVATE) && python scripts/check_cypher_clean_room.py
 	$(ACTIVATE) && python scripts/check_dependency_licenses.py
 	cargo fmt -- --check
@@ -178,6 +178,10 @@ cov-rust-core:
 ## Check centralized production-source structure and complexity ceilings
 source-quality:
 	python scripts/check_source_quality.py
+
+## Validate that every temporary RustSec exception is justified and unexpired
+rustsec-policy:
+	python scripts/check_rustsec_advisories.py --policy-only
 
 ## Verify type stubs match runtime (requires built extension)
 stubtest:
