@@ -1401,7 +1401,7 @@ impl KnowledgeGraph {
         label: &str,
     ) -> PyResult<Py<PyAny>> {
         validate_interner_names(&self.inner, [label])?;
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Node type '{}' does not exist in the graph",
@@ -1456,7 +1456,7 @@ impl KnowledgeGraph {
         label: &str,
     ) -> PyResult<Py<PyAny>> {
         validate_interner_names(&self.inner, [label])?;
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         if !g.type_indices.contains_key(node_type) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Node type '{}' does not exist in the graph",

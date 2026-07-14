@@ -82,9 +82,10 @@ impl GraphBackend {
         matches!(self, GraphBackend::Memory(_))
     }
 
-    /// Transfer writer-lineage authority to an already-cloned transaction
-    /// backend. Generic `Clone` never transfers that authority.
-    pub(crate) fn adopt_transaction_lineage(&mut self, parent: &Self) {
+    /// Transfer writer-lineage authority to an already-cloned child that keeps
+    /// the parent's runtime identity (transaction or Arc copy-on-write view).
+    /// Generic `Clone` never transfers that authority on its own.
+    pub(crate) fn adopt_shared_writer_lineage(&mut self, parent: &Self) {
         if let (GraphBackend::Disk(child), GraphBackend::Disk(parent)) = (self, parent) {
             child.adopt_writer_lineage(parent);
         }

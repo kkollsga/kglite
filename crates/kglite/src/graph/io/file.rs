@@ -1026,7 +1026,7 @@ pub(crate) fn read_secondary_labels_bin(
 
 /// Stamp save metadata and snapshot index keys. Quick, runs with GIL held.
 pub fn prepare_save(graph: &mut Arc<DirGraph>) {
-    let g = Arc::make_mut(graph);
+    let g = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
     g.save_metadata = SaveMetadata::current();
     g.populate_index_keys();
 }
@@ -1388,7 +1388,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 pub fn save_inmemory_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> io::Result<()> {
     prepare_save(graph);
     {
-        let dir = Arc::make_mut(graph);
+        let dir = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
         dir.enable_columnar();
     }
     write_kgl_with(graph, path, fsync)
@@ -1410,7 +1410,7 @@ pub fn save_graph(graph: &mut Arc<DirGraph>, path: &str) -> Result<(), String> {
 /// is the fast, non-durable opt-out (atomic rename, no crash barrier).
 pub fn save_graph_with(graph: &mut Arc<DirGraph>, path: &str, fsync: bool) -> Result<(), String> {
     if graph.graph.is_disk() {
-        let dir = Arc::make_mut(graph);
+        let dir = crate::graph::handle::make_dir_graph_mut_preserving_lineage(graph);
         return dir.save_disk(path);
     }
     save_inmemory_with(graph, path, fsync).map_err(|e| e.to_string())

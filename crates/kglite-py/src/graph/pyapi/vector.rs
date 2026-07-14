@@ -8,7 +8,7 @@ use pyo3::IntoPyObjectExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::KnowledgeGraph;
+use crate::graph::{get_graph_mut, KnowledgeGraph};
 use kglite_core::api::io as file;
 use kglite_core::api::GraphRead;
 
@@ -41,7 +41,7 @@ impl KnowledgeGraph {
         embeddings: &Bound<'_, PyDict>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         let embedding_property = format!("{}_emb", text_column);
 
         // Validate node type exists
@@ -179,7 +179,7 @@ impl KnowledgeGraph {
         embeddings: &Bound<'_, PyDict>,
         metric: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         let embedding_property = format!("{}_emb", text_column);
 
         if !g.type_indices.contains_key(node_type) {
@@ -724,7 +724,7 @@ impl KnowledgeGraph {
     ///     node_type: The node type
     ///     text_column: Source column name (e.g. 'summary')
     fn remove_embeddings(&mut self, node_type: &str, text_column: &str) -> PyResult<()> {
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         let key = (node_type.to_string(), format!("{}_emb", text_column));
         g.embeddings.remove(&key);
         Ok(())
@@ -801,7 +801,7 @@ impl KnowledgeGraph {
     ///     'dropped_stores' (int) counts. ``dropped_stores`` is the number
     ///     of per-type stores that contained entries but had zero matches.
     fn import_embeddings(&mut self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         let stats = file::import_embeddings_from_file(g, path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e)))?;
 
@@ -1250,7 +1250,7 @@ impl KnowledgeGraph {
         }
 
         let embedded = node_texts.len();
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         g.embeddings.insert(emb_key, store);
 
         let result = PyDict::new(py);
@@ -1408,7 +1408,7 @@ impl KnowledgeGraph {
             ef_search: ef_search.unwrap_or(64).max(1),
         };
 
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         let store = g.embeddings.get_mut(&key).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No embedding store '{}.{}_emb' to index. Call set_embeddings()/embed_texts() first.",
@@ -1436,7 +1436,7 @@ impl KnowledgeGraph {
     #[pyo3(signature = (node_type, text_column))]
     fn drop_vector_index(&mut self, node_type: &str, text_column: &str) -> PyResult<bool> {
         let key = (node_type.to_string(), format!("{}_emb", text_column));
-        let g = Arc::make_mut(&mut self.inner);
+        let g = get_graph_mut(&mut self.inner);
         match g.embeddings.get_mut(&key) {
             Some(store) => {
                 let had = store.has_index();

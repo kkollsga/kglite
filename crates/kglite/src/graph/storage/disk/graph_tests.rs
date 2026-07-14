@@ -10,6 +10,7 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 use crate::graph::DirGraph;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
@@ -317,6 +318,35 @@ fn independent_copy_retains_unsaved_parent_index_files() {
         GraphBackend::Disk(disk) => assert!(disk.has_property_index("Doc", "tag")),
         _ => panic!("expected disk backend"),
     }
+}
+
+#[test]
+fn arc_copy_on_write_retains_disk_writer_lineage() {
+    let source = TempDir::new().unwrap();
+    let path = source.path().to_str().unwrap();
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1]);
+    writer.enable_disk_mode().unwrap();
+    writer.save_disk(path).unwrap();
+
+    let mut active = Arc::new(writer);
+    let held_snapshot = Arc::clone(&active);
+    let active_graph = crate::graph::handle::make_dir_graph_mut(&mut active);
+    add_docs(active_graph, &[2]);
+    assert_eq!(held_snapshot.graph.node_count(), 1);
+    assert_eq!(active.graph.node_count(), 2);
+    match &active.graph {
+        GraphBackend::Disk(disk) => {
+            assert!(disk.writer_lock.is_some());
+            assert!(disk.mutation_workspace.is_some());
+        }
+        _ => panic!("expected disk backend"),
+    }
+
+    crate::graph::io::file::save_graph(&mut active, path).unwrap();
+    assert_eq!(held_snapshot.graph.node_count(), 1);
+    let reloaded = crate::graph::io::file::load_file(path).unwrap();
+    assert_eq!(reloaded.graph.node_count(), 2);
 }
 
 #[test]

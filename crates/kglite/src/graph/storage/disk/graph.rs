@@ -2245,8 +2245,9 @@ impl DiskGraph {
         self.independent_root.as_deref().map(|root| root.path())
     }
 
-    /// Adopt the retained writer lease from a serialized transaction parent.
-    /// Generic clones intentionally remain independent and do not call this.
+    /// Adopt the retained writer lease from a shared-identity parent.
+    /// Generic clones intentionally lack writer authority unless a controlled
+    /// transaction or Arc copy-on-write path calls this method.
     pub(crate) fn adopt_writer_lineage(&mut self, parent: &Self) {
         self.writer_lock = parent.writer_lock.clone();
         self.parent_workspaces = parent.parent_workspaces.clone();

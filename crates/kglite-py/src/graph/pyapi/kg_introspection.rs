@@ -74,7 +74,7 @@ impl KnowledgeGraph {
     ///     graph.reindex()
     ///     ```
     fn reindex(&mut self) {
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         graph.reindex();
     }
 
@@ -90,7 +90,7 @@ impl KnowledgeGraph {
     ///     assert graph.is_columnar()
     ///     ```
     fn enable_columnar(&mut self) {
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         graph.enable_columnar();
     }
 
@@ -103,7 +103,7 @@ impl KnowledgeGraph {
     /// This reduces memory usage to ~10% of the in-memory graph for
     /// edge-heavy graphs. Best called after all data is loaded.
     fn enable_disk_mode(&mut self) -> PyResult<()> {
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         graph
             .enable_disk_mode()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
@@ -114,7 +114,7 @@ impl KnowledgeGraph {
     /// This is the inverse of enable_columnar(). Useful before saving
     /// or when columnar storage is no longer needed.
     fn disable_columnar(&mut self) {
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         graph.disable_columnar();
     }
 
@@ -134,7 +134,7 @@ impl KnowledgeGraph {
     ///     assert not info['columnar_is_mapped']
     ///     ```
     fn unspill(&mut self) {
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         if !graph.is_columnar() {
             return;
         }

@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Disk-backed copies also write through a lazy private workspace—including
   N-Triples bulk builds—so mutating or saving a copy cannot alter the source
   generation or collide with its active writer lease.
+- **Disk writers remain usable while frozen or fluent snapshots are held.**
+  Copy-on-write mutations and saves now retain the source graph's writer
+  lineage, while the held view continues reading its stable prior snapshot.
 - **Native and XML dependencies include current upstream fixes.** PyO3,
   quick-xml, AWS-LC, crossbeam, anyhow, and memmap2 were refreshed; SEC XML
   parsing continues to decode escaped and numeric entities after the parser

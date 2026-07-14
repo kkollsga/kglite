@@ -533,7 +533,7 @@ impl KnowledgeGraph {
             progress: progress_sink,
         };
 
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         // Release the GIL during the multi-minute load so Python
         // heartbeat threads (download/build progress monitors) can run.
         // Cancellation: when the progress sink notices a pending SIGINT
@@ -776,7 +776,7 @@ impl KnowledgeGraph {
         if !self.inner.graph.is_disk() {
             return Ok(0);
         }
-        let graph = Arc::make_mut(&mut self.inner);
+        let graph = get_graph_mut(&mut self.inner);
         graph
             .compact_disk()
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)

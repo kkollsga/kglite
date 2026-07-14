@@ -564,8 +564,24 @@ impl KnowledgeGraph {
 /// node, edge, and index. Mutation in a read-heavy workload is fine,
 /// but a lingering reference can cause an unexpected memory spike on
 /// the first write.
-pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+/// Copy-on-write access that preserves disk writer authority when a shared
+/// snapshot forces a clone. Does not change the graph version; callers that
+/// perform semantic mutations should use [`make_dir_graph_mut`].
+pub(crate) fn make_dir_graph_mut_preserving_lineage(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+    let parent = if Arc::get_mut(arc).is_none() {
+        Some(Arc::clone(arc))
+    } else {
+        None
+    };
     let graph = Arc::make_mut(arc);
+    if let Some(parent) = parent {
+        graph.graph.adopt_shared_writer_lineage(&parent.graph);
+    }
+    graph
+}
+
+pub fn make_dir_graph_mut(arc: &mut Arc<DirGraph>) -> &mut DirGraph {
+    let graph = make_dir_graph_mut_preserving_lineage(arc);
     graph.bump_version();
     graph
 }

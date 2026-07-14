@@ -32,7 +32,7 @@ impl DirGraph {
     /// retain their ordinary snapshot clone semantics.
     pub(crate) fn fork_transaction(&self) -> Self {
         let mut child = self.clone();
-        child.graph.adopt_transaction_lineage(&self.graph);
+        child.graph.adopt_shared_writer_lineage(&self.graph);
         child
     }
 }

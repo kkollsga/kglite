@@ -34,6 +34,18 @@ def _count(view, q: str) -> int:
     return view.cypher(q).to_list()[0]["c"]
 
 
+def _disk_graph(path, n: int = 2) -> kglite.KnowledgeGraph:
+    graph = kglite.KnowledgeGraph(storage="disk", path=str(path))
+    graph.add_nodes(
+        pd.DataFrame({"id": list(range(n)), "title": [f"d{i}" for i in range(n)]}),
+        "Doc",
+        "id",
+        "title",
+    )
+    graph.save(str(path))
+    return graph
+
+
 def test_freeze_reads_match_source():
     g = _graph(3)
     fz = g.freeze()
@@ -62,6 +74,41 @@ def test_freeze_is_stable_under_source_mutation():
     # The snapshot is unchanged (copy-on-write); the source grew.
     assert _count(fz, "MATCH (n:Doc) RETURN count(n) AS c") == 3
     assert _count(g, "MATCH (n:Doc) RETURN count(n) AS c") == 5
+
+
+@pytest.mark.parametrize(
+    "hold_snapshot",
+    [lambda graph: graph.freeze(), lambda graph: graph.select("Doc")],
+    ids=["freeze", "fluent-view"],
+)
+def test_disk_snapshot_keeps_stable_reads_while_source_mutates_and_saves(tmp_path, hold_snapshot):
+    path = tmp_path / "graph"
+    graph = _disk_graph(path)
+    snapshot = hold_snapshot(graph)
+
+    graph.cypher("CREATE (:Doc {id: 10, title: 'source'})")
+    assert _count(snapshot, "MATCH (n:Doc) RETURN count(n) AS c") == 2
+    assert _count(graph, "MATCH (n:Doc) RETURN count(n) AS c") == 3
+    graph.save()
+
+    assert _count(snapshot, "MATCH (n:Doc) RETURN count(n) AS c") == 2
+    assert _count(kglite.open(str(path)), "MATCH (n:Doc) RETURN count(n) AS c") == 3
+    assert not list(path.glob(".working-*"))
+
+
+def test_disk_save_with_held_freeze_reuses_writer_lineage(tmp_path):
+    path = tmp_path / "graph"
+    graph = _disk_graph(path)
+    snapshot = graph.freeze()
+    current_before = (path / "CURRENT").read_text(encoding="utf-8")
+
+    graph.save()
+
+    current_after = (path / "CURRENT").read_text(encoding="utf-8")
+    assert current_after != current_before
+    assert _count(snapshot, "MATCH (n:Doc) RETURN count(n) AS c") == 2
+    assert _count(kglite.open(str(path)), "MATCH (n:Doc) RETURN count(n) AS c") == 2
+    assert not list(path.glob(".working-*"))
 
 
 def test_freeze_cypher_with_params_and_df():
