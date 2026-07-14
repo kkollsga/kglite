@@ -274,6 +274,7 @@ jobs:
           /tmp/kglite-networkx-smoke/bin/pip install "${wheel}[networkx]"
           cd /tmp
           /tmp/kglite-networkx-smoke/bin/python -c "import networkx as nx; import pandas; import kglite; graph = kglite.from_networkx(nx.path_graph(3)); assert graph.to_networkx().number_of_nodes() == 3"
+          /tmp/kglite-networkx-smoke/bin/kglite-mcp-server --help | grep -- '--selftest'
 
       - name: Prefetch all-feature dependency metadata
         # The dependency-license contract deliberately reruns metadata offline.

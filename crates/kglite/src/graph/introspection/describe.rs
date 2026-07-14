@@ -1883,9 +1883,12 @@ pub fn mcp_quickstart() -> String {
     format!(
         r##"<mcp_quickstart version="{version}">
 
-  <install>pip install "kglite[mcp]"</install>
+  <install>
+    <python>pip install kglite</python>
+    <cargo>cargo install kglite-mcp-server</cargo>
+  </install>
 
-  <bundled_cli desc="Default path — no fork, no Python required">
+  <bundled_cli desc="The wheel bundles this command; Cargo installs a standalone binary">
     <command>kglite-mcp-server --graph /abs/path/to/your_graph.kgl</command>
     <bundled_tools>
       <tool name="graph_overview">
@@ -1896,11 +1899,12 @@ pub fn mcp_quickstart() -> String {
         Execute any Cypher query. Returns up to 15 rows inline; append
         FORMAT CSV for full export served over a localhost HTTP endpoint.
       </tool>
+      <tool name="ping">Liveness probe; echoes a message or returns pong.</tool>
     </bundled_tools>
     <flags>
-      --embedder MODEL_NAME    sentence-transformers model for text_score()
       --mcp-config FILE        explicit manifest path (otherwise auto-detected)
-      --trust-tools            authorise loading python: hooks declared in manifest
+      --writable               allow Cypher mutations and graph lifecycle tools
+      --selftest               verify startup, tools, and graph hydration
     </flags>
   </bundled_cli>
 
@@ -1947,24 +1951,23 @@ tools:
       </effect>
     </cypher_tools>
 
-    <python_hooks desc="Custom Python functions as MCP tools (trust-gated)">
+    <embedder desc="Enable text_score() with a manifest-declared embedding library">
       <yaml><![CDATA[
 trust:
-  allow_python_tools: true
+  allow_embedder: true
 
-tools:
-  - name: session_detail
-    description: Full source JSON for a session by id.
-    python: ./tools.py
-    function: session_detail
+extensions:
+  embedder:
+    library: sentence-transformers   # or fastembed; use fastembed-rs with Cargo
+    model: BAAI/bge-m3
 ]]></yaml>
       <trust_gate>
-        Both signals required: trust.allow_python_tools: true in the yaml
-        AND --trust-tools on the CLI. Either alone refuses to load. The
-        loaded function's signature, type hints, and docstring become the
-        MCP input schema directly.
+        The manifest must explicitly set trust.allow_embedder: true before
+        either a Python factory or Rust model is constructed. For the Python
+        wheel, install the named library separately. For the standalone Rust
+        binary, use library: fastembed-rs and install with --features fastembed.
       </trust_gate>
-    </python_hooks>
+    </embedder>
   </manifest>
 
   <register_with_claude>
@@ -1996,8 +1999,8 @@ tools:
     </claude_code>
     <note>
       Restart Claude after editing config. The server appears as an MCP
-      tool provider. For Python hooks, add "--trust-tools" to args after
-      auditing the manifest's python: entries.
+      tool provider. Use an absolute command path when multiple wheel or
+      Cargo installations may be present.
     </note>
   </register_with_claude>
 
@@ -2006,7 +2009,7 @@ tools:
     (the kglite-mcp-server crate is the reference) only when you need
     to replace bundled tools, swap the rmcp transport, or register
     conditional tools. For everything else (custom Cypher tools,
-    source-file access, Python hooks), the manifest is the answer. See
+    source-file access, embedders), the manifest is the answer. See
     docs/python/guides/mcp-servers.md for the full reference.
   </forking>
 
@@ -2014,4 +2017,29 @@ tools:
 "##,
         version = env!("CARGO_PKG_VERSION"),
     )
+}
+
+#[cfg(test)]
+mod mcp_quickstart_tests {
+    use super::mcp_quickstart;
+
+    #[test]
+    fn names_only_current_install_and_extension_contracts() {
+        let quickstart = mcp_quickstart();
+        for expected in [
+            "pip install kglite",
+            "cargo install kglite-mcp-server",
+            "trust.allow_embedder: true",
+            "library: sentence-transformers",
+            "--features fastembed",
+        ] {
+            assert!(quickstart.contains(expected), "missing {expected:?}");
+        }
+        for retired in ["kglite[mcp]", "--embedder", "--trust-tools", "python:"] {
+            assert!(
+                !quickstart.contains(retired),
+                "retired contract returned: {retired:?}"
+            );
+        }
+    }
 }

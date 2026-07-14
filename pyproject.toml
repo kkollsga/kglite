@@ -45,6 +45,9 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.0"]
+# DataFrame loading and conversion are optional so graph-only and MCP users
+# keep a zero-dependency base wheel. Install this extra for pandas workflows.
+pandas = ["pandas>=2.0"]
 # NetworkX interop: `KnowledgeGraph.to_networkx()` /
 # `kglite.from_networkx()`. Optional — networkx is never imported at
 # module load. `from_networkx` converts records through pandas, so the

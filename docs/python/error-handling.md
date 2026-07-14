@@ -6,18 +6,17 @@
 > future Arrow / language-binding work) mapping typed errors to
 > wire-protocol shapes.
 
-This page documents the `kglite.KgError` exception hierarchy: what
-each class means, what raises it, how to catch it, and the trade-off
-with the pre-A.2 built-in-exception surface.
+This page documents the `kglite.KgError` exception hierarchy and the boundary
+where KGLite intentionally preserves ordinary Python built-in exceptions.
 
 ## The hierarchy
 
-Every kglite-raised exception is a subclass of `kglite.KgError`. The
-class chain mirrors the Rust `KgError` enum at `crates/kglite/src/error.rs`:
+Typed graph-engine failures are subclasses of `kglite.KgError`. The class
+chain mirrors the Rust `KgError` enum at `crates/kglite/src/error.rs`:
 
 ```text
 Exception
-└── kglite.KgError                          (universal base)
+└── kglite.KgError                          (typed engine-error base)
     ├── kglite.CypherError                   (Cypher pipeline base)
     │   ├── kglite.CypherSyntaxError         — parser/tokenizer rejection
     │   ├── kglite.CypherTimeoutError        — exceeded timeout_ms
@@ -29,7 +28,7 @@ Exception
     ├── kglite.NodeNotFoundError              — node lookup miss
     ├── kglite.ConnectionNotFoundError        — edge-type lookup miss
     ├── kglite.PropertyNotFoundError          — property lookup miss
-    ├── kglite.FileError                      — file not found
+    ├── kglite.FileError                      — engine-side file lookup failure
     ├── kglite.FileFormatError                — malformed .kgl / blueprint
     ├── kglite.FileIoError                    — permission, mid-read EOF
     ├── kglite.ArgumentError                  — bad arg precondition
@@ -38,7 +37,26 @@ Exception
     └── kglite.InternalError                  — invariant violation (bug)
 ```
 
-### The one exception that is *not* a `KgError`: Ctrl-C
+## Built-in Python exceptions remain part of the public contract
+
+`KgError` is not a universal wrapper around every Python call. Operations that
+participate in familiar Python protocols retain the conventional exception
+family so callers can handle them like the equivalent built-in object:
+
+| Operation family | Exception examples |
+|---|---|
+| Mapping/column/type lookup | `KeyError` |
+| Python argument values or unsupported wrapper modes | `ValueError` |
+| Wrong Python object or argument shape | `TypeError` |
+| Wrapper-side path opening, such as a missing blueprint | `FileNotFoundError` |
+| Borrow/object lifecycle conflicts | `RuntimeError` |
+| User cancellation | `KeyboardInterrupt` |
+
+Use `KgError` for typed query, schema, graph-engine, transaction, and storage
+failures. Catch a built-in when the documented method follows a standard
+Python lookup, argument, filesystem, or object-lifecycle convention.
+
+### Ctrl-C
 
 Interrupting a long-running read with `Ctrl-C` raises the **builtin
 `KeyboardInterrupt`**, not a `kglite.KgError` subclass — by design, an
@@ -84,7 +102,7 @@ except kglite.CypherError:
     ...
 ```
 
-**Universal:** catch any kglite-raised error regardless of category:
+**Typed engine base:** catch any typed KGLite engine failure:
 
 ```python
 try:
@@ -92,7 +110,7 @@ try:
     g.add_nodes(df, ...)
     g.save("graph.kgl")
 except kglite.KgError as e:
-    log.error("kglite failed: %s", e)
+    log.error("kglite engine failed: %s", e)
 ```
 
 `kglite.KgError` is `Exception`-derived, so a bare `except Exception:`
@@ -128,33 +146,20 @@ or silent corruption. Give each worker its own `g.copy()`, share a read-only
 `g.freeze()` snapshot for concurrent reads, or — for shared reads **and** writes
 — use `g.session()` (see {doc}`/concepts/concurrency`).
 
-## Migration from pre-A.2
+## Choosing what to catch
 
-Before A.2, kglite raised the Python built-in exceptions directly:
-`ValueError`, `RuntimeError`, `KeyError`, `IOError`, `TypeError`. A.2
-replaces these with typed subclasses descending from `KgError`. The
-trade-off: **existing `except ValueError:` / `except RuntimeError:` /
-`except KeyError:` catches no longer match** kglite-raised
-exceptions.
+Use the method's documented exception family rather than translating every
+built-in mechanically. For example, a Cypher type failure is a
+`CypherTypeMismatchError`, while indexing a result with a missing column is a
+normal `KeyError`. A missing path handled by the engine loader is a
+`FileError`; a wrapper API that follows Python's path-opening convention may
+document `FileNotFoundError` instead.
 
-PyO3's `create_exception!` macro is single-inheritance — combining
-`KgError` as a base AND `ValueError` as an additional base would
-require Python-level multiple-inheritance which PyO3 doesn't support
-cleanly. The plan chose consistency-first: every kglite error is
-`isinstance(e, kglite.KgError)`.
-
-**Migration mapping** (most common cases):
-
-| Pre-A.2 | A.2+ |
-|---|---|
-| `except ValueError:` | `except kglite.KgError:` or specific subclass |
-| `except RuntimeError:` | `except kglite.CypherExecutionError:` (or `KgError`) |
-| `except KeyError:` | `except kglite.NodeNotFoundError:` / `PropertyNotFoundError:` |
-| `except FileNotFoundError:` | `except kglite.FileError:` |
-| `except TypeError:` | `except kglite.ArgumentError:` |
-
-For the "I don't care which kglite error, just any error from kglite"
-case, `except kglite.KgError:` is the new canonical form.
+PyO3's `create_exception!` macro is single-inheritance, so typed KGLite errors
+do not also inherit from `ValueError`, `KeyError`, or another built-in. For the
+"I don't care which typed engine error occurred" case,
+`except kglite.KgError:` is canonical. It intentionally does not swallow
+built-in Python protocol errors or `KeyboardInterrupt`.
 
 ## What's in the message
 

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Installation, exception, and MCP quickstart contracts match runtime behavior.**
+  DataFrame workflows have a named `pandas` extra, NetworkX guidance uses its
+  complete extra, `KgError` is documented as the typed engine-error base, and
+  the generated MCP quickstart names only supported install paths, flags, and
+  trust-gated embedder configuration.
 - **Manifest embedders require their documented trust opt-in.** MCP servers
   reject `extensions.embedder` unless the manifest explicitly sets
   `trust.allow_embedder: true`, before any Python factory or Rust model is

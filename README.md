@@ -173,6 +173,7 @@ one shared synthetic graph. Reproduce with `python benchmarks/benchmark.py`.
 pip install kglite
 
 # Optional extras
+pip install 'kglite[pandas]'   # DataFrame loading used in the walkthrough below
 pip install fastembed            # (or sentence-transformers) embedding models for text_score() — bring your own
 pip install 'kglite[neo4j]'      # Neo4j Python driver for Bolt-server tests
 ```
@@ -278,8 +279,10 @@ beside `wikidata.kgl`) and the server auto-loads it at boot.
 ```yaml
 name: Wikidata Explorer
 source_root: /path/to/related/source        # exposes read/grep/list
+trust:
+  allow_embedder: true
 extensions:
-  embedder: { kind: fastembed, model: bge-small }   # enables text_score()
+  embedder: { library: fastembed, model: BAAI/bge-small-en-v1.5 }  # enables text_score()
   csv_http_server: true                              # bulk CSV exports
 tools:                                               # inline parameterised Cypher
   - name: who_invented

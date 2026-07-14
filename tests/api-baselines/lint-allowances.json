@@ -563,10 +563,6 @@
       "classification": "dead-code"
     },
     {
-      "identity": "crates/kglite-mcp-server/src/lib.rs::fn:pick_mode:fn pick_mode(cli: &Cli) -> Mode::dead_code",
-      "classification": "dead-code"
-    },
-    {
       "identity": "crates/kglite-py/src/graph/embedder/py_adapter.rs::fn:instance:pub fn instance(&self) -> &Py<PyAny>::dead_code",
       "classification": "dead-code"
     },

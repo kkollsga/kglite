@@ -303,7 +303,18 @@ result exports, agents use the bundled `cypher_query` with
 ### `extensions.embedder` — semantic search inside Cypher
 
 Wire bge-m3 (or any fastembed-catalog model) so `text_score()` works
-inside `cypher_query`. Worked example at
+inside `cypher_query`. Loading model code is explicit and trust-gated:
+
+```yaml
+trust:
+  allow_embedder: true
+extensions:
+  embedder:
+    library: sentence-transformers
+    model: BAAI/bge-m3
+```
+
+Worked example at
 {doc}`../examples/manifest_with_embedder`. Reference under
 [`extensions:` schema reference](#extensions-schema-reference) below.
 
@@ -336,6 +347,8 @@ instructions: |                       # Replaces default instructions (optional)
   Custom prompt shown to the agent at server-info time.
 skills: true                          # Turn on the skill system (see below)
 source_root: ./data                   # OR source_roots: [./data, ../alt]
+trust:
+  allow_embedder: true                # Required when extensions.embedder exists.
 builtins:
   save_graph: false                   # Default false — gate write-back tool.
   temp_cleanup: on_overview           # Wipe temp/ on every bare graph_overview().
@@ -813,18 +826,16 @@ the discriminator for `--graph` / `--workspace` / `--watch` /
 | `workspace.kind: local` + `workspace.root: <dir>` | — | — | — | — | promotes into local-workspace mode |
 | `workspace.watch: true` | — | — | ✓ (auto-rebuild) | — | ✓ when `workspace.kind: local` |
 | `tools[].cypher` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
-| `trust.allow_python_tools` / `allow_embedder` | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension | parsed, used by matching extension |
+| `trust.allow_embedder` | parsed, required by `extensions.embedder` | parsed, required by matching extension | parsed, required by matching extension | parsed (no graph) | parsed (no graph) |
 | `builtins.save_graph: true` | ✓ (registers `save_graph`) | — (multiple graphs) | — | — | — |
 | `builtins.temp_cleanup: on_overview` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.embedder` | ✓ | ✓ (per active repo) | ✓ | — (no graph) | — |
 | `extensions.csv_http_server` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `extensions.value_codecs` | ✓ | ✓ | ✓ | — (no graph) | — |
 | `extensions.<other>` (passthrough) | parsed, opaque to framework | parsed, opaque | parsed, opaque | parsed, opaque | parsed, opaque |
-| legacy top-level `embedder:` (pre-0.9.18) | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored | parsed and ignored |
-| `tools[].python:` (pre-0.9.18) | not loaded; mcp-methods (Rust) still parses it | (same) | (same) | (same) | (same) |
 
 Unknown keys at the top level (or under `builtins:` / `workspace:` /
-`trust:` / `tools[]` / `embedder:`) fail validation at boot with a
+`trust:` / `tools[]`) fail validation at boot with a
 non-zero exit and an `ERROR: <path>: unknown ... keys: [...]`
 message. Keys under `extensions:` are deliberately unvalidated —
 they're the downstream-binary passthrough zone.

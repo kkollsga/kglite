@@ -119,9 +119,6 @@ struct Cli {
     mcp_config: Option<PathBuf>,
     #[arg(long)]
     name: Option<String>,
-    #[arg(long = "trust-tools")]
-    #[allow(dead_code)]
-    trust_tools: bool,
     #[arg(long = "stale-after-days", default_value_t = 7)]
     stale_after_days: u32,
 }
@@ -1276,5 +1273,18 @@ mod embedder_trust_tests {
 
         assert!(error.to_string().contains("factory sentinel"));
         assert!(called.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod cli_contract_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn retired_trust_tools_flag_is_rejected() {
+        let error = Cli::try_parse_from(["kglite-mcp-server", "--trust-tools"])
+            .expect_err("removed no-op flag must not parse");
+        assert!(error.to_string().contains("--trust-tools"));
     }
 }

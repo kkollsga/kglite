@@ -7,6 +7,10 @@
 This is the full path from raw `pandas` tables to a queryable graph
 on disk. Most domain graphs land somewhere on this template.
 
+```bash
+pip install "kglite[pandas]"
+```
+
 ### 1. Shape your tables
 
 Two flat tables — one row per node, one row per edge — is enough.

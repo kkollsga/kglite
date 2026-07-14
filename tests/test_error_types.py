@@ -1,7 +1,7 @@
 """Phase A.2 / C1 — pin the typed exception class hierarchy.
 
 These tests assert the *contract* — class names exported, inheritance
-chains, that `kglite.KgError` is the universal catch. They don't yet
+chains, and that `kglite.KgError` catches every typed engine error. They don't yet
 exercise the executor's error paths (that's C2-C5's job; those tests
 flip from xfail to passing as the migration sweeps through).
 
@@ -62,7 +62,7 @@ class TestHierarchy:
 
     def test_every_typed_exception_subclasses_kgerror(self):
         # If any of these fails, the create_exception! base argument
-        # was wrong — every error should descend from KgError.
+        # was wrong — every typed engine error should descend from KgError.
         typed = [
             kglite.CypherError,
             kglite.CypherSyntaxError,
@@ -122,8 +122,8 @@ class TestInstantiation:
         with pytest.raises(kglite.CypherError):
             raise kglite.CypherTimeoutError("timeout")
 
-    def test_catch_via_kgerror_universal_catch(self):
-        # Every kglite exception is catchable via the universal base.
+    def test_catch_via_kgerror_engine_base(self):
+        # Every typed engine exception is catchable via the shared base.
         with pytest.raises(kglite.KgError):
             raise kglite.SchemaError("missing prop")
         with pytest.raises(kglite.KgError):

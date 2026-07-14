@@ -8,8 +8,9 @@
 //!
 //! ## Hierarchy
 //!
-//! All kglite-raised exceptions descend from `kglite.KgError`, which
-//! itself descends from `Exception`:
+//! Typed engine errors descend from `kglite.KgError`, which itself descends
+//! from `Exception`. Wrapper operations that implement conventional Python
+//! protocols may raise built-in exceptions directly.
 //!
 //! ```text
 //! Exception
@@ -34,25 +35,14 @@
 //!     └── kglite.InternalError
 //! ```
 //!
-//! ## Backward compatibility (pre-A.2 vs A.2)
-//!
-//! Before A.2, all kglite errors surfaced as `ValueError` /
-//! `RuntimeError` / `KeyError` / etc. Existing user code that did
-//! `except ValueError:` will NOT automatically catch the new typed
-//! exceptions — A.2 is a deliberate break for the sake of clean
-//! typing.
+//! ## Built-in exception boundary
 //!
 //! PyO3's `create_exception!` macro is single-inheritance; combining
 //! `kglite.KgError` as a base AND `PyValueError` as an additional
 //! base would require Python-level multiple inheritance which PyO3
-//! doesn't support cleanly. The user-decided trade-off in
-//! `docs/history/bolt-implementation.md` is consistency-first: every kglite error
-//! is now `isinstance(e, kglite.KgError)`.
-//!
-//! Migration path: change `except ValueError as e:` to
-//! `except kglite.CypherSyntaxError as e:` (or
-//! `except kglite.KgError as e:` for the catch-all). The CHANGELOG
-//! `[Unreleased]` entry names this break loudly.
+//! doesn't support cleanly. Engine failures use the typed hierarchy; Python
+//! lookup, argument-shape, filesystem, and object-lifecycle conventions keep
+//! their documented built-in exception families.
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

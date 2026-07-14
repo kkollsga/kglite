@@ -22,6 +22,7 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 - Optional extras:
   - `neo4j`: `neo4j>=5.0`
   - `networkx`: `networkx>=3.0`, `pandas>=2.0`
+  - `pandas`: `pandas>=2.0`
 - Published classifiers:
   - `Development Status :: 4 - Beta`
   - `Intended Audience :: Developers`

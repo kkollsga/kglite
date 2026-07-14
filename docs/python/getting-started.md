@@ -13,6 +13,7 @@ an MCP server for Claude / Cursor / agents and to parse Python / Rust
 Optional extras:
 
 ```bash
+pip install "kglite[pandas]"    # DataFrame loading and to_df=True
 pip install fastembed        # or sentence-transformers — embedding models for semantic search (bring your own)
 pip install "kglite[neo4j]"  # round-trip with Neo4j
 pip install "kglite[networkx]"  # NetworkX import/export (includes pandas)
@@ -23,6 +24,9 @@ support](platform-support.md) for the exact OS/architecture tiers, PyPy status,
 and what to do when no wheel matches.
 
 ## Quick Start — DataFrames in, queries out
+
+Install `kglite[pandas]` before following this DataFrame walkthrough. The base
+`kglite` wheel stays dependency-free for graph-only, Rust-backed, and MCP use.
 
 The day-1 workflow is *not* writing CREATE statements one node at a
 time — that path exists, but it isn't how anyone loads real data.

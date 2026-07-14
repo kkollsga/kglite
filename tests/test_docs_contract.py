@@ -68,6 +68,15 @@ def test_active_docs_only_name_declared_extras() -> None:
     assert references <= declared, f"docs name removed extras: {sorted(references - declared)}"
 
 
+def test_dataframe_walkthroughs_name_the_pandas_extra() -> None:
+    for relative in (
+        "README.md",
+        "docs/python/getting-started.md",
+        "docs/python/guides/data-loading.md",
+    ):
+        assert "kglite[pandas]" in (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+
 def test_documented_make_commands_are_real_targets() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     targets = set(re.findall(r"(?m)^([A-Za-z0-9_.-]+):", makefile))

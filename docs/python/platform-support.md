@@ -17,8 +17,9 @@ pip install kglite
 ```
 
 The base wheel has no required Python packages. Optional integrations declare
-their own dependencies, for example `kglite[networkx]` (NetworkX and pandas)
-and `kglite[neo4j]` (the Neo4j driver).
+their own dependencies: `kglite[pandas]` for DataFrame workflows,
+`kglite[networkx]` for the NetworkX bridge (including pandas), and
+`kglite[neo4j]` for the Neo4j driver.
 
 ## Evidence tiers
 

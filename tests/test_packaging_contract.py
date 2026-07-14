@@ -35,6 +35,11 @@ def test_networkx_extra_declares_every_runtime_dependency() -> None:
     assert requirements == {"networkx", "pandas"}
 
 
+def test_pandas_workflows_have_a_named_extra() -> None:
+    requirements = _requirement_names(_optional_dependency_blocks()["pandas"])
+    assert requirements == {"pandas"}
+
+
 def test_ci_only_installs_declared_project_extras() -> None:
     declared = set(_optional_dependency_blocks())
     referenced: set[str] = set()
@@ -89,6 +94,11 @@ def test_cp310_abi3_policy_does_not_claim_pypy_compatibility() -> None:
 def test_bundled_mcp_entry_point_stays_declared() -> None:
     pyproject = PYPROJECT.read_text(encoding="utf-8")
     assert 'kglite-mcp-server = "kglite.mcp_server:main"' in pyproject
+
+
+def test_installed_wheel_smoke_executes_console_script() -> None:
+    ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert "/tmp/kglite-networkx-smoke/bin/kglite-mcp-server --help" in ci
 
 
 def test_ci_compiles_packaged_optional_features_outside_workspace() -> None:

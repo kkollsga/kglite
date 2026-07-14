@@ -11,19 +11,17 @@ __version__: str
 
 # ─── Typed exception hierarchy (Phase A.2 / C1) ──────────────────────────────
 #
-# Every kglite-raised exception subclasses `KgError`. See
-# docs/explanation/error-handling.md for the full hierarchy and Bolt
-# wire-protocol mapping.
-#
-# Migration note: pre-A.2 kglite raised `ValueError` / `RuntimeError` /
-# `KeyError` etc. directly. Existing `except ValueError:` catches no
-# longer match — use the specific typed class or the `KgError` base.
+# Typed engine, query, schema, storage, and transaction failures subclass
+# `KgError`. Conventional Python protocol failures retain their built-in
+# families (`KeyError`, `ValueError`, `TypeError`, `FileNotFoundError`, and
+# `RuntimeError`). See docs/python/error-handling.md for the boundary.
 
 class KgError(Exception):
-    """Base class for every kglite-raised exception.
+    """Base class for typed KGLite engine failures.
 
-    Use ``except kglite.KgError:`` to catch any error raised by kglite,
-    regardless of category.
+    Query, schema, graph-engine, transaction, and storage failures use this
+    hierarchy. Python lookup, argument-shape, filesystem, and object-lifecycle
+    protocols may instead raise their conventional built-in exceptions.
     """
 
 class CypherError(KgError):
@@ -853,7 +851,7 @@ def from_networkx(
     ``MultiDiGraph``, the edge key) use it as the edge type. Plain networkx
     graphs get ``default_node_type`` / ``default_edge_type``.
 
-    Requires ``networkx`` and ``pandas``: ``pip install networkx pandas``.
+    Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
     Args:
         nx_graph: A networkx graph instance.
@@ -3981,7 +3979,7 @@ class KnowledgeGraph:
         NetworkX graph collapses same-type duplicate edges with identical
         endpoints even though this export preserves them.
 
-        Requires the ``networkx`` package: ``pip install networkx``.
+        Requires the ``networkx`` extra: ``pip install "kglite[networkx]"``.
 
         Returns:
             A ``networkx.MultiDiGraph`` mirroring the full graph.
