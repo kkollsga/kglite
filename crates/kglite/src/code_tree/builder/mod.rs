@@ -235,6 +235,13 @@ fn parse_directory(
         }
     }
 
+    // WalkDir follows the host filesystem's directory-entry order, which is
+    // not stable across platforms. Parsing in path order keeps graph node
+    // insertion (and therefore unsorted query results) reproducible.
+    for files in by_lang.values_mut() {
+        files.sort();
+    }
+
     if verbose {
         let langs: Vec<&'static str> = by_lang.keys().copied().collect();
         eprintln!(

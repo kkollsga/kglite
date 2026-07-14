@@ -84,7 +84,8 @@ def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
     assert "actions/upload-artifact@v7" in perf
     assert "include-hidden-files: true" in perf
     assert "scripts/benchmark_provenance.py" in perf
-    assert "tests/benchmarks/baselines/current.linux.json" not in perf
+    assert "tests/benchmarks/baselines/current.linux.json .bench-candidate.json" in perf
+    assert perf.count("--require-exact-set") == 2
 
 
 def test_perf_regression_is_part_of_the_aggregate_gate() -> None:

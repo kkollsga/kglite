@@ -486,6 +486,12 @@ jobs:
             .bench-reference-0.13.2.json .bench-candidate.json \
             --metric min --threshold 20 --require-exact-set
 
+      - name: Compare candidate against committed Linux baseline
+        run: |
+          python scripts/compare_bench.py \
+            tests/benchmarks/baselines/current.linux.json .bench-candidate.json \
+            --metric min --threshold 20 --require-exact-set
+
   public-api:
     name: Public API gate
     runs-on: ubuntu-latest

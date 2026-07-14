@@ -6,8 +6,15 @@ import json
 from pathlib import Path
 
 import pytest
-from scripts.benchmark_provenance import absolute_executable, sha256, validate_benchmark_results
+from scripts.benchmark_provenance import (
+    absolute_executable,
+    benchmark_names,
+    sha256,
+    validate_benchmark_results,
+)
 from scripts.promote_linux_benchmark import promote
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _result(*names: str, system: str = "Linux", python: str = "3.12.9") -> dict:
@@ -70,3 +77,10 @@ def test_promotion_accepts_only_verified_reference_and_strips_samples(tmp_path: 
     provenance_path.write_text(json.dumps(provenance))
     with pytest.raises(ValueError, match="digest"):
         promote(reference_path, provenance_path, expected_path, versioned, current)
+
+
+def test_committed_linux_and_generic_baselines_track_the_same_workloads() -> None:
+    baselines = REPO_ROOT / "tests" / "benchmarks" / "baselines"
+    generic = json.loads((baselines / "current.json").read_text())
+    linux = json.loads((baselines / "current.linux.json").read_text())
+    assert benchmark_names(linux) == benchmark_names(generic)
