@@ -295,9 +295,9 @@ jobs:
       # Skipped if its version is already on crates.io. The cdylib +
       # staticlib artifacts are NOT published here — crates.io
       # publishes the source crate; consumers run `cargo build` to
-      # produce the shared library. CI release artifacts (precompiled
-      # .so / .dylib / .dll + include/kglite.h) ship via the
-      # release workflow separately.
+      # produce the platform library. The generated header is committed
+      # under crates/kglite-c/include/ and ships in the source crate.
+      # Precompiled C ABI libraries are not release assets today.
       - name: Publish kglite-c
         if: needs.version-check.outputs.should_publish_c == 'true'
         env:

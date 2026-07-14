@@ -157,6 +157,24 @@ jobs:
       - name: List build directory
         run: Get-ChildItem -Recurse wheels
         shell: pwsh
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
+      - name: Smoke-test installed wheel (Windows x86_64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          python -m venv .wheel-smoke
+          $wheel = (Get-ChildItem wheels\*.whl | Select-Object -First 1).FullName
+          .\.wheel-smoke\Scripts\python -m pip install $wheel
+          .\.wheel-smoke\Scripts\python scripts/smoke_installed_wheel.py
+      - name: Smoke-test installed wheel (macOS arm64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .wheel-smoke
+          ./.wheel-smoke/bin/python -m pip install wheels/*.whl
+          ./.wheel-smoke/bin/python scripts/smoke_installed_wheel.py
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:
@@ -233,6 +251,15 @@ jobs:
           args: --release --out wheels
       - name: List build directory
         run: ls -la wheels
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
+      - name: Smoke-test installed manylinux wheel
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          python -m venv .wheel-smoke
+          ./.wheel-smoke/bin/python -m pip install wheels/*.whl
+          ./.wheel-smoke/bin/python scripts/smoke_installed_wheel.py
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:
@@ -290,6 +317,8 @@ jobs:
             export CFLAGS_aarch64_unknown_linux_gnu="${CFLAGS_aarch64_unknown_linux_gnu:-} -D__ARM_ARCH=8"
       - name: List build directory
         run: ls -la wheels
+      - name: Inventory wheel contents and entry points
+        run: python scripts/check_wheel_artifact.py "wheels/*.whl"
       - name: Upload wheels as artifact
         uses: actions/upload-artifact@v7
         with:

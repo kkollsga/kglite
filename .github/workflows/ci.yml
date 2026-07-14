@@ -253,16 +253,18 @@ jobs:
         # The MCP server is bundled Rust code and has no Python extra.
         run: pip install -e '.[neo4j,networkx]'
 
-      - name: Build kglite-mcp-server + kglite-bolt-server binaries + kglite cdylib
+      - name: Build protocol servers and the Python release wheel
         # Both protocol smoke suites skip when their standalone binary is
         # absent, so materialize the current MCP and Bolt adapters explicitly.
         #
-        # `-p kglite` (in addition to the server binaries) explicitly
-        # forces the libkglite cdylib to build. Cargo only needs the
-        # rlib when kglite is consumed as a workspace dep, and may skip
-        # the cdylib to save time — but the binary_size gate below
-        # reads the cdylib's file size, so we must materialise it.
-        run: cargo build --release -p kglite-mcp-server -p kglite-bolt-server -p kglite
+        # The binary-size gate measures the extension users receive, not the
+        # core Rust library. Use maturin so macOS extension-module linkage gets
+        # the same configuration as production wheels; a raw cargo build is
+        # not a portable way to link a PyO3 extension.
+        run: |
+          cargo build --release -p kglite-mcp-server -p kglite-bolt-server
+          rm -rf /tmp/kglite-binary-size-wheel
+          maturin build --release --out /tmp/kglite-binary-size-wheel
 
       - name: Smoke-test the NetworkX extra from an installed wheel
         if: matrix.python-version == '3.12'
@@ -494,7 +496,9 @@ jobs:
           .venv/bin/pytest -m parity -v --tb=short \
             tests/test_storage_parity.py \
             tests/test_phase1_parity.py tests/test_phase2_parity.py \
-            tests/test_phase3_parity.py tests/test_phase4_parity.py
+            tests/test_phase3_parity.py tests/test_phase4_parity.py \
+            tests/test_phase5_parity.py::test_graph_copy_cow_correctness_memory \
+            tests/test_phase5_parity.py::test_graph_copy_cow_correctness_mapped
 
   disk-concurrency:
     name: Disk concurrency regressions

@@ -129,3 +129,13 @@ def test_retired_architecture_claims_do_not_return() -> None:
 )
 def test_retired_install_claims_do_not_return(path: Path, retired_claim: str) -> None:
     assert retired_claim not in path.read_text(encoding="utf-8")
+
+
+def test_c_abi_distribution_docs_match_source_only_releases() -> None:
+    c_abi = (REPO_ROOT / "docs" / "rust" / "c-abi.md").read_text(encoding="utf-8")
+    binding = (REPO_ROOT / "docs" / "rust" / "implementing-a-binding.md").read_text(encoding="utf-8")
+    publishing = (REPO_ROOT / ".github" / "workflows" / "publish_crates.yml").read_text(encoding="utf-8")
+    truth = "Precompiled C ABI libraries are not currently attached to releases"
+    assert truth in c_abi
+    assert truth in binding
+    assert "release workflow separately" not in publishing

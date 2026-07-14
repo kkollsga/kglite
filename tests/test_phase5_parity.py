@@ -4,18 +4,19 @@ Guards the columnar-cleanup + per-backend-impls phase of the 0.8.0
 storage refactor. Tests here:
 
 - **graph.copy() CoW correctness** — mutating a copy leaves the
-  original unchanged on every backend. This is the Phase 0 crunch-point
-  re-asserted after Phase 5's per-backend impls + ColumnStore split.
-- **binary-size regression gate** — the release `.dylib` stays under
-  the +20% budget relative to the Phase 4 baseline.
+  original unchanged on the memory and mapped backends. This is the Phase 0
+  crunch-point re-asserted after Phase 5's per-backend impls + ColumnStore
+  split. Disk copy ownership has a separate storage-lifecycle follow-up.
+- **binary-size regression gate** — the release extension stays under
+  the +10% budget relative to the current per-platform baseline.
 
 Marker assignment is per-function so the expensive checks stay opt-in:
 
   - `test_graph_copy_cow_correctness_*` — `@pytest.mark.parity`
     (functional, needs backend setup).
   - `test_binary_size_regression` — `@pytest.mark.binary_size`
-    (needs the release `.dylib` built; CI's `python-tests` job
-    already does `cargo build --release`, so it plugs in there).
+    (needs the release extension built; CI's `python-tests` job
+    already builds a release wheel with maturin, so it plugs in there).
   - `test_dead_code_check` — `@pytest.mark.parity` (runs
     `cargo clippy --release`, ~30s).
 
@@ -89,7 +90,7 @@ def test_graph_copy_cow_correctness_mapped():
 
 
 #: Per-platform release-wheel library size baseline. The Linux ELF
-#: (libkglite.so) is ~65% larger than the macOS Mach-O (.dylib) for the
+#: (`libkglite_py.so`) is ~65% larger than the macOS Mach-O (`.dylib`) for the
 #: same source — different linker behaviour around debug info, lazy
 #: binding, and the absence of macOS-style `strip` defaults. CI runs on
 #: Linux; most local development happens on macOS; both pin separately.
@@ -160,18 +161,17 @@ def test_binary_size_regression():
     # Post-G.4 the wheel cdylib is the kglite-py crate's output —
     # `libkglite_py.{dylib,so}` — not the engine's `libkglite.{dylib,so}`
     # (which is now an rlib + dylib pair for downstream Rust crates).
-    # The wheel artifact is what users `pip install`, so that's what
-    # the size gate should track. Pre-G.4 candidates kept for stale
-    # leftover compatibility, but listed second so the cdylib wins.
+    # The wheel artifact is what users `pip install`, so only kglite-py's
+    # cdylib is a valid measurement. Falling back to the core library can make
+    # this gate pass while the shipped extension is absent or oversized.
     candidates = [
         REPO_ROOT / "target" / "release" / "libkglite_py.dylib",
         REPO_ROOT / "target" / "release" / "libkglite_py.so",
-        REPO_ROOT / "target" / "release" / "libkglite.dylib",
-        REPO_ROOT / "target" / "release" / "libkglite.so",
+        REPO_ROOT / "target" / "release" / "kglite_py.dll",
     ]
     bin_path = next((p for p in candidates if p.exists()), None)
     if bin_path is None:
-        pytest.skip("release build not present — run `cargo build --release` first")
+        pytest.fail("kglite-py release cdylib is missing — run `maturin build --release`")
 
     size = bin_path.stat().st_size
     platform_key = sys.platform if sys.platform in BINARY_SIZE_BASELINES else "linux"

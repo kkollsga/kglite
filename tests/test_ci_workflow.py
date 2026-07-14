@@ -48,6 +48,8 @@ def test_storage_and_disk_jobs_run_bounded_regression_targets() -> None:
         "tests/test_phase2_parity.py",
         "tests/test_phase3_parity.py",
         "tests/test_phase4_parity.py",
+        "tests/test_phase5_parity.py::test_graph_copy_cow_correctness_memory",
+        "tests/test_phase5_parity.py::test_graph_copy_cow_correctness_mapped",
     ):
         assert target in parity
 
@@ -55,6 +57,12 @@ def test_storage_and_disk_jobs_run_bounded_regression_targets() -> None:
     assert "test_concurrent_disk_reads_keep_materialized_nodes_alive" in disk
     assert "test_disk_writer_lease_is_enforced_across_processes" in disk
     assert "test_disk_session_reuses_writer_lineage_and_composes" in disk
+
+
+def test_python_job_builds_the_measured_release_extension() -> None:
+    python_tests = _job_block("python-tests")
+    assert "maturin build --release --out /tmp/kglite-binary-size-wheel" in python_tests
+    assert "cargo build --release -p kglite-mcp-server -p kglite-bolt-server" in python_tests
 
 
 def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:

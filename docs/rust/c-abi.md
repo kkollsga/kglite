@@ -1,7 +1,10 @@
 # `kglite-c` — the C ABI for cross-language bindings
 
-> **Status**: Design doc (Phase H.1) — committed 2026-05-25.
-> Implementation in `crates/kglite-c/` (Phase H.2+) is in flight.
+> **Status**: Implemented in `crates/kglite-c/` and published as a source
+> crate. The generated header is committed at
+> `crates/kglite-c/include/kglite.h`. Precompiled C ABI libraries are not
+> currently attached to releases; consumers build the platform library from
+> the crate source.
 
 Future-language bindings for kglite (Go via cgo, JavaScript via napi,
 JVM via JNI, .NET via P/Invoke, …) reach the engine through a stable
@@ -556,19 +559,19 @@ KgliteStatusCode kglite_cypher_result_get_row_json(const KgliteCypherResult*, si
 
 ### 5. Cross-platform build (`.so` / `.dylib` / `.dll`)
 
-Existing kglite CI builds on Linux / macOS / Windows for the
-Python wheel. `kglite-c` extends that — `crate-type = ["cdylib",
-"staticlib"]` produces both shared and static libs per platform.
-The C header is platform-independent; only the shared library
-changes.
+`crate-type = ["cdylib", "staticlib"]` produces shared and static
+libraries for the selected build target. The C header is
+platform-independent and is committed in the source crate.
 
-CI artifacts:
-- `libkglite_c.so` / `libkglite_c.dylib` / `kglite_c.dll`
-- `libkglite_c.a` / `libkglite_c.lib` (static)
-- `kglite.h` (header)
+Build the platform artifacts from source with:
 
-Published as GitHub release assets attached to each `kglite-c`
-release.
+```bash
+cargo build --release -p kglite-c
+```
+
+That produces `libkglite_c.so` / `libkglite_c.dylib` /
+`kglite_c.dll` and the corresponding static library for the active
+target. Precompiled C ABI libraries are not currently attached to releases.
 
 ---
 

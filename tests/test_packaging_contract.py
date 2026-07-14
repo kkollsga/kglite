@@ -10,6 +10,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import subprocess
+import sys
+import zipfile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -107,3 +110,41 @@ def test_ci_compiles_packaged_optional_features_outside_workspace() -> None:
     assert "bash scripts/check_packaged_features.sh" in ci
     assert "cargo package -p kglite" in script
     assert "--features parallel-bz2" in script
+
+
+def _write_fake_wheel(path: Path, *, include_extension: bool = True) -> None:
+    with zipfile.ZipFile(path, "w") as wheel:
+        wheel.writestr("kglite/mcp_server.py", "")
+        if include_extension:
+            wheel.writestr("kglite/kglite.abi3.so", b"native")
+        wheel.writestr(
+            "kglite-0.0.0.dist-info/entry_points.txt",
+            "[console_scripts]\nkglite-mcp-server = kglite.mcp_server:main\n",
+        )
+
+
+def test_wheel_inventory_checks_native_extension_and_mcp_entry_point(tmp_path: Path) -> None:
+    checker = REPO_ROOT / "scripts" / "check_wheel_artifact.py"
+    valid = tmp_path / "valid.whl"
+    invalid = tmp_path / "invalid.whl"
+    _write_fake_wheel(valid)
+    _write_fake_wheel(invalid, include_extension=False)
+
+    subprocess.run([sys.executable, checker, valid], check=True)
+    result = subprocess.run(
+        [sys.executable, checker, invalid],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "missing the native kglite extension" in result.stderr
+
+
+def test_release_workflow_inventories_all_wheels_and_smokes_native_targets() -> None:
+    workflow = (WORKFLOWS / "build_wheels.yml").read_text(encoding="utf-8")
+    assert workflow.count('python scripts/check_wheel_artifact.py "wheels/*.whl"') == 3
+    assert "scripts/smoke_installed_wheel.py" in workflow
+    assert "matrix.target == 'x86_64-pc-windows-msvc'" in workflow
+    assert "matrix.target == 'aarch64-apple-darwin'" in workflow
+    assert "matrix.target == 'x86_64-unknown-linux-gnu'" in workflow

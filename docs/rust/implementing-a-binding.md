@@ -110,13 +110,16 @@ version:
 ```toml
 # Cargo.toml of an in-Rust consumer
 [dependencies]
-kglite-c = "0.11"     # cdylib + staticlib + rlib
+kglite-c = "0.13"     # cdylib + staticlib + rlib
 ```
 
 For non-Rust consumers, link against `libkglite_c.{so,dylib,dll}`
 and include the header that ships at
-`crates/kglite-c/include/kglite.h`. CI publishes the header as a
-release artifact alongside the precompiled shared libraries.
+`crates/kglite-c/include/kglite.h`. Build the platform library from
+the `kglite-c` source crate with `cargo build --release -p kglite-c`.
+Precompiled C ABI libraries are not currently attached to releases; the
+generated header is committed in the repository and included with the source
+crate.
 
 #### Worked example — cgo (Go)
 
