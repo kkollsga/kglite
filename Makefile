@@ -155,8 +155,11 @@ lint-py:
 check-api-chokepoint:
 	./scripts/check_api_chokepoint.sh
 
+check-lint-allowances:
+	python scripts/check_lint_allowances.py
+
 ## Run all lint checks (Rust + Python + stubs) — use before pushing
-lint: check-api-chokepoint
+lint: check-api-chokepoint check-lint-allowances
 	$(ACTIVATE) && python scripts/check_cypher_clean_room.py
 	$(ACTIVATE) && python scripts/check_dependency_licenses.py
 	cargo fmt -- --check

@@ -1,0 +1,842 @@
+{
+  "schema_version": 1,
+  "classification_reasons": {
+    "api-shape": "Changing the warned shape is deferred to the public API review.",
+    "boundary": "The signature or import shape is imposed by a binding or protocol boundary.",
+    "test": "The allowance exists only for a test, fixture, or numeric test literal.",
+    "transitional": "Internal debt is inventoried for removal or localization in the next phase.",
+    "dead-code": "Dead-code allowances are audited separately from style and API lints."
+  },
+  "allowances": [
+    {
+      "identity": "crates/kglite-c/src/lib.rs::module::clippy::missing_safety_doc",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/src/lib.rs::module::clippy::not_unsafe_ptr_arg_deref",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-c/src/session.rs::fn:execute_mut_impl:unsafe fn execute_mut_impl( session: *mut KgliteSession, query: *const c_char, params_json: *const c_char, timeout_ms: u64, max_rows: u64, out_result: *mut *mut KgliteCypherResult, out_error_msg: *mut *const c_char, ) -> KgliteStatusCode::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-mcp-server/src/tools.rs::fn:run_cypher_write:fn run_cypher_write( active: &mut ActiveGraph, query: &str, write_scope: Option<&[String]>, git_sha: Option<&str>, modified_by: Option<&str>, value_codecs: Option<&[ValueCodec]>, csv_http: Option<&crate::csv_http::CsvHttpConfig>, ) -> Result<String, String>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/code_tree/pyapi/entry.rs::fn:build:pub fn build( py: Python<'_>, src_dir: PathBuf, save_to: Option<PathBuf>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, rev: Option<String>, revs: Option<Vec<String>>, repo_root: Option<PathBuf>, ) -> PyResult<KnowledgeGraph>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/code_tree/pyapi/entry.rs::fn:repo_tree:pub fn repo_tree( py: Python<'_>, repo: String, save_to: Option<PathBuf>, clone_to: Option<PathBuf>, branch: Option<String>, token: Option<String>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, ) -> PyResult<KnowledgeGraph>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/mod.rs::fn:compare_inner:pub(crate) fn compare_inner( inner: &Arc<DirGraph>, selection: &mut CowSelection, target_type: Option<&str>, config: &kglite_core::api::fluent::MethodConfig, conditions: Option<&HashMap<String, FilterCondition>>, sort_fields: Option<&Vec<(String, bool)>>, limit: Option<usize>, estimated: usize, ) ->::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:all_paths:fn all_paths( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, max_hops: Option<usize>, max_results: Option<usize>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:betweenness_centrality:fn betweenness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<Vec<String>>, top_k: Option<usize>, as_dict: Option<bool>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:closeness_centrality:fn closeness_centrality( &self, py: Python<'_>, normalized: Option<bool>, sample_size: Option<usize>, connection_types: Option<Vec<String>>, top_k: Option<usize>, as_dict: Option<bool>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:degree_centrality:fn degree_centrality( &self, py: Python<'_>, normalized: Option<bool>, connection_types: Option<Vec<String>>, top_k: Option<usize>, as_dict: Option<bool>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:pagerank:fn pagerank( &self, py: Python<'_>, damping_factor: Option<f64>, max_iterations: Option<usize>, tolerance: Option<f64>, connection_types: Option<Vec<String>>, top_k: Option<usize>, as_dict: Option<bool>, timeout_ms: Option<u64>, to_df: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path:fn shortest_path( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, weight_property: Option<String>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_ids:fn shortest_path_ids( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/algorithms.rs::fn:shortest_path_indices:fn shortest_path_indices( &self, py: Python<'_>, source_type: &str, source_id: &Bound<'_, PyAny>, target_type: &str, target_id: &Bound<'_, PyAny>, connection_types: Option<Vec<String>>, via_types: Option<Vec<String>>, timeout_ms: Option<u64>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:cypher:fn cypher( slf: &Bound<'_, Self>, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, streaming: bool, disable_optimizer: bool, disabled_passes: Option<Vec<String>>, write_scope: Option<Vec<String>>, git_sha: Option<String>,::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:load_ntriples:fn load_ntriples( &mut self, py: Python<'_>, path: &str, predicates: Option<Vec<String>>, languages: Option<Vec<String>>, node_types: Option<&Bound<'_, PyDict>>, predicate_labels: Option<&Bound<'_, PyDict>>, max_entities: Option<usize>, max_triples: Option<u64>, verbose: bool, progress: Option<Py<Py::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_core.rs::fn:to_bytes:fn to_bytes(&mut self, py: Python<'_>) -> PyResult<Py<PyBytes>>::clippy::wrong_self_convention",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:collect_children:fn collect_children( &mut self, py: Python<'_>, property: Option<&str>, r#where: Option<&Bound<'_, PyDict>>, sort: Option<&Bound<'_, PyAny>>, limit: Option<usize>, store_as: Option<&str>, max_length: Option<usize>, keep_selection: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:compare:fn compare( &mut self, target_type: &Bound<'_, PyAny>, method: &Bound<'_, PyAny>, filter: Option<&Bound<'_, PyDict>>, sort: Option<&Bound<'_, PyAny>>, limit: Option<usize>, level_index: Option<usize>, new_level: Option<bool>, ) -> PyResult<Self>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:create_connections:fn create_connections( &mut self, py: Python<'_>, connection_type: String, keep_selection: Option<bool>, conflict_handling: Option<String>, properties: Option<&Bound<'_, PyDict>>, source_type: Option<String>, target_type: Option<String>, ) -> PyResult<Self>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:describe:fn describe( &self, types: Option<Vec<String>>, type_search: Option<String>, connections: Option<&Bound<'_, PyAny>>, cypher: Option<&Bound<'_, PyAny>>, fluent: Option<&Bound<'_, PyAny>>, max_pairs: Option<usize>, sample_truncate: Option<usize>, ) -> PyResult<String>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:traverse:fn traverse( &self, py: Python<'_>, connection_type: String, level_index: Option<usize>, direction: Option<String>, sort_target: Option<&Bound<'_, PyAny>>, limit: Option<usize>, new_level: Option<bool>, at: Option<&str>, during: Option<(String, String)>, temporal: Option<bool>, target_type: Option<&::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_introspection.rs::fn:unique_values:fn unique_values( &mut self, property: String, group_by_parent: Option<bool>, level_index: Option<usize>, indices: Option<Vec<usize>>, store_as: Option<&str>, max_length: Option<usize>, keep_selection: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:add_connections:fn add_connections( &mut self, py: Python<'_>, data: Option<&Bound<'_, PyAny>>, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, columns: Option<&Bound<'_, PyLi::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:add_nodes:fn add_nodes( &mut self, data: &Bound<'_, PyAny>, node_type: String, unique_id_field: String, node_title_field: Option<String>, columns: Option<&Bound<'_, PyList>>, conflict_handling: Option<String>, skip_columns: Option<&Bound<'_, PyList>>, column_types: Option<&Bound<'_, PyDict>>, timeseries: Opti::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:build_connection_df_from_pandas:fn build_connection_df_from_pandas( data: &Bound<'_, PyAny>, source_id_field: &str, target_id_field: &str, source_title_field: Option<&str>, target_title_field: Option<&str>, columns: Option<&Bound<'_, PyList>>, skip_columns: Option<&Bound<'_, PyList>>, column_types: Option<&Bound<'_, PyDict>>, ) ->::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:replace_connections:fn replace_connections( &mut self, py: Python<'_>, data: Option<&Bound<'_, PyAny>>, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, columns: Option<&Bound<'_, ::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs::fn:write_connections:fn write_connections( py: Python<'_>, kg: &mut KnowledgeGraph, replace: bool, data: Option<&Bound<'_, PyAny>>, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, ::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/session.rs::fn:execute:fn execute( &self, py: Python<'_>, query: &str, to_df: bool, params: Option<&Bound<'_, PyDict>>, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/timeseries.rs::fn:add_timeseries:fn add_timeseries( &mut self, py: Python<'_>, node_type: String, data: &Bound<'_, PyAny>, fk: String, time_key: Vec<String>, channels: &Bound<'_, PyAny>, resolution: Option<String>, units: Option<HashMap<String, String>>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/transaction.rs::fn:cypher:fn cypher( &mut self, py: Python<'_>, query: &str, params: Option<&Bound<'_, PyDict>>, to_df: bool, timeout_ms: Option<u64>, max_rows: Option<usize>, write_scope: Option<Vec<String>>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:build_vector_index:fn build_vector_index( &mut self, py: Python<'_>, node_type: &str, text_column: &str, m: Option<usize>, ef_construction: Option<usize>, ef_search: Option<usize>, metric: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:embed_texts:fn embed_texts( &mut self, py: Python<'_>, node_type: &str, text_column: &str, batch_size: Option<usize>, show_progress: Option<bool>, replace: Option<bool>, mode: Option<&str>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:search_text:fn search_text( &self, py: Python<'_>, text_column: &str, query: &str, top_k: Option<usize>, metric: Option<&str>, to_df: Option<bool>, returning: Option<Vec<String>>, exact: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/pyapi/vector.rs::fn:vector_search:fn vector_search( &self, py: Python<'_>, text_column: &str, query_vector: Vec<f32>, top_k: Option<usize>, metric: Option<&str>, to_df: Option<bool>, returning: Option<Vec<String>>, exact: Option<bool>, ) -> PyResult<Py<PyAny>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/lib.rs::module::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite-py/src/lib.rs::module::hidden_glob_reexports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/lib.rs::module::unused_imports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/okf/pyapi/entry.rs::fn:build:pub fn build( py: Python<'_>, path: PathBuf, dialect: Option<String>, require_frontmatter: bool, respect_skip: bool, skip_dirs: Option<Vec<String>>, with_body: bool, embed: bool, ) -> PyResult<KnowledgeGraph>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/sec.rs::fn:fetch_raw:fn fetch_raw( py: Python<'_>, workdir: String, user_agent: &str, years: u16, current_year: u16, current_quarter: u8, force_refetch: bool, staleness_hours: u64, ) -> PyResult<Py<PyDict>>::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite-py/src/sec.rs::fn:run_batch:fn run_batch<T, F>( py: Python<'_>, user_agent: &str, workdir: String, batch: Vec<T>, phase: &str, label: &str, unit: &str, progress: Option<&Py<PyAny>>, fetch_one: F, ) -> PyResult<(usize, usize)> where T: Send, // shared `&F` *inside* `py.detach`, whose `Ungil` bound requires // that borrow be `Se::clippy::too_many_arguments",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:finalize_and_load:fn finalize_and_load( mut combined: ParseResult, project_info: Option<crate::code_tree::models::ProjectInfo>, project_root: &Path, include_docs: bool, verbose: bool, save_to: Option<&Path>, ) -> Result<(Arc<DirGraph>, call_edges::CallResolutionStats), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:run_with_options:pub fn run_with_options( input: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:run_with_options_stats:pub fn run_with_options_stats( input: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<(Arc<DirGraph>, call_edges::CallResolutionStats), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::collapsible_if",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::collapsible_match",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::explicit_auto_deref",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::if_same_then_else",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::manual_contains",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::manual_find",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::manual_pattern_char_comparison",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::needless_borrow",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::needless_lifetimes",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::needless_return",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::clippy::useless_conversion",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/cpp.rs::fn:parse_class_body:fn parse_class_body( &self, node: Node, source: &[u8], module_path: &str, rel_path: &str, class_name: &str, class_qname: &str, result: &mut ParseResult, default_vis: &str, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/csharp.rs::fn:parse_type_body:fn parse_type_body( node: Node, source: &[u8], module_path: &str, rel_path: &str, type_name: &str, type_qname: &str, result: &mut ParseResult, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/csharp.rs::fn:parse_type_declaration:fn parse_type_declaration( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, outer_name: Option<&str>, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/dart.rs::fn:emit_function:fn emit_function( result: &mut ParseResult, rel_path: &str, source: &[u8], sig: Node, body: Option<Node>, name: String, owner_prefix: &str, is_method: bool, metadata: MetadataMap, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/java.rs::fn:parse_class:fn parse_class( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, outer_name: Option<&str>, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/java.rs::fn:parse_class_body:fn parse_class_body( node: Node, source: &[u8], module_path: &str, rel_path: &str, class_name: &str, class_qname: &str, result: &mut ParseResult, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/python.rs::fn:parse_class:fn parse_class( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, decorators: Option<Vec<String>>, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/rust_lang.rs::fn:parse_function:fn parse_function( node: Node, source: &[u8], module_path: &str, file_path: &str, is_method: bool, owner: Option<&str>, impl_is_pymethods: bool, in_test_mod: bool, ) -> FunctionInfo::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/parsers/typescript.rs::fn:parse_top_level:fn parse_top_level( &self, node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, file_info: &mut FileInfo, )::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/repo.rs::fn:clone_and_build:pub fn clone_and_build( repo: &str, save_to: Option<&Path>, clone_to: Option<&Path>, branch: Option<&str>, token: Option<&str>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/rev.rs::fn:archive_and_build:pub fn archive_and_build( src_dir: &Path, rev: &str, repo_root: Option<&Path>, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/rev.rs::fn:archive_and_build_into:fn archive_and_build_into( repo_root: &Path, rev: &str, src_dir: &Path, snapshot_dir: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/rev.rs::fn:build_code_tree_revs:pub fn build_code_tree_revs( src_dir: &Path, revs: &[String], repo_root: Option<&Path>, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/datasets/sec/extract/forms/eightk.rs::fn:emit_8k:fn emit_8k( items: &[EightKItem], officer_changes: &[OfficerChange], issuer_cik_raw: &str, path: &Path, sinks: &mut Sinks, identities: &mut Identities, extracted_at: &str, report: &mut FormReport, ) -> Result<()>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/datasets/sec/extract/identity/companies.rs::fn:emit_one_submission:fn emit_one_submission( sub: &crate::datasets::sec::parsers::submissions::Submission, slice: &SliceSpec, sinks: &mut Sinks, identities: &mut Identities, filing_index: &mut csv::Writer<File>, sic_index: &mut HashMap<String, String>, report: &mut CompanyEmitReport, ) -> Result<()>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/datasets/sec/extract/identity/mod.rs::fn:ensure_company:pub fn ensure_company( &mut self, sinks: &mut Sinks, cik: &str, name: &str, sic: &str, sic_description: &str, state_of_incorporation: &str, fiscal_year_end: &str, tickers: &str, exchanges: &str, entity_type: &str, former_names: &str, ) -> Result<()>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/datatypes/values.rs::fn:test_as_string_with_string_value:fn test_as_string_with_string_value()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/algorithms/graph_algorithms.rs::fn:all_paths:pub fn all_paths( graph: &DirGraph, source: NodeIndex, target: NodeIndex, max_hops: usize, max_results: Option<usize>, connection_types: Option<&[String]>, via_types: Option<&[String]>, deadline: Interrupt, ) -> Vec<Vec<NodeIndex>>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/algorithms/graph_algorithms.rs::fn:find_all_paths_recursive:fn find_all_paths_recursive( graph: &DirGraph, current: NodeIndex, target: NodeIndex, remaining_hops: usize, current_path: &mut Vec<NodeIndex>, visited: &mut HashSet<NodeIndex>, results: &mut Vec<Vec<NodeIndex>>, max_results: Option<usize>, connection_types: Option<&[InternedKey]>, via_types: &Optio::clippy::only_used_in_recursion",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/algorithms/graph_algorithms.rs::fn:find_all_paths_recursive:fn find_all_paths_recursive( graph: &DirGraph, current: NodeIndex, target: NodeIndex, remaining_hops: usize, current_path: &mut Vec<NodeIndex>, visited: &mut HashSet<NodeIndex>, results: &mut Vec<Vec<NodeIndex>>, max_results: Option<usize>, connection_types: Option<&[InternedKey]>, via_types: &Optio::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/build.rs::fn:connect:fn connect( graph: &mut DirGraph, df: DataFrame, connection_type: &str, source_type: &str, source_id_field: &str, target_type: &str, target_id_field: &str, report: &mut BuildReport, ) -> Result<usize, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:run_calendar:pub fn run_calendar( blueprint: &mut Blueprint, input_root: &Path, node_type: &str, start: &str, end: &str, next_edge: &str, in_month_edge: Option<&str>, in_quarter_edge: Option<&str>, in_year_edge: Option<&str>, links: &[CalendarLink], ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:write_hierarchy:fn write_hierarchy<F>( blueprint: &mut Blueprint, input_root: &Path, hier_type: &str, keys: Vec<String>, date_type: &str, edge_name: &str, date_pk_col: &str, hier_fk_col: &str, key_from_iso: F, ) -> Result<(), String> where F: Fn(&str) -> String,::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/compute/calendar.rs::fn:write_hierarchy_year:fn write_hierarchy_year( _blueprint: &mut Blueprint, _input_root: &Path, _years: HashSet<i32>, _date_type: &str, _edge_name: &str, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/expr.rs::fn:ctx:fn ctx(pairs: &[(&str, Value)]) -> HashMap<String, Value>::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/data_retrieval.rs::fn:get_connections:pub fn get_connections( graph: &DirGraph, selection: &CurrentSelection, level_index: Option<usize>, indices: Option<&[usize]>, include_node_properties: bool, ) -> Vec<LevelConnections>::clippy::type_complexity",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/filtering.rs::fn:test_values_equal_same_type:fn test_values_equal_same_type()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:cluster_traversal:fn cluster_traversal( graph: &DirGraph, selection: &mut CurrentSelection, target_type: Option<&str>, algorithm: &str, features: &[String], k: Option<usize>, eps: Option<f64>, min_samples: Option<usize>, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:distance_closest_mode:fn distance_closest_mode( graph: &DirGraph, selection: &mut CurrentSelection, source_nodes: &[NodeIndex], target_candidates: &[NodeIndex], max_distance_m: f64, source_spatial: Option<&SpatialConfig>, target_spatial: Option<&SpatialConfig>, geometry_field: Option<&str>, filter_target: Option<&HashMap::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:distance_point_mode:fn distance_point_mode( graph: &DirGraph, selection: &mut CurrentSelection, source_nodes: &[NodeIndex], target_candidates: &[NodeIndex], max_distance_m: f64, resolve: Option<SpatialResolve>, source_spatial: Option<&SpatialConfig>, target_spatial: Option<&SpatialConfig>, geometry_field: Option<&str>,::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:from_components:pub fn from_components( method_type: String, resolve_str: Option<String>, max_distance_m: Option<f64>, geometry_field: Option<String>, property: Option<String>, threshold: Option<f64>, metric: Option<String>, algorithm: Option<String>, features: Option<Vec<String>>, k: Option<usize>, eps: Option<f64::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:make_traversal:pub fn make_traversal( graph: &DirGraph, selection: &mut CurrentSelection, connection_type: String, level_index: Option<usize>, direction: Option<String>, filter_target: Option<&HashMap<String, FilterCondition>>, filter_connection: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&Vec<::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:make_traversal_full:fn make_traversal_full( graph: &DirGraph, selection: &mut CurrentSelection, connection_type: String, source_level_index: usize, direction: Option<Direction>, filter_target: Option<&HashMap<String, FilterCondition>>, filter_connection: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&V::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:semantic_score_traversal:fn semantic_score_traversal( graph: &DirGraph, selection: &mut CurrentSelection, target_type: &str, embedding_property: &str, threshold: f64, metric: crate::graph::algorithms::vector::DistanceMetric, filter_target: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&Vec<(String, bool)>>,::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:spatial_contains_traversal:fn spatial_contains_traversal( graph: &DirGraph, selection: &mut CurrentSelection, target_type: &str, resolve: Option<SpatialResolve>, geometry_field: Option<&str>, filter_target: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&Vec<(String, bool)>>, max_nodes: Option<usize>, ) -> Res::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:spatial_distance_traversal:fn spatial_distance_traversal( graph: &DirGraph, selection: &mut CurrentSelection, target_type: &str, max_distance_m: f64, resolve: Option<SpatialResolve>, geometry_field: Option<&str>, filter_target: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&Vec<(String, bool)>>, max_nodes: Op::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/traversal.rs::fn:spatial_intersects_traversal:fn spatial_intersects_traversal( graph: &DirGraph, selection: &mut CurrentSelection, target_type: &str, geometry_field: Option<&str>, filter_target: Option<&HashMap<String, FilterCondition>>, sort_target: Option<&Vec<(String, bool)>>, max_nodes: Option<usize>, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/value_operations.rs::fn:test_arithmetic_int_overflow_wraps:fn test_arithmetic_int_overflow_wraps()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/features/spatial.rs::fn:near_point:pub fn near_point( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/features/spatial.rs::fn:near_point_m:pub fn near_point_m( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, center_lat: f64, center_lon: f64, max_distance_m: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/features/spatial.rs::fn:test_parse_wkt_point:fn test_parse_wkt_point()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/features/spatial.rs::fn:within_bounds:pub fn within_bounds( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, min_lat: f64, max_lat: f64, min_lon: f64, max_lon: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/features/spatial.rs::fn:within_bounds:pub fn within_bounds( graph: &DirGraph, selection: &CurrentSelection, lat_field: &str, lon_field: &str, min_lat: f64, max_lat: f64, min_lon: f64, max_lon: f64, geom_fallback: Option<&str>, ) -> Result<Vec<NodeIndex>, String>::clippy::type_complexity",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/introspection/describe.rs::fn:compute_description:pub fn compute_description( graph: &DirGraph, types: Option<&[String]>, connections: &ConnectionDetail, cypher: &CypherDetail, fluent: &FluentDetail, type_search: Option<&str>, max_pairs: Option<usize>, sample_truncate: Option<usize>, ) -> Result<String, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/introspection/reporting.rs::fn:new:pub fn new( operation_type: String, expression: String, nodes_processed: usize, nodes_updated: usize, nodes_with_errors: usize, processing_time_ms: f64, is_aggregation: bool, ) -> Self::clippy::enum_variant_names",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/file.rs::mod:file_tests::unused_imports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/column_builder.rs::fn:flush_type_entries:fn flush_type_entries( type_name: &str, entries: &[BufferedEntry], writers: &mut HashMap<String, TypeWriter>, mmap: &mut MmapMut, row_ids: &mut Vec<(petgraph::graph::NodeIndex, u32)>, ) -> usize::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/loader.rs::fn:flush_entity:fn flush_entity( graph: &mut DirGraph, acc: EntityAccumulator, config: &NTriplesConfig, edge_buffer: &mut EdgeBuffer, stats: &mut NTriplesStats, mapped: bool, prop_log: &mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>, label_writer: &mut Option<super::label_spill::LabelSpi::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/loader.rs::fn:test_parse_entity_triple:fn test_parse_entity_triple()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/rdf/loader.rs::fn:resource_iri:fn resource_iri(term: &Term) -> Option<Cow<'_, str>>::unreachable_patterns",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs::fn:try_fast_with_aggregate_via_histogram:fn try_fast_with_aggregate_via_histogram( &self, pattern: &Pattern, with_clause: &WithClause, columns: &[String], group_var: &str, group_elem_idx: usize, group_key_indices: &[usize], count_indices: &[usize], ) -> Result<Option<Vec<ResultRow>>, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/tests.rs::module::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/write.rs::fn:execute_foreach:fn execute_foreach( graph: &mut DirGraph, variable: &str, list: &Expression, body: &[Clause], outer: &ResultSet, params: &HashMap<String, Value>, stats: &mut MutationStats, interrupt: &Interrupt, budget: &super::budget::ExecutionBudget, ) -> Result<(), String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/planner/index_selection.rs::fn:extract_from_predicate:pub(super) fn extract_from_predicate( pred: &Predicate, match_vars: &[(String, Option<String>)], prior_node_vars: &HashSet<String>, prior_scalar_vars: &HashSet<String>, params: &HashMap<String, Value>, pushable: &mut Vec<(String, String, Value)>, pushable_in: &mut Vec<(String, String, Vec<Value>)>, ::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/tokenizer.rs::fn:test_simple_match_return:fn test_simple_match_return()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_connections:pub fn add_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> Resul::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:add_properties_aggregate:fn add_properties_aggregate( graph: &mut DirGraph, selection: &CurrentSelection, property_spec: &HashMap<String, PropertySpec>, type_to_level: &HashMap<String, usize>, parent_maps: &[HashMap<NodeIndex, NodeIndex>], target_level: usize, ) -> Result<AddPropertiesReport, String>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/maintain.rs::fn:replace_connections:pub fn replace_connections( graph: &mut DirGraph, df_data: DataFrame, connection_type: String, source_type: String, source_id_field: String, target_type: String, target_id_field: String, source_title_field: Option<String>, target_title_field: Option<String>, conflict_handling: Option<String>, ) -> R::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/subgraph_streaming_writer.rs::fn:make_schema:fn make_schema(interner: &mut StringInterner, props: &[&str]) -> Arc<TypeSchema>::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/validation.rs::fn:test_value_matches_type:fn test_value_matches_type()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/schema.rs::fn:is_reserved_provenance_key:pub fn is_reserved_provenance_key(key: &str) -> bool::unused_imports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/backend.rs::fn:new:pub fn new() -> Self::clippy::large_enum_variant",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store_tests.rs::module::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/builder.rs::fn:swap_csr_files:pub(super) fn swap_csr_files( &mut self, build_dir: &Path, node_bound: usize, edge_count: usize, out_offsets: MmapOrVec<u64>, out_edges: MmapOrVec<CsrEdge>, in_offsets: MmapOrVec<u64>, in_edges: MmapOrVec<CsrEdge>, edge_endpoints: MmapOrVec<EdgeEndpoints>, ) -> io::Result<()>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/csr_build.rs::fn:merge_sort_build:fn merge_sort_build( pending: &MmapOrVec<PendingEdge>, edge_count: usize, by_source: bool, chunk_dir: &Path, output_dir: &Path, label: &str, config: &BuilderConfig, verbose: bool, ) -> std::io::Result<MmapOrVec<CsrEdge>>::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/edge_properties.rs::fn:k:fn k(s: &str, interner: &mut StringInterner) -> InternedKey::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/graph.rs::statement:pub(super) edge_arena: std::sync::Mutex<Vec<Box<EdgeData>>>,::clippy::vec_box",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/graph.rs::statement:pub(super) node_arena: std::sync::Mutex<Vec<Box<NodeData>>>,::clippy::vec_box",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/memory/property_log.rs::fn:round_trip_basic:fn round_trip_basic()::clippy::approx_constant",
+      "classification": "test"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mod.rs::statement:pub use recording::RecordingGraph;::unused_imports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::len_without_is_empty",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::new_without_default",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::result_large_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::result_unit_err",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::should_implement_trait",
+      "classification": "api-shape"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::clippy::too_many_arguments",
+      "classification": "transitional"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::hidden_glob_reexports",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/lib.rs::module::private_interfaces",
+      "classification": "boundary"
+    },
+    {
+      "identity": "crates/kglite/src/param/mod.rs::fn:null_roundtrip:fn null_roundtrip()::clippy::approx_constant",
+      "classification": "test"
+    }
+  ],
+  "dead_code_allowances": [
+    {
+      "identity": "crates/kglite-c/src/embedder.rs::fn:into_handle:pub(crate) fn into_handle(inner: Arc<dyn Embedder>) -> *mut KgliteEmbedder::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite-mcp-server/src/lib.rs::fn:pick_mode:fn pick_mode(cli: &Cli) -> Mode::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite-py/src/graph/embedder/py_adapter.rs::fn:instance:pub fn instance(&self) -> &Py<PyAny>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/code_tree/mod.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/datasets/sec/fetch.rs::fn:raw_master_idx_path:pub(crate) fn raw_master_idx_path(workdir: &Workdir, year: u16, q: u8) -> PathBuf::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/datasets/sodir/client.rs::fn:fetch_bytes:pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/error.rs::fn:code_round_trip:fn code_round_trip()@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/error.rs::fn:code_round_trip:fn code_round_trip()@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/algorithms/vector.rs::fn:cosine_similarity:pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/csv_stream.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/expr.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/blueprint/schema.rs::enum:ComputeOp::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/pattern_matching/pattern.rs::enum:AnchorSide::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/core/pattern_matching/pattern.rs::enum:RelEdgePredicate::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/file.rs::fn:apply_to:pub(crate) fn apply_to(self, graph: &mut DirGraph)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/label_spill.rs::fn:record_overhead_bytes:fn record_overhead_bytes() -> usize::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/mod.rs::fn:emit:fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled>@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/ntriples/mod.rs::fn:emit:fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled>@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/io/unified_columns.rs::fn:write_unified_columns:pub fn write_unified_columns( dir: &Path, column_stores: &HashMap<String, Arc<ColumnStore>>, _interner: &StringInterner, ) -> io::Result<WriteResult>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/stream/mod.rs::fn:columns:pub fn columns(&self) -> &[String]::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/stream/optional_match.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/stream/pattern_source.rs::module::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/stream/pipeline.rs::fn:_silence_where_clause:fn _silence_where_clause(_: &WhereClause)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/transient_index.rs::fn:try_build:pub(super) fn try_build( graph: &DirGraph, pattern: &Pattern, existing_row_count: usize, ) -> Option<TransientEqIndex>@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/executor/transient_index.rs::fn:try_build:pub(super) fn try_build( graph: &DirGraph, pattern: &Pattern, existing_row_count: usize, ) -> Option<TransientEqIndex>@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs::fn:fmt:fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/mutation/subgraph_streaming.rs::fn:pass_a_scan:pub fn pass_a_scan(source: &DiskGraph, spec: &SubsetSpec) -> PassAResult::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/backend.rs::fn:new:pub fn new() -> Self::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:column_type_str:pub fn column_type_str(&self, slot: usize) -> Option<&'static str>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:column_values_mixed:pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:compare_str_by_slot:pub fn compare_str_by_slot(&self, row_id: u32, slot: u16, target: &str) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:contains:pub fn contains(&self, row_id: u32, key: InternedKey) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:get_by_slot:pub fn get_by_slot(&self, row_id: u32, slot: u16) -> Option<Value>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:live_count:pub fn live_count(&self) -> u32::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:new_mixed:pub fn new_mixed(schema: Arc<TypeSchema>) -> Self::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_columns:pub fn replace_columns(&mut self, columns: Vec<TypedColumn>)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_id_column:pub fn replace_id_column(&mut self, col: TypedColumn)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:replace_title_column:pub fn replace_title_column(&mut self, col: TypedColumn)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:row_properties_map:pub fn row_properties_map( &self, row_id: u32, interner: &StringInterner, ) -> HashMap<String, Value>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:set_row_count:pub fn set_row_count(&mut self, n: u32)::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/column_store.rs::fn:slot:pub fn slot(&self, key: InternedKey) -> Option<u16>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/graph.rs::fn:sources_for_conn_type:pub fn sources_for_conn_type(&self, conn_type: u64) -> Option<Vec<u32>>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/property_index.rs::fn:len:pub fn len(&self) -> usize::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/property_index.rs::fn:remove_files:pub fn remove_files(data_dir: &Path, node_type: &str, property: &str) -> std::io::Result<()>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:candidates_for_conn_type:pub fn candidates_for_conn_type<'a>( &'a self, conn_type_hash: u64, ) -> impl Iterator<Item = &'a SegmentSummary> + 'a::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:candidates_for_node_range:pub fn candidates_for_node_range<'a>( &'a self, lo: u32, hi: u32, ) -> impl Iterator<Item = &'a SegmentSummary> + 'a::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:candidates_for_node_type:pub fn candidates_for_node_type<'a>( &'a self, node_type_hash: u64, ) -> impl Iterator<Item = &'a SegmentSummary> + 'a::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:covers_node:pub fn covers_node(&self, node_id: u32) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:find_indexed_range:pub fn find_indexed_range(&self, node_type_hash: u64, prop_hash: u64) -> Option<&PropRange>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:get:pub fn get(&self, index: usize) -> Option<&SegmentSummary>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:has_conn_type:pub fn has_conn_type(&self, conn_type_hash: u64) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:has_node_type:pub fn has_node_type(&self, node_type_hash: u64) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:len:pub fn len(&self) -> usize::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:might_match_numeric_prop:pub fn might_match_numeric_prop( &self, node_type_hash: u64, prop_hash: u64, value: f64, ) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:numeric:pub fn numeric(value: f64) -> Self@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/segment_summary.rs::fn:numeric:pub fn numeric(value: f64) -> Self@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/disk/type_index.rs::fn:contains:pub fn contains(&self, idx: &NodeIndex) -> bool::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:fadvise_dontneed:pub fn fadvise_dontneed(&self)@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:fadvise_dontneed:pub fn fadvise_dontneed(&self)@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:fadvise_dontneed:pub fn fadvise_dontneed(&self)@occurrence:3::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> io::Result<()>@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> std::io::Result<()>@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:flush_and_release_pages:pub fn flush_and_release_pages(&self) -> std::io::Result<()>@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:1::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:materialize_to_heap:pub fn materialize_to_heap(&mut self)@occurrence:2::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mapped/mmap_vec.rs::fn:save_to_file:pub fn save_to_file(&self, path: &Path) -> io::Result<()>::dead_code",
+      "classification": "dead-code"
+    },
+    {
+      "identity": "crates/kglite/src/graph/storage/mod.rs::fn:is_memory:fn is_memory(&self) -> bool::dead_code",
+      "classification": "dead-code"
+    }
+  ]
+}

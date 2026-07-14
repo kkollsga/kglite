@@ -116,9 +116,13 @@ jobs:
           shared-key: source-quality
           workspaces: ". -> target"
       - name: Exercise intentional failure fixtures
-        run: python scripts/check_source_quality.py --self-test
+        run: |
+          python scripts/check_source_quality.py --self-test
+          python scripts/check_lint_allowances.py --self-test
       - name: Check centralized structure and complexity ceilings
-        run: python scripts/check_source_quality.py
+        run: |
+          python scripts/check_source_quality.py
+          python scripts/check_lint_allowances.py
 
   kglite-c:
     name: kglite-c (C ABI)

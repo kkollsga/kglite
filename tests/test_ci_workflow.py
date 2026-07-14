@@ -97,5 +97,8 @@ def test_source_quality_runs_once_in_its_own_required_job() -> None:
     source_quality = _job_block("source-quality")
     assert "python scripts/check_source_quality.py --self-test" in source_quality
     assert "python scripts/check_source_quality.py" in source_quality
+    assert "python scripts/check_lint_allowances.py --self-test" in source_quality
+    assert "python scripts/check_lint_allowances.py" in source_quality
     python_tests = _job_block("python-tests")
     assert "check_source_quality.py" not in python_tests
+    assert "check_lint_allowances.py" not in python_tests

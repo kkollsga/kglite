@@ -85,6 +85,16 @@ baseline with `python scripts/check_source_quality.py --refresh-functions`.
 The dedicated CI job runs the analysis once rather than repeating it in every
 Python-version leg.
 
+Rust `#[allow(...)]` attributes are separately inventoried by stable
+module/item + lint identity in `tests/api-baselines/lint-allowances.json`.
+The inventory classifies API-shape, binding-boundary, test, transitional, and
+dead-code cases; dead code remains a separate list so style cleanup cannot
+hide unused implementation. A new allowance needs a nearby explanatory
+comment and an explicit `python scripts/check_lint_allowances.py --refresh`;
+deleting an allowance also tightens the exact baseline. To re-audit a broad
+suppression, use Clippy's `--force-warn <lint>` so crate/module `allow`
+attributes cannot hide its current trigger sites.
+
 CI also checks surfaces not covered by `make lint`:
 
 - public Rust API against `tests/api-baselines/kglite.txt` on the pinned nightly;
