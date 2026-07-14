@@ -67,6 +67,8 @@ pub enum GraphBackend {
 
 impl GraphBackend {
     #[inline]
+    // Keep the established constructor-only backend API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         GraphBackend::Memory(MemoryGraph::new())
     }

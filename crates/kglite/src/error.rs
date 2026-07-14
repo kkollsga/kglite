@@ -546,10 +546,9 @@ impl From<InternerCollision> for KgError {
     }
 }
 
-/// `Result` alias for KGLite operations. Use throughout the crate.
-///
-/// `#[allow(dead_code)]` until the C2+ commits start using it (the
-/// foundation lands first; consumers migrate after).
+/// Public convenience alias for downstream Rust callers that prefer a
+/// single KGLite result spelling. Engine internals use explicit result types
+/// where the error boundary benefits from being visible.
 #[allow(dead_code)]
 pub type KgResult<T> = std::result::Result<T, KgError>;
 

@@ -1030,6 +1030,8 @@ pub struct SelectionLevel {
 }
 
 impl SelectionLevel {
+    // Keep the established constructor-only selection API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         SelectionLevel {
             selections: HashMap::new(),
@@ -1577,6 +1579,8 @@ impl EmbeddingStore {
 
     /// Number of stored embeddings.
     #[inline]
+    // Adding a public companion method would change the curated Rust API in a cleanup phase.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.slot_to_node.len()
     }

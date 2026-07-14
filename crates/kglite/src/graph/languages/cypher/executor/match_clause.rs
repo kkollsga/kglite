@@ -361,20 +361,6 @@ impl<'a> CypherExecutor<'a> {
         row
     }
 
-    /// Expand a single upstream row through the OPTIONAL MATCH
-    /// patterns, returning the rows produced. Same semantics as the
-    /// per-row body of [`Self::execute_optional_match`] minus the
-    /// outer `existing.rows.is_empty()` first-clause case (the
-    /// streaming path only enters when the upstream is non-empty).
-    /// Used by [`super::stream::optional_match`].
-    pub(super) fn stream_expand_optional(
-        &self,
-        clause: &MatchClause,
-        row: &ResultRow,
-    ) -> Result<Vec<ResultRow>, String> {
-        self.expand_optional_match_row(clause, row, 0)
-    }
-
     /// Expand one upstream row through ALL comma patterns of an OPTIONAL
     /// MATCH as one joined unit: each pattern extends the working row set
     /// produced by the previous one (cross-join with shared-variable and

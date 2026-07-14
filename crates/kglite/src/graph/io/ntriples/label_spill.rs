@@ -205,13 +205,6 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(filled)
 }
 
-/// Total record overhead per entry, for size estimation in callers
-/// that want to predict disk usage.
-#[allow(dead_code)]
-pub const fn record_overhead_bytes() -> usize {
-    HEADER_BYTES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,25 +1,10 @@
 // src/lib.rs
 
-// Phase A.2 / C2 — crate-wide allow for clippy::result_large_err.
-// `KgError` is intentionally rich (16 variants spanning Cypher /
-// schema / IO / argument validation) so its size pushes past clippy's
-// default 128-byte threshold. Boxing the error variant in every
-// `Result<T, KgError>` would add an allocation per error path for no
-// real benefit — error paths aren't hot. Standard pattern for crates
-// with a unified typed error.
-#![allow(clippy::result_large_err)]
 // kglite-py is the PyO3 wrapper over the kglite engine crate
 // (aliased as `kglite_core` in this crate's source — see
 // Cargo.toml for the `package = "kglite"` indirection). The
-// local module shims (`graph/mod.rs`, `graph/languages/mod.rs`,
-// `graph/embedder/mod.rs`, `code_tree/mod.rs`, `datatypes/mod.rs`)
-// pull in the engine's content via `pub use kglite_core::*::*;`
-// glob re-exports + add the pyo3-only submodules. clippy flags
-// the legitimate shadowing pattern under
-// `hidden_glob_reexports`. The `unused_imports` allows the same
-// pattern in nested shims.
-#![allow(hidden_glob_reexports)]
-#![allow(unused_imports)]
+// local modules expose only the curated engine API plus PyO3-specific
+// wrapper concerns.
 
 // mimalloc as the global allocator. samply profile of the N-Triples
 // build showed libsystem_malloc accounting for ~32% of loader-thread

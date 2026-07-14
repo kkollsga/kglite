@@ -126,7 +126,7 @@ impl CSharpParser {
         CS_PARSER.with(|p| p.borrow_mut().parse(source, None))
     }
 
-    fn get_visibility<'a>(node: Node, source: &[u8], default: &'a str) -> String {
+    fn get_visibility(node: Node, source: &[u8], default: &str) -> String {
         let mut mods: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {

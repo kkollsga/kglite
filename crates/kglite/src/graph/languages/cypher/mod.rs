@@ -94,6 +94,8 @@ fn collect_node_types(m: &MatchClause) -> Vec<String> {
 /// Lifted from `kglite-bolt-server::backend.rs` +
 /// `kglite-mcp-server::tools.rs` in 2026-05-25 — both wrote the same
 /// `parse_cypher() + is_mutation_query()` pair identically.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn parse_with_mutation_check(
     query: &str,
 ) -> Result<(ast::CypherQuery, bool), crate::error::KgError> {

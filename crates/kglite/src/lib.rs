@@ -17,30 +17,6 @@
 //!
 //! See `docs/rust/embedding.md` for the embedder guide.
 
-// Phase A.2 / C2 — crate-wide allow for clippy::result_large_err.
-// `KgError` is intentionally rich (16 variants spanning Cypher /
-// schema / IO / argument validation) so its size pushes past clippy's
-// default 128-byte threshold. Boxing the error variant in every
-// `Result<T, KgError>` would add an allocation per error path for no
-// real benefit — error paths aren't hot. Standard pattern for crates
-// with a unified typed error.
-#![allow(clippy::result_large_err)]
-// Phase G.3a — when the engine moved from a cdylib (root crate) into
-// an rlib (this crate), clippy's lint set widened because more items
-// became reachable across crate boundaries. The noisy lints below
-// were tolerated in the root crate's pub(crate) surface; they're
-// follow-up cleanup tasks but not blockers. Two of them
-// (hidden_glob_reexports, private_interfaces) directly reflect the
-// rushed wide-public visibility bumps in G.3a — proper accessor
-// methods would resolve them.
-#![allow(clippy::new_without_default)]
-#![allow(clippy::len_without_is_empty)]
-#![allow(private_interfaces)]
-#![allow(hidden_glob_reexports)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::should_implement_trait)]
-#![allow(clippy::result_unit_err)]
-
 pub mod code_tree;
 // Dataset loaders — sealed behind the curated `api::datasets` facade (the
 // same chokepoint treatment as `graph`). `pub(crate)` so no wrapper can reach

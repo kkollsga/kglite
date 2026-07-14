@@ -94,6 +94,8 @@ thread_local! {
 }
 
 impl PhpParser {
+    // Keep the established constructor-only parser API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         PhpParser
     }

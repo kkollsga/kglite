@@ -7,9 +7,6 @@
 
 use crate::graph::KnowledgeGraph;
 use kglite_core::api::blueprint;
-use kglite_core::api::mutation::OperationReports;
-use kglite_core::api::TemporalContext;
-use kglite_core::api::{CowSelection, DirGraph};
 use pyo3::prelude::*;
 use std::path::Path;
 use std::sync::Arc;

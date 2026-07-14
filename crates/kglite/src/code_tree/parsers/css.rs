@@ -37,6 +37,8 @@ thread_local! {
 }
 
 impl CssParser {
+    // Keep the established constructor-only parser API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         CssParser
     }
@@ -207,12 +209,10 @@ impl CssParser {
 
     fn find_named_child<'a>(node: Node<'a>, name: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == name {
-                return Some(child);
-            }
-        }
-        None
+        let child = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == name);
+        child
     }
 
     fn find_block(node: Node) -> Option<Node> {

@@ -282,6 +282,8 @@ impl Transaction {
     /// - The tx is read-only (`begin_read`).
     /// - The tx has been committed/rolled back (no snapshot, no
     ///   working).
+    // KgError carries transaction context; boxing it would only burden an error path.
+    #[allow(clippy::result_large_err)]
     pub fn working_mut(&mut self) -> Result<&mut DirGraph, KgError> {
         if self.read_only {
             return Err(KgError::Argument(

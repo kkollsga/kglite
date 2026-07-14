@@ -7,26 +7,21 @@
 //! of clauses into a single pipeline; on success the streaming path runs
 //! without materializing intermediate `Vec<ResultRow>` between clauses.
 //!
-//! # Phase 1 scope
-//! - Pattern source wraps an already-materialized `Vec<ResultRow>` (true
-//!   pattern streaming is Phase 3).
+//! # Current scope
+//! - The source wraps an already-materialized [`ResultSet`]; pattern matching
+//!   itself is not streamed yet.
 //! - Streaming aggregate: hash aggregate that builds per-group state while
 //!   iterating, replacing the materialize-then-bucket path in
 //!   `return_clause::execute_return_with_aggregation`.
 //! - Heap top-K: `BinaryHeap<Reverse<…>>` of capacity K, replacing the
 //!   full sort + truncate path in `return_clause::execute_order_by` +
 //!   `execute_limit`.
-//! - Streaming OPTIONAL MATCH: lazy flat-map that avoids the
-//!   `Vec::with_capacity(existing.rows.len())` materialization in
-//!   `match_clause::execute_optional_match`.
 
 use super::super::result::ResultRow;
 use super::super::result::ResultSet;
 
 pub mod aggregate;
 pub mod heap_top_k;
-pub mod optional_match;
-pub mod pattern_source;
 pub mod pipeline;
 
 /// A typed iterator of result rows with column-name metadata. Used as the
@@ -60,11 +55,6 @@ impl<'q> RowStream<'q> {
     pub fn from_result_set(rs: ResultSet) -> Self {
         let columns = rs.columns;
         RowStream::from_vec(rs.rows, columns)
-    }
-
-    #[allow(dead_code)]
-    pub fn columns(&self) -> &[String] {
-        &self.columns
     }
 
     pub fn columns_owned(&self) -> Vec<String> {

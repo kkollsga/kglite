@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use crate::graph::{
     centrality_results_to_dataframe, centrality_results_to_py_dict, community_results_to_py,
-    KnowledgeGraph, TemporalContext,
+    KnowledgeGraph,
 };
-use kglite_core::api::mutation::OperationReports;
-use kglite_core::api::{CowSelection, PlanStep};
+use kglite_core::api::PlanStep;
 
 #[pymethods]
 impl KnowledgeGraph {

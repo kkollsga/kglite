@@ -139,6 +139,8 @@ impl Session {
     /// Read path: snapshot → GIL-free `execute_read` → marshal. Shared by
     /// `cypher` and `execute`'s non-mutation fast path (so a read passed to
     /// `execute` never materialises a working copy).
+    // The detached closure preserves the engine's structured KgError until PyErr conversion.
+    #[allow(clippy::result_large_err)]
     fn run_read(
         &self,
         py: Python<'_>,
@@ -176,6 +178,8 @@ impl Session {
     /// Write path: take the writer lock, then hold the core Session's mutable
     /// guard for the complete GIL-free mutation. This avoids the old
     /// begin-created Arc clone that made the unique-owner path unreachable.
+    // The detached closure preserves the engine's structured KgError until PyErr conversion.
+    #[allow(clippy::result_large_err)]
     fn run_write(
         &self,
         py: Python<'_>,

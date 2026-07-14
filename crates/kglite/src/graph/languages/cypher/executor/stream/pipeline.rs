@@ -21,7 +21,7 @@
 
 use super::super::super::ast::{
     is_aggregate_expression, Clause, Expression, LimitClause, OrderByClause, OrderItem,
-    ReturnClause, WhereClause,
+    ReturnClause,
 };
 use super::super::super::result::ResultSet;
 use super::super::CypherExecutor;
@@ -172,8 +172,3 @@ fn find_top_k(clauses: &[Clause]) -> Option<(Vec<OrderItem>, usize, usize)> {
     };
     Some((order, n, 2))
 }
-
-// Ensure we don't accidentally drop `WhereClause` import — it's part of
-// the WITH ... WHERE handling above.
-#[allow(dead_code)]
-fn _silence_where_clause(_: &WhereClause) {}

@@ -56,6 +56,8 @@ impl InternedKey {
     /// short strings, so collision risk is negligible; `StringInterner`
     /// nevertheless detects and rejects conflicting strings in every build.
     #[inline]
+    // This established persisted-key constructor predates FromStr and is part of the public API.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         const FNV_OFFSET: u64 = 0xcbf29ce484222325;
         const FNV_PRIME: u64 = 0x100000001b3;

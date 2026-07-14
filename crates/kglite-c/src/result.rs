@@ -78,6 +78,11 @@ pub(crate) fn result_to_json_object(result: &CypherResult) -> serde_json::Value 
 /// via [`kglite_free_string`](crate::kglite_free_string). Returns
 /// null on serialization failure (shouldn't happen — column names
 /// are always serializable).
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by a kglite query
+/// function. It must not be freed while this call is running.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_cypher_result_columns_json(
     result: *const KgliteCypherResult,
@@ -109,6 +114,11 @@ pub unsafe extern "C" fn kglite_cypher_result_columns_json(
 /// The returned string is OWNED by the caller and must be freed
 /// via [`kglite_free_string`](crate::kglite_free_string). Returns
 /// null on serialization failure.
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by a kglite query
+/// function. It must not be freed while this call is running.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_cypher_result_rows_json(
     result: *const KgliteCypherResult,
@@ -128,6 +138,11 @@ pub unsafe extern "C" fn kglite_cypher_result_rows_json(
 
 /// Return the number of rows in the result. Useful for callers
 /// that want to size buffers before requesting the JSON blob.
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by a kglite query
+/// function. It must not be freed while this call is running.
 #[no_mangle]
 pub unsafe extern "C" fn kglite_cypher_result_row_count(
     result: *const KgliteCypherResult,

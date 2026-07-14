@@ -79,6 +79,8 @@ const FLUTTER_WIDGET_BASES: &[(&str, &str)] = &[
 ];
 
 impl DartParser {
+    // Keep the established constructor-only parser API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         DartParser
     }

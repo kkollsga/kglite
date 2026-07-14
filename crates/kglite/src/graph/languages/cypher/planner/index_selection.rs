@@ -365,7 +365,7 @@ fn reserve_comparison(
 /// Recursively extract pushable predicates from a predicate tree.
 /// Returns the remaining predicate (None if fully consumed).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn extract_from_predicate(
+fn extract_from_predicate(
     pred: &Predicate,
     match_vars: &[(String, Option<String>)],
     prior_node_vars: &HashSet<String>,

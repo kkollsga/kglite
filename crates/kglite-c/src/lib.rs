@@ -26,15 +26,6 @@
 //! Each submodule's items are re-exported at the crate root so the
 //! generated `kglite.h` is a flat namespace.
 
-#![allow(clippy::missing_safety_doc)]
-// SAFETY docs live in the module-level comments + per-function doc
-// comments. cbindgen reads the function-level doc comments into the
-// generated header so each C function's doc is self-contained.
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
-// extern "C" functions are by definition unsafe at the C ABI
-// boundary; the unsafe-ness is the caller's responsibility, not
-// ours to wrap up in `unsafe { ... }` for clippy's sake.
-
 pub mod abi;
 pub mod alloc;
 pub mod datasets;

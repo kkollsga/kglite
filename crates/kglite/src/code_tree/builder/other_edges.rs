@@ -332,7 +332,7 @@ pub fn build_uses_type_edges(
         .collect();
 
     let mut by_target_type: BTreeMap<&'static str, Vec<UsesTypeEdge>> = BTreeMap::new();
-    for (fn_info, matches) in functions.iter().zip(per_fn.into_iter()) {
+    for (fn_info, matches) in functions.iter().zip(per_fn) {
         for (_pat_id, target, qname, position) in matches {
             by_target_type
                 .entry(target)

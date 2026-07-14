@@ -174,7 +174,7 @@ pub fn extract_comment_annotations(
 
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        if comment_types.iter().any(|t| *t == kind) {
+        if comment_types.contains(&kind) {
             let text = node_text(node, source);
             for caps in re.captures_iter(text) {
                 let kind = caps

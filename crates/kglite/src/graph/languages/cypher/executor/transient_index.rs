@@ -26,12 +26,6 @@ pub(super) const TRANSIENT_INDEX_THRESHOLD: usize = 64;
 pub(super) struct TransientEqIndex {
     /// Pattern variable bound by an index probe (e.g. `"pg"`).
     pub(super) bind_var: String,
-    /// Node type the index covers (e.g. `"Prospect"`).
-    #[allow(dead_code)]
-    pub(super) node_type: String,
-    /// Property used as the equality key (e.g. `"prospect_number"`).
-    #[allow(dead_code)]
-    pub(super) property: String,
     /// How to resolve the per-row probe value.
     pub(super) resolution: ProbeResolution,
     /// Built index: property value → matching `NodeIndex`(es).
@@ -119,8 +113,6 @@ impl TransientEqIndex {
         }
         Some(TransientEqIndex {
             bind_var,
-            node_type,
-            property: property.clone(),
             resolution,
             by_value,
         })

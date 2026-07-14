@@ -68,6 +68,8 @@ fn hash_query(query: &str) -> u64 {
 /// the cache. `CypherQuery`'s `Clone` impl is shallow-heap (a `Vec<Clause>`
 /// plus a handful of metadata strings); cache HIT measured at ~700 ns end-to-
 /// end for typical queries vs ~1.4 µs uncached.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn parse_cypher_cached(query: &str) -> Result<CypherQuery, KgError> {
     let key = hash_query(query);
 

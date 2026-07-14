@@ -33,7 +33,6 @@
 // K1 ships the expression engine standalone. Consumers (K3 derive/filter,
 // K6 aggregate) wire up in subsequent phases; until then everything below
 // is dead from the compiler's perspective.
-#![allow(dead_code)]
 
 use std::fmt;
 
@@ -390,16 +389,6 @@ impl Parser {
             Some(t)
         } else {
             None
-        }
-    }
-
-    fn expect_op(&mut self, op: &str) -> ExprResult<()> {
-        match self.eat() {
-            Some(Tok::Op(s)) if s == op => Ok(()),
-            other => Err(ExprError::Parse(format!(
-                "expected '{}', got {:?}",
-                op, other
-            ))),
         }
     }
 

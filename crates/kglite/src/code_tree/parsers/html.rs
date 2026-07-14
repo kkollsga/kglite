@@ -45,6 +45,8 @@ thread_local! {
 const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 
 impl HtmlParser {
+    // Keep the established constructor-only parser API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         HtmlParser
     }
@@ -71,12 +73,10 @@ impl HtmlParser {
         match kind {
             "script_element" => {
                 Self::handle_script(node, source, rel_path, result, file_info, script_counter);
-                // script bodies don't contain HTML elements — return
-                return;
+                // Script bodies don't contain HTML elements.
             }
             "style_element" => {
                 // CSS embedded inline. v1 scope: do nothing.
-                return;
             }
             "element" => {
                 // An element has start_tag + children. Extract tag name
@@ -368,12 +368,10 @@ impl HtmlParser {
 
     fn find_named_child<'a>(node: Node<'a>, name: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == name {
-                return Some(child);
-            }
-        }
-        None
+        let child = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == name);
+        child
     }
 
     fn extract_tag_name<'a>(start_tag: Node<'a>, source: &'a [u8]) -> Option<&'a str> {

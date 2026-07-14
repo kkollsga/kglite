@@ -58,6 +58,8 @@ impl FrozenGraph {
     ///
     /// Safe to call from many threads on the same `FrozenGraph` at once.
     #[pyo3(signature = (query, to_df=false, params=None, timeout_ms=None, max_rows=None))]
+    // The detached closure preserves the engine's structured KgError until PyErr conversion.
+    #[allow(clippy::result_large_err)]
     fn cypher(
         &self,
         py: Python<'_>,

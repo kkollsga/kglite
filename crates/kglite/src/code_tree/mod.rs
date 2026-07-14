@@ -1,17 +1,3 @@
-#![allow(
-    dead_code,
-    clippy::needless_lifetimes,
-    clippy::collapsible_match,
-    clippy::collapsible_if,
-    clippy::manual_pattern_char_comparison,
-    clippy::manual_contains,
-    clippy::needless_return,
-    clippy::if_same_then_else,
-    clippy::manual_find,
-    clippy::needless_borrow,
-    clippy::explicit_auto_deref,
-    clippy::useless_conversion
-)]
 //! Code-tree: parse polyglot codebases into KGLite knowledge graphs.
 //!
 //! Tree-sitter grammars are compiled into the kglite crate's

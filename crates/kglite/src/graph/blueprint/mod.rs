@@ -4,7 +4,6 @@
 pub mod build;
 pub mod compute;
 pub mod csv_loader;
-pub mod csv_stream;
 pub mod expr;
 pub mod filter;
 pub mod geometry;

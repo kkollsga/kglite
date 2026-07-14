@@ -11,11 +11,11 @@ use crate::graph::languages::cypher;
 use crate::graph::{
     get_graph_mut, parse_inline_timeseries, parse_spatial_column_types,
     parse_temporal_column_types, resolve_noderefs, EmbeddingColumnData, InlineTimeseriesConfig,
-    KnowledgeGraph, TemporalContext, TimeSpec,
+    KnowledgeGraph, TimeSpec,
 };
-use kglite_core::api::mutation::{NodeOperationReport, OperationReport, OperationReports};
+use kglite_core::api::mutation::{NodeOperationReport, OperationReport};
+use kglite_core::api::DirGraph;
 use kglite_core::api::GraphRead;
-use kglite_core::api::{CowSelection, DirGraph};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;

@@ -421,6 +421,8 @@ impl CypherParser {
 /// The internal tokenizer/parser still produce `Result<_, String>`
 /// for ergonomic `?` chains inside the parsing code — only the
 /// outer boundary is typed.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn parse_cypher(input: &str) -> Result<CypherQuery, KgError> {
     let positioned =
         super::tokenizer::tokenize_cypher_with_positions(input).map_err(|tokenizer_err| {

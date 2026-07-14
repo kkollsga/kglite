@@ -23,7 +23,9 @@ pub(crate) fn alloc_c_string(s: &str) -> *const c_char {
 
 /// Free a string previously returned by any `kglite_*` function.
 ///
-/// Safety: `s` must be either null or a pointer previously returned
+/// # Safety
+///
+/// `s` must be either null or a pointer previously returned
 /// by a `kglite_*` function (these all flow through
 /// [`alloc_c_string`]). Calling twice on the same pointer is UB.
 /// Calling with a pointer to a string allocated by the C caller's

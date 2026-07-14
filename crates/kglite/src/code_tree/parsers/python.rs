@@ -18,7 +18,6 @@ use crate::code_tree::models::{
 };
 
 const ENUM_BASES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "auto"];
-const PROTOCOL_BASES: &[&str] = &["Protocol"];
 
 /// Identifier is ALL_CAPS (module-level constant).
 fn constant_re() -> &'static Regex {
@@ -123,9 +122,7 @@ impl PythonParser {
     // ── Small helpers ───────────────────────────────────────────────
 
     fn get_visibility(name: &str) -> &'static str {
-        if name.starts_with("__") && !name.ends_with("__") {
-            "private"
-        } else if name.starts_with('_') {
+        if name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__")) {
             "private"
         } else {
             "public"
@@ -144,12 +141,10 @@ impl PythonParser {
 
     fn get_block<'a>(node: Node<'a>) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "block" {
-                return Some(child);
-            }
-        }
-        None
+        let child = node
+            .children(&mut cursor)
+            .find(|child| child.kind() == "block");
+        child
     }
 
     fn get_docstring(node: Node, source: &[u8]) -> Option<String> {
@@ -243,10 +238,7 @@ impl PythonParser {
                 _ => parts.push(node_text(child, source)),
             }
         }
-        parts
-            .join(" ")
-            .trim_end_matches(|c: char| c == ' ' || c == ':')
-            .to_string()
+        parts.join(" ").trim_end_matches([' ', ':']).to_string()
     }
 
     fn get_return_type(node: Node, source: &[u8]) -> Option<String> {

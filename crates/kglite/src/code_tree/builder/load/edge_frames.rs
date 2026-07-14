@@ -1,33 +1,11 @@
 //! DataFrame builders for code-tree relationships.
 
 use super::entity_frames::{bool_col, build_df, int_col, str_col};
-use super::ModuleRecord;
 use crate::code_tree::models::ParseResult;
 use crate::datatypes::values::{ColumnType, DataFrame};
 use std::collections::HashMap;
 
 // ── Edge DataFrame builders ─────────────────────────────────────────
-
-pub(super) fn has_submodule_df(modules: &[ModuleRecord]) -> DataFrame {
-    let mut parent: Vec<Option<String>> = Vec::new();
-    let mut child: Vec<Option<String>> = Vec::new();
-    for m in modules {
-        for sep in ["::", ".", "/"] {
-            if let Some(idx) = m.qualified_name.rfind(sep) {
-                let p = &m.qualified_name[..idx];
-                if modules.iter().any(|o| o.qualified_name == p) {
-                    parent.push(Some(p.to_string()));
-                    child.push(Some(m.qualified_name.clone()));
-                    break;
-                }
-            }
-        }
-    }
-    build_df(vec![
-        ("parent", ColumnType::String, str_col(parent)),
-        ("child", ColumnType::String, str_col(child)),
-    ])
-}
 
 pub(super) fn contains_edges_df(edges: &[super::super::other_edges::ContainsEdge]) -> DataFrame {
     let parent: Vec<Option<String>> = edges.iter().map(|e| Some(e.parent.clone())).collect();

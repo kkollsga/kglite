@@ -6,7 +6,7 @@ use crate::datatypes::py_in;
 use crate::datatypes::values::Value;
 use crate::graph::languages::cypher;
 use crate::graph::KnowledgeGraph;
-use kglite_core::api::session::{Session as CoreSession, Transaction as CoreTransaction};
+use kglite_core::api::session::Transaction as CoreTransaction;
 use kglite_core::api::CowSelection;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

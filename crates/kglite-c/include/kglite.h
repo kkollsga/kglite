@@ -1075,6 +1075,11 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
  * via [`kglite_free_string`](crate::kglite_free_string). Returns
  * null on serialization failure (shouldn't happen — column names
  * are always serializable).
+ *
+ * # Safety
+ *
+ * `result` must be null or a live pointer returned by a kglite query
+ * function. It must not be freed while this call is running.
  */
  const char *kglite_cypher_result_columns_json(const struct KgliteCypherResult *result);
 
@@ -1094,12 +1099,22 @@ KgliteStatusCode kglite_compute_schema_json(struct KgliteGraph *graph,
  * The returned string is OWNED by the caller and must be freed
  * via [`kglite_free_string`](crate::kglite_free_string). Returns
  * null on serialization failure.
+ *
+ * # Safety
+ *
+ * `result` must be null or a live pointer returned by a kglite query
+ * function. It must not be freed while this call is running.
  */
  const char *kglite_cypher_result_rows_json(const struct KgliteCypherResult *result);
 
 /**
  * Return the number of rows in the result. Useful for callers
  * that want to size buffers before requesting the JSON blob.
+ *
+ * # Safety
+ *
+ * `result` must be null or a live pointer returned by a kglite query
+ * function. It must not be freed while this call is running.
  */
  uintptr_t kglite_cypher_result_row_count(const struct KgliteCypherResult *result);
 
@@ -1372,7 +1387,9 @@ KgliteStatusCode kglite_create_edges_batch(struct KgliteSession *session,
 /**
  * Free a string previously returned by any `kglite_*` function.
  *
- * Safety: `s` must be either null or a pointer previously returned
+ * # Safety
+ *
+ * `s` must be either null or a pointer previously returned
  * by a `kglite_*` function (these all flow through
  * [`alloc_c_string`]). Calling twice on the same pointer is UB.
  * Calling with a pointer to a string allocated by the C caller's

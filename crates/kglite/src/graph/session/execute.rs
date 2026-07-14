@@ -195,6 +195,8 @@ pub struct ExecuteOutcome {
 /// - Map the returned `KgError` to the binding's error type
 ///   (PyErr subclass via `From`, `BoltError` via the
 ///   `kg_to_bolt`/`string_to_bolt` helpers in bolt-server).
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn execute_read(
     graph: &DirGraph,
     query: &str,
@@ -294,6 +296,8 @@ fn can_skip_rollback_checkpoint(
 /// mutable graph view as a read. The function returns
 /// `is_mutation: false` in that case so the caller knows nothing
 /// was changed.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn execute_mut(
     graph: &mut DirGraph,
     query: &str,
@@ -491,6 +495,8 @@ type PreparedQuery = (
     Vec<Option<ValueCodec>>,
 );
 
+// KgError carries query context; boxing it would only burden an error path.
+#[allow(clippy::result_large_err)]
 fn prepare(
     graph: &DirGraph,
     query: &str,
@@ -592,6 +598,8 @@ fn prepare(
 /// Run the embedder on collected texts; inject the JSON-encoded
 /// vectors into a clone of the param map. Caller-supplied params
 /// are not mutated. Returns the augmented map.
+// KgError carries query context; boxing it would only burden an error path.
+#[allow(clippy::result_large_err)]
 fn embed_into_params(
     opts: &ExecuteOptions<'_>,
     rewrite: &cypher::planner::simplification::TextScoreRewrite,

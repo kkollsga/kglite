@@ -148,6 +148,8 @@ pub struct PathBinding {
 }
 
 impl ResultRow {
+    // Keep the established constructor-only result-row API stable in this hardening pass.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         ResultRow {
             node_bindings: Bindings::new(),
@@ -286,6 +288,8 @@ impl LazyResultDescriptor {
         self.pending_rows.is_empty()
     }
 
+    // KgError carries provenance details; boxing it would only burden an error path.
+    #[allow(clippy::result_large_err)]
     fn validate_graph(
         &self,
         graph: &crate::graph::dir_graph::DirGraph,
@@ -311,6 +315,8 @@ impl LazyResultDescriptor {
 /// Materialise one pending lazy-result row against `graph`.
 ///
 /// Returns engine [`Value`]s; native/wire conversion remains a binding concern.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn materialise_lazy_row(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,
@@ -383,6 +389,8 @@ fn materialise_lazy_row_inner(
 ///
 /// C-ABI and server consumers can call this before serialising an executor
 /// result whose [`CypherResult::lazy`] field is populated.
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn materialise_lazy(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,
@@ -395,6 +403,8 @@ pub fn materialise_lazy(
 /// Provenance and bounds are checked once for the whole batch. Disk arena
 /// lifetime is still scoped independently to each row, so large sequential
 /// reads retain the bounded-memory guarantee of [`materialise_lazy_row`].
+// KgError deliberately carries structured context; boxing it would change the public result type.
+#[allow(clippy::result_large_err)]
 pub fn materialise_lazy_range(
     descriptor: &LazyResultDescriptor,
     graph: &crate::graph::dir_graph::DirGraph,

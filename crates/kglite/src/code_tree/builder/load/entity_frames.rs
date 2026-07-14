@@ -8,18 +8,6 @@ use crate::code_tree::models::{
 use crate::datatypes::values::{ColumnData, ColumnType, DataFrame};
 use std::collections::HashMap;
 
-/// Build a DataFrame with the given columns, all of type `String` (most code
-/// entity properties are strings). Numeric/boolean columns must be added
-/// separately via `add_column_typed`.
-pub(super) fn df_with_cols(columns: &[&str]) -> DataFrame {
-    DataFrame::new(
-        columns
-            .iter()
-            .map(|c| (c.to_string(), ColumnType::String))
-            .collect(),
-    )
-}
-
 /// Add a pre-built `ColumnData::*` to an existing DataFrame.
 pub(super) fn add_typed_col(df: &mut DataFrame, name: &str, ct: ColumnType, data: ColumnData) {
     df.add_column(name.to_string(), ct, data)

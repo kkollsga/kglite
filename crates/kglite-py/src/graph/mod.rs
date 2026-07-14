@@ -22,7 +22,7 @@ pub use pyapi::transaction::Transaction;
 use crate::datatypes::py_out;
 use crate::datatypes::values::{FilterCondition, Value};
 use kglite_core::api::mutation::{OperationReport, OperationReports};
-use kglite_core::api::{DirGraph, GraphRead};
+use kglite_core::api::DirGraph;
 // `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
 // `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
 use kglite_core::api::code_tree::SourceLookup;
@@ -34,7 +34,7 @@ use petgraph::graph::NodeIndex;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Bound;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Shadow the engine's re-exports of these types with the local

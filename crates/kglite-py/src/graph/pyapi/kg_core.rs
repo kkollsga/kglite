@@ -1518,6 +1518,8 @@ impl KnowledgeGraph {
     ///     ```
     #[pyo3(signature = (query, *, to_df=false, params=None, timeout_ms=None, max_rows=None, streaming=true, disable_optimizer=false, disabled_passes=None, write_scope=None, git_sha=None, modified_by=None))]
     #[allow(clippy::too_many_arguments)]
+    // The detached closure preserves the engine's structured KgError until PyErr conversion.
+    #[allow(clippy::result_large_err)]
     fn cypher(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
