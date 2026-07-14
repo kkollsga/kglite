@@ -150,839 +150,30 @@ fn emit(sink: Option<&dyn ProgressSink>, event: ProgressEvent<'_>) -> Result<(),
     Ok(())
 }
 
-pub fn load_ntriples(
+fn open_ntriples_reader(path: &Path, display_path: &str) -> Result<Box<dyn Read + Send>, String> {
+    if display_path.ends_with(".bz2") {
+        // The parallel reader falls back to MultiBzDecoder for a single stream.
+        return super::parallel_bz2::open(path)
+            .map_err(|error| format!("Cannot open {display_path}: {error}"));
+    }
+    let file = File::open(path).map_err(|error| format!("Cannot open {display_path}: {error}"))?;
+    if display_path.ends_with(".gz") {
+        Ok(Box::new(GzDecoder::new(BufReader::new(file))))
+    } else if display_path.ends_with(".zst") || display_path.ends_with(".zstd") {
+        Ok(Box::new(
+            zstd::Decoder::new(BufReader::new(file))
+                .map_err(|error| format!("zstd decoder error: {error}"))?,
+        ))
+    } else {
+        Ok(Box::new(file))
+    }
+}
+
+fn finalize_disk_graph(
     graph: &mut DirGraph,
-    path: &str,
     config: &NTriplesConfig,
-) -> Result<NTriplesStats, String> {
-    let start = Instant::now();
-    let path_obj = Path::new(path);
-
-    // Open decompression reader
-    let reader: Box<dyn Read + Send> = if path.ends_with(".bz2") {
-        // Multistream bz2 (pbzip2 / Wikidata dumps) decompresses
-        // in parallel; single-stream files fall through to
-        // `MultiBzDecoder` inside `parallel_bz2::open`.
-        super::parallel_bz2::open(path_obj).map_err(|e| format!("Cannot open {}: {}", path, e))?
-    } else {
-        let file = File::open(path_obj).map_err(|e| format!("Cannot open {}: {}", path, e))?;
-        if path.ends_with(".gz") {
-            Box::new(GzDecoder::new(BufReader::new(file)))
-        } else if path.ends_with(".zst") || path.ends_with(".zstd") {
-            Box::new(
-                zstd::Decoder::new(BufReader::new(file))
-                    .map_err(|e| format!("zstd decoder error: {}", e))?,
-            )
-        } else {
-            Box::new(file)
-        }
-    };
-    // Reader thread: decompresses + reads lines via channel (hides I/O latency).
-    //
-    // Each batch packs lines into a single `LineBuffer` (contiguous bytes
-    // + offset table) instead of `Vec<String>` with 200k separately
-    // heap-allocated `String`s. Cache-friendly iteration on the loader
-    // side, no per-line allocation in the reader, and the channel
-    // transports one buffer at a time. Channel capacity 32 × ~16 MB =
-    // ~512 MB ceiling on in-flight bytes — well within memory budget,
-    // smooths out short loader stalls.
-    let (rx, reader_handle) = spawn_reader(reader);
-
-    let mut stats = NTriplesStats {
-        triples_scanned: 0,
-        entities_created: 0,
-        edges_created: 0,
-        edges_skipped: 0,
-        seconds: 0.0,
-    };
-
-    // Phase 1: Parse and ingest.
-    // For Disk mode: serialize properties to a compressed log file (fast, ~100 ns/entity).
-    // Phase 1b replays the log to build ColumnStores in bulk.
-    // For other modes: use fast non-mapped insertion (HashMap properties, then Phase 1b).
-    // final_mode was graph.storage_mode; now read from graph.graph variant
-    let mapped = false;
-    let mut current: Option<EntityAccumulator> = None;
-    // Mapped mode reuses the disk path's Phase 1 streaming: a spill-backed
-    // property log + packed `EdgeBuffer::Compact` in place of the slow
-    // per-entity `PropertyStorage::Map` + `EdgeBuffer::Strings` path.
-    // Phase 1b then routes through `build_columns_direct`, writing a single
-    // `columns.bin` instead of the per-entity `enable_columnar()` loop.
-    let use_streaming_build = graph.graph.is_disk() || graph.graph.is_mapped();
-    let use_compact = use_streaming_build;
-
-    // Property log for streaming builds: serialize properties during Phase 1,
-    // replay in Phase 1b. Used by both disk and mapped modes.
-    let mut prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter> =
-        if use_streaming_build {
-            let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-            });
-            // Clean up stale spill dirs from previous killed builds.
-            //
-            // Safe for concurrent runs: only delete directories whose
-            // contents haven't been modified in the last hour. A running
-            // build writes to its `properties.log.zst` continuously, so
-            // active spill dirs always look "fresh" and won't be touched.
-            // This matters because a parallel `load_ntriples` call (e.g.
-            // `api_benchmark.py` spawning multiple loaders, or a long
-            // Wikidata rebuild running alongside a small test) would
-            // otherwise wipe out the log file of the *other* run.
-            const STALE_AFTER_SECS: u64 = 3600; // 1 hour
-            if let Some(parent) = spill_dir.parent() {
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    let now = std::time::SystemTime::now();
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if !name.starts_with("kglite_build_") {
-                            continue;
-                        }
-                        if entry.path() == spill_dir {
-                            continue;
-                        }
-                        let is_stale = entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|m| now.duration_since(m).ok())
-                            .map(|d| d.as_secs() > STALE_AFTER_SECS)
-                            .unwrap_or(false);
-                        if is_stale {
-                            let _ = std::fs::remove_dir_all(entry.path());
-                        }
-                    }
-                }
-            }
-            // Clean up stale pending_edges from previous killed builds
-            if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-                let stale = dg.data_dir.join("_pending_edges.bin");
-                if stale.exists() {
-                    let _ = std::fs::remove_file(&stale);
-                }
-            }
-            let log_path = spill_dir.join("properties.log.zst");
-            if build_debug() {
-                eplog!("  Property log: {}", log_path.display());
-            }
-            Some(
-                crate::graph::storage::memory::property_log::PropertyLogWriter::new(&log_path, 1)
-                    .map_err(|e| format!("Failed to create property log: {}", e))?,
-            )
-        } else {
-            None
-        };
-    let mut edge_buffer = if use_compact {
-        if use_streaming_build {
-            // File-backed edge buffer: avoids holding ~14 GB in RAM during Phase 1b
-            let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-            });
-            std::fs::create_dir_all(&spill_dir)
-                .map_err(|e| format!("Failed to create spill dir: {}", e))?;
-            let edge_path = spill_dir.join("edges.bin");
-            EdgeBuffer::Compact(
-                MmapOrVec::mapped(&edge_path, 1 << 20)
-                    .map_err(|e| format!("Failed to create edge buffer file: {}", e))?,
-            )
-        } else {
-            EdgeBuffer::Compact(MmapOrVec::new())
-        }
-    } else {
-        EdgeBuffer::Strings(Vec::new())
-    };
-
-    // Label journal for auto-typing. Previously a `HashMap<u32, String>`
-    // that grew to ~10 GB of heap at Wikidata scale (124M entities),
-    // pushing 16 GB machines into swap and collapsing the Phase 1
-    // rate from 1.8M to 450K triples/s. Now a buffered sequential
-    // write to `{spill_dir}/labels.bin` — zero heap growth during
-    // Phase 1. The post-Phase-1 rename pass reads the journal once,
-    // keeping only the ~88K labels that actually appear as type names.
-    // In-Phase-1 `get` is gone entirely (it was best-effort anyway —
-    // misses always fell through to post-Phase-1 rename).
-    let mut label_writer: Option<super::label_spill::LabelSpillWriter> = if config.auto_type {
-        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-        });
-        std::fs::create_dir_all(&spill_dir)
-            .map_err(|e| format!("Failed to create label spill directory: {e}"))?;
-        Some(
-            super::label_spill::LabelSpillWriter::new(&spill_dir.join("labels.bin"))
-                .map_err(|e| format!("Failed to create label journal: {}", e))?,
-        )
-    } else {
-        None
-    };
-
-    // Per-type build metadata for Phase 1b pre-allocation.
-    let mut type_meta: HashMap<String, TypeBuildMeta> = HashMap::new();
-
-    // For disk mode: build qnum_to_idx during Phase 1 (instead of from id_indices in Phase 2).
-    // This lets us skip id_indices entirely, saving ~11 GB at full Wikidata scale.
-    // Pre-allocate for 150M Q-numbers (~600 MB mmap, lazily paged).
-    let mut qnum_to_idx: Option<MmapOrVec<u32>> = if graph.graph.is_disk() {
-        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-        });
-        std::fs::create_dir_all(&spill_dir)
-            .map_err(|e| format!("Failed to create id spill directory: {e}"))?;
-        // 150M covers all Wikidata Q-numbers. OS allocates pages lazily.
-        Some(
-            MmapOrVec::mapped_prefilled(&spill_dir.join("qnum_to_idx.bin"), 150_000_000)
-                .unwrap_or_else(|_| MmapOrVec::from_vec(vec![0u32; 150_000_000])),
-        )
-    } else {
-        None
-    };
-
-    let mut entity_limit_reached = false;
-    // Reusable scratch buffer for `flush_entity`'s property-log
-    // `Vec<(InternedKey, Value)>`. Hoisted out of `flush_entity` so the
-    // alloc + grow cost is paid once, not per entity (~2% of loader CPU
-    // under samply).
-    let mut scratch_props: Vec<(InternedKey, Value)> = Vec::with_capacity(64);
-    // Cheap bucket counter (decrement in the hot loop); every 5M triples we
-    // check wall time and only log a `[Phase 1]` progress line if at least
-    // PROGRESS_INTERVAL_SECS have elapsed since the last line.
-    let mut progress_countdown: u64 = 5_000_000;
-    let mut last_progress_log = Instant::now();
-    const PROGRESS_BUCKET: u64 = 5_000_000;
-    const PROGRESS_INTERVAL_SECS: f64 = 60.0;
-    let include_labels = true;
-
-    if config.verbose {
-        eplog!("[Phase 1] Streaming and parsing N-triples ({})", path);
-    }
-    let sink = config.progress.as_deref();
-    // The bar tracks triples — the loop's natural unit. When the
-    // caller has set `max_triples` we use that as the bar's total so
-    // tqdm shows ETA; otherwise the bar runs unbounded.
-    let phase1_label = format!(
-        "Phase 1: Streaming N-triples ({})",
-        path_obj
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(path)
-    );
-    emit(
-        sink,
-        ProgressEvent::Start {
-            phase: "phase1",
-            label: &phase1_label,
-            total: config.max_triples,
-            unit: "tri",
-        },
-    )?;
-
-    let mut reader_error = None;
-    'outer: while let Ok(message) = rx.recv() {
-        let batch = match message {
-            Ok(batch) => batch,
-            Err(error) => {
-                reader_error = Some(error);
-                break;
-            }
-        };
-        let n_lines = batch.offsets.len();
-        for i in 0..n_lines {
-            // Slice into the batch's contiguous buffer — pointer math,
-            // no per-line heap dereference. Validation happens only after
-            // the reader's byte-level entity-prefix filter accepted the line.
-            let line = match validated_line(batch.line(i)) {
-                Ok(line) => line,
-                Err(error) => {
-                    reader_error = Some(format!(
-                        "N-Triples input contains invalid UTF-8 in an accepted entity line: {error}"
-                    ));
-                    break 'outer;
-                }
-            };
-            if entity_limit_reached && current.is_none() {
-                break 'outer;
-            }
-            // `max_triples` short-circuit: hard-stop after N triples
-            // scanned, regardless of entity progress. Unlike the
-            // `max_entities` check above we don't gate on
-            // `current.is_none()` — `current` is essentially always
-            // `Some` during steady-state Wikidata reading (subject-sorted
-            // dump = always mid-entity), so the gate would never trip.
-            // We trade losing one in-progress entity for a deterministic
-            // triple cap; that's the right call for a perf benchmark.
-            if let Some(cap) = config.max_triples {
-                if stats.triples_scanned >= cap {
-                    break 'outer;
-                }
-            }
-
-            stats.triples_scanned += 1;
-
-            progress_countdown -= 1;
-            if progress_countdown == 0 {
-                progress_countdown = PROGRESS_BUCKET;
-                let buf_len = edge_buffer.len() as u64;
-                // Callback fires on every bucket so tqdm stays live;
-                // the sink may also signal cancellation here (Ctrl+C).
-                emit(
-                    sink,
-                    ProgressEvent::Update {
-                        phase: "phase1",
-                        current: stats.triples_scanned,
-                        fields: &[
-                            ("entities", PV::U64(stats.entities_created)),
-                            ("edges_buffered", PV::U64(buf_len)),
-                        ],
-                    },
-                )?;
-                // eplog stays on the 60s gate so terminal output isn't spammed.
-                if config.verbose
-                    && last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS
-                {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let rate = stats.triples_scanned as f64 / elapsed;
-                    eplog!(
-                        "[Phase 1] {} triples, {} entities, {} edges buffered — {:.0}k triples/s",
-                        format_count(stats.triples_scanned),
-                        format_count(stats.entities_created),
-                        format_count(buf_len),
-                        rate / 1000.0,
-                    );
-                    last_progress_log = Instant::now();
-                }
-            }
-
-            // Note: the reader thread already filters out non-entity
-            // lines via `starts_with(ENTITY_PREFIX)` before they reach
-            // the channel, so no redundant prefix check is needed here.
-            let (subject, predicate, object) = match parse_line(line) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
-
-            let subj_id = match subject {
-                Subject::Entity(id) => id,
-                Subject::Other => continue,
-            };
-
-            // Subject changed → flush previous entity
-            if current.as_ref().is_some_and(|c| c.id != subj_id) {
-                if let Some(acc) = current.take() {
-                    flush_entity(
-                        graph,
-                        acc,
-                        config,
-                        &mut edge_buffer,
-                        &mut stats,
-                        mapped,
-                        &mut prop_log,
-                        &mut label_writer,
-                        &mut type_meta,
-                        &mut qnum_to_idx,
-                        &mut scratch_props,
-                    )?;
-                }
-                if entity_limit_reached {
-                    break;
-                }
-            }
-
-            if current.is_none() {
-                if let Some(max) = config.max_entities {
-                    if stats.entities_created >= max as u64 {
-                        entity_limit_reached = true;
-                        continue;
-                    }
-                }
-                current = Some(EntityAccumulator::new(subj_id.to_string()));
-            }
-
-            let acc = current.as_mut().unwrap();
-
-            // Process triple based on predicate type
-            match predicate {
-                Predicate::Label => {
-                    if include_labels {
-                        if let Some(text) = extract_lang_text(&object, &config.languages) {
-                            acc.label = Some(text);
-                        }
-                    }
-                }
-                Predicate::Description => {
-                    if let Some(text) = extract_lang_text(&object, &config.languages) {
-                        acc.description = Some(text);
-                    }
-                }
-                Predicate::AltLabel => {}
-                Predicate::Type => {}
-                Predicate::WikidataDirect(pcode) => {
-                    if let Some(ref allowed) = config.predicates {
-                        if !allowed.contains(pcode) {
-                            continue;
-                        }
-                    }
-
-                    let pred_label = config
-                        .predicate_labels
-                        .get(pcode)
-                        .cloned()
-                        .unwrap_or_else(|| pcode.to_string());
-
-                    match &object {
-                        Object::Entity(target_qcode) => {
-                            if pcode == "P31" && acc.type_qcode.is_none() {
-                                acc.type_qcode = Some(target_qcode.to_string());
-                            }
-                            acc.outgoing_edges
-                                .push((pred_label, target_qcode.to_string()));
-                        }
-                        Object::Literal(text) => {
-                            acc.properties
-                                .insert(pred_label, Value::String(text.clone()));
-                        }
-                        Object::LangLiteral(text, lang) => {
-                            if language_matches(lang, &config.languages) {
-                                acc.properties
-                                    .insert(pred_label, Value::String(text.clone()));
-                            }
-                        }
-                        Object::TypedLiteral(text, type_uri) => {
-                            acc.properties
-                                .insert(pred_label, typed_literal_to_value(text, type_uri));
-                        }
-                        Object::Other => {}
-                    }
-                }
-                Predicate::Other => {}
-            }
-        } // end for line in batch
-    } // end for batch in rx
-      // CRITICAL: drop `rx` before joining so the reader thread's
-      // `tx.send` returns Err (channel closed) on its next batch and
-      // exits. Without this, an early `break 'outer` (e.g. from the
-      // `max_triples` cap) leaves the reader thread blocked on a full
-      // bounded channel that nobody is draining → `join()` deadlocks.
-    drop(rx);
-    let join_result = join_reader(reader_handle);
-    if let Some(error) = reader_error {
-        return Err(error);
-    }
-    join_result?;
-
-    // Flush last entity
-    if let Some(acc) = current.take() {
-        flush_entity(
-            graph,
-            acc,
-            config,
-            &mut edge_buffer,
-            &mut stats,
-            mapped,
-            &mut prop_log,
-            &mut label_writer,
-            &mut type_meta,
-            &mut qnum_to_idx,
-            &mut scratch_props,
-        )?;
-    }
-
-    // Post-Phase-1: resolve Q-code type names using the label journal.
-    // During Phase 1 every entity's type stayed as its raw Q-code (e.g.
-    // "Q5") because the old HashMap cache was removed to avoid the ~10
-    // GB heap spike. Now we read the journal ONCE and pull labels only
-    // for the small set of Q-codes that actually became type names —
-    // typically tens of thousands on Wikidata, not the 124M entries
-    // the in-memory cache held.
-    let mut type_rename_map: HashMap<String, String> = HashMap::new();
-
-    // Flush + close the label journal before reading it back.
-    let label_journal_path = if let Some(writer) = label_writer.take() {
-        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-        });
-        let path = spill_dir.join("labels.bin");
-        let journal_size = writer
-            .finish()
-            .map_err(|e| format!("Failed to finish label journal: {e}"))?;
-        if build_debug() {
-            eplog!(
-                "  Label journal: {} bytes on disk",
-                format_count(journal_size)
-            );
-        }
-        Some(path)
-    } else {
-        None
-    };
-
-    if config.auto_type {
-        // Collect the Q-numbers that actually need label resolution —
-        // only those that appear as type names in `type_indices`.
-        let wanted: std::collections::HashSet<u32> = graph
-            .type_indices
-            .keys()
-            .filter_map(parse_qcode_number)
-            .collect();
-
-        // Pull those labels (and only those) from the journal. One
-        // forward scan; skips unwanted records without allocating.
-        let label_lookup: HashMap<u32, String> = if let Some(ref path) = label_journal_path {
-            super::label_spill::read_labels_for(path, &wanted).unwrap_or_else(|e| {
-                eplog!("  WARN: failed to read label journal: {}", e);
-                HashMap::new()
-            })
-        } else {
-            HashMap::new()
-        };
-
-        let mut renames: Vec<(String, String)> = Vec::new();
-        for type_name in graph.type_indices.keys() {
-            if let Some(qnum) = parse_qcode_number(type_name) {
-                if let Some(label) = label_lookup.get(&qnum) {
-                    if label != type_name {
-                        renames.push((type_name.to_string(), label.clone()));
-                    }
-                }
-            }
-        }
-        if !renames.is_empty() {
-            let rename_start = std::time::Instant::now();
-            if build_debug() {
-                eplog!(
-                    "  Resolving {} Q-code type names to labels...",
-                    renames.len()
-                );
-            }
-            graph
-                .interner
-                .validate_names(
-                    renames
-                        .iter()
-                        .flat_map(|(old, new)| [old.as_str(), new.as_str()]),
-                )
-                .map_err(|e| e.to_string())?;
-            let old_key_to_new_key: Vec<(InternedKey, InternedKey)> = renames
-                .iter()
-                .map(|(old, new)| {
-                    let old_key = graph.interner.get_or_intern(old);
-                    let new_key = graph.interner.get_or_intern(new);
-                    (old_key, new_key)
-                })
-                .collect();
-            for (old_name, new_name) in &renames {
-                // Merge type_indices: if target name already exists, append indices
-                if let Some(indices) = graph.type_indices.remove(old_name) {
-                    graph
-                        .type_indices
-                        .entry_or_default(new_name.clone())
-                        .extend(indices);
-                }
-                // Merge node_type_metadata: keep the richer entry (more property keys)
-                if let Some(old_meta) = graph.node_type_metadata.remove(old_name) {
-                    let entry = graph
-                        .node_type_metadata
-                        .entry(new_name.clone())
-                        .or_default();
-                    for (k, v) in old_meta {
-                        entry.entry(k).or_insert(v);
-                    }
-                }
-                // Merge type_schemas: union property keys
-                if let Some(old_schema) = graph.type_schemas.remove(old_name) {
-                    if let Some(existing) = graph.type_schemas.get(new_name) {
-                        let merged = existing.merge(&old_schema);
-                        graph
-                            .type_schemas
-                            .insert(new_name.clone(), Arc::new(merged));
-                    } else {
-                        graph.type_schemas.insert(new_name.clone(), old_schema);
-                    }
-                }
-                // Merge type_build_meta: combine row counts and column info
-                if let Some(old_build) = type_meta.remove(old_name) {
-                    let entry = type_meta
-                        .entry(new_name.clone())
-                        .or_insert_with(TypeBuildMeta::new);
-                    entry.merge_from(&old_build);
-                }
-            }
-            // Build type_rename_map for Phase 1b (property log entries use old names)
-            for (old_name, new_name) in &renames {
-                type_rename_map.insert(old_name.clone(), new_name.clone());
-            }
-
-            // Update node_type InternedKey on affected nodes.
-            // Build lookup map first, then ONE sequential pass over all nodes.
-            // This is O(nodes) not O(renames × nodes).
-            let rename_map: HashMap<u64, u64> = old_key_to_new_key
-                .iter()
-                .map(|(old, new)| (old.as_u64(), new.as_u64()))
-                .collect();
-            match &mut graph.graph {
-                crate::graph::schema::GraphBackend::Disk(ref mut dg) => {
-                    let n = dg.node_slot_len();
-                    for i in 0..n {
-                        let slot = dg.node_slot(i);
-                        if slot.is_alive() {
-                            if let Some(&new_type) = rename_map.get(&slot.node_type) {
-                                let mut new_slot = slot;
-                                new_slot.node_type = new_type;
-                                dg.set_node_slot(i, new_slot);
-                            }
-                        }
-                    }
-                }
-                crate::graph::schema::GraphBackend::Memory(ref mut g) => {
-                    for i in 0..g.node_bound() {
-                        let idx = petgraph::graph::NodeIndex::new(i);
-                        if let Some(node) = g.node_weight_mut(idx) {
-                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
-                                node.node_type = InternedKey::from_u64(new_key);
-                            }
-                        }
-                    }
-                }
-                crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
-                    for i in 0..g.node_bound() {
-                        let idx = petgraph::graph::NodeIndex::new(i);
-                        if let Some(node) = g.node_weight_mut(idx) {
-                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
-                                node.node_type = InternedKey::from_u64(new_key);
-                            }
-                        }
-                    }
-                }
-                // RecordingGraph is a Phase 6 validation wrapper only
-                // constructed in Rust tests; the ntriples loader never
-                // sees it in practice.
-                crate::graph::schema::GraphBackend::Recording(_) => {
-                    unreachable!("ntriples loader does not run on a Recording-wrapped graph");
-                }
-            }
-            if build_debug() {
-                eplog!(
-                    "  Resolved {} Q-code types ({})",
-                    renames.len(),
-                    fmt_dur(rename_start.elapsed().as_secs_f64())
-                );
-            }
-        }
-    }
-
-    let phase1_elapsed = start.elapsed().as_secs_f64();
-    let phase1_buf_len = edge_buffer.len() as u64;
-    let phase1_num_types = type_meta.len() as u64;
-    let phase1_total_cols: u64 = type_meta.values().map(|m| m.columns.len() as u64).sum();
-    if config.verbose {
-        eplog!(
-            "[Phase 1] Complete: {} entities, {} types ({} columns), {} edges buffered in {}",
-            format_count(stats.entities_created),
-            format_count(phase1_num_types),
-            format_count(phase1_total_cols),
-            format_count(phase1_buf_len),
-            fmt_dur(phase1_elapsed),
-        );
-    }
-    emit(
-        sink,
-        ProgressEvent::Complete {
-            phase: "phase1",
-            elapsed_s: phase1_elapsed,
-            fields: &[
-                ("entities", PV::U64(stats.entities_created)),
-                ("edges_buffered", PV::U64(phase1_buf_len)),
-                ("types", PV::U64(phase1_num_types)),
-                ("columns", PV::U64(phase1_total_cols)),
-                ("triples_scanned", PV::U64(stats.triples_scanned)),
-            ],
-        },
-    )?;
-
-    // Phase 1b: Convert to columnar storage.
-    // For Disk mode: pre-allocate columns from metadata, then direct-write from log.
-    // For Mapped mode: bulk convert from HashMap properties.
-    if let Some(log_writer) = prop_log.take() {
-        let phase1b_total = log_writer.count();
-        let phase1b_label = format!(
-            "Phase 1b: Building columnar storage ({} entities, {} types)",
-            format_count(phase1b_total),
-            type_meta.len(),
-        );
-        if config.verbose {
-            eplog!("[Phase 1b] {}", phase1b_label);
-        }
-        emit(
-            sink,
-            ProgressEvent::Start {
-                phase: "phase1b",
-                label: &phase1b_label,
-                total: Some(phase1b_total),
-                unit: "ent",
-            },
-        )?;
-        let conv_start = Instant::now();
-        let log_path = log_writer
-            .finish()
-            .map_err(|e| format!("Failed to finish property log: {}", e))?;
-        let build_result = super::column_builder::build_columns_direct(
-            graph,
-            &log_path,
-            &type_meta,
-            &type_rename_map,
-            build_debug(),
-            sink,
-        );
-        let _ = std::fs::remove_file(&log_path);
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
-        match build_result {
-            Ok(()) => {}
-            Err(super::column_builder::BuildColumnsError::Cancelled) => {
-                return Err(CANCELLED_TOKEN.to_string());
-            }
-            Err(super::column_builder::BuildColumnsError::Io(error)) => {
-                return Err(format!("Failed to build columns: {error}"));
-            }
-        }
-        let phase1b_elapsed = conv_start.elapsed().as_secs_f64();
-        if config.verbose {
-            eplog!("[Phase 1b] Complete in {}", fmt_dur(phase1b_elapsed));
-        }
-        emit(
-            sink,
-            ProgressEvent::Complete {
-                phase: "phase1b",
-                elapsed_s: phase1b_elapsed,
-                fields: &[("entities", PV::U64(phase1b_total))],
-            },
-        )?;
-    } else {
-        // Mapped mode now goes through the `Some(log_writer)` arm above
-        // (the disk path). The prior `enable_columnar()` per-entity loop
-        // was the 7× bottleneck vs disk builds and has been retired for
-        // N-Triples builds. Memory mode lands here and intentionally
-        // does nothing — its columnar conversion is triggered on demand
-        // elsewhere.
-        debug_assert!(
-            !graph.graph.is_mapped(),
-            "mapped load_ntriples must populate prop_log and use build_columns_direct"
-        );
-    }
-
-    // Free everything not needed for Phase 2+3 to maximize page cache.
-    // Phase 2 only needs qnum_to_idx + edge_buffer. Phase 3 only needs pending_edges.
-    if graph.graph.is_disk() {
-        let dropped_stores = graph.column_stores.len();
-        graph.column_stores.clear();
-        graph.sync_disk_column_stores();
-        drop(type_meta);
-        // type_indices: 1 GB — not needed for Phase 2/3. Rebuild from node_slots after.
-        let type_indices_count = graph.type_indices.len();
-        graph.type_indices.clear();
-        if build_debug() {
-            eplog!(
-                "  Freed {} column stores + {} type indices before Phase 2",
-                dropped_stores,
-                type_indices_count,
-            );
-        }
-    }
-
-    let phase2_total = edge_buffer.len() as u64;
-    if config.verbose {
-        eplog!("[Phase 2] Creating edges");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
-    }
-    emit(
-        sink,
-        ProgressEvent::Start {
-            phase: "phase2",
-            label: "Phase 2: Creating edges",
-            total: Some(phase2_total),
-            unit: "edge",
-        },
-    )?;
-
-    // Phase 2: Create edges from buffer
-    let edge_start = Instant::now();
-    if let Some(ref qt) = qnum_to_idx {
-        // Fast path: use pre-built qnum_to_idx from Phase 1 (disk mode)
-        create_edges_with_qnum_map(graph, &edge_buffer, &mut stats, qt, sink)?;
-    } else {
-        create_edges_from_buffer(graph, &edge_buffer, &mut stats, sink)?;
-    }
-
-    let phase2_elapsed = edge_start.elapsed().as_secs_f64();
-    if config.verbose {
-        eplog!(
-            "[Phase 2] Complete: {} edges created ({} skipped) in {}",
-            format_count(stats.edges_created),
-            format_count(stats.edges_skipped),
-            fmt_dur(phase2_elapsed),
-        );
-    }
-    emit(
-        sink,
-        ProgressEvent::Complete {
-            phase: "phase2",
-            elapsed_s: phase2_elapsed,
-            fields: &[
-                ("edges_created", PV::U64(stats.edges_created)),
-                ("edges_skipped", PV::U64(stats.edges_skipped)),
-            ],
-        },
-    )?;
-
-    // Free qnum_to_idx after Phase 2
-    if let Some(qt) = qnum_to_idx.take() {
-        let qt_path = qt.file_path().map(|p| p.to_path_buf());
-        drop(qt);
-        if let Some(path) = qt_path {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    // Free edge_buffer before Phase 3.
-    let edge_file_path = match &edge_buffer {
-        EdgeBuffer::Compact(buf) => buf.file_path().map(|p| p.to_path_buf()),
-        _ => None,
-    };
-    drop(edge_buffer);
-    if let Some(path) = edge_file_path {
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // Phase 3: Build CSR from pending edges (disk mode)
-    if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
-        if config.verbose {
-            eplog!("[Phase 3] Building CSR edge index");
-        }
-        emit(
-            sink,
-            ProgressEvent::Start {
-                phase: "phase3",
-                label: "Phase 3: Building CSR edge index",
-                total: None,
-                unit: "step",
-            },
-        )?;
-        let csr_start = Instant::now();
-        dg.build_csr_from_pending()
-            .map_err(|e| format!("Failed to build disk CSR: {e}"))?;
-        let phase3_elapsed = csr_start.elapsed().as_secs_f64();
-        if config.verbose {
-            eplog!("[Phase 3] Complete in {}", fmt_dur(phase3_elapsed));
-        }
-        emit(
-            sink,
-            ProgressEvent::Complete {
-                phase: "phase3",
-                elapsed_s: phase3_elapsed,
-                fields: &[],
-            },
-        )?;
-    }
-
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
     let finalising_start = Instant::now();
     if config.verbose && graph.graph.is_disk() {
         eplog!("[Finalising] Building auxiliary indexes + saving metadata");
@@ -1289,6 +480,950 @@ pub fn load_ntriples(
             },
         )?;
     }
+
+    Ok(())
+}
+
+fn build_columns(
+    graph: &mut DirGraph,
+    config: &NTriplesConfig,
+    sink: Option<&dyn ProgressSink>,
+    mut prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
+    type_meta: HashMap<String, TypeBuildMeta>,
+    type_rename_map: &HashMap<String, String>,
+) -> Result<(), String> {
+    // Phase 1b: Convert to columnar storage.
+    // For Disk mode: pre-allocate columns from metadata, then direct-write from log.
+    // For Mapped mode: bulk convert from HashMap properties.
+    if let Some(log_writer) = prop_log.take() {
+        let phase1b_total = log_writer.count();
+        let phase1b_label = format!(
+            "Phase 1b: Building columnar storage ({} entities, {} types)",
+            format_count(phase1b_total),
+            type_meta.len(),
+        );
+        if config.verbose {
+            eplog!("[Phase 1b] {}", phase1b_label);
+        }
+        emit(
+            sink,
+            ProgressEvent::Start {
+                phase: "phase1b",
+                label: &phase1b_label,
+                total: Some(phase1b_total),
+                unit: "ent",
+            },
+        )?;
+        let conv_start = Instant::now();
+        let log_path = log_writer
+            .finish()
+            .map_err(|e| format!("Failed to finish property log: {}", e))?;
+        let build_result = super::column_builder::build_columns_direct(
+            graph,
+            &log_path,
+            &type_meta,
+            type_rename_map,
+            build_debug(),
+            sink,
+        );
+        let _ = std::fs::remove_file(&log_path);
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+        match build_result {
+            Ok(()) => {}
+            Err(super::column_builder::BuildColumnsError::Cancelled) => {
+                return Err(CANCELLED_TOKEN.to_string());
+            }
+            Err(super::column_builder::BuildColumnsError::Io(error)) => {
+                return Err(format!("Failed to build columns: {error}"));
+            }
+        }
+        let phase1b_elapsed = conv_start.elapsed().as_secs_f64();
+        if config.verbose {
+            eplog!("[Phase 1b] Complete in {}", fmt_dur(phase1b_elapsed));
+        }
+        emit(
+            sink,
+            ProgressEvent::Complete {
+                phase: "phase1b",
+                elapsed_s: phase1b_elapsed,
+                fields: &[("entities", PV::U64(phase1b_total))],
+            },
+        )?;
+    } else {
+        // Mapped mode now goes through the `Some(log_writer)` arm above
+        // (the disk path). The prior `enable_columnar()` per-entity loop
+        // was the 7× bottleneck vs disk builds and has been retired for
+        // N-Triples builds. Memory mode lands here and intentionally
+        // does nothing — its columnar conversion is triggered on demand
+        // elsewhere.
+        debug_assert!(
+            !graph.graph.is_mapped(),
+            "mapped load_ntriples must populate prop_log and use build_columns_direct"
+        );
+    }
+
+    // Free everything not needed for Phase 2+3 to maximize page cache.
+    // Phase 2 only needs qnum_to_idx + edge_buffer. Phase 3 only needs pending_edges.
+    if graph.graph.is_disk() {
+        let dropped_stores = graph.column_stores.len();
+        graph.column_stores.clear();
+        graph.sync_disk_column_stores();
+        drop(type_meta);
+        // type_indices: 1 GB — not needed for Phase 2/3. Rebuild from node_slots after.
+        let type_indices_count = graph.type_indices.len();
+        graph.type_indices.clear();
+        if build_debug() {
+            eplog!(
+                "  Freed {} column stores + {} type indices before Phase 2",
+                dropped_stores,
+                type_indices_count,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn build_edges(
+    graph: &mut DirGraph,
+    config: &NTriplesConfig,
+    sink: Option<&dyn ProgressSink>,
+    stats: &mut NTriplesStats,
+    edge_buffer: EdgeBuffer,
+    mut qnum_to_idx: Option<MmapOrVec<u32>>,
+) -> Result<(), String> {
+    let phase2_total = edge_buffer.len() as u64;
+    if config.verbose {
+        eplog!("[Phase 2] Creating edges");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+    emit(
+        sink,
+        ProgressEvent::Start {
+            phase: "phase2",
+            label: "Phase 2: Creating edges",
+            total: Some(phase2_total),
+            unit: "edge",
+        },
+    )?;
+
+    // Phase 2: Create edges from buffer
+    let edge_start = Instant::now();
+    if let Some(ref qt) = qnum_to_idx {
+        // Fast path: use pre-built qnum_to_idx from Phase 1 (disk mode)
+        create_edges_with_qnum_map(graph, &edge_buffer, stats, qt, sink)?;
+    } else {
+        create_edges_from_buffer(graph, &edge_buffer, stats, sink)?;
+    }
+
+    let phase2_elapsed = edge_start.elapsed().as_secs_f64();
+    if config.verbose {
+        eplog!(
+            "[Phase 2] Complete: {} edges created ({} skipped) in {}",
+            format_count(stats.edges_created),
+            format_count(stats.edges_skipped),
+            fmt_dur(phase2_elapsed),
+        );
+    }
+    emit(
+        sink,
+        ProgressEvent::Complete {
+            phase: "phase2",
+            elapsed_s: phase2_elapsed,
+            fields: &[
+                ("edges_created", PV::U64(stats.edges_created)),
+                ("edges_skipped", PV::U64(stats.edges_skipped)),
+            ],
+        },
+    )?;
+
+    // Free qnum_to_idx after Phase 2
+    if let Some(qt) = qnum_to_idx.take() {
+        let qt_path = qt.file_path().map(|p| p.to_path_buf());
+        drop(qt);
+        if let Some(path) = qt_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    // Free edge_buffer before Phase 3.
+    let edge_file_path = match &edge_buffer {
+        EdgeBuffer::Compact(buf) => buf.file_path().map(|p| p.to_path_buf()),
+        _ => None,
+    };
+    drop(edge_buffer);
+    if let Some(path) = edge_file_path {
+        let _ = std::fs::remove_file(&path);
+    }
+
+    Ok(())
+}
+
+fn build_disk_csr(
+    graph: &mut DirGraph,
+    config: &NTriplesConfig,
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), String> {
+    // Phase 3: Build CSR from pending edges (disk mode)
+    if let crate::graph::schema::GraphBackend::Disk(ref mut dg) = graph.graph {
+        if config.verbose {
+            eplog!("[Phase 3] Building CSR edge index");
+        }
+        emit(
+            sink,
+            ProgressEvent::Start {
+                phase: "phase3",
+                label: "Phase 3: Building CSR edge index",
+                total: None,
+                unit: "step",
+            },
+        )?;
+        let csr_start = Instant::now();
+        dg.build_csr_from_pending()
+            .map_err(|e| format!("Failed to build disk CSR: {e}"))?;
+        let phase3_elapsed = csr_start.elapsed().as_secs_f64();
+        if config.verbose {
+            eplog!("[Phase 3] Complete in {}", fmt_dur(phase3_elapsed));
+        }
+        emit(
+            sink,
+            ProgressEvent::Complete {
+                phase: "phase3",
+                elapsed_s: phase3_elapsed,
+                fields: &[],
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn resolve_type_labels(
+    graph: &mut DirGraph,
+    config: &NTriplesConfig,
+    mut label_writer: Option<super::label_spill::LabelSpillWriter>,
+    type_meta: &mut HashMap<String, TypeBuildMeta>,
+) -> Result<HashMap<String, String>, String> {
+    // Post-Phase-1: resolve Q-code type names using the label journal.
+    // During Phase 1 every entity's type stayed as its raw Q-code (e.g.
+    // "Q5") because the old HashMap cache was removed to avoid the ~10
+    // GB heap spike. Now we read the journal ONCE and pull labels only
+    // for the small set of Q-codes that actually became type names —
+    // typically tens of thousands on Wikidata, not the 124M entries
+    // the in-memory cache held.
+    let mut type_rename_map: HashMap<String, String> = HashMap::new();
+
+    // Flush + close the label journal before reading it back.
+    let label_journal_path = if let Some(writer) = label_writer.take() {
+        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        });
+        let path = spill_dir.join("labels.bin");
+        let journal_size = writer
+            .finish()
+            .map_err(|e| format!("Failed to finish label journal: {e}"))?;
+        if build_debug() {
+            eplog!(
+                "  Label journal: {} bytes on disk",
+                format_count(journal_size)
+            );
+        }
+        Some(path)
+    } else {
+        None
+    };
+
+    if config.auto_type {
+        // Collect the Q-numbers that actually need label resolution —
+        // only those that appear as type names in `type_indices`.
+        let wanted: std::collections::HashSet<u32> = graph
+            .type_indices
+            .keys()
+            .filter_map(parse_qcode_number)
+            .collect();
+
+        // Pull those labels (and only those) from the journal. One
+        // forward scan; skips unwanted records without allocating.
+        let label_lookup: HashMap<u32, String> = if let Some(ref path) = label_journal_path {
+            super::label_spill::read_labels_for(path, &wanted).unwrap_or_else(|e| {
+                eplog!("  WARN: failed to read label journal: {}", e);
+                HashMap::new()
+            })
+        } else {
+            HashMap::new()
+        };
+
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for type_name in graph.type_indices.keys() {
+            if let Some(qnum) = parse_qcode_number(type_name) {
+                if let Some(label) = label_lookup.get(&qnum) {
+                    if label != type_name {
+                        renames.push((type_name.to_string(), label.clone()));
+                    }
+                }
+            }
+        }
+        if !renames.is_empty() {
+            let rename_start = std::time::Instant::now();
+            if build_debug() {
+                eplog!(
+                    "  Resolving {} Q-code type names to labels...",
+                    renames.len()
+                );
+            }
+            graph
+                .interner
+                .validate_names(
+                    renames
+                        .iter()
+                        .flat_map(|(old, new)| [old.as_str(), new.as_str()]),
+                )
+                .map_err(|e| e.to_string())?;
+            let old_key_to_new_key: Vec<(InternedKey, InternedKey)> = renames
+                .iter()
+                .map(|(old, new)| {
+                    let old_key = graph.interner.get_or_intern(old);
+                    let new_key = graph.interner.get_or_intern(new);
+                    (old_key, new_key)
+                })
+                .collect();
+            for (old_name, new_name) in &renames {
+                // Merge type_indices: if target name already exists, append indices
+                if let Some(indices) = graph.type_indices.remove(old_name) {
+                    graph
+                        .type_indices
+                        .entry_or_default(new_name.clone())
+                        .extend(indices);
+                }
+                // Merge node_type_metadata: keep the richer entry (more property keys)
+                if let Some(old_meta) = graph.node_type_metadata.remove(old_name) {
+                    let entry = graph
+                        .node_type_metadata
+                        .entry(new_name.clone())
+                        .or_default();
+                    for (k, v) in old_meta {
+                        entry.entry(k).or_insert(v);
+                    }
+                }
+                // Merge type_schemas: union property keys
+                if let Some(old_schema) = graph.type_schemas.remove(old_name) {
+                    if let Some(existing) = graph.type_schemas.get(new_name) {
+                        let merged = existing.merge(&old_schema);
+                        graph
+                            .type_schemas
+                            .insert(new_name.clone(), Arc::new(merged));
+                    } else {
+                        graph.type_schemas.insert(new_name.clone(), old_schema);
+                    }
+                }
+                // Merge type_build_meta: combine row counts and column info
+                if let Some(old_build) = type_meta.remove(old_name) {
+                    let entry = type_meta
+                        .entry(new_name.clone())
+                        .or_insert_with(TypeBuildMeta::new);
+                    entry.merge_from(&old_build);
+                }
+            }
+            // Build type_rename_map for Phase 1b (property log entries use old names)
+            for (old_name, new_name) in &renames {
+                type_rename_map.insert(old_name.clone(), new_name.clone());
+            }
+
+            // Update node_type InternedKey on affected nodes.
+            // Build lookup map first, then ONE sequential pass over all nodes.
+            // This is O(nodes) not O(renames × nodes).
+            let rename_map: HashMap<u64, u64> = old_key_to_new_key
+                .iter()
+                .map(|(old, new)| (old.as_u64(), new.as_u64()))
+                .collect();
+            match &mut graph.graph {
+                crate::graph::schema::GraphBackend::Disk(ref mut dg) => {
+                    let n = dg.node_slot_len();
+                    for i in 0..n {
+                        let slot = dg.node_slot(i);
+                        if slot.is_alive() {
+                            if let Some(&new_type) = rename_map.get(&slot.node_type) {
+                                let mut new_slot = slot;
+                                new_slot.node_type = new_type;
+                                dg.set_node_slot(i, new_slot);
+                            }
+                        }
+                    }
+                }
+                crate::graph::schema::GraphBackend::Memory(ref mut g) => {
+                    for i in 0..g.node_bound() {
+                        let idx = petgraph::graph::NodeIndex::new(i);
+                        if let Some(node) = g.node_weight_mut(idx) {
+                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
+                                node.node_type = InternedKey::from_u64(new_key);
+                            }
+                        }
+                    }
+                }
+                crate::graph::schema::GraphBackend::Mapped(ref mut g) => {
+                    for i in 0..g.node_bound() {
+                        let idx = petgraph::graph::NodeIndex::new(i);
+                        if let Some(node) = g.node_weight_mut(idx) {
+                            if let Some(&new_key) = rename_map.get(&node.node_type.as_u64()) {
+                                node.node_type = InternedKey::from_u64(new_key);
+                            }
+                        }
+                    }
+                }
+                // RecordingGraph is a Phase 6 validation wrapper only
+                // constructed in Rust tests; the ntriples loader never
+                // sees it in practice.
+                crate::graph::schema::GraphBackend::Recording(_) => {
+                    unreachable!("ntriples loader does not run on a Recording-wrapped graph");
+                }
+            }
+            if build_debug() {
+                eplog!(
+                    "  Resolved {} Q-code types ({})",
+                    renames.len(),
+                    fmt_dur(rename_start.elapsed().as_secs_f64())
+                );
+            }
+        }
+    }
+
+    Ok(type_rename_map)
+}
+
+struct LoadSpills {
+    prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
+    edge_buffer: EdgeBuffer,
+    label_writer: Option<super::label_spill::LabelSpillWriter>,
+    type_meta: HashMap<String, TypeBuildMeta>,
+    qnum_to_idx: Option<MmapOrVec<u32>>,
+}
+
+fn initialize_spills(graph: &DirGraph, config: &NTriplesConfig) -> Result<LoadSpills, String> {
+    let use_streaming_build = graph.graph.is_disk() || graph.graph.is_mapped();
+    let use_compact = use_streaming_build;
+
+    // Property log for streaming builds: serialize properties during Phase 1,
+    // replay in Phase 1b. Used by both disk and mapped modes.
+    let prop_log: Option<crate::graph::storage::memory::property_log::PropertyLogWriter> =
+        if use_streaming_build {
+            let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+            });
+            // Clean up stale spill dirs from previous killed builds.
+            //
+            // Safe for concurrent runs: only delete directories whose
+            // contents haven't been modified in the last hour. A running
+            // build writes to its `properties.log.zst` continuously, so
+            // active spill dirs always look "fresh" and won't be touched.
+            // This matters because a parallel `load_ntriples` call (e.g.
+            // `api_benchmark.py` spawning multiple loaders, or a long
+            // Wikidata rebuild running alongside a small test) would
+            // otherwise wipe out the log file of the *other* run.
+            const STALE_AFTER_SECS: u64 = 3600; // 1 hour
+            if let Some(parent) = spill_dir.parent() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    let now = std::time::SystemTime::now();
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if !name.starts_with("kglite_build_") {
+                            continue;
+                        }
+                        if entry.path() == spill_dir {
+                            continue;
+                        }
+                        let is_stale = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|m| now.duration_since(m).ok())
+                            .map(|d| d.as_secs() > STALE_AFTER_SECS)
+                            .unwrap_or(false);
+                        if is_stale {
+                            let _ = std::fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
+            }
+            // Clean up stale pending_edges from previous killed builds
+            if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
+                let stale = dg.data_dir.join("_pending_edges.bin");
+                if stale.exists() {
+                    let _ = std::fs::remove_file(&stale);
+                }
+            }
+            let log_path = spill_dir.join("properties.log.zst");
+            if build_debug() {
+                eplog!("  Property log: {}", log_path.display());
+            }
+            Some(
+                crate::graph::storage::memory::property_log::PropertyLogWriter::new(&log_path, 1)
+                    .map_err(|e| format!("Failed to create property log: {}", e))?,
+            )
+        } else {
+            None
+        };
+    let edge_buffer = if use_compact {
+        if use_streaming_build {
+            // File-backed edge buffer: avoids holding ~14 GB in RAM during Phase 1b
+            let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+            });
+            std::fs::create_dir_all(&spill_dir)
+                .map_err(|e| format!("Failed to create spill dir: {}", e))?;
+            let edge_path = spill_dir.join("edges.bin");
+            EdgeBuffer::Compact(
+                MmapOrVec::mapped(&edge_path, 1 << 20)
+                    .map_err(|e| format!("Failed to create edge buffer file: {}", e))?,
+            )
+        } else {
+            EdgeBuffer::Compact(MmapOrVec::new())
+        }
+    } else {
+        EdgeBuffer::Strings(Vec::new())
+    };
+
+    // Label journal for auto-typing. Previously a `HashMap<u32, String>`
+    // that grew to ~10 GB of heap at Wikidata scale (124M entities),
+    // pushing 16 GB machines into swap and collapsing the Phase 1
+    // rate from 1.8M to 450K triples/s. Now a buffered sequential
+    // write to `{spill_dir}/labels.bin` — zero heap growth during
+    // Phase 1. The post-Phase-1 rename pass reads the journal once,
+    // keeping only the ~88K labels that actually appear as type names.
+    // In-Phase-1 `get` is gone entirely (it was best-effort anyway —
+    // misses always fell through to post-Phase-1 rename).
+    let label_writer: Option<super::label_spill::LabelSpillWriter> = if config.auto_type {
+        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        });
+        std::fs::create_dir_all(&spill_dir)
+            .map_err(|e| format!("Failed to create label spill directory: {e}"))?;
+        Some(
+            super::label_spill::LabelSpillWriter::new(&spill_dir.join("labels.bin"))
+                .map_err(|e| format!("Failed to create label journal: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    // Per-type build metadata for Phase 1b pre-allocation.
+    let type_meta: HashMap<String, TypeBuildMeta> = HashMap::new();
+
+    // For disk mode: build qnum_to_idx during Phase 1 (instead of from id_indices in Phase 2).
+    // This lets us skip id_indices entirely, saving ~11 GB at full Wikidata scale.
+    // Pre-allocate for 150M Q-numbers (~600 MB mmap, lazily paged).
+    let qnum_to_idx: Option<MmapOrVec<u32>> = if graph.graph.is_disk() {
+        let spill_dir = graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        });
+        std::fs::create_dir_all(&spill_dir)
+            .map_err(|e| format!("Failed to create id spill directory: {e}"))?;
+        // 150M covers all Wikidata Q-numbers. OS allocates pages lazily.
+        Some(
+            MmapOrVec::mapped_prefilled(&spill_dir.join("qnum_to_idx.bin"), 150_000_000)
+                .unwrap_or_else(|_| MmapOrVec::from_vec(vec![0u32; 150_000_000])),
+        )
+    } else {
+        None
+    };
+
+    Ok(LoadSpills {
+        prop_log,
+        edge_buffer,
+        label_writer,
+        type_meta,
+        qnum_to_idx,
+    })
+}
+
+struct Phase1Ingest<'a> {
+    graph: &'a mut DirGraph,
+    path: &'a str,
+    path_obj: &'a Path,
+    config: &'a NTriplesConfig,
+    stats: &'a mut NTriplesStats,
+    edge_buffer: &'a mut EdgeBuffer,
+    prop_log: &'a mut Option<crate::graph::storage::memory::property_log::PropertyLogWriter>,
+    label_writer: &'a mut Option<super::label_spill::LabelSpillWriter>,
+    type_meta: &'a mut HashMap<String, TypeBuildMeta>,
+    qnum_to_idx: &'a mut Option<MmapOrVec<u32>>,
+    rx: std::sync::mpsc::Receiver<ReaderBatch>,
+    reader_handle: std::thread::JoinHandle<Result<(), String>>,
+    started: Instant,
+}
+
+fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
+    let Phase1Ingest {
+        graph,
+        path,
+        path_obj,
+        config,
+        stats,
+        edge_buffer,
+        prop_log,
+        label_writer,
+        type_meta,
+        qnum_to_idx,
+        rx,
+        reader_handle,
+        started: start,
+    } = context;
+    let mapped = false;
+    let mut current: Option<EntityAccumulator> = None;
+    let mut entity_limit_reached = false;
+    // Reusable scratch buffer for `flush_entity`'s property-log
+    // `Vec<(InternedKey, Value)>`. Hoisted out of `flush_entity` so the
+    // alloc + grow cost is paid once, not per entity (~2% of loader CPU
+    // under samply).
+    let mut scratch_props: Vec<(InternedKey, Value)> = Vec::with_capacity(64);
+    // Cheap bucket counter (decrement in the hot loop); every 5M triples we
+    // check wall time and only log a `[Phase 1]` progress line if at least
+    // PROGRESS_INTERVAL_SECS have elapsed since the last line.
+    let mut progress_countdown: u64 = 5_000_000;
+    let mut last_progress_log = Instant::now();
+    const PROGRESS_BUCKET: u64 = 5_000_000;
+    const PROGRESS_INTERVAL_SECS: f64 = 60.0;
+    let include_labels = true;
+
+    if config.verbose {
+        eplog!("[Phase 1] Streaming and parsing N-triples ({})", path);
+    }
+    let sink = config.progress.as_deref();
+    // The bar tracks triples — the loop's natural unit. When the
+    // caller has set `max_triples` we use that as the bar's total so
+    // tqdm shows ETA; otherwise the bar runs unbounded.
+    let phase1_label = format!(
+        "Phase 1: Streaming N-triples ({})",
+        path_obj
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+    );
+    emit(
+        sink,
+        ProgressEvent::Start {
+            phase: "phase1",
+            label: &phase1_label,
+            total: config.max_triples,
+            unit: "tri",
+        },
+    )?;
+
+    let mut reader_error = None;
+    'outer: while let Ok(message) = rx.recv() {
+        let batch = match message {
+            Ok(batch) => batch,
+            Err(error) => {
+                reader_error = Some(error);
+                break;
+            }
+        };
+        let n_lines = batch.offsets.len();
+        for i in 0..n_lines {
+            // Slice into the batch's contiguous buffer — pointer math,
+            // no per-line heap dereference. Validation happens only after
+            // the reader's byte-level entity-prefix filter accepted the line.
+            let line = match validated_line(batch.line(i)) {
+                Ok(line) => line,
+                Err(error) => {
+                    reader_error = Some(format!(
+                        "N-Triples input contains invalid UTF-8 in an accepted entity line: {error}"
+                    ));
+                    break 'outer;
+                }
+            };
+            if entity_limit_reached && current.is_none() {
+                break 'outer;
+            }
+            // `max_triples` short-circuit: hard-stop after N triples
+            // scanned, regardless of entity progress. Unlike the
+            // `max_entities` check above we don't gate on
+            // `current.is_none()` — `current` is essentially always
+            // `Some` during steady-state Wikidata reading (subject-sorted
+            // dump = always mid-entity), so the gate would never trip.
+            // We trade losing one in-progress entity for a deterministic
+            // triple cap; that's the right call for a perf benchmark.
+            if let Some(cap) = config.max_triples {
+                if stats.triples_scanned >= cap {
+                    break 'outer;
+                }
+            }
+
+            stats.triples_scanned += 1;
+
+            progress_countdown -= 1;
+            if progress_countdown == 0 {
+                progress_countdown = PROGRESS_BUCKET;
+                let buf_len = edge_buffer.len() as u64;
+                // Callback fires on every bucket so tqdm stays live;
+                // the sink may also signal cancellation here (Ctrl+C).
+                emit(
+                    sink,
+                    ProgressEvent::Update {
+                        phase: "phase1",
+                        current: stats.triples_scanned,
+                        fields: &[
+                            ("entities", PV::U64(stats.entities_created)),
+                            ("edges_buffered", PV::U64(buf_len)),
+                        ],
+                    },
+                )?;
+                // eplog stays on the 60s gate so terminal output isn't spammed.
+                if config.verbose
+                    && last_progress_log.elapsed().as_secs_f64() >= PROGRESS_INTERVAL_SECS
+                {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let rate = stats.triples_scanned as f64 / elapsed;
+                    eplog!(
+                        "[Phase 1] {} triples, {} entities, {} edges buffered — {:.0}k triples/s",
+                        format_count(stats.triples_scanned),
+                        format_count(stats.entities_created),
+                        format_count(buf_len),
+                        rate / 1000.0,
+                    );
+                    last_progress_log = Instant::now();
+                }
+            }
+
+            // Note: the reader thread already filters out non-entity
+            // lines via `starts_with(ENTITY_PREFIX)` before they reach
+            // the channel, so no redundant prefix check is needed here.
+            let (subject, predicate, object) = match parse_line(line) {
+                Some(parsed) => parsed,
+                None => continue,
+            };
+
+            let subj_id = match subject {
+                Subject::Entity(id) => id,
+                Subject::Other => continue,
+            };
+
+            // Subject changed → flush previous entity
+            if current.as_ref().is_some_and(|c| c.id != subj_id) {
+                if let Some(acc) = current.take() {
+                    flush_entity(
+                        graph,
+                        acc,
+                        config,
+                        edge_buffer,
+                        stats,
+                        mapped,
+                        prop_log,
+                        label_writer,
+                        type_meta,
+                        qnum_to_idx,
+                        &mut scratch_props,
+                    )?;
+                }
+                if entity_limit_reached {
+                    break;
+                }
+            }
+
+            if current.is_none() {
+                if let Some(max) = config.max_entities {
+                    if stats.entities_created >= max as u64 {
+                        entity_limit_reached = true;
+                        continue;
+                    }
+                }
+                current = Some(EntityAccumulator::new(subj_id.to_string()));
+            }
+
+            let acc = current.as_mut().unwrap();
+
+            // Process triple based on predicate type
+            match predicate {
+                Predicate::Label => {
+                    if include_labels {
+                        if let Some(text) = extract_lang_text(&object, &config.languages) {
+                            acc.label = Some(text);
+                        }
+                    }
+                }
+                Predicate::Description => {
+                    if let Some(text) = extract_lang_text(&object, &config.languages) {
+                        acc.description = Some(text);
+                    }
+                }
+                Predicate::AltLabel => {}
+                Predicate::Type => {}
+                Predicate::WikidataDirect(pcode) => {
+                    if let Some(ref allowed) = config.predicates {
+                        if !allowed.contains(pcode) {
+                            continue;
+                        }
+                    }
+
+                    let pred_label = config
+                        .predicate_labels
+                        .get(pcode)
+                        .cloned()
+                        .unwrap_or_else(|| pcode.to_string());
+
+                    match &object {
+                        Object::Entity(target_qcode) => {
+                            if pcode == "P31" && acc.type_qcode.is_none() {
+                                acc.type_qcode = Some(target_qcode.to_string());
+                            }
+                            acc.outgoing_edges
+                                .push((pred_label, target_qcode.to_string()));
+                        }
+                        Object::Literal(text) => {
+                            acc.properties
+                                .insert(pred_label, Value::String(text.clone()));
+                        }
+                        Object::LangLiteral(text, lang) => {
+                            if language_matches(lang, &config.languages) {
+                                acc.properties
+                                    .insert(pred_label, Value::String(text.clone()));
+                            }
+                        }
+                        Object::TypedLiteral(text, type_uri) => {
+                            acc.properties
+                                .insert(pred_label, typed_literal_to_value(text, type_uri));
+                        }
+                        Object::Other => {}
+                    }
+                }
+                Predicate::Other => {}
+            }
+        } // end for line in batch
+    } // end for batch in rx
+      // CRITICAL: drop `rx` before joining so the reader thread's
+      // `tx.send` returns Err (channel closed) on its next batch and
+      // exits. Without this, an early `break 'outer` (e.g. from the
+      // `max_triples` cap) leaves the reader thread blocked on a full
+      // bounded channel that nobody is draining → `join()` deadlocks.
+    drop(rx);
+    let join_result = join_reader(reader_handle);
+    if let Some(error) = reader_error {
+        return Err(error);
+    }
+    join_result?;
+
+    // Flush last entity
+    if let Some(acc) = current.take() {
+        flush_entity(
+            graph,
+            acc,
+            config,
+            edge_buffer,
+            stats,
+            mapped,
+            prop_log,
+            label_writer,
+            type_meta,
+            qnum_to_idx,
+            &mut scratch_props,
+        )?;
+    }
+
+    Ok(())
+}
+
+pub fn load_ntriples(
+    graph: &mut DirGraph,
+    path: &str,
+    config: &NTriplesConfig,
+) -> Result<NTriplesStats, String> {
+    let start = Instant::now();
+    let path_obj = Path::new(path);
+
+    let reader = open_ntriples_reader(path_obj, path)?;
+    // Reader thread: decompresses + reads lines via channel (hides I/O latency).
+    //
+    // Each batch packs lines into a single `LineBuffer` (contiguous bytes
+    // + offset table) instead of `Vec<String>` with 200k separately
+    // heap-allocated `String`s. Cache-friendly iteration on the loader
+    // side, no per-line allocation in the reader, and the channel
+    // transports one buffer at a time. Channel capacity 32 × ~16 MB =
+    // ~512 MB ceiling on in-flight bytes — well within memory budget,
+    // smooths out short loader stalls.
+    let (rx, reader_handle) = spawn_reader(reader);
+
+    let mut stats = NTriplesStats {
+        triples_scanned: 0,
+        entities_created: 0,
+        edges_created: 0,
+        edges_skipped: 0,
+        seconds: 0.0,
+    };
+
+    // Phase 1: Parse and ingest.
+    // For Disk mode: serialize properties to a compressed log file (fast, ~100 ns/entity).
+    // Phase 1b replays the log to build ColumnStores in bulk.
+    // For other modes: use fast non-mapped insertion (HashMap properties, then Phase 1b).
+    // Mapped mode reuses the disk path's Phase 1 streaming: a spill-backed
+    // property log + packed `EdgeBuffer::Compact` in place of the slow
+    // per-entity `PropertyStorage::Map` + `EdgeBuffer::Strings` path.
+    // Phase 1b then routes through `build_columns_direct`, writing a single
+    // `columns.bin` instead of the per-entity `enable_columnar()` loop.
+    let LoadSpills {
+        mut prop_log,
+        mut edge_buffer,
+        mut label_writer,
+        mut type_meta,
+        mut qnum_to_idx,
+    } = initialize_spills(graph, config)?;
+
+    ingest_phase1(Phase1Ingest {
+        graph,
+        path,
+        path_obj,
+        config,
+        stats: &mut stats,
+        edge_buffer: &mut edge_buffer,
+        prop_log: &mut prop_log,
+        label_writer: &mut label_writer,
+        type_meta: &mut type_meta,
+        qnum_to_idx: &mut qnum_to_idx,
+        rx,
+        reader_handle,
+        started: start,
+    })?;
+    let sink = config.progress.as_deref();
+
+    let type_rename_map = resolve_type_labels(graph, config, label_writer, &mut type_meta)?;
+
+    let phase1_elapsed = start.elapsed().as_secs_f64();
+    let phase1_buf_len = edge_buffer.len() as u64;
+    let phase1_num_types = type_meta.len() as u64;
+    let phase1_total_cols: u64 = type_meta.values().map(|m| m.columns.len() as u64).sum();
+    if config.verbose {
+        eplog!(
+            "[Phase 1] Complete: {} entities, {} types ({} columns), {} edges buffered in {}",
+            format_count(stats.entities_created),
+            format_count(phase1_num_types),
+            format_count(phase1_total_cols),
+            format_count(phase1_buf_len),
+            fmt_dur(phase1_elapsed),
+        );
+    }
+    emit(
+        sink,
+        ProgressEvent::Complete {
+            phase: "phase1",
+            elapsed_s: phase1_elapsed,
+            fields: &[
+                ("entities", PV::U64(stats.entities_created)),
+                ("edges_buffered", PV::U64(phase1_buf_len)),
+                ("types", PV::U64(phase1_num_types)),
+                ("columns", PV::U64(phase1_total_cols)),
+                ("triples_scanned", PV::U64(stats.triples_scanned)),
+            ],
+        },
+    )?;
+
+    build_columns(graph, config, sink, prop_log, type_meta, &type_rename_map)?;
+
+    build_edges(graph, config, sink, &mut stats, edge_buffer, qnum_to_idx)?;
+
+    build_disk_csr(graph, config, sink)?;
+
+    finalize_disk_graph(graph, config, sink)?;
 
     stats.seconds = start.elapsed().as_secs_f64();
     if config.verbose {
