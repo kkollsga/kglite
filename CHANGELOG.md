@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Manifest embedders require their documented trust opt-in.** MCP servers
+  reject `extensions.embedder` unless the manifest explicitly sets
+  `trust.allow_embedder: true`, before any Python factory or Rust model is
+  constructed.
+- **Strong connected components retain their directed semantics on disk.**
+  `connected_components(weak=False)` now computes SCCs across memory, mapped,
+  and disk storage instead of degrading to weak components on disk.
 - **The `networkx` extra installs the complete bridge dependency set.** A
   clean `pip install 'kglite[networkx]'` now includes pandas, which
   `from_networkx()` uses internally.

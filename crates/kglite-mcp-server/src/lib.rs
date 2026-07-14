@@ -1064,6 +1064,12 @@ fn build_embedder_from_manifest(
     let Some(raw) = manifest.extensions.get("embedder") else {
         return Ok(None);
     };
+    if !manifest.trust.allow_embedder {
+        anyhow::bail!(
+            "extensions.embedder is disabled unless the manifest explicitly sets \
+             trust.allow_embedder: true"
+        );
+    }
     let obj = raw
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("extensions.embedder must be a mapping (got: {raw:?})"))?;
@@ -1210,5 +1216,65 @@ mod discovery_steer_tests {
         };
         let out = apply_discovery_steer(&mode, ServerOptions::default());
         assert!(out.instructions.is_none());
+    }
+}
+
+#[cfg(test)]
+mod embedder_trust_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn load_embedder_manifest(allow_embedder: bool) -> (tempfile::TempDir, Manifest) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.yaml");
+        fs::write(
+            &path,
+            format!(
+                "name: trust-test\ntrust:\n  allow_embedder: {allow_embedder}\n\
+                 extensions:\n  embedder:\n    library: test\n    model: test\n"
+            ),
+        )
+        .expect("write manifest");
+        let manifest = mcp_methods::server::load_manifest(&path).expect("load manifest");
+        (dir, manifest)
+    }
+
+    #[test]
+    fn untrusted_embedder_never_invokes_factory() {
+        let (_dir, manifest) = load_embedder_manifest(false);
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_factory = called.clone();
+        let factory: PyEmbedderFactory = Box::new(move |_| {
+            called_by_factory.store(true, Ordering::SeqCst);
+            Err("factory sentinel".to_string())
+        });
+
+        let error = match build_embedder_from_manifest(&manifest, Some(&factory)) {
+            Ok(_) => panic!("untrusted embedder must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("trust.allow_embedder: true"));
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn trusted_embedder_reaches_factory() {
+        let (_dir, manifest) = load_embedder_manifest(true);
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_factory = called.clone();
+        let factory: PyEmbedderFactory = Box::new(move |_| {
+            called_by_factory.store(true, Ordering::SeqCst);
+            Err("factory sentinel".to_string())
+        });
+
+        let error = match build_embedder_from_manifest(&manifest, Some(&factory)) {
+            Ok(_) => panic!("sentinel factory must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("factory sentinel"));
+        assert!(called.load(Ordering::SeqCst));
     }
 }

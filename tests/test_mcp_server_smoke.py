@@ -1153,7 +1153,8 @@ class TestEmbedderLibrary:
         `library: fastembed-rs`."""
         manifest = tmp_path / "py_embed_mcp.yaml"
         manifest.write_text(
-            "name: py_embed\nextensions:\n  embedder:\n    library: sentence-transformers\n    model: BAAI/bge-m3\n"
+            "name: py_embed\ntrust:\n  allow_embedder: true\nextensions:\n"
+            "  embedder:\n    library: sentence-transformers\n    model: BAAI/bge-m3\n"
         )
         proc = subprocess.Popen(
             [str(BINARY), "--graph", str(graph_fixture), "--mcp-config", str(manifest)],

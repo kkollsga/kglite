@@ -116,7 +116,9 @@ def test_python_library_embedder_powers_text_score(tmp_path: Path) -> None:
 
     manifest = tmp_path / "docs_mcp.yaml"
     # `library: stub` (anything but fastembed-rs) routes to the Python factory.
-    manifest.write_text("name: stub\nextensions:\n  embedder:\n    library: stub\n    model: stub\n")
+    manifest.write_text(
+        "name: stub\ntrust:\n  allow_embedder: true\nextensions:\n  embedder:\n    library: stub\n    model: stub\n"
+    )
 
     # Launch the bundled server with the same stub via the factory arg — the
     # real console-script path dispatches on library; here we inject the stub

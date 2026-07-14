@@ -267,3 +267,35 @@ def test_save_load_round_trip(graphs, tmp_path):
     original = _rows(graphs["memory"].cypher(query))
     after = _rows(reloaded.cypher(query))
     assert original == after, f"save/load round-trip diverged: {original} vs {after}"
+
+
+def test_strongly_connected_components_parity(tmp_path):
+    """Directed SCC semantics must not degrade to weak components on disk."""
+    nodes = pd.DataFrame({"id": [1, 2, 3, 4, 5, 6], "title": ["A", "B", "C", "D", "E", "F"]})
+    edges = pd.DataFrame(
+        {
+            "src": [1, 2, 3, 4, 4, 6],
+            "dst": [2, 3, 2, 5, 6, 5],
+        }
+    )
+    results: dict[str, list[list[str]]] = {}
+
+    for mode in STORAGE_MODES:
+        if mode == "memory":
+            graph = KnowledgeGraph()
+        elif mode == "mapped":
+            graph = KnowledgeGraph(storage="mapped")
+        else:
+            graph = KnowledgeGraph(storage="disk", path=str(tmp_path / "scc-disk"))
+        graph.add_nodes(nodes, "Node", "id", "title")
+        graph.add_connections(edges, "LINK", "Node", "src", "Node", "dst")
+        components = graph.connected_components(weak=False, titles_only=True)
+        results[mode] = sorted((sorted(component) for component in components), key=lambda c: (len(c), c))
+
+    # D fans out to E and F, while F also points to E. An iterative first
+    # pass that marks sibling nodes too early incorrectly merges E and F on
+    # the transpose pass, so this also guards the DFS finishing-order detail.
+    expected = [["A"], ["D"], ["E"], ["F"], ["B", "C"]]
+    assert results["memory"] == expected
+    for mode in ("mapped", "disk"):
+        assert results[mode] == expected, f"SCC {mode} diverged: {results[mode]}"

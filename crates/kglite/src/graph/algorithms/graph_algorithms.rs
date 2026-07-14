@@ -7,6 +7,7 @@ use crate::graph::schema::{DirGraph, InternedKey};
 use crate::graph::storage::GraphRead;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::NodeIndex;
+use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
 // Centrality algorithms moved to the sibling `centrality` module to keep this
@@ -819,13 +820,62 @@ pub fn connected_components(graph: &DirGraph) -> Vec<Vec<NodeIndex>> {
     // arena, which must run under a DiskQueryGuard (arena protocol in
     // disk/graph.rs, enforced by a debug assert); no-op on memory/mapped.
     let _arena_guard = graph.graph.begin_query();
-    // For disk mode, fall back to weakly_connected_components since
-    // kosaraju_scc requires petgraph trait bounds.
     if GraphRead::is_disk(&graph.graph) {
-        return weakly_connected_components(graph, Interrupt::default())
-            .expect("weakly_connected_components with deadline=None cannot time out");
+        return strongly_connected_components(&graph.graph);
     }
     kosaraju_scc(graph.graph.as_stable_digraph())
+}
+
+/// Kosaraju's algorithm over the storage abstraction. Disk graphs cannot
+/// implement petgraph's borrowing traversal traits because their CSR reads
+/// materialise through a query arena, so the disk path uses the equivalent
+/// two-pass traversal through [`GraphRead`].
+fn strongly_connected_components(graph: &impl GraphRead) -> Vec<Vec<NodeIndex>> {
+    let nodes: Vec<NodeIndex> = graph.node_indices().collect();
+    let mut visited = HashSet::with_capacity(nodes.len());
+    let mut finished = Vec::with_capacity(nodes.len());
+
+    for &root in &nodes {
+        if visited.contains(&root) {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if expanded {
+                finished.push(node);
+                continue;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            stack.push((node, true));
+            for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
+                if !visited.contains(&neighbor) {
+                    stack.push((neighbor, false));
+                }
+            }
+        }
+    }
+
+    visited.clear();
+    let mut components = Vec::new();
+    for root in finished.into_iter().rev() {
+        if !visited.insert(root) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            component.push(node);
+            for neighbor in graph.neighbors_directed(node, Direction::Incoming) {
+                if visited.insert(neighbor) {
+                    stack.push(neighbor);
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
 }
 
 /// Find weakly connected components (treating graph as undirected).
