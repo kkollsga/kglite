@@ -25,12 +25,143 @@ def _production_rs_files(root: Path) -> list[Path]:
     return sorted(files)
 
 
-def _strip_test_tail(source: str) -> str:
-    """Match the historical enum gate by excluding a trailing test module."""
-    marker = "#[cfg(test)]"
-    index = source.find(marker)
-    production = source if index < 0 else source[:index]
-    return "\n".join(line for line in production.splitlines() if not line.lstrip().startswith("//"))
+CFG_TEST_LINE = re.compile(r"#\[cfg\(test\)\][ \t]*(?:\r?\n|$)")
+
+
+def _skip_comment_or_literal(source: str, index: int) -> int | None:
+    """Return the first byte after a Rust comment/literal, if one starts here."""
+    if source.startswith("//", index):
+        newline = source.find("\n", index + 2)
+        return len(source) if newline < 0 else newline
+    if source.startswith("/*", index):
+        depth = 1
+        cursor = index + 2
+        while cursor < len(source) and depth:
+            if source.startswith("/*", cursor):
+                depth += 1
+                cursor += 2
+            elif source.startswith("*/", cursor):
+                depth -= 1
+                cursor += 2
+            else:
+                cursor += 1
+        return cursor
+
+    raw = re.match(r'(?:b|c)?r(#{0,255})"', source[index:])
+    if raw:
+        terminator = '"' + raw.group(1)
+        end = source.find(terminator, index + raw.end())
+        return len(source) if end < 0 else end + len(terminator)
+
+    quote_index = index + 1 if source.startswith(('b"', 'c"'), index) else index
+    if quote_index < len(source) and source[quote_index] == '"':
+        cursor = quote_index + 1
+        while cursor < len(source):
+            if source[cursor] == "\\":
+                cursor += 2
+            elif source[cursor] == '"':
+                return cursor + 1
+            else:
+                cursor += 1
+        return len(source)
+
+    # A character literal always has a closing quote. Lifetimes such as 'a do not.
+    if source[index] == "'":
+        cursor = index + 1
+        if cursor < len(source) and source[cursor] == "\\":
+            cursor += 2
+        else:
+            cursor += 1
+        if cursor < len(source) and source[cursor] == "'":
+            return cursor + 1
+    return None
+
+
+def _balanced_end(source: str, index: int, opening: str, closing: str) -> int:
+    """Find the end of a balanced Rust delimiter group."""
+    depth = 1
+    cursor = index + 1
+    while cursor < len(source) and depth:
+        skipped = _skip_comment_or_literal(source, cursor)
+        if skipped is not None:
+            cursor = skipped
+            continue
+        if source[cursor] == opening:
+            depth += 1
+        elif source[cursor] == closing:
+            depth -= 1
+        cursor += 1
+    return cursor
+
+
+def _cfg_test_item_end(source: str, index: int) -> int:
+    """Find the end of the item or statement controlled by ``cfg(test)``."""
+    cursor = index
+    while cursor < len(source):
+        while cursor < len(source) and source[cursor].isspace():
+            cursor += 1
+        skipped = _skip_comment_or_literal(source, cursor) if cursor < len(source) else None
+        if skipped is not None and source.startswith(("//", "/*"), cursor):
+            cursor = skipped
+            continue
+        if not source.startswith("#[", cursor):
+            break
+        cursor = _balanced_end(source, cursor + 1, "[", "]")
+
+    parens = 0
+    brackets = 0
+    while cursor < len(source):
+        skipped = _skip_comment_or_literal(source, cursor)
+        if skipped is not None:
+            cursor = skipped
+            continue
+        char = source[cursor]
+        if char == "(":
+            parens += 1
+        elif char == ")":
+            parens = max(0, parens - 1)
+        elif char == "[":
+            brackets += 1
+        elif char == "]":
+            brackets = max(0, brackets - 1)
+        elif char == "{" and parens == 0 and brackets == 0:
+            return _balanced_end(source, cursor, "{", "}")
+        elif char == ";" and parens == 0 and brackets == 0:
+            return cursor + 1
+        cursor += 1
+    return len(source)
+
+
+def _cfg_test_markers(source: str) -> list[tuple[int, int]]:
+    """Locate line-level cfg(test) attributes outside comments and literals."""
+    markers: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(source):
+        skipped = _skip_comment_or_literal(source, cursor)
+        if skipped is not None:
+            cursor = skipped
+            continue
+        if source[cursor] == "#":
+            line_start = source.rfind("\n", 0, cursor) + 1
+            if not source[line_start:cursor].strip():
+                marker = CFG_TEST_LINE.match(source, cursor)
+                if marker:
+                    markers.append((line_start, marker.end()))
+                    cursor = marker.end()
+                    continue
+        cursor += 1
+    return markers
+
+
+def _strip_test_items(source: str) -> str:
+    """Blank cfg(test)-controlled items while preserving later production code."""
+    production = list(source)
+    for start, marker_end in _cfg_test_markers(source):
+        end = _cfg_test_item_end(source, marker_end)
+        for index in range(start, end):
+            if production[index] not in "\r\n":
+                production[index] = " "
+    return "\n".join(line for line in "".join(production).splitlines() if not line.lstrip().startswith("//"))
 
 
 def _load_baseline(path: Path) -> dict[str, Any]:
@@ -69,7 +200,7 @@ def _enum_match_violations(root: Path, baseline: dict[str, Any]) -> list[str]:
         if path.name.endswith("_tests.rs"):
             continue
         relative = path.relative_to(graph_root).as_posix()
-        count = len(ENUM_PATTERN.findall(_strip_test_tail(path.read_text())))
+        count = len(ENUM_PATTERN.findall(_strip_test_items(path.read_text())))
         if count:
             hits[relative] = count
     violations = [
@@ -264,6 +395,36 @@ def _self_test() -> None:
         assert _enum_match_violations(root, baseline)
         source.write_text("fn f() { unsafe { call(); } }\n")
         assert _unsafe_violations(root, baseline)
+
+    mixed_source = """\
+fn before() { GraphBackend::Memory(graph); }
+const CFG_TEXT: &str = r#"
+#[cfg(test)]
+"#;
+// #[cfg(test)] in a comment is not an attribute.
+#[cfg(test)]
+use crate::GraphBackend;
+fn after_import() { GraphBackend::Mapped(graph); }
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    const BRACES: &str = r#"{ not syntax }"#;
+    /* nested { comment /* inner } */ still comment } */
+    fn helper() { GraphBackend::Disk(graph); }
+}
+fn after_module() { GraphBackend::Recording(graph); }
+fn with_test_statement() {
+    #[cfg(test)]
+    { GraphBackend::Disk(graph); }
+    GraphBackend::Memory(graph);
+}
+"""
+    stripped = _strip_test_items(mixed_source)
+    assert len(ENUM_PATTERN.findall(stripped)) == 4
+    assert "after_import" in stripped
+    assert "after_module" in stripped
+    assert "helper" not in stripped
+    assert "CFG_TEXT" in stripped
 
     captured = {
         "path": "crates/demo/src/lib.rs",

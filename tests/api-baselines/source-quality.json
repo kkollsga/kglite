@@ -11,10 +11,14 @@
     "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
     "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
     "introspection/connectivity.rs": "disk-mode Rayon connectivity fast path",
+    "io/file.rs": "persisted-graph construction and disk sidecar restoration boundary",
+    "io/ntriples/column_builder.rs": "disk-specific durable column path selection",
+    "io/ntriples/loader.rs": "storage-specific bulk-load finalization and compaction",
     "io/ntriples/writer.rs": "disk-internal bulk-build edge writer",
     "mutation/batch.rs": "disk-internal update-path row-id lookup",
     "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter",
     "storage/mode.rs": "explicit storage-mode transition constructor",
+    "storage/backend.rs": "central GraphBackend trait dispatcher",
     "languages/cypher/executor/match_clause/fused_match.rs": "storage-specific fused traversal primitives"
   },
   "safety_roots": [

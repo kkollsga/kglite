@@ -2,8 +2,8 @@
 //!
 //! The `GraphBackend` enum is the runtime variant of all storage backends
 //! (Memory / Mapped / Disk / Recording). Its trait impls forward to the
-//! inner backend via enum match. Boundary file — one of 7 whitelisted
-//! `GraphBackend::[A-Z]` match sites.
+//! inner backend via enum match. This is the central enum-dispatch boundary
+//! captured by the source-quality whitelist.
 
 use crate::graph::schema::{EdgeData, InternedKey, NodeData};
 use crate::graph::storage::recording::RecordingGraph;
