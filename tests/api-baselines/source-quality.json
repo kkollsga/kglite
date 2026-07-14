@@ -15,7 +15,6 @@
     "mutation/batch.rs": "disk-internal update-path row-id lookup",
     "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter",
     "storage/mode.rs": "explicit storage-mode transition constructor",
-    "io/ntriples/column_builder.rs": "N-Triples columnar-build hot path",
     "languages/cypher/executor/match_clause/fused_match.rs": "storage-specific fused traversal primitives"
   },
   "safety_roots": [
@@ -100,9 +99,23 @@
     },
     {
       "path": "crates/kglite/src/code_tree/builder/load.rs",
-      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::load_into_graph",
-      "lines": 1142,
-      "branches": 135,
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::LoadPipeline::entity_nodes",
+      "lines": 207,
+      "branches": 26,
+      "nesting": 2
+    },
+    {
+      "path": "crates/kglite/src/code_tree/builder/load.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::LoadPipeline::structural_edges",
+      "lines": 201,
+      "branches": 21,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/code_tree/builder/load.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::LoadPipeline::type_relationship_edges",
+      "lines": 209,
+      "branches": 34,
       "nesting": 4
     },
     {
@@ -268,10 +281,17 @@
     },
     {
       "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
-      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::column_builder::build_columns_direct",
-      "lines": 1149,
-      "branches": 94,
-      "nesting": 4
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::column_builder::plan_layout",
+      "lines": 208,
+      "branches": 8,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::finalize_disk_graph",
+      "lines": 314,
+      "branches": 51,
+      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
@@ -282,10 +302,10 @@
     },
     {
       "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
-      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::load_ntriples",
-      "lines": 1138,
-      "branches": 189,
-      "nesting": 6
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::ingest_phase1",
+      "lines": 269,
+      "branches": 47,
+      "nesting": 5
     },
     {
       "path": "crates/kglite/src/graph/io/unified_columns.rs",
@@ -321,13 +341,6 @@
       "lines": 231,
       "branches": 41,
       "nesting": 6
-    },
-    {
-      "path": "crates/kglite/src/graph/languages/cypher/executor/expression/evaluate.rs",
-      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::expression::evaluate::CypherExecutor::evaluate_expression",
-      "lines": 740,
-      "branches": 202,
-      "nesting": 8
     },
     {
       "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause.rs",
@@ -649,6 +662,36 @@
       "qualified_name": "crate::crates::kglite::src::graph::storage::disk::graph_persist::DiskGraph::seal_to_new_segment",
       "lines": 263,
       "branches": 44,
+      "nesting": 3
+    }
+  ],
+  "function_caps": [
+    {
+      "path": "crates/kglite/src/code_tree/builder/load.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::load_into_graph",
+      "lines": 49,
+      "branches": 1,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::column_builder::build_columns_direct",
+      "lines": 67,
+      "branches": 6,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::load_ntriples",
+      "lines": 107,
+      "branches": 11,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/expression/evaluate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::expression::evaluate::CypherExecutor::evaluate_expression",
+      "lines": 124,
+      "branches": 33,
       "nesting": 3
     }
   ]

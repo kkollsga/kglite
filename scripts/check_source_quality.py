@@ -198,6 +198,24 @@ def _function_violations(metrics: list[dict[str, Any]], baseline: dict[str, Any]
     return violations
 
 
+def _function_cap_violations(metrics: list[dict[str, Any]], baseline: dict[str, Any]) -> list[str]:
+    current = {_metric_identity(metric): _normalise_metric(metric) for metric in metrics}
+    caps = {f"{metric['path']}::{metric['qualified_name']}": metric for metric in baseline["function_caps"]}
+    if len(caps) != len(baseline["function_caps"]):
+        return ["function cap identities are not unique"]
+
+    violations: list[str] = []
+    for identity, cap in caps.items():
+        metric = current.get(identity)
+        if metric is None:
+            violations.append(f"stale function cap {identity}: function is missing")
+            continue
+        for key in ("lines", "branches", "nesting"):
+            if metric[key] > cap[key]:
+                violations.append(f"function exceeded cap {identity}: {key} {cap[key]} -> {metric[key]}")
+    return violations
+
+
 def _refresh_functions(path: Path, root: Path, baseline: dict[str, Any]) -> None:
     metrics = [_normalise_metric(metric) for metric in _collect_function_metrics(root)]
     exceptions = [metric for metric in metrics if _is_exception(metric, baseline["limits"])]
@@ -214,7 +232,9 @@ def _check(root: Path, baseline: dict[str, Any]) -> list[str]:
     violations.extend(_unsafe_violations(root, baseline))
     violations.extend(_module_violations(root, baseline))
     violations.extend(_symbol_violations(root))
-    violations.extend(_function_violations(_collect_function_metrics(root), baseline))
+    metrics = _collect_function_metrics(root)
+    violations.extend(_function_violations(metrics, baseline))
+    violations.extend(_function_cap_violations(metrics, baseline))
     return violations
 
 
@@ -231,6 +251,7 @@ def _self_test() -> None:
         "safety_roots": ["crates/kglite/src/graph"],
         "mod_rs_caps": {},
         "function_exceptions": [],
+        "function_caps": [],
     }
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -265,6 +286,11 @@ def _self_test() -> None:
     tightened = copy.deepcopy(raw)
     tightened["end_line"] = 11
     assert any("can tighten" in item for item in _function_violations([tightened], baseline))
+
+    baseline["function_caps"] = [captured]
+    assert not _function_cap_violations([tightened], baseline)
+    assert any("exceeded cap" in item for item in _function_cap_violations([raw], baseline))
+    assert any("function is missing" in item for item in _function_cap_violations([], baseline))
     print("source-quality self-test: OK")
 
 
