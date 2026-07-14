@@ -11,8 +11,15 @@
 
 use crate::datatypes::values::Value;
 use crate::graph::schema::{DirGraph, InternedKey, PropertyStorage, TypeSchema};
+use crate::graph::storage::column_store::ColumnStore;
+use crate::graph::storage::mapped::column_store::{
+    ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
+};
+use crate::graph::storage::memory::property_log::PropertyLogReader;
 use crate::graph::storage::type_build_meta::{ColType, TypeBuildMeta};
 use crate::graph::storage::{GraphRead, GraphWrite};
+use memmap2::MmapMut;
+use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -197,6 +204,7 @@ impl ColumnTypeMeta {
 const PHASE1B_TICK: u64 = 250_000;
 #[cfg(test)]
 const PHASE1B_TICK: u64 = 2;
+const FILL_RATE_THRESHOLD: f64 = 0.05;
 
 pub(super) enum BuildColumnsError {
     Cancelled,
@@ -209,125 +217,410 @@ impl From<std::io::Error> for BuildColumnsError {
     }
 }
 
-pub(super) fn build_columns_direct(
-    graph: &mut DirGraph,
-    log_path: &std::path::Path,
-    type_meta: &HashMap<String, TypeBuildMeta>,
-    type_rename_map: &HashMap<String, String>,
+struct TypeWriter {
+    row_cursor: u32,
+    id_is_string: bool,
+    id_data: Region,
+    id_nulls: Region,
+    id_str_data: Region,
+    id_str_offsets: Region,
+    title_data: Region,
+    title_offsets: Region,
+    title_nulls: Region,
+    title_cursor: u64,
+    col_map: HashMap<InternedKey, (ColType, usize)>,
+    fixed_cols: Vec<FixedColLayout>,
+    str_cols: Vec<StrColLayout>,
+    overflow_keys: HashSet<InternedKey>,
+    overflow_bag_data: Vec<u8>,
+    overflow_offsets: Vec<u64>,
+    overflow_offsets_region: Region,
+    overflow_data_region: Region,
+}
+
+struct FixedColLayout {
+    col_type: ColType,
+    data: Region,
+    nulls: Region,
+}
+
+struct StrColLayout {
+    data: Region,
+    offsets: Region,
+    nulls: Region,
+    cursor: u64,
+}
+
+struct BufferedEntry {
+    node_idx: NodeIndex,
+    id: Value,
+    title: Value,
+    properties: Vec<(InternedKey, Value)>,
+}
+
+struct LayoutPlan {
+    writers: HashMap<String, TypeWriter>,
+    null_regions: Vec<Region>,
+    total_bytes: usize,
+    types_with_overflow: u32,
+    total_dense_cols: u64,
+    total_overflow_cols: u64,
+}
+
+struct MmapAllocation<'a> {
+    col_dir: &'a std::path::Path,
+    type_meta: &'a HashMap<String, TypeBuildMeta>,
     verbose: bool,
-    progress: Option<&dyn ProgressSink>,
+    started: Instant,
+}
+
+struct ReplayContext<'a> {
+    graph: &'a DirGraph,
+    log_path: &'a std::path::Path,
+    type_meta: &'a HashMap<String, TypeBuildMeta>,
+    type_rename_map: &'a HashMap<String, String>,
+    verbose: bool,
+    progress: Option<&'a dyn ProgressSink>,
+}
+
+#[inline]
+fn write_i64(mmap: &mut MmapMut, region: &Region, row: usize, value: i64) {
+    let offset = region.offset + row * 8;
+    mmap[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn write_f64(mmap: &mut MmapMut, region: &Region, row: usize, value: f64) {
+    let offset = region.offset + row * 8;
+    mmap[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn write_u32(mmap: &mut MmapMut, region: &Region, row: usize, value: u32) {
+    let offset = region.offset + row * 4;
+    mmap[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn write_i32(mmap: &mut MmapMut, region: &Region, row: usize, value: i32) {
+    let offset = region.offset + row * 4;
+    mmap[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn write_u8(mmap: &mut MmapMut, region: &Region, row: usize, value: u8) {
+    mmap[region.offset + row] = value;
+}
+
+#[inline]
+fn write_u64(mmap: &mut MmapMut, region: &Region, row: usize, value: u64) {
+    let offset = region.offset + row * 8;
+    mmap[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+#[inline]
+fn read_u64(mmap: &MmapMut, region: &Region, row: usize) -> u64 {
+    let offset = region.offset + row * 8;
+    u64::from_ne_bytes(mmap[offset..offset + 8].try_into().unwrap())
+}
+
+#[inline]
+fn align8(value: usize) -> usize {
+    (value + 7) & !7
+}
+
+fn estimate_entry_bytes(id: &Value, title: &Value, properties: &[(InternedKey, Value)]) -> usize {
+    let mut size = 100;
+    if let Value::String(string) = id {
+        size += string.len();
+    }
+    if let Value::String(string) = title {
+        size += string.len();
+    }
+    for (_, value) in properties {
+        size += match value {
+            Value::String(string) => 16 + string.len(),
+            _ => 16,
+        };
+    }
+    size
+}
+
+fn forward_fill_offsets(writers: &HashMap<String, TypeWriter>, mmap: &mut MmapMut) {
+    for writer in writers.values() {
+        forward_fill_region(mmap, &writer.title_offsets);
+        if writer.id_is_string {
+            forward_fill_region(mmap, &writer.id_str_offsets);
+        }
+        for column in &writer.str_cols {
+            forward_fill_region(mmap, &column.offsets);
+        }
+    }
+}
+
+fn forward_fill_region(mmap: &mut MmapMut, region: &Region) {
+    for row in 1..region.len / 8 {
+        if read_u64(mmap, region, row) == 0 {
+            let previous = read_u64(mmap, region, row - 1);
+            write_u64(mmap, region, row, previous);
+        }
+    }
+}
+
+fn publish_column_metadata(
+    data_dir: &std::path::Path,
+    columns: &[ColumnTypeMeta],
+    verbose: bool,
 ) -> Result<(), BuildColumnsError> {
-    use crate::graph::storage::column_store::ColumnStore;
-    use crate::graph::storage::mapped::column_store::{
-        ColRef, FixedColumnMeta, MmapColumnStore, Region, StrColumnMeta,
+    // The mmap file stays in place. Metadata publication is the last step, but
+    // earlier column writes are intentionally not transactionally rolled back.
+    let json_path = data_dir.join("columns_meta.json");
+    if !columns.is_empty() {
+        let json = serde_json::to_string(columns).map_err(std::io::Error::other)?;
+        std::fs::write(&json_path, json)?;
+        let bytes = bincode::serialize(columns).map_err(std::io::Error::other)?;
+        let compressed = zstd::encode_all(bytes.as_slice(), 3)?;
+        std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed)?;
+    }
+    if verbose {
+        eplog!(
+            "  Phase 1b: saved columns metadata ({} types) to {}",
+            columns.len(),
+            json_path.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Flush all buffered entries for a single type to the mmap.
+/// Returns the approximate byte count that was flushed.
+#[allow(clippy::too_many_arguments)]
+fn flush_type_entries(
+    type_name: &str,
+    entries: &[BufferedEntry],
+    writers: &mut HashMap<String, TypeWriter>,
+    mmap: &mut MmapMut,
+    row_ids: &mut Vec<(petgraph::graph::NodeIndex, u32)>,
+) -> usize {
+    let writer = match writers.get_mut(type_name) {
+        Some(w) => w,
+        None => return 0,
     };
-    use crate::graph::storage::memory::property_log::PropertyLogReader;
-    use memmap2::MmapMut;
 
-    let alloc_start = Instant::now();
+    let mut flushed_bytes = 0;
 
-    // Get data_dir for placing the final columns.bin. Disk graphs have a
-    // persistent user-provided data_dir; mapped graphs reuse the same
-    // per-process spill-dir scheme as the property log and edge buffer.
-    // The resulting mmap'd `columns.bin` stays alive until graph drop.
-    let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-        dg.data_dir.clone()
-    } else {
-        graph.spill_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
-        })
-    };
-    std::fs::create_dir_all(&data_dir)?;
+    for entry in entries {
+        let row = writer.row_cursor as usize;
+        writer.row_cursor += 1;
+        row_ids.push((entry.node_idx, row as u32));
 
-    // ── Step 1: Layout computation — single mmap file ────────────────────
+        // Write id
+        if writer.id_is_string {
+            if let Value::String(s) = &entry.id {
+                let bytes = s.as_bytes();
+                let c = if row > 0 {
+                    read_u64(mmap, &writer.id_str_offsets, row - 1) as usize
+                } else {
+                    0
+                };
+                let end = c + bytes.len();
+                if c + bytes.len() <= writer.id_str_data.len {
+                    let off = writer.id_str_data.offset + c;
+                    mmap[off..off + bytes.len()].copy_from_slice(bytes);
+                }
+                write_u64(mmap, &writer.id_str_offsets, row, end as u64);
+                write_u8(mmap, &writer.id_nulls, row, 0);
+            }
+        } else if let Value::UniqueId(n) = &entry.id {
+            write_u32(mmap, &writer.id_data, row, *n);
+            write_u8(mmap, &writer.id_nulls, row, 0);
+        }
+
+        // Write title
+        if let Value::String(s) = &entry.title {
+            let bytes = s.as_bytes();
+            let c = writer.title_cursor as usize;
+            if c + bytes.len() <= writer.title_data.len {
+                let off = writer.title_data.offset + c;
+                mmap[off..off + bytes.len()].copy_from_slice(bytes);
+            }
+            writer.title_cursor += bytes.len() as u64;
+            write_u64(mmap, &writer.title_offsets, row, writer.title_cursor);
+            write_u8(mmap, &writer.title_nulls, row, 0);
+        }
+
+        // Write properties — dense columns and overflow bag
+        let has_overflow = !writer.overflow_keys.is_empty();
+        let overflow_start = writer.overflow_bag_data.len() as u64;
+        if has_overflow {
+            writer.overflow_offsets.push(overflow_start);
+        }
+
+        let mut overflow_entry_buf: Vec<u8> = Vec::new();
+        let mut overflow_entry_count: u16 = 0;
+        if has_overflow {
+            overflow_entry_buf.extend_from_slice(&0u16.to_le_bytes());
+        }
+
+        for (key, value) in &entry.properties {
+            if matches!(value, Value::Null) {
+                continue;
+            }
+
+            if writer.overflow_keys.contains(key) {
+                crate::graph::storage::overflow::encode_value(&mut overflow_entry_buf, *key, value);
+                overflow_entry_count += 1;
+                continue;
+            }
+
+            let (col_type, idx) = match writer.col_map.get(key) {
+                Some(v) => *v,
+                None => continue,
+            };
+
+            match col_type {
+                ColType::Str => {
+                    if let Value::String(s) = value {
+                        let sc = &mut writer.str_cols[idx];
+                        let bytes = s.as_bytes();
+                        let c = sc.cursor as usize;
+                        if c + bytes.len() <= sc.data.len {
+                            let off = sc.data.offset + c;
+                            mmap[off..off + bytes.len()].copy_from_slice(bytes);
+                        }
+                        sc.cursor += bytes.len() as u64;
+                        write_u64(mmap, &sc.offsets, row, sc.cursor);
+                        write_u8(mmap, &sc.nulls, row, 0);
+                    }
+                }
+                _ => {
+                    let fc = &writer.fixed_cols[idx];
+                    let written = match (fc.col_type, value) {
+                        (ColType::Int64, Value::Int64(v)) => {
+                            write_i64(mmap, &fc.data, row, *v);
+                            true
+                        }
+                        (ColType::Float64, Value::Float64(v)) => {
+                            write_f64(mmap, &fc.data, row, *v);
+                            true
+                        }
+                        (ColType::Float64, Value::Int64(v)) => {
+                            write_f64(mmap, &fc.data, row, *v as f64);
+                            true
+                        }
+                        (ColType::UniqueId, Value::UniqueId(v)) => {
+                            write_u32(mmap, &fc.data, row, *v);
+                            true
+                        }
+                        (ColType::Bool, Value::Boolean(v)) => {
+                            write_u8(mmap, &fc.data, row, *v as u8);
+                            true
+                        }
+                        (ColType::Date, Value::DateTime(dt)) => {
+                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            write_i32(mmap, &fc.data, row, (*dt - epoch).num_days() as i32);
+                            true
+                        }
+                        _ => false, // type mismatch — leave as null
+                    };
+                    if written {
+                        write_u8(mmap, &fc.nulls, row, 0);
+                    }
+                }
+            }
+        }
+
+        // Finalize this row's overflow blob
+        if has_overflow {
+            if overflow_entry_count > 0 {
+                overflow_entry_buf[0..2].copy_from_slice(&overflow_entry_count.to_le_bytes());
+                writer
+                    .overflow_bag_data
+                    .extend_from_slice(&overflow_entry_buf);
+            } else {
+                writer
+                    .overflow_bag_data
+                    .extend_from_slice(&0u16.to_le_bytes());
+            }
+        }
+
+        flushed_bytes += estimate_entry_bytes(&entry.id, &entry.title, &entry.properties);
+    }
+
+    flushed_bytes
+}
+
+fn link_column_rows(graph: &mut DirGraph, row_ids: &[(NodeIndex, u32)], verbose: bool) {
+    // ── Step 5: Link nodes to their column store row_ids ───────────────────
     //
-    // ONE file (`columns.bin`) in data_dir holds ALL column data for ALL types.
+    // Disk backend: `update_row_id` writes into the DiskNodeSlot array so
+    // later reads resolve `(type, row_id)` → column data.
     //
-    // Each region is 8-byte aligned so typed reads are safe.
+    // Mapped backend: replace each node's `PropertyStorage::Map` with
+    // `PropertyStorage::Columnar { store, row_id }`, mirroring the second
+    // pass in `DirGraph::enable_columnar`. Without this linkage the nodes
+    // in MappedGraph's petgraph would have empty properties and queries
+    // like `MATCH (n {id: "Q42"}) RETURN n.description` would return
+    // `None`.
+    //
+    // Memory backend: `update_row_id` is a default no-op and mapped
+    // linkage is skipped — memory-mode N-Triples builds don't go through
+    // this path (they keep `PropertyStorage::Map/Compact` unchanged).
+    if GraphRead::is_disk(&graph.graph) {
+        for &(node_idx, row_id) in row_ids {
+            GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
+        }
+        if verbose {
+            eplog!(
+                "  Phase 1b: fixed up {} row_ids",
+                format_count(row_ids.len() as u64),
+            );
+        }
+    } else if GraphRead::is_mapped(&graph.graph) {
+        // Snapshot the Arc<ColumnStore> per type once so the inner loop
+        // only does a HashMap lookup; avoids a clone on every node.
+        let type_name_by_key: HashMap<InternedKey, String> = graph
+            .column_stores
+            .keys()
+            .filter_map(|t| graph.interner.try_resolve_to_key(t).map(|k| (k, t.clone())))
+            .collect();
+        let stores_snapshot: HashMap<
+            String,
+            Arc<crate::graph::storage::column_store::ColumnStore>,
+        > = graph
+            .column_stores
+            .iter()
+            .map(|(t, s)| (t.clone(), Arc::clone(s)))
+            .collect();
+        let mut linked = 0u64;
+        for &(node_idx, row_id) in row_ids {
+            let type_key = match GraphRead::node_type_of(&graph.graph, node_idx) {
+                Some(k) => k,
+                None => continue,
+            };
+            let type_name = match type_name_by_key.get(&type_key) {
+                Some(n) => n,
+                None => continue,
+            };
+            let store = match stores_snapshot.get(type_name) {
+                Some(s) => Arc::clone(s),
+                None => continue,
+            };
+            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
+                node.properties = PropertyStorage::Columnar { store, row_id };
+                linked += 1;
+            }
+        }
+        if verbose {
+            eplog!(
+                "  Phase 1b: linked {} mapped nodes to column stores",
+                format_count(linked),
+            );
+        }
+    }
+}
 
-    struct TypeWriter {
-        row_cursor: u32,
-        id_is_string: bool,
-        id_data: Region,
-        id_nulls: Region,
-        id_str_data: Region,
-        id_str_offsets: Region,
-        title_data: Region,
-        title_offsets: Region,
-        title_nulls: Region,
-        title_cursor: u64,
-        col_map: HashMap<InternedKey, (ColType, usize)>,
-        fixed_cols: Vec<FixedColLayout>,
-        str_cols: Vec<StrColLayout>,
-        /// Keys with fill rate < threshold go to the overflow bag instead of dense columns.
-        overflow_keys: HashSet<InternedKey>,
-        /// Grows during write pass — serialized overflow entries for all rows.
-        overflow_bag_data: Vec<u8>,
-        /// One offset per row (+ final sentinel), recording the start of each row's blob.
-        overflow_offsets: Vec<u64>,
-        /// Region in the mmap for overflow offsets (set after appending to file).
-        overflow_offsets_region: Region,
-        /// Region in the mmap for overflow bag data (set after appending to file).
-        overflow_data_region: Region,
-    }
-
-    struct FixedColLayout {
-        col_type: ColType,
-        data: Region,
-        nulls: Region,
-    }
-
-    struct StrColLayout {
-        data: Region,
-        offsets: Region,
-        nulls: Region,
-        cursor: u64,
-    }
-
-    // Helpers to write typed values into the mmap
-    #[inline]
-    fn write_i64(mmap: &mut MmapMut, region: &Region, row: usize, val: i64) {
-        let off = region.offset + row * 8;
-        mmap[off..off + 8].copy_from_slice(&val.to_ne_bytes());
-    }
-    #[inline]
-    fn write_f64(mmap: &mut MmapMut, region: &Region, row: usize, val: f64) {
-        let off = region.offset + row * 8;
-        mmap[off..off + 8].copy_from_slice(&val.to_ne_bytes());
-    }
-    #[inline]
-    fn write_u32(mmap: &mut MmapMut, region: &Region, row: usize, val: u32) {
-        let off = region.offset + row * 4;
-        mmap[off..off + 4].copy_from_slice(&val.to_ne_bytes());
-    }
-    #[inline]
-    fn write_i32(mmap: &mut MmapMut, region: &Region, row: usize, val: i32) {
-        let off = region.offset + row * 4;
-        mmap[off..off + 4].copy_from_slice(&val.to_ne_bytes());
-    }
-    #[inline]
-    fn write_u8(mmap: &mut MmapMut, region: &Region, row: usize, val: u8) {
-        mmap[region.offset + row] = val;
-    }
-    #[inline]
-    fn write_u64(mmap: &mut MmapMut, region: &Region, row: usize, val: u64) {
-        let off = region.offset + row * 8;
-        mmap[off..off + 8].copy_from_slice(&val.to_ne_bytes());
-    }
-    #[inline]
-    fn read_u64(mmap: &MmapMut, region: &Region, row: usize) -> u64 {
-        let off = region.offset + row * 8;
-        u64::from_ne_bytes(mmap[off..off + 8].try_into().unwrap())
-    }
-
-    /// Align a byte offset up to 8-byte boundary.
-    #[inline]
-    fn align8(v: usize) -> usize {
-        (v + 7) & !7
-    }
-
-    let col_dir = data_dir.clone();
-
+fn plan_layout(type_meta: &HashMap<String, TypeBuildMeta>) -> LayoutPlan {
     let mut writers: HashMap<String, TypeWriter> = HashMap::new();
 
     // Accumulate regions that need null-fill (0xFF) so we can batch-fill after mmap creation.
@@ -337,8 +630,6 @@ pub(super) fn build_columns_direct(
     // Keys with fill rate < threshold are routed to the overflow bag instead
     // of a dense column. Hoisted here so the Phase 1b summary below can cite
     // the same threshold the per-type loop applies.
-    const FILL_RATE_THRESHOLD: f64 = 0.05;
-
     // Aggregate per-type column-layout stats instead of printing one line per
     // type. On Wikidata this replaced 88 k spam lines with a single summary.
     let mut types_with_overflow: u32 = 0;
@@ -528,14 +819,42 @@ pub(super) fn build_columns_direct(
 
     let total_bytes = align8(cursor).max(8); // at least 8 bytes for valid mmap
 
+    LayoutPlan {
+        writers,
+        null_regions,
+        total_bytes,
+        types_with_overflow,
+        total_dense_cols,
+        total_overflow_cols,
+    }
+}
+
+fn allocate_columns_mmap(
+    allocation: MmapAllocation<'_>,
+    plan: &LayoutPlan,
+) -> Result<(MmapMut, std::path::PathBuf), BuildColumnsError> {
+    let MmapAllocation {
+        col_dir,
+        type_meta,
+        verbose,
+        started,
+    } = allocation;
+    let LayoutPlan {
+        writers,
+        null_regions,
+        total_bytes,
+        types_with_overflow,
+        total_dense_cols,
+        total_overflow_cols,
+    } = plan;
     // ── Step 1b: Create single file and mmap ──────────────────────────────
 
     if verbose {
         eplog!(
             "  Phase 1b: layout computed — {:.1} GB for {} types ({:.1}s)",
-            total_bytes as f64 / (1u64 << 30) as f64,
+            *total_bytes as f64 / (1u64 << 30) as f64,
             writers.len(),
-            alloc_start.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64(),
         );
         eplog!(
             "  Phase 1b: columns — {} dense, {} overflow across {} types with sparse (< {:.0}%) cols",
@@ -573,20 +892,20 @@ pub(super) fn build_columns_direct(
         }
     }
 
-    if total_bytes == 0 && verbose {
+    if *total_bytes == 0 && verbose {
         eplog!(
             "  Phase 1b: no types to pre-allocate ({:.1}s)",
-            alloc_start.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64(),
         );
     }
 
     // Create the single mmap file (only if there are types to store)
     let mmap_path = col_dir.join("columns.bin");
-    let mmap_opt: Option<MmapMut> = if total_bytes > 0 {
+    let mmap_opt: Option<MmapMut> = if *total_bytes > 0 {
         if verbose {
             eplog!(
                 "  Phase 1b: creating {:.1} GB mmap file...",
-                total_bytes as f64 / (1u64 << 30) as f64,
+                *total_bytes as f64 / (1u64 << 30) as f64,
             );
             let _ = std::io::Write::flush(&mut std::io::stderr());
         }
@@ -596,7 +915,7 @@ pub(super) fn build_columns_direct(
             .create(true)
             .truncate(true)
             .open(&mmap_path)?;
-        file.set_len(total_bytes as u64)?;
+        file.set_len(*total_bytes as u64)?;
         // SAFETY: file was just created+truncated to total_bytes; mmap
         // region matches the on-disk length.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -606,27 +925,25 @@ pub(super) fn build_columns_direct(
             let _ = std::io::Write::flush(&mut std::io::stderr());
         }
         // Fill all null bitmap regions with 0xFF (all-null)
-        for region in &null_regions {
+        for region in null_regions {
             mmap[region.offset..region.offset + region.len].fill(0xFF);
         }
         Some(mmap)
     } else {
         None
     };
-    drop(null_regions);
-
     if verbose {
         eplog!(
             "  Phase 1b: mmap ready — {:.1} GB for {} types ({:.1}s)",
-            total_bytes as f64 / (1u64 << 30) as f64,
+            *total_bytes as f64 / (1u64 << 30) as f64,
             writers.len(),
-            alloc_start.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64(),
         );
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
 
     // Unwrap mmap for the write/read phases (guaranteed to exist if writers is non-empty)
-    let mut mmap = mmap_opt.unwrap_or_else(|| {
+    let mmap = mmap_opt.unwrap_or_else(|| {
         // Create a dummy 1-byte mmap if no types
         let p = col_dir.join("columns.bin");
         let f = std::fs::OpenOptions::new()
@@ -642,203 +959,28 @@ pub(super) fn build_columns_direct(
         unsafe { MmapMut::map_mut(&f).unwrap() }
     });
 
+    Ok((mmap, mmap_path))
+}
+
+fn replay_property_log(
+    context: ReplayContext<'_>,
+    writers: &mut HashMap<String, TypeWriter>,
+    mmap: &mut MmapMut,
+) -> Result<Vec<(NodeIndex, u32)>, BuildColumnsError> {
+    let ReplayContext {
+        graph,
+        log_path,
+        type_meta,
+        type_rename_map,
+        verbose,
+        progress,
+    } = context;
     // ── Step 2: Buffered type-batched write pass ──────────────────────────
     //
     // Instead of writing each entity to the mmap immediately (random I/O across
     // 35 GB when entities are interleaved by type), we buffer entries grouped by
     // type and flush the biggest type when the buffer exceeds a threshold.
     // This makes writes sequential within each type's mmap region.
-
-    struct BufferedEntry {
-        node_idx: petgraph::graph::NodeIndex,
-        id: Value,
-        title: Value,
-        properties: Vec<(InternedKey, Value)>,
-    }
-
-    /// Estimate the in-memory size of a log entry for buffer accounting.
-    fn estimate_entry_bytes(
-        id: &Value,
-        title: &Value,
-        properties: &[(InternedKey, Value)],
-    ) -> usize {
-        let mut sz = 100; // base overhead (Vec headers, NodeIndex, etc.)
-        if let Value::String(s) = id {
-            sz += s.len();
-        }
-        if let Value::String(s) = title {
-            sz += s.len();
-        }
-        for (_, v) in properties {
-            sz += match v {
-                Value::String(s) => 16 + s.len(),
-                _ => 16,
-            };
-        }
-        sz
-    }
-
-    /// Flush all buffered entries for a single type to the mmap.
-    /// Returns the approximate byte count that was flushed.
-    #[allow(clippy::too_many_arguments)]
-    fn flush_type_entries(
-        type_name: &str,
-        entries: &[BufferedEntry],
-        writers: &mut HashMap<String, TypeWriter>,
-        mmap: &mut MmapMut,
-        row_ids: &mut Vec<(petgraph::graph::NodeIndex, u32)>,
-    ) -> usize {
-        let writer = match writers.get_mut(type_name) {
-            Some(w) => w,
-            None => return 0,
-        };
-
-        let mut flushed_bytes = 0;
-
-        for entry in entries {
-            let row = writer.row_cursor as usize;
-            writer.row_cursor += 1;
-            row_ids.push((entry.node_idx, row as u32));
-
-            // Write id
-            if writer.id_is_string {
-                if let Value::String(s) = &entry.id {
-                    let bytes = s.as_bytes();
-                    let c = if row > 0 {
-                        read_u64(mmap, &writer.id_str_offsets, row - 1) as usize
-                    } else {
-                        0
-                    };
-                    let end = c + bytes.len();
-                    if c + bytes.len() <= writer.id_str_data.len {
-                        let off = writer.id_str_data.offset + c;
-                        mmap[off..off + bytes.len()].copy_from_slice(bytes);
-                    }
-                    write_u64(mmap, &writer.id_str_offsets, row, end as u64);
-                    write_u8(mmap, &writer.id_nulls, row, 0);
-                }
-            } else if let Value::UniqueId(n) = &entry.id {
-                write_u32(mmap, &writer.id_data, row, *n);
-                write_u8(mmap, &writer.id_nulls, row, 0);
-            }
-
-            // Write title
-            if let Value::String(s) = &entry.title {
-                let bytes = s.as_bytes();
-                let c = writer.title_cursor as usize;
-                if c + bytes.len() <= writer.title_data.len {
-                    let off = writer.title_data.offset + c;
-                    mmap[off..off + bytes.len()].copy_from_slice(bytes);
-                }
-                writer.title_cursor += bytes.len() as u64;
-                write_u64(mmap, &writer.title_offsets, row, writer.title_cursor);
-                write_u8(mmap, &writer.title_nulls, row, 0);
-            }
-
-            // Write properties — dense columns and overflow bag
-            let has_overflow = !writer.overflow_keys.is_empty();
-            let overflow_start = writer.overflow_bag_data.len() as u64;
-            if has_overflow {
-                writer.overflow_offsets.push(overflow_start);
-            }
-
-            let mut overflow_entry_buf: Vec<u8> = Vec::new();
-            let mut overflow_entry_count: u16 = 0;
-            if has_overflow {
-                overflow_entry_buf.extend_from_slice(&0u16.to_le_bytes());
-            }
-
-            for (key, value) in &entry.properties {
-                if matches!(value, Value::Null) {
-                    continue;
-                }
-
-                if writer.overflow_keys.contains(key) {
-                    crate::graph::storage::overflow::encode_value(
-                        &mut overflow_entry_buf,
-                        *key,
-                        value,
-                    );
-                    overflow_entry_count += 1;
-                    continue;
-                }
-
-                let (col_type, idx) = match writer.col_map.get(key) {
-                    Some(v) => *v,
-                    None => continue,
-                };
-
-                match col_type {
-                    ColType::Str => {
-                        if let Value::String(s) = value {
-                            let sc = &mut writer.str_cols[idx];
-                            let bytes = s.as_bytes();
-                            let c = sc.cursor as usize;
-                            if c + bytes.len() <= sc.data.len {
-                                let off = sc.data.offset + c;
-                                mmap[off..off + bytes.len()].copy_from_slice(bytes);
-                            }
-                            sc.cursor += bytes.len() as u64;
-                            write_u64(mmap, &sc.offsets, row, sc.cursor);
-                            write_u8(mmap, &sc.nulls, row, 0);
-                        }
-                    }
-                    _ => {
-                        let fc = &writer.fixed_cols[idx];
-                        let written = match (fc.col_type, value) {
-                            (ColType::Int64, Value::Int64(v)) => {
-                                write_i64(mmap, &fc.data, row, *v);
-                                true
-                            }
-                            (ColType::Float64, Value::Float64(v)) => {
-                                write_f64(mmap, &fc.data, row, *v);
-                                true
-                            }
-                            (ColType::Float64, Value::Int64(v)) => {
-                                write_f64(mmap, &fc.data, row, *v as f64);
-                                true
-                            }
-                            (ColType::UniqueId, Value::UniqueId(v)) => {
-                                write_u32(mmap, &fc.data, row, *v);
-                                true
-                            }
-                            (ColType::Bool, Value::Boolean(v)) => {
-                                write_u8(mmap, &fc.data, row, *v as u8);
-                                true
-                            }
-                            (ColType::Date, Value::DateTime(dt)) => {
-                                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                                write_i32(mmap, &fc.data, row, (*dt - epoch).num_days() as i32);
-                                true
-                            }
-                            _ => false, // type mismatch — leave as null
-                        };
-                        if written {
-                            write_u8(mmap, &fc.nulls, row, 0);
-                        }
-                    }
-                }
-            }
-
-            // Finalize this row's overflow blob
-            if has_overflow {
-                if overflow_entry_count > 0 {
-                    overflow_entry_buf[0..2].copy_from_slice(&overflow_entry_count.to_le_bytes());
-                    writer
-                        .overflow_bag_data
-                        .extend_from_slice(&overflow_entry_buf);
-                } else {
-                    writer
-                        .overflow_bag_data
-                        .extend_from_slice(&0u16.to_le_bytes());
-                }
-            }
-
-            flushed_bytes += estimate_entry_bytes(&entry.id, &entry.title, &entry.properties);
-        }
-
-        flushed_bytes
-    }
 
     let write_start = Instant::now();
     let reader = PropertyLogReader::open(log_path)?;
@@ -932,13 +1074,8 @@ pub(super) fn build_columns_direct(
                 let n_entries = entries.len();
                 // Resolve InternedKey → String only at flush time (once per flush)
                 let flush_name = graph.interner.resolve(flush_key).to_string();
-                let flushed = flush_type_entries(
-                    &flush_name,
-                    &entries,
-                    &mut writers,
-                    &mut mmap,
-                    &mut row_ids,
-                );
+                let flushed =
+                    flush_type_entries(&flush_name, &entries, writers, mmap, &mut row_ids);
                 total_buffer_bytes = total_buffer_bytes.saturating_sub(flushed);
                 if verbose {
                     eplog!(
@@ -961,7 +1098,7 @@ pub(super) fn build_columns_direct(
         }
         let n_entries = entries.len();
         let flush_type = graph.interner.resolve(flush_key).to_string();
-        flush_type_entries(&flush_type, &entries, &mut writers, &mut mmap, &mut row_ids);
+        flush_type_entries(&flush_type, &entries, writers, mmap, &mut row_ids);
         if verbose {
             eplog!(
                 "  Phase 1b: flushed {} ({} entries, final)",
@@ -990,44 +1127,15 @@ pub(super) fn build_columns_direct(
 
     // ── Step 3: Forward-fill string offsets for null rows ───────────────────
 
-    for writer in writers.values() {
-        // Title offsets
-        let r = &writer.title_offsets;
-        let rc = r.len / 8;
-        for i in 1..rc {
-            if read_u64(&mmap, r, i) == 0 {
-                let prev = read_u64(&mmap, r, i - 1);
-                write_u64(&mut mmap, r, i, prev);
-            }
-        }
-        // Id string offsets (if string type)
-        if writer.id_is_string {
-            let r = &writer.id_str_offsets;
-            let rc = r.len / 8;
-            for i in 1..rc {
-                if read_u64(&mmap, r, i) == 0 {
-                    let prev = read_u64(&mmap, r, i - 1);
-                    write_u64(&mut mmap, r, i, prev);
-                }
-            }
-        }
-        // Property string offsets
-        for sc in &writer.str_cols {
-            let r = &sc.offsets;
-            let rc = r.len / 8;
-            for i in 1..rc {
-                if read_u64(&mmap, r, i) == 0 {
-                    let prev = read_u64(&mmap, r, i - 1);
-                    write_u64(&mut mmap, r, i, prev);
-                }
-            }
-        }
-    }
+    Ok(row_ids)
+}
 
-    // ── Step 4: Append overflow data to mmap file and create MmapColumnStores ──
-
-    let assemble_start = Instant::now();
-
+fn append_overflow_data(
+    writers: &mut HashMap<String, TypeWriter>,
+    mut mmap: MmapMut,
+    mmap_path: &std::path::Path,
+    verbose: bool,
+) -> Result<MmapMut, BuildColumnsError> {
     // First pass: compute total overflow bytes to append
     let mut total_overflow_bytes: usize = 0;
     for writer in writers.values() {
@@ -1053,7 +1161,7 @@ pub(super) fn build_columns_direct(
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(&mmap_path)?;
+                .open(mmap_path)?;
             file.set_len(new_len as u64)?;
         }
 
@@ -1061,7 +1169,7 @@ pub(super) fn build_columns_direct(
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&mmap_path)?;
+            .open(mmap_path)?;
         // SAFETY: file was just ftruncated to include the overflow region;
         // re-mmapping the full length is safe.
         mmap = unsafe { MmapMut::map_mut(&file)? };
@@ -1118,13 +1226,30 @@ pub(super) fn build_columns_direct(
         }
     }
 
+    Ok(mmap)
+}
+
+fn assemble_column_stores(
+    graph: &mut DirGraph,
+    type_meta: &HashMap<String, TypeBuildMeta>,
+    writers: &mut HashMap<String, TypeWriter>,
+    mmap: MmapMut,
+    mmap_path: &std::path::Path,
+    verbose: bool,
+) -> Result<Vec<ColumnTypeMeta>, BuildColumnsError> {
+    // ── Step 4: Append overflow data to mmap file and create MmapColumnStores ──
+
+    let assemble_start = Instant::now();
+
+    let mmap = append_overflow_data(writers, mmap, mmap_path, verbose)?;
+
     // Create shared mmap Arc for all MmapColumnStore instances
     let mmap_arc = Arc::new(mmap);
 
     // Metadata to serialize for post-Phase-3 reload
     let mut columns_meta: Vec<ColumnTypeMeta> = Vec::new();
 
-    for (type_name, writer) in &writers {
+    for (type_name, writer) in writers.iter() {
         let meta = match type_meta.get(type_name) {
             Some(m) => m,
             None => continue,
@@ -1268,93 +1393,73 @@ pub(super) fn build_columns_direct(
         );
     }
 
-    // ── Step 5: Link nodes to their column store row_ids ───────────────────
-    //
-    // Disk backend: `update_row_id` writes into the DiskNodeSlot array so
-    // later reads resolve `(type, row_id)` → column data.
-    //
-    // Mapped backend: replace each node's `PropertyStorage::Map` with
-    // `PropertyStorage::Columnar { store, row_id }`, mirroring the second
-    // pass in `DirGraph::enable_columnar`. Without this linkage the nodes
-    // in MappedGraph's petgraph would have empty properties and queries
-    // like `MATCH (n {id: "Q42"}) RETURN n.description` would return
-    // `None`.
-    //
-    // Memory backend: `update_row_id` is a default no-op and mapped
-    // linkage is skipped — memory-mode N-Triples builds don't go through
-    // this path (they keep `PropertyStorage::Map/Compact` unchanged).
-    if GraphRead::is_disk(&graph.graph) {
-        for &(node_idx, row_id) in &row_ids {
-            GraphWrite::update_row_id(&mut graph.graph, node_idx, row_id);
-        }
-        if verbose {
-            eplog!(
-                "  Phase 1b: fixed up {} row_ids",
-                format_count(row_ids.len() as u64),
-            );
-        }
-    } else if GraphRead::is_mapped(&graph.graph) {
-        // Snapshot the Arc<ColumnStore> per type once so the inner loop
-        // only does a HashMap lookup; avoids a clone on every node.
-        let type_name_by_key: HashMap<InternedKey, String> = graph
-            .column_stores
-            .keys()
-            .filter_map(|t| graph.interner.try_resolve_to_key(t).map(|k| (k, t.clone())))
-            .collect();
-        let stores_snapshot: HashMap<
-            String,
-            Arc<crate::graph::storage::column_store::ColumnStore>,
-        > = graph
-            .column_stores
-            .iter()
-            .map(|(t, s)| (t.clone(), Arc::clone(s)))
-            .collect();
-        let mut linked = 0u64;
-        for &(node_idx, row_id) in &row_ids {
-            let type_key = match GraphRead::node_type_of(&graph.graph, node_idx) {
-                Some(k) => k,
-                None => continue,
-            };
-            let type_name = match type_name_by_key.get(&type_key) {
-                Some(n) => n,
-                None => continue,
-            };
-            let store = match stores_snapshot.get(type_name) {
-                Some(s) => Arc::clone(s),
-                None => continue,
-            };
-            if let Some(node) = GraphWrite::node_weight_mut(&mut graph.graph, node_idx) {
-                node.properties = PropertyStorage::Columnar { store, row_id };
-                linked += 1;
-            }
-        }
-        if verbose {
-            eplog!(
-                "  Phase 1b: linked {} mapped nodes to column stores",
-                format_count(linked),
-            );
-        }
-    }
+    Ok(columns_meta)
+}
 
-    // Save columns metadata for post-Phase-3 reload.
-    // The mmap file stays on disk at data_dir/columns.bin — don't delete it.
-    let meta_path = data_dir.join("columns_meta.json");
-    if !columns_meta.is_empty() {
-        let json = serde_json::to_string(&columns_meta).map_err(std::io::Error::other)?;
-        std::fs::write(&meta_path, json)?;
-        // Also save as bincode+zstd for fast loading (~10x faster than JSON parse)
-        let bytes = bincode::serialize(&columns_meta).map_err(std::io::Error::other)?;
-        let compressed = zstd::encode_all(bytes.as_slice(), 3)?;
-        std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed)?;
-    }
+pub(super) fn build_columns_direct(
+    graph: &mut DirGraph,
+    log_path: &std::path::Path,
+    type_meta: &HashMap<String, TypeBuildMeta>,
+    type_rename_map: &HashMap<String, String>,
+    verbose: bool,
+    progress: Option<&dyn ProgressSink>,
+) -> Result<(), BuildColumnsError> {
+    let alloc_start = Instant::now();
 
-    if verbose {
-        eplog!(
-            "  Phase 1b: saved columns metadata ({} types) to {}",
-            columns_meta.len(),
-            meta_path.display(),
-        );
-    }
+    // Get data_dir for placing the final columns.bin. Disk graphs have a
+    // persistent user-provided data_dir; mapped graphs reuse the same
+    // per-process spill-dir scheme as the property log and edge buffer.
+    // The resulting mmap'd `columns.bin` stays alive until graph drop.
+    let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
+        dg.data_dir.clone()
+    } else {
+        graph.spill_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))
+        })
+    };
+    std::fs::create_dir_all(&data_dir)?;
+
+    // ── Step 1: Layout computation — single mmap file ────────────────────
+    //
+    // ONE file (`columns.bin`) in data_dir holds ALL column data for ALL types.
+    //
+    // Each region is 8-byte aligned so typed reads are safe.
+
+    let col_dir = data_dir.clone();
+
+    let plan = plan_layout(type_meta);
+    let (mut mmap, mmap_path) = allocate_columns_mmap(
+        MmapAllocation {
+            col_dir: &col_dir,
+            type_meta,
+            verbose,
+            started: alloc_start,
+        },
+        &plan,
+    )?;
+    let mut writers = plan.writers;
+
+    let row_ids = replay_property_log(
+        ReplayContext {
+            graph,
+            log_path,
+            type_meta,
+            type_rename_map,
+            verbose,
+            progress,
+        },
+        &mut writers,
+        &mut mmap,
+    )?;
+
+    forward_fill_offsets(&writers, &mut mmap);
+
+    let columns_meta =
+        assemble_column_stores(graph, type_meta, &mut writers, mmap, &mmap_path, verbose)?;
+
+    link_column_rows(graph, &row_ids, verbose);
+
+    publish_column_metadata(&data_dir, &columns_meta, verbose)?;
 
     Ok(())
 }
