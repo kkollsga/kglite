@@ -1962,6 +1962,8 @@ pub fn kglite::api::DirGraph::has_edge_type_counts_cache(&self) -> bool
 pub fn kglite::api::DirGraph::has_type_connectivity_cache(&self) -> bool
 pub fn kglite::api::DirGraph::property_ndv(&self, node_type: &str, property: &str) -> core::option::Option<usize>
 impl kglite::api::DirGraph
+pub fn kglite::api::DirGraph::independent_copy(&self) -> Self
+impl kglite::api::DirGraph
 pub fn kglite::api::DirGraph::insert_node_routed(&mut self, id: kglite::datatypes::values::Value, title: kglite::datatypes::values::Value, node_type: &str, properties: std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> petgraph::graph_impl::NodeIndex
 impl core::clone::Clone for kglite::api::DirGraph
 pub fn kglite::api::DirGraph::clone(&self) -> kglite::api::DirGraph

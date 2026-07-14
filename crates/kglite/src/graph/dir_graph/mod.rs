@@ -43,6 +43,7 @@ fn next_graph_id() -> u64 {
 // file stays under the god-file ceiling; child = retains private access.
 mod caches;
 mod disk_persistence;
+mod independent_copy;
 mod node_write;
 mod schema_ops;
 

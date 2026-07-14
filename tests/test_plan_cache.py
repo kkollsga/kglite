@@ -12,6 +12,7 @@ unchanged graph. These tests pin the three properties that make it sound:
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 import kglite
 
@@ -66,3 +67,28 @@ def test_no_cross_graph_leakage():
     # Re-run interleaved (both now potentially cached) — still isolated.
     assert b.cypher(q).to_dicts()[0]["c"] == 20
     assert a.cypher(q).to_dicts()[0]["c"] == 4
+
+
+def test_divergent_explicit_copies_do_not_share_schema_plans():
+    # Explicit copies start at the same version. Advance each exactly once but
+    # with a different schema, then warm a schema-dependent plan on only one.
+    # Reusing that plan in the other copy would bypass validation entirely.
+    original = kglite.KnowledgeGraph()
+    original.add_nodes(_items([1]), "Item", "nid")
+    copied = original.copy()
+
+    original.add_nodes(
+        pd.DataFrame({"nid": [2], "value": [2.0], "original_only": [True]}),
+        "Item",
+        "nid",
+    )
+    copied.add_nodes(
+        pd.DataFrame({"nid": [3], "value": [3.0], "copy_only": [True]}),
+        "Item",
+        "nid",
+    )
+
+    query = "MATCH (n:Item {original_only: true}) RETURN count(n) AS c"
+    assert original.cypher(query).to_dicts()[0]["c"] == 1
+    with pytest.raises(kglite.SchemaError, match="original_only"):
+        copied.cypher(query)

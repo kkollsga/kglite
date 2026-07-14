@@ -1653,7 +1653,7 @@ impl KnowledgeGraph {
     /// source graph.
     fn copy(&self) -> Self {
         KnowledgeGraph {
-            inner: Arc::new((*self.inner).clone()),
+            inner: Arc::new(self.inner.independent_copy()),
             // copy() resets the selection/reports/stats but preserves the
             // temporal context (the as-of date carries to the independent copy).
             cursor: crate::graph::CursorState {

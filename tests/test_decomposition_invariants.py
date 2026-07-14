@@ -11,6 +11,8 @@ If one of these changes, the decomposition changed observable behavior — that
 is a regression unless explicitly intended and re-pinned.
 """
 
+import copy
+
 import pandas as pd
 import pytest
 
@@ -49,6 +51,19 @@ def test_copy_is_independent_both_directions():
     g.cypher("CREATE (n:Person {id: 100, name: 'y'})")
     assert _count(c) == 4, "mutating the original must not affect the copy"
     assert _count(g) == 4
+
+
+@pytest.mark.parametrize(
+    "copier",
+    [lambda graph: graph.copy(), copy.copy, copy.deepcopy],
+    ids=["method", "copy.copy", "copy.deepcopy"],
+)
+def test_all_copy_protocols_create_independent_graphs(copier):
+    original = _people(2)
+    copied = copier(original)
+    copied.cypher("CREATE (:Person {id: 99, name: 'copied'})")
+    assert _count(original) == 2
+    assert _count(copied) == 3
 
 
 def test_copy_resets_selection():

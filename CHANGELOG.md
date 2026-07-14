@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Explicit graph copies have independent runtime identity and caches.**
+  `copy()`, `copy.copy()`, and `copy.deepcopy()` no longer share Cypher plan
+  identity or mutable semantic-cache locks with the source graph, so equally
+  versioned copies with divergent schemas cannot reuse one another's plans.
 - **Native and XML dependencies include current upstream fixes.** PyO3,
   quick-xml, AWS-LC, crossbeam, anyhow, and memmap2 were refreshed; SEC XML
   parsing continues to decode escaped and numeric entities after the parser
