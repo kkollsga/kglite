@@ -2303,7 +2303,7 @@ impl ColumnStore {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 // Hosted in `column_store_tests.rs` to keep this file under the
-// 2500-line god-file gate (see test_phase7_parity.py::test_god_file_gate).
+// centralized 2500-line production-source cap.
 
 #[cfg(test)]
 #[path = "column_store_tests.rs"]

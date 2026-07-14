@@ -3,22 +3,14 @@
 Guards the columnar-cleanup + per-backend-impls phase of the 0.8.0
 storage refactor. Tests here:
 
-- **enum-match audit** — confirms that `GraphBackend::<Variant>` match
-  sites are confined to the documented whitelist (the dispatcher in
-  `schema.rs`, the PyO3 boundary in `mod.rs`, the trait declarations in
-  `storage/mod.rs`, and the three disk-internal boundary files
-  `ntriples.rs`, `io_operations.rs`, `batch_operations.rs` which reach
-  into `DiskGraph` internals for bulk-path performance).
 - **graph.copy() CoW correctness** — mutating a copy leaves the
   original unchanged on every backend. This is the Phase 0 crunch-point
   re-asserted after Phase 5's per-backend impls + ColumnStore split.
 - **binary-size regression gate** — the release `.dylib` stays under
   the +20% budget relative to the Phase 4 baseline.
 
-Marker assignment is per-function so the structural gate runs in
-default CI while the rest stay opt-in:
+Marker assignment is per-function so the expensive checks stay opt-in:
 
-  - `test_enum_match_audit` — unmarked (pure file scan, < 1s).
   - `test_graph_copy_cow_correctness_*` — `@pytest.mark.parity`
     (functional, needs backend setup).
   - `test_binary_size_regression` — `@pytest.mark.binary_size`
@@ -27,15 +19,13 @@ default CI while the rest stay opt-in:
   - `test_dead_code_check` — `@pytest.mark.parity` (runs
     `cargo clippy --release`, ~30s).
 
-Run: pytest tests/test_phase5_parity.py                  (structural only)
-     pytest tests/test_phase5_parity.py -m parity        (functional)
+Run: pytest tests/test_phase5_parity.py -m parity        (functional)
      pytest tests/test_phase5_parity.py -m binary_size   (release-build gate)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import subprocess
 import sys
 
@@ -45,85 +35,6 @@ import pytest
 from kglite import KnowledgeGraph
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-# Files allowed to carry `GraphBackend::<Variant>` enum-match patterns.
-# Everything else should dispatch through the `GraphRead` / `GraphWrite`
-# traits. Each whitelist entry has a justification — if the list grows,
-# revisit the design instead of adding another file.
-ENUM_MATCH_WHITELIST = {
-    "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
-    "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
-    "introspection/connectivity.rs": "compute_type_connectivity disk-mode Rayon fast path",
-    "io/ntriples/writer.rs": "disk-internal bulk-build (ntriples edge writer)",
-    "mutation/batch.rs": "disk-internal update-path row_id lookup",
-    "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter (Pass A/B)",
-    "storage/mode.rs": "explicit storage-mode transition constructor",
-    "io/ntriples/column_builder.rs": "ntriples columnar-build hot path",
-    "languages/cypher/executor/match_clause/fused_match.rs": (
-        "MATCH executor inspects backend variant to pick storage-mode-specific traversal primitives"
-    ),
-}
-
-ENUM_MATCH_PATTERN = re.compile(r"GraphBackend::[A-Z]")
-
-
-def _list_rs_files(root: Path) -> list[Path]:
-    return sorted(root.rglob("*.rs"))
-
-
-def _strip_test_modules(src: str) -> str:
-    """Drop any `#[cfg(test)] mod …` block. The audit is about the
-    production dispatch path; in-source test fixtures may legitimately
-    construct `GraphBackend::Memory(…)` etc. (Phase 6's
-    `storage/recording.rs` tests do this.)
-    """
-
-    marker = "#[cfg(test)]"
-    idx = src.find(marker)
-    production = src if idx < 0 else src[:idx]
-    return "\n".join(line for line in production.splitlines() if not line.lstrip().startswith("//"))
-
-
-def test_enum_match_audit():
-    """`GraphBackend::<Variant>` matches only appear in whitelisted files."""
-
-    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
-    assert src_graph.is_dir(), f"structural audit root is missing: {src_graph}"
-    rs_files = _list_rs_files(src_graph)
-    assert rs_files, f"structural audit found no Rust sources under {src_graph}"
-    offenders: dict[Path, int] = {}
-    for rs in rs_files:
-        if rs.name.endswith("_tests.rs"):
-            continue
-        rel = rs.relative_to(src_graph).as_posix()
-        if rel in ENUM_MATCH_WHITELIST:
-            continue
-        # storage/ subdir files MUST NOT carry enum matches — they
-        # exist to provide trait-based alternatives. Test-module
-        # fixtures (`#[cfg(test)]`) are stripped before scanning.
-        text = _strip_test_modules(rs.read_text())
-        hits = ENUM_MATCH_PATTERN.findall(text)
-        if hits:
-            offenders[rs] = len(hits)
-
-    assert not offenders, (
-        "GraphBackend:: enum matches leaked outside the whitelist:\n"
-        + "\n".join(f"  {p.relative_to(REPO_ROOT)}: {n} hit(s)" for p, n in offenders.items())
-        + "\n\nAdd the file to ENUM_MATCH_WHITELIST (with a written justification) "
-        + "or route the call through GraphRead / GraphWrite."
-    )
-
-
-def test_enum_match_whitelist_is_not_stale():
-    src_graph = REPO_ROOT / "crates" / "kglite" / "src" / "graph"
-    stale = []
-    for rel in ENUM_MATCH_WHITELIST:
-        path = src_graph / rel
-        if not path.is_file():
-            stale.append(f"{rel}: file no longer exists")
-        elif not ENUM_MATCH_PATTERN.search(_strip_test_modules(path.read_text())):
-            stale.append(f"{rel}: no production GraphBackend variant match remains")
-    assert not stale, "Stale enum-match whitelist entries:\n  " + "\n  ".join(stale)
 
 
 @pytest.mark.parity

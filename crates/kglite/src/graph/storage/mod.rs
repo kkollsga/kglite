@@ -757,10 +757,9 @@ impl<'de> serde::Deserialize<'de> for MappedGraph {
 pub mod impls;
 pub mod recording;
 
-// Phase-6 recording backend — re-exported so downstream consumers (and
-// the Phase-6 parity test) can construct it without reaching into
-// `storage::recording::`. DO NOT REMOVE despite unused-import warnings;
-// `tests/test_phase6_parity.py::test_recording_graph_symbol_exported`
-// asserts this exact line survives.
+// Phase-6 recording backend — re-exported so downstream consumers can
+// construct it without reaching into `storage::recording::`. DO NOT REMOVE
+// despite unused-import warnings; the centralized source-quality gate asserts
+// this exact line survives.
 #[allow(unused_imports)]
 pub use recording::RecordingGraph;

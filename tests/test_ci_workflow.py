@@ -17,6 +17,7 @@ CI_TEXT = CI_PATH.read_text()
 REQUIRED_JOBS = {
     "docs",
     "rust-core-coverage",
+    "source-quality",
     "storage-parity",
     "disk-concurrency",
     "loom-session",
@@ -90,3 +91,11 @@ def test_docs_job_checks_generated_facts_and_warnings() -> None:
     assert "python scripts/render_docs_facts.py --check" in docs
     assert "sphinx-build -W --keep-going -b html docs docs/_build/html" in docs
     assert "myst.xref_missing" not in (REPO_ROOT / "docs" / "conf.py").read_text()
+
+
+def test_source_quality_runs_once_in_its_own_required_job() -> None:
+    source_quality = _job_block("source-quality")
+    assert "python scripts/check_source_quality.py --self-test" in source_quality
+    assert "python scripts/check_source_quality.py" in source_quality
+    python_tests = _job_block("python-tests")
+    assert "check_source_quality.py" not in python_tests

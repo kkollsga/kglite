@@ -172,6 +172,10 @@ cov:
 cov-rust-core:
 	cargo llvm-cov --package kglite --lib --tests --ignore-filename-regex 'src/bin/' --lcov --output-path rust-core-coverage.lcov
 
+## Check centralized production-source structure and complexity ceilings
+source-quality:
+	python scripts/check_source_quality.py
+
 ## Verify type stubs match runtime (requires built extension)
 stubtest:
 	$(ACTIVATE) && python -m mypy.stubtest kglite --ignore-missing-stub --ignore-unused-allowlist --mypy-config-file mypy_stubtest.ini --allowlist stubtest_allowlist.txt

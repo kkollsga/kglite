@@ -1,6 +1,6 @@
 //! `node_type_metadata.bin.zst` / `connection_type_metadata.bin.zst` —
 //! packed binary fast-load sidecars for the two heavy `FileMetadata`
-//! HashMap fields (0.8.28+). Split out of `file.rs` (god-file gate);
+//! HashMap fields (0.8.28+). Split out of `file.rs` (source-quality file cap);
 //! see each section comment for the wire layout.
 
 use super::zstd_decompress;

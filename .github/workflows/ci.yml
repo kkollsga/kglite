@@ -102,6 +102,24 @@ jobs:
           disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  source-quality:
+    name: Production source quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: source-quality
+          workspaces: ". -> target"
+      - name: Exercise intentional failure fixtures
+        run: python scripts/check_source_quality.py --self-test
+      - name: Check centralized structure and complexity ceilings
+        run: python scripts/check_source_quality.py
+
   kglite-c:
     name: kglite-c (C ABI)
     runs-on: ubuntu-latest
@@ -269,12 +287,9 @@ jobs:
         run: pytest tests/ -m "bolt and not benchmark" -v --tb=short
 
       - name: Run binary-size gate
-        # The structural gates (god-file, unsafe-SAFETY, enum-match,
-        # mod_rs purity, recording-symbol-export) run inside the regular
-        # `pytest tests/` step above — they're unmarked since they're
-        # pure file scans. test_binary_size_regression needs the release
-        # artifact built above, so it carries `@pytest.mark.binary_size`
-        # and runs in this dedicated step.
+        # Production source structure and complexity run once in the
+        # dedicated source-quality job. This test alone needs the release
+        # artifact built above, so it carries `@pytest.mark.binary_size`.
         run: pytest tests/test_phase5_parity.py -m binary_size -v
 
       - name: Run stubtest
@@ -593,6 +608,7 @@ jobs:
       - docs
       - rust-checks
       - rust-core-coverage
+      - source-quality
       - kglite-c
       - python-lint
       - python-tests

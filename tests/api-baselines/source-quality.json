@@ -1,0 +1,655 @@
+{
+  "schema_version": 1,
+  "limits": {
+    "file_lines": 2500,
+    "function_lines": 200,
+    "function_branches": 50,
+    "function_nesting": 8
+  },
+  "file_exceptions": {},
+  "enum_match_whitelist": {
+    "dir_graph/mod.rs": "DirGraph index maintenance (petgraph-only fast paths)",
+    "dir_graph/disk_persistence.rs": "DirGraph disk lifecycle and durable-save dispatch",
+    "introspection/connectivity.rs": "disk-mode Rayon connectivity fast path",
+    "io/ntriples/writer.rs": "disk-internal bulk-build edge writer",
+    "mutation/batch.rs": "disk-internal update-path row-id lookup",
+    "mutation/subgraph_streaming.rs": "disk-internal streaming subgraph filter",
+    "storage/mode.rs": "explicit storage-mode transition constructor",
+    "io/ntriples/column_builder.rs": "N-Triples columnar-build hot path",
+    "languages/cypher/executor/match_clause/fused_match.rs": "storage-specific fused traversal primitives"
+  },
+  "safety_roots": [
+    "crates/kglite/src/graph"
+  ],
+  "mod_rs_caps": {
+    "crates/kglite/src/graph/algorithms/mod.rs": 300,
+    "crates/kglite/src/graph/core/mod.rs": 300,
+    "crates/kglite/src/graph/core/pattern_matching/mod.rs": 300,
+    "crates/kglite/src/graph/features/mod.rs": 300,
+    "crates/kglite/src/graph/introspection/mod.rs": 300,
+    "crates/kglite/src/graph/io/mod.rs": 300,
+    "crates/kglite/src/graph/io/ntriples/mod.rs": 300,
+    "crates/kglite/src/graph/languages/mod.rs": 300,
+    "crates/kglite/src/graph/languages/cypher/mod.rs": 500,
+    "crates/kglite/src/graph/languages/cypher/executor/mod.rs": 1300,
+    "crates/kglite/src/graph/languages/cypher/parser/mod.rs": 1100,
+    "crates/kglite/src/graph/languages/cypher/planner/mod.rs": 750,
+    "crates/kglite/src/graph/languages/fluent/mod.rs": 300,
+    "crates/kglite/src/graph/mutation/mod.rs": 300,
+    "crates/kglite/src/graph/storage/mod.rs": 800,
+    "crates/kglite/src/graph/storage/disk/mod.rs": 300,
+    "crates/kglite/src/graph/storage/mapped/mod.rs": 300,
+    "crates/kglite/src/graph/storage/memory/mod.rs": 300
+  },
+  "function_exceptions": [
+    {
+      "path": "crates/kglite-mcp-server/src/lib.rs",
+      "qualified_name": "crate::crates::kglite-mcp-server::src::run_async",
+      "lines": 372,
+      "branches": 40,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite-py/src/datatypes/py_in.rs",
+      "qualified_name": "crate::crates::kglite-py::src::datatypes::py_in::convert_pandas_series",
+      "lines": 193,
+      "branches": 66,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite-py/src/datatypes/py_out.rs",
+      "qualified_name": "crate::crates::kglite-py::src::datatypes::py_out::level_connections_to_pydict",
+      "lines": 169,
+      "branches": 103,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
+      "qualified_name": "crate::crates::kglite-py::src::graph::pyapi::kg_core::KnowledgeGraph::cypher",
+      "lines": 349,
+      "branches": 37,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite-py/src/graph/pyapi/kg_core.rs",
+      "qualified_name": "crate::crates::kglite-py::src::graph::pyapi::kg_core::KnowledgeGraph::define_schema",
+      "lines": 163,
+      "branches": 56,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite-py/src/graph/pyapi/kg_mutation.rs",
+      "qualified_name": "crate::crates::kglite-py::src::graph::pyapi::kg_mutation::write_connections",
+      "lines": 250,
+      "branches": 26,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite-py/src/graph/pyapi/vector.rs",
+      "qualified_name": "crate::crates::kglite-py::src::graph::pyapi::vector::KnowledgeGraph::embed_texts",
+      "lines": 227,
+      "branches": 44,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/code_tree/builder/call_edges.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::call_edges::build_call_edges",
+      "lines": 317,
+      "branches": 42,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/code_tree/builder/load.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::load_into_graph",
+      "lines": 1142,
+      "branches": 135,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/code_tree/builder/load/entity_frames.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::builder::load::entity_frames::functions_df",
+      "lines": 300,
+      "branches": 0,
+      "nesting": 0
+    },
+    {
+      "path": "crates/kglite/src/code_tree/parsers/go.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::parsers::go::GoParser::parse_file",
+      "lines": 313,
+      "branches": 38,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/code_tree/parsers/python.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::parsers::python::PythonParser::parse_file",
+      "lines": 277,
+      "branches": 43,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/code_tree/parsers/rust_lang.rs",
+      "qualified_name": "crate::crates::kglite::src::code_tree::parsers::rust_lang::RustParser::parse_items",
+      "lines": 327,
+      "branches": 48,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/datasets/sec/extract/sinks.rs",
+      "qualified_name": "crate::crates::kglite::src::datasets::sec::extract::sinks::Sinks::open",
+      "lines": 84,
+      "branches": 67,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/algorithms/centrality.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::algorithms::centrality::betweenness_centrality",
+      "lines": 286,
+      "branches": 38,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/algorithms/centrality.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::algorithms::centrality::closeness_centrality",
+      "lines": 257,
+      "branches": 29,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/blueprint/compute/aggregate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::blueprint::compute::aggregate::run_aggregate",
+      "lines": 227,
+      "branches": 32,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/blueprint/expr.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::blueprint::expr::call_builtin",
+      "lines": 153,
+      "branches": 88,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/core/calculations.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::calculations::process_equation",
+      "lines": 242,
+      "branches": 38,
+      "nesting": 9
+    },
+    {
+      "path": "crates/kglite/src/graph/core/filtering.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::filtering::filter_nodes_by_conditions",
+      "lines": 249,
+      "branches": 33,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::pattern_matching::matcher::PatternExecutor::execute",
+      "lines": 418,
+      "branches": 76,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::pattern_matching::matcher::PatternExecutor::expand_from_node",
+      "lines": 226,
+      "branches": 41,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/core/pattern_matching/matcher.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::pattern_matching::matcher::PatternExecutor::try_index_lookup",
+      "lines": 237,
+      "branches": 45,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/core/pattern_matching/parser.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::pattern_matching::parser::tokenize",
+      "lines": 210,
+      "branches": 53,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/core/traversal.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::core::traversal::make_traversal_full",
+      "lines": 218,
+      "branches": 43,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/dir_graph/disk_persistence.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::dir_graph::disk_persistence::DirGraph::write_disk_snapshot",
+      "lines": 257,
+      "branches": 47,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/dir_graph/mod.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::dir_graph::DirGraph::enable_columnar",
+      "lines": 267,
+      "branches": 31,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/features/equations.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::features::equations::Evaluator::evaluate_single",
+      "lines": 83,
+      "branches": 54,
+      "nesting": 2
+    },
+    {
+      "path": "crates/kglite/src/graph/introspection/describe.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::introspection::describe::write_type_detail",
+      "lines": 406,
+      "branches": 47,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/io/export.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::export::to_csv_dir",
+      "lines": 307,
+      "branches": 40,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/io/file.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::file::load_disk_dir",
+      "lines": 378,
+      "branches": 74,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/io/file.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::file::load_v4",
+      "lines": 219,
+      "branches": 41,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::column_builder::build_columns_direct",
+      "lines": 1149,
+      "branches": 94,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::flush_entity",
+      "lines": 212,
+      "branches": 25,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/io/ntriples/loader.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::loader::load_ntriples",
+      "lines": 1138,
+      "branches": 189,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/io/unified_columns.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::io::unified_columns::write_unified_columns",
+      "lines": 337,
+      "branches": 28,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::aggregation::materialized::CypherExecutor::evaluate_aggregate_with_rows",
+      "lines": 468,
+      "branches": 139,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/aggregation/materialized.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::aggregation::materialized::CypherExecutor::execute_return_with_aggregation",
+      "lines": 246,
+      "branches": 41,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::call_clause::CypherExecutor::execute_call",
+      "lines": 787,
+      "branches": 132,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/call_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::call_clause::CypherExecutor::execute_call_cluster",
+      "lines": 231,
+      "branches": 41,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/expression/evaluate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::expression::evaluate::CypherExecutor::evaluate_expression",
+      "lines": 740,
+      "branches": 202,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::CypherExecutor::count_simple_pattern_from_bound",
+      "lines": 211,
+      "branches": 42,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::CypherExecutor::try_fast_exists_check",
+      "lines": 208,
+      "branches": 51,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::fused_match::CypherExecutor::execute_fused_match_return_aggregate",
+      "lines": 984,
+      "branches": 188,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::fused_match::CypherExecutor::execute_fused_match_with_aggregate",
+      "lines": 284,
+      "branches": 41,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::fused_match::CypherExecutor::execute_fused_node_scan_aggregate",
+      "lines": 362,
+      "branches": 55,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_clause/fused_match.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_clause::fused_match::CypherExecutor::try_fast_with_aggregate_via_histogram",
+      "lines": 202,
+      "branches": 26,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/match_execution.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::match_execution::CypherExecutor::execute_match",
+      "lines": 463,
+      "branches": 86,
+      "nesting": 9
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/mod.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::CypherExecutor::execute_single_clause",
+      "lines": 323,
+      "branches": 46,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/return_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::return_clause::CypherExecutor::execute_fused_order_by_top_k",
+      "lines": 236,
+      "branches": 41,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/collection.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::collection::CypherExecutor::eval_collection_fn",
+      "lines": 179,
+      "branches": 60,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/graph.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::graph::CypherExecutor::eval_graph_fn",
+      "lines": 373,
+      "branches": 74,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/numeric.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::numeric::CypherExecutor::eval_numeric_fn",
+      "lines": 200,
+      "branches": 100,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/spatial.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::spatial::CypherExecutor::eval_spatial_fn",
+      "lines": 411,
+      "branches": 145,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/string.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::string::CypherExecutor::eval_string_fn",
+      "lines": 411,
+      "branches": 157,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/temporal.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::temporal::CypherExecutor::eval_temporal_fn",
+      "lines": 274,
+      "branches": 102,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/scalar_functions/utility.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::scalar_functions::utility::CypherExecutor::eval_utility_fn",
+      "lines": 308,
+      "branches": 90,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/shortest_path.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::shortest_path::CypherExecutor::execute_shortest_path_match",
+      "lines": 253,
+      "branches": 36,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/stream/aggregate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::stream::aggregate::apply",
+      "lines": 204,
+      "branches": 36,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::where_clause::CypherExecutor::evaluate_predicate_tristate",
+      "lines": 321,
+      "branches": 87,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/where_clause.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::where_clause::CypherExecutor::execute_where",
+      "lines": 287,
+      "branches": 74,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::write::execute_set",
+      "lines": 551,
+      "branches": 80,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/executor/write.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::executor::write::try_match_merge_pattern",
+      "lines": 203,
+      "branches": 34,
+      "nesting": 8
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/parser/expression.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::parser::expression::CypherParser::parse_primary_expression_inner",
+      "lines": 226,
+      "branches": 50,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::fusion::aggregate::fuse_match_return_aggregate",
+      "lines": 371,
+      "branches": 59,
+      "nesting": 11
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::fusion::aggregate::fuse_match_with_aggregate",
+      "lines": 248,
+      "branches": 43,
+      "nesting": 10
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/aggregate.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::fusion::aggregate::try_fuse_two_match_with_aggregate",
+      "lines": 212,
+      "branches": 49,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/fusion/count.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::fusion::count::fuse_count_short_circuits",
+      "lines": 241,
+      "branches": 33,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/rel_predicate_pushdown.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::rel_predicate_pushdown::extract_pushable_rel_predicates_with_params",
+      "lines": 124,
+      "branches": 18,
+      "nesting": 10
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::schema_check::validate_expression_scope",
+      "lines": 155,
+      "branches": 54,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/schema_check.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::schema_check::validate_scope",
+      "lines": 202,
+      "branches": 79,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/simplification.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::simplification::TextScoreCollector::rewrite_expr",
+      "lines": 209,
+      "branches": 73,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/planner/simplification.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::planner::simplification::rewrite_text_score",
+      "lines": 123,
+      "branches": 56,
+      "nesting": 7
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::tokenizer::keyword_token",
+      "lines": 58,
+      "branches": 53,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::tokenizer::token_to_keyword_name",
+      "lines": 58,
+      "branches": 53,
+      "nesting": 1
+    },
+    {
+      "path": "crates/kglite/src/graph/languages/cypher/tokenizer.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::languages::cypher::tokenizer::tokenize_cypher_with_positions",
+      "lines": 365,
+      "branches": 72,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/batch.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::batch::BatchProcessor::flush_chunk",
+      "lines": 352,
+      "branches": 53,
+      "nesting": 6
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/extend.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::extend::extend_graph",
+      "lines": 218,
+      "branches": 27,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::maintain::add_connections",
+      "lines": 304,
+      "branches": 44,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::maintain::add_nodes",
+      "lines": 287,
+      "branches": 41,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::maintain::add_properties_aggregate",
+      "lines": 187,
+      "branches": 39,
+      "nesting": 10
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/maintain.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::maintain::create_connections",
+      "lines": 267,
+      "branches": 52,
+      "nesting": 10
+    },
+    {
+      "path": "crates/kglite/src/graph/mutation/subgraph_streaming.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::mutation::subgraph_streaming::save_subset_streaming_disk",
+      "lines": 545,
+      "branches": 64,
+      "nesting": 5
+    },
+    {
+      "path": "crates/kglite/src/graph/storage/column_store.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::storage::column_store::ColumnStore::unpack_column",
+      "lines": 209,
+      "branches": 34,
+      "nesting": 3
+    },
+    {
+      "path": "crates/kglite/src/graph/storage/disk/builder.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::storage::disk::builder::DiskGraph::build_csr_partitioned",
+      "lines": 368,
+      "branches": 54,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::storage::disk::graph_persist::DiskGraph::load_from_dir",
+      "lines": 276,
+      "branches": 27,
+      "nesting": 4
+    },
+    {
+      "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
+      "qualified_name": "crate::crates::kglite::src::graph::storage::disk::graph_persist::DiskGraph::seal_to_new_segment",
+      "lines": 263,
+      "branches": 44,
+      "nesting": 3
+    }
+  ]
+}

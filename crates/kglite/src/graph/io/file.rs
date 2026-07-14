@@ -345,7 +345,7 @@ pub(crate) fn strip_heavy_metadata(meta: &mut FileMetadata) {
 //
 // The `node_type_metadata.bin.zst` / `connection_type_metadata.bin.zst`
 // fast-load codecs live in a submodule (split out of this file for the
-// god-file gate); re-exported here so caller paths stay stable.
+// production-source file cap); re-exported here so caller paths stay stable.
 mod metadata_sidecars;
 pub(crate) use metadata_sidecars::{
     read_connection_type_metadata_bin, read_node_type_metadata_bin,

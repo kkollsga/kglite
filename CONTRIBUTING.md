@@ -56,6 +56,7 @@ make test-full   # Rust + Python parity and Bolt markers
 make lint        # local format, lint, clean-room, license, and stub gates
 make cov         # pinned line + branch coverage for Python production modules
 make cov-rust-core  # report-only default-feature kglite core coverage
+make source-quality  # production-only structure and complexity ratchet
 ```
 
 The default Python configuration skips benchmark, parity, stress,
@@ -74,6 +75,15 @@ threshold. It does not claim coverage for the PyO3 Rust wrapper, C ABI,
 MCP/Bolt/CLI crates, or optional dataset, RDF, parallel-decoder, and embedder
 features. Those components need their own representative harnesses before
 their denominators can be reported honestly.
+
+`make source-quality` is the single production-source structural gate. It
+checks Rust file size, backend enum dispatch, unsafe-block justification,
+module-file caps, required recording symbols, and per-function line/branch/
+nesting growth. Existing complex functions are identified in
+`tests/api-baselines/source-quality.json`; improvements must tighten that
+baseline with `python scripts/check_source_quality.py --refresh-functions`.
+The dedicated CI job runs the analysis once rather than repeating it in every
+Python-version leg.
 
 CI also checks surfaces not covered by `make lint`:
 

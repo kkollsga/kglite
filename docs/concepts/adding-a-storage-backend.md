@@ -201,8 +201,9 @@ surface on each of the three production backends it can wrap.
 
 ## File-count budget
 
-Phase 6's gate (`tests/test_phase6_parity.py::test_file_count_budget`)
-enforces that adding a wrapper backend touches at most 3 src files:
+The centralized source-quality gate (`scripts/check_source_quality.py`)
+keeps backend dispatch exceptions explicit and rejects stale allowances. A
+wrapper backend normally touches only these three source files:
 
 - own file (`crates/kglite/src/graph/storage/recording.rs`)
 - enum + dispatch (`crates/kglite/src/graph/storage/backend.rs`)

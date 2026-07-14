@@ -1,6 +1,6 @@
 //! Unit tests for `column_store.rs`. Split out as a sibling file via
-//! `#[path]` so the production file stays under the 2500-line god-file
-//! gate (test_phase7_parity.py::test_god_file_gate).
+//! `#[path]` so the production file stays under the centralized 2500-line
+//! source-quality cap.
 
 #![allow(clippy::approx_constant)]
 
