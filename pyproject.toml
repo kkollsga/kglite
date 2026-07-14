@@ -46,9 +46,9 @@ dynamic = ["version"]
 neo4j = ["neo4j>=5.0"]
 # NetworkX interop: `KnowledgeGraph.to_networkx()` /
 # `kglite.from_networkx()`. Optional — networkx is never imported at
-# module load. `from_networkx` also uses pandas (already required by the
-# DataFrame loaders), so only networkx is declared here.
-networkx = ["networkx>=3.0"]
+# module load. `from_networkx` converts records through pandas, so the
+# integration extra installs both of its runtime dependencies.
+networkx = ["networkx>=3.0", "pandas>=2.0"]
 # No `embed` extra (removed in 0.10.28). Embedding is bring-your-own: the user
 # installs whatever embedding library they want and names it. For engine-level
 # semantic search, pass any duck-typed object to `g.set_embedder(...)` (see the

@@ -180,20 +180,11 @@ jobs:
         if: matrix.python-version == '3.14'
         run: pip install pyarrow
 
-      - name: Build and install extension (with [mcp] + [neo4j] extras)
-        # 0.9.21+: install the [mcp] extras so the Python MCP server
-        # integration tests in tests/test_mcp_server_python_entry.py
-        # can run. Without these (mcp, pyyaml, aiohttp, fastembed,
-        # watchdog), the server's _check_extras gate fires at boot
-        # and the test suite times out trying to talk to a server
-        # that exited immediately. The tests do also importorskip
-        # gracefully, but installing the extras lets CI exercise the
-        # real tool-surface baseline gate.
-        #
-        # 0.10.x+: [neo4j] extra is needed for the Bolt-protocol smoke
-        # tests in tests/test_bolt_server_smoke.py (Phase B contract —
-        # all 8 currently xfail-strict against the unimplemented backend).
-        run: pip install -e .[mcp,neo4j]
+      - name: Build and install extension with integration extras
+        # [networkx] keeps the bridge suite active instead of import-skipping;
+        # [neo4j] supplies the Bolt client used by the protocol smoke tests.
+        # The MCP server is bundled Rust code and has no Python extra.
+        run: pip install -e '.[neo4j,networkx]'
 
       - name: Build kglite-mcp-server + kglite-bolt-server binaries + kglite cdylib
         # 0.9.45+: kglite-mcp-server binary is needed by
@@ -213,6 +204,17 @@ jobs:
         # the cdylib to save time — but the binary_size gate below
         # reads the cdylib's file size, so we must materialise it.
         run: cargo build --release -p kglite-mcp-server -p kglite-bolt-server -p kglite
+
+      - name: Smoke-test the NetworkX extra from an installed wheel
+        if: matrix.python-version == '3.12'
+        run: |
+          rm -rf /tmp/kglite-networkx-wheel /tmp/kglite-networkx-smoke
+          maturin build --release --out /tmp/kglite-networkx-wheel
+          wheel="$(find /tmp/kglite-networkx-wheel -name '*.whl' -print -quit)"
+          python -m venv /tmp/kglite-networkx-smoke
+          /tmp/kglite-networkx-smoke/bin/pip install "${wheel}[networkx]"
+          cd /tmp
+          /tmp/kglite-networkx-smoke/bin/python -c "import networkx as nx; import pandas; import kglite; graph = kglite.from_networkx(nx.path_graph(3)); assert graph.to_networkx().number_of_nodes() == 3"
 
       - name: Prefetch all-feature dependency metadata
         # The dependency-license contract deliberately reruns metadata offline.
