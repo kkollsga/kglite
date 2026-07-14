@@ -27,7 +27,7 @@ their own dependencies: `kglite[pandas]` for DataFrame workflows,
 
 - Linux x86_64 source builds on CPython 3.10, 3.12, 3.13, and 3.14 run the
   Python suite.
-- Linux x86_64 CPython 3.13t builds without abi3 and runs the dedicated
+- Linux x86_64 CPython 3.14t builds without abi3 and runs the dedicated
   free-threading concurrency suite. This proves a source-build configuration;
   a free-threaded wheel is not currently published.
 - A Linux x86_64 CPython 3.12 job builds a wheel, installs its `networkx` extra

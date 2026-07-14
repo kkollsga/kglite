@@ -337,10 +337,10 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up free-threaded Python 3.13t
+      - name: Set up free-threaded Python 3.14t
         uses: actions/setup-python@v6
         with:
-          python-version: '3.13t'
+          python-version: '3.14t'
 
       - name: Cache cargo registry & target
         uses: Swatinem/rust-cache@v2
@@ -353,7 +353,7 @@ jobs:
         # extension is built per-version with `--no-default-features` (drops the
         # `abi3` default) + `python-extension,loaders,mcp-server` (re-adds the
         # default loaders/server the wheel ships, minus abi3). The build itself is
-        # a real test: PyO3 0.28 enforces `Sync` on every `#[pyclass]` for a
+        # a real test: PyO3 0.29 enforces `Sync` on every `#[pyclass]` for a
         # free-threaded target, so a non-thread-safe class fails to compile here.
         #
         # Use `maturin develop` (not `build` + `pip install <wheel>`): it
@@ -380,6 +380,8 @@ jobs:
     name: Perf regression gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      REFERENCE_VERSION: "0.13.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -391,6 +393,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements/benchmark.txt
 
       - name: Cache cargo registry & target
         uses: Swatinem/rust-cache@v2
@@ -398,42 +401,89 @@ jobs:
           shared-key: perf
           workspaces: ". -> target"
 
-      - name: Set up venv (maturin develop needs one)
-        # `maturin develop --release` is the standard way to install
-        # the extension in release mode for development. It requires
-        # an active venv. CI's actions/setup-python uses the system
-        # Python, so we create `.venv` ourselves and prepend its bin
-        # to PATH so every subsequent step picks up the venv's pip /
-        # maturin / pytest. `.venv` is the directory name maturin
-        # auto-detects, so no VIRTUAL_ENV export needed.
+      - name: Create isolated reference and candidate environments
         run: |
           python -m venv .venv
-          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          python -m venv "$RUNNER_TEMP/kglite-reference"
+          .venv/bin/python -m pip install maturin==1.13.3 -r requirements/benchmark.txt
+          "$RUNNER_TEMP/kglite-reference/bin/python" -m pip install -r requirements/benchmark.txt
+          python -m pip download --only-binary=:all: --no-deps \
+            "kglite==$REFERENCE_VERSION" --dest "$RUNNER_TEMP/reference-wheel"
+          REFERENCE_WHEEL=$(find "$RUNNER_TEMP/reference-wheel" -name '*.whl' -print -quit)
+          "$RUNNER_TEMP/kglite-reference/bin/python" -m pip install "$REFERENCE_WHEEL"
+          echo "REFERENCE_PY=$RUNNER_TEMP/kglite-reference/bin/python" >> "$GITHUB_ENV"
+          echo "REFERENCE_WHEEL=$REFERENCE_WHEEL" >> "$GITHUB_ENV"
+          echo "HARNESS_DIR=$RUNNER_TEMP/kglite-core-harness" >> "$GITHUB_ENV"
 
-      - name: Install dependencies
-        run: pip install maturin pytest pytest-benchmark pandas
-
-      - name: Build and install extension (release)
-        run: maturin develop --release
-
-      - name: Run tracked benchmarks
-        # Match the harness shape from CLAUDE.md's performance protocol:
-        # 100 rounds, warmup on, 20 warmup iterations. The JSON-dump path
-        # is what compare_bench.py reads.
+      - name: Build candidate wheel before measurement
         run: |
-          pytest tests/benchmarks/test_bench_core.py -m benchmark \
+          .venv/bin/maturin build --release --out "$RUNNER_TEMP/candidate-wheel"
+          CANDIDATE_WHEEL=$(find "$RUNNER_TEMP/candidate-wheel" -name '*.whl' -print -quit)
+          CANDIDATE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kglite") | .version')
+          .venv/bin/python -m pip install "$CANDIDATE_WHEEL"
+          echo "CANDIDATE_WHEEL=$CANDIDATE_WHEEL" >> "$GITHUB_ENV"
+          echo "CANDIDATE_VERSION=$CANDIDATE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Copy the frozen harness outside the checkout
+        run: |
+          mkdir -p "$HARNESS_DIR"
+          cp tests/benchmarks/test_bench_core.py "$HARNESS_DIR/test_bench_core.py"
+
+      - name: Benchmark published 0.13.2 wheel
+        working-directory: ${{ runner.temp }}/kglite-core-harness
+        env:
+          PYTHONNOUSERSITE: "1"
+          PYTHONPATH: ""
+        run: |
+          "$REFERENCE_PY" -m pytest test_bench_core.py -m benchmark \
             --benchmark-min-rounds=100 \
             --benchmark-warmup=on --benchmark-warmup-iterations=20 \
-            --benchmark-json=.bench-current.json
+            --benchmark-json="$GITHUB_WORKSPACE/.bench-reference-0.13.2.json"
 
-      - name: Compare against baseline
-        # CI runs on Linux; the Linux baseline lives in current.linux.json.
-        # macOS local development uses current.json (the platform divergence
-        # is real — Linux GitHub runners run ~2-3x slower than Apple Silicon
-        # for these benchmarks, so a single baseline can't gate both).
+      - name: Thermal settle
+        run: sleep 30
+
+      - name: Benchmark candidate wheel
+        working-directory: ${{ runner.temp }}/kglite-core-harness
+        env:
+          PYTHONNOUSERSITE: "1"
+          PYTHONPATH: ""
+        run: |
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest test_bench_core.py -m benchmark \
+            --benchmark-min-rounds=100 \
+            --benchmark-warmup=on --benchmark-warmup-iterations=20 \
+            --benchmark-json="$GITHUB_WORKSPACE/.bench-candidate.json"
+
+      - name: Validate benchmark isolation and record provenance
+        run: |
+          .venv/bin/python scripts/benchmark_provenance.py \
+            --reference-python "$REFERENCE_PY" \
+            --candidate-python .venv/bin/python \
+            --reference-wheel "$REFERENCE_WHEEL" \
+            --candidate-wheel "$CANDIDATE_WHEEL" \
+            --reference-json .bench-reference-0.13.2.json \
+            --candidate-json .bench-candidate.json \
+            --expected-names tests/benchmarks/baselines/current.json \
+            --harness "$HARNESS_DIR/test_bench_core.py" \
+            --candidate-version "$CANDIDATE_VERSION" \
+            --output .bench-provenance.json
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-perf-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .bench-reference-0.13.2.json
+            .bench-candidate.json
+            .bench-provenance.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Compare candidate against live released-wheel reference
         run: |
           python scripts/compare_bench.py \
-            tests/benchmarks/baselines/current.linux.json .bench-current.json \
+            .bench-reference-0.13.2.json .bench-candidate.json \
             --metric min --threshold 20 --require-exact-set
 
   public-api:

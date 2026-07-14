@@ -413,7 +413,7 @@ fn _run_mcp_server(
 }
 
 // `gil_used = false` declares this module compatible with the free-threaded
-// (no-GIL, 3.13t) build — PyO3 0.28 makes this opt-in. The engine's shared
+// (no-GIL, 3.14t) build — PyO3 0.29 makes this opt-in. The engine's shared
 // types are already `Send + Sync` (the concurrent `Session` / `FrozenGraph`
 // path is built on that), and the read/write entry points release the GIL via
 // `EnterKg`, so the module doesn't rely on the GIL as an implicit lock.

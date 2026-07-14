@@ -67,10 +67,28 @@ def test_python_job_builds_the_measured_release_extension() -> None:
     assert "cargo build --release -p kglite-mcp-server -p kglite-bolt-server" in python_tests
 
 
-def test_linux_perf_gate_requires_a_complete_baseline_set() -> None:
+def test_free_threading_uses_the_pyo3_supported_python() -> None:
+    free_threading = _job_block("free-threading")
+    assert "python-version: '3.14t'" in free_threading
+    assert "python-version: '3.13t'" not in free_threading
+
+
+def test_linux_perf_gate_uses_isolated_released_wheel_reference() -> None:
     perf = _job_block("perf-regression")
-    assert "tests/benchmarks/baselines/current.linux.json" in perf
+    assert '"kglite==$REFERENCE_VERSION"' in perf
+    assert "--only-binary=:all:" in perf
+    assert "test_bench_core.py" in perf
+    assert "sleep 30" in perf
+    assert ".bench-reference-0.13.2.json .bench-candidate.json" in perf
     assert "--require-exact-set" in perf
+    assert "actions/upload-artifact@v7" in perf
+    assert "include-hidden-files: true" in perf
+    assert "scripts/benchmark_provenance.py" in perf
+    assert "tests/benchmarks/baselines/current.linux.json" not in perf
+
+
+def test_perf_regression_is_part_of_the_aggregate_gate() -> None:
+    assert "- perf-regression" in _job_block("ci-success")
 
 
 def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:

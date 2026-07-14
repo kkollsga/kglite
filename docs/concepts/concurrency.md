@@ -61,11 +61,11 @@ Existing test coverage at `tests/test_concurrency.py`:
   16 mutators) for 500 ms over a shared `Session`. Asserts zero panics
   and zero errors.
 
-## Free-threading (no-GIL / 3.13t) support
+## Free-threading (no-GIL / 3.14t) support
 
-The extension declares `gil_used = false` (PyO3 0.28), so it imports and
+The extension declares `gil_used = false` (PyO3 0.29), so it imports and
 runs under a free-threaded CPython build with the GIL genuinely disabled
-— validated in CI (the `free-threading` job builds against `3.13t` and
+— validated in CI (the `free-threading` job builds against `3.14t` and
 asserts `sys._is_gil_enabled()` is `False` under a threaded query load).
 Because the read path already releases the GIL and runs against a
 shared-immutable `Arc<DirGraph>`, true parallelism is the same model

@@ -1,0 +1,5 @@
+# Keep the Linux released-wheel and candidate benchmark environments identical.
+pandas==3.0.3
+pytest==9.0.3
+pytest-benchmark==5.2.3
+py-cpuinfo==9.0.0
