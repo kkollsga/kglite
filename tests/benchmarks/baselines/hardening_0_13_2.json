@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "source_distribution": "kglite==0.13.2 (PyPI wheel)",
+  "captured_at": "2026-07-14",
+  "workload_base_commit": "b3722db6912c45bc1dc42af41a607559ab175ac6",
+  "metric": "min",
+  "command_notes": "Python 3.12; min rounds 100; warmup enabled with 20 iterations; pedantic workloads retain their explicit round counts",
+  "machine_info": {
+    "system": "Darwin",
+    "release": "25.3.0",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "python": "CPython 3.12.9",
+    "pytest_benchmark": "5.2.3"
+  },
+  "benchmarks": [
+    {
+      "name": "test_bench_complex_expression_dispatch",
+      "stats": {"min": 0.004850666970014572},
+      "rounds": 205
+    },
+    {
+      "name": "test_bench_code_tree_build",
+      "stats": {"min": 0.0006776251830160618},
+      "rounds": 5
+    },
+    {
+      "name": "test_bench_ntriples_load_memory",
+      "stats": {"min": 0.025676208082586527},
+      "rounds": 7
+    },
+    {
+      "name": "test_bench_ntriples_load_mapped",
+      "stats": {"min": 0.04564866703003645},
+      "rounds": 5
+    },
+    {
+      "name": "test_bench_ntriples_load_disk",
+      "stats": {"min": 0.05783520778641105},
+      "rounds": 5
+    }
+  ]
+}

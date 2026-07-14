@@ -585,6 +585,55 @@ fn test_parameter_missing_error() {
 }
 
 #[test]
+fn expression_only_window_function_has_an_exact_boundary_error() {
+    let graph = DirGraph::new();
+    let no_params = HashMap::new();
+    let executor = CypherExecutor::with_params(&graph, &no_params, None);
+    let expr = Expression::WindowFunction {
+        name: "row_number".to_string(),
+        partition_by: Vec::new(),
+        order_by: Vec::new(),
+    };
+
+    assert_eq!(
+        executor.evaluate_expression(&expr, &ResultRow::new()),
+        Err("Window function must appear in RETURN/WITH clause".to_string())
+    );
+}
+
+#[test]
+fn count_subquery_expression_propagates_deadline_and_cancellation() {
+    static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    let graph = build_test_graph();
+    let no_params = HashMap::new();
+    let query = super::super::parser::parse_cypher("RETURN COUNT { (n) } AS c").unwrap();
+    let Clause::Return(return_clause) = &query.clauses[0] else {
+        panic!("expected RETURN clause");
+    };
+    let expr = &return_clause.items[0].expression;
+
+    let timed_out = CypherExecutor::with_params(
+        &graph,
+        &no_params,
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+    )
+    .evaluate_expression(expr, &ResultRow::new())
+    .unwrap_err();
+    assert_eq!(
+        timed_out,
+        "Query timed out during node scan. Hint: add an index on a predicate property \
+         (create_index), anchor with MATCH (n {id: ...}), or raise timeout_ms."
+    );
+
+    let cancelled = CypherExecutor::with_params(&graph, &no_params, None)
+        .with_cancel(Some(&CANCELLED))
+        .evaluate_expression(expr, &ResultRow::new())
+        .unwrap_err();
+    assert_eq!(cancelled, "Query cancelled");
+}
+
+#[test]
 fn test_expression_to_string_case() {
     let expr = Expression::Case {
         operand: None,

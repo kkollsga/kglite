@@ -26,6 +26,48 @@ pytestmark = pytest.mark.benchmark
 REGEX_NODES = 50_000
 NTRIPLES_ENTITIES = 10_000
 DISK_NODES = 10_000
+EXPRESSION_NODES = 20_000
+
+
+@pytest.fixture(scope="module")
+def expression_graph() -> KnowledgeGraph:
+    """A bounded graph for the expression-dispatcher release baseline."""
+    graph = KnowledgeGraph()
+    graph.add_nodes(
+        pd.DataFrame(
+            {
+                "id": list(range(EXPRESSION_NODES)),
+                "title": [f"Expression {i}" for i in range(EXPRESSION_NODES)],
+                "a": list(range(EXPRESSION_NODES)),
+                "b": [i % 17 for i in range(EXPRESSION_NODES)],
+                "name": [f"name-{i % 100}" for i in range(EXPRESSION_NODES)],
+            }
+        ),
+        "Expression",
+        "id",
+        "title",
+        columns=["a", "b", "name"],
+    )
+    return graph
+
+
+def test_bench_complex_expression_dispatch(benchmark, expression_graph):
+    """Nested CASE/list/map/string/arithmetic evaluation over 20k rows."""
+    query = """
+        MATCH (n:Expression)
+        RETURN CASE
+                 WHEN n.a % 2 = 0
+                 THEN ([n.a, n.b, n.a + n.b][2] * 2)
+                 ELSE {fallback: n.a - n.b}['fallback']
+               END AS score,
+               toUpper(n.name) + ':' + toString(n.b) AS label
+    """
+
+    def run():
+        rows = expression_graph.cypher(query).to_list()
+        assert len(rows) == EXPRESSION_NODES
+
+    benchmark(run)
 
 
 @pytest.fixture(scope="module")
@@ -89,6 +131,17 @@ def test_bench_ntriples_load_memory(benchmark, generated_ntriples):
         assert stats["triples_scanned"] == NTRIPLES_ENTITIES * 3
 
     benchmark.pedantic(load, rounds=7, iterations=1)
+
+
+def test_bench_ntriples_load_mapped(benchmark, generated_ntriples):
+    """Fresh mapped load through the direct column-builder path."""
+
+    def load():
+        graph = KnowledgeGraph(storage="mapped")
+        stats = graph.load_ntriples(str(generated_ntriples), languages=["en"], verbose=False)
+        assert stats["triples_scanned"] == NTRIPLES_ENTITIES * 3
+
+    benchmark.pedantic(load, rounds=5, iterations=1)
 
 
 def test_bench_ntriples_load_disk(benchmark, generated_ntriples, tmp_path):

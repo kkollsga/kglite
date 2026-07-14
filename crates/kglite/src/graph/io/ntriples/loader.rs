@@ -1548,6 +1548,7 @@ fn build_debug() -> bool {
 mod tests {
     use super::super::parser::{XSD_BOOLEAN, XSD_DECIMAL, XSD_DOUBLE};
     use super::*;
+    use crate::graph::storage::mode::{new_dir_graph_in_mode, StorageMode};
 
     #[test]
     fn test_parse_entity_triple() {
@@ -1626,6 +1627,9 @@ mod tests {
     }
 
     const VALID_TRIPLE: &[u8] = b"<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n";
+    const TWO_ENTITY_FIXTURE: &[u8] = b"<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n\
+<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P2> <http://www.wikidata.org/entity/Q2> .\n\
+<http://www.wikidata.org/entity/Q2> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n";
 
     fn test_config() -> NTriplesConfig {
         NTriplesConfig {
@@ -1645,6 +1649,317 @@ mod tests {
         match load_ntriples(graph, path.to_str().unwrap(), &test_config()) {
             Ok(_) => panic!("malformed N-Triples input loaded successfully"),
             Err(error) => error,
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingProgressSink {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        cancel_on: Option<&'static str>,
+    }
+
+    impl RecordingProgressSink {
+        fn event_name(event: &ProgressEvent<'_>) -> String {
+            match event {
+                ProgressEvent::Start { phase, .. } => format!("start:{phase}"),
+                ProgressEvent::Update { phase, .. } => format!("update:{phase}"),
+                ProgressEvent::Complete { phase, .. } => format!("complete:{phase}"),
+            }
+        }
+    }
+
+    impl ProgressSink for RecordingProgressSink {
+        fn emit(&self, event: ProgressEvent<'_>) -> Result<(), Cancelled> {
+            let name = Self::event_name(&event);
+            self.events.lock().unwrap().push(name.clone());
+            if self.cancel_on == Some(name.as_str()) {
+                Err(Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn graph_for_mode(mode: StorageMode, root: &Path) -> DirGraph {
+        let mut graph =
+            new_dir_graph_in_mode(mode, (mode == StorageMode::Disk).then_some(root)).unwrap();
+        graph.spill_dir = Some(root.join("spill"));
+        graph
+    }
+
+    fn column_boundary_fixture() -> String {
+        let mut lines = String::new();
+        for qid in 1..=40 {
+            lines.push_str(&format!(
+                "<http://www.wikidata.org/entity/Q{qid}> <http://www.wikidata.org/prop/direct/P31> <http://www.wikidata.org/entity/Q5> .\n"
+            ));
+            if qid <= 2 {
+                lines.push_str(&format!(
+                    "<http://www.wikidata.org/entity/Q{qid}> <http://www.wikidata.org/prop/direct/P10> \"dense-{qid}\" .\n"
+                ));
+            }
+            if qid == 1 {
+                lines.push_str(
+                    "<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P11> \"overflow\" .\n",
+                );
+                lines.push_str(
+                    "<http://www.wikidata.org/entity/Q1> <http://www.wikidata.org/prop/direct/P12> \"7\"^^<http://www.w3.org/2001/XMLSchema#decimal> .\n",
+                );
+            } else if qid == 2 {
+                lines.push_str(
+                    "<http://www.wikidata.org/entity/Q2> <http://www.wikidata.org/prop/direct/P12> \"seven\" .\n",
+                );
+            }
+        }
+        lines
+    }
+
+    fn boundary_config() -> NTriplesConfig {
+        let mut config = test_config();
+        config
+            .node_types
+            .insert("Q5".to_string(), "Human".to_string());
+        config
+            .predicate_labels
+            .insert("P10".to_string(), "dense".to_string());
+        config
+            .predicate_labels
+            .insert("P11".to_string(), "sparse".to_string());
+        config
+            .predicate_labels
+            .insert("P12".to_string(), "mixed".to_string());
+        config
+    }
+
+    fn assert_column_boundary_values(graph: &DirGraph) {
+        let dense = InternedKey::from_str("dense");
+        let sparse = InternedKey::from_str("sparse");
+        let mixed = InternedKey::from_str("mixed");
+        let q1 = graph
+            .lookup_by_id_normalized("Human", &Value::UniqueId(1))
+            .unwrap();
+        let q2 = graph
+            .lookup_by_id_normalized("Human", &Value::UniqueId(2))
+            .unwrap();
+        let q3 = graph
+            .lookup_by_id_normalized("Human", &Value::UniqueId(3))
+            .unwrap();
+
+        assert!(graph.column_stores.contains_key("Human"));
+        assert_eq!(
+            graph.graph.get_node_property(q1, dense),
+            Some(Value::String("dense-1".to_string()))
+        );
+        assert_eq!(graph.graph.get_node_property(q3, dense), None);
+        assert_eq!(
+            graph.graph.get_node_property(q1, sparse),
+            Some(Value::String("overflow".to_string()))
+        );
+        assert_eq!(
+            graph.graph.get_node_property(q1, mixed),
+            Some(Value::Int64(7))
+        );
+        // Current direct-build behavior: the first non-null value fixes the
+        // dense type and a later incompatible value is silently left null.
+        assert_eq!(graph.graph.get_node_property(q2, mixed), None);
+    }
+
+    fn assert_column_layout_is_valid(data_dir: &Path) {
+        let file_len = std::fs::metadata(data_dir.join("columns.bin"))
+            .unwrap()
+            .len() as usize;
+        let metadata: Vec<ColumnTypeMeta> =
+            serde_json::from_slice(&std::fs::read(data_dir.join("columns_meta.json")).unwrap())
+                .unwrap();
+        let human = metadata.iter().find(|m| m.type_name == "Human").unwrap();
+        let dense = InternedKey::from_str("dense").as_u64();
+        let sparse = InternedKey::from_str("sparse").as_u64();
+        let mixed = InternedKey::from_str("mixed").as_u64();
+        assert!(human.col_map.iter().any(|entry| entry.key_u64 == dense));
+        assert!(human.col_map.iter().any(|entry| entry.key_u64 == mixed));
+        assert!(!human.col_map.iter().any(|entry| entry.key_u64 == sparse));
+        assert!(human.has_overflow);
+        let mut regions = vec![
+            human.id_data,
+            human.id_nulls,
+            human.id_str_data,
+            human.id_str_offsets,
+            human.title_data,
+            human.title_offsets,
+            human.title_nulls,
+            human.overflow_offsets,
+            human.overflow_data,
+        ];
+        for col in &human.fixed_cols {
+            regions.extend([col.data, col.nulls]);
+        }
+        for col in &human.str_cols {
+            regions.extend([col.data, col.offsets, col.nulls]);
+        }
+        regions.retain(|region| region.len > 0);
+        regions.sort_by_key(|region| region.offset);
+        for region in &regions {
+            assert!(region.offset.checked_add(region.len).unwrap() <= file_len);
+        }
+        for pair in regions.windows(2) {
+            assert!(pair[0].offset + pair[0].len <= pair[1].offset);
+        }
+    }
+
+    #[test]
+    fn empty_input_is_valid_in_every_storage_mode() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+            let root = tempfile::tempdir().unwrap();
+            let mut graph = graph_for_mode(mode, root.path());
+            let stats = load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &test_config())
+                .unwrap();
+            assert_eq!(stats.entities_created, 0);
+            assert_eq!(stats.edges_created, 0);
+            assert_eq!(graph.graph.node_count(), 0);
+        }
+    }
+
+    #[test]
+    fn column_builder_boundaries_and_disk_reopen_are_characterized() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), column_boundary_fixture()).unwrap();
+
+        let mapped_root = tempfile::tempdir().unwrap();
+        let mut mapped = graph_for_mode(StorageMode::Mapped, mapped_root.path());
+        load_ntriples(
+            &mut mapped,
+            fixture.path().to_str().unwrap(),
+            &boundary_config(),
+        )
+        .unwrap();
+        assert_column_boundary_values(&mapped);
+        assert_column_layout_is_valid(mapped.spill_dir.as_ref().unwrap());
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let mut disk = graph_for_mode(StorageMode::Disk, disk_root.path());
+        load_ntriples(
+            &mut disk,
+            fixture.path().to_str().unwrap(),
+            &boundary_config(),
+        )
+        .unwrap();
+        assert_column_boundary_values(&disk);
+        assert_column_layout_is_valid(&disk_root.path().join("seg_000"));
+        drop(disk);
+
+        let reopened =
+            crate::graph::io::file::load_file(disk_root.path().to_str().unwrap()).unwrap();
+        assert_column_boundary_values(&reopened);
+    }
+
+    #[test]
+    fn progress_phase_order_is_stable_across_storage_modes() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), TWO_ENTITY_FIXTURE).unwrap();
+
+        for (mode, expected) in [
+            (
+                StorageMode::Memory,
+                vec![
+                    "start:phase1",
+                    "complete:phase1",
+                    "start:phase2",
+                    "complete:phase2",
+                ],
+            ),
+            (
+                StorageMode::Mapped,
+                vec![
+                    "start:phase1",
+                    "complete:phase1",
+                    "start:phase1b",
+                    "update:phase1b",
+                    "complete:phase1b",
+                    "start:phase2",
+                    "complete:phase2",
+                ],
+            ),
+            (
+                StorageMode::Disk,
+                vec![
+                    "start:phase1",
+                    "complete:phase1",
+                    "start:phase1b",
+                    "update:phase1b",
+                    "complete:phase1b",
+                    "start:phase2",
+                    "complete:phase2",
+                    "start:phase3",
+                    "complete:phase3",
+                    "start:finalising",
+                    "complete:finalising",
+                ],
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut graph = graph_for_mode(mode, root.path());
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut config = test_config();
+            config.progress = Some(Box::new(RecordingProgressSink {
+                events: Arc::clone(&events),
+                cancel_on: None,
+            }));
+
+            load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config).unwrap();
+            assert_eq!(*events.lock().unwrap(), expected, "mode={mode:?}");
+        }
+    }
+
+    #[test]
+    fn phase2_start_cancellation_retains_nodes_but_not_edges_or_completion_marker() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), TWO_ENTITY_FIXTURE).unwrap();
+
+        for mode in [StorageMode::Memory, StorageMode::Mapped, StorageMode::Disk] {
+            let root = tempfile::tempdir().unwrap();
+            let mut graph = graph_for_mode(mode, root.path());
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut config = test_config();
+            config.progress = Some(Box::new(RecordingProgressSink {
+                events,
+                cancel_on: Some("start:phase2"),
+            }));
+
+            let error = match load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config) {
+                Ok(_) => panic!("mode={mode:?} ignored phase2 cancellation"),
+                Err(error) => error,
+            };
+            assert_eq!(error, CANCELLED_TOKEN, "mode={mode:?}");
+            assert_eq!(graph.graph.node_count(), 2, "mode={mode:?}");
+            assert_eq!(graph.graph.edge_count(), 0, "mode={mode:?}");
+            if mode == StorageMode::Disk {
+                assert!(!root.path().join("metadata.json").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn phase1b_update_cancellation_is_currently_ignored() {
+        let fixture = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fixture.path(), TWO_ENTITY_FIXTURE).unwrap();
+
+        for mode in [StorageMode::Mapped, StorageMode::Disk] {
+            let root = tempfile::tempdir().unwrap();
+            let mut graph = graph_for_mode(mode, root.path());
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut config = test_config();
+            config.progress = Some(Box::new(RecordingProgressSink {
+                events: Arc::clone(&events),
+                cancel_on: Some("update:phase1b"),
+            }));
+
+            load_ntriples(&mut graph, fixture.path().to_str().unwrap(), &config).unwrap();
+            assert!(events.lock().unwrap().iter().any(|e| e == "update:phase1b"));
+            assert_eq!(graph.graph.node_count(), 2);
+            if mode == StorageMode::Disk {
+                assert!(root.path().join("metadata.json").exists());
+            }
         }
     }
 

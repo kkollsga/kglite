@@ -193,7 +193,10 @@ impl ColumnTypeMeta {
 /// Entities between Phase 1b progress callbacks. Tuned so the bar
 /// moves smoothly on Wikidata-scale (~120M entities) without firing
 /// a callback on every line.
+#[cfg(not(test))]
 const PHASE1B_TICK: u64 = 250_000;
+#[cfg(test)]
+const PHASE1B_TICK: u64 = 2;
 
 pub(super) fn build_columns_direct(
     graph: &mut DirGraph,
