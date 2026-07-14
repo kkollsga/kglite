@@ -97,13 +97,13 @@ def _time_call(fn, base_reps: int):
     return min(times), statistics.median(times), len(times), sanity
 
 
-def run_library(key: str, ds, base_reps: int) -> dict | None:
+def run_library(key: str, ds, base_reps: int, provenance: dict) -> dict | None:
     """Run one backend. For provisioned keys (neo4j-docker / neo4j-native),
     auto-start a server first and tear it down after — degrading to a clean
     skip when the prerequisite (Docker daemon / Java + neo4j CLI) is absent."""
     flavor = PROVISIONERS.get(key)
     if flavor is None:
-        return _run_library_inner(key, ds, base_reps)
+        return _run_library_inner(key, ds, base_reps, provenance)
 
     from .neo4j_server import provisioner_for
 
@@ -120,12 +120,12 @@ def run_library(key: str, ds, base_reps: int) -> dict | None:
         prov.stop()
         return None
     try:
-        return _run_library_inner(key, ds, base_reps)
+        return _run_library_inner(key, ds, base_reps, provenance)
     finally:
         prov.stop()
 
 
-def _run_library_inner(key: str, ds, base_reps: int) -> dict | None:
+def _run_library_inner(key: str, ds, base_reps: int, provenance: dict) -> dict | None:
     AdapterCls = _load_adapter(key)
     probe = AdapterCls()
     ok, reason = probe.available()
@@ -149,7 +149,7 @@ def _run_library_inner(key: str, ds, base_reps: int) -> dict | None:
         except Exception:
             pass
         groups_result["build"] = {"status": "err", "error": f"{type(e).__name__}: {e}"}
-        return _finish(key, inst, ds, groups_result, version="?")
+        return _finish(key, inst, ds, groups_result, version="?", provenance=provenance)
     build_times = [build_e]
     # one cheap rebuild for a tighter min, but never for slow/bolt builds
     if build_e < 3.0 and base_reps > 1 and "bolt" not in key:
@@ -204,10 +204,10 @@ def _run_library_inner(key: str, ds, base_reps: int) -> dict | None:
                 groups_result[gid] = {"status": "err", "error": f"{type(e).__name__}: {e}"}
                 print(f"      {gid:<20}    ERR {type(e).__name__}: {e}", flush=True)
 
-    return _finish(key, inst, ds, groups_result, version)
+    return _finish(key, inst, ds, groups_result, version, provenance)
 
 
-def _finish(key, inst, ds, groups_result, version):
+def _finish(key, inst, ds, groups_result, version, provenance):
     try:
         inst.teardown()
     except Exception:
@@ -215,12 +215,14 @@ def _finish(key, inst, ds, groups_result, version):
     return results_mod.make_run(
         library=key,
         version=version,
-        run_date=datetime.now().isoformat(timespec="seconds"),
+        run_date=datetime.now().astimezone().isoformat(timespec="seconds"),
         ds_scale=ds.scale,
         ds_signature=ds.signature(),
         n_nodes=ds.n_nodes,
         n_edges=ds.n_edges,
         groups=groups_result,
+        provenance=provenance,
+        dataset_seed=ds.seed,
     )
 
 
@@ -232,6 +234,12 @@ def main(argv=None):
         "--libs", default=",".join(DEFAULT_LIBS), help="comma-separated subset of: " + ",".join(DEFAULT_LIBS)
     )
     ap.add_argument("--repeats", type=int, default=5, help="base repeat count per group")
+    ap.add_argument(
+        "--origin",
+        choices=("manual", "ci"),
+        default="manual",
+        help="where this capture runs (recorded in provenance)",
+    )
     ap.add_argument(
         "--staged",
         default=None,
@@ -273,11 +281,12 @@ def main(argv=None):
         ds = dataset_mod.generate(args.scale, args.seed)
     print(f"  nodes={ds.n_nodes:,} edges={ds.n_edges:,} signature={ds.signature()}", flush=True)
 
+    provenance = results_mod.capture_context(origin=args.origin, base_repeats=args.repeats)
     new_runs = []
     for key in libs:
         print(f"\n=== {key} ===", flush=True)
         try:
-            run = run_library(key, ds, args.repeats)
+            run = run_library(key, ds, args.repeats, provenance)
         except Exception as e:
             print(f"  [{key}] adapter load failed: {type(e).__name__}: {e}")
             traceback.print_exc()

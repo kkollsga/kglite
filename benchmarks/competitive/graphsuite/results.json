@@ -1,5 +1,18 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "harness": {
+    "name": "graphsuite",
+    "version": 1
+  },
+  "historical_capture": {
+    "origin": "manual",
+    "dataset_seed": 1234,
+    "base_repeats": 5,
+    "source_commit": null,
+    "source_commit_note": "The v1 harness did not capture the source revision or dirty state.",
+    "timezone_note": "The v1 harness recorded local timestamps without a UTC offset.",
+    "results_first_committed_in": "2b61b350a3e7db99ff79cd43462ad8fe16d2cdca"
+  },
   "groups": [
     [
       "build",

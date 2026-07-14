@@ -243,6 +243,16 @@ def render(signature: str | None = None) -> str:
     out: list[str] = []
     out.append("# KGLite benchmarks")
     out.append("")
+    historical = data.get("historical_capture")
+    if historical and not any("provenance" in run for run in latest.values()):
+        kglite_version = latest.get(HEADLINE_KGLITE, {}).get("version", "unknown")
+        out.append(
+            f"> **Historical snapshot.** These measurements were captured with "
+            f"KGLite {kglite_version}; they are not measurements of the current "
+            "workspace version. The report remains useful as a reproducible "
+            "workload snapshot and is refreshed only by an explicit benchmark run."
+        )
+        out.append("")
     out.append(
         "Wall-to-wall time per topic (each topic sums several individual "
         "queries), lower is better, on one synthetic knowledge graph that "
@@ -476,6 +486,13 @@ def render(signature: str | None = None) -> str:
     out.append("```")
     out.append("")
     out.append(
+        "That command creates a new capture with the installed engine versions; "
+        "it does not relabel the historical numbers as current. Use "
+        "`python benchmarks/benchmark.py --report-only` to render the committed "
+        "metadata without executing benchmarks."
+    )
+    out.append("")
+    out.append(
         "Each engine runs the *same* queries (shared seed-derived parameters) "
         "and prints a result digest per topic, so the comparison reflects "
         "equal work. Versions used for this run:"
@@ -494,6 +511,38 @@ def render(signature: str | None = None) -> str:
         "wall-time over repeats; absolute times vary by hardware — the "
         "*ratios* are the point."
     )
+    out.append("")
+    out.append("### Capture provenance")
+    out.append("")
+    out.append(f"- Results schema: `{data.get('schema_version', 'unknown')}`")
+    harness = data.get("harness", {})
+    out.append(f"- Harness: `{harness.get('name', 'graphsuite')}` v{harness.get('version', 'unknown')}")
+    out.append(f"- Dataset signature: `{ds['signature']}`")
+    selected_dates = sorted(run["run_date"] for run in latest.values())
+    out.append(f"- Selected run timestamps: `{selected_dates[0]}` through `{selected_dates[-1]}`")
+
+    provenance = [run.get("provenance") for run in latest.values()]
+    recorded = [item for item in provenance if isinstance(item, dict)]
+    if recorded:
+        origins = sorted({item["origin"] for item in recorded})
+        commits = sorted({item["source_commit"] for item in recorded})
+        dirty = sorted({str(item["source_dirty"]).lower() for item in recorded})
+        repeats = sorted({str(item["base_repeats"]) for item in recorded})
+        out.append(f"- Capture origin: `{', '.join(origins)}`")
+        out.append(f"- Source commit: `{', '.join(commits)}` (dirty: `{', '.join(dirty)}`)")
+        out.append(f"- Base repeat policy: `{', '.join(repeats)}`")
+        out.append(f"- Dataset seed: `{ds.get('seed', 'recorded in signature')}`")
+    elif historical:
+        out.append(f"- Capture origin: `{historical['origin']}`")
+        out.append(f"- Dataset seed: `{historical['dataset_seed']}`")
+        out.append(f"- Base repeat policy: `{historical['base_repeats']}`")
+        out.append(
+            "- Source commit: `not recorded`; "
+            f"{historical['source_commit_note']} Results first entered history in "
+            f"`{historical['results_first_committed_in']}`."
+        )
+        out.append(f"- Timestamp limitation: {historical['timezone_note']}")
+    out.append("- Raw metadata authority: `benchmarks/competitive/graphsuite/results.json`.")
     out.append("")
     return "\n".join(out)
 

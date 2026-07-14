@@ -21,6 +21,13 @@ bytes, and (re)writes the top-level **[`BENCHMARKS.md`](../BENCHMARKS.md)** —
 the topic-summed comparison table you can link to. `--scale large` for a
 bigger graph; `--report-only` to just rebuild the table from saved results.
 
+`BENCHMARKS.md` is an explicitly dated historical snapshot, not a claim that
+every release was remeasured. Its provenance section is rendered from
+`results.json`; the report-drift test fails if prose and metadata diverge.
+Running the suite creates a new capture with the installed versions and records
+the repository commit/dirty state, timezone, manual-vs-CI origin, seed, repeat
+policy, harness version, platform, and Python implementation.
+
 ## Layout
 
 | Path | What |
