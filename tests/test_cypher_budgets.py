@@ -104,6 +104,33 @@ def test_max_rows_covers_correlated_subquery_join() -> None:
         graph.cypher(query, max_rows=3)
 
 
+def test_max_rows_covers_count_subquery_patterns_and_cross_joins() -> None:
+    graph = graph_with_types()
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
+        graph.cypher("RETURN COUNT { (n:T) } AS c", max_rows=1)
+    assert graph.cypher("RETURN COUNT { (n:T) } AS c", max_rows=2).to_list() == [{"c": 2}]
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
+        graph.cypher("RETURN COUNT { (:T), (:U) } AS c", max_rows=1)
+    assert graph.cypher("RETURN COUNT { (:T), (:U) } AS c", max_rows=2).to_list() == [{"c": 2}]
+
+
+def test_count_subquery_budget_error_rolls_back_earlier_mutation() -> None:
+    graph = graph_with_types()
+    query = """
+    MATCH (n:T {id: 'seed'})
+    SET n.flag = true
+    WITH n
+    RETURN COUNT { (m:T) } AS c
+    """
+
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
+        graph.cypher(query, max_rows=1)
+
+    assert graph.cypher("MATCH (n:T {id: 'seed'}) RETURN n.flag AS flag").to_list() == [{"flag": False}]
+
+
 def test_mutation_budget_error_rolls_back_earlier_clause() -> None:
     graph = graph_with_types()
     query = """

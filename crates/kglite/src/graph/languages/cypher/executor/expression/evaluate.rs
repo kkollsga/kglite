@@ -630,17 +630,20 @@ impl<'a> CypherExecutor<'a> {
                     };
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
-                        None,
+                        self.budget_probe_limit(None),
                         &row.node_bindings,
                         self.params,
                     )
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel);
                     let matches = executor.execute(pat)?;
+                    self.budget
+                        .check_work(matches.len(), "COUNT subquery pattern")?;
                     let count = matches
                         .iter()
                         .filter(|m| self.bindings_compatible(row, m))
                         .count();
+                    self.budget.check_rows(count, "COUNT subquery")?;
                     return Ok(Value::Int64(count as i64));
                 }
 
@@ -683,13 +686,15 @@ impl<'a> CypherExecutor<'a> {
                     };
                     let executor = PatternExecutor::with_bindings_and_params(
                         self.graph,
-                        None,
+                        self.budget_probe_limit(None),
                         &row.node_bindings,
                         self.params,
                     )
                     .set_deadline(self.deadline)
                     .set_cancel(self.cancel);
                     let matches = executor.execute(pat)?;
+                    self.budget
+                        .check_work(matches.len(), "COUNT subquery pattern")?;
 
                     let mut next_rows: Vec<ResultRow> = Vec::new();
                     let mut next_sets: Vec<Vec<petgraph::graph::EdgeIndex>> = Vec::new();
@@ -710,6 +715,11 @@ impl<'a> CypherExecutor<'a> {
                             }
                             let mut merged = current.clone();
                             self.merge_match_into_row(&mut merged, m);
+                            self.budget.reserve_rows(
+                                next_rows.len(),
+                                1,
+                                "COUNT subquery join",
+                            )?;
                             next_rows.push(merged);
                         }
                     }
@@ -720,21 +730,21 @@ impl<'a> CypherExecutor<'a> {
                 }
 
                 let count = if let Some(ref where_pred) = where_clause {
-                    combined_rows
-                        .iter()
-                        .filter(|r| {
-                            // Same NULL handling as EXISTS: a NULL inner
-                            // predicate means "row doesn't satisfy" — it
-                            // isn't counted.
-                            matches!(
-                                self.evaluate_predicate_tristate(where_pred, r),
-                                Ok(Some(true))
-                            )
-                        })
-                        .count()
+                    let mut count = 0usize;
+                    for inner_row in &combined_rows {
+                        // Same NULL handling as EXISTS: a NULL inner
+                        // predicate means "row doesn't satisfy" — it isn't
+                        // counted. Evaluation errors remain errors.
+                        if self.evaluate_predicate_tristate(where_pred, inner_row)? == Some(true) {
+                            self.budget.reserve_rows(count, 1, "COUNT subquery WHERE")?;
+                            count += 1;
+                        }
+                    }
+                    count
                 } else {
                     combined_rows.len()
                 };
+                self.budget.check_rows(count, "COUNT subquery")?;
                 Ok(Value::Int64(count as i64))
             }
         }

@@ -52,6 +52,18 @@ DIFFERENTIAL_QUERIES: list[tuple[str, str, str, dict | None]] = [
     ("simple_match_param", "small_graph", "MATCH (p:Person) WHERE p.age > $min RETURN p.name AS n", {"min": 30}),
     ("count_all_typed", "social_graph", "MATCH (p:Person) RETURN count(p) AS n", None),
     ("count_all_untyped", "social_graph", "MATCH (n) RETURN count(n) AS n", None),
+    (
+        "count_subquery_where_shape",
+        "social_graph",
+        "RETURN COUNT { (p:Person) WHERE p.age > 30 } AS n",
+        None,
+    ),
+    (
+        "count_subquery_cross_join_shape",
+        "small_graph",
+        "RETURN COUNT { (:Person), (:Person) } AS n",
+        None,
+    ),
     ("distinct_property", "social_graph", "MATCH (p:Person) RETURN DISTINCT p.city AS c", None),
     ("budget_unwind_shape", "small_graph", "UNWIND [1, 2, 3] AS x RETURN x", None),
     (

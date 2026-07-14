@@ -120,23 +120,17 @@ def test_binary_operands_fail_left_to_right(expression_graph: kglite.KnowledgeGr
     assert str(right_second.value).startswith("Cypher execution error: String index requires")
 
 
-def test_count_subquery_currently_bypasses_the_shared_budget(
+def test_count_subquery_honors_the_shared_budget(
     expression_graph: kglite.KnowledgeGraph,
 ) -> None:
-    """Characterize the defect fixed in Phase 14.
-
-    The nested scan produces two matches despite max_rows=1. Phase 14 changes
-    this assertion to expect a max_rows error.
-    """
-
-    assert expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_rows=1).to_list() == [{"value": 2}]
+    with pytest.raises(kglite.CypherExecutionError, match="max_rows"):
+        expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_rows=1).to_list()
+    assert expression_graph.cypher("RETURN COUNT { (n:Thing) } AS value", max_rows=2).to_list() == [{"value": 2}]
 
 
-def test_count_subquery_currently_swallows_where_errors(
+def test_count_subquery_propagates_where_errors(
     expression_graph: kglite.KnowledgeGraph,
 ) -> None:
-    """Characterize the defect fixed in Phase 14."""
-
-    assert expression_graph.cypher("RETURN COUNT { (n:Thing) WHERE n.age > $missing } AS value").to_list() == [
-        {"value": 0}
-    ]
+    with pytest.raises(kglite.CypherExecutionError) as caught:
+        expression_graph.cypher("RETURN COUNT { (n:Thing) WHERE n.age > $missing } AS value").to_list()
+    assert str(caught.value) == "Cypher execution error: Missing parameter: $missing"

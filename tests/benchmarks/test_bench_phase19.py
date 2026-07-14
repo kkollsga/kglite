@@ -70,6 +70,16 @@ def test_bench_complex_expression_dispatch(benchmark, expression_graph):
     benchmark(run)
 
 
+def test_bench_count_subquery(benchmark, expression_graph):
+    """Single-pattern COUNT-subquery scan over the expression fixture."""
+
+    def run():
+        rows = expression_graph.cypher("RETURN COUNT { (:Expression) } AS count").to_list()
+        assert rows == [{"count": EXPRESSION_NODES}]
+
+    benchmark(run)
+
+
 @pytest.fixture(scope="module")
 def regex_graph() -> KnowledgeGraph:
     graph = KnowledgeGraph()

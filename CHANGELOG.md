@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Package classifiers match the artifacts actually published.** Metadata no
   longer claims PyPy or OS-independent installation for the native extension;
   macOS, Linux, Windows, and CPython are declared explicitly.
+- **N-Triples cancellation reaches the column-build phase.** Mapped and disk
+  loads now stop at the next Phase 1b progress callback instead of continuing
+  through edge creation and, for disk graphs, publishing completion metadata.
+- **COUNT subqueries honor query budgets and preserve WHERE errors.** Pattern
+  expansion and joined rows count toward `max_rows`, while missing parameters
+  and other predicate failures are returned instead of being treated as
+  non-matching rows.
 
 ## [0.13.2] - 2026-07-13
 

@@ -20,6 +20,11 @@
       "rounds": 205
     },
     {
+      "name": "test_bench_count_subquery",
+      "stats": {"min": 0.00008658412843942642},
+      "rounds": 10422
+    },
+    {
       "name": "test_bench_code_tree_build",
       "stats": {"min": 0.0006776251830160618},
       "rounds": 5

@@ -14,6 +14,7 @@ BENCHMARK_SOURCES = [
 ]
 EXPECTED = {
     "test_bench_complex_expression_dispatch",
+    "test_bench_count_subquery",
     "test_bench_code_tree_build",
     "test_bench_ntriples_load_memory",
     "test_bench_ntriples_load_mapped",
