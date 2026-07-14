@@ -186,6 +186,140 @@ fn transaction_fork_inherits_lease_but_uses_private_workspace() {
 }
 
 #[test]
+fn independent_copy_uses_lazy_private_root_and_rebases_on_save() {
+    let source = TempDir::new().unwrap();
+    let destination = TempDir::new().unwrap();
+    let source_path = source.path().to_str().unwrap();
+    let destination_path = destination.path().to_str().unwrap();
+
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1, 2]);
+    writer.enable_disk_mode().unwrap();
+    writer.save_disk(source_path).unwrap();
+    let frozen_source = snapshot_files(source.path());
+
+    let mut copy = writer.independent_copy();
+    let private_root = match &copy.graph {
+        GraphBackend::Disk(disk) => disk.independent_root_path().unwrap().to_path_buf(),
+        _ => panic!("expected disk backend"),
+    };
+    assert!(!private_root.exists(), "copy roots must be lazy");
+
+    add_docs(&mut copy, &[3]);
+    assert!(private_root.exists());
+    assert_eq!(writer.graph.node_count(), 2);
+    assert_eq!(copy.graph.node_count(), 3);
+    assert_eq!(
+        snapshot_files(source.path()),
+        frozen_source,
+        "copy mutations must not write into the selected source generation"
+    );
+
+    copy.save_disk(destination_path).unwrap();
+    assert!(
+        !private_root.exists(),
+        "save-as must clean the scratch root"
+    );
+    match &copy.graph {
+        GraphBackend::Disk(disk) => assert!(disk.independent_root_path().is_none()),
+        _ => panic!("expected disk backend"),
+    }
+
+    let source_reader = crate::graph::io::file::load_file(source_path).unwrap();
+    let copy_reader = crate::graph::io::file::load_file(destination_path).unwrap();
+    assert_eq!(source_reader.graph.node_count(), 2);
+    assert_eq!(copy_reader.graph.node_count(), 3);
+    assert!(source_reader
+        .lookup_by_id_readonly("Doc", &Value::Int64(3))
+        .is_none());
+    assert!(copy_reader
+        .lookup_by_id_readonly("Doc", &Value::Int64(3))
+        .is_some());
+
+    // The source retains its own writer lease and can continue independently.
+    add_docs(&mut writer, &[4]);
+    writer.save_disk(source_path).unwrap();
+    let newest_source = crate::graph::io::file::load_file(source_path).unwrap();
+    let held_copy = crate::graph::io::file::load_file(destination_path).unwrap();
+    assert!(newest_source
+        .lookup_by_id_readonly("Doc", &Value::Int64(4))
+        .is_some());
+    assert!(held_copy
+        .lookup_by_id_readonly("Doc", &Value::Int64(4))
+        .is_none());
+}
+
+#[test]
+fn dropping_unsaved_independent_copy_cleans_private_root() {
+    let source = TempDir::new().unwrap();
+    let mut writer = DirGraph::new();
+    add_docs(&mut writer, &[1]);
+    writer.enable_disk_mode().unwrap();
+    writer.save_disk(source.path().to_str().unwrap()).unwrap();
+
+    let mut copy = writer.independent_copy();
+    let private_root = match &copy.graph {
+        GraphBackend::Disk(disk) => disk.independent_root_path().unwrap().to_path_buf(),
+        _ => panic!("expected disk backend"),
+    };
+    add_docs(&mut copy, &[2]);
+    assert!(private_root.exists());
+    drop(copy);
+    assert!(!private_root.exists());
+}
+
+#[test]
+fn independent_copy_retains_unsaved_parent_index_files() {
+    let source = TempDir::new().unwrap();
+    let destination = TempDir::new().unwrap();
+    let mut writer = DirGraph::new();
+    let frame = DataFrame::from_cypher_rows(
+        vec!["id".into(), "title".into(), "tag".into()],
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::String("one".into()),
+                Value::String("a".into()),
+            ],
+            vec![
+                Value::Int64(2),
+                Value::String("two".into()),
+                Value::String("b".into()),
+            ],
+        ],
+    )
+    .unwrap();
+    crate::graph::mutation::maintain::add_nodes(
+        &mut writer,
+        frame,
+        "Doc".to_string(),
+        "id".to_string(),
+        Some("title".to_string()),
+        None,
+    )
+    .unwrap();
+    writer.enable_disk_mode().unwrap();
+    writer.sync_disk_column_stores();
+    writer.save_disk(source.path().to_str().unwrap()).unwrap();
+    match &mut writer.graph {
+        GraphBackend::Disk(disk) => {
+            assert_eq!(disk.build_property_index("Doc", "tag").unwrap(), 2);
+        }
+        _ => panic!("expected disk backend"),
+    }
+
+    let mut copy = writer.independent_copy();
+    drop(writer);
+    copy.save_disk(destination.path().to_str().unwrap())
+        .unwrap();
+    let reloaded = crate::graph::io::file::load_file(destination.path().to_str().unwrap()).unwrap();
+    match &reloaded.graph {
+        GraphBackend::Disk(disk) => assert!(disk.has_property_index("Doc", "tag")),
+        _ => panic!("expected disk backend"),
+    }
+}
+
+#[test]
 fn generation_publish_keeps_held_reader_on_old_snapshot() {
     let target = TempDir::new().unwrap();
     let path = target.path().to_str().unwrap();

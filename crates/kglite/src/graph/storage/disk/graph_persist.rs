@@ -17,6 +17,7 @@ use super::csr::TOMBSTONE_EDGE;
 use super::edge_properties::{EdgePropertyStore, EdgePropertyStoreMeta};
 use super::graph::{enumerate_segment_dirs, segment_subdir, DiskGraph, CURRENT_CSR_LAYOUT_VERSION};
 use super::property_index;
+use super::segment_summary::SegmentManifest;
 
 /// Metadata stored alongside the binary files in the disk graph directory.
 #[derive(Serialize, Deserialize)]
@@ -149,7 +150,7 @@ impl DiskGraph {
         if self.appended_node_slots.is_empty() && self.node_slot_updates.is_empty() {
             return Ok(());
         }
-        let path = self.data_dir.join("node_slots.bin");
+        let path = self.active_write_dir().join("node_slots.bin");
         self.save_logical_node_slots(&path)?;
         // `save_logical_node_slots` only swaps in the merged file (and
         // clears the overlay) when node_slots was already mapped at
@@ -223,6 +224,11 @@ impl DiskGraph {
             })
             .collect();
         let mut sources = vec![self.data_dir.as_path()];
+        sources.extend(
+            self.parent_workspaces
+                .iter()
+                .map(|workspace| workspace.segment_dir()),
+        );
         if let Some(workspace) = &self.mutation_workspace {
             sources.push(workspace.segment_dir());
         }
@@ -1078,8 +1084,7 @@ impl DiskGraph {
         log_stage("dg.overflow_edges", t);
 
         let t = stage_timer();
-        let segment_manifest =
-            super::segment_summary::SegmentManifest::load_from(dir).unwrap_or_default();
+        let segment_manifest = SegmentManifest::load_from(dir).unwrap_or_default();
         log_stage("dg.segment_manifest", t);
 
         // PR1 phase 8: serde-defaulted to 0 on pre-phase-8 graphs.
@@ -1131,6 +1136,7 @@ impl DiskGraph {
                 writer_lock: None,
                 mutation_workspace: None,
                 parent_workspaces: Vec::new(),
+                independent_root: None,
                 metadata_dirty: false,
                 csr_sorted_by_type: meta.csr_sorted_by_type,
                 defer_csr: false,

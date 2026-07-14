@@ -194,6 +194,10 @@ pub struct DiskGraph {
     pub(crate) writer_lock: Option<Arc<super::generation::GraphDirectoryLock>>,
     pub(super) mutation_workspace: Option<Arc<super::generation::MutationWorkspace>>,
     pub(super) parent_workspaces: Vec<Arc<super::generation::MutationWorkspace>>,
+    /// Cleanup owner for an explicit copy's lazily-created private writer
+    /// root. Generic clones retain this lineage; only `independent_copy`
+    /// replaces it with a fresh root.
+    pub(super) independent_root: Option<Arc<super::generation::IndependentGraphRoot>>,
     // ── Dirty flag: flushed on Drop or next query ──
     pub(super) metadata_dirty: bool,
     // ── CSR edges are sorted by (node, connection_type) — enables binary search
@@ -2182,6 +2186,7 @@ impl Clone for DiskGraph {
             writer_lock: None,
             mutation_workspace: None,
             parent_workspaces: self.parent_workspaces.clone(),
+            independent_root: self.independent_root.clone(),
             metadata_dirty: self.metadata_dirty,
             csr_sorted_by_type: self.csr_sorted_by_type,
             defer_csr: self.defer_csr,
@@ -2212,6 +2217,34 @@ impl Clone for DiskGraph {
 }
 
 impl DiskGraph {
+    /// Detach a user-requested copy from the source graph's writer lease.
+    /// Immutable mapped arrays remain shared, while the first subsequent
+    /// write materialises a private root and workspace.
+    pub(crate) fn detach_for_independent_copy(&mut self, parent: &Self) {
+        self.parent_workspaces = parent.parent_workspaces.clone();
+        if let Some(workspace) = &parent.mutation_workspace {
+            self.parent_workspaces.push(Arc::clone(workspace));
+        }
+        let ancestors = parent.independent_root.iter().cloned().collect();
+        let root = Arc::new(super::generation::IndependentGraphRoot::new(ancestors));
+        self.logical_root = root.path().to_path_buf();
+        self.writer_lock = None;
+        self.mutation_workspace = None;
+        self.independent_root = Some(root);
+    }
+
+    pub(crate) fn prepare_independent_bulk_load(&mut self) -> std::io::Result<()> {
+        if self.independent_root.is_some() {
+            self.prepare_mutation()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn independent_root_path(&self) -> Option<&std::path::Path> {
+        self.independent_root.as_deref().map(|root| root.path())
+    }
+
     /// Adopt the retained writer lease from a serialized transaction parent.
     /// Generic clones intentionally remain independent and do not call this.
     pub(crate) fn adopt_writer_lineage(&mut self, parent: &Self) {
@@ -2221,6 +2254,7 @@ impl DiskGraph {
             self.parent_workspaces.push(Arc::clone(workspace));
         }
         self.mutation_workspace = None;
+        self.independent_root = parent.independent_root.clone();
     }
 }
 

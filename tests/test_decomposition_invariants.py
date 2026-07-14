@@ -12,11 +12,14 @@ is a regression unless explicitly intended and re-pinned.
 """
 
 import copy
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import kglite
+
+_SAMPLE_NT_PATH = Path(__file__).parent / "data" / "sample_wikidata.nt"
 
 
 def _people(n: int = 5) -> kglite.KnowledgeGraph:
@@ -79,6 +82,72 @@ def test_copy_has_no_save_target():
     c = _people(2).copy()
     with pytest.raises((ValueError, OSError)):
         c.save()
+
+
+def test_disk_copy_bulk_load_isolated_and_save_as_rebases(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "copy"
+    original = kglite.KnowledgeGraph(storage="disk", path=str(source))
+    original.save(str(source))
+
+    def persisted_bytes(root):
+        return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    before = persisted_bytes(source)
+    copied = original.copy()
+    stats = copied.load_ntriples(str(_SAMPLE_NT_PATH), languages=["en"])
+
+    assert stats["entities"] == 4
+    assert original.cypher("MATCH (n) RETURN count(n) AS c").to_list() == [{"c": 0}]
+    assert copied.cypher("MATCH (n) RETURN count(n) AS c").to_list() == [{"c": 4}]
+    assert persisted_bytes(source) == before
+
+    copied.save(str(destination))
+    assert persisted_bytes(source) == before
+    reloaded = kglite.open(str(destination))
+    assert reloaded.cypher("MATCH (n) RETURN count(n) AS c").to_list() == [{"c": 4}]
+
+
+@pytest.mark.parametrize("copy_first", [True, False])
+def test_disk_copy_and_loaded_source_mutate_in_either_order(tmp_path, copy_first):
+    source_path = tmp_path / "source"
+    copy_path = tmp_path / "copy"
+    seed = kglite.KnowledgeGraph(storage="disk", path=str(source_path))
+    seed.add_nodes(
+        pd.DataFrame({"id": [1, 2], "name": ["p1", "p2"]}),
+        "Person",
+        "id",
+        "name",
+    )
+    seed.save(str(source_path))
+    del seed
+
+    source = kglite.open(str(source_path))
+    copied = source.copy()
+
+    def source_mutation():
+        source.cypher("CREATE (:Person {id: 10, name: 'source'})")
+
+    def copy_mutation():
+        copied.cypher("CREATE (:Person {id: 20, name: 'copy'})")
+
+    operations = (
+        (copy_mutation, source_mutation)
+        if copy_first
+        else (
+            source_mutation,
+            copy_mutation,
+        )
+    )
+    for operation in operations:
+        operation()
+
+    assert _count(source) == 3
+    assert _count(copied) == 3
+    source.save()
+    copied.save(str(copy_path))
+    assert kglite.open(str(source_path)).cypher("MATCH (:Person {id: 20}) RETURN count(*) AS c").to_list() == [{"c": 0}]
+    assert kglite.open(str(copy_path)).cypher("MATCH (:Person {id: 10}) RETURN count(*) AS c").to_list() == [{"c": 0}]
 
 
 # ── Clone / derived views: preserve identity fields ──────────────────────────

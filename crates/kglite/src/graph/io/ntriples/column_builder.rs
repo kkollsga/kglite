@@ -1406,12 +1406,12 @@ pub(super) fn build_columns_direct(
 ) -> Result<(), BuildColumnsError> {
     let alloc_start = Instant::now();
 
-    // Get data_dir for placing the final columns.bin. Disk graphs have a
-    // persistent user-provided data_dir; mapped graphs reuse the same
-    // per-process spill-dir scheme as the property log and edge buffer.
-    // The resulting mmap'd `columns.bin` stays alive until graph drop.
+    // Get the directory for the final columns.bin. Fresh disk builders write
+    // in place so their directory is reloadable before save(); detached copies
+    // and generation writers use their active private workspace instead.
+    // Mapped graphs reuse the property-log spill-dir scheme.
     let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-        dg.data_dir.clone()
+        dg.active_write_dir().to_path_buf()
     } else {
         graph.spill_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("kglite_build_{}", std::process::id()))

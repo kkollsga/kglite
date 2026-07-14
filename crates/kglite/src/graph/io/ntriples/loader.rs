@@ -241,7 +241,7 @@ fn finalize_disk_graph(
     // Reload column stores by re-opening the mmap file + reading saved metadata.
     if graph.graph.is_disk() {
         let data_dir = if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-            dg.data_dir.clone()
+            dg.active_write_dir().to_path_buf()
         } else {
             std::path::PathBuf::new()
         };
@@ -334,7 +334,7 @@ fn finalize_disk_graph(
             }
         }
         if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-            let data_dir = dg.data_dir.clone();
+            let data_dir = dg.active_write_dir().to_path_buf();
             // DirGraph-level sidecars (interner, metadata, id/type
             // indexes) belong at the graph ROOT, next to
             // disk_graph_meta.json — that's where `load_disk_dir`
@@ -949,7 +949,7 @@ fn initialize_spills(graph: &DirGraph, config: &NTriplesConfig) -> Result<LoadSp
             }
             // Clean up stale pending_edges from previous killed builds
             if let crate::graph::schema::GraphBackend::Disk(ref dg) = graph.graph {
-                let stale = dg.data_dir.join("_pending_edges.bin");
+                let stale = dg.active_write_dir().join("_pending_edges.bin");
                 if stale.exists() {
                     let _ = std::fs::remove_file(&stale);
                 }
@@ -1324,6 +1324,22 @@ fn ingest_phase1(context: Phase1Ingest<'_>) -> Result<(), String> {
     Ok(())
 }
 
+/// Open the input and prepare only detached disk copies for private writes.
+/// Fresh disk builders intentionally finalise in place so their directory is
+/// reloadable without save(); a copy's base snapshot belongs to its source.
+fn open_reader_for_load(
+    graph: &mut DirGraph,
+    path: &Path,
+    display_path: &str,
+) -> Result<Box<dyn Read + Send>, String> {
+    let reader = open_ntriples_reader(path, display_path)?;
+    if let crate::graph::schema::GraphBackend::Disk(ref mut disk) = graph.graph {
+        disk.prepare_independent_bulk_load()
+            .map_err(|error| format!("Failed to prepare independent disk copy: {error}"))?;
+    }
+    Ok(reader)
+}
+
 pub fn load_ntriples(
     graph: &mut DirGraph,
     path: &str,
@@ -1332,7 +1348,7 @@ pub fn load_ntriples(
     let start = Instant::now();
     let path_obj = Path::new(path);
 
-    let reader = open_ntriples_reader(path_obj, path)?;
+    let reader = open_reader_for_load(graph, path_obj, path)?;
     // Reader thread: decompresses + reads lines via channel (hides I/O latency).
     //
     // Each batch packs lines into a single `LineBuffer` (contiguous bytes

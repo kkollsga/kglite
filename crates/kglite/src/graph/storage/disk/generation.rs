@@ -101,6 +101,40 @@ pub(crate) struct MutationWorkspace {
     segment: PathBuf,
 }
 
+/// Cleanup owner for the private writer root of an explicit graph copy.
+///
+/// Merely constructing this value does not touch the filesystem. The root is
+/// materialised only when [`GraphDirectoryLock`] or [`MutationWorkspace`]
+/// prepares the copy's first disk write. Ancestors keep earlier private roots
+/// alive when an already-detached graph is copied again.
+#[derive(Debug)]
+pub(crate) struct IndependentGraphRoot {
+    root: PathBuf,
+    _ancestors: Vec<std::sync::Arc<IndependentGraphRoot>>,
+}
+
+impl IndependentGraphRoot {
+    pub(crate) fn new(ancestors: Vec<std::sync::Arc<Self>>) -> Self {
+        let nonce = NEXT_WORKSPACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("kglite_copy_{}_{nonce:x}", std::process::id()));
+        Self {
+            root,
+            _ancestors: ancestors,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for IndependentGraphRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 impl MutationWorkspace {
     pub(crate) fn create(graph_root: &Path) -> io::Result<Self> {
         let nonce = NEXT_WORKSPACE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

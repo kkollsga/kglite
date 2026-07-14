@@ -53,6 +53,7 @@ impl DiskGraph {
         self.removed_property_indexes.clear();
         self.mutation_workspace = None;
         self.parent_workspaces.clear();
+        self.independent_root = None;
         self.mark_persisted();
         Ok(())
     }
@@ -104,6 +105,7 @@ impl DiskGraph {
             writer_lock: None,
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
+            independent_root: None,
             metadata_dirty: false,
             csr_sorted_by_type: false,
             // Phase 5: `defer_csr = false` by default so one-off Cypher
@@ -288,6 +290,7 @@ impl DiskGraph {
             writer_lock: None,
             mutation_workspace: None,
             parent_workspaces: Vec::new(),
+            independent_root: None,
             metadata_dirty: false,
             csr_sorted_by_type: false,
             // Phase 5: `defer_csr = false` by default so one-off Cypher

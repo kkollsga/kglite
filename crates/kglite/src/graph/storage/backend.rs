@@ -90,6 +90,15 @@ impl GraphBackend {
         }
     }
 
+    /// Give an explicit copy private writer authority while retaining any
+    /// mutation-workspace files needed to reproduce the parent's current
+    /// logical state.
+    pub(crate) fn detach_independent_copy(&mut self, parent: &Self) {
+        if let (GraphBackend::Disk(child), GraphBackend::Disk(parent)) = (self, parent) {
+            child.detach_for_independent_copy(parent);
+        }
+    }
+
     /// Hold the disk materialization arenas for one read-query lifetime.
     /// Heap/mapped backends do not materialize through shared arenas.
     pub(crate) fn begin_query(&self) -> Option<DiskQueryGuard<'_>> {

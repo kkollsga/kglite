@@ -31,6 +31,7 @@ impl DirGraph {
         copy.edge_type_counts_cache = copy_cache(&self.edge_type_counts_cache);
         copy.type_connectivity_cache = copy_cache(&self.type_connectivity_cache);
         copy.property_ndv_cache = copy_cache(&self.property_ndv_cache);
+        copy.graph.detach_independent_copy(&self.graph);
         copy.active_write_scope = None;
         copy.active_git_sha = None;
         copy.active_modified_by = None;
