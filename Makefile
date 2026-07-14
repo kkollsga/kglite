@@ -81,8 +81,9 @@ bench-check:
 			--benchmark-min-rounds=100 --benchmark-warmup=on --benchmark-warmup-iterations=20 \
 			--benchmark-json=.bench-current.json \
 		&& BASELINE=tests/benchmarks/baselines/current$$( [ "$$(uname)" = "Linux" ] && echo ".linux" )$$( [ "$$(uname)" = "Darwin" ] && echo "" ).json \
+		&& EXACT_SET=$$( [ "$$(uname)" = "Linux" ] && echo "--require-exact-set" || true ) \
 		&& python scripts/compare_bench.py $$BASELINE .bench-current.json \
-			--metric min --threshold 20
+			--metric min --threshold 20 $$EXACT_SET
 
 ## Refresh the three captured constants that drift across releases:
 ## the .kgl golden digest, the binary-size baseline, and the perf

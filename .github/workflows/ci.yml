@@ -434,7 +434,7 @@ jobs:
         run: |
           python scripts/compare_bench.py \
             tests/benchmarks/baselines/current.linux.json .bench-current.json \
-            --metric min --threshold 20
+            --metric min --threshold 20 --require-exact-set
 
   public-api:
     name: Public API gate

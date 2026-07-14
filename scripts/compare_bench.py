@@ -9,6 +9,7 @@ Usage:
     python scripts/compare_bench.py BASELINE CURRENT \\
         [--metric min|mean|median] \\
         [--threshold PERCENT] \\
+        [--require-exact-set] \\
         [--quiet]
 
 By default, `min` is the gating metric (per CLAUDE.md performance protocol:
@@ -23,6 +24,8 @@ it.
 A benchmark newly present in the current file is informational until the next
 baseline refresh. A benchmark present in the baseline but missing from the
 current run fails the gate: benchmark coverage must not disappear silently.
+Use `--require-exact-set` for CI baselines, where newly collected benchmarks
+must also have a committed baseline row before the gate can pass.
 """
 
 from __future__ import annotations
@@ -47,6 +50,11 @@ def main() -> int:
     p.add_argument("current", type=Path, help="Current run JSON.")
     p.add_argument("--metric", default="min", choices=["min", "mean", "median"], help="Gating metric (default: min).")
     p.add_argument("--threshold", type=float, default=20.0, help="Regression threshold in percent (default: 20.0).")
+    p.add_argument(
+        "--require-exact-set",
+        action="store_true",
+        help="Fail when the current run contains benchmarks absent from the baseline.",
+    )
     p.add_argument("--quiet", action="store_true", help="Suppress the summary table on pass.")
     args = p.parse_args()
 
@@ -69,7 +77,8 @@ def main() -> int:
         for name in only_baseline:
             print(f"  - {name}")
     if only_current:
-        print(f"info: {len(only_current)} new benchmark(s) in current run (no gate yet):")
+        level = "error" if args.require_exact_set else "info"
+        print(f"{level}: {len(only_current)} new benchmark(s) in current run (no baseline row):")
         for name in only_current:
             print(f"  + {name}")
 
@@ -97,7 +106,8 @@ def main() -> int:
             flag = " ←" if delta > args.threshold else ""
             print(f"  {name:<{name_w}}  {b:>14.3e}  {c:>14.3e}  {delta:>+7.1f}%{flag}")
 
-    if regressions or only_baseline:
+    unbaselined = only_current if args.require_exact_set else []
+    if regressions or only_baseline or unbaselined:
         if only_baseline:
             print(
                 f"\nFAIL: {len(only_baseline)} tracked benchmark(s) were not collected. "
@@ -105,6 +115,13 @@ def main() -> int:
             )
             for name in only_baseline:
                 print(f"  - {name}")
+        if unbaselined:
+            print(
+                f"\nFAIL: {len(unbaselined)} collected benchmark(s) have no baseline row. "
+                "Capture the complete benchmark set before enabling this gate."
+            )
+            for name in unbaselined:
+                print(f"  + {name}")
     if regressions:
         print(f"\nFAIL: {len(regressions)} benchmark(s) regressed > {args.threshold:+.1f}% on {args.metric}:")
         for name, _, _, delta in regressions:
@@ -114,7 +131,7 @@ def main() -> int:
             "refresh the baseline via `make refresh-release-constants` and explain in "
             "the CHANGELOG entry. Otherwise investigate before merging."
         )
-    if regressions or only_baseline:
+    if regressions or only_baseline or unbaselined:
         return 1
 
     print(f"\nOK: no regressions > {args.threshold:+.1f}% on {args.metric} across {len(common)} benchmark(s).")

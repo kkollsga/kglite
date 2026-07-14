@@ -67,6 +67,12 @@ def test_python_job_builds_the_measured_release_extension() -> None:
     assert "cargo build --release -p kglite-mcp-server -p kglite-bolt-server" in python_tests
 
 
+def test_linux_perf_gate_requires_a_complete_baseline_set() -> None:
+    perf = _job_block("perf-regression")
+    assert "tests/benchmarks/baselines/current.linux.json" in perf
+    assert "--require-exact-set" in perf
+
+
 def test_loom_and_unsafe_jobs_use_the_intended_commands() -> None:
     loom = _job_block("loom-session")
     assert 'RUSTFLAGS="--cfg loom" cargo test -p kglite --test loom_session' in loom

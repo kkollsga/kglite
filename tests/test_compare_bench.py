@@ -19,13 +19,18 @@ def _write_result(path: Path, names: list[str]) -> None:
     )
 
 
-def _compare(tmp_path: Path, baseline: list[str], current: list[str]) -> subprocess.CompletedProcess[str]:
+def _compare(
+    tmp_path: Path, baseline: list[str], current: list[str], *, require_exact_set: bool = False
+) -> subprocess.CompletedProcess[str]:
     baseline_path = tmp_path / "baseline.json"
     current_path = tmp_path / "current.json"
     _write_result(baseline_path, baseline)
     _write_result(current_path, current)
+    command = [sys.executable, str(SCRIPT), str(baseline_path), str(current_path), "--quiet"]
+    if require_exact_set:
+        command.append("--require-exact-set")
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(baseline_path), str(current_path), "--quiet"],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -43,3 +48,10 @@ def test_new_benchmark_waits_for_baseline_refresh(tmp_path: Path) -> None:
     result = _compare(tmp_path, ["kept"], ["kept", "new"])
     assert result.returncode == 0
     assert "new benchmark(s)" in result.stdout
+
+
+def test_exact_set_rejects_benchmark_without_baseline_row(tmp_path: Path) -> None:
+    result = _compare(tmp_path, ["kept"], ["kept", "new"], require_exact_set=True)
+    assert result.returncode == 1
+    assert "collected benchmark(s) have no baseline row" in result.stdout
+    assert "new" in result.stdout
