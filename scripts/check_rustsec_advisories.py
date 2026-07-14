@@ -86,7 +86,8 @@ def main() -> int:
         return 0
 
     # Treat yanked, unmaintained, and unsound notices as findings too. The
-    # scheduled workflow is report-only, but it should surface more than CVEs.
+    # required gate blocks unreviewed findings; the scheduled workflow remains
+    # report-first so dependency-update failures still produce useful output.
     command = ["cargo", "audit", "--deny", "warnings"]
     for advisory_id in ignored:
         command.extend(("--ignore", advisory_id))

@@ -2067,7 +2067,6 @@ dependencies = [
 name = "kglite-py"
 version = "0.13.2"
 dependencies = [
- "bincode",
  "chrono",
  "kglite",
  "kglite-mcp-server",

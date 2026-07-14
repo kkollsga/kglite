@@ -18,6 +18,7 @@ REQUIRED_JOBS = {
     "docs",
     "rust-core-coverage",
     "source-quality",
+    "rustsec-audit",
     "storage-parity",
     "disk-concurrency",
     "loom-session",
@@ -138,6 +139,15 @@ def test_source_quality_runs_once_in_its_own_required_job() -> None:
     python_tests = _job_block("python-tests")
     assert "check_source_quality.py" not in python_tests
     assert "check_lint_allowances.py" not in python_tests
+
+
+def test_rustsec_audit_is_required_and_pinned() -> None:
+    audit = _job_block("rustsec-audit")
+    assert "if: github.event_name == 'schedule'" not in audit
+    assert "cargo-audit@0.22.2" in audit
+    assert "python scripts/check_rustsec_advisories.py" in audit
+    assert "--policy-only" not in audit
+    assert "- rustsec-audit" in _job_block("ci-success")
 
 
 def test_every_ci_job_has_a_wall_clock_timeout() -> None:

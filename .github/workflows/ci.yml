@@ -133,6 +133,20 @@ jobs:
       - name: Validate temporary RustSec exception policy
         run: python scripts/check_rustsec_advisories.py --policy-only
 
+  rustsec-audit:
+    name: Required RustSec audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Deny unreviewed RustSec findings
+        run: python scripts/check_rustsec_advisories.py
+
   kglite-c:
     name: kglite-c (C ABI)
     runs-on: ubuntu-latest
@@ -736,6 +750,7 @@ jobs:
       - rust-checks
       - rust-core-coverage
       - source-quality
+      - rustsec-audit
       - kglite-c
       - python-lint
       - python-tests
