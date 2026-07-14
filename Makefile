@@ -93,15 +93,11 @@ refresh-release-constants:
 	$(ACTIVATE) && maturin develop --release --quiet
 	$(ACTIVATE) && python scripts/refresh_release_constants.py
 
-## Refresh the committed public-API baseline (tests/api-baselines/kglite.txt)
-## via cargo-public-api on the pinned nightly. Keep KGLITE_API_NIGHTLY in sync
-## with the public-api job in .github/workflows/ci.yml. One-time setup:
-##   rustup toolchain install $(KGLITE_API_NIGHTLY)
-##   cargo install cargo-public-api --locked --version 0.49.0
-KGLITE_API_NIGHTLY ?= nightly-2026-07-01
+## Refresh every feature-profiled Rust public-API baseline. Toolchain, tool
+## version, feature classifications, and output paths are single-sourced in
+## tests/api-baselines/rust-api-profiles.json.
 refresh-api-baseline:
-	RUSTUP_TOOLCHAIN=$(KGLITE_API_NIGHTLY) cargo public-api -p kglite -ss > tests/api-baselines/kglite.txt
-	@echo "refreshed tests/api-baselines/kglite.txt ($(KGLITE_API_NIGHTLY))"
+	python3 scripts/rust_api_profiles.py refresh
 
 docs-facts:
 	$(ACTIVATE) && python scripts/render_docs_facts.py

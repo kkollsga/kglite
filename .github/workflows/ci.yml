@@ -493,7 +493,7 @@ jobs:
             --metric min --threshold 20 --require-exact-set
 
   public-api:
-    name: Public API gate
+    name: Feature-complete public API gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Locks the public API surface of the `kglite` core crate (api:: + every
@@ -502,21 +502,17 @@ jobs:
     # (which gates *reaches past* the boundary, not the boundary's own shape)
     # and the kglite-c cbindgen header-drift gate.
     #
-    # cargo-public-api needs nightly rustdoc-JSON, so this job pins a nightly
-    # (the rest of CI is stable-only). Both pins below are the single source of
-    # truth for CI; bump them together with a `make refresh-api-baseline` at
-    # release time (see CLAUDE.md "Captured-constant refresh"). Keep
-    # KGLITE_API_NIGHTLY in sync with the Makefile + refresh_release_constants.py.
-    env:
-      KGLITE_API_NIGHTLY: nightly-2026-07-01
-      KGLITE_PUBLIC_API_VERSION: 0.49.0
+    # cargo-public-api needs nightly rustdoc-JSON. The toolchain, tool version,
+    # Cargo-feature classifications, profiles, and exact baseline paths all
+    # come from tests/api-baselines/rust-api-profiles.json.
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install pinned nightly
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.KGLITE_API_NIGHTLY }}
+      - name: Validate profile manifest and install pinned nightly
+        run: |
+          python scripts/rust_api_profiles.py validate
+          nightly="$(python scripts/rust_api_profiles.py value nightly)"
+          rustup toolchain install "$nightly" --profile minimal
 
       - name: Cache cargo registry & target
         uses: Swatinem/rust-cache@v2
@@ -525,19 +521,15 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install cargo-public-api (pinned)
-        run: cargo install cargo-public-api --locked --version ${{ env.KGLITE_PUBLIC_API_VERSION }}
-
-      - name: Diff public API against committed baseline
-        # Baseline is generated with default features (rdf off) and `-ss`
-        # (omit blanket + auto-trait impls) so it's platform-stable. A diff
-        # means the kglite public surface changed — refresh & commit if intended.
         run: |
-          RUSTUP_TOOLCHAIN=${{ env.KGLITE_API_NIGHTLY }} \
-            cargo public-api -p kglite -ss > /tmp/kglite_api_current.txt
-          if ! diff -u tests/api-baselines/kglite.txt /tmp/kglite_api_current.txt; then
-            echo "::error::Public API of kglite changed vs tests/api-baselines/kglite.txt. If intentional, run 'make refresh-api-baseline' and commit the result."
-            exit 1
-          fi
+          version="$(python scripts/rust_api_profiles.py value cargo_public_api_version)"
+          cargo install cargo-public-api --locked --version "$version"
+
+      - name: Diff every feature profile against its exact baseline
+        run: python scripts/rust_api_profiles.py check
+
+      - name: Check packaged implementation-only feature
+        run: bash scripts/check_packaged_features.sh
 
   storage-parity:
     name: Cross-storage parity

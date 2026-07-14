@@ -203,5 +203,5 @@ loom = "0.7"
 # missing (defaults are intentionally empty). `rustdoc-args` enables doc-cfg
 # annotations so feature-gated APIs are visually marked on the page.
 [package.metadata.docs.rs]
-features = ["sec", "sodir", "wikidata", "fastembed", "okf", "parallel-bz2"]
+features = ["sec", "sodir", "wikidata", "fastembed", "okf", "rdf", "parallel-bz2"]
 rustdoc-args = ["--cfg", "docsrs"]

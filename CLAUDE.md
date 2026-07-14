@@ -12,8 +12,9 @@ make lint                    # fmt + clippy + ruff format/check + mypy stubtest;
 
 `make lint` covers the local lint gate (api-chokepoint, clean-room +
 dependency-license checks, `cargo fmt --check`, clippy, ruff, stubtest).
-CI additionally gates things `make lint` doesn't run: the public-API diff
-(`cargo public-api` on a pinned nightly vs `tests/api-baselines/kglite.txt`),
+CI additionally gates things `make lint` doesn't run: the feature-profiled
+public-API diffs (`cargo public-api` using the pins and exact baselines in
+`tests/api-baselines/rust-api-profiles.json`),
 `kglite-c` clippy + tests with `--features sec,sodir,wikidata,rdf`, and the
 cbindgen header-drift check on `crates/kglite-c/include/kglite.h`. If you run
 pieces by hand, both `cargo fmt --check` and `ruff format --check` matter —

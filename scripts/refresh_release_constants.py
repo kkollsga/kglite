@@ -14,10 +14,10 @@ nobody updates them at release time:
   3. ``tests/benchmarks/baselines/<version>.json`` — pytest-benchmark
      JSON for the tracked core benchmarks. ``current.json`` is a copy.
 
-  4. ``tests/api-baselines/kglite.txt`` — the ``kglite`` public API
-     surface (cargo-public-api on the pinned nightly). Drifts whenever
-     the public API legitimately changes; the CI public-api gate fails
-     until it's refreshed and committed.
+  4. ``tests/api-baselines/rust/*.txt`` — the feature-profiled ``kglite``
+     public API surfaces (cargo-public-api on the manifest-pinned nightly).
+     They drift whenever a profile's public API legitimately changes; the CI
+     public-api gate fails until all exact baselines are refreshed and committed.
 
 This script reads ``Cargo.toml`` for the version, then refreshes all
 four. Idempotent: running it twice in a row produces no diff. Step 4
@@ -39,7 +39,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -51,10 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE4_TEST = REPO_ROOT / "tests" / "test_phase4_parity.py"
 PHASE5_TEST = REPO_ROOT / "tests" / "test_phase5_parity.py"
 BASELINES_DIR = REPO_ROOT / "tests" / "benchmarks" / "baselines"
-API_BASELINE = REPO_ROOT / "tests" / "api-baselines" / "kglite.txt"
-# Pinned nightly for cargo-public-api. Keep in sync with the public-api job in
-# .github/workflows/ci.yml and KGLITE_API_NIGHTLY in the Makefile.
-PUBLIC_API_NIGHTLY = "nightly-2026-07-01"
+API_PROFILE_MANIFEST = REPO_ROOT / "tests" / "api-baselines" / "rust-api-profiles.json"
 
 
 def read_version() -> str:
@@ -280,27 +276,25 @@ def refresh_perf_baseline(version: str) -> tuple[bool, str]:
 
 
 def refresh_api_baseline() -> tuple[bool, str]:
-    """Regenerate tests/api-baselines/kglite.txt via cargo-public-api on the
-    pinned nightly. Best-effort locally: no-ops with a clear message if the
-    tool or toolchain is absent (the gate still runs in CI either way)."""
+    """Regenerate every manifest-declared cargo-public-api baseline."""
     if shutil.which("cargo-public-api") is None:
-        return False, "cargo-public-api not installed — `cargo install cargo-public-api --locked` (skipped)"
-    before = API_BASELINE.read_text() if API_BASELINE.exists() else ""
+        return False, "cargo-public-api not installed — see rust-api-profiles.json for the pinned version (skipped)"
+    manifest = json.loads(API_PROFILE_MANIFEST.read_text())
+    paths = [REPO_ROOT / profile["baseline"] for profile in manifest["profiles"]]
+    before = {path: path.read_text() if path.exists() else None for path in paths}
     proc = subprocess.run(
-        ["cargo", "public-api", "-p", "kglite", "-ss"],
+        [sys.executable, "scripts/rust_api_profiles.py", "refresh"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        env={**os.environ, "RUSTUP_TOOLCHAIN": PUBLIC_API_NIGHTLY},
     )
     if proc.returncode != 0:
         last = proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "unknown error"
-        return False, f"cargo public-api failed (is {PUBLIC_API_NIGHTLY} installed?): {last}"
-    API_BASELINE.parent.mkdir(parents=True, exist_ok=True)
-    if proc.stdout == before:
-        return False, f"api baseline already current ({API_BASELINE.relative_to(REPO_ROOT)})"
-    API_BASELINE.write_text(proc.stdout)
-    return True, f"api baseline updated ({API_BASELINE.relative_to(REPO_ROOT)})"
+        return False, f"cargo public-api profile refresh failed: {last}"
+    after = {path: path.read_text() if path.exists() else None for path in paths}
+    if before == after:
+        return False, f"all {len(paths)} Rust API profile baselines already current"
+    return True, f"refreshed {len(paths)} Rust API profile baselines"
 
 
 def main() -> int:
@@ -336,7 +330,7 @@ def main() -> int:
         print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 
     # 4. public-api baseline
-    print("4. public-api baseline (cargo-public-api on pinned nightly)")
+    print("4. feature-profiled public-api baselines (cargo-public-api on manifest-pinned nightly)")
     changed, msg = refresh_api_baseline()
     print(f"   {'CHANGED' if changed else 'no-op '}: {msg}\n")
 

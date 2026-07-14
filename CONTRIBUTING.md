@@ -97,7 +97,8 @@ attributes cannot hide its current trigger sites.
 
 CI also checks surfaces not covered by `make lint`:
 
-- public Rust API against `tests/api-baselines/kglite.txt` on the pinned nightly;
+- feature-profiled public Rust API against the exact contracts declared in
+  `tests/api-baselines/rust-api-profiles.json`;
 - `kglite-c` all-feature clippy/tests and generated-header drift;
 - storage parity, disk concurrency, Loom, Miri, sanitizers, free-threading,
   binary size, and release performance contracts.
