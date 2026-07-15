@@ -13,6 +13,11 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+const PROPERTY_LOG_MAGIC: [u8; 4] = *b"KPRL";
+const PROPERTY_LOG_FORMAT_VERSION: u8 = 2;
+const LEGACY_PROPERTY_LOG_FORMAT_VERSION: u8 = 1;
+const MAX_PROPERTY_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
 // ─── LogEntry ───────────────────────────────────────────────────────────────
 
 /// A single entity's property data, as stored in the log.
@@ -27,7 +32,8 @@ pub struct LogEntry {
 // ─── PropertyLogWriter ──────────────────────────────────────────────────────
 
 /// Streaming writer: serializes entity properties to a zstd-compressed file.
-/// Each entry is: [node_type_u64][node_idx_u32][bincode(id, title, props)]
+/// The decompressed stream begins with `KPRL` + a format version; each entry
+/// is `[node_type_u64][node_idx_u32][len_u32][codec(id, title, props)]`.
 pub struct PropertyLogWriter {
     writer: zstd::Encoder<'static, BufWriter<File>>,
     path: PathBuf,
@@ -42,7 +48,9 @@ impl PropertyLogWriter {
             std::fs::create_dir_all(parent)?;
         }
         let file = BufWriter::with_capacity(1 << 20, File::create(path)?); // 1 MB buffer
-        let writer = zstd::Encoder::new(file, compression_level).map_err(io::Error::other)?;
+        let mut writer = zstd::Encoder::new(file, compression_level).map_err(io::Error::other)?;
+        writer.write_all(&PROPERTY_LOG_MAGIC)?;
+        writer.write_all(&[PROPERTY_LOG_FORMAT_VERSION])?;
         Ok(PropertyLogWriter {
             writer,
             path: path.to_path_buf(),
@@ -64,14 +72,18 @@ impl PropertyLogWriter {
         self.writer
             .write_all(&(node_idx.index() as u32).to_le_bytes())?;
 
-        // Serialize (id, title, properties) with bincode
+        // Serialize (id, title, properties) with the header-selected codec.
         // Convert InternedKey to u64 for serialization since InternedKey doesn't impl Serialize
         let props_ser: Vec<(u64, Value)> = properties
             .iter()
             .map(|(k, v)| (k.as_u64(), v.clone()))
             .collect();
-        let payload =
-            crate::serde_codec::encode(&(id, title, &props_ser)).map_err(io::Error::other)?;
+        let payload = crate::serde_codec::encode_versioned(
+            crate::serde_codec::CURRENT_CODEC,
+            &(id, title, &props_ser),
+            MAX_PROPERTY_PAYLOAD_BYTES,
+        )
+        .map_err(io::Error::other)?;
 
         // Write payload length + payload
         self.writer
@@ -100,6 +112,7 @@ impl PropertyLogWriter {
 /// Sequential reader: replays the property log to build ColumnStores.
 pub struct PropertyLogReader {
     reader: zstd::Decoder<'static, BufReader<File>>,
+    codec: crate::serde_codec::CodecVersion,
 }
 
 impl PropertyLogReader {
@@ -107,7 +120,34 @@ impl PropertyLogReader {
         let file = File::open(path)?;
         let mut reader = zstd::Decoder::new(file).map_err(io::Error::other)?;
         reader.window_log_max(26)?; // 64 MB window for decompression
-        Ok(PropertyLogReader { reader })
+        let mut header = [0u8; 5];
+        reader.read_exact(&mut header).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unversioned or truncated property log; rebuild the N-Triples graph",
+                )
+            } else {
+                error
+            }
+        })?;
+        if header[..4] != PROPERTY_LOG_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unversioned property log; rebuild the N-Triples graph",
+            ));
+        }
+        let codec = match header[4] {
+            LEGACY_PROPERTY_LOG_FORMAT_VERSION => crate::serde_codec::CodecVersion::BincodeV1,
+            PROPERTY_LOG_FORMAT_VERSION => crate::serde_codec::CodecVersion::PostcardV1,
+            version => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported property-log format version {version}"),
+                ));
+            }
+        };
+        Ok(PropertyLogReader { reader, codec })
     }
 }
 
@@ -117,10 +157,14 @@ impl Iterator for PropertyLogReader {
     fn next(&mut self) -> Option<Self::Item> {
         // Read header: node_type (u64) + node_idx (u32)
         let mut header = [0u8; 12];
-        match self.reader.read_exact(&mut header) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return None,
-            Err(e) => return Some(Err(e)),
+        match self.reader.read(&mut header[..1]) {
+            Ok(0) => return None,
+            Ok(1) => {}
+            Ok(_) => unreachable!(),
+            Err(error) => return Some(Err(error)),
+        }
+        if let Err(error) = self.reader.read_exact(&mut header[1..]) {
+            return Some(Err(error));
         }
         let node_type = InternedKey::from_u64(u64::from_le_bytes(header[0..8].try_into().unwrap()));
         let node_idx =
@@ -132,6 +176,15 @@ impl Iterator for PropertyLogReader {
             return Some(Err(e));
         }
         let payload_len = u32::from_le_bytes(len_buf) as usize;
+        if payload_len as u64 > MAX_PROPERTY_PAYLOAD_BYTES {
+            return Some(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "property-log payload is {payload_len} bytes; limit is \
+                     {MAX_PROPERTY_PAYLOAD_BYTES}"
+                ),
+            )));
+        }
 
         let mut payload = vec![0u8; payload_len];
         if let Err(e) = self.reader.read_exact(&mut payload) {
@@ -140,7 +193,10 @@ impl Iterator for PropertyLogReader {
 
         // Deserialize
         type Payload = (Value, Value, Vec<(u64, Value)>);
-        let result: Result<Payload, _> = crate::serde_codec::decode(&payload);
+        let limits =
+            crate::serde_codec::DecodeLimits::new(MAX_PROPERTY_PAYLOAD_BYTES, payload_len as u64);
+        let result: Result<Payload, _> =
+            crate::serde_codec::decode_exact_with(self.codec, &payload, payload_len as u64, limits);
         match result {
             Ok((id, title, props_raw)) => {
                 let properties: Vec<(InternedKey, Value)> = props_raw
@@ -163,11 +219,105 @@ impl Iterator for PropertyLogReader {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
+    fn write_fixture(
+        path: &Path,
+        version: u8,
+        codec: crate::serde_codec::CodecVersion,
+        trailing_payload_byte: bool,
+    ) {
+        let payload_value = (
+            Value::UniqueId(7),
+            Value::String("legacy".into()),
+            vec![(11u64, Value::List(vec![Value::Int64(1)]))],
+        );
+        let mut payload =
+            crate::serde_codec::encode_versioned(codec, &payload_value, MAX_PROPERTY_PAYLOAD_BYTES)
+                .unwrap();
+        if trailing_payload_byte {
+            payload.push(0);
+        }
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&PROPERTY_LOG_MAGIC);
+        raw.push(version);
+        raw.extend_from_slice(&42u64.to_le_bytes());
+        raw.extend_from_slice(&3u32.to_le_bytes());
+        raw.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&payload);
+        let compressed = zstd::stream::encode_all(std::io::Cursor::new(raw), 1).unwrap();
+        std::fs::write(path, compressed).unwrap();
+    }
+
     #[test]
+    fn header_selects_legacy_bincode_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.log.zst");
+        write_fixture(
+            &path,
+            LEGACY_PROPERTY_LOG_FORMAT_VERSION,
+            crate::serde_codec::CodecVersion::BincodeV1,
+            false,
+        );
+
+        let entry = PropertyLogReader::open(&path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.node_type, InternedKey::from_u64(42));
+        assert_eq!(entry.node_idx, NodeIndex::new(3));
+        assert_eq!(entry.id, Value::UniqueId(7));
+        assert_eq!(entry.properties[0].1, Value::List(vec![Value::Int64(1)]));
+    }
+
+    #[test]
+    fn unversioned_and_unknown_logs_fail_without_codec_sniffing() {
+        let dir = tempfile::tempdir().unwrap();
+        let unversioned = dir.path().join("unversioned.log.zst");
+        let compressed =
+            zstd::stream::encode_all(std::io::Cursor::new(b"legacy bytes"), 1).unwrap();
+        std::fs::write(&unversioned, compressed).unwrap();
+        let error = match PropertyLogReader::open(&unversioned) {
+            Ok(_) => panic!("unversioned property log was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unversioned"));
+
+        let unknown = dir.path().join("unknown.log.zst");
+        let compressed = zstd::stream::encode_all(
+            std::io::Cursor::new([PROPERTY_LOG_MAGIC.as_slice(), &[99]].concat()),
+            1,
+        )
+        .unwrap();
+        std::fs::write(&unknown, compressed).unwrap();
+        let error = match PropertyLogReader::open(&unknown) {
+            Ok(_) => panic!("unknown property-log version was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("version 99"));
+    }
+
+    #[test]
+    fn current_payload_rejects_trailing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.log.zst");
+        write_fixture(
+            &path,
+            PROPERTY_LOG_FORMAT_VERSION,
+            crate::serde_codec::CodecVersion::PostcardV1,
+            true,
+        );
+        let error = match PropertyLogReader::open(&path).unwrap().next().unwrap() {
+            Ok(_) => panic!("payload with trailing bytes was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("trailing"));
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
     fn round_trip_basic() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("test.log.zst");
@@ -289,7 +439,7 @@ mod tests {
         let nt = InternedKey::from_u64(1);
         let props: Vec<(InternedKey, Value)> = vec![
             (InternedKey::from_u64(1), Value::Int64(-42)),
-            (InternedKey::from_u64(2), Value::Float64(3.14)),
+            (InternedKey::from_u64(2), Value::Float64(3.25)),
             (InternedKey::from_u64(3), Value::Boolean(true)),
             (InternedKey::from_u64(4), Value::String("test".into())),
             (InternedKey::from_u64(5), Value::UniqueId(999)),

@@ -204,8 +204,8 @@ pub(crate) fn decode_exact_with<'de, T: Deserialize<'de>>(
     decode_versioned_exact(envelope)
 }
 
-/// Active encoding. Until the writer migration phase this deliberately emits
-/// the frozen legacy bytes.
+/// Test-only compatibility encoder for constructing frozen legacy fixtures.
+#[cfg(test)]
 pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
     bincode_v1::encode(value)
 }

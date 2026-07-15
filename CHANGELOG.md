@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy readers. Rebuildable vector-index caches carry their own codec-aware
   format version. New disk snapshots also version their Serde-backed sidecars,
   mixed-value columns, edge-property slots, overflow records, and general ID
-  indexes; existing bincode generations remain readable.
+  indexes; existing bincode generations remain readable. Durable WALs are
+  upgraded atomically before append, and new transient N-Triples property logs
+  and nested list payloads use explicit Postcard format versions.
 
 ## [0.13.3] - 2026-07-14
 

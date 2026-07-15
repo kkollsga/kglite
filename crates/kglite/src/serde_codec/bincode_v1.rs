@@ -48,6 +48,7 @@ fn check_size(bytes: &[u8], limit: u64) -> Result<(), CodecError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
     bincode::serialize(value).map_err(encode_error)
 }
