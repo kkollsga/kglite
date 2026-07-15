@@ -367,10 +367,10 @@ pub mod api {
         pub use crate::graph::wal::{recover, wal_path, Wal, WalFrame};
     }
 
-    /// Code-tree — build a queryable graph from source files, map a path to
-    /// its language, and resolve / locate code entities. The code-graph
-    /// surface (parser + the `Type::method` entity helpers + source-location
-    /// types). Consolidated in the api-organization pass.
+    /// Code-tree — build a queryable graph from source files and map a path
+    /// to its language (parser + builder + multi-rev merge). Build-side
+    /// only; the read-side entity helpers live in [`code_entities`] and work
+    /// on any code-schema graph regardless of which builder produced it.
     pub mod code_tree {
         pub use crate::code_tree::builder::run_with_options as build_code_tree;
         pub use crate::code_tree::parsers::language_for_path;
@@ -379,6 +379,14 @@ pub mod api {
         /// `code_tree.build(revs=[...])` and the MCP server's rev-aware
         /// activation hook are its two bindings.
         pub use crate::code_tree::rev::{archive_and_build, build_code_tree_revs, dedup_revs};
+    }
+
+    /// Code-entity read surface — resolve / locate / contextualize entities
+    /// (`Type::method` helpers + source-location types) on any graph with
+    /// the code schema (Function/Class/… nodes carrying `file_path`/`line`).
+    /// Defined on the graph handle, independent of the builder: graphs built
+    /// by an external builder (codingest) get the same surface.
+    pub mod code_entities {
         pub use crate::graph::handle::{
             code_entity_context, find_code_entities, resolve_code_entity, source_location,
             CodeContextLookup, CodeEntityContext, CodeEntityMatch, CODE_TYPES,

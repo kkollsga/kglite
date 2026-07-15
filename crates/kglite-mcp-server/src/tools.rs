@@ -693,7 +693,7 @@ impl GraphState {
             return Err(NO_GRAPH.to_string());
         };
         match active.kg.source_location(qualified_name, node_type) {
-            kglite::api::code_tree::SourceLookup::Found(loc) => {
+            kglite::api::code_entities::SourceLookup::Found(loc) => {
                 let file_path = loc.file_path.ok_or_else(|| {
                     format!("graph.source({qualified_name:?}) returned no file_path")
                 })?;
@@ -705,11 +705,11 @@ impl GraphState {
                     end_line,
                 })
             }
-            kglite::api::code_tree::SourceLookup::Ambiguous(matches) => Err(format!(
+            kglite::api::code_entities::SourceLookup::Ambiguous(matches) => Err(format!(
                 "ambiguous qualified_name {qualified_name:?}; matches: {matches:?}. \
                  Pass `node_type` to narrow."
             )),
-            kglite::api::code_tree::SourceLookup::NotFound => Err(format!(
+            kglite::api::code_entities::SourceLookup::NotFound => Err(format!(
                 "graph.source({qualified_name:?}) returned no match. \
                  Try passing `node_type` or using a different qualified name."
             )),

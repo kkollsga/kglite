@@ -90,7 +90,7 @@ pub mod api {
     pub use crate::graph::embedder::fastembed::FastEmbedAdapter;
     pub use crate::graph::embedder::Embedder;
     pub use crate::graph::KnowledgeGraph;
-    pub use kglite_core::api::code_tree::{SourceLocation, SourceLookup};
+    pub use kglite_core::api::code_entities::{SourceLocation, SourceLookup};
     pub use kglite_core::api::introspection::compute_description;
     pub use kglite_core::api::introspection::compute_schema;
     pub use kglite_core::api::introspection::SchemaOverview;

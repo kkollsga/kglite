@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the plain `run`) keep today's in-tree builder — no behavior change for
   existing callers.
 
+### Changed
+
+- **Rust API: code-entity read helpers moved to `kglite::api::code_entities`.**
+  `resolve_code_entity`, `find_code_entities`, `source_location`,
+  `code_entity_context`, `SourceLookup`/`SourceLocation`, and the
+  `CodeEntity*` types now live in their own facade module — they operate on
+  any code-schema graph regardless of builder and are no longer coupled to
+  the parser surface in `kglite::api::code_tree` (which keeps the build-side:
+  `build_code_tree`, `build_code_tree_revs`, `language_for_path`, …). Rust
+  consumers update their `use` paths; the Python API is unchanged.
+
 ### Fixed
 
 - **Deterministic code-tree edge counts on minified assets.** Repos whose

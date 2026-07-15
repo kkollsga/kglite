@@ -1237,11 +1237,11 @@ impl KnowledgeGraph {
         match_type: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let match_type = match match_type.unwrap_or("exact") {
-            "contains" => kglite_core::api::code_tree::CodeEntityMatch::Contains,
-            "starts_with" => kglite_core::api::code_tree::CodeEntityMatch::StartsWith,
-            _ => kglite_core::api::code_tree::CodeEntityMatch::Exact,
+            "contains" => kglite_core::api::code_entities::CodeEntityMatch::Contains,
+            "starts_with" => kglite_core::api::code_entities::CodeEntityMatch::StartsWith,
+            _ => kglite_core::api::code_entities::CodeEntityMatch::Exact,
         };
-        let results = kglite_core::api::code_tree::find_code_entities(
+        let results = kglite_core::api::code_entities::find_code_entities(
             &self.inner,
             name,
             node_type,
@@ -1327,7 +1327,7 @@ impl KnowledgeGraph {
         node_type: Option<&str>,
         hops: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let lookup = kglite_core::api::code_tree::code_entity_context(
+        let lookup = kglite_core::api::code_entities::code_entity_context(
             &self.inner,
             name,
             node_type,
@@ -1336,11 +1336,11 @@ impl KnowledgeGraph {
         Python::attach(|py| {
             let result = PyDict::new(py);
             let context = match lookup {
-                kglite_core::api::code_tree::CodeContextLookup::NotFound => {
+                kglite_core::api::code_entities::CodeContextLookup::NotFound => {
                     result.set_item("error", format!("Node not found: {}", name))?;
                     return Ok(result.into_any().unbind());
                 }
-                kglite_core::api::code_tree::CodeContextLookup::Ambiguous(matches) => {
+                kglite_core::api::code_entities::CodeContextLookup::Ambiguous(matches) => {
                     result.set_item("ambiguous", true)?;
                     let match_list = PyList::empty(py);
                     for info in &matches {
@@ -1349,7 +1349,7 @@ impl KnowledgeGraph {
                     result.set_item("matches", match_list)?;
                     return Ok(result.into_any().unbind());
                 }
-                kglite_core::api::code_tree::CodeContextLookup::Found(context) => context,
+                kglite_core::api::code_entities::CodeContextLookup::Found(context) => context,
             };
             result.set_item("node", py_out::nodeinfo_to_pydict(py, &context.node)?)?;
             if let Some(path) = &context.defined_in {

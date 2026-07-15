@@ -267,63 +267,64 @@ pub fn kglite::api::blueprint::TimeseriesSpec::deserialize<__D>(__deserializer: 
 pub fn kglite::api::blueprint::build(graph: &mut kglite::api::DirGraph, blueprint: kglite::api::blueprint::Blueprint, blueprint_dir: &std::path::Path) -> core::result::Result<kglite::api::blueprint::BuildReport, alloc::string::String>
 pub fn kglite::api::blueprint::from_records(graph: &mut kglite::api::DirGraph, spec: &serde_json::value::Value) -> core::result::Result<kglite::api::blueprint::RecordsReport, alloc::string::String>
 pub fn kglite::api::blueprint::load_blueprint_file(path: &std::path::Path) -> core::result::Result<kglite::api::blueprint::Blueprint, alloc::string::String>
+pub mod kglite::api::code_entities
+pub enum kglite::api::code_entities::CodeContextLookup
+pub kglite::api::code_entities::CodeContextLookup::Ambiguous(alloc::vec::Vec<kglite::api::NodeInfo>)
+pub kglite::api::code_entities::CodeContextLookup::Found(alloc::boxed::Box<kglite::api::code_entities::CodeEntityContext>)
+pub kglite::api::code_entities::CodeContextLookup::NotFound
+impl core::fmt::Debug for kglite::api::code_entities::CodeContextLookup
+pub fn kglite::api::code_entities::CodeContextLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum kglite::api::code_entities::CodeEntityMatch
+pub kglite::api::code_entities::CodeEntityMatch::Contains
+pub kglite::api::code_entities::CodeEntityMatch::Exact
+pub kglite::api::code_entities::CodeEntityMatch::StartsWith
+impl core::clone::Clone for kglite::api::code_entities::CodeEntityMatch
+pub fn kglite::api::code_entities::CodeEntityMatch::clone(&self) -> kglite::api::code_entities::CodeEntityMatch
+impl core::cmp::Eq for kglite::api::code_entities::CodeEntityMatch
+impl core::cmp::PartialEq for kglite::api::code_entities::CodeEntityMatch
+pub fn kglite::api::code_entities::CodeEntityMatch::eq(&self, other: &kglite::api::code_entities::CodeEntityMatch) -> bool
+impl core::fmt::Debug for kglite::api::code_entities::CodeEntityMatch
+pub fn kglite::api::code_entities::CodeEntityMatch::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for kglite::api::code_entities::CodeEntityMatch
+impl core::marker::StructuralPartialEq for kglite::api::code_entities::CodeEntityMatch
+pub enum kglite::api::code_entities::SourceLookup
+pub kglite::api::code_entities::SourceLookup::Ambiguous(alloc::vec::Vec<alloc::string::String>)
+pub kglite::api::code_entities::SourceLookup::Found(kglite::api::code_entities::SourceLocation)
+pub kglite::api::code_entities::SourceLookup::NotFound
+impl core::clone::Clone for kglite::api::code_entities::SourceLookup
+pub fn kglite::api::code_entities::SourceLookup::clone(&self) -> kglite::api::code_entities::SourceLookup
+impl core::fmt::Debug for kglite::api::code_entities::SourceLookup
+pub fn kglite::api::code_entities::SourceLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::code_entities::CodeEntityContext
+pub kglite::api::code_entities::CodeEntityContext::defined_in: core::option::Option<alloc::string::String>
+pub kglite::api::code_entities::CodeEntityContext::incoming: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
+pub kglite::api::code_entities::CodeEntityContext::node: kglite::api::NodeInfo
+pub kglite::api::code_entities::CodeEntityContext::outgoing: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
+impl core::fmt::Debug for kglite::api::code_entities::CodeEntityContext
+pub fn kglite::api::code_entities::CodeEntityContext::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct kglite::api::code_entities::SourceLocation
+pub kglite::api::code_entities::SourceLocation::end_line: core::option::Option<i64>
+pub kglite::api::code_entities::SourceLocation::file_path: core::option::Option<alloc::string::String>
+pub kglite::api::code_entities::SourceLocation::line_number: core::option::Option<i64>
+pub kglite::api::code_entities::SourceLocation::name: alloc::string::String
+pub kglite::api::code_entities::SourceLocation::qualified_name: alloc::string::String
+pub kglite::api::code_entities::SourceLocation::signature: core::option::Option<alloc::string::String>
+pub kglite::api::code_entities::SourceLocation::type_name: alloc::string::String
+impl core::clone::Clone for kglite::api::code_entities::SourceLocation
+pub fn kglite::api::code_entities::SourceLocation::clone(&self) -> kglite::api::code_entities::SourceLocation
+impl core::fmt::Debug for kglite::api::code_entities::SourceLocation
+pub fn kglite::api::code_entities::SourceLocation::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const kglite::api::code_entities::CODE_TYPES: &[&str]
+pub fn kglite::api::code_entities::code_entity_context(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, hops: usize) -> kglite::api::code_entities::CodeContextLookup
+pub fn kglite::api::code_entities::find_code_entities(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, match_type: kglite::api::code_entities::CodeEntityMatch) -> alloc::vec::Vec<kglite::api::NodeInfo>
+pub fn kglite::api::code_entities::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
+pub fn kglite::api::code_entities::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_entities::SourceLookup
 pub mod kglite::api::code_tree
-pub enum kglite::api::code_tree::CodeContextLookup
-pub kglite::api::code_tree::CodeContextLookup::Ambiguous(alloc::vec::Vec<kglite::api::NodeInfo>)
-pub kglite::api::code_tree::CodeContextLookup::Found(alloc::boxed::Box<kglite::api::code_tree::CodeEntityContext>)
-pub kglite::api::code_tree::CodeContextLookup::NotFound
-impl core::fmt::Debug for kglite::api::code_tree::CodeContextLookup
-pub fn kglite::api::code_tree::CodeContextLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub enum kglite::api::code_tree::CodeEntityMatch
-pub kglite::api::code_tree::CodeEntityMatch::Contains
-pub kglite::api::code_tree::CodeEntityMatch::Exact
-pub kglite::api::code_tree::CodeEntityMatch::StartsWith
-impl core::clone::Clone for kglite::api::code_tree::CodeEntityMatch
-pub fn kglite::api::code_tree::CodeEntityMatch::clone(&self) -> kglite::api::code_tree::CodeEntityMatch
-impl core::cmp::Eq for kglite::api::code_tree::CodeEntityMatch
-impl core::cmp::PartialEq for kglite::api::code_tree::CodeEntityMatch
-pub fn kglite::api::code_tree::CodeEntityMatch::eq(&self, other: &kglite::api::code_tree::CodeEntityMatch) -> bool
-impl core::fmt::Debug for kglite::api::code_tree::CodeEntityMatch
-pub fn kglite::api::code_tree::CodeEntityMatch::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for kglite::api::code_tree::CodeEntityMatch
-impl core::marker::StructuralPartialEq for kglite::api::code_tree::CodeEntityMatch
-pub enum kglite::api::code_tree::SourceLookup
-pub kglite::api::code_tree::SourceLookup::Ambiguous(alloc::vec::Vec<alloc::string::String>)
-pub kglite::api::code_tree::SourceLookup::Found(kglite::api::code_tree::SourceLocation)
-pub kglite::api::code_tree::SourceLookup::NotFound
-impl core::clone::Clone for kglite::api::code_tree::SourceLookup
-pub fn kglite::api::code_tree::SourceLookup::clone(&self) -> kglite::api::code_tree::SourceLookup
-impl core::fmt::Debug for kglite::api::code_tree::SourceLookup
-pub fn kglite::api::code_tree::SourceLookup::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct kglite::api::code_tree::CodeEntityContext
-pub kglite::api::code_tree::CodeEntityContext::defined_in: core::option::Option<alloc::string::String>
-pub kglite::api::code_tree::CodeEntityContext::incoming: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
-pub kglite::api::code_tree::CodeEntityContext::node: kglite::api::NodeInfo
-pub kglite::api::code_tree::CodeEntityContext::outgoing: std::collections::hash::map::HashMap<alloc::string::String, alloc::vec::Vec<kglite::api::NodeInfo>>
-impl core::fmt::Debug for kglite::api::code_tree::CodeEntityContext
-pub fn kglite::api::code_tree::CodeEntityContext::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct kglite::api::code_tree::SourceLocation
-pub kglite::api::code_tree::SourceLocation::end_line: core::option::Option<i64>
-pub kglite::api::code_tree::SourceLocation::file_path: core::option::Option<alloc::string::String>
-pub kglite::api::code_tree::SourceLocation::line_number: core::option::Option<i64>
-pub kglite::api::code_tree::SourceLocation::name: alloc::string::String
-pub kglite::api::code_tree::SourceLocation::qualified_name: alloc::string::String
-pub kglite::api::code_tree::SourceLocation::signature: core::option::Option<alloc::string::String>
-pub kglite::api::code_tree::SourceLocation::type_name: alloc::string::String
-impl core::clone::Clone for kglite::api::code_tree::SourceLocation
-pub fn kglite::api::code_tree::SourceLocation::clone(&self) -> kglite::api::code_tree::SourceLocation
-impl core::fmt::Debug for kglite::api::code_tree::SourceLocation
-pub fn kglite::api::code_tree::SourceLocation::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub const kglite::api::code_tree::CODE_TYPES: &[&str]
 pub fn kglite::api::code_tree::archive_and_build(src_dir: &std::path::Path, rev: &str, repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::api::code_tree::build_code_tree(input: &std::path::Path, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
 pub fn kglite::api::code_tree::build_code_tree_revs(src_dir: &std::path::Path, revs: &[alloc::string::String], repo_root: core::option::Option<&std::path::Path>, verbose: bool, include_tests: bool, save_to: core::option::Option<&std::path::Path>, max_loc_per_file: core::option::Option<usize>, include_docs: bool) -> core::result::Result<alloc::sync::Arc<kglite::api::DirGraph>, alloc::string::String>
-pub fn kglite::api::code_tree::code_entity_context(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, hops: usize) -> kglite::api::code_tree::CodeContextLookup
 pub fn kglite::api::code_tree::dedup_revs(revs: &[alloc::string::String]) -> alloc::vec::Vec<alloc::string::String>
-pub fn kglite::api::code_tree::find_code_entities(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>, match_type: kglite::api::code_tree::CodeEntityMatch) -> alloc::vec::Vec<kglite::api::NodeInfo>
 pub fn kglite::api::code_tree::language_for_path(path: &std::path::Path) -> core::option::Option<&'static str>
-pub fn kglite::api::code_tree::resolve_code_entity(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> (core::option::Option<petgraph::graph_impl::NodeIndex>, alloc::vec::Vec<(petgraph::graph_impl::NodeIndex, kglite::api::NodeInfo)>)
-pub fn kglite::api::code_tree::source_location(dir: &alloc::sync::Arc<kglite::api::DirGraph>, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_tree::SourceLookup
 pub mod kglite::api::cypher
 pub mod kglite::api::cypher::planner
 pub mod kglite::api::cypher::planner::cost_model
@@ -2108,7 +2109,7 @@ pub fn kglite::api::KnowledgeGraph::dir_mut(&mut self) -> &mut alloc::sync::Arc<
 pub fn kglite::api::KnowledgeGraph::embedder(&self) -> core::option::Option<&alloc::sync::Arc<dyn kglite::api::Embedder>>
 pub fn kglite::api::KnowledgeGraph::from_arc(inner: alloc::sync::Arc<kglite::api::DirGraph>) -> Self
 pub fn kglite::api::KnowledgeGraph::set_embedder_native(&mut self, embedder: alloc::sync::Arc<dyn kglite::api::Embedder>)
-pub fn kglite::api::KnowledgeGraph::source_location(&self, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_tree::SourceLookup
+pub fn kglite::api::KnowledgeGraph::source_location(&self, name: &str, node_type: core::option::Option<&str>) -> kglite::api::code_entities::SourceLookup
 pub struct kglite::api::NodeData
 pub kglite::api::NodeData::id: kglite::datatypes::values::Value
 pub kglite::api::NodeData::node_type: kglite::api::InternedKey

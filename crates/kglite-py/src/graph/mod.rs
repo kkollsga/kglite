@@ -25,7 +25,7 @@ use kglite_core::api::mutation::{OperationReport, OperationReports};
 use kglite_core::api::DirGraph;
 // `MutationStats` is not yet in `api::cypher` (Piece 2 lift candidate);
 // `CowSelection`/`PlanStep` are the fluent cursor types (Piece 3 decision).
-use kglite_core::api::code_tree::SourceLookup;
+use kglite_core::api::code_entities::SourceLookup;
 use kglite_core::api::cypher;
 use kglite_core::api::introspection;
 use kglite_core::api::TemporalContext;
@@ -531,7 +531,7 @@ impl KnowledgeGraph {
         Option<NodeIndex>,
         Vec<(NodeIndex, kglite_core::api::NodeInfo)>,
     ) {
-        kglite_core::api::code_tree::resolve_code_entity(&self.inner, name, node_type)
+        kglite_core::api::code_entities::resolve_code_entity(&self.inner, name, node_type)
     }
 
     /// Build a source-location dict for a single name.
@@ -610,7 +610,7 @@ impl KnowledgeGraph {
     /// crate keeps this method for back-compat with Python callers
     /// via `#[pymethods]`; the engine logic lives in `kglite`.
     pub fn source_location(&self, name: &str, node_type: Option<&str>) -> SourceLookup {
-        kglite_core::api::code_tree::source_location(&self.inner, name, node_type)
+        kglite_core::api::code_entities::source_location(&self.inner, name, node_type)
     }
 
     // `field_contains_ci` and `field_starts_with_ci` lifted to
