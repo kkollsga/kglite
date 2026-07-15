@@ -2074,7 +2074,6 @@ dependencies = [
  "mimalloc",
  "petgraph",
  "pyo3",
- "rayon",
  "regex",
  "serde",
  "serde_json",
