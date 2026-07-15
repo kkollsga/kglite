@@ -3,7 +3,7 @@
 use super::entity_frames::{bool_col, build_df, int_col, str_col};
 use crate::code_tree::models::ParseResult;
 use crate::datatypes::values::{ColumnType, DataFrame};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashSet};
 
 // ── Edge DataFrame builders ─────────────────────────────────────────
 
@@ -294,8 +294,15 @@ pub(super) fn defines_edges(result: &ParseResult) -> Vec<DefinesEdge> {
     out
 }
 
-pub(super) fn defines_edges_df(edges: &[DefinesEdge]) -> HashMap<(String, String), DataFrame> {
-    let mut by_pair: HashMap<(String, String), Vec<&DefinesEdge>> = HashMap::new();
+/// BTreeMap, not HashMap: the caller feeds these frames to `add_connections`,
+/// which treats the first-ever batch of a connection type as initial load and
+/// skips edge-existence checks — so whichever pair iterates first gets
+/// different dedup semantics. Hash iteration order is randomized per process,
+/// which made total edge counts flap run-to-run (three stable values on
+/// distillPDF). Ordered iteration + within-batch consolidation below make the
+/// result independent of which pair goes first.
+pub(super) fn defines_edges_df(edges: &[DefinesEdge]) -> BTreeMap<(String, String), DataFrame> {
+    let mut by_pair: BTreeMap<(String, String), Vec<&DefinesEdge>> = BTreeMap::new();
     for e in edges {
         by_pair
             .entry((e.source_type.clone(), e.target_type.clone()))
@@ -305,8 +312,20 @@ pub(super) fn defines_edges_df(edges: &[DefinesEdge]) -> HashMap<(String, String
     by_pair
         .into_iter()
         .map(|(pair, list)| {
-            let src: Vec<Option<String>> = list.iter().map(|e| Some(e.source_id.clone())).collect();
-            let tgt: Vec<Option<String>> = list.iter().map(|e| Some(e.target_id.clone())).collect();
+            // Consolidate duplicate (source, target) rows: a file that defines
+            // the same selector/element name twice would otherwise become a
+            // parallel duplicate edge on the skip-existence-check initial-load
+            // path — batch.rs makes within-chunk consolidation the caller's
+            // responsibility in that mode.
+            let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(list.len());
+            let mut src: Vec<Option<String>> = Vec::with_capacity(list.len());
+            let mut tgt: Vec<Option<String>> = Vec::with_capacity(list.len());
+            for e in &list {
+                if seen.insert((e.source_id.as_str(), e.target_id.as_str())) {
+                    src.push(Some(e.source_id.clone()));
+                    tgt.push(Some(e.target_id.clone()));
+                }
+            }
             let df = build_df(vec![
                 ("source", ColumnType::String, str_col(src)),
                 ("target", ColumnType::String, str_col(tgt)),

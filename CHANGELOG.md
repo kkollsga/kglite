@@ -5,6 +5,18 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Deterministic code-tree edge counts on minified assets.** Repos whose
+  minified CSS/HTML repeats a selector or element name on one line (duplicate
+  entity ids) produced run-to-run-varying total edge counts: duplicate
+  `(file, entity)` DEFINES rows became parallel edges when their type-pair won
+  the per-process-random iteration order into the initial-load fast path.
+  DEFINES frames are now consolidated and iterated in a stable order; builds
+  of the same tree are byte-for-byte repeatable across processes.
+
 ## [0.13.4] - 2026-07-15
 
 ### Added
