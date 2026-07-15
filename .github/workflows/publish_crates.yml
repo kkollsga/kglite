@@ -184,7 +184,7 @@ jobs:
       # crates.io publish. macOS aarch64 (a must-pass `build-native` leg)
       # is NOT excluded — only `aarch64-unknown-linux`.
       - name: Wait for wheel build matrix
-        uses: lewagon/wait-on-check-action@v1.8.0
+        uses: lewagon/wait-on-check-action@v1.8.1
         with:
           ref: ${{ github.sha }}
           check-regexp: '^Build wheel - (?!.*aarch64-unknown-linux).*$'
