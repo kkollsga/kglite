@@ -239,7 +239,9 @@ mod tests {
             for host in [Host::Codex, Host::Claude] {
                 let dest = destination(host, project_scope, &home, &project);
                 let body = fs::read_to_string(dest.join("SKILL.md")).unwrap();
-                assert!(body.starts_with("---\nname: kglite-code-review\n"));
+                let mut lines = body.lines();
+                assert_eq!(lines.next(), Some("---"));
+                assert_eq!(lines.next(), Some("name: kglite-code-review"));
                 assert!(dest.join(MARKER).is_file());
                 assert!(dest.join("references/queries.md").is_file());
             }
