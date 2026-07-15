@@ -53,6 +53,7 @@ mod explore;
 mod selftest;
 mod tools;
 mod value_codecs;
+pub use crate::tools::CodeTreeHooks;
 use crate::tools::GraphState;
 use kglite::api::storage::StorageMode;
 
@@ -162,17 +163,6 @@ fn pick_mode(cli: &Cli) -> Mode {
     }
 }
 
-/// Whether a changed path should tag a code_tree rebuild: any file a parser
-/// handles, plus `.md` files when the docs pass is enabled (so editing a
-/// README re-links it to the code).
-fn is_graph_relevant(p: &std::path::Path, include_docs: bool) -> bool {
-    kglite::api::code_tree::language_for_path(p).is_some()
-        || (include_docs
-            && p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md")))
-}
-
 fn fallback_name(mode: &Mode) -> &'static str {
     match mode {
         Mode::Graph { .. } => "KGLite (single-graph)",
@@ -246,7 +236,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    run_with_embedder_factory(args, None)
+    run_with_options(args, None, None)
 }
 
 /// Like [`run`], but with an optional Python-embedder factory for the
@@ -254,6 +244,31 @@ where
 /// `fastembed`). The standalone binary calls [`run`] (no factory); the
 /// kglite wheel passes a factory that builds the named Python embedder.
 pub fn run_with_embedder_factory<I, T>(args: I, factory: Option<PyEmbedderFactory>) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_options(args, factory, None)
+}
+
+/// Like [`run`], but with an external code-tree builder ([`CodeTreeHooks`]).
+/// An outer binary embedding this server as a library (e.g. codingest-mcp)
+/// passes closures for the build / multi-rev-build / watch-predicate paths;
+/// every other tool is builder-agnostic and unaffected. `None` keeps the
+/// in-tree `kglite::api::code_tree` builder — [`run`] passes `None`.
+pub fn run_with_code_tree_hooks<I, T>(args: I, hooks: Option<CodeTreeHooks>) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    run_with_options(args, None, hooks)
+}
+
+fn run_with_options<I, T>(
+    args: I,
+    factory: Option<PyEmbedderFactory>,
+    code_tree_hooks: Option<CodeTreeHooks>,
+) -> Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
@@ -271,7 +286,7 @@ where
         .enable_all()
         .build()
         .context("failed to build tokio runtime")?;
-    runtime.block_on(run_async(cli, factory))
+    runtime.block_on(run_async(cli, factory, code_tree_hooks))
 }
 
 /// Fail fast on bad mode-specific path arguments before any expensive setup.
@@ -634,7 +649,83 @@ fn apply_discovery_steer(mode: &Mode, mut options: ServerOptions) -> ServerOptio
     options
 }
 
-async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> Result<()> {
+/// Watch handler: rebuild on every debounced change batch. Both
+/// explicit `--watch DIR` and `manifest.workspace.kind: local` with
+/// `watch: true` wire the same change-handler shape. Returns the watch
+/// handle the caller must keep alive for the server's lifetime.
+fn spawn_mode_watcher(
+    mode: &Mode,
+    graph_state: &GraphState,
+    local_active_root: &Arc<RwLock<Option<PathBuf>>>,
+) -> Result<Option<watch::WatchHandle>> {
+    match mode {
+        Mode::Watch { dir } => {
+            let canon = dir.canonicalize()?;
+            let gs = graph_state.clone();
+            let cb: watch::ChangeHandler = Arc::new(move |paths| {
+                // Skip when no changed path is a file code_tree parses
+                // — a `cargo build` / `npm install` storm of `.rlib` /
+                // `node_modules/` events would otherwise needlessly
+                // tag a rebuild. Cheap predicate (just an ext lookup).
+                let any_code = paths.iter().any(|p| gs.is_graph_relevant(p));
+                if !any_code {
+                    return;
+                }
+                // Tag for rebuild — the actual work happens on the
+                // next MCP tool call via ensure_code_tree_fresh.
+                // Cheap: no rebuild on the watcher thread, ms-scale.
+                gs.tag_code_tree_dirty(canon.clone());
+            });
+            maybe_watch(Some(dir), Some(cb))
+        }
+        Mode::LocalWorkspace { root, watch: true } => {
+            // Hand mcp-methods the wide `workspace.root` to monitor —
+            // FSEvents/inotify only emit events for files inside the
+            // subtree, so watching wide is cheap. Filtering happens
+            // in the callback.
+            //
+            // Operator inbox 2026-05-25: pre-fix this captured
+            // `workspace.root` and rebuilt the entire wide tree on
+            // every event (build storm on any `cargo build` /
+            // editor save anywhere in the sandbox). Fix: read the
+            // shared `local_active_root` (populated by the
+            // post-activate hook above on each `set_root_dir`),
+            // skip when nothing changed under the active root,
+            // rebuild against the active root only.
+            let gs = graph_state.clone();
+            let active_root_for_watch = local_active_root.clone();
+            let cb: watch::ChangeHandler = Arc::new(move |paths| {
+                let active = tools::read_lock(&active_root_for_watch).clone();
+                let Some(active) = active else {
+                    // No `set_root_dir` yet; nothing to rebuild.
+                    return;
+                };
+                // Two-stage filter: (1) inside the active root,
+                // (2) is a code file `code_tree` would parse. The
+                // second filter skips `cargo build` /
+                // `node_modules/` storms that otherwise tag a
+                // rebuild for changes the parser doesn't see.
+                let any_under_active_and_code = paths
+                    .iter()
+                    .any(|p| p.starts_with(&active) && gs.is_graph_relevant(p));
+                if !any_under_active_and_code {
+                    return;
+                }
+                // Tag for rebuild; the actual rebuild fires on the
+                // next MCP tool call (ensure_code_tree_fresh).
+                gs.tag_code_tree_dirty(active.clone());
+            });
+            maybe_watch(Some(root), Some(cb))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn run_async(
+    cli: Cli,
+    py_embedder_factory: Option<PyEmbedderFactory>,
+    code_tree_hooks: Option<CodeTreeHooks>,
+) -> Result<()> {
     init_tracing();
     let mode = pick_mode(&cli);
     validate_mode_paths(&mode, &cli)?;
@@ -683,7 +774,9 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
     } else {
         Some(Arc::new(value_codecs))
     };
-    let graph_state = GraphState::new(include_docs).with_value_codecs(value_codecs);
+    let graph_state = GraphState::new(include_docs)
+        .with_value_codecs(value_codecs)
+        .with_code_tree_hooks(code_tree_hooks.map(Arc::new));
 
     // Shared "active root" slot for local-workspace mode. Populated
     // by the post-activate hook on each `set_root_dir`; read by the
@@ -854,73 +947,7 @@ async fn run_async(cli: Cli, py_embedder_factory: Option<PyEmbedderFactory>) -> 
         }
     }
 
-    // Watch handler: rebuild on every debounced change batch. Both
-    // explicit `--watch DIR` and `manifest.workspace.kind: local` with
-    // `watch: true` wire the same change-handler shape.
-    let watch_handle = match &mode {
-        Mode::Watch { dir } => {
-            let canon = dir.canonicalize()?;
-            let gs = graph_state.clone();
-            let cb: watch::ChangeHandler = Arc::new(move |paths| {
-                // Skip when no changed path is a file code_tree parses
-                // — a `cargo build` / `npm install` storm of `.rlib` /
-                // `node_modules/` events would otherwise needlessly
-                // tag a rebuild. Cheap predicate (just an ext lookup).
-                let any_code = paths
-                    .iter()
-                    .any(|p| is_graph_relevant(p, gs.include_docs()));
-                if !any_code {
-                    return;
-                }
-                // Tag for rebuild — the actual work happens on the
-                // next MCP tool call via ensure_code_tree_fresh.
-                // Cheap: no rebuild on the watcher thread, ms-scale.
-                gs.tag_code_tree_dirty(canon.clone());
-            });
-            maybe_watch(Some(dir), Some(cb))?
-        }
-        Mode::LocalWorkspace { root, watch: true } => {
-            // Hand mcp-methods the wide `workspace.root` to monitor —
-            // FSEvents/inotify only emit events for files inside the
-            // subtree, so watching wide is cheap. Filtering happens
-            // in the callback.
-            //
-            // Operator inbox 2026-05-25: pre-fix this captured
-            // `workspace.root` and rebuilt the entire wide tree on
-            // every event (build storm on any `cargo build` /
-            // editor save anywhere in the sandbox). Fix: read the
-            // shared `local_active_root` (populated by the
-            // post-activate hook above on each `set_root_dir`),
-            // skip when nothing changed under the active root,
-            // rebuild against the active root only.
-            let gs = graph_state.clone();
-            let active_root_for_watch = local_active_root.clone();
-            let cb: watch::ChangeHandler = Arc::new(move |paths| {
-                let active = tools::read_lock(&active_root_for_watch).clone();
-                let Some(active) = active else {
-                    // No `set_root_dir` yet; nothing to rebuild.
-                    return;
-                };
-                // Two-stage filter: (1) inside the active root,
-                // (2) is a code file `code_tree` would parse. The
-                // second filter skips `cargo build` /
-                // `node_modules/` storms that otherwise tag a
-                // rebuild for changes the parser doesn't see.
-                let any_under_active_and_code = paths
-                    .iter()
-                    .any(|p| p.starts_with(&active) && is_graph_relevant(p, gs.include_docs()));
-                if !any_under_active_and_code {
-                    return;
-                }
-                // Tag for rebuild; the actual rebuild fires on the
-                // next MCP tool call (ensure_code_tree_fresh).
-                gs.tag_code_tree_dirty(active.clone());
-            });
-            maybe_watch(Some(root), Some(cb))?
-        }
-        _ => None,
-    };
-    let _watch_handle = watch_handle;
+    let _watch_handle = spawn_mode_watcher(&mode, &graph_state, &local_active_root)?;
 
     // 0.9.31: SkillRegistry wiring. Bundled methodology for kglite's
     // four custom tools (cypher_query / graph_overview / save_graph /

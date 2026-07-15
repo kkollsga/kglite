@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`kglite-mcp-server` accepts an external code-tree builder.**
+  `run_with_code_tree_hooks(args, Option<CodeTreeHooks>)` mirrors the existing
+  `run_with_embedder_factory` pattern: an embedding binary can inject
+  `{build, build_revs, is_code_file}` closures for the workspace build and
+  watch paths, while every other tool remains builder-agnostic. `None` (and
+  the plain `run`) keep today's in-tree builder — no behavior change for
+  existing callers.
+
 ### Fixed
 
 - **Deterministic code-tree edge counts on minified assets.** Repos whose

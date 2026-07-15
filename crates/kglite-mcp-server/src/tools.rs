@@ -52,6 +52,35 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Single-tree build closure: `(dir, include_docs) -> graph`.
+pub type CodeTreeBuildFn =
+    dyn Fn(&Path, bool) -> Result<Arc<kglite::api::DirGraph>, String> + Send + Sync;
+
+/// Multi-rev build closure: `(dir, revs, include_docs) -> (graph, canonical_revs)`.
+pub type CodeTreeBuildRevsFn = dyn Fn(&Path, &[String], bool) -> Result<(Arc<kglite::api::DirGraph>, Vec<String>), String>
+    + Send
+    + Sync;
+
+/// Injection seam for the code-tree build path — the builder analogue of
+/// the Python-embedder factory in `run_with_embedder_factory`. An external
+/// builder (e.g. the standalone codingest workspace) passes closures via
+/// [`crate::run_with_code_tree_hooks`]; `None` keeps the in-tree
+/// `kglite::api::code_tree` builder. The closures must be `Send + Sync`:
+/// they're called from tool handlers on the tokio runtime.
+pub struct CodeTreeHooks {
+    /// Build a single-tree code graph for a directory.
+    pub build: Box<CodeTreeBuildFn>,
+    /// Build a multi-rev graph. Returns the graph **and the canonical
+    /// (deduped) rev labels**: the labels are recorded on the active slot
+    /// and surfaced in the activation banner, so the hook owns rev
+    /// canonicalization — the server must not assume an in-tree
+    /// `dedup_revs` exists.
+    pub build_revs: Box<CodeTreeBuildRevsFn>,
+    /// Watch predicate: does a change to this path affect the code graph?
+    /// (The docs-pass `.md` extension check stays server-side.)
+    pub is_code_file: Box<dyn Fn(&Path) -> bool + Send + Sync>,
+}
+
 /// Shared active-graph state. Cloning is cheap (Arc).
 #[derive(Clone, Default)]
 pub struct GraphState {
@@ -81,6 +110,10 @@ pub struct GraphState {
     /// `tools[].cypher` run so the engine decodes query-side literals and
     /// encodes result columns (`'Q42'` ↔ `42`) — safely, after parsing.
     value_codecs: Option<Arc<Vec<ValueCodec>>>,
+    /// External code-tree builder ([`CodeTreeHooks`]); `None` = in-tree
+    /// builder. Set once at boot via [`with_code_tree_hooks`], carried by
+    /// every clone so the lazy watch-rebuild uses the same builder.
+    code_tree_hooks: Option<Arc<CodeTreeHooks>>,
 }
 
 /// Bookkeeping for lazy code-tree rebuild failures. Reset to default on
@@ -200,6 +233,28 @@ impl GraphState {
     pub fn with_value_codecs(mut self, codecs: Option<Arc<Vec<ValueCodec>>>) -> Self {
         self.value_codecs = codecs;
         self
+    }
+
+    /// Attach an external code-tree builder ([`CodeTreeHooks`]). Builder
+    /// form, set once at boot like [`Self::with_value_codecs`].
+    pub fn with_code_tree_hooks(mut self, hooks: Option<Arc<CodeTreeHooks>>) -> Self {
+        self.code_tree_hooks = hooks;
+        self
+    }
+
+    /// Whether a changed path should tag a code-tree rebuild: any file the
+    /// active builder handles, plus `.md` files when the docs pass is
+    /// enabled (so editing a README re-links it to the code).
+    pub fn is_graph_relevant(&self, p: &Path) -> bool {
+        let is_code = match &self.code_tree_hooks {
+            Some(hooks) => (hooks.is_code_file)(p),
+            None => kglite::api::code_tree::language_for_path(p).is_some(),
+        };
+        is_code
+            || (self.include_docs
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md")))
     }
 
     /// The configured value codecs as a slice for `ExecuteOptions::value_codecs`
@@ -385,24 +440,22 @@ impl GraphState {
         ))
     }
 
-    /// Whether this state builds with the markdown docs pass (so the watch
-    /// predicate also treats `.md` changes as graph-relevant).
-    pub fn include_docs(&self) -> bool {
-        self.include_docs
-    }
-
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
         // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
         // include_docs is mode-dependent (github-workspace on, local off).
-        let dir_arc = kglite::api::code_tree::build_code_tree(
-            dir,
-            false,
-            true,
-            None,
-            None,
-            self.include_docs,
-        )
-        .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?;
+        let dir_arc = match &self.code_tree_hooks {
+            Some(hooks) => (hooks.build)(dir, self.include_docs)
+                .map_err(|e| anyhow::anyhow!("code-tree build hook failed: {}", e))?,
+            None => kglite::api::code_tree::build_code_tree(
+                dir,
+                false,
+                true,
+                None,
+                None,
+                self.include_docs,
+            )
+            .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?,
+        };
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
@@ -427,23 +480,32 @@ impl GraphState {
     /// slot so the identity surfaces (`<active_graph …>` header, activation
     /// summary) name the loaded rev-set.
     pub fn build_code_tree_revs(&self, dir: &Path, revs: &[String]) -> Result<()> {
-        // Collapse duplicate rev labels up front (shared core helper) so the
-        // recorded `active.revs` — which feeds the header + activation banner —
-        // matches the canonical label set the core builder folds into the graph.
-        let revs = kglite::api::code_tree::dedup_revs(revs);
-        // repo_root=None → auto-resolve the git root from `dir` (the activated
-        // root is a work tree). include_docs mirrors build_code_tree.
-        let dir_arc = kglite::api::code_tree::build_code_tree_revs(
-            dir,
-            &revs,
-            None,
-            false,
-            true,
-            None,
-            None,
-            self.include_docs,
-        )
-        .map_err(|e| anyhow::anyhow!("kglite::build_code_tree_revs failed: {}", e))?;
+        // The recorded `active.revs` — which feeds the header + activation
+        // banner — must match the canonical label set the builder folds into
+        // the graph, so the builder (hook or in-tree) owns rev dedup and
+        // returns the canonical list alongside the graph.
+        let (dir_arc, revs) = match &self.code_tree_hooks {
+            Some(hooks) => (hooks.build_revs)(dir, revs, self.include_docs)
+                .map_err(|e| anyhow::anyhow!("code-tree revs build hook failed: {}", e))?,
+            None => {
+                let revs = kglite::api::code_tree::dedup_revs(revs);
+                // repo_root=None → auto-resolve the git root from `dir` (the
+                // activated root is a work tree). include_docs mirrors
+                // build_code_tree.
+                let dir_arc = kglite::api::code_tree::build_code_tree_revs(
+                    dir,
+                    &revs,
+                    None,
+                    false,
+                    true,
+                    None,
+                    None,
+                    self.include_docs,
+                )
+                .map_err(|e| anyhow::anyhow!("kglite::build_code_tree_revs failed: {}", e))?;
+                (dir_arc, revs)
+            }
+        };
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
@@ -1387,6 +1449,57 @@ fn run_save(graph: &mut ActiveGraph) -> String {
 mod tests {
     use super::*;
     use kglite::api::storage::{new_dir_graph_in_mode, StorageMode};
+
+    #[test]
+    fn code_tree_hooks_replace_builder_and_watch_predicate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let calls = build_calls.clone();
+        let hooks = CodeTreeHooks {
+            build: Box::new(move |_dir, _docs| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                new_dir_graph_in_mode(StorageMode::Memory, None)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            }),
+            build_revs: Box::new(|_dir, revs, _docs| {
+                new_dir_graph_in_mode(StorageMode::Memory, None)
+                    .map(|g| (Arc::new(g), revs.to_vec()))
+                    .map_err(|e| e.to_string())
+            }),
+            is_code_file: Box::new(|p| p.extension().is_some_and(|e| e == "zig")),
+        };
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(Arc::new(hooks)));
+
+        // Watch predicate comes from the hook, not language_for_path
+        // (in-tree has no zig parser; hook says only zig is code).
+        assert!(gs.is_graph_relevant(Path::new("a.zig")));
+        assert!(!gs.is_graph_relevant(Path::new("a.rs")));
+
+        // build goes through the hook and swaps in the returned graph.
+        gs.build_code_tree(Path::new("/nonexistent-is-fine-for-hook"))
+            .expect("hook build");
+        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
+        assert!(gs.schema().is_some(), "hook-built graph became active");
+
+        // revs path records the hook's canonical rev list.
+        gs.build_code_tree_revs(
+            Path::new("/nonexistent-is-fine-for-hook"),
+            &["a".into(), "b".into()],
+        )
+        .expect("hook build_revs");
+    }
+
+    #[test]
+    fn without_hooks_watch_predicate_uses_in_tree_languages() {
+        let gs = GraphState::new(false);
+        assert!(gs.is_graph_relevant(Path::new("a.rs")));
+        assert!(!gs.is_graph_relevant(Path::new("a.rlib")));
+        // docs pass off: md is not graph-relevant.
+        assert!(!gs.is_graph_relevant(Path::new("README.md")));
+        let gs_docs = GraphState::new(true);
+        assert!(gs_docs.is_graph_relevant(Path::new("README.md")));
+    }
 
     fn fresh_active() -> ActiveGraph {
         let dir = new_dir_graph_in_mode(StorageMode::Memory, None).expect("create graph");
