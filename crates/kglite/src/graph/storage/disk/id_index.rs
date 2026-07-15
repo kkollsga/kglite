@@ -86,7 +86,7 @@ pub struct IdIndexBase {
     /// type_name -> directory entry. Built once at load (88k entries × ~50 bytes ≈ 4 MB).
     /// Strings owned to keep the API HashMap-compatible without lifetime gymnastics.
     dir: HashMap<String, BaseEntry>,
-    /// Lazy materialization cache for General variant (deserialized bincode blobs).
+    /// Lazy materialization cache for codec-selected General payloads.
     /// Integer variant never enters here — it's read directly from mmap.
     general_cache: RwLock<HashMap<String, Arc<HashMap<Value, NodeIndex>>>>,
     codec: serde_codec::CodecVersion,

@@ -651,7 +651,7 @@ impl ColumnWriter {
                 *len = len.checked_add(1).ok_or_else(row_overflow)?;
             }
             ColumnWriter::Mixed { values } => {
-                // Mixed columns can't avoid heap (the bincode payload
+                // Mixed columns can't avoid heap (the binary Serde payload
                 // at finalize captures owned `Value`s). Convert at
                 // push time.
                 values.push(value.to_value());

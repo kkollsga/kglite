@@ -183,13 +183,13 @@ fn decode_embedding_file_payload(
 
     if version >= 2 {
         let gz = GzDecoder::new(&buf[8..]);
-        return serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
+        return serde_codec::legacy::decode_from_bounded(gz, MAX_CODEC_BYTES)
             .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")));
     }
 
     let gz = GzDecoder::new(&buf[8..]);
     let v1: Vec<ExportedEmbeddingStoreV1> =
-        serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
+        serde_codec::legacy::decode_from_bounded(gz, MAX_CODEC_BYTES)
             .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")))?;
     Ok(v1
         .into_iter()
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn legacy_v2_and_postcard_v3_embedding_payloads_decode_identically() {
         let stores = vec![fixture_store()];
-        let legacy_payload = serde_codec::encode(&stores).unwrap();
+        let legacy_payload = serde_codec::legacy::encode(&stores).unwrap();
         let legacy = embedding_file(2, None, &legacy_payload);
         let postcard_payload = codec_ser(serde_codec::CodecVersion::PostcardV1, &stores).unwrap();
         let current = embedding_file(

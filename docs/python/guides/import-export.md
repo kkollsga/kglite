@@ -16,7 +16,7 @@ atomically renames it over the target, so a crash mid-save can't leave a torn
 `kglite.FileFormatError` on a corrupt file (see [Threading](#threading) and the
 {doc}`durable apps guide </python/guides/durable-apps>`).
 
-Save files (`.kgl`) use a pinned binary format (bincode with explicit little-endian, fixed-int encoding). Files are forward-compatible within the same major version. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
+Save files (`.kgl`) use an explicitly versioned binary container. Current files use Postcard payloads; supported older bincode containers are selected only by their legacy format headers. For sharing across machines or long-term archival, prefer a portable format (GraphML, CSV).
 
 ### `open()` — load-or-create lifecycle
 

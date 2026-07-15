@@ -158,7 +158,7 @@ impl crate::graph::KnowledgeGraph {
 /// from "it isn't there" (`FileError`) or a genuine IO fault (`FileIoError`),
 /// instead of catching a broad `IOError`. A load that fails for any reason
 /// other than not-found / permission is treated as a format/corruption error
-/// (bad magic, truncated section, version mismatch, zstd/bincode failure).
+/// (bad magic, truncated section, version mismatch, compression/codec failure).
 fn load_err_to_pyerr(e: std::io::Error, path: Option<&str>) -> PyErr {
     use std::io::ErrorKind;
     let pb = || std::path::PathBuf::from(path.unwrap_or(""));

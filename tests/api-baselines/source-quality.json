@@ -237,7 +237,7 @@
     {
       "path": "crates/kglite/src/graph/dir_graph/disk_persistence.rs",
       "qualified_name": "crate::crates::kglite::src::graph::dir_graph::disk_persistence::DirGraph::write_disk_snapshot",
-      "lines": 255,
+      "lines": 254,
       "branches": 43,
       "nesting": 4
     },

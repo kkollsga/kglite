@@ -172,7 +172,7 @@ mod atomic_save_tests {
                     .map(|index| (node_type, property, index))
             })
             .collect();
-        let body = serde_codec::encode(&entries).unwrap();
+        let body = serde_codec::legacy::encode(&entries).unwrap();
         let mut payload = Vec::new();
         payload.extend_from_slice(vector_persistence::VECTOR_INDEX_MAGIC);
         payload.extend_from_slice(&vector_persistence::VECTOR_INDEX_LEGACY_VERSION.to_le_bytes());

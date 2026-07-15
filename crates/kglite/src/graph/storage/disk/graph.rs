@@ -1322,7 +1322,7 @@ impl DiskGraph {
     /// Safe to call in hot loops — does not push into `edge_arena`.
     ///
     /// The returned `Cow` is `Borrowed` for overlay hits (zero copy) and
-    /// `Owned` for columnar-base hits (one bincode deserialize). Callers
+    /// `Owned` for columnar-base hits (one binary payload decode). Callers
     /// that need `&[(InternedKey, Value)]` can use `.as_deref()`.
     #[inline]
     pub fn edge_properties_at(&self, edge_idx: u32) -> Option<Cow<'_, [(InternedKey, Value)]>> {

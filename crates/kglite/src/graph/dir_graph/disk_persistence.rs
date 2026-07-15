@@ -260,11 +260,10 @@ impl DirGraph {
         // graph root; no-op when the cache is empty.
         crate::graph::io::file::write_type_connectivity_bin(dir, self)?;
 
-        // 0.8.13: interner switches from JSON (hash → original) to
-        // bincode `Vec<String>` of originals. The hash is re-derived
-        // deterministically on load via `get_or_intern`. Loader falls
-        // back to `interner.json` for graphs saved by 0.8.12 and
-        // earlier.
+        // The interner sidecar stores a codec-framed `Vec<String>` of
+        // originals. The hash is re-derived deterministically on load via
+        // `get_or_intern`; legacy unframed bincode and 0.8.12 JSON remain
+        // read-only compatibility paths.
         crate::graph::io::file::write_interner_bin(dir, self)?;
 
         // Save column stores (per type, sidecar format). Two modes:

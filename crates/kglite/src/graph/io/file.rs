@@ -524,7 +524,7 @@ mod interner_file_tests {
     fn malformed_interner_collision_is_invalid_data() {
         let dir = tempfile::tempdir().unwrap();
         let incoming = "persisted-name";
-        let bytes = serde_codec::encode(&vec![incoming.to_string()]).unwrap();
+        let bytes = serde_codec::legacy::encode(&vec![incoming.to_string()]).unwrap();
         let compressed = zstd::encode_all(bytes.as_slice(), 3).unwrap();
         std::fs::write(dir.path().join("interner.bin.zst"), compressed).unwrap();
 
@@ -552,7 +552,7 @@ mod interner_file_tests {
             values
         );
 
-        let legacy = serde_codec::encode(&values).unwrap();
+        let legacy = serde_codec::legacy::encode(&values).unwrap();
         assert_eq!(
             decode_disk_serde::<Vec<String>>(&legacy, legacy.capacity() as u64).unwrap(),
             values
@@ -694,7 +694,7 @@ pub(crate) fn read_id_indices_bin(
                 let inner: std::collections::HashMap<
                     crate::datatypes::values::Value,
                     petgraph::graph::NodeIndex,
-                > = serde_codec::decode_exact(blob, MAX_CODEC_BYTES)
+                > = serde_codec::legacy::decode_exact(blob, MAX_CODEC_BYTES)
                     .map_err(|e| invalid_data(format!("invalid general id index: {e}")))?;
                 if inner.len() != num_entries {
                     return Err(invalid_data("general id index cardinality mismatch"));
@@ -1094,7 +1094,7 @@ pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
         )
         .map_err(io::Error::other);
     }
-    serde_codec::decode_bounded(bytes, MAX_CODEC_BYTES).map_err(io::Error::other)
+    serde_codec::legacy::decode_bounded(bytes, MAX_CODEC_BYTES).map_err(io::Error::other)
 }
 
 /// Wrap a sidecar decode failure in an error that names the file and
@@ -1144,7 +1144,9 @@ fn codec_deser<'a, T: Deserialize<'a>>(
     allocated_bytes: u64,
 ) -> io::Result<T> {
     let decoded = match codec {
-        serde_codec::CodecVersion::BincodeV1 => serde_codec::decode_bounded(buf, MAX_CODEC_BYTES),
+        serde_codec::CodecVersion::BincodeV1 => {
+            serde_codec::legacy::decode_bounded(buf, MAX_CODEC_BYTES)
+        }
         serde_codec::CodecVersion::PostcardV1 => {
             let envelope = serde_codec::PayloadEnvelope::from_tag(
                 codec.tag(),
@@ -1714,9 +1716,9 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
     }
     log_stage("metadata_json", t);
 
-    // Load interner. 0.8.13 prefers `interner.bin.zst` (bincode
-    // `Vec<String>` + zstd); old `interner.json` is the backward-compat
-    // fallback for 0.8.12-and-earlier graphs.
+    // Load interner. Current `interner.bin.zst` carries a codec frame and
+    // Postcard `Vec<String>`; the reader also accepts the unframed bincode
+    // generation and falls back to `interner.json` for 0.8.12-and-earlier.
     let t = stage_timer();
     let loaded_from_bin = read_interner_bin(dir, &mut graph)?;
     if !loaded_from_bin && dir.join("interner.json").exists() {
@@ -1789,7 +1791,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                                 loaded = true;
                             }
                             _ => {
-                                if let Ok(indices) = crate::serde_codec::decode(&bytes) {
+                                if let Ok(indices) = crate::serde_codec::legacy::decode(&bytes) {
                                     graph.type_indices.replace_with(indices);
                                     loaded = true;
                                 }
@@ -1885,7 +1887,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         let mmap = unsafe { MmapMut::map_mut(&file)? };
         let mmap_arc = std::sync::Arc::new(mmap);
 
-        // Prefer bincode (fast) over JSON (slow for 295 MB)
+        // Prefer the binary sidecar over JSON (slow for 295 MB).
         let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
             let compressed = std::fs::read(&meta_bin_path)?;
             let bytes = zstd_decompress(&compressed)?;
@@ -1950,7 +1952,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                         match read_id_indices_bin(&bytes, &graph.interner) {
                             Ok(Some(indices)) => graph.id_indices.replace_with(indices),
                             _ => {
-                                if let Ok(indices) = crate::serde_codec::decode(&bytes) {
+                                if let Ok(indices) = crate::serde_codec::legacy::decode(&bytes) {
                                     graph.id_indices.replace_with(indices);
                                 }
                             }

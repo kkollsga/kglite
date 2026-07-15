@@ -1203,8 +1203,11 @@ mod tests {
         assert_eq!(format_value(&v), "\"2024-03-15T10:30:45\"");
 
         // serde round-trip (the .kgl path for Mixed columns).
-        let bytes = crate::serde_codec::encode(&v).unwrap();
-        assert_eq!(crate::serde_codec::decode::<Value>(&bytes).unwrap(), v);
+        let bytes = crate::serde_codec::legacy::encode(&v).unwrap();
+        assert_eq!(
+            crate::serde_codec::legacy::decode::<Value>(&bytes).unwrap(),
+            v
+        );
 
         // Appended last → discriminant 15 unchanged-prefix property:
         // a date-only value still orders before any timestamp.

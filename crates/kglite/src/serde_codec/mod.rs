@@ -4,6 +4,14 @@
 //! codec crate directly. `bincode_v1` is deliberately the only production
 //! module allowed to name bincode; once legacy readers expire, removing that
 //! adapter must be a small, auditable deletion.
+//!
+//! ## Future legacy-codec yank
+//!
+//! When support for pre-Postcard files is deliberately retired: remove
+//! `bincode_v1.rs`, the `bincode` Cargo dependency, `CodecVersion::BincodeV1`,
+//! and this module's `legacy` namespace; then replace each outer-format v1/v4
+//! branch with its existing unsupported-format/rebuild error. Never reinterpret
+//! legacy payload bytes as Postcard.
 
 mod bincode_v1;
 mod postcard_v1;
@@ -204,47 +212,47 @@ pub(crate) fn decode_exact_with<'de, T: Deserialize<'de>>(
     decode_versioned_exact(envelope)
 }
 
-/// Test-only compatibility encoder for constructing frozen legacy fixtures.
-#[cfg(test)]
-pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
-    bincode_v1::encode(value)
-}
-
-pub(crate) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
-    bincode_v1::decode(bytes)
-}
-
-pub(crate) fn decode_bounded<'de, T: Deserialize<'de>>(
-    bytes: &'de [u8],
-    limit: u64,
-) -> Result<T, CodecError> {
-    bincode_v1::decode_bounded(bytes, limit)
-}
-
-pub(crate) fn decode_exact<'de, T: Deserialize<'de>>(
-    bytes: &'de [u8],
-    limit: u64,
-) -> Result<T, CodecError> {
-    let envelope = PayloadEnvelope::from_tag(
-        CodecVersion::BincodeV1.tag(),
-        bytes,
-        bytes.len() as u64,
-        DecodeLimits::new(limit, limit),
-    )?;
-    decode_versioned_exact(envelope)
-}
-
-pub(crate) fn decode_from_bounded<R: Read, T: serde::de::DeserializeOwned>(
-    reader: R,
-    limit: u64,
-) -> Result<T, CodecError> {
-    bincode_v1::decode_from_bounded(reader, limit)
-}
-
 /// Explicit compatibility namespace. New format branches use the active
 /// facade above; old on-disk versions must say `legacy` at the call site.
 pub(crate) mod legacy {
     use super::*;
+
+    /// Test-only encoder for constructing frozen legacy fixtures.
+    #[cfg(test)]
+    pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
+        bincode_v1::encode(value)
+    }
+
+    pub(crate) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
+        bincode_v1::decode(bytes)
+    }
+
+    pub(crate) fn decode_bounded<'de, T: Deserialize<'de>>(
+        bytes: &'de [u8],
+        limit: u64,
+    ) -> Result<T, CodecError> {
+        bincode_v1::decode_bounded(bytes, limit)
+    }
+
+    pub(crate) fn decode_exact<'de, T: Deserialize<'de>>(
+        bytes: &'de [u8],
+        limit: u64,
+    ) -> Result<T, CodecError> {
+        let envelope = PayloadEnvelope::from_tag(
+            CodecVersion::BincodeV1.tag(),
+            bytes,
+            bytes.len() as u64,
+            DecodeLimits::new(limit, limit),
+        )?;
+        decode_versioned_exact(envelope)
+    }
+
+    pub(crate) fn decode_from_bounded<R: Read, T: serde::de::DeserializeOwned>(
+        reader: R,
+        limit: u64,
+    ) -> Result<T, CodecError> {
+        bincode_v1::decode_from_bounded(reader, limit)
+    }
 
     pub(crate) fn decode_counted_map_exact<'de, K, V>(
         bytes: &'de [u8],

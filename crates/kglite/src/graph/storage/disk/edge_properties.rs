@@ -395,7 +395,7 @@ impl EdgePropertyStore {
         let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
         let _guard = SerdeDeserializeGuard::new(interner);
         let map: HashMap<u32, Vec<(InternedKey, Value)>> =
-            crate::serde_codec::decode(&bytes).map_err(io::Error::other)?;
+            crate::serde_codec::legacy::decode(&bytes).map_err(io::Error::other)?;
         Ok(Self::from_overlay(map))
     }
 
@@ -542,7 +542,7 @@ mod tests {
         // serialization guard so InternedKey serializes as a string.
         {
             let _g = SerdeSerializeGuard::new(&interner);
-            let raw = crate::serde_codec::encode(&map).unwrap();
+            let raw = crate::serde_codec::legacy::encode(&map).unwrap();
             let compressed = zstd::encode_all(raw.as_slice(), 3).unwrap();
             std::fs::write(tmp.path().join(LEGACY_FILE), compressed).unwrap();
         }
@@ -565,7 +565,7 @@ mod tests {
         let mut interner = StringInterner::new();
         let key = k("legacy-column", &mut interner);
         let raw = vec![(key.as_u64(), Value::Int64(17))];
-        let heap = crate::serde_codec::encode(&raw).unwrap();
+        let heap = crate::serde_codec::legacy::encode(&raw).unwrap();
         MmapOrVec::from_vec(vec![0u64, heap.len() as u64])
             .save_to_file(&tmp.path().join(OFFSETS_FILE))
             .unwrap();

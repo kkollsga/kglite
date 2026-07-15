@@ -110,7 +110,7 @@ impl Serialize for InternedKey {
 /// HashMap<String, Value> on disk). Registers the string in the thread-local
 /// DESERIALIZE_INTERNER if set.
 ///
-/// Uses a custom Visitor to avoid String allocation: bincode's SliceReader
+/// Uses a custom Visitor to avoid String allocation: the binary Serde reader
 /// provides borrowed &str directly from the decompressed buffer. Only the
 /// first occurrence of each key allocates (in the interner). For ~5.6M
 /// property keys with ~200 unique ones, this eliminates ~5.6M allocations.
@@ -311,9 +311,9 @@ mod tests {
         interner
             .try_register(InternedKey::from_str(incoming), "conflicting-existing")
             .unwrap();
-        let bytes = crate::serde_codec::encode(incoming).unwrap();
+        let bytes = crate::serde_codec::legacy::encode(incoming).unwrap();
         let guard = SerdeDeserializeGuard::new(&mut interner);
-        let decoded = crate::serde_codec::decode::<InternedKey>(&bytes);
+        let decoded = crate::serde_codec::legacy::decode::<InternedKey>(&bytes);
         drop(guard);
         assert!(decoded.unwrap_err().to_string().contains("hash collision"));
         assert_eq!(

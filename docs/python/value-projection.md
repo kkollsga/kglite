@@ -217,9 +217,10 @@ explicitly.
 
 - **Not the public API surface.** That's `kglite::api::*`
   (`crates/kglite/src/lib.rs`).
-- **Not a serialisation spec for the `.kgl` format.** The bincode +
-  zstd layout details live in `crates/kglite/src/graph/io/file.rs`; this doc just
-  names the format-version boundaries.
+- **Not a serialisation spec for the `.kgl` format.** The versioned binary
+  container and zstd layout details live in
+  `crates/kglite/src/graph/io/file.rs`; this doc just names the format-version
+  boundaries.
 - **Not a guide to writing new scalar functions.** That's covered
   inline in `crates/kglite/src/graph/languages/cypher/executor/scalar_functions/`
   — search for the pattern of an existing function and mirror it.

@@ -1633,7 +1633,7 @@ impl ColumnStore {
 
     /// Borrow the `Vec<Value>` inside a `TypedColumn::Mixed` at `slot`.
     /// Returns `None` for non-Mixed variants. Used by the chunked-spill
-    /// builder to serialize Mixed columns to per-chunk bincode sidecars
+    /// builder to serialize Mixed columns to per-chunk versioned sidecars
     /// (since `materialize_to_files` skips Mixed).
     #[allow(dead_code)]
     pub fn column_values_mixed(&self, slot: usize) -> Option<&Vec<Value>> {

@@ -95,11 +95,11 @@ pub struct DirGraph {
     #[serde(skip)]
     pub connection_types: std::collections::HashSet<InternedKey>,
     /// Node type metadata: node_type → { property_name → type_string }
-    /// Replaces SchemaNode graph nodes — persisted via serde/bincode.
+    /// Replaces SchemaNode graph nodes — persisted via versioned binary Serde.
     #[serde(default)]
     pub node_type_metadata: HashMap<String, HashMap<String, String>>,
     /// Connection type metadata: connection_type → ConnectionTypeInfo
-    /// Replaces SchemaNode graph nodes for connections — persisted via serde/bincode.
+    /// Replaces SchemaNode graph nodes for connections — persisted via versioned binary Serde.
     #[serde(default)]
     pub connection_type_metadata: HashMap<String, ConnectionTypeInfo>,
     /// Version and library info stamped at save time.

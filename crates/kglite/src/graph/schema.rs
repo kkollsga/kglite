@@ -1909,7 +1909,7 @@ pub struct EdgeData {
     pub properties: Vec<(InternedKey, Value)>,
 }
 
-// Serialize EdgeData in bincode-compatible struct format:
+// Serialize EdgeData in a stable Serde struct shape:
 // connection_type as InternedKey (auto-resolves to string),
 // properties as HashMap<InternedKey, Value> (backward-compatible with old format).
 impl Serialize for EdgeData {

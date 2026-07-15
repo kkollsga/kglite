@@ -29,6 +29,10 @@ DIRECT_CODEC_RULES = {
         {"crates/kglite/src/serde_codec/postcard_v1.rs"},
     ),
 }
+CODEC_MANIFEST_OWNERS = {
+    "bincode": {"crates/kglite/Cargo.toml"},
+    "postcard": {"crates/kglite/Cargo.toml"},
+}
 
 
 def _production_rs_files(root: Path) -> list[Path]:
@@ -260,7 +264,7 @@ def _symbol_violations(root: Path) -> list[str]:
 
 
 def _codec_boundary_violations(root: Path) -> list[str]:
-    """Keep each Serde codec dependency behind its own adapter."""
+    """Keep each Serde codec dependency behind its adapter and owning crate."""
     violations: list[str] = []
     for path in _production_rs_files(root):
         relative = path.relative_to(root).as_posix()
@@ -268,6 +272,15 @@ def _codec_boundary_violations(root: Path) -> list[str]:
         for codec, (pattern, allowlist) in DIRECT_CODEC_RULES.items():
             if relative not in allowlist and pattern.search(production):
                 violations.append(f"{relative}: direct {codec} use bypasses serde_codec")
+    for manifest in sorted(root.rglob("Cargo.toml")):
+        relative = manifest.relative_to(root).as_posix()
+        lines = manifest.read_text().splitlines()
+        for codec, owners in CODEC_MANIFEST_OWNERS.items():
+            declaration = re.compile(rf"^\s*{re.escape(codec)}\s*=")
+            if relative not in owners and any(
+                declaration.search(line) for line in lines if not line.lstrip().startswith("#")
+            ):
+                violations.append(f"{relative}: {codec} dependency declared outside its codec-owning crate")
     return violations
 
 
@@ -425,6 +438,11 @@ def _self_test() -> None:
         assert _codec_boundary_violations(root)
         source.write_text("fn f() { postcard::to_stdvec(&1).unwrap(); }\n")
         assert _codec_boundary_violations(root)
+        source.write_text("fn f() {}\n")
+        wrapper = root / "crates" / "wrapper"
+        wrapper.mkdir()
+        (wrapper / "Cargo.toml").write_text('[dependencies]\nbincode = "1"\n')
+        assert any("dependency declared outside" in item for item in _codec_boundary_violations(root))
 
     mixed_source = """\
 fn before() { GraphBackend::Memory(graph); }
