@@ -28,6 +28,7 @@ python tests/benchmarks/internal/wiki_benchmark.py
 | `benchmark_wikidata_cypher.py`, `wiki_benchmark.py` | Wikidata-scale load/query (appends `wiki_benchmark.csv`). |
 | `benchmark_legal_graph.py` | Legal-graph scenario. |
 | `bench_save_subset.py` | Subset-save cost. |
+| `bench_postcard_persistence.py` | Cross-version portable/disk/WAL/property-log persistence and artifact sizes. |
 
 Some target datasets or scales that aren't wired into a one-command flow; treat
 them as dev tools, and prefer `benchmarks/benchmark.py` for any

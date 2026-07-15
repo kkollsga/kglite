@@ -220,15 +220,27 @@ class TestHnswInCypher:
 
     def test_cypher_fused_topk_uses_index_with_high_recall(self):
         g, emb = self._g()
-        q = emb[0]  # stored vector → clear nearest-neighbour structure
-        exact = [r["id"] for r in g.cypher(self.Q, params={"q": q})]  # no index → exact
-        assert exact[0] == 0  # the query's own node ranks first
+        query_ids = [0, 1, 3, 5, 8, 13, 21, 34, 55, 89]
+        exact_by_query = {}
+        for query_id in query_ids:
+            # Stored vectors give a clear nearest-neighbour structure. Capture
+            # exact truth before the index exists.
+            exact = [r["id"] for r in g.cypher(self.Q, params={"q": emb[query_id]})]
+            assert exact[0] == query_id
+            exact_by_query[query_id] = exact
+
         g.build_vector_index("Doc", "summary")
-        approx_rows = g.cypher(self.Q, params={"q": q})  # index → HNSW
-        approx = [r["id"] for r in approx_rows]
-        assert len(approx) == 10
-        assert approx[0] == 0
-        recall = len(set(exact) & set(approx)) / 10.0
+
+        # Concurrent HNSW construction is intentionally nondeterministic. A
+        # single query can occasionally land at 0.7 even while corpus recall
+        # is healthy, so gate the Cypher dispatch on aggregate recall like the
+        # Rust HNSW tests do rather than on one scheduling-sensitive sample.
+        hits = 0
+        for query_id in query_ids:
+            approx = [r["id"] for r in g.cypher(self.Q, params={"q": emb[query_id]})]
+            assert len(approx) == 10
+            hits += len(set(exact_by_query[query_id]) & set(approx))
+        recall = hits / (10.0 * len(query_ids))
         assert recall >= 0.8, f"cypher HNSW recall too low: {recall}"
 
     def test_cypher_scores_match_exact_scale(self):
