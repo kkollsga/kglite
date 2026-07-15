@@ -54,4 +54,4 @@ chrono = { version = "0.4.43", default-features = false, optional = true }
 # H.2 ships with the generated header committed under
 # `include/kglite.h` and CI verifies the committed copy matches
 # fresh-cbindgen output.
-cbindgen = "0.27"
+cbindgen = "0.29"
