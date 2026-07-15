@@ -36,6 +36,7 @@ pub mod graphgen;
 #[cfg(feature = "okf")]
 pub mod okf;
 pub mod param;
+pub(crate) mod serde_codec;
 
 #[cfg(test)]
 mod bincode_wire_contract_tests;

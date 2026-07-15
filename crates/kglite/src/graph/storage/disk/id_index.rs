@@ -38,7 +38,7 @@
 
 use crate::datatypes::Value;
 use crate::graph::schema::{InternedKey, StringInterner, TypeIdIndex};
-use bincode::Options;
+use crate::serde_codec::{self, CodecError};
 use memmap2::Mmap;
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -194,34 +194,23 @@ impl IdIndexBase {
                 .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
             if variant == 1 {
                 let blob = &mmap[payload_off_usize..payload_end];
-                let encoded_count = blob
-                    .get(..8)
-                    .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
-                    .ok_or_else(|| invalid_index("general payload is truncated before count"))?;
-                if encoded_count != num_entries_u64 {
-                    return Err(invalid_index(
-                        "general payload count disagrees with directory",
-                    ));
-                }
-                let minimum = 8u64
-                    .checked_add(
-                        num_entries_u64
-                            .checked_mul(8)
-                            .ok_or_else(|| invalid_index("general minimum size overflow"))?,
-                    )
-                    .ok_or_else(|| invalid_index("general minimum size overflow"))?;
-                if payload_len < minimum {
-                    return Err(invalid_index(
-                        "general payload cannot contain declared entries",
-                    ));
-                }
-                let map: HashMap<Value, NodeIndex> = bincode::options()
-                    .with_fixint_encoding()
-                    .with_little_endian()
-                    .reject_trailing_bytes()
-                    .with_limit(MAX_GENERAL_INDEX_DECODE_BYTES)
-                    .deserialize(blob)
-                    .map_err(|_| invalid_index("general payload bincode is malformed"))?;
+                let map: HashMap<Value, NodeIndex> = serde_codec::legacy::decode_counted_map_exact(
+                    blob,
+                    num_entries_u64,
+                    MAX_GENERAL_INDEX_DECODE_BYTES,
+                )
+                .map_err(|error| match error {
+                    CodecError::TruncatedCollectionCount => {
+                        invalid_index("general payload is truncated before count")
+                    }
+                    CodecError::CollectionCountMismatch { .. } => {
+                        invalid_index("general payload count disagrees with directory")
+                    }
+                    CodecError::CollectionPayloadTooSmall { .. } => {
+                        invalid_index("general payload cannot contain declared entries")
+                    }
+                    _ => invalid_index("general payload bincode is malformed"),
+                })?;
                 if map.len() != num_entries as usize {
                     return Err(invalid_index(
                         "general payload has duplicate or missing keys",
@@ -352,13 +341,12 @@ impl IdIndexBase {
         let off = entry.payload_off as usize;
         let len = entry.payload_len as usize;
         let blob = self.mmap.get(off..off + len)?;
-        let map: HashMap<Value, NodeIndex> = bincode::options()
-            .with_fixint_encoding()
-            .with_little_endian()
-            .reject_trailing_bytes()
-            .with_limit(MAX_GENERAL_INDEX_DECODE_BYTES)
-            .deserialize(blob)
-            .ok()?;
+        let map: HashMap<Value, NodeIndex> = serde_codec::legacy::decode_counted_map_exact(
+            blob,
+            entry.num_entries as u64,
+            MAX_GENERAL_INDEX_DECODE_BYTES,
+        )
+        .ok()?;
         if map.len() != entry.num_entries as usize {
             return None;
         }
@@ -719,8 +707,8 @@ pub fn write_id_indices_bin(
                 cursor += len;
             }
             TypeIdIndex::General(map) => {
-                let blob = bincode::serialize(map)
-                    .map_err(|e| format!("id_indices General-variant bincode failed: {}", e))?;
+                let blob = serde_codec::encode(map)
+                    .map_err(|e| format!("id_indices General-variant codec failed: {e}"))?;
                 let len = blob.len() as u64;
                 plans.push(Plan {
                     type_key: *type_key,
