@@ -2,6 +2,20 @@
 
 use super::*;
 
+fn write_compressed_disk_serde<T: serde::Serialize + ?Sized>(
+    dir: &std::path::Path,
+    filename: &str,
+    value: &T,
+    label: &str,
+) -> Result<(), String> {
+    let bytes = crate::graph::io::file::encode_disk_serde(value)
+        .map_err(|e| format!("{label} serialization failed: {e}"))?;
+    let compressed = zstd::encode_all(bytes.as_slice(), 3)
+        .map_err(|e| format!("{label} compression failed: {e}"))?;
+    std::fs::write(dir.join(filename), compressed)
+        .map_err(|e| format!("Failed to write {label}: {e}"))
+}
+
 impl DirGraph {
     /// Convert the graph to disk-backed storage mode.
     /// Enables columnar storage first, then builds CSR edge arrays on disk.
@@ -320,7 +334,7 @@ impl DirGraph {
                             .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
                         let bytes = zstd::decode_all(compressed.as_slice())
                             .map_err(|e| format!("decompress columns_meta: {}", e))?;
-                        crate::serde_codec::decode(&bytes)
+                        crate::graph::io::file::decode_disk_serde(&bytes, bytes.capacity() as u64)
                             .map_err(|e| format!("parse columns_meta.bin: {}", e))?
                     } else {
                         let json = std::fs::read_to_string(meta_path)
@@ -347,7 +361,10 @@ impl DirGraph {
             std::fs::create_dir_all(&type_dir)
                 .map_err(|e| format!("Failed to create type dir: {}", e))?;
             let packed = store
-                .write_packed(&self.interner)
+                .write_packed_with_codec(
+                    &self.interner,
+                    crate::serde_codec::CodecVersion::PostcardV1,
+                )
                 .map_err(|e| format!("Column pack failed: {}", e))?;
             // Prefix with a magic tag + the ColumnStore's row_count so
             // `load_column_sidecars` can pass the correct row count to
@@ -359,14 +376,14 @@ impl DirGraph {
             // and produce garbage titles / null ages on reload.
             //
             // Format:
-            //   magic: 8 bytes b"KGLCOLv1"
+            //   magic: 8 bytes b"KGLCOLv2"
             //   row_count: u32 LE
             //   packed: existing `write_packed` output
             //
             // Old-format sidecars (no magic tag) stay loadable via a
             // fallback in the load path.
             let mut framed: Vec<u8> = Vec::with_capacity(12 + packed.len());
-            framed.extend_from_slice(b"KGLCOLv1");
+            framed.extend_from_slice(b"KGLCOLv2");
             framed.extend_from_slice(&store.row_count().to_le_bytes());
             framed.extend_from_slice(&packed);
             let compressed = zstd::encode_all(framed.as_slice(), 3)
@@ -394,22 +411,17 @@ impl DirGraph {
 
         // Save embeddings if any (matches write_kgl behavior for in-memory saves)
         if !self.embeddings.is_empty() {
-            let emb_bytes = crate::serde_codec::encode(&self.embeddings)
-                .map_err(|e| format!("embeddings serialization failed: {}", e))?;
-            let emb_compressed = zstd::encode_all(emb_bytes.as_slice(), 3)
-                .map_err(|e| format!("embeddings compression failed: {}", e))?;
-            std::fs::write(dir.join("embeddings.bin.zst"), emb_compressed)
-                .map_err(|e| format!("Failed to write embeddings: {}", e))?;
+            write_compressed_disk_serde(dir, "embeddings.bin.zst", &self.embeddings, "embeddings")?;
         }
 
         // Save timeseries_store if any
         if !self.timeseries_store.is_empty() {
-            let ts_bytes = crate::serde_codec::encode(&self.timeseries_store)
-                .map_err(|e| format!("timeseries serialization failed: {}", e))?;
-            let ts_compressed = zstd::encode_all(ts_bytes.as_slice(), 3)
-                .map_err(|e| format!("timeseries compression failed: {}", e))?;
-            std::fs::write(dir.join("timeseries.bin.zst"), ts_compressed)
-                .map_err(|e| format!("Failed to write timeseries: {}", e))?;
+            write_compressed_disk_serde(
+                dir,
+                "timeseries.bin.zst",
+                &self.timeseries_store,
+                "timeseries",
+            )?;
         }
 
         // Root metadata is the graph-level completion marker. Publish it only

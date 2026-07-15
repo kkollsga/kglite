@@ -43,7 +43,7 @@ impl DiskGraph {
         let mut unused_interner = crate::graph::storage::interner::StringInterner::new();
         self.edge_properties = super::edge_properties::EdgePropertyStore::load_from(
             &self.data_dir,
-            1,
+            2,
             edge_props_meta,
             &mut unused_interner,
         )?;

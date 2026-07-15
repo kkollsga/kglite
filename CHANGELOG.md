@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Portable graph and embedding files use explicitly versioned Postcard payloads.**
+- **Graph persistence uses explicitly versioned Postcard payloads.**
   New `.kgl` v5 and `.kgle` v3 files select their codec in the header, while
   existing `.kgl` v4 and `.kgle` v1/v2 files remain readable through dedicated
   legacy readers. Rebuildable vector-index caches carry their own codec-aware
-  format version.
+  format version. New disk snapshots also version their Serde-backed sidecars,
+  mixed-value columns, edge-property slots, overflow records, and general ID
+  indexes; existing bincode generations remain readable.
 
 ## [0.13.3] - 2026-07-14
 

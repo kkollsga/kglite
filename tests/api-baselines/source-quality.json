@@ -237,8 +237,8 @@
     {
       "path": "crates/kglite/src/graph/dir_graph/disk_persistence.rs",
       "qualified_name": "crate::crates::kglite::src::graph::dir_graph::disk_persistence::DirGraph::write_disk_snapshot",
-      "lines": 257,
-      "branches": 47,
+      "lines": 255,
+      "branches": 43,
       "nesting": 4
     },
     {
@@ -272,7 +272,7 @@
     {
       "path": "crates/kglite/src/graph/io/file.rs",
       "qualified_name": "crate::crates::kglite::src::graph::io::file::load_disk_dir",
-      "lines": 378,
+      "lines": 377,
       "branches": 74,
       "nesting": 7
     },
@@ -636,8 +636,8 @@
     {
       "path": "crates/kglite/src/graph/storage/column_store.rs",
       "qualified_name": "crate::crates::kglite::src::graph::storage::column_store::ColumnStore::unpack_column",
-      "lines": 209,
-      "branches": 34,
+      "lines": 204,
+      "branches": 33,
       "nesting": 3
     },
     {
@@ -650,8 +650,8 @@
     {
       "path": "crates/kglite/src/graph/storage/disk/graph_persist.rs",
       "qualified_name": "crate::crates::kglite::src::graph::storage::disk::graph_persist::DiskGraph::load_from_dir",
-      "lines": 276,
-      "branches": 27,
+      "lines": 273,
+      "branches": 25,
       "nesting": 4
     },
     {

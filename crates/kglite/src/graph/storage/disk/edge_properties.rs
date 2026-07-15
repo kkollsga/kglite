@@ -28,7 +28,7 @@
 // Legacy format=0 graphs stored `Vec<(InternedKey, Value)>` under the
 // `SerdeSerializeGuard` (InternedKey serialized as strings). The
 // `load_legacy` path still handles these for backward compat and
-// requires `&mut StringInterner` to re-register keys. New format=1
+// requires `&mut StringInterner` to re-register keys. Columnar formats
 // reads never touch the interner.
 
 use crate::datatypes::values::Value;
@@ -70,6 +70,7 @@ struct ColumnarBase {
     /// Concatenated bincode blobs. Each populated slot is a
     /// `Vec<(u64, Value)>` — u64 is the raw `InternedKey` hash.
     heap: MmapBytes,
+    codec: crate::serde_codec::CodecVersion,
 }
 
 impl ColumnarBase {
@@ -102,8 +103,17 @@ impl ColumnarBase {
 
 /// Decode a single slot's bytes into `(InternedKey, Value)` pairs.
 /// Assumes bytes were produced by `encode_props_into` at save time.
-fn decode_props(bytes: &[u8]) -> Option<Vec<(InternedKey, Value)>> {
-    let raw: Vec<(u64, Value)> = crate::serde_codec::decode(bytes).ok()?;
+fn decode_props(
+    codec: crate::serde_codec::CodecVersion,
+    bytes: &[u8],
+) -> Option<Vec<(InternedKey, Value)>> {
+    let raw: Vec<(u64, Value)> = crate::serde_codec::decode_exact_with(
+        codec,
+        bytes,
+        bytes.len() as u64,
+        crate::serde_codec::DecodeLimits::new(bytes.len() as u64, bytes.len() as u64),
+    )
+    .ok()?;
     Some(
         raw.into_iter()
             .map(|(k, v)| (InternedKey::from_u64(k), v))
@@ -116,13 +126,12 @@ fn decode_props(bytes: &[u8]) -> Option<Vec<(InternedKey, Value)>> {
 /// save-path cost during PR2 phase-2 benchmarking. The interner is not
 /// consulted — we store the raw u64 hash.
 fn encode_props_into(props: &[(InternedKey, Value)], heap: &mut Vec<u8>) -> io::Result<()> {
-    // bincode's default config encodes Vec<T> as a u64 length prefix +
-    // N × T-encoded. We mirror that layout by serializing a
-    // Vec<(u64, &Value)> — but by writing directly into `heap` via
-    // `serialize_into`, we save one Vec<u8> allocation per edge (1M+
-    // allocations on a million-edge save).
     let raw: Vec<(u64, &Value)> = props.iter().map(|(k, v)| (k.as_u64(), v)).collect();
-    crate::serde_codec::encode_into(heap, &raw).map_err(io::Error::other)
+    let encoded =
+        crate::serde_codec::encode_versioned(crate::serde_codec::CURRENT_CODEC, &raw, u64::MAX)
+            .map_err(io::Error::other)?;
+    heap.extend_from_slice(&encoded);
+    Ok(())
 }
 
 /// Edge-property store: columnar disk base + in-memory mutation overlay.
@@ -169,7 +178,7 @@ impl EdgePropertyStore {
         if bytes.is_empty() {
             return None;
         }
-        let decoded = decode_props(bytes)?;
+        let decoded = decode_props(base.codec, bytes)?;
         if decoded.is_empty() {
             None
         } else {
@@ -256,7 +265,7 @@ impl EdgePropertyStore {
     ///
     /// After `save_to` returns, `self.base` is *not* automatically
     /// re-opened — callers that want subsequent reads to hit the freshly
-    /// written files should `*self = Self::load_from(target_dir, 1, meta, ...)`.
+    /// written files should `*self = Self::load_from(target_dir, 2, meta, ...)`.
     pub fn save_to(&mut self, target_dir: &Path, upper_bound: u32) -> io::Result<()> {
         let offsets_path = target_dir.join(OFFSETS_FILE);
         let heap_path = target_dir.join(HEAP_FILE);
@@ -324,7 +333,8 @@ impl EdgePropertyStore {
 
     /// Open the store from a directory.
     /// - `format_version` comes from `DiskGraphMeta.edge_properties_format`
-    ///   (0 = legacy, 1 = columnar).
+    ///   (0 = legacy combined bincode, 1 = bincode columnar,
+    ///   2 = Postcard columnar).
     /// - `meta` provides the file lengths needed to mmap the columnar files.
     ///   Ignored when loading format=0.
     /// - `interner` is mutated only on the legacy path (to register keys
@@ -356,8 +366,22 @@ impl EdgePropertyStore {
         }
         let offsets = MmapOrVec::<u64>::load_mapped(&offsets_path, meta.offsets_len)?;
         let heap = MmapBytes::load_mapped(&heap_path, meta.heap_len)?;
+        let codec = match format_version {
+            1 => crate::serde_codec::CodecVersion::BincodeV1,
+            2 => crate::serde_codec::CodecVersion::PostcardV1,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported edge property format {other}"),
+                ));
+            }
+        };
         Ok(Self {
-            base: Some(Arc::new(ColumnarBase { offsets, heap })),
+            base: Some(Arc::new(ColumnarBase {
+                offsets,
+                heap,
+                codec,
+            })),
             overlay: HashMap::new(),
         })
     }
@@ -461,7 +485,7 @@ mod tests {
         assert!(meta.heap_len > 0);
 
         // Reload and verify each edge.
-        let reloaded = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
+        let reloaded = EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
         assert_eq!(reloaded.get(0).unwrap().as_ref(), p0.as_slice());
         assert!(reloaded.get(1).is_none());
         assert!(reloaded.get(2).is_none());
@@ -480,7 +504,7 @@ mod tests {
 
         let meta = EdgePropertyStore::meta_for(tmp.path());
         let mut reloaded =
-            EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
+            EdgePropertyStore::load_from(tmp.path(), 2, meta, &mut interner).unwrap();
         assert!(reloaded.get(5).is_some());
 
         reloaded.remove(5);
@@ -489,7 +513,7 @@ mod tests {
         // Save+reload persists the tombstone — no trace of edge 5.
         reloaded.save_to(tmp2.path(), 6).unwrap();
         let meta2 = EdgePropertyStore::meta_for(tmp2.path());
-        let after = EdgePropertyStore::load_from(tmp2.path(), 1, meta2, &mut interner).unwrap();
+        let after = EdgePropertyStore::load_from(tmp2.path(), 2, meta2, &mut interner).unwrap();
         assert!(after.get(5).is_none());
     }
 
@@ -533,6 +557,29 @@ mod tests {
         let got = loaded.get(2).expect("should load from legacy");
         assert_eq!(got.as_ref().len(), 1);
         assert_eq!(got.as_ref()[0].1, Value::String("old".into()));
+    }
+
+    #[test]
+    fn legacy_columnar_slots_remain_readable_and_unknown_versions_fail() {
+        let tmp = TempDir::new().unwrap();
+        let mut interner = StringInterner::new();
+        let key = k("legacy-column", &mut interner);
+        let raw = vec![(key.as_u64(), Value::Int64(17))];
+        let heap = crate::serde_codec::encode(&raw).unwrap();
+        MmapOrVec::from_vec(vec![0u64, heap.len() as u64])
+            .save_to_file(&tmp.path().join(OFFSETS_FILE))
+            .unwrap();
+        std::fs::write(tmp.path().join(HEAP_FILE), &heap).unwrap();
+        let meta = EdgePropertyStore::meta_for(tmp.path());
+
+        let loaded = EdgePropertyStore::load_from(tmp.path(), 1, meta, &mut interner).unwrap();
+        assert_eq!(loaded.get(0).unwrap()[0].1, Value::Int64(17));
+
+        let error = EdgePropertyStore::load_from(tmp.path(), 99, meta, &mut interner).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("unsupported edge property format"));
     }
 
     #[test]

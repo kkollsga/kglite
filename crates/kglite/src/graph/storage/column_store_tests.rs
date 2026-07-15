@@ -389,6 +389,36 @@ fn test_column_store_new_mixed() {
 }
 
 #[test]
+fn packed_mixed_columns_read_both_codec_generations() {
+    let mut interner = StringInterner::new();
+    let key = interner.get_or_intern("payload");
+    let schema = Arc::new(TypeSchema::from_keys(vec![key]));
+    let mut store = ColumnStore::new_mixed(schema.clone());
+    store.push_row(&[(key, Value::String("legacy-or-current".into()))]);
+
+    for codec in [
+        crate::serde_codec::CodecVersion::BincodeV1,
+        crate::serde_codec::CodecVersion::PostcardV1,
+    ] {
+        let packed = store.write_packed_with_codec(&interner, codec).unwrap();
+        let loaded = ColumnStore::load_packed_with_codec(
+            schema.clone(),
+            &HashMap::new(),
+            &interner,
+            &packed,
+            1,
+            None,
+            codec,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.get(0, key),
+            Some(Value::String("legacy-or-current".into()))
+        );
+    }
+}
+
+#[test]
 fn test_column_store_materialize_roundtrip() {
     let dir = tempfile::TempDir::new().unwrap();
     let (schema, meta, interner) = make_schema_and_meta();

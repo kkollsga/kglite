@@ -10,7 +10,7 @@
 //! ```text
 //! Header (32 bytes):
 //!   [ 0.. 8]  magic           = b"KGLIIDXR"  (R = raw, mmap-friendly)
-//!   [ 8..12]  version         = u32 LE (= 1)
+//!   [ 8..12]  version         = u32 LE (= 2)
 //!   [12..16]  num_types       = u32 LE
 //!   [16..24]  dir_offset      = u64 LE   (always 32)
 //!   [24..32]  data_offset     = u64 LE   (32 + 48 * num_types)
@@ -29,7 +29,7 @@
 //!     [payload_off..payload_off + 4*num_entries]               keys: [u32 sorted asc]
 //!     [payload_off + 4*num_entries..payload_off + payload_len] idxs: [u32]
 //!   General (variant=1):
-//!     bincode of HashMap<Value, NodeIndex>, length = payload_len
+//!     Postcard of HashMap<Value, NodeIndex>, length = payload_len
 //! ```
 //!
 //! Lookup is `O(log n)` binary search on `keys` for the Integer variant
@@ -46,7 +46,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 const MAGIC: &[u8; 8] = b"KGLIIDXR";
-const VERSION: u32 = 1;
+const LEGACY_VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 32;
 const DIR_ENTRY_BYTES: usize = 48;
 const MAX_GENERAL_INDEX_DECODE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -88,6 +89,7 @@ pub struct IdIndexBase {
     /// Lazy materialization cache for General variant (deserialized bincode blobs).
     /// Integer variant never enters here — it's read directly from mmap.
     general_cache: RwLock<HashMap<String, Arc<HashMap<Value, NodeIndex>>>>,
+    codec: serde_codec::CodecVersion,
 }
 
 #[derive(Clone, Copy)]
@@ -119,9 +121,11 @@ impl IdIndexBase {
             return Ok(None);
         }
         let version = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
-        if version != VERSION {
-            return Err(invalid_index("unsupported raw index version"));
-        }
+        let codec = match version {
+            LEGACY_VERSION => serde_codec::CodecVersion::BincodeV1,
+            VERSION => serde_codec::CodecVersion::PostcardV1,
+            _ => return Err(invalid_index("unsupported raw index version")),
+        };
         let num_types = u32::from_le_bytes(mmap[12..16].try_into().unwrap()) as usize;
         let dir_offset = usize::try_from(u64::from_le_bytes(mmap[16..24].try_into().unwrap()))
             .map_err(|_| invalid_index("directory offset exceeds usize"))?;
@@ -194,23 +198,37 @@ impl IdIndexBase {
                 .ok_or_else(|| invalid_index("directory contains an unresolved type key"))?;
             if variant == 1 {
                 let blob = &mmap[payload_off_usize..payload_end];
-                let map: HashMap<Value, NodeIndex> = serde_codec::legacy::decode_counted_map_exact(
-                    blob,
-                    num_entries_u64,
-                    MAX_GENERAL_INDEX_DECODE_BYTES,
-                )
-                .map_err(|error| match error {
-                    CodecError::TruncatedCollectionCount => {
-                        invalid_index("general payload is truncated before count")
+                let map: HashMap<Value, NodeIndex> = match codec {
+                    serde_codec::CodecVersion::BincodeV1 => {
+                        serde_codec::legacy::decode_counted_map_exact(
+                            blob,
+                            num_entries_u64,
+                            MAX_GENERAL_INDEX_DECODE_BYTES,
+                        )
+                        .map_err(|error| match error {
+                            CodecError::TruncatedCollectionCount => {
+                                invalid_index("general payload is truncated before count")
+                            }
+                            CodecError::CollectionCountMismatch { .. } => {
+                                invalid_index("general payload count disagrees with directory")
+                            }
+                            CodecError::CollectionPayloadTooSmall { .. } => {
+                                invalid_index("general payload cannot contain declared entries")
+                            }
+                            _ => invalid_index("general payload bincode is malformed"),
+                        })?
                     }
-                    CodecError::CollectionCountMismatch { .. } => {
-                        invalid_index("general payload count disagrees with directory")
-                    }
-                    CodecError::CollectionPayloadTooSmall { .. } => {
-                        invalid_index("general payload cannot contain declared entries")
-                    }
-                    _ => invalid_index("general payload bincode is malformed"),
-                })?;
+                    serde_codec::CodecVersion::PostcardV1 => serde_codec::decode_exact_with(
+                        codec,
+                        blob,
+                        blob.len() as u64,
+                        serde_codec::DecodeLimits::new(
+                            MAX_GENERAL_INDEX_DECODE_BYTES,
+                            MAX_GENERAL_INDEX_DECODE_BYTES,
+                        ),
+                    )
+                    .map_err(|_| invalid_index("general payload Postcard is malformed"))?,
+                };
                 if map.len() != num_entries as usize {
                     return Err(invalid_index(
                         "general payload has duplicate or missing keys",
@@ -243,6 +261,7 @@ impl IdIndexBase {
             mmap: Arc::new(mmap),
             dir: dir_map,
             general_cache: RwLock::new(general_cache_map),
+            codec,
         }))
     }
 
@@ -341,12 +360,24 @@ impl IdIndexBase {
         let off = entry.payload_off as usize;
         let len = entry.payload_len as usize;
         let blob = self.mmap.get(off..off + len)?;
-        let map: HashMap<Value, NodeIndex> = serde_codec::legacy::decode_counted_map_exact(
-            blob,
-            entry.num_entries as u64,
-            MAX_GENERAL_INDEX_DECODE_BYTES,
-        )
-        .ok()?;
+        let map: HashMap<Value, NodeIndex> = match self.codec {
+            serde_codec::CodecVersion::BincodeV1 => serde_codec::legacy::decode_counted_map_exact(
+                blob,
+                entry.num_entries as u64,
+                MAX_GENERAL_INDEX_DECODE_BYTES,
+            )
+            .ok()?,
+            serde_codec::CodecVersion::PostcardV1 => serde_codec::decode_exact_with(
+                self.codec,
+                blob,
+                blob.len() as u64,
+                serde_codec::DecodeLimits::new(
+                    MAX_GENERAL_INDEX_DECODE_BYTES,
+                    MAX_GENERAL_INDEX_DECODE_BYTES,
+                ),
+            )
+            .ok()?,
+        };
         if map.len() != entry.num_entries as usize {
             return None;
         }
@@ -707,8 +738,12 @@ pub fn write_id_indices_bin(
                 cursor += len;
             }
             TypeIdIndex::General(map) => {
-                let blob = serde_codec::encode(map)
-                    .map_err(|e| format!("id_indices General-variant codec failed: {e}"))?;
+                let blob = serde_codec::encode_versioned(
+                    serde_codec::CURRENT_CODEC,
+                    map,
+                    MAX_GENERAL_INDEX_DECODE_BYTES,
+                )
+                .map_err(|e| format!("id_indices General-variant codec failed: {e}"))?;
                 let len = blob.len() as u64;
                 plans.push(Plan {
                     type_key: *type_key,
@@ -921,7 +956,7 @@ mod validation_tests {
         let key = interner.get_or_intern("Person").as_u64();
         let valid = integer_fixture(key, &[(7, 70)]);
         let mut version = valid.clone();
-        version[8..12].copy_from_slice(&2u32.to_le_bytes());
+        version[8..12].copy_from_slice(&(VERSION + 1).to_le_bytes());
         assert_invalid(&version, &interner);
         let mut trailing = valid.clone();
         trailing.push(0);

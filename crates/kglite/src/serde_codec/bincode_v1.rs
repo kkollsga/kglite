@@ -6,7 +6,7 @@ use serde::de::{Deserialize, DeserializeOwned};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::io::{Read, Write};
+use std::io::Read;
 
 const CODEC: &str = "bincode-v1";
 
@@ -59,13 +59,6 @@ pub(super) fn encode_bounded<T: Serialize + ?Sized>(
     permissive_bounded_options(limit)
         .serialize(value)
         .map_err(encode_error)
-}
-
-pub(super) fn encode_into<W: Write, T: Serialize + ?Sized>(
-    writer: W,
-    value: &T,
-) -> Result<(), CodecError> {
-    bincode::serialize_into(writer, value).map_err(encode_error)
 }
 
 pub(super) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {

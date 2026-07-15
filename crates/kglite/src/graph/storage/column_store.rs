@@ -694,8 +694,12 @@ impl TypedColumn {
 
     /// Write column data to a writer (for v3 packed format).
     /// Writes data bytes, then null bytes. For strings: offsets + data + nulls.
-    /// For mixed: bincode-serialized Vec<Value>.
-    pub fn write_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+    /// For mixed: codec-selected `Vec<Value>`.
+    fn write_to_with_codec(
+        &self,
+        writer: &mut impl io::Write,
+        codec: crate::serde_codec::CodecVersion,
+    ) -> io::Result<()> {
         match self {
             TypedColumn::Int64 { data, nulls } => {
                 write_packed_values(data, writer)?;
@@ -757,8 +761,8 @@ impl TypedColumn {
                 }
             }
             TypedColumn::Mixed { data } => {
-                let encoded = crate::serde_codec::encode(data)
-                    .map_err(|e| io::Error::other(format!("bincode error: {}", e)))?;
+                let encoded = crate::serde_codec::encode_versioned(codec, data, u64::MAX)
+                    .map_err(|e| io::Error::other(format!("column codec error: {e}")))?;
                 writer.write_all(&encoded)?;
             }
         }
@@ -1646,12 +1650,20 @@ impl ColumnStore {
     ///   [2B] type_tag_len  [NB] type_tag
     ///   [8B] data_len      [NB] data_bytes (+ null_bytes for typed columns)
     ///   For "string": data_bytes = offsets + str_data + null_bitmap
-    ///   For "mixed": data_bytes = bincode(Vec<Value>)
+    ///   For "mixed": data_bytes = the selected codec's Vec<Value>
     pub fn write_packed(&self, interner: &StringInterner) -> io::Result<Vec<u8>> {
+        self.write_packed_with_codec(interner, crate::serde_codec::CURRENT_CODEC)
+    }
+
+    pub(crate) fn write_packed_with_codec(
+        &self,
+        interner: &StringInterner,
+        codec: crate::serde_codec::CodecVersion,
+    ) -> io::Result<Vec<u8>> {
         // If this ColumnStore is mmap-backed (from_mmap_store), materialize
         // rows from the mmap store so they can be serialized.
         if let Some(ref mmap_store) = self.mmap_store {
-            return self.write_packed_from_mmap(mmap_store, interner);
+            return self.write_packed_from_mmap(mmap_store, interner, codec);
         }
 
         let mut buf: Vec<u8> = Vec::new();
@@ -1680,9 +1692,9 @@ impl ColumnStore {
                 while padded.len() < self.row_count as usize {
                     padded.push_null();
                 }
-                Self::write_packed_column(&mut buf, col_name, &padded)?;
+                Self::write_packed_column(&mut buf, col_name, &padded, codec)?;
             } else {
-                Self::write_packed_column(&mut buf, col_name, col)?;
+                Self::write_packed_column(&mut buf, col_name, col, codec)?;
             }
         }
 
@@ -1692,14 +1704,14 @@ impl ColumnStore {
             while padded.len() < self.row_count as usize {
                 padded.push_null();
             }
-            Self::write_packed_column(&mut buf, "__id__", &padded)?;
+            Self::write_packed_column(&mut buf, "__id__", &padded, codec)?;
         }
         if let Some(ref col) = self.title_column {
             let mut padded = col.clone();
             while padded.len() < self.row_count as usize {
                 padded.push_null();
             }
-            Self::write_packed_column(&mut buf, "__title__", &padded)?;
+            Self::write_packed_column(&mut buf, "__title__", &padded, codec)?;
         }
 
         // Write overflow bag as two pseudo-columns
@@ -1740,6 +1752,7 @@ impl ColumnStore {
         &self,
         mmap_store: &crate::graph::storage::mapped::column_store::MmapColumnStore,
         interner: &StringInterner,
+        codec: crate::serde_codec::CodecVersion,
     ) -> io::Result<Vec<u8>> {
         let rc = mmap_store.row_count();
         let mut buf: Vec<u8> = Vec::new();
@@ -1787,12 +1800,12 @@ impl ColumnStore {
 
         // Write property columns
         for (name, col) in &prop_columns {
-            Self::write_packed_column(&mut buf, name, col)?;
+            Self::write_packed_column(&mut buf, name, col, codec)?;
         }
 
         // Write id/title
-        Self::write_packed_column(&mut buf, "__id__", &id_col)?;
-        Self::write_packed_column(&mut buf, "__title__", &title_col)?;
+        Self::write_packed_column(&mut buf, "__id__", &id_col, codec)?;
+        Self::write_packed_column(&mut buf, "__title__", &title_col, codec)?;
 
         // Write overflow if present
         if has_overflow {
@@ -1828,7 +1841,12 @@ impl ColumnStore {
     }
 
     /// Write a single column entry to a packed buffer.
-    fn write_packed_column(buf: &mut Vec<u8>, col_name: &str, col: &TypedColumn) -> io::Result<()> {
+    fn write_packed_column(
+        buf: &mut Vec<u8>,
+        col_name: &str,
+        col: &TypedColumn,
+        codec: crate::serde_codec::CodecVersion,
+    ) -> io::Result<()> {
         let type_tag = col.type_tag();
 
         // Column name
@@ -1844,7 +1862,7 @@ impl ColumnStore {
         // Column data — write length placeholder, then data directly, then patch length
         let len_offset = buf.len();
         buf.extend_from_slice(&0u64.to_le_bytes()); // placeholder
-        col.write_to(buf)?;
+        col.write_to_with_codec(buf, codec)?;
         let data_len = (buf.len() - len_offset - 8) as u64;
         buf[len_offset..len_offset + 8].copy_from_slice(&data_len.to_le_bytes());
         Ok(())
@@ -1862,18 +1880,39 @@ impl ColumnStore {
         row_count: u32,
         temp_dir: Option<&Path>,
     ) -> io::Result<Self> {
-        Self::load_packed_inner(schema, type_meta, interner, packed, row_count, temp_dir).map_err(
-            |error| {
-                if error.kind() == io::ErrorKind::InvalidData {
-                    error
-                } else {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid packed column store: {error}"),
-                    )
-                }
-            },
+        Self::load_packed_with_codec(
+            schema,
+            type_meta,
+            interner,
+            packed,
+            row_count,
+            temp_dir,
+            crate::serde_codec::CURRENT_CODEC,
         )
+    }
+
+    pub(crate) fn load_packed_with_codec(
+        schema: Arc<TypeSchema>,
+        type_meta: &HashMap<String, String>,
+        interner: &StringInterner,
+        packed: &[u8],
+        row_count: u32,
+        temp_dir: Option<&Path>,
+        codec: crate::serde_codec::CodecVersion,
+    ) -> io::Result<Self> {
+        Self::load_packed_inner(
+            schema, type_meta, interner, packed, row_count, temp_dir, codec,
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                error
+            } else {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid packed column store: {error}"),
+                )
+            }
+        })
     }
 
     fn load_packed_inner(
@@ -1883,6 +1922,7 @@ impl ColumnStore {
         packed: &[u8],
         row_count: u32,
         temp_dir: Option<&Path>,
+        codec: crate::serde_codec::CodecVersion,
     ) -> io::Result<Self> {
         use std::io::Read;
 
@@ -1954,14 +1994,16 @@ impl ColumnStore {
 
             // Check for special id/title columns first
             if col_name == "__id__" {
-                let col =
-                    Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
+                let col = Self::unpack_column(
+                    &type_tag, data_blob, row_count, temp_dir, &col_name, codec,
+                )?;
                 store.id_column = Some(col);
                 continue;
             }
             if col_name == "__title__" {
-                let col =
-                    Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
+                let col = Self::unpack_column(
+                    &type_tag, data_blob, row_count, temp_dir, &col_name, codec,
+                )?;
                 store.title_column = Some(col);
                 continue;
             }
@@ -1993,7 +2035,8 @@ impl ColumnStore {
             };
 
             // Build the TypedColumn from the data blob
-            let col = Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name)?;
+            let col =
+                Self::unpack_column(&type_tag, data_blob, row_count, temp_dir, &col_name, codec)?;
 
             if slot < store.columns.len() {
                 store.columns[slot] = col;
@@ -2010,6 +2053,7 @@ impl ColumnStore {
         row_count: u32,
         temp_dir: Option<&Path>,
         col_name: &str,
+        codec: crate::serde_codec::CodecVersion,
     ) -> io::Result<TypedColumn> {
         let rc = row_count as usize;
         match type_tag {
@@ -2204,14 +2248,23 @@ impl ColumnStore {
                     relocated: HashMap::new(),
                 })
             }
-            _ => {
-                // Mixed — bincode deserialize
-                let data: Vec<Value> = crate::serde_codec::decode(data_blob).map_err(|e| {
-                    io::Error::other(format!("bincode error for '{}': {}", col_name, e))
-                })?;
-                Ok(TypedColumn::Mixed { data })
-            }
+            _ => Self::unpack_mixed_column(codec, data_blob, col_name),
         }
+    }
+
+    fn unpack_mixed_column(
+        codec: crate::serde_codec::CodecVersion,
+        data_blob: &[u8],
+        col_name: &str,
+    ) -> io::Result<TypedColumn> {
+        let data = crate::serde_codec::decode_exact_with(
+            codec,
+            data_blob,
+            data_blob.len() as u64,
+            crate::serde_codec::DecodeLimits::new(data_blob.len() as u64, data_blob.len() as u64),
+        )
+        .map_err(|e| io::Error::other(format!("codec error for '{col_name}': {e}")))?;
+        Ok(TypedColumn::Mixed { data })
     }
 
     /// Load raw bytes into a MmapOrVec<T>, optionally via temp file + mmap.

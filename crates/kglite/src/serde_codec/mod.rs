@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
-use std::io::{Read, Write};
+use std::io::Read;
 
 #[cfg(test)]
 mod tests;
@@ -100,6 +100,8 @@ pub(crate) enum CodecVersion {
     BincodeV1 = 1,
     PostcardV1 = 2,
 }
+
+pub(crate) const CURRENT_CODEC: CodecVersion = CodecVersion::PostcardV1;
 
 impl CodecVersion {
     pub(crate) const fn tag(self) -> u8 {
@@ -192,17 +194,20 @@ pub(crate) fn decode_versioned_exact<'de, T: Deserialize<'de>>(
     }
 }
 
+pub(crate) fn decode_exact_with<'de, T: Deserialize<'de>>(
+    codec: CodecVersion,
+    bytes: &'de [u8],
+    allocated_bytes: u64,
+    limits: DecodeLimits,
+) -> Result<T, CodecError> {
+    let envelope = PayloadEnvelope::from_tag(codec.tag(), bytes, allocated_bytes, limits)?;
+    decode_versioned_exact(envelope)
+}
+
 /// Active encoding. Until the writer migration phase this deliberately emits
 /// the frozen legacy bytes.
 pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
     bincode_v1::encode(value)
-}
-
-pub(crate) fn encode_into<W: Write, T: Serialize + ?Sized>(
-    writer: W,
-    value: &T,
-) -> Result<(), CodecError> {
-    bincode_v1::encode_into(writer, value)
 }
 
 pub(crate) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {

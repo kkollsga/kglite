@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "527754e18881505d307eda6057a8635bd325091f3b70fe4966f3889ee4de37da"
+GOLDEN_V3_DIGEST = "19dfe6a7495832d42a639dd0b0e28d78b73f89df23c2fa89948ef41520d00f1f"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,9 @@ GOLDEN_V3_DIGEST = "527754e18881505d307eda6057a8635bd325091f3b70fe4966f3889ee4de
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Initial v5/Postcard digest before nested mixed-value column payloads
+        # were moved through the same explicit codec selection.
+        "527754e18881505d307eda6057a8635bd325091f3b70fe4966f3889ee4de37da",
         # Final v4/bincode digest, demoted when v5 switched portable Serde
         # payloads to explicitly tagged Postcard.
         "827e2bc03e514d2ed58b45a84e1c9ecd75e8c71cf2a9aa3d5fe052a42bf63554",

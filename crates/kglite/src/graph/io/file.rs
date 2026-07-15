@@ -48,6 +48,7 @@ use std::sync::Arc;
 use crate::serde_codec;
 
 const MAX_CODEC_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DISK_SERDE_MAGIC: &[u8; 8] = b"KGLDSC1\0";
 
 /// Magic bytes for the v3 columnar format: "RGF\x03". Retained ONLY
 /// so the loader can detect a v3 file and emit a specific
@@ -489,7 +490,7 @@ pub(crate) fn read_type_indices_bin(
 
 pub(crate) fn write_interner_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
     let originals: Vec<String> = graph.interner.iter().map(|(_, v)| v.to_string()).collect();
-    let bytes = serde_codec::encode(&originals)
+    let bytes = encode_disk_serde(&originals)
         .map_err(|e| format!("interner serialization failed: {}", e))?;
     let compressed = zstd::encode_all(bytes.as_slice(), 3)
         .map_err(|e| format!("interner compression failed: {}", e))?;
@@ -505,7 +506,7 @@ pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> 
     }
     let compressed = std::fs::read(&path)?;
     let bytes = zstd_decompress(&compressed)?;
-    let originals: Vec<String> = serde_codec::decode(&bytes).map_err(io::Error::other)?;
+    let originals: Vec<String> = decode_disk_serde(&bytes, bytes.capacity() as u64)?;
     for s in &originals {
         graph
             .interner
@@ -538,6 +539,40 @@ mod interner_file_tests {
         let err = read_interner_bin(dir.path(), &mut graph).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("hash collision"));
+    }
+
+    #[test]
+    fn disk_sidecar_frame_is_versioned_and_legacy_remains_readable() {
+        let values = vec!["alpha".to_string(), "beta".to_string()];
+        let current = encode_disk_serde(&values).unwrap();
+        assert_eq!(&current[..8], DISK_SERDE_MAGIC);
+        assert_eq!(current[8], serde_codec::CodecVersion::PostcardV1.tag());
+        assert_eq!(
+            decode_disk_serde::<Vec<String>>(&current, current.capacity() as u64).unwrap(),
+            values
+        );
+
+        let legacy = serde_codec::encode(&values).unwrap();
+        assert_eq!(
+            decode_disk_serde::<Vec<String>>(&legacy, legacy.capacity() as u64).unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn disk_sidecar_frame_rejects_unknown_codec_and_trailing_bytes() {
+        let mut unknown = encode_disk_serde(&vec![1u32, 2]).unwrap();
+        unknown[8] = 99;
+        let error = decode_disk_serde::<Vec<u32>>(&unknown, unknown.capacity() as u64).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown binary codec version 99"));
+
+        let mut trailing = encode_disk_serde(&vec![1u32, 2]).unwrap();
+        trailing.push(0xff);
+        let error =
+            decode_disk_serde::<Vec<u32>>(&trailing, trailing.capacity() as u64).unwrap_err();
+        assert!(error.to_string().contains("trailing"));
     }
 }
 
@@ -1026,6 +1061,42 @@ fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     zstd_decompress_limited(data, MAX_DECOMPRESSED_SECTION_BYTES)
 }
 
+/// Encode a Serde-backed disk sidecar with an explicit codec selector.
+/// Legacy sidecars lack this frame and remain readable through
+/// [`decode_disk_serde`].
+pub(crate) fn encode_disk_serde<T: Serialize + ?Sized>(value: &T) -> io::Result<Vec<u8>> {
+    let payload = serde_codec::encode_versioned(serde_codec::CURRENT_CODEC, value, MAX_CODEC_BYTES)
+        .map_err(io::Error::other)?;
+    let mut framed = Vec::with_capacity(DISK_SERDE_MAGIC.len() + 1 + payload.len());
+    framed.extend_from_slice(DISK_SERDE_MAGIC);
+    framed.push(serde_codec::CURRENT_CODEC.tag());
+    framed.extend_from_slice(&payload);
+    Ok(framed)
+}
+
+/// Decode a new explicitly framed disk sidecar or the frozen unframed
+/// bincode-v1 legacy representation. A recognised frame never falls back to
+/// another codec on error.
+pub(crate) fn decode_disk_serde<'de, T: Deserialize<'de>>(
+    bytes: &'de [u8],
+    allocated_bytes: u64,
+) -> io::Result<T> {
+    if bytes.starts_with(DISK_SERDE_MAGIC) {
+        let codec_tag = *bytes
+            .get(DISK_SERDE_MAGIC.len())
+            .ok_or_else(|| invalid_data("disk codec frame is truncated"))?;
+        let payload = &bytes[DISK_SERDE_MAGIC.len() + 1..];
+        return serde_codec::decode_exact_with(
+            serde_codec::CodecVersion::from_tag(codec_tag).map_err(io::Error::other)?,
+            payload,
+            allocated_bytes,
+            serde_codec::DecodeLimits::new(MAX_CODEC_BYTES, MAX_CODEC_BYTES),
+        )
+        .map_err(io::Error::other);
+    }
+    serde_codec::decode_bounded(bytes, MAX_CODEC_BYTES).map_err(io::Error::other)
+}
+
 /// Wrap a sidecar decode failure in an error that names the file and
 /// tells the operator what to do. Used by `load_disk_dir` for optional
 /// sidecars (embeddings / timeseries / secondary labels): a *missing*
@@ -1240,7 +1311,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
         graph.column_stores.iter().collect();
     column_stores_sorted.sort_by(|a, b| a.0.cmp(b.0));
     for (type_name, store) in column_stores_sorted {
-        let packed = store.write_packed(&graph.interner)?;
+        let packed = store.write_packed_with_codec(&graph.interner, codec)?;
         let compressed = zstd_compress(&packed)?;
         drop(packed); // free uncompressed before next type
 
@@ -1818,7 +1889,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
             let compressed = std::fs::read(&meta_bin_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            crate::serde_codec::decode(&bytes).map_err(io::Error::other)?
+            decode_disk_serde(&bytes, bytes.capacity() as u64)?
         } else {
             let meta_json = std::fs::read_to_string(&meta_json_path)?;
             serde_json::from_str(&meta_json).map_err(io::Error::other)?
@@ -1923,10 +1994,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         let mut embeddings = (|| -> io::Result<HashMap<(String, String), EmbeddingStore>> {
             let compressed = std::fs::read(&emb_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            // Use the legacy codec policy for parity with the writer in
-            // disk_persistence.rs; size is already bounded by the zstd
-            // decompression limit above.
-            crate::serde_codec::decode(&bytes).map_err(|e| invalid_data(e.to_string()))
+            decode_disk_serde(&bytes, bytes.capacity() as u64)
+                .map_err(|e| invalid_data(e.to_string()))
         })()
         .map_err(|e| corrupt_sidecar_error("embeddings.bin.zst", &e))?;
         // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
@@ -1942,7 +2011,8 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         graph.timeseries_store = (|| -> io::Result<HashMap<usize, NodeTimeseries>> {
             let compressed = std::fs::read(&ts_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            crate::serde_codec::decode(&bytes).map_err(|e| invalid_data(e.to_string()))
+            decode_disk_serde(&bytes, bytes.capacity() as u64)
+                .map_err(|e| invalid_data(e.to_string()))
         })()
         .map_err(|e| corrupt_sidecar_error("timeseries.bin.zst", &e))?;
     }
@@ -2050,26 +2120,42 @@ fn load_column_sidecars(
             |job| -> io::Result<(String, crate::graph::storage::column_store::ColumnStore)> {
                 let compressed = std::fs::read(&job.col_file)?;
                 let decoded = zstd_decompress(&compressed)?;
-                // New format: `KGLCOLv1` + row_count: u32 + packed bytes.
+                // Current format: `KGLCOLv2` + row_count + Postcard-backed
+                // mixed columns. `KGLCOLv1` and raw sidecars use bincode.
                 // Old format (pre-0.8.12): raw packed bytes. Dispatch via the
                 // magic tag. Old-format row_count is derived from
                 // `type_indices[type].len()` — wrong after DELETE tombstones
                 // (0.8.12 CHANGELOG F2), but best effort for legacy graphs.
-                let (packed_slice, row_count): (&[u8], u32) =
-                    if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
-                        let rc = u32::from_le_bytes(decoded[8..12].try_into().unwrap());
-                        (&decoded[12..], rc)
+                let (packed_slice, row_count, codec): (&[u8], u32, serde_codec::CodecVersion) =
+                    if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv2" {
+                        (
+                            &decoded[12..],
+                            u32::from_le_bytes(decoded[8..12].try_into().unwrap()),
+                            serde_codec::CodecVersion::PostcardV1,
+                        )
+                    } else if decoded.len() >= 12 && &decoded[..8] == b"KGLCOLv1" {
+                        (
+                            &decoded[12..],
+                            u32::from_le_bytes(decoded[8..12].try_into().unwrap()),
+                            serde_codec::CodecVersion::BincodeV1,
+                        )
                     } else {
-                        (decoded.as_slice(), job.legacy_row_count)
+                        (
+                            decoded.as_slice(),
+                            job.legacy_row_count,
+                            serde_codec::CodecVersion::BincodeV1,
+                        )
                     };
-                let store = crate::graph::storage::column_store::ColumnStore::load_packed(
-                    job.schema,
-                    &job.type_meta,
-                    interner,
-                    packed_slice,
-                    row_count,
-                    None,
-                )?;
+                let store =
+                    crate::graph::storage::column_store::ColumnStore::load_packed_with_codec(
+                        job.schema,
+                        &job.type_meta,
+                        interner,
+                        packed_slice,
+                        row_count,
+                        None,
+                        codec,
+                    )?;
                 Ok((job.type_name, store))
             },
         )
@@ -2187,6 +2273,7 @@ fn portable_temp_dir() -> std::path::PathBuf {
 }
 
 fn load_portable_column_section(
+    codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
     section_meta: &V3ColumnSection,
@@ -2226,13 +2313,14 @@ fn load_portable_column_section(
         .unwrap_or_default();
     let type_temp_dir = temp_dir.join(format!("type_{section_index}"));
     std::fs::create_dir_all(&type_temp_dir)?;
-    let store = ColumnStore::load_packed(
+    let store = ColumnStore::load_packed_with_codec(
         column_schema,
         &type_meta,
         &dir_graph.interner,
         &packed,
         section_meta.row_count,
         Some(&type_temp_dir),
+        codec,
     )?;
     dir_graph
         .column_stores
@@ -2264,6 +2352,7 @@ fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
 }
 
 fn load_portable_columns(
+    codec: serde_codec::CodecVersion,
     dir_graph: &mut DirGraph,
     sections: &mut SectionCursor<'_>,
     columns: &[V3ColumnSection],
@@ -2273,7 +2362,7 @@ fn load_portable_columns(
         dirs.push(temp_dir.clone());
     }
     for (index, metadata) in columns.iter().enumerate() {
-        load_portable_column_section(dir_graph, sections, metadata, index, &temp_dir)?;
+        load_portable_column_section(codec, dir_graph, sections, metadata, index, &temp_dir)?;
     }
     attach_portable_column_stores(dir_graph);
     Ok(())
@@ -2345,7 +2434,7 @@ fn load_portable_columnar(
     let (metadata, mut sections) =
         parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
     let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
-    load_portable_columns(&mut dir_graph, &mut sections, &plan.columns)?;
+    load_portable_columns(codec, &mut dir_graph, &mut sections, &plan.columns)?;
     load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
     Ok(Arc::new(dir_graph))
 }

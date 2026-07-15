@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use super::csr::TOMBSTONE_EDGE;
+use super::csr::{CsrEdge, TOMBSTONE_EDGE};
 use super::edge_properties::{EdgePropertyStore, EdgePropertyStoreMeta};
 use super::graph::{enumerate_segment_dirs, segment_subdir, DiskGraph, CURRENT_CSR_LAYOUT_VERSION};
 use super::property_index;
@@ -22,6 +22,10 @@ use super::segment_summary::SegmentManifest;
 /// Metadata stored alongside the binary files in the disk graph directory.
 #[derive(Serialize, Deserialize)]
 struct DiskGraphMeta {
+    /// Codec for Serde-backed payloads owned by this disk snapshot.
+    /// Missing means the frozen bincode v1 format used before 0.13.4.
+    #[serde(default = "legacy_codec_tag")]
+    serde_codec_version: u8,
     node_count: usize,
     node_slots_len: usize,
     edge_count: usize,
@@ -46,7 +50,8 @@ struct DiskGraphMeta {
     #[serde(default = "default_has_tombstones")]
     has_tombstones: bool,
     /// Edge property storage format. 0 = legacy bincode+zstd HashMap
-    /// (edge_properties.bin.zst). 1 = columnar mmap base + overlay
+    /// (edge_properties.bin.zst). 1 = bincode columnar mmap base + overlay;
+    /// 2 = Postcard columnar mmap base + overlay.
     /// (edge_prop_offsets.bin + edge_prop_heap.bin). Added in PR2 of
     /// the disk-graph-improvement-plan; defaults to 0 for backward
     /// compat with older .kgl directories.
@@ -78,6 +83,33 @@ fn default_has_tombstones() -> bool {
     // Conservative: older graphs that lack this field get the slow path
     // (tombstone-aware). Fresh builds emit `false` explicitly.
     true
+}
+
+const MAX_DISK_CODEC_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+const fn legacy_codec_tag() -> u8 {
+    crate::serde_codec::CodecVersion::BincodeV1.tag()
+}
+
+type OverflowEdges = (HashMap<u32, Vec<CsrEdge>>, HashMap<u32, Vec<CsrEdge>>);
+
+fn load_overflow_edges(
+    dir: &Path,
+    codec: crate::serde_codec::CodecVersion,
+) -> std::io::Result<OverflowEdges> {
+    let path = dir.join("overflow_edges.bin.zst");
+    if !path.exists() {
+        return Ok((HashMap::new(), HashMap::new()));
+    }
+    let compressed = std::fs::read(path)?;
+    let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
+    crate::serde_codec::decode_exact_with(
+        codec,
+        &bytes,
+        bytes.capacity() as u64,
+        crate::serde_codec::DecodeLimits::new(MAX_DISK_CODEC_BYTES, MAX_DISK_CODEC_BYTES),
+    )
+    .map_err(std::io::Error::other)
 }
 
 impl DiskGraph {
@@ -293,6 +325,7 @@ impl DiskGraph {
         edge_props_meta: EdgePropertyStoreMeta,
     ) -> std::io::Result<()> {
         let meta = DiskGraphMeta {
+            serde_codec_version: crate::serde_codec::CURRENT_CODEC.tag(),
             node_count: self.node_count,
             node_slots_len: self.node_slot_len(),
             edge_count: self.edge_count,
@@ -306,9 +339,9 @@ impl DiskGraph {
             free_edge_slots: self.free_edge_slots.clone(),
             csr_sorted_by_type: self.csr_sorted_by_type,
             has_tombstones: self.has_tombstones,
-            // PR2: format=1 = columnar. Fresh graphs always emit the new
-            // format; legacy format=0 is only ever loaded, never written.
-            edge_properties_format: 1,
+            // Fresh graphs use Postcard columnar slots. Formats 0 and 1 are
+            // read-only compatibility branches.
+            edge_properties_format: 2,
             edge_properties_meta: edge_props_meta,
             // PR1 phase 4: fresh saves always emit the segmented layout.
             csr_layout_version: CURRENT_CSR_LAYOUT_VERSION,
@@ -501,17 +534,22 @@ impl DiskGraph {
             .save_to_file(&csr_target.join("in_edges.bin"))?;
         self.save_logical_edge_endpoints(&csr_target.join("edge_endpoints.bin"))?;
 
-        // Save overflow edges (bincode + zstd)
+        // Save overflow edges using the codec selected by DiskGraphMeta.
         if !self.overflow_out.is_empty() || !self.overflow_in.is_empty() {
             let overflow = (&self.overflow_out, &self.overflow_in);
-            let bytes = crate::serde_codec::encode(&overflow).map_err(std::io::Error::other)?;
+            let bytes = crate::serde_codec::encode_versioned(
+                crate::serde_codec::CURRENT_CODEC,
+                &overflow,
+                MAX_DISK_CODEC_BYTES,
+            )
+            .map_err(std::io::Error::other)?;
             let compressed =
                 zstd::encode_all(bytes.as_slice(), 3).map_err(std::io::Error::other)?;
             std::fs::write(target_dir.join("overflow_edges.bin.zst"), compressed)?;
         }
 
         // Save edge properties (columnar: edge_prop_offsets.bin + edge_prop_heap.bin).
-        // Always write even when empty so format=1 + zero-length files are
+        // Always write even when empty so format=2 + zero-length files are
         // self-consistent with the metadata. No interner/guard needed —
         // the columnar format stores raw u64 hashes directly. Phase-4
         // layout puts these alongside the CSR in `csr_target`.
@@ -898,6 +936,8 @@ impl DiskGraph {
         let t = stage_timer();
         let meta_str = std::fs::read_to_string(dir.join("disk_graph_meta.json"))?;
         let meta: DiskGraphMeta = serde_json::from_str(&meta_str).map_err(std::io::Error::other)?;
+        let serde_codec = crate::serde_codec::CodecVersion::from_tag(meta.serde_codec_version)
+            .map_err(std::io::Error::other)?;
         log_stage("dg.meta_parse", t);
 
         // PR1 phase 4: CSR binaries live under seg_NNN/ when the graph
@@ -1061,7 +1101,8 @@ impl DiskGraph {
             peer_count_entries,
         } = segment_csr;
 
-        // Load edge properties — columnar (format=1) or legacy (format=0).
+        // Load edge properties — Postcard columnar (2), bincode columnar (1),
+        // or legacy combined bincode (0).
         // In the segmented layout the files live alongside the CSR.
         let t = stage_timer();
         let edge_properties = EdgePropertyStore::load_from(
@@ -1074,13 +1115,7 @@ impl DiskGraph {
 
         // Load overflow edges (kept at the graph root; orthogonal to segments)
         let t = stage_timer();
-        let (overflow_out, overflow_in) = if dir.join("overflow_edges.bin.zst").exists() {
-            let compressed = std::fs::read(dir.join("overflow_edges.bin.zst"))?;
-            let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
-            crate::serde_codec::decode(&bytes).map_err(std::io::Error::other)?
-        } else {
-            (HashMap::new(), HashMap::new())
-        };
+        let (overflow_out, overflow_in) = load_overflow_edges(dir, serde_codec)?;
         log_stage("dg.overflow_edges", t);
 
         let t = stage_timer();
