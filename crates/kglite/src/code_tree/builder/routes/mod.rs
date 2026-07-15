@@ -29,6 +29,7 @@
 //! after that is one new file in this directory plus a line below.
 
 use crate::code_tree::models::{ConstantInfo, FunctionInfo};
+use std::collections::HashSet;
 
 mod django;
 mod fastapi;
@@ -67,8 +68,10 @@ pub struct RouteEdge {
 }
 
 /// Run every registered framework detector over the parse result and
-/// concatenate their outputs. The order in this match arm fixes the
-/// node-id stable-prefix order — newer frameworks land at the end.
+/// concatenate their outputs. One node is retained per route id while distinct
+/// handler edges survive, matching the `(framework, method, path)` identity
+/// contract above. Exact duplicate decorators collapse to one edge as well.
+/// The first declaration supplies the shared Route node's source location.
 pub fn build_routes(
     functions: &[FunctionInfo],
     constants: &[ConstantInfo],
@@ -83,6 +86,10 @@ pub fn build_routes(
         nodes.extend(det_nodes);
         edges.extend(det_edges);
     }
+    let mut node_ids = HashSet::new();
+    nodes.retain(|node| node_ids.insert(node.id.clone()));
+    let mut edge_ids = HashSet::new();
+    edges.retain(|edge| edge_ids.insert((edge.route_id.clone(), edge.function_qname.clone())));
     (nodes, edges)
 }
 

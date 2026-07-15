@@ -69,12 +69,16 @@ pub fn archive_and_build(
         tmp.path(),
         verbose,
         include_tests,
-        save_to,
+        None,
         max_loc_per_file,
         include_docs,
     )?;
 
-    stamp_rev_provenance(graph, rev, &sha, &repo_root)
+    let mut graph = stamp_rev_provenance(graph, rev, &sha, &repo_root)?;
+    if let Some(dest) = save_to {
+        save_built_graph(&mut graph, dest)?;
+    }
+    Ok(graph)
 }
 
 /// Extract the tracked tree at `rev` into `snapshot_dir`, then build a code
@@ -452,16 +456,21 @@ pub fn build_code_tree_revs(
         stamp_edge_revs(g, &edge_revs);
     }
 
+    let mut graph = stamp_rev_provenance_multi(graph, &sha_of_rev, &repo_root)?;
     if let Some(dest) = save_to {
-        // Mirror the builder's save prep so property column stores materialise
-        // (including the new `revs` / `rev_fp` list columns) before write.
-        crate::graph::io::file::prepare_save(&mut graph);
-        Arc::make_mut(&mut graph).enable_columnar();
-        let dest_str = dest.to_string_lossy();
-        crate::graph::io::file::write_kgl(&graph, &dest_str).map_err(|e| e.to_string())?;
+        save_built_graph(&mut graph, dest)?;
     }
+    Ok(graph)
+}
 
-    stamp_rev_provenance_multi(graph, &sha_of_rev, &repo_root)
+/// Persist a completed revision graph after every provenance field has been
+/// stamped. Saving earlier produces a valid graph whose reloaded `describe()`
+/// silently loses the revision instructions held only by the returned Arc.
+fn save_built_graph(graph: &mut Arc<DirGraph>, dest: &Path) -> Result<(), String> {
+    crate::graph::io::file::prepare_save(graph);
+    Arc::make_mut(graph).enable_columnar();
+    let dest_str = dest.to_string_lossy();
+    crate::graph::io::file::write_kgl(graph, &dest_str).map_err(|e| e.to_string())
 }
 
 /// Read a freshly-built rev graph and fold its nodes/edges into the running
@@ -1086,5 +1095,31 @@ mod tests {
         assert_eq!(list_prop(&reloaded, "Function", "gone", "revs"), vec![s1]);
         // Edge revs survive the round-trip (EdgeData property vector).
         assert_eq!(calls_edge_revs(&reloaded, "foo", "bar"), vec![s2, s3]);
+        let instructions = reloaded
+            .get_instructions(None)
+            .expect("saved multi-rev graph keeps provenance instructions");
+        assert!(instructions.contains("Multi-rev code graph"));
+        assert!(instructions.contains("CALL rev_diff"));
+    }
+
+    #[test]
+    fn single_revision_instructions_survive_save_reload() {
+        let (tmp, [s1, _s2, _s3]) = fixture();
+        let out = tmp.path().join("single.kgl");
+        let built = archive_and_build(
+            tmp.path(),
+            &s1,
+            Some(tmp.path()),
+            false,
+            false,
+            Some(&out),
+            None,
+            false,
+        )
+        .expect("build+save");
+        let expected = built.get_instructions(None).expect("in-memory provenance");
+        let reloaded = crate::graph::io::file::load_file(out.to_str().unwrap()).expect("reload");
+        assert_eq!(reloaded.get_instructions(None), Some(expected));
+        assert!(expected.contains("not the current working tree"));
     }
 }

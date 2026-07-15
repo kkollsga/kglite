@@ -17,6 +17,34 @@ cargo install kglite-cli
 `kglite-cli` is separate from the Python `kglite` package. Installing it
 puts the `kglite` binary on `PATH`.
 
+## Code-Review Skill
+
+Install the bundled Agent Skill for both Codex and Claude Code:
+
+```bash
+kglite skill install
+```
+
+Use `--host codex` or `--host claude` to choose one, `--project` for repository
+scope, and `--dry-run` to inspect destinations. Re-running replaces the managed
+artifact idempotently; `kglite skill uninstall` removes only directories marked
+as CLI-managed.
+
+The skill drives the CLI directly. Build a working-tree graph, or a graph that
+spans a committed base and head revision:
+
+```bash
+kglite code-tree build . --output .kglite/code-review.kgl --format json
+kglite code-tree build . --revs main HEAD \
+  --output .kglite/code-review.kgl --format json
+kglite code-tree status --output .kglite/code-review.kgl --format json
+```
+
+`build` writes a metadata sidecar with the source/revision fingerprint.
+`status` reports `fresh`, `stale`, or `missing` without loading the graph. The
+review workflow still calls `describe` before Cypher and verifies structural
+results against exact source lines.
+
 ## One-Shot Commands
 
 Run a read-only Cypher query and exit:

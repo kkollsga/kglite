@@ -378,7 +378,7 @@ pub mod api {
         /// identity + `revs` / `rev_fp` list props (B.2b). The wheel's
         /// `code_tree.build(revs=[...])` and the MCP server's rev-aware
         /// activation hook are its two bindings.
-        pub use crate::code_tree::rev::{build_code_tree_revs, dedup_revs};
+        pub use crate::code_tree::rev::{archive_and_build, build_code_tree_revs, dedup_revs};
         pub use crate::graph::handle::{
             code_entity_context, find_code_entities, resolve_code_entity, source_location,
             CodeContextLookup, CodeEntityContext, CodeEntityMatch, CODE_TYPES,

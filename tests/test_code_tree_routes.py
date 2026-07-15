@@ -165,6 +165,37 @@ def test_flask_blueprint_route(tmp_path):
     assert any(r["p"] == "/blueprinted" and r["h"] == "from_blueprint" for r in rows), rows
 
 
+def test_same_route_in_several_modules_has_one_node_and_distinct_handlers(tmp_path):
+    """Route identity is framework+method+path; declarations sharing that
+    endpoint must not insert duplicate node ids, while both handlers remain."""
+    pkg = _make_pkg(
+        tmp_path,
+        {
+            "first.py": """
+            class _Flask:
+                def route(self, *a, **k): return lambda fn: fn
+            app = _Flask()
+            @app.route('/')
+            def first_home(): return 'first'
+            """,
+            "second.py": """
+            class _Flask:
+                def route(self, *a, **k): return lambda fn: fn
+            app = _Flask()
+            @app.route('/')
+            def second_home(): return 'second'
+            """,
+        },
+    )
+    g = build(str(pkg))
+    nodes = g.cypher("MATCH (r:Route {id:'flask::ANY::/'}) RETURN count(r) AS n").to_list()
+    assert nodes == [{"n": 1}]
+    handlers = g.cypher(
+        "MATCH (:Route {id:'flask::ANY::/'})-[:HANDLES]->(f:Function) RETURN f.name AS name ORDER BY name"
+    ).to_list()
+    assert handlers == [{"name": "first_home"}, {"name": "second_home"}]
+
+
 # ── FastAPI ───────────────────────────────────────────────────────
 
 

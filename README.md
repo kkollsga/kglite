@@ -7,6 +7,31 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
+## Install as a code-review skill
+
+```bash
+pip install kglite-cli && kglite skill install
+```
+
+That installs the bundled `kglite-code-review` skill for Codex and Claude Code.
+The skill builds a local code graph through the pure-Rust CLI, calls
+`describe()` before writing Cypher, uses graph relationships alongside the git
+diff and literal search, and verifies findings against source lines. No MCP
+configuration or Python runtime is required.
+
+Use `--host codex` or `--host claude` to select one host, and `--project` to
+install into the current repository instead of your home directory. The
+standards-based, multi-host alternative in GitHub CLI 2.90+ is currently in
+public preview:
+
+```bash
+gh skill preview kkollsga/kglite kglite-code-review
+gh skill install kkollsga/kglite kglite-code-review
+```
+
+> Or tell your coding agent: “Install the KGLite code-review skill by running
+> `pip install kglite-cli && kglite skill install`.”
+
 KGLite is an embedded, Cypher-queryable knowledge graph for Python,
 built so you can hand it to an LLM agent. `pip install kglite` and
 point `kglite.code_tree.build(".")` at any source directory — your
@@ -85,7 +110,7 @@ parsed codebase.
   Scale to large corpora with an opt-in HNSW index
   (`build_vector_index()`).
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
-- 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 13
+- 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 14
   languages into Function / Class / Module / Route nodes with
   web-framework route detection (Flask, FastAPI, Django). Build from
   any git revision, or merge several into one multi-revision graph for
@@ -144,13 +169,13 @@ questions traverse it.
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | — | — | — |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
 | **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | — | ✅ | — |
-| **Codebase → graph parser**                | 13 languages, route detection     | —                                                   | —                  | —                  | —                      |
+| **Codebase → graph parser**                | 14 languages, route detection     | —                                                   | —                  | —                  | —                      |
 | **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                                                   | toy graphs only    | —                  | —                      |
 | **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want one embedded package that combines Python and
 pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, a
-13-language code-graph parser, bundled datasets, and agent-contract primitives:
+14-language code-graph parser, bundled datasets, and agent-contract primitives:
 role-scoped writes (`write_scope`), ownership layers, `set_instructions`, and
 `CALL ready_set(...)`. **Pick LadybugDB** when columnar analytical scans and
 its broader language ecosystem are the priority; it also provides Rust
@@ -238,9 +263,11 @@ loads real CSVs end to end.
 
 ## Serve it to an agent
 
-Three levels of effort, three levels of capability.
+The skill above is the zero-configuration review path. Use the MCP server when
+you want a graph kept warm across many calls, typed tool schemas, watch-mode
+refresh, root switching, or cached public-repository and source tools.
 
-### 1. One command — any `.kgl` becomes an MCP server
+### One command — any `.kgl` becomes an MCP server
 
 ```bash
 kglite-mcp-server --graph path/to/graph.kgl
@@ -270,7 +297,7 @@ which drives a real handshake and prints green/red per capability.
   point it at a checked-out tree, `set_root_dir(path)` to swap roots,
   watch-mode auto-rebuild.
 
-### 2. Customise with a YAML manifest
+### Customise with a YAML manifest
 
 Drop `<basename>_mcp.yaml` next to the graph (e.g. `wikidata_mcp.yaml`
 beside `wikidata.kgl`) and the server auto-loads it at boot.
@@ -293,7 +320,7 @@ tools:                                               # inline parameterised Cyph
 No fork required for most customisation. **→
 [MCP server guide](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html).**
 
-### 3. Teach the agent with bundled skills
+### Teach the MCP agent with bundled tool skills
 
 Markdown skill files (`<basename>.skills/*.md`) ship methodology for
 each tool. The agent reads `cypher_query.md` at session start to learn

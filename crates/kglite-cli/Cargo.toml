@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
-description = "Interactive Cypher shell for kglite knowledge graphs — the sqlite3-style REPL: `kglite app.kgl` opens a prompt that runs Cypher and dot-commands (.labels, .schema, .dump, .read, .mode) against a single .kgl file. Pure-Rust single binary, no libpython."
+description = "Pure-Rust KGLite CLI: Cypher shell, code-graph builder, and offline code-review skill installer"
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
 homepage = "https://github.com/kkollsga/kglite"
@@ -20,7 +20,7 @@ path = "src/main.rs"
 # in the resulting binary. Mirrors the kglite-bolt-server / kglite-mcp-server
 # pattern: path dep locally, version requirement on `cargo publish`. Version
 # kept in sync with crates/kglite/Cargo.toml's package.version each release.
-kglite = { version = "0.13", path = "../kglite", default-features = false }
+kglite = { version = "0.13", path = "../kglite", default-features = false, features = ["okf"] }
 
 # Line editor: prompt, history, Emacs/Vi keybindings, Ctrl-C/Ctrl-D handling.
 # The standard Rust REPL choice; not otherwise a workspace dep.

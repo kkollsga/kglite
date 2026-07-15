@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Code review has a zero-configuration CLI and Agent Skill path.**
+  `kglite code-tree build` creates current-tree, single-revision, or merged
+  multi-revision code graphs without Python; a metadata sidecar lets
+  `kglite code-tree status` detect stale artifacts. `kglite skill install`
+  installs the bundled `kglite-code-review` skill offline for Codex and Claude
+  Code at user or project scope, while the existing MCP workspaces remain the
+  persistent watch/cache/tool-schema path.
+
+### Fixed
+
+- **Saved revision code graphs retain their agent instructions.** Single- and
+  multi-revision `save_to` artifacts now persist the same revision provenance
+  and scoping guidance returned by the in-memory graph.
+- **Repeated web endpoints keep unique Route node IDs.** Multiple declarations
+  of the same framework/method/path share one Route node with distinct handler
+  edges, and exact duplicate decorators no longer duplicate the handler edge.
+
 ### Changed
 
 - **Graph persistence uses explicitly versioned Postcard payloads.**

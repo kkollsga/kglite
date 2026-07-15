@@ -15,6 +15,14 @@ $ cargo install kglite-cli    # build from source (needs a Rust toolchain)
 `kglite` command. It's independent of the `kglite` Python library; install
 either or both.
 
+Install the bundled code-review skill for Codex and Claude Code:
+
+```console
+$ kglite skill install
+# one host, or project scope:
+$ kglite skill install --host codex --project
+```
+
 ## Use
 
 Run one query and exit:
@@ -48,6 +56,18 @@ $ kglite describe app.kgl
 $ kglite describe app.kgl --types Task
 $ kglite describe app.kgl --cypher
 ```
+
+Build a code-review graph without Python or MCP configuration:
+
+```console
+$ kglite code-tree build . --output .kglite/code-review.kgl --format json
+$ kglite code-tree status --output .kglite/code-review.kgl --format json
+$ kglite code-tree build . --revs main HEAD --output .kglite/code-review.kgl
+```
+
+The adjacent metadata sidecar records the source and revision fingerprint so
+`status` can detect a stale working-tree artifact or a revision label that
+moved.
 
 Keep one graph loaded for an agent loop:
 
@@ -92,6 +112,9 @@ dot-commands run on Enter. Tab completes dot-commands and the graph's labels.
 
 Non-interactive commands:
 
+- `code-tree build <path> [--output graph.kgl] [--rev REV | --revs REV...]` — build a current-tree or revision-aware code graph
+- `code-tree status [--output graph.kgl]` — report whether the graph matches its recorded source fingerprint
+- `skill install|uninstall [--host codex|claude] [--project] [--dry-run]` — manage the bundled code-review Agent Skill
 - `query <graph.kgl> <cypher> [--format table|csv|json]` — run a read-only Cypher query
 - `write <graph.kgl> <cypher> [--format table|csv|json] [--save]` — run a write-capable Cypher statement
 - `write --write-scope A,B --git-sha <sha> --modified-by <actor>` — restrict writes and stamp provenance on `auto_timestamp` types

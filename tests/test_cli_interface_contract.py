@@ -12,7 +12,21 @@ from tests.test_cli_shell_smoke import BINARY
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "api-baselines" / "cli-interface.json"
-COMMANDS = ("query", "write", "ready-set", "describe", "session", "export-text", "diff")
+COMMANDS = {
+    "query": ("query",),
+    "write": ("write",),
+    "ready-set": ("ready-set",),
+    "describe": ("describe",),
+    "session": ("session",),
+    "export-text": ("export-text",),
+    "diff": ("diff",),
+    "code-tree": ("code-tree",),
+    "code-tree-build": ("code-tree", "build"),
+    "code-tree-status": ("code-tree", "status"),
+    "skill": ("skill",),
+    "skill-install": ("skill", "install"),
+    "skill-uninstall": ("skill", "uninstall"),
+}
 
 pytestmark = pytest.mark.skipif(not BINARY.exists(), reason="kglite CLI binary not built")
 
@@ -27,8 +41,8 @@ def _text(value: str) -> str:
 
 def capture_cli_contract() -> dict:
     help_text = {"root": _text(_run("--help").stdout)}
-    for command in COMMANDS:
-        help_text[command] = _text(_run(command, "--help").stdout)
+    for name, command in COMMANDS.items():
+        help_text[name] = _text(_run(*command, "--help").stdout)
 
     errors = {}
     for name, args in {
