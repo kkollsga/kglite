@@ -6,6 +6,7 @@
 //! adapter must be a small, auditable deletion.
 
 mod bincode_v1;
+mod postcard_v1;
 
 use serde::de::Deserialize;
 use serde::Serialize;
@@ -32,6 +33,14 @@ pub(crate) enum CodecError {
         actual: u64,
         limit: u64,
     },
+    AllocationLimit {
+        actual: u64,
+        limit: u64,
+    },
+    TrailingBytes {
+        remaining: u64,
+    },
+    UnknownCodecVersion(u8),
     TruncatedCollectionCount,
     CollectionCountMismatch {
         encoded: u64,
@@ -55,6 +64,18 @@ impl fmt::Display for CodecError {
             Self::SizeLimit { actual, limit } => {
                 write!(formatter, "payload is {actual} bytes; limit is {limit}")
             }
+            Self::AllocationLimit { actual, limit } => {
+                write!(
+                    formatter,
+                    "payload allocation is {actual} bytes; limit is {limit}"
+                )
+            }
+            Self::TrailingBytes { remaining } => {
+                write!(formatter, "payload has {remaining} trailing bytes")
+            }
+            Self::UnknownCodecVersion(version) => {
+                write!(formatter, "unknown binary codec version {version}")
+            }
             Self::TruncatedCollectionCount => {
                 formatter.write_str("payload is truncated before its collection count")
             }
@@ -72,6 +93,105 @@ impl fmt::Display for CodecError {
 
 impl std::error::Error for CodecError {}
 
+/// Stable codec selector stored by each versioned persistence envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum CodecVersion {
+    BincodeV1 = 1,
+    PostcardV1 = 2,
+}
+
+impl CodecVersion {
+    pub(crate) const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    pub(crate) fn from_tag(tag: u8) -> Result<Self, CodecError> {
+        match tag {
+            1 => Ok(Self::BincodeV1),
+            2 => Ok(Self::PostcardV1),
+            _ => Err(CodecError::UnknownCodecVersion(tag)),
+        }
+    }
+}
+
+/// Limits established by the format reader before invoking a codec.
+///
+/// `max_allocation_bytes` covers the owned payload/decompression buffer that
+/// the caller has already measured. Format-specific readers remain
+/// responsible for semantic collection-count limits because Serde has no
+/// generic way to calculate a decoded type's heap footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeLimits {
+    pub(crate) max_payload_bytes: u64,
+    pub(crate) max_allocation_bytes: u64,
+}
+
+impl DecodeLimits {
+    pub(crate) const fn new(max_payload_bytes: u64, max_allocation_bytes: u64) -> Self {
+        Self {
+            max_payload_bytes,
+            max_allocation_bytes,
+        }
+    }
+}
+
+/// Dependency-neutral view of a payload selected by its outer format header.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PayloadEnvelope<'a> {
+    codec: CodecVersion,
+    payload: &'a [u8],
+}
+
+impl<'a> PayloadEnvelope<'a> {
+    pub(crate) fn from_tag(
+        codec_tag: u8,
+        payload: &'a [u8],
+        allocated_bytes: u64,
+        limits: DecodeLimits,
+    ) -> Result<Self, CodecError> {
+        let actual = payload.len() as u64;
+        if actual > limits.max_payload_bytes {
+            return Err(CodecError::SizeLimit {
+                actual,
+                limit: limits.max_payload_bytes,
+            });
+        }
+        if allocated_bytes > limits.max_allocation_bytes {
+            return Err(CodecError::AllocationLimit {
+                actual: allocated_bytes,
+                limit: limits.max_allocation_bytes,
+            });
+        }
+        Ok(Self {
+            codec: CodecVersion::from_tag(codec_tag)?,
+            payload,
+        })
+    }
+}
+
+pub(crate) fn encode_versioned<T: Serialize + ?Sized>(
+    codec: CodecVersion,
+    value: &T,
+    limit: u64,
+) -> Result<Vec<u8>, CodecError> {
+    match codec {
+        CodecVersion::BincodeV1 => bincode_v1::encode_bounded(value, limit),
+        CodecVersion::PostcardV1 => postcard_v1::encode_bounded(value, limit),
+    }
+}
+
+pub(crate) fn decode_versioned_exact<'de, T: Deserialize<'de>>(
+    envelope: PayloadEnvelope<'de>,
+) -> Result<T, CodecError> {
+    match envelope.codec {
+        CodecVersion::BincodeV1 => {
+            bincode_v1::decode_exact(envelope.payload, envelope.payload.len() as u64)
+        }
+        CodecVersion::PostcardV1 => postcard_v1::decode_exact(envelope.payload),
+    }
+}
+
 /// Active encoding. Until the writer migration phase this deliberately emits
 /// the frozen legacy bytes.
 pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
@@ -82,7 +202,7 @@ pub(crate) fn encode_bounded<T: Serialize + ?Sized>(
     value: &T,
     limit: u64,
 ) -> Result<Vec<u8>, CodecError> {
-    bincode_v1::encode_bounded(value, limit)
+    encode_versioned(CodecVersion::BincodeV1, value, limit)
 }
 
 pub(crate) fn encode_into<W: Write, T: Serialize + ?Sized>(
@@ -115,7 +235,13 @@ pub(crate) fn decode_exact<'de, T: Deserialize<'de>>(
     bytes: &'de [u8],
     limit: u64,
 ) -> Result<T, CodecError> {
-    bincode_v1::decode_exact(bytes, limit)
+    let envelope = PayloadEnvelope::from_tag(
+        CodecVersion::BincodeV1.tag(),
+        bytes,
+        bytes.len() as u64,
+        DecodeLimits::new(limit, limit),
+    )?;
+    decode_versioned_exact(envelope)
 }
 
 pub(crate) fn decode_from_bounded<R: Read, T: serde::de::DeserializeOwned>(

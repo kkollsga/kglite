@@ -16,10 +16,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = REPO_ROOT / "tests" / "api-baselines" / "source-quality.json"
 ENUM_PATTERN = re.compile(r"GraphBackend::[A-Z]")
 UNSAFE_PATTERN = re.compile(r"unsafe\s*\{")
-DIRECT_BINCODE_PATTERN = re.compile(r"\bbincode\s*::|^\s*use\s+bincode\b", re.MULTILINE)
-DIRECT_BINCODE_ALLOWLIST = {
-    "crates/kglite/src/serde_codec/bincode_v1.rs",
-    "crates/kglite/src/bincode_wire_contract_tests.rs",
+DIRECT_CODEC_RULES = {
+    "bincode": (
+        re.compile(r"\bbincode\s*::|^\s*use\s+bincode\b", re.MULTILINE),
+        {
+            "crates/kglite/src/serde_codec/bincode_v1.rs",
+            "crates/kglite/src/bincode_wire_contract_tests.rs",
+        },
+    ),
+    "postcard": (
+        re.compile(r"\bpostcard\s*::|^\s*use\s+postcard\b", re.MULTILINE),
+        {"crates/kglite/src/serde_codec/postcard_v1.rs"},
+    ),
 }
 
 
@@ -252,15 +260,14 @@ def _symbol_violations(root: Path) -> list[str]:
 
 
 def _codec_boundary_violations(root: Path) -> list[str]:
-    """Keep the removable bincode dependency behind its one adapter."""
+    """Keep each Serde codec dependency behind its own adapter."""
     violations: list[str] = []
     for path in _production_rs_files(root):
         relative = path.relative_to(root).as_posix()
-        if relative in DIRECT_BINCODE_ALLOWLIST:
-            continue
         production = _strip_test_items(path.read_text())
-        if DIRECT_BINCODE_PATTERN.search(production):
-            violations.append(f"{relative}: direct bincode use bypasses serde_codec")
+        for codec, (pattern, allowlist) in DIRECT_CODEC_RULES.items():
+            if relative not in allowlist and pattern.search(production):
+                violations.append(f"{relative}: direct {codec} use bypasses serde_codec")
     return violations
 
 
@@ -415,6 +422,8 @@ def _self_test() -> None:
         source.write_text("fn f() { unsafe { call(); } }\n")
         assert _unsafe_violations(root, baseline)
         source.write_text("fn f() { bincode::serialize(&1).unwrap(); }\n")
+        assert _codec_boundary_violations(root)
+        source.write_text("fn f() { postcard::to_stdvec(&1).unwrap(); }\n")
         assert _codec_boundary_violations(root)
 
     mixed_source = """\
