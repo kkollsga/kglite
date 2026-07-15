@@ -7,17 +7,26 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-## Install as a code-review skill
+## Give your coding agent a code graph
+
+Install KGLite as a code-review skill for Codex and Claude Code:
 
 ```bash
 pip install kglite-cli && kglite skill install
 ```
 
-That installs the bundled `kglite-code-review` skill for Codex and Claude Code.
-The skill builds a local code graph through the pure-Rust CLI, calls
-`describe()` before writing Cypher, uses graph relationships alongside the git
-diff and literal search, and verifies findings against source lines. No MCP
-configuration or Python runtime is required.
+Then ask your agent to review a change, trace callers, find affected tests,
+inspect routes and dependencies, or compare symbols across git revisions. The
+`kglite-code-review` skill builds a local, Cypher-queryable code graph and
+combines it with the diff and literal search. Every reported finding is checked
+against exact source lines; repository code is never executed.
+
+This is the lowest-friction way to use KGLite: one offline skill install, no MCP
+configuration, and no Python interpreter involved in the review workflow. The
+pure-Rust CLI handles graph construction, schema discovery, queries, revision
+comparison, and artifact-freshness checks. Use the MCP server later when you
+want a warm graph, watch mode, typed tools, or a persistent multi-repository
+workspace.
 
 Use `--host codex` or `--host claude` to select one host, and `--project` to
 install into the current repository instead of your home directory. The
@@ -29,7 +38,8 @@ gh skill preview kkollsga/kglite kglite-code-review
 gh skill install kkollsga/kglite kglite-code-review
 ```
 
-> Or tell your coding agent: “Install the KGLite code-review skill by running
+> **Try it now:** tell your coding agent, “Install the KGLite code-review skill
+> and review this repository. Run
 > `pip install kglite-cli && kglite skill install`.”
 
 KGLite is an embedded, Cypher-queryable knowledge graph for Python,
