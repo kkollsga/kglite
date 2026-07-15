@@ -1,8 +1,9 @@
 name: Build & Publish kglite-cli wheels
 # Builds the `kglite-cli` binary wheel (the `kglite` interactive shell) for each
 # platform and publishes it to PyPI as the separate `kglite-cli` distribution —
-# so `pip install kglite-cli` puts the shell on PATH while the core `kglite`
-# wheel stays lean. Mirrors build_wheels.yml but for the maturin `bin` wheel
+# so `pip install kglite-cli` offers a standalone, libpython-free alternative
+# to the CLI now bundled in the main `kglite` wheel. Mirrors build_wheels.yml
+# but for the maturin `bin` wheel
 # (one `py3-none-<platform>` wheel per target, no Python-version matrix).
 #
 # Publishing uses PyPI Trusted Publishing (OIDC) — a pending publisher for the

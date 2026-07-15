@@ -1,21 +1,27 @@
 # CLI
 
-`kglite-cli` ships the standalone `kglite` command for working with
-`.kgl` graph files without starting a server. It has two modes:
+The main `kglite` wheel includes the `kglite` command for working with `.kgl`
+graph files without starting a server. It has two modes:
 
 - one-shot commands for scripts and agents
 - an interactive Cypher shell for humans
 
-Install it from PyPI or crates.io:
+Install the Python API and CLI together:
+
+```bash
+pip install kglite
+```
+
+For a standalone CLI-only installation:
 
 ```bash
 pip install kglite-cli
-# or
+# or build the libpython-free binary from crates.io
 cargo install kglite-cli
 ```
 
-`kglite-cli` is separate from the Python `kglite` package. Installing it
-puts the `kglite` binary on `PATH`.
+Both routes expose the same Rust CLI implementation. Do not install both into
+one environment because they provide the same `kglite` command name.
 
 ## Code-Review Skill
 

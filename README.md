@@ -12,7 +12,7 @@
 Install KGLite as a code-review skill for Codex and Claude Code:
 
 ```bash
-pip install kglite-cli && kglite skill install
+pip install kglite && kglite skill install
 ```
 
 Then ask your agent to review a change, trace callers, find affected tests,
@@ -21,12 +21,11 @@ inspect routes and dependencies, or compare symbols across git revisions. The
 combines it with the diff and literal search. Every reported finding is checked
 against exact source lines; repository code is never executed.
 
-This is the lowest-friction way to use KGLite: one offline skill install, no MCP
-configuration, and no Python interpreter involved in the review workflow. The
-pure-Rust CLI handles graph construction, schema discovery, queries, revision
-comparison, and artifact-freshness checks. Use the MCP server later when you
-want a warm graph, watch mode, typed tools, or a persistent multi-repository
-workspace.
+This is the lowest-friction way to use KGLite: one package install, one offline
+skill install, and no MCP configuration. The bundled Rust CLI handles graph
+construction, schema discovery, queries, revision comparison, and
+artifact-freshness checks. Use the MCP server later when you want a warm graph,
+watch mode, typed tools, or a persistent multi-repository workspace.
 
 Use `--host codex` or `--host claude` to select one host, and `--project` to
 install into the current repository instead of your home directory. The
@@ -40,7 +39,7 @@ gh skill install kkollsga/kglite kglite-code-review
 
 > **Try it now:** tell your coding agent, “Install the KGLite code-review skill
 > and review this repository. Run
-> `pip install kglite-cli && kglite skill install`.”
+> `pip install kglite && kglite skill install`.”
 
 KGLite is an embedded, Cypher-queryable knowledge graph for Python,
 built so you can hand it to an LLM agent. `pip install kglite` and
@@ -56,11 +55,11 @@ structural validators that compose with Cypher.
 > the same engine. If you want kglite as a Rust library — without the
 > Python wheel in your build — see **[Use from Rust](#use-from-rust)** below.
 
-> **Interactive shell.** `pip install kglite-cli` (or `cargo install
-> kglite-cli`) gives you `kglite` — a `sqlite3`-style REPL: `kglite app.kgl`
-> opens a Cypher prompt with `.import`, `.dump`, `.schema`, multi-line input,
-> and tab-completion. It's a separate lightweight package, so the core
-> `kglite` wheel stays library-only.
+> **Interactive shell.** `pip install kglite` also gives you the `kglite`
+> command — a `sqlite3`-style REPL: `kglite app.kgl` opens a Cypher prompt with
+> `.import`, `.dump`, `.schema`, multi-line input, and tab-completion. For a
+> standalone CLI-only install, use `pip install kglite-cli` or `cargo install
+> kglite-cli`.
 
 > ### Codebase → Claude
 >

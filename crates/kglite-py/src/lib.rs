@@ -351,6 +351,21 @@ fn cypher_pass_names() -> Vec<String> {
     kglite_core::api::cypher::planner::all_pass_names()
 }
 
+/// Run the shared KGLite CLI in-process and block until it exits.
+///
+/// The standalone `kglite-cli` binary and the `kglite` console script bundled
+/// in this wheel both call the same pure-Rust library. `argv` excludes the
+/// program name, which is synthesized here for clap. The Python shim owns only
+/// console-script error formatting; all command behavior remains Rust-side.
+#[pyfunction]
+fn _run_cli(py: Python<'_>, argv: Vec<String>) -> PyResult<()> {
+    let mut full = Vec::with_capacity(argv.len() + 1);
+    full.push("kglite".to_string());
+    full.extend(argv);
+    py.detach(|| kglite_cli::run(full))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{e:#}")))
+}
+
 /// Run the bundled MCP server in-process and block until it exits.
 ///
 /// This is the exact same server as the standalone `kglite-mcp-server`
@@ -429,6 +444,7 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(from_blueprint_rust, m)?)?;
     m.add_function(wrap_pyfunction!(from_records_rust, m)?)?;
     m.add_function(wrap_pyfunction!(cypher_pass_names, m)?)?;
+    m.add_function(wrap_pyfunction!(_run_cli, m)?)?;
     #[cfg(feature = "mcp-server")]
     m.add_function(wrap_pyfunction!(_run_mcp_server, m)?)?;
     m.add_class::<KnowledgeGraph>()?;

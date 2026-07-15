@@ -38,8 +38,10 @@ dependencies = [
     # server is the pure-Rust `kglite-mcp-server`, and as of 0.10.26 it ships
     # *inside* this wheel (statically linked into the extension, sharing the
     # one engine; the `kglite-mcp-server` console script just forwards argv to
-    # it). The engine + code_tree + server are all the compiled extension;
-    # nothing here links a Python package at import time.
+    # it). The shared Rust CLI library is bundled the same way and exposed by
+    # the `kglite` console script. The engine + code_tree + CLI + server are all
+    # in the compiled extension; nothing here links another Python package at
+    # import time.
 ]
 dynamic = ["version"]
 
@@ -61,7 +63,12 @@ networkx = ["networkx>=3.0", "pandas>=2.0"]
 # and `pip install` that library (or `cargo install --features fastembed` for
 # the Rust `library: fastembed-rs`). The wheel pins no embedding library.
 
-# `kglite-mcp-server` console script. As of 0.10.26 the Rust MCP server is
+# Bundled Rust console scripts. The CLI and MCP server are linked into the
+# existing extension as libraries sharing the same engine. Their thin Python
+# shims forward argv; the standalone `kglite-cli` wheel and cargo binary remain
+# alternative installation routes, not dependencies of this wheel.
+#
+# As of 0.10.26 the Rust MCP server is
 # bundled into the wheel (statically linked into the extension via the
 # `kglite-mcp-server` *library*, sharing the one engine — no separate wheel,
 # no duplicated engine). This entry point is a thin shim that forwards
@@ -71,6 +78,7 @@ networkx = ["networkx>=3.0", "pandas>=2.0"]
 # server; 0.10.25 dropped it for cargo-only; 0.10.26 brings it back pip-native
 # as the bundled Rust server.)
 [project.scripts]
+kglite = "kglite.cli:main"
 kglite-mcp-server = "kglite.mcp_server:main"
 
 [project.urls]

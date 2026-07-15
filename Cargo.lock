@@ -2091,6 +2091,7 @@ version = "0.13.3"
 dependencies = [
  "chrono",
  "kglite",
+ "kglite-cli",
  "kglite-mcp-server",
  "libc",
  "mimalloc",

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installs the bundled `kglite-code-review` skill offline for Codex and Claude
   Code at user or project scope, while the existing MCP workspaces remain the
   persistent watch/cache/tool-schema path.
+- **`pip install kglite` now includes the `kglite` CLI.** The Python wheel
+  exposes the same Rust CLI library as the standalone `kglite-cli` binary, so
+  `kglite skill install` works immediately without a second package or a
+  duplicated engine. The separate CLI-only PyPI/crates.io distribution remains
+  available for users who do not need the Python extension.
 
 ### Fixed
 

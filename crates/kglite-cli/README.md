@@ -6,14 +6,16 @@ knowledge graphs — the `sqlite3`-style REPL for `.kgl` files.
 ## Install
 
 ```console
-$ pip install kglite-cli      # ships the `kglite` binary on PATH
+$ pip install kglite          # Python API plus the `kglite` command
 # or
-$ cargo install kglite-cli    # build from source (needs a Rust toolchain)
+$ pip install kglite-cli      # standalone CLI-only binary wheel
+# or
+$ cargo install kglite-cli    # standalone build (needs a Rust toolchain)
 ```
 
-`kglite-cli` is a standalone binary distribution — installing it gives you the
-`kglite` command. It's independent of the `kglite` Python library; install
-either or both.
+The main `kglite` wheel embeds this crate's Rust library and exposes the same
+command through a thin console-script shim. `kglite-cli` remains the standalone
+libpython-free binary distribution; install one route or the other.
 
 Install the bundled code-review skill for Codex and Claude Code:
 

@@ -92,6 +92,12 @@ pyo3 = { version = "0.29", features = ["multiple-pymethods", "chrono"] }
 # diagnostic variant can drop them.
 kglite_core = { package = "kglite", path = "../kglite" }
 
+# Shared CLI implementation. The standalone `kglite-cli` package builds the
+# same crate as a libpython-free binary; the main Python wheel calls its Rust
+# library through `_run_cli`, so `pip install kglite` also installs the
+# `kglite` command without a second wheel or a duplicated engine build.
+kglite-cli = { path = "../kglite-cli" }
+
 # The MCP server, hosted in-process. This is a pure-Rust lib (no pyo3,
 # no libpython link) depending on the SAME `kglite` core crate as
 # `kglite_core` above — cargo unifies them to one engine build, so the

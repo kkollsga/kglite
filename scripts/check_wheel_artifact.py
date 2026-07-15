@@ -29,6 +29,8 @@ def inspect_wheel(path: Path) -> None:
         extensions = [name for name in names if name.startswith("kglite/") and name.endswith((".so", ".pyd"))]
         if not extensions:
             raise ValueError("missing the native kglite extension")
+        if "kglite/cli.py" not in names:
+            raise ValueError("missing bundled kglite/cli.py")
         if "kglite/mcp_server.py" not in names:
             raise ValueError("missing bundled kglite/mcp_server.py")
 
@@ -37,11 +39,14 @@ def inspect_wheel(path: Path) -> None:
             raise ValueError(f"expected one .dist-info/entry_points.txt, found {len(entry_point_files)}")
         parser = configparser.ConfigParser()
         parser.read_string(wheel.read(entry_point_files[0]).decode("utf-8"))
-        actual = parser.get("console_scripts", "kglite-mcp-server", fallback="")
-        if actual != "kglite.mcp_server:main":
+        cli_actual = parser.get("console_scripts", "kglite", fallback="")
+        if cli_actual != "kglite.cli:main":
+            raise ValueError("missing kglite = kglite.cli:main console entry point")
+        mcp_actual = parser.get("console_scripts", "kglite-mcp-server", fallback="")
+        if mcp_actual != "kglite.mcp_server:main":
             raise ValueError("missing kglite-mcp-server = kglite.mcp_server:main console entry point")
 
-    print(f"{path}: extension={','.join(extensions)}; mcp-entry-point=present")
+    print(f"{path}: extension={','.join(extensions)}; cli+mcp-entry-points=present")
 
 
 def main() -> int:

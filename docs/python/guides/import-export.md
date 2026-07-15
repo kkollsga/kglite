@@ -343,7 +343,7 @@ Reserved provenance keys (`updated_at`/`git_sha`) are omitted so per-write
 metadata churn doesn't swamp the diff.
 
 **Wire it into git** so `git diff` / PR review renders `.kgl` files readably
-(the CLI ships an `export-text` subcommand — `pip install kglite-cli`):
+(the CLI ships an `export-text` subcommand — `pip install kglite`):
 
 ```bash
 git config diff.kglite.textconv "kglite export-text"

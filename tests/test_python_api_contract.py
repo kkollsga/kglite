@@ -14,7 +14,7 @@ from interface_contracts import capture_python_api  # noqa: E402
 
 BASELINE = ROOT / "tests" / "api-baselines" / "python-api.json"
 TYPING_ONLY = {"EmbeddingModel"}
-STUB_INTERNAL = {"_run_mcp_server"}
+STUB_INTERNAL = {"_run_cli", "_run_mcp_server"}
 RUNTIME_INTERNAL_MEMBERS = {"KnowledgeGraph": {"add_connections_internal"}}
 NONCONSTRUCTIBLE = {"FrozenGraph", "ResultIter", "ResultView", "Session", "Transaction"}
 

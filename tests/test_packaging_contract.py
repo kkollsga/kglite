@@ -99,8 +99,14 @@ def test_bundled_mcp_entry_point_stays_declared() -> None:
     assert 'kglite-mcp-server = "kglite.mcp_server:main"' in pyproject
 
 
+def test_bundled_cli_entry_point_stays_declared() -> None:
+    pyproject = PYPROJECT.read_text(encoding="utf-8")
+    assert 'kglite = "kglite.cli:main"' in pyproject
+
+
 def test_installed_wheel_smoke_executes_console_script() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert "/tmp/kglite-networkx-smoke/bin/kglite --help" in ci
     assert "/tmp/kglite-networkx-smoke/bin/kglite-mcp-server --help" in ci
 
 
@@ -114,12 +120,13 @@ def test_ci_compiles_packaged_optional_features_outside_workspace() -> None:
 
 def _write_fake_wheel(path: Path, *, include_extension: bool = True) -> None:
     with zipfile.ZipFile(path, "w") as wheel:
+        wheel.writestr("kglite/cli.py", "")
         wheel.writestr("kglite/mcp_server.py", "")
         if include_extension:
             wheel.writestr("kglite/kglite.abi3.so", b"native")
         wheel.writestr(
             "kglite-0.0.0.dist-info/entry_points.txt",
-            "[console_scripts]\nkglite-mcp-server = kglite.mcp_server:main\n",
+            "[console_scripts]\nkglite = kglite.cli:main\nkglite-mcp-server = kglite.mcp_server:main\n",
         )
 
 

@@ -94,8 +94,9 @@ That is a source-build route, not a promise that an unlisted platform is
 release-tested. Rust-only consumers should depend on the `kglite` crate and do
 not need the Python extension.
 
-## Bundled entry point
+## Bundled entry points
 
-The `kglite-mcp-server` console command is installed by the same wheel and
-forwards into the bundled Rust server inside the extension. There is no Python
-`mcp` extra and no second server wheel.
+The same wheel installs both `kglite` and `kglite-mcp-server`. Each console
+script is a thin Python shim over its bundled Rust library inside the extension,
+sharing one graph engine. There is no second CLI/server wheel dependency; the
+standalone `kglite-cli` distribution is an alternative for CLI-only users.
