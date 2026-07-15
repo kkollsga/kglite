@@ -70,7 +70,8 @@ impl PropertyLogWriter {
             .iter()
             .map(|(k, v)| (k.as_u64(), v.clone()))
             .collect();
-        let payload = bincode::serialize(&(id, title, &props_ser)).map_err(io::Error::other)?;
+        let payload =
+            crate::serde_codec::encode(&(id, title, &props_ser)).map_err(io::Error::other)?;
 
         // Write payload length + payload
         self.writer
@@ -139,7 +140,7 @@ impl Iterator for PropertyLogReader {
 
         // Deserialize
         type Payload = (Value, Value, Vec<(u64, Value)>);
-        let result: Result<Payload, _> = bincode::deserialize(&payload);
+        let result: Result<Payload, _> = crate::serde_codec::decode(&payload);
         match result {
             Ok((id, title, props_raw)) => {
                 let properties: Vec<(InternedKey, Value)> = props_raw

@@ -757,7 +757,7 @@ impl TypedColumn {
                 }
             }
             TypedColumn::Mixed { data } => {
-                let encoded = bincode::serialize(data)
+                let encoded = crate::serde_codec::encode(data)
                     .map_err(|e| io::Error::other(format!("bincode error: {}", e)))?;
                 writer.write_all(&encoded)?;
             }
@@ -2206,7 +2206,7 @@ impl ColumnStore {
             }
             _ => {
                 // Mixed — bincode deserialize
-                let data: Vec<Value> = bincode::deserialize(data_blob).map_err(|e| {
+                let data: Vec<Value> = crate::serde_codec::decode(data_blob).map_err(|e| {
                     io::Error::other(format!("bincode error for '{}': {}", col_name, e))
                 })?;
                 Ok(TypedColumn::Mixed { data })

@@ -16,6 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = REPO_ROOT / "tests" / "api-baselines" / "source-quality.json"
 ENUM_PATTERN = re.compile(r"GraphBackend::[A-Z]")
 UNSAFE_PATTERN = re.compile(r"unsafe\s*\{")
+DIRECT_BINCODE_PATTERN = re.compile(r"\bbincode\s*::|^\s*use\s+bincode\b", re.MULTILINE)
+DIRECT_BINCODE_ALLOWLIST = {
+    "crates/kglite/src/serde_codec/bincode_v1.rs",
+    "crates/kglite/src/bincode_wire_contract_tests.rs",
+}
 
 
 def _production_rs_files(root: Path) -> list[Path]:
@@ -246,6 +251,19 @@ def _symbol_violations(root: Path) -> list[str]:
     return [f"storage/mod.rs lost required symbol: {symbol}" for symbol in required if symbol not in storage_mod]
 
 
+def _codec_boundary_violations(root: Path) -> list[str]:
+    """Keep the removable bincode dependency behind its one adapter."""
+    violations: list[str] = []
+    for path in _production_rs_files(root):
+        relative = path.relative_to(root).as_posix()
+        if relative in DIRECT_BINCODE_ALLOWLIST:
+            continue
+        production = _strip_test_items(path.read_text())
+        if DIRECT_BINCODE_PATTERN.search(production):
+            violations.append(f"{relative}: direct bincode use bypasses serde_codec")
+    return violations
+
+
 def _collect_function_metrics(root: Path) -> list[dict[str, Any]]:
     command = [
         "cargo",
@@ -363,6 +381,7 @@ def _check(root: Path, baseline: dict[str, Any]) -> list[str]:
     violations.extend(_unsafe_violations(root, baseline))
     violations.extend(_module_violations(root, baseline))
     violations.extend(_symbol_violations(root))
+    violations.extend(_codec_boundary_violations(root))
     metrics = _collect_function_metrics(root)
     violations.extend(_function_violations(metrics, baseline))
     violations.extend(_function_cap_violations(metrics, baseline))
@@ -395,6 +414,8 @@ def _self_test() -> None:
         assert _enum_match_violations(root, baseline)
         source.write_text("fn f() { unsafe { call(); } }\n")
         assert _unsafe_violations(root, baseline)
+        source.write_text("fn f() { bincode::serialize(&1).unwrap(); }\n")
+        assert _codec_boundary_violations(root)
 
     mixed_source = """\
 fn before() { GraphBackend::Memory(graph); }

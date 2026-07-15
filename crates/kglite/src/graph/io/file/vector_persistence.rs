@@ -1,11 +1,11 @@
 //! Vector-cache and standalone embedding-file persistence.
 
-use super::{bincode_deser, bincode_options, bincode_ser};
+use super::{codec_deser, codec_ser, MAX_CODEC_BYTES};
 use crate::datatypes::values::Value;
 use crate::graph::algorithms::hnsw::HnswIndex;
 use crate::graph::schema::DirGraph;
 use crate::graph::storage::GraphRead;
-use bincode::Options;
+use crate::serde_codec;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -42,7 +42,7 @@ pub(super) fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u
     if entries.is_empty() {
         return Ok(None);
     }
-    let body = bincode_ser(&entries)?;
+    let body = codec_ser(&entries)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(VECTOR_INDEX_MAGIC);
     payload.extend_from_slice(&VECTOR_INDEX_FORMAT_VERSION.to_le_bytes());
@@ -63,7 +63,7 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
     if ver != VECTOR_INDEX_FORMAT_VERSION {
         return; // newer/older index format — skip, the store rebuilds on demand
     }
-    let entries: Vec<(String, String, HnswIndex)> = match bincode_deser(&payload[12..]) {
+    let entries: Vec<(String, String, HnswIndex)> = match codec_deser(&payload[12..]) {
         Ok(e) => e,
         Err(_) => return,
     };
@@ -213,8 +213,7 @@ pub fn export_embeddings_to_file(
     writer.write_all(&KGLE_VERSION.to_le_bytes())?;
 
     let gz = GzEncoder::new(&mut writer, Compression::new(3));
-    bincode_options()
-        .serialize_into(gz, &exported_stores)
+    serde_codec::encode_into_bounded(gz, &exported_stores, MAX_CODEC_BYTES)
         .map_err(|e| io::Error::other(format!("Failed to serialize embeddings: {}", e)))?;
 
     writer.flush()?;
@@ -256,12 +255,11 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
     // (no provenance) must be read with its own struct and lifted to v2.
     let gz = GzDecoder::new(&buf[8..]);
     let exported_stores: Vec<ExportedEmbeddingStore> = if version >= 2 {
-        bincode_options()
-            .deserialize_from(gz)
+        serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
             .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?
     } else {
         let v1: Vec<ExportedEmbeddingStoreV1> =
-            bincode_options().deserialize_from(gz).map_err(|e| {
+            serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES).map_err(|e| {
                 io::Error::other(format!("Failed to deserialize embedding data: {}", e))
             })?;
         v1.into_iter()

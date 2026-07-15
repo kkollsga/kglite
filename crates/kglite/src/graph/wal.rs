@@ -158,8 +158,8 @@ pub fn write_header(w: &mut impl Write) -> io::Result<()> {
 /// only writes the bytes (so a batch of frames can share one fsync if
 /// the caller wants).
 pub fn append_frame(w: &mut impl Write, frame: &WalFrame) -> io::Result<()> {
-    let payload =
-        bincode::serialize(frame).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let payload = crate::serde_codec::encode(frame)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "WAL frame exceeds 4 GiB"))?;
     let crc = crc32(&payload);
@@ -264,7 +264,7 @@ pub fn read_frames(mut r: impl Read, stream_len: u64) -> io::Result<Vec<WalFrame
         if crc32(&payload) != expected_crc {
             break Some(frame_start); // corrupt/torn payload — stop here
         }
-        match bincode::deserialize::<WalFrame>(&payload) {
+        match crate::serde_codec::decode::<WalFrame>(&payload) {
             Ok(frame) => frames.push(frame),
             Err(_) => break Some(frame_start), // unparseable — treat as torn
         }

@@ -35,7 +35,6 @@ use crate::graph::storage::{GraphRead, GraphWrite};
 // ergonomic type (pyapi → `KnowledgeGraph`, mcp-server → its
 // own `ActiveGraph`, future Go/TS → their binding's struct).
 // Keeps io decoupled from binding state.
-use bincode::Options;
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -46,22 +45,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Return a pinned bincode configuration that is identical to the legacy
-/// `bincode::serialize` / `bincode::deserialize` encoding:
-///   - Fixed-size integer encoding (not varint)
-///   - Little-endian byte order
-///   - No trailing bytes rejected
-///   - 2 GiB size limit (generous, prevents OOM on corrupt files)
-///
-/// Using explicit options guarantees wire-format stability regardless of
-/// bincode crate default changes or future upgrades.
-fn bincode_options() -> impl bincode::Options {
-    bincode::options()
-        .with_fixint_encoding()
-        .with_little_endian()
-        .allow_trailing_bytes()
-        .with_limit(2 * 1024 * 1024 * 1024) // 2 GiB
-}
+use crate::serde_codec;
+
+const MAX_CODEC_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Magic bytes for the v3 columnar format: "RGF\x03". Retained ONLY
 /// so the loader can detect a v3 file and emit a specific
@@ -499,7 +485,7 @@ pub(crate) fn read_type_indices_bin(
 
 pub(crate) fn write_interner_bin(dir: &std::path::Path, graph: &DirGraph) -> Result<(), String> {
     let originals: Vec<String> = graph.interner.iter().map(|(_, v)| v.to_string()).collect();
-    let bytes = bincode::serialize(&originals)
+    let bytes = serde_codec::encode(&originals)
         .map_err(|e| format!("interner serialization failed: {}", e))?;
     let compressed = zstd::encode_all(bytes.as_slice(), 3)
         .map_err(|e| format!("interner compression failed: {}", e))?;
@@ -515,7 +501,7 @@ pub(crate) fn read_interner_bin(dir: &std::path::Path, graph: &mut DirGraph) -> 
     }
     let compressed = std::fs::read(&path)?;
     let bytes = zstd_decompress(&compressed)?;
-    let originals: Vec<String> = bincode::deserialize(&bytes).map_err(io::Error::other)?;
+    let originals: Vec<String> = serde_codec::decode(&bytes).map_err(io::Error::other)?;
     for s in &originals {
         graph
             .interner
@@ -533,7 +519,7 @@ mod interner_file_tests {
     fn malformed_interner_collision_is_invalid_data() {
         let dir = tempfile::tempdir().unwrap();
         let incoming = "persisted-name";
-        let bytes = bincode::serialize(&vec![incoming.to_string()]).unwrap();
+        let bytes = serde_codec::encode(&vec![incoming.to_string()]).unwrap();
         let compressed = zstd::encode_all(bytes.as_slice(), 3).unwrap();
         std::fs::write(dir.path().join("interner.bin.zst"), compressed).unwrap();
 
@@ -669,12 +655,7 @@ pub(crate) fn read_id_indices_bin(
                 let inner: std::collections::HashMap<
                     crate::datatypes::values::Value,
                     petgraph::graph::NodeIndex,
-                > = bincode::options()
-                    .with_fixint_encoding()
-                    .with_little_endian()
-                    .reject_trailing_bytes()
-                    .with_limit(2 * 1024 * 1024 * 1024)
-                    .deserialize(blob)
+                > = serde_codec::decode_exact(blob, MAX_CODEC_BYTES)
                     .map_err(|e| invalid_data(format!("invalid general id index: {e}")))?;
                 if inner.len() != num_entries {
                     return Err(invalid_data("general id index cardinality mismatch"));
@@ -1075,16 +1056,15 @@ fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-/// Serialize a value using the project's pinned bincode options.
-fn bincode_ser<T: Serialize>(val: &T) -> io::Result<Vec<u8>> {
-    bincode_options().serialize(val).map_err(io::Error::other)
+/// Serialize a value using the current codec's bounded legacy policy.
+fn codec_ser<T: Serialize>(val: &T) -> io::Result<Vec<u8>> {
+    serde_codec::encode_bounded(val, MAX_CODEC_BYTES).map_err(io::Error::other)
 }
 
-/// Deserialize a value using the project's pinned bincode options.
-fn bincode_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
-    bincode_options()
-        .deserialize(buf)
-        .map_err(|e| invalid_data(format!("bincode deserialization failed: {e}")))
+/// Deserialize a value using the current codec's bounded legacy policy.
+fn codec_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
+    serde_codec::decode_bounded(buf, MAX_CODEC_BYTES)
+        .map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
 }
 
 /// Verify every InternedKey in `graph.column_stores`'s schemas
@@ -1218,7 +1198,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
     let topology_raw = {
         let _strip = StripPropertiesGuard::new();
         let _guard = SerdeSerializeGuard::new(&graph.interner);
-        bincode_ser(&graph.graph)?
+        codec_ser(&graph.graph)?
     };
     let topology_compressed = zstd_compress(&topology_raw)?;
     drop(topology_raw); // free before compressing columns
@@ -1262,7 +1242,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 3. Compress embeddings if any
     let embedding_compressed = if !graph.embeddings.is_empty() {
-        let raw = bincode_ser(&graph.embeddings)?;
+        let raw = codec_ser(&graph.embeddings)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
@@ -1270,7 +1250,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 4. Compress timeseries if any
     let timeseries_compressed = if !graph.timeseries_store.is_empty() {
-        let raw = bincode_ser(&graph.timeseries_store)?;
+        let raw = codec_ser(&graph.timeseries_store)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
@@ -1695,7 +1675,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                                 loaded = true;
                             }
                             _ => {
-                                if let Ok(indices) = bincode::deserialize(&bytes) {
+                                if let Ok(indices) = crate::serde_codec::decode(&bytes) {
                                     graph.type_indices.replace_with(indices);
                                     loaded = true;
                                 }
@@ -1795,7 +1775,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         let type_metas: Vec<ColumnTypeMeta> = if meta_bin_path.exists() {
             let compressed = std::fs::read(&meta_bin_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            bincode::deserialize(&bytes).map_err(io::Error::other)?
+            crate::serde_codec::decode(&bytes).map_err(io::Error::other)?
         } else {
             let meta_json = std::fs::read_to_string(&meta_json_path)?;
             serde_json::from_str(&meta_json).map_err(io::Error::other)?
@@ -1856,7 +1836,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
                         match read_id_indices_bin(&bytes, &graph.interner) {
                             Ok(Some(indices)) => graph.id_indices.replace_with(indices),
                             _ => {
-                                if let Ok(indices) = bincode::deserialize(&bytes) {
+                                if let Ok(indices) = crate::serde_codec::decode(&bytes) {
                                     graph.id_indices.replace_with(indices);
                                 }
                             }
@@ -1900,10 +1880,10 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         let mut embeddings = (|| -> io::Result<HashMap<(String, String), EmbeddingStore>> {
             let compressed = std::fs::read(&emb_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            // Plain `bincode::deserialize` for wire parity with the plain
-            // `bincode::serialize` writer (disk_persistence.rs); size is
-            // already bounded by the zstd decompression limit above.
-            bincode::deserialize(&bytes).map_err(|e| invalid_data(e.to_string()))
+            // Use the legacy codec policy for parity with the writer in
+            // disk_persistence.rs; size is already bounded by the zstd
+            // decompression limit above.
+            crate::serde_codec::decode(&bytes).map_err(|e| invalid_data(e.to_string()))
         })()
         .map_err(|e| corrupt_sidecar_error("embeddings.bin.zst", &e))?;
         // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
@@ -1919,7 +1899,7 @@ fn load_disk_dir(dir: &std::path::Path) -> io::Result<Arc<DirGraph>> {
         graph.timeseries_store = (|| -> io::Result<HashMap<usize, NodeTimeseries>> {
             let compressed = std::fs::read(&ts_path)?;
             let bytes = zstd_decompress(&compressed)?;
-            bincode::deserialize(&bytes).map_err(|e| invalid_data(e.to_string()))
+            crate::serde_codec::decode(&bytes).map_err(|e| invalid_data(e.to_string()))
         })()
         .map_err(|e| corrupt_sidecar_error("timeseries.bin.zst", &e))?;
     }
@@ -2113,7 +2093,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     let mut interner = StringInterner::new();
     let graph: crate::graph::schema::GraphBackend = {
         let _guard = SerdeDeserializeGuard::new(&mut interner);
-        bincode_deser(&topology_raw)?
+        codec_deser(&topology_raw)?
     };
     drop(topology_raw);
 
@@ -2245,7 +2225,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
         }
         let emb_compressed = sections.take(embeddings_compressed_size, "embeddings")?;
         let emb_raw = zstd_decompress(emb_compressed)?;
-        let mut embeddings: HashMap<(String, String), EmbeddingStore> = bincode_deser(&emb_raw)?;
+        let mut embeddings: HashMap<(String, String), EmbeddingStore> = codec_deser(&emb_raw)?;
         // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
         for store in embeddings.values_mut() {
             store.rebuild_norms();
@@ -2257,7 +2237,7 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     if timeseries_compressed_size > 0 {
         let ts_compressed = sections.take(timeseries_compressed_size, "timeseries")?;
         let ts_raw = zstd_decompress(ts_compressed)?;
-        let ts_store: HashMap<usize, NodeTimeseries> = bincode_deser(&ts_raw)?;
+        let ts_store: HashMap<usize, NodeTimeseries> = codec_deser(&ts_raw)?;
         dir_graph.timeseries_store = ts_store;
     }
 

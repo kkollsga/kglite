@@ -504,7 +504,7 @@ impl DiskGraph {
         // Save overflow edges (bincode + zstd)
         if !self.overflow_out.is_empty() || !self.overflow_in.is_empty() {
             let overflow = (&self.overflow_out, &self.overflow_in);
-            let bytes = bincode::serialize(&overflow).map_err(std::io::Error::other)?;
+            let bytes = crate::serde_codec::encode(&overflow).map_err(std::io::Error::other)?;
             let compressed =
                 zstd::encode_all(bytes.as_slice(), 3).map_err(std::io::Error::other)?;
             std::fs::write(target_dir.join("overflow_edges.bin.zst"), compressed)?;
@@ -1077,7 +1077,7 @@ impl DiskGraph {
         let (overflow_out, overflow_in) = if dir.join("overflow_edges.bin.zst").exists() {
             let compressed = std::fs::read(dir.join("overflow_edges.bin.zst"))?;
             let bytes = zstd::decode_all(compressed.as_slice()).map_err(std::io::Error::other)?;
-            bincode::deserialize(&bytes).map_err(std::io::Error::other)?
+            crate::serde_codec::decode(&bytes).map_err(std::io::Error::other)?
         } else {
             (HashMap::new(), HashMap::new())
         };

@@ -172,7 +172,7 @@ fn encode_str(buf: &mut Vec<u8>, s: &str) {
 
 #[inline]
 fn encode_list(buf: &mut Vec<u8>, items: &[Value]) {
-    match bincode::serialize(items) {
+    match crate::serde_codec::encode(items) {
         Ok(bytes) => {
             buf.push(TAG_LIST);
             buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
@@ -253,7 +253,7 @@ pub fn read_value(blob: &[u8], pos: &mut usize, type_tag: u8) -> Option<Value> {
         }
         TAG_LIST => {
             let bytes = read_len_prefixed(blob, pos)?;
-            let items: Vec<Value> = bincode::deserialize(bytes).ok()?;
+            let items: Vec<Value> = crate::serde_codec::decode(bytes).ok()?;
             Some(Value::List(items))
         }
         _ => None,
@@ -456,7 +456,7 @@ where
                 // Lists can't borrow the blob — bincode must allocate —
                 // but the owned `Vec` lives across the synchronous
                 // `f()` call, so a borrowed slice into it is valid.
-                let items: Vec<Value> = match bincode::deserialize(bytes) {
+                let items: Vec<Value> = match crate::serde_codec::decode(bytes) {
                     Ok(v) => v,
                     Err(_) => return Some(Ok(())), // corrupt payload — stop
                 };

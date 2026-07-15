@@ -320,7 +320,7 @@ impl DirGraph {
                             .map_err(|e| format!("read {}: {}", meta_path.display(), e))?;
                         let bytes = zstd::decode_all(compressed.as_slice())
                             .map_err(|e| format!("decompress columns_meta: {}", e))?;
-                        bincode::deserialize(&bytes)
+                        crate::serde_codec::decode(&bytes)
                             .map_err(|e| format!("parse columns_meta.bin: {}", e))?
                     } else {
                         let json = std::fs::read_to_string(meta_path)
@@ -394,7 +394,7 @@ impl DirGraph {
 
         // Save embeddings if any (matches write_kgl behavior for in-memory saves)
         if !self.embeddings.is_empty() {
-            let emb_bytes = bincode::serialize(&self.embeddings)
+            let emb_bytes = crate::serde_codec::encode(&self.embeddings)
                 .map_err(|e| format!("embeddings serialization failed: {}", e))?;
             let emb_compressed = zstd::encode_all(emb_bytes.as_slice(), 3)
                 .map_err(|e| format!("embeddings compression failed: {}", e))?;
@@ -404,7 +404,7 @@ impl DirGraph {
 
         // Save timeseries_store if any
         if !self.timeseries_store.is_empty() {
-            let ts_bytes = bincode::serialize(&self.timeseries_store)
+            let ts_bytes = crate::serde_codec::encode(&self.timeseries_store)
                 .map_err(|e| format!("timeseries serialization failed: {}", e))?;
             let ts_compressed = zstd::encode_all(ts_bytes.as_slice(), 3)
                 .map_err(|e| format!("timeseries compression failed: {}", e))?;

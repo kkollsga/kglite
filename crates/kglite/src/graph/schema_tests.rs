@@ -636,13 +636,13 @@ mod maintenance_tests {
         // Serialize (Columnar should produce same output as Compact)
         let serialized = {
             let _guard = SerdeSerializeGuard::new(&g.interner);
-            bincode::serialize(&g.graph).unwrap()
+            crate::serde_codec::encode(&g.graph).unwrap()
         };
 
         // Deserialize into a new graph — will come back as Map
         let graph2: GraphBackend = {
             let _guard = SerdeDeserializeGuard::new(&mut g.interner);
-            bincode::deserialize(&serialized).unwrap()
+            crate::serde_codec::decode(&serialized).unwrap()
         };
         let node0 = graph2.node_weight(NodeIndex::new(0)).unwrap();
 

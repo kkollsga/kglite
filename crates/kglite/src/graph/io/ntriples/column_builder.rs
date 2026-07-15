@@ -378,7 +378,7 @@ fn publish_column_metadata(
     if !columns.is_empty() {
         let json = serde_json::to_string(columns).map_err(std::io::Error::other)?;
         std::fs::write(&json_path, json)?;
-        let bytes = bincode::serialize(columns).map_err(std::io::Error::other)?;
+        let bytes = crate::serde_codec::encode(columns).map_err(std::io::Error::other)?;
         let compressed = zstd::encode_all(bytes.as_slice(), 3)?;
         std::fs::write(data_dir.join("columns_meta.bin.zst"), compressed)?;
     }

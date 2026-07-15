@@ -2,10 +2,11 @@
 
 use super::CodecError;
 use bincode::Options;
-use serde::de::Deserialize;
+use serde::de::{Deserialize, DeserializeOwned};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::io::{Read, Write};
 
 const CODEC: &str = "bincode-v1";
 
@@ -21,6 +22,14 @@ fn decode_error(error: impl ToString) -> CodecError {
         codec: CODEC,
         message: error.to_string(),
     }
+}
+
+fn permissive_bounded_options(limit: u64) -> impl Options {
+    bincode::options()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .allow_trailing_bytes()
+        .with_limit(limit)
 }
 
 fn exact_bounded_options(limit: u64) -> impl Options {
@@ -43,6 +52,46 @@ pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecE
     bincode::serialize(value).map_err(encode_error)
 }
 
+pub(super) fn encode_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    limit: u64,
+) -> Result<Vec<u8>, CodecError> {
+    permissive_bounded_options(limit)
+        .serialize(value)
+        .map_err(encode_error)
+}
+
+pub(super) fn encode_into<W: Write, T: Serialize + ?Sized>(
+    writer: W,
+    value: &T,
+) -> Result<(), CodecError> {
+    bincode::serialize_into(writer, value).map_err(encode_error)
+}
+
+pub(super) fn encode_into_bounded<W: Write, T: Serialize + ?Sized>(
+    writer: W,
+    value: &T,
+    limit: u64,
+) -> Result<(), CodecError> {
+    permissive_bounded_options(limit)
+        .serialize_into(writer, value)
+        .map_err(encode_error)
+}
+
+pub(super) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
+    bincode::deserialize(bytes).map_err(decode_error)
+}
+
+pub(super) fn decode_bounded<'de, T: Deserialize<'de>>(
+    bytes: &'de [u8],
+    limit: u64,
+) -> Result<T, CodecError> {
+    check_size(bytes, limit)?;
+    permissive_bounded_options(limit)
+        .deserialize(bytes)
+        .map_err(decode_error)
+}
+
 pub(super) fn decode_exact<'de, T: Deserialize<'de>>(
     bytes: &'de [u8],
     limit: u64,
@@ -50,6 +99,15 @@ pub(super) fn decode_exact<'de, T: Deserialize<'de>>(
     check_size(bytes, limit)?;
     exact_bounded_options(limit)
         .deserialize(bytes)
+        .map_err(decode_error)
+}
+
+pub(super) fn decode_from_bounded<R: Read, T: DeserializeOwned>(
+    reader: R,
+    limit: u64,
+) -> Result<T, CodecError> {
+    permissive_bounded_options(limit)
+        .deserialize_from(reader)
         .map_err(decode_error)
 }
 

@@ -103,7 +103,7 @@ impl ColumnarBase {
 /// Decode a single slot's bytes into `(InternedKey, Value)` pairs.
 /// Assumes bytes were produced by `encode_props_into` at save time.
 fn decode_props(bytes: &[u8]) -> Option<Vec<(InternedKey, Value)>> {
-    let raw: Vec<(u64, Value)> = bincode::deserialize(bytes).ok()?;
+    let raw: Vec<(u64, Value)> = crate::serde_codec::decode(bytes).ok()?;
     Some(
         raw.into_iter()
             .map(|(k, v)| (InternedKey::from_u64(k), v))
@@ -122,7 +122,7 @@ fn encode_props_into(props: &[(InternedKey, Value)], heap: &mut Vec<u8>) -> io::
     // `serialize_into`, we save one Vec<u8> allocation per edge (1M+
     // allocations on a million-edge save).
     let raw: Vec<(u64, &Value)> = props.iter().map(|(k, v)| (k.as_u64(), v)).collect();
-    bincode::serialize_into(heap, &raw).map_err(io::Error::other)
+    crate::serde_codec::encode_into(heap, &raw).map_err(io::Error::other)
 }
 
 /// Edge-property store: columnar disk base + in-memory mutation overlay.
@@ -371,7 +371,7 @@ impl EdgePropertyStore {
         let bytes = zstd::decode_all(compressed.as_slice()).map_err(io::Error::other)?;
         let _guard = SerdeDeserializeGuard::new(interner);
         let map: HashMap<u32, Vec<(InternedKey, Value)>> =
-            bincode::deserialize(&bytes).map_err(io::Error::other)?;
+            crate::serde_codec::decode(&bytes).map_err(io::Error::other)?;
         Ok(Self::from_overlay(map))
     }
 
@@ -518,7 +518,7 @@ mod tests {
         // serialization guard so InternedKey serializes as a string.
         {
             let _g = SerdeSerializeGuard::new(&interner);
-            let raw = bincode::serialize(&map).unwrap();
+            let raw = crate::serde_codec::encode(&map).unwrap();
             let compressed = zstd::encode_all(raw.as_slice(), 3).unwrap();
             std::fs::write(tmp.path().join(LEGACY_FILE), compressed).unwrap();
         }
