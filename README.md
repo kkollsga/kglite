@@ -135,31 +135,30 @@ questions traverse it.
 
 ## How it compares
 
-|                                            | KGLite                            | Embedded columnar graph DB | NetworkX           | rustworkx          | Neo4j Embedded         |
-|--------------------------------------------|-----------------------------------|----------------------------|--------------------|--------------------|------------------------|
-| **Install**                                | `pip install kglite`              | `pip install …`            | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
-| **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher (full) | Python API         | Python API         | Cypher (full)          |
-| **Storage**                                | in-mem · mmap · disk (1B+ edges)  | in-mem · disk (columnar)   | in-mem             | in-mem             | in-mem · disk (JVM)    |
-| **Bulk-load from pandas**                  | one-liner                         | via Arrow                  | manual             | manual             | via driver             |
-| **Bundled MCP server for LLM agents**      | ✅                                 | —                          | —                  | —                  | —                      |
-| **`describe()` schema for LLM prompts**    | ✅                                 | —                          | —                  | —                  | —                      |
-| **Embeddable in Rust** (no Python in build) | ✅ (`crates/kglite`)               | —                          | —                  | ✅                  | —                      |
-| **Codebase → graph parser**                | 13 languages, route detection     | —                          | —                  | —                  | —                      |
-| **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                          | toy graphs only    | —                  | —                      |
-| **License**                                | MIT                               | MIT                        | BSD-3              | Apache-2           | GPLv3                  |
+|                                            | KGLite                            | [LadybugDB](https://ladybugdb.com/) (formerly Kuzu) | NetworkX           | rustworkx          | Neo4j Embedded         |
+|--------------------------------------------|-----------------------------------|-----------------------------------------------------|--------------------|--------------------|------------------------|
+| **Install**                                | `pip install kglite`              | `pip install ladybug`                               | `pip install networkx` | `pip install rustworkx` | JVM + Java deps  |
+| **Query language**                         | Cypher ([broad coverage](CYPHER.md#feature-coverage)) | Cypher                              | Python API         | Python API         | Cypher (full)          |
+| **Storage**                                | in-mem · mmap · disk (1B+ edges)  | in-mem · disk (columnar)                            | in-mem             | in-mem             | in-mem · disk (JVM)    |
+| **Bulk-load from pandas**                  | one-liner                         | via Arrow                                           | manual             | manual             | via driver             |
+| **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | — | — | — |
+| **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
+| **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | — | ✅ | — |
+| **Codebase → graph parser**                | 13 languages, route detection     | —                                                   | —                  | —                  | —                      |
+| **Bundled public datasets**                | SEC EDGAR, Wikidata, Sodir        | —                                                   | toy graphs only    | —                  | —                      |
+| **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
 
-**Pick KGLite** when you want Cypher + Python ergonomics + LLM-agent
-plumbing in one wheel — embedded, in-process, with the [Cypher
-surface](CYPHER.md#feature-coverage) (subqueries, path-finding,
-vector + text search, graph algorithms) you'd expect from a columnar
-graph DB, plus a code-graph parser, bundled datasets, and an MCP
-server none of them ship. **Pick a columnar OLAP graph engine** if
-your workload is heavy analytical scans over a mostly-static graph and
-you don't need the Python/agent ergonomics. **Pick NetworkX** when you
-need its enormous graph-algorithm library and your data fits in RAM.
-**Pick rustworkx** when you want NetworkX's API in Rust with no query
-language. **Pick Neo4j Embedded** when you've standardised on
-server-mode Cypher and want the in-process driver for tests.
+**Pick KGLite** when you want one embedded package that combines Python and
+pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, a
+13-language code-graph parser, bundled datasets, and agent-contract primitives:
+role-scoped writes (`write_scope`), ownership layers, `set_instructions`, and
+`CALL ready_set(...)`. **Pick LadybugDB** when columnar analytical scans and
+its broader language ecosystem are the priority; it also provides Rust
+bindings and a separately installed MCP server. **Pick NetworkX** when you need
+its enormous graph-algorithm library and your data fits in RAM. **Pick
+rustworkx** when you want a Rust-backed Python graph API with no query language.
+**Pick Neo4j Embedded** when you've standardised on server-mode Cypher and want
+the in-process driver for tests.
 
 📊 **[Benchmarks →](BENCHMARKS.md)** — wall-to-wall time per topic (load,
 filter/aggregate, traversal, pathfinding, algorithms, mutations) against

@@ -9,12 +9,12 @@ version.workspace = true
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
-description = "Pure-Rust knowledge graph engine — Cypher pipeline, snapshot/working CoW transactions, columnar/mmap/disk storage backends, optional dataset loaders (SEC EDGAR, Sodir, Wikidata). PyO3 wrappers live in the sibling kglite-py crate (the Python wheel); embeddable directly from any Rust binary without PyO3 in the dep tree."
+description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, agent-facing schema introspection, and optional dataset loaders"
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
 homepage = "https://github.com/kkollsga/kglite"
 documentation = "https://docs.rs/kglite"
-keywords = ["graph", "knowledge-graph", "cypher", "petgraph", "database"]
+keywords = ["cypher", "knowledge-graph", "graph-database", "embedded-database", "rust"]
 categories = ["database", "data-structures"]
 
 [lib]

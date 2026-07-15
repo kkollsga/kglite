@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "kglite"
-description = "A high-performance graph database library with Python bindings written in Rust"
+description = "Embedded Cypher knowledge graph for Python with a bundled MCP server, describe() schema, and code-graph parser for LLM agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Kristian dF Kollsgård", email = "kkollsg@gmail.com"}
 ]
-keywords = ["graph", "database", "knowledge-graph", "rust", "high-performance", "data-science"]
+keywords = ["graph", "database", "knowledge-graph", "cypher", "embedded-database", "mcp", "llm-agents", "code-analysis", "rust"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
