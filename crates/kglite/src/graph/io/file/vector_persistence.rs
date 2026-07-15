@@ -27,9 +27,10 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 //
 //   [0..8]   magic = b"KGLVIDX1"
 //   [8..12]  format_version: u32 LE
-//   [12..]   bincode( Vec<(node_type, embedding_property, HnswIndex)> )
-const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
-const VECTOR_INDEX_FORMAT_VERSION: u32 = 1;
+//   [12..]   codec payload for Vec<(node_type, embedding_property, HnswIndex)>
+pub(super) const VECTOR_INDEX_MAGIC: &[u8; 8] = b"KGLVIDX1";
+const VECTOR_INDEX_FORMAT_VERSION: u32 = 2;
+pub(super) const VECTOR_INDEX_LEGACY_VERSION: u32 = 1;
 
 /// Encode every built HNSW index into a self-describing payload. Returns `None`
 /// when no store carries an index (the section is then omitted entirely).
@@ -42,7 +43,7 @@ pub(super) fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u
     if entries.is_empty() {
         return Ok(None);
     }
-    let body = codec_ser(&entries)?;
+    let body = codec_ser(serde_codec::CodecVersion::PostcardV1, &entries)?;
     let mut payload = Vec::with_capacity(12 + body.len());
     payload.extend_from_slice(VECTOR_INDEX_MAGIC);
     payload.extend_from_slice(&VECTOR_INDEX_FORMAT_VERSION.to_le_bytes());
@@ -51,7 +52,7 @@ pub(super) fn encode_vector_indexes(graph: &DirGraph) -> io::Result<Option<Vec<u
 }
 
 /// Decode the vector-index section and attach indexes to the matching stores.
-/// Best-effort: an unrecognised magic, an unknown format version, a bincode
+/// Best-effort: an unrecognised magic, an unknown format version, a codec
 /// error, or a shape mismatch against the loaded store all result in the index
 /// being silently skipped — never a load failure. Must run AFTER embeddings are
 /// loaded and their norms rebuilt (cosine navigation needs the norm cache).
@@ -60,13 +61,16 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
         return;
     }
     let ver = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
-    if ver != VECTOR_INDEX_FORMAT_VERSION {
-        return; // newer/older index format — skip, the store rebuilds on demand
-    }
-    let entries: Vec<(String, String, HnswIndex)> = match codec_deser(&payload[12..]) {
-        Ok(e) => e,
-        Err(_) => return,
+    let codec = match ver {
+        VECTOR_INDEX_LEGACY_VERSION => serde_codec::CodecVersion::BincodeV1,
+        VECTOR_INDEX_FORMAT_VERSION => serde_codec::CodecVersion::PostcardV1,
+        _ => return, // newer/older index format — skip, the store rebuilds on demand
     };
+    let entries: Vec<(String, String, HnswIndex)> =
+        match codec_deser(codec, &payload[12..], (payload.len() - 12) as u64) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
     for (node_type, prop, idx) in entries {
         if let Some(store) = graph.embeddings.get_mut(&(node_type, prop)) {
             // Defensive: only attach an index whose shape still matches the
@@ -82,11 +86,12 @@ pub(super) fn decode_vector_indexes(payload: &[u8], graph: &mut DirGraph) {
 
 /// Magic bytes for the embedding export format.
 const KGLE_MAGIC: [u8; 4] = *b"KGLE";
-/// v2 (0.11.1): carries store `metric` + `model_id` + per-node `text_hash`
+/// v3: retains the v2 payload shape but explicitly selects Postcard. v2
+/// (0.11.1) added store `metric` + `model_id` + per-node `text_hash`
 /// alongside each vector, so a rebuild-from-`.kgle` pipeline retains provenance
 /// and can use `embed_texts(mode='changed')`. v1 files (no provenance) still
 /// read — see the version branch in `import_embeddings_from_file`.
-const KGLE_VERSION: u32 = 2;
+const KGLE_VERSION: u32 = 3;
 
 /// v1 `.kgle` store shape (no provenance) — kept solely to deserialize files
 /// produced by kglite ≤ 0.11.0.
@@ -140,6 +145,63 @@ pub struct ImportStats {
     /// different node IDs or types — the count of such stores would
     /// otherwise be invisible to callers.
     pub dropped_stores: usize,
+}
+
+fn decode_embedding_file_payload(
+    buf: &[u8],
+    version: u32,
+) -> io::Result<Vec<ExportedEmbeddingStore>> {
+    // Legacy bincode is positional, so the v1 shape (no provenance) must be
+    // read with its own struct and lifted to the current in-memory shape.
+    if version >= 3 {
+        if buf.len() < 9 {
+            return Err(io::Error::other(
+                "Embedding file v3 is truncated before its codec tag.",
+            ));
+        }
+        let codec = serde_codec::CodecVersion::from_tag(buf[8])
+            .map_err(|e| io::Error::other(format!("Invalid .kgle codec tag: {e}")))?;
+        if codec != serde_codec::CodecVersion::PostcardV1 {
+            return Err(io::Error::other(format!(
+                "Embedding file v3 selects codec {}, but v3 requires Postcard codec {}.",
+                codec.tag(),
+                serde_codec::CodecVersion::PostcardV1.tag()
+            )));
+        }
+        let decoder = GzDecoder::new(&buf[9..]);
+        let mut bounded = decoder.take(MAX_CODEC_BYTES.saturating_add(1));
+        let mut payload = Vec::new();
+        bounded.read_to_end(&mut payload)?;
+        if payload.len() as u64 > MAX_CODEC_BYTES {
+            return Err(io::Error::other(format!(
+                "Decompressed embedding payload exceeds the {MAX_CODEC_BYTES} byte limit"
+            )));
+        }
+        return codec_deser(codec, &payload, payload.capacity() as u64)
+            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")));
+    }
+
+    if version >= 2 {
+        let gz = GzDecoder::new(&buf[8..]);
+        return serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
+            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")));
+    }
+
+    let gz = GzDecoder::new(&buf[8..]);
+    let v1: Vec<ExportedEmbeddingStoreV1> =
+        serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
+            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {e}")))?;
+    Ok(v1
+        .into_iter()
+        .map(|s| ExportedEmbeddingStore {
+            node_type: s.node_type,
+            text_column: s.text_column,
+            dimension: s.dimension,
+            metric: None,
+            model_id: None,
+            entries: s.entries.into_iter().map(|(id, v)| (id, v, None)).collect(),
+        })
+        .collect())
 }
 
 /// Export embeddings to a standalone .kgle file, keyed by node ID.
@@ -206,15 +268,18 @@ pub fn export_embeddings_to_file(
         });
     }
 
-    // Write: magic + version + gzip(bincode(stores))
+    // Write: magic + version + codec tag + gzip(codec(stores)).
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     writer.write_all(&KGLE_MAGIC)?;
     writer.write_all(&KGLE_VERSION.to_le_bytes())?;
+    writer.write_all(&[serde_codec::CodecVersion::PostcardV1.tag()])?;
 
-    let gz = GzEncoder::new(&mut writer, Compression::new(3));
-    serde_codec::encode_into_bounded(gz, &exported_stores, MAX_CODEC_BYTES)
-        .map_err(|e| io::Error::other(format!("Failed to serialize embeddings: {}", e)))?;
+    let payload = codec_ser(serde_codec::CodecVersion::PostcardV1, &exported_stores)
+        .map_err(|e| io::Error::other(format!("Failed to serialize embeddings: {e}")))?;
+    let mut gz = GzEncoder::new(&mut writer, Compression::new(3));
+    gz.write_all(&payload)?;
+    gz.finish()?;
 
     writer.flush()?;
 
@@ -251,28 +316,7 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         )));
     }
 
-    // Decompress and deserialize. bincode is positional, so the v1 shape
-    // (no provenance) must be read with its own struct and lifted to v2.
-    let gz = GzDecoder::new(&buf[8..]);
-    let exported_stores: Vec<ExportedEmbeddingStore> = if version >= 2 {
-        serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES)
-            .map_err(|e| io::Error::other(format!("Failed to deserialize embedding data: {}", e)))?
-    } else {
-        let v1: Vec<ExportedEmbeddingStoreV1> =
-            serde_codec::decode_from_bounded(gz, MAX_CODEC_BYTES).map_err(|e| {
-                io::Error::other(format!("Failed to deserialize embedding data: {}", e))
-            })?;
-        v1.into_iter()
-            .map(|s| ExportedEmbeddingStore {
-                node_type: s.node_type,
-                text_column: s.text_column,
-                dimension: s.dimension,
-                metric: None,
-                model_id: None,
-                entries: s.entries.into_iter().map(|(id, v)| (id, v, None)).collect(),
-            })
-            .collect()
-    };
+    let exported_stores = decode_embedding_file_payload(&buf, version)?;
 
     let mut total_imported = 0usize;
     let mut total_skipped = 0usize;
@@ -329,4 +373,77 @@ pub fn import_embeddings_from_file(graph: &mut DirGraph, path: &str) -> io::Resu
         skipped: total_skipped,
         dropped_stores,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_store() -> ExportedEmbeddingStore {
+        ExportedEmbeddingStore {
+            node_type: "Doc".to_string(),
+            text_column: "summary".to_string(),
+            dimension: 2,
+            metric: Some("cosine".to_string()),
+            model_id: Some("fixture".to_string()),
+            entries: vec![(Value::UniqueId(7), vec![0.25, 0.75], Some(99))],
+        }
+    }
+
+    fn embedding_file(version: u32, codec_tag: Option<u8>, payload: &[u8]) -> Vec<u8> {
+        let mut compressed = GzEncoder::new(Vec::new(), Compression::new(3));
+        compressed.write_all(payload).unwrap();
+        let compressed = compressed.finish().unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&KGLE_MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        if let Some(tag) = codec_tag {
+            bytes.push(tag);
+        }
+        bytes.extend_from_slice(&compressed);
+        bytes
+    }
+
+    #[test]
+    fn legacy_v2_and_postcard_v3_embedding_payloads_decode_identically() {
+        let stores = vec![fixture_store()];
+        let legacy_payload = serde_codec::encode(&stores).unwrap();
+        let legacy = embedding_file(2, None, &legacy_payload);
+        let postcard_payload = codec_ser(serde_codec::CodecVersion::PostcardV1, &stores).unwrap();
+        let current = embedding_file(
+            3,
+            Some(serde_codec::CodecVersion::PostcardV1.tag()),
+            &postcard_payload,
+        );
+
+        for decoded in [
+            decode_embedding_file_payload(&legacy, 2).unwrap(),
+            decode_embedding_file_payload(&current, 3).unwrap(),
+        ] {
+            assert_eq!(decoded.len(), 1);
+            assert_eq!(decoded[0].node_type, "Doc");
+            assert_eq!(decoded[0].text_column, "summary");
+            assert_eq!(decoded[0].dimension, 2);
+            assert_eq!(decoded[0].metric.as_deref(), Some("cosine"));
+            assert_eq!(decoded[0].model_id.as_deref(), Some("fixture"));
+            assert_eq!(decoded[0].entries[0].2, Some(99));
+        }
+    }
+
+    #[test]
+    fn postcard_v3_embedding_payload_requires_its_codec_tag() {
+        let truncated = [b'K', b'G', b'L', b'E', 3, 0, 0, 0];
+        assert!(decode_embedding_file_payload(&truncated, 3)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("codec tag"));
+
+        let invalid = [b'K', b'G', b'L', b'E', 3, 0, 0, 0, 99];
+        assert!(decode_embedding_file_payload(&invalid, 3)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Invalid .kgle codec tag"));
+    }
 }

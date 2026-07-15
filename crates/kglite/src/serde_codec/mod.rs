@@ -198,26 +198,11 @@ pub(crate) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecE
     bincode_v1::encode(value)
 }
 
-pub(crate) fn encode_bounded<T: Serialize + ?Sized>(
-    value: &T,
-    limit: u64,
-) -> Result<Vec<u8>, CodecError> {
-    encode_versioned(CodecVersion::BincodeV1, value, limit)
-}
-
 pub(crate) fn encode_into<W: Write, T: Serialize + ?Sized>(
     writer: W,
     value: &T,
 ) -> Result<(), CodecError> {
     bincode_v1::encode_into(writer, value)
-}
-
-pub(crate) fn encode_into_bounded<W: Write, T: Serialize + ?Sized>(
-    writer: W,
-    value: &T,
-    limit: u64,
-) -> Result<(), CodecError> {
-    bincode_v1::encode_into_bounded(writer, value, limit)
 }
 
 pub(crate) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {

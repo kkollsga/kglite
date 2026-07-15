@@ -60,6 +60,10 @@ const V3_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x03];
 /// path) per the docs/history/bolt-implementation.md plan.
 const V4_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x04];
 
+/// Magic bytes for the v5 columnar format. v5 retains the v4 section layout
+/// but adds an explicit codec tag and writes Serde payloads with Postcard.
+const V5_MAGIC: [u8; 4] = [0x52, 0x47, 0x46, 0x05];
+
 /// Current core data version. Bump ONLY when NodeData, EdgeData, or Value enum changes.
 /// This is independent of metadata — metadata uses JSON and handles changes via serde defaults.
 ///
@@ -1056,15 +1060,32 @@ fn zstd_decompress_limited(data: &[u8], limit: u64) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-/// Serialize a value using the current codec's bounded legacy policy.
-fn codec_ser<T: Serialize>(val: &T) -> io::Result<Vec<u8>> {
-    serde_codec::encode_bounded(val, MAX_CODEC_BYTES).map_err(io::Error::other)
+/// Serialize one version-selected portable payload.
+fn codec_ser<T: Serialize>(codec: serde_codec::CodecVersion, val: &T) -> io::Result<Vec<u8>> {
+    serde_codec::encode_versioned(codec, val, MAX_CODEC_BYTES).map_err(io::Error::other)
 }
 
-/// Deserialize a value using the current codec's bounded legacy policy.
-fn codec_deser<'a, T: Deserialize<'a>>(buf: &'a [u8]) -> io::Result<T> {
-    serde_codec::decode_bounded(buf, MAX_CODEC_BYTES)
-        .map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
+/// Deserialize one version-selected portable payload. The legacy reader keeps
+/// its historical trailing-byte policy; new Postcard formats are exact.
+fn codec_deser<'a, T: Deserialize<'a>>(
+    codec: serde_codec::CodecVersion,
+    buf: &'a [u8],
+    allocated_bytes: u64,
+) -> io::Result<T> {
+    let decoded = match codec {
+        serde_codec::CodecVersion::BincodeV1 => serde_codec::decode_bounded(buf, MAX_CODEC_BYTES),
+        serde_codec::CodecVersion::PostcardV1 => {
+            let envelope = serde_codec::PayloadEnvelope::from_tag(
+                codec.tag(),
+                buf,
+                allocated_bytes,
+                serde_codec::DecodeLimits::new(MAX_CODEC_BYTES, MAX_CODEC_BYTES),
+            )
+            .map_err(|e| invalid_data(format!("binary payload envelope is invalid: {e}")))?;
+            serde_codec::decode_versioned_exact(envelope)
+        }
+    };
+    decoded.map_err(|e| invalid_data(format!("binary deserialization failed: {e}")))
 }
 
 /// Verify every InternedKey in `graph.column_stores`'s schemas
@@ -1176,9 +1197,9 @@ pub fn write_kgl_with(graph: &DirGraph, path: &str, fsync: bool) -> io::Result<(
 /// I/O, safe to run without the GIL.
 ///
 /// (Despite the long-standing `v3` names elsewhere, the bytes written are
-/// the v4 container — `V4_MAGIC` + `CURRENT_CORE_DATA_VERSION`; the loader
-/// is [`load_v4`]. This writer is named for the artifact to avoid the
-/// stale version label.)
+/// the v5 container — `V5_MAGIC` + an explicit Postcard codec tag +
+/// `CURRENT_CORE_DATA_VERSION`. This writer is named for the artifact to
+/// avoid another stale version label.)
 ///
 /// The graph MUST have columnar storage enabled before calling this function.
 /// The caller (Python `save()`) handles auto-enable/disable.
@@ -1193,12 +1214,13 @@ pub fn write_kgl(graph: &DirGraph, path: &str) -> io::Result<()> {
 /// them duplicate the section layout.
 pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()> {
     validate_column_keys_registered(graph)?;
+    let codec = serde_codec::CodecVersion::PostcardV1;
 
     // 1. Serialize topology with properties stripped (v3: node props are in column sections)
     let topology_raw = {
         let _strip = StripPropertiesGuard::new();
         let _guard = SerdeSerializeGuard::new(&graph.interner);
-        codec_ser(&graph.graph)?
+        codec_ser(codec, &graph.graph)?
     };
     let topology_compressed = zstd_compress(&topology_raw)?;
     drop(topology_raw); // free before compressing columns
@@ -1242,7 +1264,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 3. Compress embeddings if any
     let embedding_compressed = if !graph.embeddings.is_empty() {
-        let raw = codec_ser(&graph.embeddings)?;
+        let raw = codec_ser(codec, &graph.embeddings)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
@@ -1250,7 +1272,7 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 4. Compress timeseries if any
     let timeseries_compressed = if !graph.timeseries_store.is_empty() {
-        let raw = codec_ser(&graph.timeseries_store)?;
+        let raw = codec_ser(codec, &graph.timeseries_store)?;
         Some(zstd_compress(&raw)?)
     } else {
         None
@@ -1304,10 +1326,10 @@ pub fn write_kgl_to<W: Write>(graph: &DirGraph, writer: &mut W) -> io::Result<()
 
     // 6. Write the byte stream into the caller's writer.
 
-    // Header: magic (4B) + core_data_version (4B) + metadata_length (4B)
-    // Phase A.1 / C5 — write the v4 magic. v3 files become unloadable
-    // with this binary (intentional hard break).
-    writer.write_all(&V4_MAGIC)?;
+    // Header: magic (4B) + codec (1B) + core_data_version (4B) +
+    // metadata_length (4B). The codec byte prevents implicit byte sniffing.
+    writer.write_all(&V5_MAGIC)?;
+    writer.write_all(&[codec.tag()])?;
     writer.write_all(&CURRENT_CORE_DATA_VERSION.to_le_bytes())?;
     writer.write_all(&(metadata_json.len() as u32).to_le_bytes())?;
     writer.write_all(&metadata_json)?;
@@ -1462,11 +1484,17 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
                 "File is too small to be a valid kglite file.",
             ));
         }
+        if mmap[..4] == V5_MAGIC {
+            return load_v5(&mmap);
+        }
         if mmap[..4] == V4_MAGIC {
             return load_v4(&mmap);
         }
         if mmap[..4] == V3_MAGIC {
             return Err(io::Error::other(V3_HARD_BREAK_MSG));
+        }
+        if mmap[..3] == V5_MAGIC[..3] && mmap[3] > V5_MAGIC[3] {
+            return Err(newer_portable_format_error(mmap[3]));
         }
         return Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
@@ -1484,10 +1512,14 @@ pub fn load_file(path: &str) -> io::Result<Arc<DirGraph>> {
             "File is too small to be a valid kglite file.",
         ));
     }
-    if buf[..4] == V4_MAGIC {
+    if buf[..4] == V5_MAGIC {
+        load_v5(&buf)
+    } else if buf[..4] == V4_MAGIC {
         load_v4(&buf)
     } else if buf[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
+    } else if buf[..3] == V5_MAGIC[..3] && buf[3] > V5_MAGIC[3] {
+        Err(newer_portable_format_error(buf[3]))
     } else {
         Err(io::Error::other(
             "Unrecognized file format. This file was saved with an older version of kglite. \
@@ -1511,10 +1543,14 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
             "Byte buffer is too small to be a valid kglite graph.",
         ));
     }
-    if data[..4] == V4_MAGIC {
+    if data[..4] == V5_MAGIC {
+        load_v5(data)
+    } else if data[..4] == V4_MAGIC {
         load_v4(data)
     } else if data[..4] == V3_MAGIC {
         Err(io::Error::other(V3_HARD_BREAK_MSG))
+    } else if data[..3] == V5_MAGIC[..3] && data[3] > V5_MAGIC[3] {
+        Err(newer_portable_format_error(data[3]))
     } else {
         Err(io::Error::other(
             "Unrecognized byte buffer — not a kglite graph (bad magic). It may be \
@@ -1523,6 +1559,13 @@ pub fn load_kgl_bytes(data: &[u8]) -> io::Result<Arc<DirGraph>> {
              g.export_csv('backup/') and rebuild via kglite.from_blueprint('backup/blueprint.json').",
         ))
     }
+}
+
+fn newer_portable_format_error(version: u8) -> io::Error {
+    io::Error::other(format!(
+        "File uses .kgl container version {version}, but this library only supports up to version {}. Please upgrade kglite.",
+        V5_MAGIC[3]
+    ))
 }
 
 /// Contained break message for a pre-v3 embeddings section (model_id +
@@ -2039,24 +2082,256 @@ fn load_column_sidecars(
     Ok(())
 }
 
-/// Load v4 columnar format (Phase A.1 / C5+).
-///
-/// Same on-disk layout as v3 by section structure; v4 differs by
-/// magic bytes + Value enum gaining Node/Relationship/Path/List/Map
-/// variants (serde discriminants 9..=13). Old v3 files are rejected
-/// at the magic check before they reach this function.
 fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
     if buf.len() < 12 {
         return Err(invalid_data("v4 file is truncated — header incomplete"));
     }
-
-    // Parse header
     let core_version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     let metadata_len = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
+    load_portable_columnar(
+        buf,
+        "v4",
+        serde_codec::CodecVersion::BincodeV1,
+        core_version,
+        metadata_len,
+        12,
+    )
+}
 
+fn load_v5(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
+    if buf.len() < 13 {
+        return Err(invalid_data("v5 file is truncated — header incomplete"));
+    }
+    let codec = serde_codec::CodecVersion::from_tag(buf[4])
+        .map_err(|e| invalid_data(format!("v5 header has an invalid codec tag: {e}")))?;
+    if codec != serde_codec::CodecVersion::PostcardV1 {
+        return Err(invalid_data(format!(
+            "v5 header selects codec {}, but v5 requires Postcard codec {}",
+            codec.tag(),
+            serde_codec::CodecVersion::PostcardV1.tag()
+        )));
+    }
+    let core_version = u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]);
+    let metadata_len = u32::from_le_bytes([buf[9], buf[10], buf[11], buf[12]]) as usize;
+    load_portable_columnar(buf, "v5", codec, core_version, metadata_len, 13)
+}
+
+struct PortableSectionPlan {
+    columns: Vec<V3ColumnSection>,
+    embeddings: u64,
+    timeseries: u64,
+    secondary_labels: u64,
+    vector_index: u64,
+}
+
+fn parse_portable_metadata<'a>(
+    buf: &'a [u8],
+    format_name: &str,
+    metadata_len: usize,
+    metadata_start: usize,
+) -> io::Result<(FileMetadata, SectionCursor<'a>)> {
+    let metadata_end = metadata_start
+        .checked_add(metadata_len)
+        .ok_or_else(|| invalid_data(format!("{format_name} metadata offset overflow")))?;
+    let metadata_bytes = buf.get(metadata_start..metadata_end).ok_or_else(|| {
+        invalid_data(format!(
+            "{format_name} file is truncated — metadata incomplete"
+        ))
+    })?;
+    let metadata: FileMetadata = serde_json::from_slice(metadata_bytes)
+        .map_err(|e| invalid_data(format!("failed to parse {format_name} metadata: {e}")))?;
+    if metadata.column_sections.len() > 1_000_000 {
+        return Err(invalid_data(format!(
+            "{format_name} metadata declares too many column sections"
+        )));
+    }
+    Ok((metadata, SectionCursor::new(buf, metadata_end)?))
+}
+
+fn decode_portable_topology(
+    codec: serde_codec::CodecVersion,
+    sections: &mut SectionCursor<'_>,
+    metadata: FileMetadata,
+) -> io::Result<(DirGraph, PortableSectionPlan)> {
+    let topology_compressed = sections.take(metadata.topology_compressed_size, "topology")?;
+    let topology_raw = zstd_decompress(topology_compressed)?;
+    let mut interner = StringInterner::new();
+    let graph: crate::graph::schema::GraphBackend = {
+        let _guard = SerdeDeserializeGuard::new(&mut interner);
+        codec_deser(codec, &topology_raw, topology_raw.capacity() as u64)?
+    };
+    let plan = PortableSectionPlan {
+        columns: metadata.column_sections.clone(),
+        embeddings: metadata.embeddings_compressed_size,
+        timeseries: metadata.timeseries_compressed_size,
+        secondary_labels: metadata.secondary_labels_compressed_size,
+        vector_index: metadata.vector_index_compressed_size,
+    };
+    let mut dir_graph = DirGraph::from_graph(graph);
+    dir_graph.interner = interner;
+    metadata.apply_to(&mut dir_graph);
+    dir_graph.rebuild_type_indices_and_compact();
+    dir_graph.build_connection_types_cache();
+    Ok((dir_graph, plan))
+}
+
+fn portable_temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "kglite_portable_{}_{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
+}
+
+fn load_portable_column_section(
+    dir_graph: &mut DirGraph,
+    sections: &mut SectionCursor<'_>,
+    section_meta: &V3ColumnSection,
+    section_index: usize,
+    temp_dir: &Path,
+) -> io::Result<()> {
+    let compressed = sections.take(
+        section_meta.compressed_size,
+        &format!("column section {section_index}"),
+    )?;
+    let packed = zstd_decompress(compressed)?;
+    let expected_rows = dir_graph
+        .type_indices
+        .get(&section_meta.type_name)
+        .map_or(0, |nodes| nodes.len());
+    if section_meta.row_count as usize != expected_rows {
+        return Err(invalid_data(format!(
+            "column section {section_index} for '{}' declares {} rows; topology has {expected_rows}",
+            section_meta.type_name, section_meta.row_count
+        )));
+    }
+    let col_keys = section_meta
+        .columns
+        .keys()
+        .map(|name| {
+            dir_graph
+                .interner
+                .try_get_or_intern(name)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(col_keys));
+    let type_meta = dir_graph
+        .node_type_metadata
+        .get(&section_meta.type_name)
+        .cloned()
+        .unwrap_or_default();
+    let type_temp_dir = temp_dir.join(format!("type_{section_index}"));
+    std::fs::create_dir_all(&type_temp_dir)?;
+    let store = ColumnStore::load_packed(
+        column_schema,
+        &type_meta,
+        &dir_graph.interner,
+        &packed,
+        section_meta.row_count,
+        Some(&type_temp_dir),
+    )?;
+    dir_graph
+        .column_stores
+        .insert(section_meta.type_name.clone(), Arc::new(store));
+    Ok(())
+}
+
+fn attach_portable_column_stores(dir_graph: &mut DirGraph) {
+    for (type_name, store) in &dir_graph.column_stores {
+        let has_id_title = store.has_id_title_columns();
+        let Some(indices) = dir_graph.type_indices.get(type_name) else {
+            continue;
+        };
+        for (row_id, node_idx) in indices.iter().enumerate() {
+            let Some(node) = dir_graph.graph.node_weight_mut(node_idx) else {
+                continue;
+            };
+            node.properties = PropertyStorage::Columnar {
+                store: Arc::clone(store),
+                row_id: row_id as u32,
+            };
+            if has_id_title {
+                node.id = Value::Null;
+                node.title = Value::Null;
+            }
+        }
+    }
+    dir_graph.rebuild_indices_from_keys();
+}
+
+fn load_portable_columns(
+    dir_graph: &mut DirGraph,
+    sections: &mut SectionCursor<'_>,
+    columns: &[V3ColumnSection],
+) -> io::Result<()> {
+    let temp_dir = portable_temp_dir();
+    if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {
+        dirs.push(temp_dir.clone());
+    }
+    for (index, metadata) in columns.iter().enumerate() {
+        load_portable_column_section(dir_graph, sections, metadata, index, &temp_dir)?;
+    }
+    attach_portable_column_stores(dir_graph);
+    Ok(())
+}
+
+fn load_portable_optional_sections(
+    codec: serde_codec::CodecVersion,
+    core_version: u32,
+    dir_graph: &mut DirGraph,
+    sections: &mut SectionCursor<'_>,
+    plan: &PortableSectionPlan,
+) -> io::Result<()> {
+    if plan.embeddings > 0 {
+        if core_version < EMBED_PROVENANCE_MIN_VERSION {
+            return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
+        }
+        let compressed = sections.take(plan.embeddings, "embeddings")?;
+        let raw = zstd_decompress(compressed)?;
+        let mut embeddings: HashMap<(String, String), EmbeddingStore> =
+            codec_deser(codec, &raw, raw.capacity() as u64)?;
+        for store in embeddings.values_mut() {
+            store.rebuild_norms();
+        }
+        dir_graph.embeddings = embeddings;
+    }
+    if plan.timeseries > 0 {
+        let compressed = sections.take(plan.timeseries, "timeseries")?;
+        let raw = zstd_decompress(compressed)?;
+        dir_graph.timeseries_store = codec_deser(codec, &raw, raw.capacity() as u64)?;
+    }
+    if plan.secondary_labels > 0 {
+        let compressed = sections.take(plan.secondary_labels, "secondary labels")?;
+        let raw = zstd_decompress(compressed)?;
+        decode_secondary_label_index(&raw, dir_graph)?;
+    }
+    if plan.vector_index > 0 {
+        if let Ok(compressed) = sections.take(plan.vector_index, "vector index") {
+            if let Ok(raw) = zstd_decompress(compressed) {
+                decode_vector_indexes(&raw, dir_graph);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Load the shared v4/v5 columnar section layout through the codec selected by
+/// the already-validated container header.
+fn load_portable_columnar(
+    buf: &[u8],
+    format_name: &str,
+    codec: serde_codec::CodecVersion,
+    core_version: u32,
+    metadata_len: usize,
+    metadata_start: usize,
+) -> io::Result<Arc<DirGraph>> {
     if metadata_len > MAX_METADATA_BYTES {
         return Err(invalid_data(format!(
-            "v4 metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
+            "{format_name} metadata is {metadata_len} bytes; limit is {MAX_METADATA_BYTES}"
         )));
     }
 
@@ -2067,201 +2342,11 @@ fn load_v4(buf: &[u8]) -> io::Result<Arc<DirGraph>> {
             core_version, CURRENT_CORE_DATA_VERSION,
         )));
     }
-
-    let metadata_end = 12usize
-        .checked_add(metadata_len)
-        .ok_or_else(|| invalid_data("v4 metadata offset overflow"))?;
-    let metadata_bytes = buf
-        .get(12..metadata_end)
-        .ok_or_else(|| invalid_data("v4 file is truncated — metadata incomplete"))?;
-
-    // Parse JSON metadata
-    let metadata: FileMetadata = serde_json::from_slice(metadata_bytes)
-        .map_err(|e| invalid_data(format!("failed to parse v4 metadata: {e}")))?;
-    if metadata.column_sections.len() > 1_000_000 {
-        return Err(invalid_data(
-            "v4 metadata declares too many column sections",
-        ));
-    }
-
-    let mut sections = SectionCursor::new(buf, metadata_end)?;
-
-    // Decompress + deserialize topology (properties are empty maps)
-    let topology_compressed = sections.take(metadata.topology_compressed_size, "topology")?;
-    let topology_raw = zstd_decompress(topology_compressed)?;
-
-    let mut interner = StringInterner::new();
-    let graph: crate::graph::schema::GraphBackend = {
-        let _guard = SerdeDeserializeGuard::new(&mut interner);
-        codec_deser(&topology_raw)?
-    };
-    drop(topology_raw);
-
-    // Extract v3 section metadata before apply_to consumes the rest
-    let column_sections = metadata.column_sections.clone();
-    let embeddings_compressed_size = metadata.embeddings_compressed_size;
-    let timeseries_compressed_size = metadata.timeseries_compressed_size;
-    let secondary_labels_compressed_size = metadata.secondary_labels_compressed_size;
-    let vector_index_compressed_size = metadata.vector_index_compressed_size;
-
-    // Reassemble DirGraph
-    let mut dir_graph = DirGraph::from_graph(graph);
-    dir_graph.interner = interner;
-    metadata.apply_to(&mut dir_graph);
-
-    // Rebuild type indices and schemas (needed for ColumnStore construction).
-    // Note: rebuild_indices_from_keys is deferred until after column loading
-    // because properties are empty at this point (stripped during save).
-    dir_graph.rebuild_type_indices_and_compact();
-    dir_graph.build_connection_types_cache();
-
-    // Load column sections one type at a time
-    // Create temp directory for mmap column files (unique per load to avoid collisions)
-    let temp_dir = std::env::temp_dir().join(format!(
-        "kglite_v3_{}_{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    // Register for cleanup on DirGraph drop
-    if let Ok(mut dirs) = dir_graph.temp_dirs.lock() {
-        dirs.push(temp_dir.clone());
-    }
-
-    for (section_index, section_meta) in column_sections.iter().enumerate() {
-        let compressed = sections.take(
-            section_meta.compressed_size,
-            &format!("column section {section_index}"),
-        )?;
-        let packed = zstd_decompress(compressed)?;
-        let expected_rows = dir_graph
-            .type_indices
-            .get(&section_meta.type_name)
-            .map_or(0, |nodes| nodes.len());
-        if section_meta.row_count as usize != expected_rows {
-            return Err(invalid_data(format!(
-                "column section {section_index} for '{}' declares {} rows; topology has {expected_rows}",
-                section_meta.type_name, section_meta.row_count
-            )));
-        }
-
-        // Build schema from the column section metadata (exact match for saved
-        // columns). Using type_schemas here would include id/title columns that
-        // are NOT in the column data, creating empty placeholder columns that
-        // corrupt the file on re-save.
-        {
-            let col_keys: Vec<crate::graph::schema::InternedKey> = section_meta
-                .columns
-                .keys()
-                .map(|name| {
-                    dir_graph
-                        .interner
-                        .try_get_or_intern(name)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                })
-                .collect::<io::Result<_>>()?;
-            let column_schema = Arc::new(crate::graph::schema::TypeSchema::from_keys(col_keys));
-
-            let type_meta = dir_graph
-                .node_type_metadata
-                .get(&section_meta.type_name)
-                .cloned()
-                .unwrap_or_default();
-
-            // Create temp dir for this type's column files
-            let type_temp_dir = temp_dir.join(format!("type_{section_index}"));
-            std::fs::create_dir_all(&type_temp_dir)?;
-
-            let store = ColumnStore::load_packed(
-                column_schema,
-                &type_meta,
-                &dir_graph.interner,
-                &packed,
-                section_meta.row_count,
-                Some(&type_temp_dir),
-            )?;
-            drop(packed); // free before next type
-
-            dir_graph
-                .column_stores
-                .insert(section_meta.type_name.clone(), Arc::new(store));
-        }
-    }
-
-    // Re-point nodes to columnar storage
-    for (type_name, store) in &dir_graph.column_stores {
-        let has_id_title = store.has_id_title_columns();
-        if let Some(indices) = dir_graph.type_indices.get(type_name) {
-            for (row_id, node_idx) in indices.iter().enumerate() {
-                if let Some(node) = dir_graph.graph.node_weight_mut(node_idx) {
-                    node.properties = PropertyStorage::Columnar {
-                        store: Arc::clone(store),
-                        row_id: row_id as u32,
-                    };
-                    // Set sentinel values if store has id/title columns (mapped mode)
-                    if has_id_title {
-                        node.id = Value::Null;
-                        node.title = Value::Null;
-                    }
-                }
-            }
-        }
-    }
-
-    // Now that nodes have columnar properties, rebuild property/range/composite indices
-    dir_graph.rebuild_indices_from_keys();
-
-    // Load embeddings if present
-    if embeddings_compressed_size > 0 {
-        // Contained format break: the embeddings section layout changed in
-        // core-version 3 (model_id + text_hashes). An older file's embeddings
-        // can't be deserialized positionally, so reject with a clear rebuild
-        // message rather than silently corrupting. The rest of the graph
-        // (nodes/edges/columns) is unaffected — only embeddings broke.
-        if core_version < EMBED_PROVENANCE_MIN_VERSION {
-            return Err(io::Error::other(EMBED_FORMAT_BREAK_MSG));
-        }
-        let emb_compressed = sections.take(embeddings_compressed_size, "embeddings")?;
-        let emb_raw = zstd_decompress(emb_compressed)?;
-        let mut embeddings: HashMap<(String, String), EmbeddingStore> = codec_deser(&emb_raw)?;
-        // `norms` is `#[serde(skip)]` — recompute from `data` post-load.
-        for store in embeddings.values_mut() {
-            store.rebuild_norms();
-        }
-        dir_graph.embeddings = embeddings;
-    }
-
-    // Load timeseries if present
-    if timeseries_compressed_size > 0 {
-        let ts_compressed = sections.take(timeseries_compressed_size, "timeseries")?;
-        let ts_raw = zstd_decompress(ts_compressed)?;
-        let ts_store: HashMap<usize, NodeTimeseries> = codec_deser(&ts_raw)?;
-        dir_graph.timeseries_store = ts_store;
-    }
-
-    // Load secondary-label-index section if present (0.10.5+). The
-    // interner is fully populated by this point, so InternedKey →
-    // String resolution works.
-    if secondary_labels_compressed_size > 0 {
-        let sl_compressed = sections.take(secondary_labels_compressed_size, "secondary labels")?;
-        let sl_raw = zstd_decompress(sl_compressed)?;
-        decode_secondary_label_index(&sl_raw, &mut dir_graph)?;
-    }
-
-    // Load the HNSW vector-index section if present (0.11.0+). Best-effort:
-    // attach indexes to matching stores; a decode error never fails the load
-    // (the index is a rebuildable cache). Must run after embeddings are loaded
-    // and their norms rebuilt (above).
-    if vector_index_compressed_size > 0 {
-        if let Ok(vi_compressed) = sections.take(vector_index_compressed_size, "vector index") {
-            if let Ok(vi_raw) = zstd_decompress(vi_compressed) {
-                decode_vector_indexes(&vi_raw, &mut dir_graph);
-            }
-        }
-    }
-
+    let (metadata, mut sections) =
+        parse_portable_metadata(buf, format_name, metadata_len, metadata_start)?;
+    let (mut dir_graph, plan) = decode_portable_topology(codec, &mut sections, metadata)?;
+    load_portable_columns(&mut dir_graph, &mut sections, &plan.columns)?;
+    load_portable_optional_sections(codec, core_version, &mut dir_graph, &mut sections, &plan)?;
     Ok(Arc::new(dir_graph))
 }
 

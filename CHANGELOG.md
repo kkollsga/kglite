@@ -5,6 +5,16 @@ All notable changes to KGLite will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Portable graph and embedding files use explicitly versioned Postcard payloads.**
+  New `.kgl` v5 and `.kgle` v3 files select their codec in the header, while
+  existing `.kgl` v4 and `.kgle` v1/v2 files remain readable through dedicated
+  legacy readers. Rebuildable vector-index caches carry their own codec-aware
+  format version.
+
 ## [0.13.3] - 2026-07-14
 
 ### Fixed

@@ -277,13 +277,6 @@
       "nesting": 7
     },
     {
-      "path": "crates/kglite/src/graph/io/file.rs",
-      "qualified_name": "crate::crates::kglite::src::graph::io::file::load_v4",
-      "lines": 219,
-      "branches": 41,
-      "nesting": 5
-    },
-    {
       "path": "crates/kglite/src/graph/io/ntriples/column_builder.rs",
       "qualified_name": "crate::crates::kglite::src::graph::io::ntriples::column_builder::plan_layout",
       "lines": 208,

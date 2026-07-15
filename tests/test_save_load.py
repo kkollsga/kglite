@@ -108,12 +108,11 @@ class TestV3Format:
     """Tests for the columnar binary format.
 
     Class name kept as `TestV3Format` for git-blame continuity; Phase A.1 / C5
-    bumped the format to v4 (RGF\\x04) and bumped core_data_version to 2
-    when the `Value` enum gained Node/Relationship/Path/List/Map variants.
+    introduced v4; the current v5 header adds an explicit Postcard codec tag.
     """
 
     def test_v3_magic_bytes(self):
-        """Saved files should start with the v4 magic header RGF\\x04."""
+        """Saved files should start with v5 magic and Postcard codec tag 2."""
         graph = KnowledgeGraph()
         df = pd.DataFrame({"id": [1], "name": ["A"]})
         graph.add_nodes(df, "Node", "id", "name")
@@ -123,13 +122,13 @@ class TestV3Format:
         try:
             graph.save(path)
             with open(path, "rb") as f:
-                header = f.read(4)
-            assert header == b"RGF\x04", f"Expected v4 magic bytes, got {header!r}"
+                header = f.read(5)
+            assert header == b"RGF\x05\x02", f"Expected v5/Postcard header, got {header!r}"
         finally:
             os.unlink(path)
 
     def test_v3_header_structure(self):
-        """Verify the full 12-byte header: magic + core_version + metadata_length."""
+        """Verify magic + codec + core_version + metadata_length."""
         import struct
 
         graph = KnowledgeGraph()
@@ -142,10 +141,12 @@ class TestV3Format:
             graph.save(path)
             with open(path, "rb") as f:
                 magic = f.read(4)
+                codec = f.read(1)
                 core_version = struct.unpack("<I", f.read(4))[0]
                 metadata_len = struct.unpack("<I", f.read(4))[0]
 
-            assert magic == b"RGF\x04"
+            assert magic == b"RGF\x05"
+            assert codec == b"\x02"
             # 2 — Phase A.1 (Value enum); 3 — 0.10.29 (embedding model_id + text_hashes)
             assert core_version == 3
             assert metadata_len > 0  # metadata should not be empty
@@ -167,6 +168,7 @@ class TestV3Format:
             graph.save(path)
             with open(path, "rb") as f:
                 f.read(4)  # magic
+                f.read(1)  # codec
                 f.read(4)  # core_version
                 metadata_len = struct.unpack("<I", f.read(4))[0]
                 metadata_bytes = f.read(metadata_len)

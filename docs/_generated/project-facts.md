@@ -53,7 +53,7 @@ Regenerate with `python scripts/render_docs_facts.py`. CI checks this file for d
 ## Engine contracts
 
 - User storage modes: `memory`, `mapped`, `disk`
-- Snapshot container/core versions: RGF v4 / core v3
+- Snapshot container/core versions: RGF v5 / core v3
 - Spatial candidate index: per-query `rstar::RTree` in `crates/kglite/src/graph/languages/cypher/executor/spatial_join.rs`
 - Disk publication pointer: `CURRENT` selects an immutable generation.
 

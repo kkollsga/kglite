@@ -68,16 +68,6 @@ pub(super) fn encode_into<W: Write, T: Serialize + ?Sized>(
     bincode::serialize_into(writer, value).map_err(encode_error)
 }
 
-pub(super) fn encode_into_bounded<W: Write, T: Serialize + ?Sized>(
-    writer: W,
-    value: &T,
-    limit: u64,
-) -> Result<(), CodecError> {
-    permissive_bounded_options(limit)
-        .serialize_into(writer, value)
-        .map_err(encode_error)
-}
-
 pub(super) fn decode<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, CodecError> {
     bincode::deserialize(bytes).map_err(decode_error)
 }

@@ -105,7 +105,7 @@ def test_to_bytes_matches_save_bytes(tmp_path):
         kglite.from_bytes(g.to_bytes()).cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
         == kglite.load(p).cypher("MATCH (n) RETURN count(n) AS c").to_list()[0]["c"]
     )
-    assert on_disk[:4] == b"RGF\x04"
+    assert on_disk[:5] == b"RGF\x05\x02"
 
 
 def test_from_bytes_rejects_garbage():

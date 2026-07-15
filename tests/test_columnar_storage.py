@@ -315,15 +315,14 @@ class TestV3Roundtrip:
         names = [r["n.full_name"] for r in result]
         assert names == ["Charlie", "Eve"]
 
-    def test_v3_magic_bytes(self, person_graph, tmp_path):
-        """v4 file starts with magic bytes RGF\\x04 (Phase A.1 / C5
-        bumped the format from v3)."""
+    def test_current_magic_and_codec_bytes(self, person_graph, tmp_path):
+        """v5 starts with RGF\\x05 and explicitly selects Postcard (tag 2)."""
         fp = str(tmp_path / "magic.kgl")
         person_graph.save(fp)
 
         with open(fp, "rb") as f:
-            header = f.read(4)
-        assert header == b"RGF\x04"
+            header = f.read(5)
+        assert header == b"RGF\x05\x02"
 
     def test_save_auto_columnar(self, person_graph, tmp_path):
         """save() auto-enables columnar for non-columnar graphs (stays columnar)."""
@@ -342,7 +341,7 @@ class TestV3Roundtrip:
 
 class TestTempDirCleanup:
     def test_load_cleans_temp_dir_on_drop(self, person_graph, tmp_path):
-        """Temp dirs created during v3 load are cleaned up when graph is dropped."""
+        """Temp dirs created during portable load are cleaned up on drop."""
         import gc
         import glob
 
@@ -353,7 +352,7 @@ class TestTempDirCleanup:
         # this process, so measure the DELTA this test creates, not an absolute
         # count.
         pid = os.getpid()
-        pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
+        pattern = os.path.join(tempfile.gettempdir(), f"kglite_portable_{pid}_*")
         baseline = set(glob.glob(pattern))
 
         kg2 = kglite.load(fp)
@@ -377,7 +376,7 @@ class TestTempDirCleanup:
         person_graph.save(fp)
 
         pid = os.getpid()
-        pattern = os.path.join(tempfile.gettempdir(), f"kglite_v3_{pid}_*")
+        pattern = os.path.join(tempfile.gettempdir(), f"kglite_portable_{pid}_*")
         baseline = set(glob.glob(pattern))
 
         for _ in range(5):
@@ -407,8 +406,8 @@ class TestIdTitleSentinel:
     def _topology_bytes(path: str) -> bytes:
         """Extract the compressed topology section from a v4 .kgl file.
 
-        Layout: [0..4] magic, [8..12] metadata_len (u32 LE), [12..12+len] JSON
-        metadata (carries ``topology_compressed_size``), then the topology
+        Layout: [0..4] magic, [4] codec tag, [9..13] metadata_len (u32 LE),
+        [13..13+len] JSON metadata (carries ``topology_compressed_size``), then the topology
         section. The topology holds the node/edge structure incl. each node's
         inline id/title; it is the section the id/title-dedup fix shrinks, and
         it is deterministic (node order = insertion order, no zstd-ordering
@@ -419,9 +418,10 @@ class TestIdTitleSentinel:
 
         with open(path, "rb") as f:
             b = f.read()
-        mlen = struct.unpack_from("<I", b, 8)[0]
-        meta = json.loads(b[12 : 12 + mlen])
-        start = 12 + mlen
+        assert b[:5] == b"RGF\x05\x02"
+        mlen = struct.unpack_from("<I", b, 9)[0]
+        meta = json.loads(b[13 : 13 + mlen])
+        start = 13 + mlen
         return b[start : start + meta["topology_compressed_size"]]
 
     def _create_graph(self):

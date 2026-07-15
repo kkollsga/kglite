@@ -119,9 +119,9 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
     return sorted((r["cat"], r["dom"], r["c"]) for r in rows)
 
 
-# ─── Test 1: Byte-level v3 format drift ─────────────────────────────────────
+# ─── Test 1: Byte-level portable-format drift ────────────────────────────────
 
-# SHA-256 of the v3 `.kgl` bytes for the deterministic fixture built by
+# SHA-256 of the current `.kgl` bytes for the deterministic fixture built by
 # `_build_fixture_graph("memory")`. Regenerate with the helper at the
 # bottom of this file and paste the new digest here *only* when the
 # format is deliberately changed (and CURRENT_FORMAT_VERSION bumped).
@@ -129,7 +129,7 @@ def _parity_query(kg: KnowledgeGraph) -> list[tuple]:
 # Changing this digest without a format bump is a refactor bug — the
 # whole point of this test is to trip loudly when the `.kgl` byte layout
 # silently drifts.
-GOLDEN_V3_DIGEST = "827e2bc03e514d2ed58b45a84e1c9ecd75e8c71cf2a9aa3d5fe052a42bf63554"
+GOLDEN_V3_DIGEST = "527754e18881505d307eda6057a8635bd325091f3b70fe4966f3889ee4de37da"
 
 # Phase A.1 / C5 cleared this set on the v3 → v4 format break. The
 # new v4 loader rejects v3 files (per the user-decided hard break
@@ -144,6 +144,9 @@ GOLDEN_V3_DIGEST = "827e2bc03e514d2ed58b45a84e1c9ecd75e8c71cf2a9aa3d5fe052a42bf6
 # back to a working v4 era.
 ACCEPTABLE_DIGESTS: frozenset[str] = frozenset(
     {
+        # Final v4/bincode digest, demoted when v5 switched portable Serde
+        # payloads to explicitly tagged Postcard.
+        "827e2bc03e514d2ed58b45a84e1c9ecd75e8c71cf2a9aa3d5fe052a42bf63554",
         # Demoted from GOLDEN_V3_DIGEST when 0.11.0 added the
         # `vector_index_compressed_size` metadata field (the HNSW vector-index
         # section). The field serializes as `:0` even with no index, so every
@@ -306,7 +309,7 @@ def _save_memory_fixture_to_bytes() -> bytes:
 
 
 def test_kgl_v3_golden_hash():
-    """Byte-level `.kgl` v3 format tripwire.
+    """Byte-level current `.kgl` format tripwire.
 
     Any refactor that silently changes the save byte layout flips this
     digest. If intentional, regenerate the digest (see module docstring).
@@ -327,7 +330,7 @@ def test_kgl_v3_golden_hash():
         return
 
     pytest.fail(
-        ".kgl v3 format drift detected.\n"
+        ".kgl format drift detected.\n"
         f"    expected: {GOLDEN_V3_DIGEST}\n"
         f"    actual:   {digest}\n"
         "If this change is intentional, update GOLDEN_V3_DIGEST (and bump "

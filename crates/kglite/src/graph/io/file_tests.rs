@@ -58,9 +58,47 @@ mod atomic_save_tests {
         let g = tiny_graph(4);
         let mut buf: Vec<u8> = Vec::new();
         write_kgl_to(&g, &mut buf).unwrap();
-        assert_eq!(&buf[..4], &V4_MAGIC, "buffer must carry the v4 magic");
+        assert_eq!(&buf[..4], &V5_MAGIC, "buffer must carry the v5 magic");
+        assert_eq!(
+            buf[4],
+            serde_codec::CodecVersion::PostcardV1.tag(),
+            "v5 header must select Postcard explicitly"
+        );
         let loaded = load_kgl_bytes(&buf).unwrap();
         assert_eq!(loaded.graph.node_count(), g.graph.node_count());
+    }
+
+    #[test]
+    fn legacy_v4_fixtures_load_and_resave_as_v5() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spatial_graph.kgl");
+        let legacy = std::fs::read(&fixture).unwrap();
+        assert_eq!(&legacy[..4], &V4_MAGIC);
+
+        let loaded = load_kgl_bytes(&legacy).unwrap();
+        let node_count = loaded.graph.node_count();
+        let edge_count = loaded.graph.edge_count();
+        assert!(node_count > 0);
+
+        let mut current = Vec::new();
+        write_kgl_to(&loaded, &mut current).unwrap();
+        assert_eq!(&current[..4], &V5_MAGIC);
+        let reloaded = load_kgl_bytes(&current).unwrap();
+        assert_eq!(reloaded.graph.node_count(), node_count);
+        assert_eq!(reloaded.graph.edge_count(), edge_count);
+    }
+
+    #[test]
+    fn newer_container_and_invalid_v5_codec_are_rejected_clearly() {
+        let newer = [b'R', b'G', b'F', 6];
+        let error = load_kgl_bytes(&newer).err().unwrap().to_string();
+        assert!(error.contains("version 6") && error.contains("upgrade kglite"));
+
+        let mut invalid = vec![b'R', b'G', b'F', 5, 99];
+        invalid.extend_from_slice(&CURRENT_CORE_DATA_VERSION.to_le_bytes());
+        invalid.extend_from_slice(&0u32.to_le_bytes());
+        let error = load_kgl_bytes(&invalid).err().unwrap().to_string();
+        assert!(error.contains("invalid codec tag"));
     }
 
     /// A v3 (or otherwise unreadable) file is a hard break, but the error must
@@ -122,6 +160,37 @@ mod atomic_save_tests {
     }
 
     #[test]
+    fn legacy_vector_index_v1_payload_still_attaches() {
+        let source = tiny_indexed_graph();
+        let entries: Vec<(&String, &String, &crate::graph::algorithms::hnsw::HnswIndex)> = source
+            .embeddings
+            .iter()
+            .filter_map(|((node_type, property), store)| {
+                store
+                    .index
+                    .as_ref()
+                    .map(|index| (node_type, property, index))
+            })
+            .collect();
+        let body = serde_codec::encode(&entries).unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(vector_persistence::VECTOR_INDEX_MAGIC);
+        payload.extend_from_slice(&vector_persistence::VECTOR_INDEX_LEGACY_VERSION.to_le_bytes());
+        payload.extend_from_slice(&body);
+
+        let mut destination = tiny_indexed_graph();
+        for store in Arc::make_mut(&mut destination).embeddings.values_mut() {
+            store.index = None;
+        }
+        decode_vector_indexes(&payload, Arc::make_mut(&mut destination));
+        assert!(destination
+            .embeddings
+            .get(&("Doc".to_string(), "vec_emb".to_string()))
+            .unwrap()
+            .has_index());
+    }
+
+    #[test]
     fn vector_index_decode_skips_unknown_version() {
         // The section is a rebuildable cache: an unknown format version (or a
         // corrupt magic) must be skipped silently, never attached, never panic.
@@ -179,15 +248,16 @@ mod atomic_save_tests {
     }
 
     fn rewrite_metadata(buf: &[u8], mutate: impl FnOnce(&mut FileMetadata)) -> Vec<u8> {
-        let old_len = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
-        let mut metadata: FileMetadata = serde_json::from_slice(&buf[12..12 + old_len]).unwrap();
+        assert_eq!(&buf[..4], &V5_MAGIC);
+        let old_len = u32::from_le_bytes(buf[9..13].try_into().unwrap()) as usize;
+        let mut metadata: FileMetadata = serde_json::from_slice(&buf[13..13 + old_len]).unwrap();
         mutate(&mut metadata);
         let encoded = serde_json::to_vec(&metadata).unwrap();
         let mut rewritten = Vec::with_capacity(buf.len() - old_len + encoded.len());
-        rewritten.extend_from_slice(&buf[..8]);
+        rewritten.extend_from_slice(&buf[..9]);
         rewritten.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
         rewritten.extend_from_slice(&encoded);
-        rewritten.extend_from_slice(&buf[12 + old_len..]);
+        rewritten.extend_from_slice(&buf[13 + old_len..]);
         rewritten
     }
 
