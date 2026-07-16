@@ -18,23 +18,35 @@
     },
     {
       "name": "fastembed",
-      "features": ["fastembed"],
+      "features": [
+        "fastembed"
+      ],
       "baseline": "tests/api-baselines/rust/kglite-fastembed.txt"
     },
     {
       "name": "okf",
-      "features": ["okf"],
+      "features": [
+        "okf"
+      ],
       "baseline": "tests/api-baselines/rust/kglite-okf.txt"
     },
     {
       "name": "rdf",
-      "features": ["rdf"],
+      "features": [
+        "rdf"
+      ],
       "baseline": "tests/api-baselines/rust/kglite-rdf.txt"
     },
     {
       "name": "all-features",
       "all_features": true,
       "baseline": "tests/api-baselines/rust/kglite-all-features.txt"
+    }
+  ],
+  "companion_packages": [
+    {
+      "package": "kglite-mcp-server",
+      "baseline": "tests/api-baselines/rust/kglite-mcp-server-default.txt"
     }
   ]
 }

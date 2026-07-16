@@ -1,0 +1,9 @@
+pub mod kglite_mcp_server
+pub struct kglite_mcp_server::CodeTreeHooks
+pub kglite_mcp_server::CodeTreeHooks::build: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, bool) -> anyhow::Result<alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::string::String> + core::marker::Send + core::marker::Sync)>
+pub kglite_mcp_server::CodeTreeHooks::build_revs: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path, &[alloc::string::String], bool) -> anyhow::Result<(alloc::sync::Arc<kglite::graph::dir_graph::DirGraph>, alloc::vec::Vec<alloc::string::String>), alloc::string::String> + core::marker::Send + core::marker::Sync)>
+pub kglite_mcp_server::CodeTreeHooks::is_code_file: alloc::boxed::Box<(dyn core::ops::function::Fn(&std::path::Path) -> bool + core::marker::Send + core::marker::Sync)>
+pub fn kglite_mcp_server::run<I, T>(args: I) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
+pub fn kglite_mcp_server::run_with_code_tree_hooks<I, T>(args: I, hooks: core::option::Option<kglite_mcp_server::CodeTreeHooks>) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
+pub fn kglite_mcp_server::run_with_embedder_factory<I, T>(args: I, factory: core::option::Option<kglite_mcp_server::PyEmbedderFactory>) -> anyhow::Result<()> where I: core::iter::traits::collect::IntoIterator<Item = T>, T: core::convert::Into<std::ffi::os_str::OsString> + core::clone::Clone
+pub type kglite_mcp_server::PyEmbedderFactory = alloc::boxed::Box<(dyn core::ops::function::Fn(&str) -> anyhow::Result<alloc::sync::Arc<dyn kglite::graph::embedder::Embedder>, alloc::string::String> + core::marker::Send)>

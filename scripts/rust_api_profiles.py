@@ -112,9 +112,23 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     if "default" not in names or all_features_profiles != 1:
         raise ValueError("profiles must contain default and exactly one all-features contract")
 
+    # Companion crates: full default-feature public-API snapshots of sibling
+    # workspace crates whose *library* surface downstream repos build against
+    # (e.g. kglite-mcp-server's CodeTreeHooks seam, consumed by codingest-mcp).
+    # Exempt from the feature-classification machinery — one baseline each.
+    for companion in manifest.get("companion_packages", []):
+        pkg = companion.get("package")
+        baseline = companion.get("baseline")
+        if not isinstance(pkg, str) or not pkg or pkg == manifest["package"]:
+            raise ValueError(f"companion package invalid: {pkg!r}")
+        cargo_features(pkg)  # raises if the workspace package does not exist
+        if not isinstance(baseline, str) or not baseline.startswith("tests/api-baselines/rust/") or baseline in baselines:
+            raise ValueError(f"companion {pkg}: invalid or duplicate baseline {baseline!r}")
+        baselines.add(baseline)
+
 
 def public_api_command(manifest: dict[str, Any], profile: dict[str, Any]) -> list[str]:
-    cmd = ["cargo", "public-api", "-p", manifest["package"], "-ss", "--no-default-features"]
+    cmd = ["cargo", "public-api", "-p", profile.get("package", manifest["package"]), "-ss", "--no-default-features"]
     if profile.get("all_features", False):
         cmd.append("--all-features")
     elif profile.get("features"):
@@ -178,6 +192,30 @@ def run_profiles(manifest: dict[str, Any], *, check: bool) -> int:
             baseline.parent.mkdir(parents=True, exist_ok=True)
             baseline.write_text(current, encoding="utf-8")
             print(f"{name}: wrote {profile['baseline']}")
+
+    for companion in manifest.get("companion_packages", []):
+        pkg = companion["package"]
+        profile = {"name": pkg, "package": pkg, "features": companion.get("features", [])}
+        print(f"{pkg}: capturing (companion)", flush=True)
+        current = capture_profile(manifest, profile)
+        baseline = ROOT / companion["baseline"]
+        if check:
+            expected = baseline.read_text(encoding="utf-8") if baseline.exists() else ""
+            if expected != current:
+                failed = True
+                diff = difflib.unified_diff(
+                    expected.splitlines(keepends=True),
+                    current.splitlines(keepends=True),
+                    fromfile=companion["baseline"],
+                    tofile=f"current:{pkg}",
+                )
+                sys.stdout.writelines(diff)
+            else:
+                print(f"{pkg}: exact API match")
+        else:
+            baseline.parent.mkdir(parents=True, exist_ok=True)
+            baseline.write_text(current, encoding="utf-8")
+            print(f"{pkg}: wrote {companion['baseline']}")
 
     default_surface = captures["default"]
     for feature, classification in manifest["feature_classifications"].items():
