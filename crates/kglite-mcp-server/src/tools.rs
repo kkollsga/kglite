@@ -55,9 +55,16 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// Refusal message for code-graph build requests when no builder is
 /// injected. The in-tree builder moved to the standalone codingest
 /// project; this server still serves every graph-read tool on any graph.
-const NO_BUILDER_MSG: &str = "code-graph building is not available in this binary: the code-tree \
-builder lives in the codingest project. Use codingest-mcp (which embeds this server and injects \
-its builder), or open an existing .kgl graph.";
+const NO_BUILDER_MSG: &str = "code-graph building is not available in this binary: as of kglite \
+0.14 the builder lives in the codingest project.\n\
+  fix:      install codingest-mcp (`cargo install codingest-mcp`, or the prebuilt binaries at \
+https://github.com/kkollsga/codingest/releases) and swap the `command` in your MCP config from \
+`kglite-mcp-server` to `codingest-mcp` — it embeds this server, accepts the SAME flags and \
+manifest, and injects its builder. Nothing else in your config changes.\n\
+  rollback: keep running the old kglite-mcp-server binary (or `pip install \"kglite<0.14\"` for \
+the wheel-bundled one).\n\
+  reading .kgl graphs (--graph) needs no builder and keeps working here.\n\
+  migration guide: https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html";
 
 /// Single-tree build closure: `(dir, include_docs) -> graph`.
 pub type CodeTreeBuildFn =
