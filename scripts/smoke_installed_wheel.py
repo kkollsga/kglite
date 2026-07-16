@@ -44,7 +44,7 @@ def main() -> int:
         check=False,
     )
     cli_output = cli_result.stdout + cli_result.stderr
-    if cli_result.returncode != 0 or "code-tree" not in cli_output or "skill" not in cli_output:
+    if cli_result.returncode != 0 or "query" not in cli_output or "skill" not in cli_output:
         raise RuntimeError(f"installed CLI launcher failed ({cli_result.returncode}):\n{cli_output}")
 
     mcp_result = subprocess.run(
