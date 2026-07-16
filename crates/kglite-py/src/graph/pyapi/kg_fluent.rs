@@ -1307,7 +1307,7 @@ impl KnowledgeGraph {
     ///
     /// Args:
     ///     name: Entity name (e.g. "build") or qualified name
-    ///         (e.g. "kglite.code_tree.builder.build")
+    ///         (e.g. "mypkg.parser.parse_file")
     ///     node_type: Optional node type hint ("Function", "Struct", etc.)
     ///     hops: Max traversal depth for multi-hop neighbors (default 1)
     ///
@@ -1318,7 +1318,7 @@ impl KnowledgeGraph {
     /// Example:
     ///     ```python
     ///     ctx = graph.context("KnowledgeGraph")
-    ///     ctx = graph.context("kglite.code_tree.builder.build", hops=2)
+    ///     ctx = graph.context("mypkg.parser.parse_file", hops=2)
     ///     ```
     #[pyo3(signature = (name, node_type=None, hops=None))]
     fn context(

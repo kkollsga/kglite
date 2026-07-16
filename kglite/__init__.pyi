@@ -568,46 +568,6 @@ def from_bytes(data: bytes) -> KnowledgeGraph:
     """
     ...
 
-def build_code_tree(path: str, **kwargs: Any) -> KnowledgeGraph:
-    """Parse a codebase at ``path`` into a :class:`KnowledgeGraph`.
-
-    The stable, public entry point for code-graph building (tree-sitter grammars
-    are bundled in the Rust extension — no extra to install). Equivalent to
-    ``kglite.code_tree.build``; prefer either over the internal
-    ``kglite._kglite_code_tree`` module, which may change without notice.
-
-    Pass ``include_docs=True`` to also ingest markdown as ``:Doc`` nodes linked
-    to the code they mention. Pass ``rev=<tag|branch|sha>`` to build the codebase
-    as it existed at that git revision (via ``git archive`` into a tempdir — the
-    working tree is untouched and uncommitted changes are excluded); the built
-    graph's ``describe()`` records the revision.
-
-    Pass ``revs=[<rev>, ...]`` (oldest → newest, mutually exclusive with ``rev``)
-    to merge N revisions into one multi-rev graph: one node per entity across
-    revs, each node carrying native list props ``revs: [str]`` (revisions it
-    appears in) + ``rev_fp: [int]`` (a per-rev shape fingerprint), and each edge
-    carrying ``revs: [str]``. Unchanged entities are stored once, so the graph is
-    ≈ base + deltas. Ordinary properties (``signature``, ``value_preview``, …)
-    report the NEWEST rev an entity appears in (newest-wins). Because one graph
-    holds every rev, an **unscoped** ``MATCH (n:Function) RETURN count(n)``
-    over-counts across revs — scope a query to one rev with membership::
-
-        MATCH (n:Function) WHERE 'v2' IN n.revs RETURN n.name
-
-    and use ``CALL rev_diff({from: 'v1', to: 'v2'})`` for added / removed /
-    changed deltas between two revs. ``describe()`` lists the loaded revs and
-    teaches this scoping idiom. See ``kglite.code_tree.build`` for the full
-    keyword set.
-    """
-    ...
-
-def repo_tree(repo: str, **kwargs: Any) -> KnowledgeGraph:
-    """Clone a GitHub repository and build its code knowledge graph.
-
-    Public convenience alias for :func:`kglite.code_tree.repo_tree`.
-    """
-    ...
-
 def graphgen(
     scale: str = "medium",
     *,
@@ -1898,7 +1858,7 @@ class KnowledgeGraph:
         ⚠ **Code-entity search only.** ``find()`` searches nodes of type
         ``Function``, ``Struct``, ``Class``, ``Enum``, ``Trait``,
         ``Protocol``, ``Interface``, ``Module``, or ``Constant`` — the
-        types produced by ``kglite.code_tree``. On graphs that don't
+        types produced by code-graph builders (e.g. codingest). On graphs that don't
         contain these types (e.g. a social graph with ``Person`` nodes),
         ``find()`` returns an empty list. For general name lookup on
         other node types, use ``select(type).where({"name": ...})`` or
@@ -5018,7 +4978,7 @@ class KnowledgeGraph:
         a ``UserWarning`` is emitted to surface the silent-drop case. This
         most commonly indicates the ``.kgle`` file was exported from a
         different graph, or that the node ID schema has drifted (e.g. the
-        ``code_tree`` qualified-name format changed across kglite versions).
+        a code-graph qualified-name format changed across builder versions).
 
         Args:
             path: Path to a ``.kgle`` file previously created by

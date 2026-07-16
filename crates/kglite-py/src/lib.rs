@@ -34,7 +34,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-mod code_tree;
 mod datatypes;
 mod error_py;
 mod graph;
@@ -65,7 +64,7 @@ use kglite_core::api::io::load_file;
 /// Curated Rust-side façade for downstream binaries (notably
 /// `kglite-mcp-server`). This module is the **only** stable Rust
 /// API the kglite-py wrapper promises to keep — the underlying
-/// `pub mod graph` / `pub mod code_tree` are public for tooling
+/// `pub mod graph` is public for tooling
 /// but their internals can move between minor releases. New
 /// consumers should import from `kglite::api::*` (or
 /// `kglite_core::api::*` from inside this crate's source, where
@@ -74,7 +73,6 @@ use kglite_core::api::io::load_file;
 /// The Python API (`#[pymethods]` on `KnowledgeGraph`, etc.) is
 /// independent — it stays as the wheel's primary surface.
 pub mod api {
-    pub use crate::code_tree::builder::run_with_options as build_code_tree;
     pub use crate::datatypes::Value;
     // Per-variant carriers for the Value enum's compound shapes. Phase A.1
     // added `Value::Node` / `Relationship` / `Path` carrying these struct
@@ -456,7 +454,6 @@ fn kglite(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase A.2 / C1 — typed exception class hierarchy. Every kglite
     // error surfaces as `kglite.KgError` or a more specific subclass.
     error_py::register(py, m)?;
-    code_tree::pyapi::register(py, m)?;
     graphgen::register(py, m)?;
     #[cfg(feature = "loaders")]
     okf::pyapi::register(py, m)?;

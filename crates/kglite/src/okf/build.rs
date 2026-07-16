@@ -1,6 +1,6 @@
 //! Graph builder: turn parsed [`ConceptDoc`]s into a [`DirGraph`].
 //!
-//! Mirrors `code_tree`'s loader: build columnar [`DataFrame`]s and hand them to
+//! Mirrors the code-graph loader pattern: build columnar [`DataFrame`]s and hand them to
 //! the bulk `maintain::add_nodes` / `add_connections` mutators (interning, type
 //! schema, id-index, and dedup come for free). Nodes are grouped by label; edges
 //! by `(source_label, target_label, conn_type)` so each `add_connections` call
@@ -8,7 +8,7 @@
 //! stub nodes (the mutator's built-in behaviour).
 //!
 //! Structured frontmatter values (`tags` lists, nested maps surfaced inside
-//! lists) are JSON-encoded into String columns — the same convention `code_tree`
+//! lists) are JSON-encoded into String columns — the same convention code-graph builders
 //! uses for `parameters`/`fields` (the columnar `DataFrame` has no list/map
 //! column type).
 
@@ -305,7 +305,7 @@ fn build_nodes(
 
 /// Coerce a property value for columnar storage: structured values (lists, maps)
 /// JSON-encode to a String; scalars pass through unchanged. `pub(crate)` so
-/// `code_tree`'s docs pass reuses the same frontmatter→column convention.
+/// codingest's docs pass reuses the same frontmatter→column convention.
 pub(crate) fn column_value(v: &Value) -> Value {
     match v {
         Value::List(_) | Value::Map(_) => Value::String(

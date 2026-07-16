@@ -7,7 +7,6 @@
 //! Pure-Rust binary over `kglite::api::*` (no libpython link), mirroring the
 //! kglite-bolt-server / kglite-mcp-server crate pattern.
 
-mod code_tree_cli;
 mod exec;
 mod format;
 mod helper;
@@ -52,11 +51,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Build and inspect code-graph artifacts without Python or MCP.
-    CodeTree {
-        #[command(subcommand)]
-        command: code_tree_cli::CodeTreeCommand,
-    },
     /// Install or remove the bundled code-review skill for an agent host.
     Skill {
         #[command(subcommand)]
@@ -220,9 +214,6 @@ where
 {
     let cli = Cli::parse_from(args);
 
-    if let Some(Command::CodeTree { command }) = &cli.command {
-        return code_tree_cli::run(command);
-    }
     if let Some(Command::Skill { command }) = &cli.command {
         return skill::run(command);
     }

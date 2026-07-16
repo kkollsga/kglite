@@ -8,7 +8,7 @@ import copy
 import json
 from pathlib import Path
 import re
-import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -285,23 +285,15 @@ def _codec_boundary_violations(root: Path) -> list[str]:
 
 
 def _collect_function_metrics(root: Path) -> list[dict[str, Any]]:
-    command = [
-        "cargo",
-        "run",
-        "--quiet",
-        "-p",
-        "kglite",
-        "--bin",
-        "code_tree_stats",
-        "--release",
-        "--",
-        str(root),
-        "--function-metrics",
-    ]
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
-    if result.returncode:
-        raise RuntimeError(f"function-metric command failed:\n{result.stdout}\n{result.stderr}")
-    metrics = json.loads(result.stdout)
+    # Metrics come from scripts/function_metrics.py (python tree-sitter),
+    # which ports the retired in-tree parser's complexity walk — kglite's
+    # gate must not shell out to the external codingest workspace.
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        import function_metrics
+    finally:
+        sys.path.pop(0)
+    metrics = function_metrics.collect(root)
     return [
         metric
         for metric in metrics

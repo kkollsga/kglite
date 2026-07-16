@@ -12,27 +12,56 @@ from pathlib import Path
 
 import pytest
 
+import kglite
+
+# Hand-built code-schema graph mirroring the shape the operator report
+# flagged: three library functions (`hub` calling `leaf`/`leaf2`) plus a
+# test helper (`assert_identical`) called from two test functions. Node
+# props are exactly what a code-graph build emits for centrality/community
+# scoping: `name`, `is_test`, `is_benchmark`, and CALLS edges.
+#
+# (fn_id, name, file_path, line, end_line, is_test)
+_FUNCTIONS = [
+    ("core.hub", "hub", "core.py", 1, 2, False),
+    ("core.leaf", "leaf", "core.py", 3, 4, False),
+    ("core.leaf2", "leaf2", "core.py", 5, 6, False),
+    ("tests.test_x.assert_identical", "assert_identical", "tests/test_x.py", 2, 3, True),
+    ("tests.test_x.test_a", "test_a", "tests/test_x.py", 4, 5, True),
+    ("tests.test_x.test_b", "test_b", "tests/test_x.py", 6, 7, True),
+]
+_CALLS = [
+    ("core.hub", "core.leaf"),
+    ("core.hub", "core.leaf2"),
+    ("tests.test_x.assert_identical", "core.hub"),
+    ("tests.test_x.test_a", "tests.test_x.assert_identical"),
+    ("tests.test_x.test_b", "tests.test_x.assert_identical"),
+]
+
 
 def _code_graph(tmp_path: Path):
     """A tiny code graph: 3 library functions calling each other, plus a test
     helper (`assert_identical`) called from two test functions — the exact
     shape the report flagged (a test helper crowding the PageRank top-N)."""
-    from kglite import code_tree
-
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "core.py").write_text(
-        "def hub():\n    return leaf() + leaf2()\ndef leaf():\n    return 1\ndef leaf2():\n    return 2\n"
-    )
-    tests = root / "tests"
-    tests.mkdir()
-    (tests / "test_x.py").write_text(
-        "from core import hub\n"
-        "def assert_identical():\n    return hub()\n"
-        "def test_a():\n    return assert_identical()\n"
-        "def test_b():\n    return assert_identical()\n"
-    )
-    return code_tree.build(str(root))
+    g = kglite.KnowledgeGraph()
+    for fn_id, name, file_path, line, end_line, is_test in _FUNCTIONS:
+        g.cypher(
+            "CREATE (f:Function {id: $id, name: $name, file_path: $fp, "
+            "line_number: $line, end_line: $end, is_test: $is_test, is_benchmark: false})",
+            params={
+                "id": fn_id,
+                "name": name,
+                "fp": file_path,
+                "line": line,
+                "end": end_line,
+                "is_test": is_test,
+            },
+        )
+    for src, dst in _CALLS:
+        g.cypher(
+            "MATCH (a:Function {id: $src}), (b:Function {id: $dst}) CREATE (a)-[:CALLS]->(b)",
+            params={"src": src, "dst": dst},
+        )
+    return g
 
 
 def _names(g, query):

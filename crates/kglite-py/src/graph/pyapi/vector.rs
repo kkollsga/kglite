@@ -808,7 +808,7 @@ impl KnowledgeGraph {
         // Surface silent-drop cases: if the file contained entries but none
         // matched nodes in the current graph, the user almost always wants
         // to know — they're importing into the wrong graph or against an
-        // ID schema that has drifted (e.g. code_tree qualified-name format
+        // ID schema that has drifted (e.g. a code-graph qualified-name format
         // changes between releases). Emit a UserWarning that's visible by
         // default but still suppressible via the standard `warnings` module.
         if stats.imported == 0 && stats.skipped > 0 {

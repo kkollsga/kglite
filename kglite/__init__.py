@@ -134,41 +134,6 @@ class Spatial:
         return "centroid_lon"
 
 
-def build_code_tree(
-    path: str,
-    **kwargs,
-) -> "KnowledgeGraph":
-    """Parse a codebase at ``path`` into a :class:`KnowledgeGraph`.
-
-    The stable, public entry point for code-graph building (tree-sitter
-    grammars are bundled in the Rust extension — no extra to install).
-    Equivalent to :func:`kglite.code_tree.build`; prefer either of these over
-    the internal ``kglite._kglite_code_tree`` module, which is an
-    implementation detail and may change without notice.
-
-    Pass ``include_docs=True`` to also ingest markdown as ``:Doc`` nodes linked
-    to the code they mention. See :func:`kglite.code_tree.build` for the full
-    keyword set.
-    """
-    from .code_tree import build as _build
-
-    return _build(path, **kwargs)
-
-
-def repo_tree(
-    repo: str,
-    **kwargs,
-) -> "KnowledgeGraph":
-    """Clone a GitHub repository and build a knowledge graph from its source code.
-
-    Convenience re-export of :func:`kglite.code_tree.repo_tree`. Tree-sitter
-    grammars are bundled in the Rust extension — no extra to install.
-    """
-    from .code_tree import repo_tree as _repo_tree
-
-    return _repo_tree(repo, **kwargs)
-
-
 def graphgen(
     scale: str = "medium",
     *,
@@ -578,8 +543,6 @@ __all__ = [
     "cypher_pass_names",
     "from_blueprint",
     "from_records",
-    "build_code_tree",
-    "repo_tree",
     "graphgen",
     "outline",
     "stamp_file_freshness",
@@ -610,9 +573,3 @@ __all__ = [
     "InternerCollisionError",
     "InternalError",
 ]
-
-# Eager submodule bind so `import kglite; kglite.code_tree.build(...)` works
-# without a separate `from kglite import code_tree`. Placed after the extension
-# import above (it registers `kglite._kglite_code_tree`, which the code_tree
-# package re-exports) and kept out of the top import block on purpose.
-from . import code_tree  # noqa: E402, F401

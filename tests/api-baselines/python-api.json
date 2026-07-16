@@ -15,8 +15,6 @@
     "cypher_pass_names",
     "from_blueprint",
     "from_records",
-    "build_code_tree",
-    "repo_tree",
     "graphgen",
     "outline",
     "stamp_file_freshness",
@@ -1303,10 +1301,6 @@
       "kind": "constant",
       "type": "str"
     },
-    "build_code_tree": {
-      "kind": "function",
-      "signature": "(path: str, **kwargs) -> 'KnowledgeGraph'"
-    },
     "check_file_freshness": {
       "kind": "function",
       "signature": "(graph: 'KnowledgeGraph', *, node_type: str | None = None, path_property: str = 'file_path', mtime_property: str = 'file_mtime', hash_property: str | None = 'content_hash', base_dir: str | None = None) -> list"
@@ -1354,10 +1348,6 @@
     "outline": {
       "kind": "function",
       "signature": "(graph: 'KnowledgeGraph', root, edge: str, *, max_depth: int | None = None, body: str | None = None) -> str"
-    },
-    "repo_tree": {
-      "kind": "function",
-      "signature": "(repo: str, **kwargs) -> 'KnowledgeGraph'"
     },
     "stamp_file_freshness": {
       "kind": "function",

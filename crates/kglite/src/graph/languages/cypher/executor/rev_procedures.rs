@@ -1,7 +1,7 @@
 //! `CALL rev_diff({from, to [, node_type]}) YIELD bucket, type, qualified_name, name, file, line`
 //!
 //! The Cypher-side reader for the multi-rev code graphs built by
-//! [`crate::code_tree::rev::build_code_tree_revs`]. Each merged node carries two
+//! a multi-rev code-graph build (codingest's `build_code_tree_revs`). Each merged node carries two
 //! native list props — `revs: [str]` (the revisions the entity appears in,
 //! oldest → newest) and `rev_fp: [int]` (a per-rev shape fingerprint, positionally
 //! aligned with `revs`). `rev_diff` reads those two lists straight off each node
@@ -113,7 +113,7 @@ pub(super) fn execute_rev_diff(
     if !saw_revs_prop {
         return Err(format!(
             "CALL {PROC}: this graph has no `revs` property — it is not a multi-rev graph. \
-             Build one with code_tree.build(path, revs=['v1', 'v2', ...])."
+             Build one with a multi-rev code-graph builder (codingest: build --revs v1,v2)."
         ));
     }
     for rev in [&from_rev, &to_rev] {

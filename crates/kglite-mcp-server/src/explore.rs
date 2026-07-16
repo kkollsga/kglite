@@ -1,4 +1,4 @@
-//! `explore` — one-call codebase exploration over a code-tree graph.
+//! `explore` — one-call codebase exploration over a code graph.
 //!
 //! Composes lexical FTS over Function/Class/Interface names + signatures +
 //! docstrings with a 2-hop neighborhood traversal and grouped source
@@ -78,7 +78,7 @@ pub fn register(
              DEFINES / REFERENCES_FN, and returns a markdown report \
              with entry points, a relationship map, and grouped source \
              slices. Designed to replace chains of grep + read calls \
-             when answering 'how does X work' over a code-tree graph.",
+             when answering 'how does X work' over a code graph.",
         )),
         Arc::new(schema),
     );

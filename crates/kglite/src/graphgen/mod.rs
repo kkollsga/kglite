@@ -1,6 +1,6 @@
 //! Streaming synthetic property-graph generator — bundled so any binding can
 //! produce a realistic benchmark / demo graph in one call (mirrors how
-//! `code_tree` lives in the core crate and is surfaced through the wheel).
+//! code-graph building lives in the external codingest project).
 //!
 //! Emits the canonical org/social schema (Person/Company/Project/Skill/City +
 //! KNOWS/WORKS_AT/CONTRIBUTES_TO/HAS_SKILL/OWNS/DEPENDS_ON/LOCATED_IN) as one

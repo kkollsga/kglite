@@ -4,7 +4,7 @@
 //! cross-linked by markdown links. Each non-reserved `.md` file becomes one
 //! [`ConceptDoc`]; the links within become edges. The model is deliberately
 //! *partial* — the body is not retained unless [`BuildOptions::with_body`] is
-//! set, mirroring `code_tree` (store structure + a `file_path` pointer; read the
+//! set, mirroring code-graph builders (store structure + a `file_path` pointer; read the
 //! body on demand).
 
 use crate::datatypes::values::Value;

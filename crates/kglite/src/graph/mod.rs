@@ -56,7 +56,7 @@ impl TemporalContext {
 
 /// Resolved code-entity location returned by
 /// `KnowledgeGraph::source_location`. All optional fields mirror
-/// what `code_tree` stores on the node — graphs built from
+/// what code-graph builders (e.g. codingest) store on the node — graphs built from
 /// non-code-tree sources may have fewer populated.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {

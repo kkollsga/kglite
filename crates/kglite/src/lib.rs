@@ -17,7 +17,6 @@
 //!
 //! See `docs/rust/embedding.md` for the embedder guide.
 
-pub mod code_tree;
 // Dataset loaders — sealed behind the curated `api::datasets` facade (the
 // same chokepoint treatment as `graph`). `pub(crate)` so no wrapper can reach
 // `kglite::datasets::*` directly; the `api::datasets` re-exports still resolve
@@ -50,7 +49,7 @@ pub mod api {
     // binding speaks) + a couple of standalone top-level capabilities
     // (`graphgen`, `explore_markdown`). Everything else is clustered into a
     // submodule by concern: `param`, `mutation`, `fluent`, `algorithms`,
-    // `timeseries`, `introspection`, `io`, `code_tree`, `blueprint`,
+    // `timeseries`, `introspection`, `io`, `blueprint`,
     // `cypher`, `session`, `datasets`. Per-cluster items live in exactly one
     // place (no root↔submodule duplication).
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
@@ -75,7 +74,7 @@ pub mod api {
     // Piece 3b alongside the Selection api-type lift (Piece 3a).
     //
     // (The code-tree handle helpers `resolve_code_entity` / `CODE_TYPES` /
-    // `source_location` live in `api::code_tree`.)
+    // `source_location` live in `api::code_entities`.)
     pub use crate::graph::handle::{
         discover_property_keys_from_data, infer_selection_node_type, KnowledgeGraph,
     };
@@ -124,7 +123,7 @@ pub mod api {
     // (Mutation reports → `api::mutation`; schema introspection /
     // `SchemaOverview` / detail enums → `api::introspection`; `.kgl`
     // load/save → `api::io`; `SourceLocation`/`SourceLookup` →
-    // `api::code_tree`.)
+    // `api::code_entities`.)
 
     /// Parameter-shape helpers for bindings — wire-shaped values
     /// (JSON / protobuf-map / etc.) ↔ `kglite::api::Value`. Future
@@ -365,20 +364,6 @@ pub mod api {
         pub use crate::graph::mutation::wal_replay::apply_frames;
         pub use crate::graph::storage::recording::{resolve_ops, RecordingGraph};
         pub use crate::graph::wal::{recover, wal_path, Wal, WalFrame};
-    }
-
-    /// Code-tree — build a queryable graph from source files and map a path
-    /// to its language (parser + builder + multi-rev merge). Build-side
-    /// only; the read-side entity helpers live in [`code_entities`] and work
-    /// on any code-schema graph regardless of which builder produced it.
-    pub mod code_tree {
-        pub use crate::code_tree::builder::run_with_options as build_code_tree;
-        pub use crate::code_tree::parsers::language_for_path;
-        /// Multi-rev merge — one graph spanning N git revisions via shared
-        /// identity + `revs` / `rev_fp` list props (B.2b). The wheel's
-        /// `code_tree.build(revs=[...])` and the MCP server's rev-aware
-        /// activation hook are its two bindings.
-        pub use crate::code_tree::rev::{archive_and_build, build_code_tree_revs, dedup_revs};
     }
 
     /// Code-entity read surface — resolve / locate / contextualize entities

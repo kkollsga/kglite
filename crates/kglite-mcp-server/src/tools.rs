@@ -52,6 +52,13 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Refusal message for code-graph build requests when no builder is
+/// injected. The in-tree builder moved to the standalone codingest
+/// project; this server still serves every graph-read tool on any graph.
+const NO_BUILDER_MSG: &str = "code-graph building is not available in this binary: the code-tree \
+builder lives in the codingest project. Use codingest-mcp (which embeds this server and injects \
+its builder), or open an existing .kgl graph.";
+
 /// Single-tree build closure: `(dir, include_docs) -> graph`.
 pub type CodeTreeBuildFn =
     dyn Fn(&Path, bool) -> Result<Arc<kglite::api::DirGraph>, String> + Send + Sync;
@@ -246,11 +253,14 @@ impl GraphState {
     /// active builder handles, plus `.md` files when the docs pass is
     /// enabled (so editing a README re-links it to the code).
     pub fn is_graph_relevant(&self, p: &Path) -> bool {
-        let is_code = match &self.code_tree_hooks {
-            Some(hooks) => (hooks.is_code_file)(p),
-            None => kglite::api::code_tree::language_for_path(p).is_some(),
+        // No builder hooks → no rebuild is possible, so no change is
+        // graph-relevant. (The in-tree builder moved to codingest; this
+        // server builds code graphs only when an embedding binary injects
+        // CodeTreeHooks.)
+        let Some(hooks) = &self.code_tree_hooks else {
+            return false;
         };
-        is_code
+        (hooks.is_code_file)(p)
             || (self.include_docs
                 && p.extension()
                     .and_then(|e| e.to_str())
@@ -441,21 +451,12 @@ impl GraphState {
     }
 
     pub fn build_code_tree(&self, dir: &Path) -> Result<()> {
-        // Phase G.3-pre: build_code_tree returns Arc<DirGraph>; wrap.
-        // include_docs is mode-dependent (github-workspace on, local off).
-        let dir_arc = match &self.code_tree_hooks {
-            Some(hooks) => (hooks.build)(dir, self.include_docs)
-                .map_err(|e| anyhow::anyhow!("code-tree build hook failed: {}", e))?,
-            None => kglite::api::code_tree::build_code_tree(
-                dir,
-                false,
-                true,
-                None,
-                None,
-                self.include_docs,
-            )
-            .map_err(|e| anyhow::anyhow!("kglite::build_code_tree failed: {}", e))?,
+        let Some(hooks) = &self.code_tree_hooks else {
+            anyhow::bail!(NO_BUILDER_MSG);
         };
+        // include_docs is mode-dependent (github-workspace on, local off).
+        let dir_arc = (hooks.build)(dir, self.include_docs)
+            .map_err(|e| anyhow::anyhow!("code-tree build hook failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
@@ -480,32 +481,15 @@ impl GraphState {
     /// slot so the identity surfaces (`<active_graph …>` header, activation
     /// summary) name the loaded rev-set.
     pub fn build_code_tree_revs(&self, dir: &Path, revs: &[String]) -> Result<()> {
+        let Some(hooks) = &self.code_tree_hooks else {
+            anyhow::bail!(NO_BUILDER_MSG);
+        };
         // The recorded `active.revs` — which feeds the header + activation
         // banner — must match the canonical label set the builder folds into
-        // the graph, so the builder (hook or in-tree) owns rev dedup and
-        // returns the canonical list alongside the graph.
-        let (dir_arc, revs) = match &self.code_tree_hooks {
-            Some(hooks) => (hooks.build_revs)(dir, revs, self.include_docs)
-                .map_err(|e| anyhow::anyhow!("code-tree revs build hook failed: {}", e))?,
-            None => {
-                let revs = kglite::api::code_tree::dedup_revs(revs);
-                // repo_root=None → auto-resolve the git root from `dir` (the
-                // activated root is a work tree). include_docs mirrors
-                // build_code_tree.
-                let dir_arc = kglite::api::code_tree::build_code_tree_revs(
-                    dir,
-                    &revs,
-                    None,
-                    false,
-                    true,
-                    None,
-                    None,
-                    self.include_docs,
-                )
-                .map_err(|e| anyhow::anyhow!("kglite::build_code_tree_revs failed: {}", e))?;
-                (dir_arc, revs)
-            }
-        };
+        // the graph, so the hook owns rev dedup and returns the canonical
+        // list alongside the graph.
+        let (dir_arc, revs) = (hooks.build_revs)(dir, revs, self.include_docs)
+            .map_err(|e| anyhow::anyhow!("code-tree revs build hook failed: {}", e))?;
         let kg = KnowledgeGraph::from_arc(dir_arc);
         *write_lock(&self.inner) = Some(ActiveGraph {
             kg,
@@ -1491,13 +1475,25 @@ mod tests {
     }
 
     #[test]
-    fn without_hooks_watch_predicate_uses_in_tree_languages() {
-        let gs = GraphState::new(false);
-        assert!(gs.is_graph_relevant(Path::new("a.rs")));
-        assert!(!gs.is_graph_relevant(Path::new("a.rlib")));
-        // docs pass off: md is not graph-relevant.
+    fn without_hooks_nothing_is_relevant_and_builds_refuse() {
+        // The in-tree builder is gone: a hook-less state can't rebuild, so
+        // no path is graph-relevant and build requests refuse with a
+        // pointer at codingest.
+        let gs = GraphState::new(true);
+        assert!(!gs.is_graph_relevant(Path::new("a.rs")));
         assert!(!gs.is_graph_relevant(Path::new("README.md")));
-        let gs_docs = GraphState::new(true);
+        let err = gs
+            .build_code_tree(Path::new("/tmp"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("codingest"), "refusal names codingest: {err}");
+        let err = gs
+            .build_code_tree_revs(Path::new("/tmp"), &["r1".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("codingest"), "refusal names codingest: {err}");
+        // With hooks + docs pass on, .md is graph-relevant again.
+        let gs_docs = GraphState::new(true).with_code_tree_hooks(Some(test_hooks()));
         assert!(gs_docs.is_graph_relevant(Path::new("README.md")));
     }
 
@@ -1511,6 +1507,62 @@ mod tests {
             revs: None,
             built_at: SystemTime::now(),
         }
+    }
+
+    /// Stub builder hooks: the real builder lives in codingest, so these
+    /// tests exercise GraphState's machinery (activation summaries, rev
+    /// recording, rebuild backoff) against a minimal hand-built
+    /// code-schema graph. Fails on a missing dir like a real builder;
+    /// `build_revs` dedups labels and stamps a `revs` list prop.
+    fn test_hooks() -> Arc<CodeTreeHooks> {
+        fn mini_graph(revs: Option<&[String]>) -> Result<Arc<kglite::api::DirGraph>, String> {
+            let mut dir =
+                new_dir_graph_in_mode(StorageMode::Memory, None).map_err(|e| e.to_string())?;
+            let params = std::collections::HashMap::new();
+            let opts = kglite::api::session::ExecuteOptions::eager(&params);
+            kglite::api::session::execute_mut(
+                &mut dir,
+                "CREATE (f:File {id:'m.py'})-[:DEFINES]->\
+                 (g:Function {id:'m.hub', name:'hub', file_path:'m.py', line:1})",
+                &opts,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(revs) = revs {
+                let list = revs
+                    .iter()
+                    .map(|r| format!("'{r}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                kglite::api::session::execute_mut(
+                    &mut dir,
+                    &format!("MATCH (n:Function) SET n.revs = [{list}]"),
+                    &opts,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(Arc::new(dir))
+        }
+        Arc::new(CodeTreeHooks {
+            build: Box::new(|dir, _docs| {
+                if !dir.is_dir() {
+                    return Err(format!("no such directory: {}", dir.display()));
+                }
+                mini_graph(None)
+            }),
+            build_revs: Box::new(|dir, revs, _docs| {
+                if !dir.is_dir() {
+                    return Err(format!("no such directory: {}", dir.display()));
+                }
+                let mut canon: Vec<String> = Vec::new();
+                for r in revs {
+                    if !canon.contains(r) {
+                        canon.push(r.clone());
+                    }
+                }
+                mini_graph(Some(&canon)).map(|g| (g, canon))
+            }),
+            is_code_file: Box::new(|p| p.extension().is_some_and(|e| e == "py" || e == "rs")),
+        })
     }
 
     #[test]
@@ -1576,7 +1628,7 @@ mod tests {
 
     #[test]
     fn failed_rebuild_restores_marker_then_backs_off_after_cap() {
-        let state = GraphState::new(false);
+        let state = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         let bad = std::path::PathBuf::from("/nonexistent/kglite-mcp-rebuild-test");
 
         // A failed rebuild must restore the dirty marker (so the next tool
@@ -1632,7 +1684,7 @@ mod tests {
 
     #[test]
     fn activation_summary_reports_node_types_or_none() {
-        let gs = GraphState::new(false);
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         assert!(
             gs.activation_summary().is_none(),
             "no active graph → terse activation (no mini-map)"
@@ -1660,46 +1712,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Stand up a git repo with two commits touching one function, so a
-    /// multi-rev build has a real divergence to merge. Returns the repo dir +
-    /// the two SHAs (oldest first), or `None` if git is unavailable (the test
-    /// then skips). The caller removes the dir when done.
-    fn git_two_commit_repo(tag: &str) -> Option<(std::path::PathBuf, [String; 2])> {
-        use std::process::Command;
-        let dir = std::env::temp_dir().join(format!("kglmcp_revs_{}_{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok()?;
-        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&dir).args(args).output();
-        if !git(&["init", "-q"]).ok()?.status.success() {
-            let _ = std::fs::remove_dir_all(&dir);
-            return None; // git unavailable → caller skips.
-        }
-        let _ = git(&["config", "user.email", "t@t"]);
-        let _ = git(&["config", "user.name", "t"]);
-        let _ = git(&["config", "commit.gpgsign", "false"]);
-        let mut shas = Vec::new();
-        for body in [
-            "def foo(a):\n    return a + 1\n",
-            "def foo(a, b):\n    return a + b\n\n\ndef bar(x):\n    return x\n",
-        ] {
-            std::fs::write(dir.join("m.py"), body).unwrap();
-            let _ = git(&["add", "-A"]);
-            if !git(&["commit", "-q", "-m", "c"]).unwrap().status.success() {
-                let _ = std::fs::remove_dir_all(&dir);
-                return None;
-            }
-            let out = git(&["rev-parse", "HEAD"]).unwrap();
-            shas.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        }
-        Some((dir, [shas[0].clone(), shas[1].clone()]))
-    }
-
     #[test]
     fn build_code_tree_revs_swaps_slot_and_records_revs() {
-        let Some((dir, [s1, s2])) = git_two_commit_repo("slot") else {
-            return; // git unavailable
-        };
-        let gs = GraphState::new(false);
+        let dir = std::env::temp_dir().join(format!("kgl_slot_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (s1, s2) = ("r1".to_string(), "r2".to_string());
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         let revs = vec![s1.clone(), s2.clone()];
         gs.build_code_tree_revs(&dir, &revs)
             .expect("multi-rev build");
@@ -1725,10 +1743,10 @@ mod tests {
 
     #[test]
     fn activation_summary_teaches_rev_scoping_for_multi_rev() {
-        let Some((dir, [s1, s2])) = git_two_commit_repo("actsum") else {
-            return; // git unavailable
-        };
-        let gs = GraphState::new(false);
+        let dir = std::env::temp_dir().join(format!("kgl_actsumrev_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (s1, s2) = ("r1".to_string(), "r2".to_string());
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         gs.build_code_tree_revs(&dir, &[s1.clone(), s2.clone()])
             .expect("multi-rev build");
         let summary = gs.activation_summary().expect("summary present");
@@ -1761,7 +1779,7 @@ mod tests {
     fn single_rev_build_carries_no_revs_attr_or_steer() {
         // The plain build path leaves `revs = None`, so neither the header attr
         // nor the multi-rev steer appears (no regression for single-rev graphs).
-        let gs = GraphState::new(false);
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         let dir = std::env::temp_dir().join(format!("kgl_single_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("m.py"), "def foo():\n    return 1\n").unwrap();
@@ -1802,10 +1820,10 @@ mod tests {
 
     #[test]
     fn single_rev_via_revs_reads_as_snapshot_and_dedups() {
-        let Some((dir, [_s1, s2])) = git_two_commit_repo("singlerev") else {
-            return; // git unavailable
-        };
-        let gs = GraphState::new(false);
+        let dir = std::env::temp_dir().join(format!("kgl_singlerev_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let s2 = "r2".to_string();
+        let gs = GraphState::new(false).with_code_tree_hooks(Some(test_hooks()));
         // Duplicate labels for one commit → deduped to a single rev (defect B).
         gs.build_code_tree_revs(&dir, &[s2.clone(), s2.clone()])
             .expect("single-rev-via-revs build");

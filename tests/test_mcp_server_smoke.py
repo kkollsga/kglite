@@ -102,6 +102,48 @@ def _write_savegraph_manifest(path: Path) -> Path:
     return manifest
 
 
+def _build_code_graph_kgl(kgl: Path, entities: list[dict], calls: list[tuple[str, str]] | None = None) -> None:
+    """Hand-build a code-schema graph and save it to ``kgl``.
+
+    Mirrors what a code-graph build emits for the code-aware MCP tools
+    (``read_code_source`` / ``explore`` / the graph-steering footers):
+    Function/Class nodes whose ``id`` is the fully-qualified name and whose
+    ``file_path``/``line_number``/``end_line`` point at real source on disk,
+    wired by CALLS edges. ``file_path`` values are relative to the ``.kgl``'s
+    parent dir — the source root the ``--graph`` mode auto-binds.
+
+    Each entity dict needs ``id`` and ``name``; ``kind`` (default
+    ``Function``), ``file_path``, ``line_number``, ``end_line`` and
+    ``signature`` are optional.
+    """
+    g = kglite.KnowledgeGraph()
+    for ent in entities:
+        props = {
+            "id": ent["id"],
+            "name": ent["name"],
+            # `qualified_name` mirrors the node id — code-graph tools read it
+            # back on projections (the steering footer keys off the column).
+            "qualified_name": ent["id"],
+            "file_path": ent.get("file_path"),
+            "line_number": ent.get("line_number"),
+            "end_line": ent.get("end_line"),
+            "signature": ent.get("signature"),
+        }
+        keys = [k for k, v in props.items() if v is not None]
+        assignments = ", ".join(f"{k}: ${k}" for k in keys)
+        kind = ent.get("kind", "Function")
+        g.cypher(
+            f"CREATE (n:{kind} {{{assignments}}})",
+            params={k: props[k] for k in keys},
+        )
+    for src, dst in calls or []:
+        g.cypher(
+            "MATCH (a {id: $src}), (b {id: $dst}) CREATE (a)-[:CALLS]->(b)",
+            params={"src": src, "dst": dst},
+        )
+    g.save(str(kgl))
+
+
 # ── JSON-RPC stdio client ─────────────────────────────────────────────────
 
 
@@ -818,11 +860,7 @@ class TestReadCodeSource:
 
     @pytest.fixture
     def code_graph_fixture(self, tmp_path: Path) -> tuple[Path, Path]:
-        """Build a code-tree graph from a tiny Python module and save it."""
-        try:
-            from kglite import code_tree
-        except ImportError:
-            pytest.skip("kglite.code_tree (tree-sitter) not installed")
+        """Hand-build a code-schema graph over a tiny Python module and save it."""
         project = tmp_path / "demo_proj"
         project.mkdir()
         src = project / "demo_mod.py"
@@ -836,13 +874,34 @@ class TestReadCodeSource:
             '    """Greet then upper-case."""\n'
             "    return greet(name).upper()\n"
         )
-        g = code_tree.build(str(project))
         # Save the .kgl inside the project dir so the --graph mode's
-        # auto-bound source root (parent of the .kgl) lines up with
-        # the project root that code_tree's file_path entries are
-        # relative to.
+        # auto-bound source root (parent of the .kgl) lines up with the
+        # project root the Function file_path entries are relative to.
+        # line_number/end_line point at the real `greet`/`shout` bodies so
+        # read_code_source slices the correct lines off disk.
         kgl = project / "demo_code.kgl"
-        g.save(str(kgl))
+        _build_code_graph_kgl(
+            kgl,
+            [
+                {
+                    "id": "demo_proj.demo_mod.greet",
+                    "name": "greet",
+                    "file_path": "demo_mod.py",
+                    "line_number": 1,
+                    "end_line": 3,
+                    "signature": "def greet(name)",
+                },
+                {
+                    "id": "demo_proj.demo_mod.shout",
+                    "name": "shout",
+                    "file_path": "demo_mod.py",
+                    "line_number": 6,
+                    "end_line": 8,
+                    "signature": "def shout(name)",
+                },
+            ],
+            calls=[("demo_proj.demo_mod.shout", "demo_proj.demo_mod.greet")],
+        )
         return kgl, project
 
     def test_lists_read_code_source(self, code_graph_fixture):
@@ -938,18 +997,42 @@ class TestExploreAndSkills:
 
     @pytest.fixture
     def code_graph_fixture(self, tmp_path: Path) -> Path:
-        try:
-            from kglite import code_tree
-        except ImportError:
-            pytest.skip("kglite.code_tree (tree-sitter) not installed")
         project = tmp_path / "demo_proj"
         project.mkdir()
         (project / "demo_mod.py").write_text(
             "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
         )
-        g = code_tree.build(str(project))
         kgl = project / "demo_code.kgl"
-        g.save(str(kgl))
+        _build_code_graph_kgl(
+            kgl,
+            [
+                {
+                    "id": "demo_mod.hub",
+                    "name": "hub",
+                    "file_path": "demo_mod.py",
+                    "line_number": 1,
+                    "end_line": 2,
+                    "signature": "def hub()",
+                },
+                {
+                    "id": "demo_mod.leaf",
+                    "name": "leaf",
+                    "file_path": "demo_mod.py",
+                    "line_number": 4,
+                    "end_line": 5,
+                    "signature": "def leaf()",
+                },
+                {
+                    "id": "demo_mod.Bar",
+                    "name": "Bar",
+                    "kind": "Class",
+                    "file_path": "demo_mod.py",
+                    "line_number": 7,
+                    "end_line": 8,
+                },
+            ],
+            calls=[("demo_mod.hub", "demo_mod.leaf")],
+        )
         manifest = project / "demo_mcp.yaml"
         manifest.write_text("name: explore_smoke\nskills: true\n")
         return kgl
@@ -1004,22 +1087,32 @@ class TestSteeringFooters:
     a code graph is active."""
 
     @pytest.fixture
-    def code_proj(self, tmp_path: Path) -> Path:
-        try:
-            from kglite import code_tree
-        except ImportError:
-            pytest.skip("kglite.code_tree (tree-sitter) not installed")
+    def code_kgl(self, tmp_path: Path) -> Path:
+        """A hand-built code-schema graph saved next to its source file. The
+        ``--graph`` mode auto-binds the source root to the .kgl's parent dir,
+        so grep runs against ``m.py`` with the code graph active — the same
+        "code graph active + source root bound" condition the steering hook
+        fires on."""
         project = tmp_path / "steer_proj"
         project.mkdir()
         (project / "m.py").write_text(
             "def hub():\n    return leaf()\n\ndef leaf():\n    return 1\n\nclass Bar:\n    pass\n"
         )
-        code_tree.build(str(project)).save(str(project / "code.kgl"))
-        return project
+        kgl = project / "code.kgl"
+        _build_code_graph_kgl(
+            kgl,
+            [
+                {"id": "m.hub", "name": "hub", "file_path": "m.py", "line_number": 1, "end_line": 2},
+                {"id": "m.leaf", "name": "leaf", "file_path": "m.py", "line_number": 4, "end_line": 5},
+                {"id": "m.Bar", "name": "Bar", "kind": "Class", "file_path": "m.py", "line_number": 7, "end_line": 8},
+            ],
+            calls=[("m.hub", "m.leaf")],
+        )
+        return kgl
 
-    def test_cypher_result_suggests_read_code_source(self, code_proj):
+    def test_cypher_result_suggests_read_code_source(self, code_kgl):
         """A cypher result carrying qualified_name gets a read_code_source tip."""
-        client = _spawn(["--graph", str(code_proj / "code.kgl")])
+        client = _spawn(["--graph", str(code_kgl)])
         try:
             text = _text_content(
                 client.call_tool(
@@ -1031,18 +1124,19 @@ class TestSteeringFooters:
             client.shutdown()
         assert "read_code_source(qualified_name" in text, text
 
-    def test_definition_shaped_grep_steers_to_graph(self, code_proj):
-        """`--watch` builds the graph AND sets a source root, so grep runs with a
-        code graph active. A `def `-shaped pattern gets the cypher_query tip."""
-        client = _spawn(["--watch", str(code_proj)])
+    def test_definition_shaped_grep_steers_to_graph(self, code_kgl):
+        """`--graph` loads the code graph AND auto-binds the .kgl's parent as a
+        source root, so grep runs with a code graph active. A `def `-shaped
+        pattern gets the cypher_query tip."""
+        client = _spawn(["--graph", str(code_kgl)])
         try:
             text = _text_content(client.call_tool("grep", {"pattern": "def "}))
         finally:
             client.shutdown()
         assert "definition search" in text and "cypher_query" in text, text
 
-    def test_zero_match_grep_steers_to_graph(self, code_proj):
-        client = _spawn(["--watch", str(code_proj)])
+    def test_zero_match_grep_steers_to_graph(self, code_kgl):
+        client = _spawn(["--graph", str(code_kgl)])
         try:
             text = _text_content(client.call_tool("grep", {"pattern": "zzzz_no_such_symbol"}))
         finally:
@@ -1050,9 +1144,9 @@ class TestSteeringFooters:
         assert "No grep matches" in text or "No matches" in text, text
         assert "graph_overview" in text, text
 
-    def test_literal_grep_not_over_steered(self, code_proj):
+    def test_literal_grep_not_over_steered(self, code_kgl):
         """A plain literal grep that matches should NOT get the definition tip."""
-        client = _spawn(["--watch", str(code_proj)])
+        client = _spawn(["--graph", str(code_kgl)])
         try:
             text = _text_content(client.call_tool("grep", {"pattern": "return"}))
         finally:

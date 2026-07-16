@@ -23,7 +23,7 @@ def test_python_module_launcher_forwards_help_to_rust() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "code-tree" in result.stdout
+    assert "skill" in result.stdout
     assert "skill" in result.stdout
 
 

@@ -5,168 +5,100 @@ and yield the subset of reached File nodes whose `is_test` property is
 true. Builds on the File→File IMPORTS edges added in 0.9.34.
 """
 
-import pathlib
-import textwrap
-
 import pytest
 
-pytest.importorskip("tree_sitter")
-
-from kglite.code_tree import build  # noqa: E402
+from kglite import KnowledgeGraph
 
 
-def _make_pkg(tmp_path, files: dict[str, str]) -> pathlib.Path:
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
-    for rel, content in files.items():
-        fp = pkg / rel
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(textwrap.dedent(content))
-    return pkg
+def _file_graph(files: list[tuple[str, bool]], imports: list[tuple[str, str]]) -> KnowledgeGraph:
+    """Hand-build a code-schema File graph mirroring what a code-graph build
+    emits for the `affected_tests` procedure: File nodes carrying an
+    ``is_test`` flag, wired by File→File IMPORTS edges.
+
+    Args:
+        files: ``(path, is_test)`` for each File node.
+        imports: ``(source_path, target_path)`` File→File IMPORTS edges,
+            i.e. *source* imports *target*.
+    """
+    g = KnowledgeGraph()
+    for path, is_test in files:
+        filename = path.rsplit("/", 1)[-1]
+        g.cypher(
+            "CREATE (n:File {id: $id, name: $name, is_test: $is_test})",
+            params={"id": path, "name": filename, "is_test": is_test},
+        )
+    for source, target in imports:
+        g.cypher(
+            "MATCH (a:File {id: $src}), (b:File {id: $tgt}) CREATE (a)-[:IMPORTS]->(b)",
+            params={"src": source, "tgt": target},
+        )
+    return g
 
 
-# ── Real code-tree builds ───────────────────────────────────────────
+# ── Hand-built code-schema graphs ───────────────────────────────────
 
 
-def test_direct_test_importer(tmp_path):
+def test_direct_test_importer():
     """tests/ file that imports the changed file shows up at depth 1."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "util.py": """
-            def helper():
-                return 1
-            """,
-            "tests/__init__.py": "",
-            "tests/test_util.py": """
-            from pkg.util import helper
-
-            def test_helper():
-                assert helper() == 1
-            """,
-        },
+    g = _file_graph(
+        [("util.py", False), ("tests/test_util.py", True)],
+        [("tests/test_util.py", "util.py")],
     )
-    g = build(str(pkg))
     rows = g.cypher(
         "CALL affected_tests({files: ['util.py']}) YIELD test_file, depth RETURN test_file, depth ORDER BY test_file"
     ).to_list()
     assert rows == [{"test_file": "tests/test_util.py", "depth": 1}], rows
 
 
-def test_transitive_test_importer(tmp_path):
+def test_transitive_test_importer():
     """Test file importing an importer of the seed: depth 2."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "util.py": """
-            def helper():
-                return 1
-            """,
-            "core.py": """
-            from pkg.util import helper
-
-            def run():
-                return helper()
-            """,
-            "tests/__init__.py": "",
-            "tests/test_core.py": """
-            from pkg.core import run
-
-            def test_run():
-                assert run() == 1
-            """,
-        },
+    g = _file_graph(
+        [("util.py", False), ("core.py", False), ("tests/test_core.py", True)],
+        [("core.py", "util.py"), ("tests/test_core.py", "core.py")],
     )
-    g = build(str(pkg))
     rows = g.cypher(
         "CALL affected_tests({files: ['util.py']}) YIELD test_file, depth RETURN test_file, depth ORDER BY test_file"
     ).to_list()
     assert rows == [{"test_file": "tests/test_core.py", "depth": 2}], rows
 
 
-def test_max_depth_cuts_off_transitive(tmp_path):
+def test_max_depth_cuts_off_transitive():
     """max_depth=1 finds only direct importers; transitive ones drop."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "util.py": "def helper(): return 1",
-            "core.py": """
-            from pkg.util import helper
-
-            def run():
-                return helper()
-            """,
-            "tests/__init__.py": "",
-            "tests/test_core.py": """
-            from pkg.core import run
-
-            def test_run():
-                assert run() == 1
-            """,
-        },
+    g = _file_graph(
+        [("util.py", False), ("core.py", False), ("tests/test_core.py", True)],
+        [("core.py", "util.py"), ("tests/test_core.py", "core.py")],
     )
-    g = build(str(pkg))
     rows = g.cypher(
         "CALL affected_tests({files: ['util.py'], max_depth: 1}) YIELD test_file RETURN test_file"
     ).to_list()
     assert rows == [], f"expected no tests at depth>1 with max_depth=1, got {rows}"
 
 
-def test_seed_test_file_not_emitted(tmp_path):
+def test_seed_test_file_not_emitted():
     """If the seed itself is a test file, it must not appear in the output."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "tests/__init__.py": "",
-            "tests/test_util.py": """
-            def test_self():
-                assert True
-            """,
-        },
-    )
-    g = build(str(pkg))
+    g = _file_graph([("tests/test_util.py", True)], [])
     rows = g.cypher("CALL affected_tests({files: ['tests/test_util.py']}) YIELD test_file RETURN test_file").to_list()
     assert rows == [], f"seed should not echo back, got {rows}"
 
 
-def test_unknown_seed_paths_silently_skip(tmp_path):
+def test_unknown_seed_paths_silently_skip():
     """Seed paths that don't match a File node produce no rows (no error)."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "util.py": "def helper(): return 1",
-            "tests/__init__.py": "",
-            "tests/test_util.py": """
-            from pkg.util import helper
-
-            def test_helper():
-                assert helper() == 1
-            """,
-        },
+    g = _file_graph(
+        [("util.py", False), ("tests/test_util.py", True)],
+        [("tests/test_util.py", "util.py")],
     )
-    g = build(str(pkg))
     rows = g.cypher(
         "CALL affected_tests({files: ['nonexistent.py', 'util.py']}) YIELD test_file RETURN test_file"
     ).to_list()
     assert rows == [{"test_file": "tests/test_util.py"}], rows
 
 
-def test_non_test_importers_excluded(tmp_path):
+def test_non_test_importers_excluded():
     """Only files with is_test=true appear; non-test importers are filtered out."""
-    pkg = _make_pkg(
-        tmp_path,
-        {
-            "util.py": "def helper(): return 1",
-            "core.py": """
-            from pkg.util import helper
-
-            def run():
-                return helper()
-            """,
-        },
+    g = _file_graph(
+        [("util.py", False), ("core.py", False)],
+        [("core.py", "util.py")],
     )
-    g = build(str(pkg))
     rows = g.cypher("CALL affected_tests({files: ['util.py']}) YIELD test_file RETURN test_file").to_list()
     assert rows == [], f"expected no test files in pure-src graph, got {rows}"
 

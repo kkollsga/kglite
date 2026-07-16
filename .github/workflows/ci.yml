@@ -117,11 +117,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: source-quality
-          workspaces: ". -> target"
+      - name: Install function-metric parser (python tree-sitter)
+        # scripts/function_metrics.py replaced the retired in-tree
+        # code_tree_stats bin as the gate's metrics source — no cargo
+        # build needed for this job anymore.
+        run: pip install tree-sitter tree-sitter-rust
       - name: Exercise intentional failure fixtures
         run: |
           python scripts/check_source_quality.py --self-test
@@ -299,7 +299,7 @@ jobs:
           /tmp/kglite-networkx-smoke/bin/pip install "${wheel}[networkx]"
           cd /tmp
           /tmp/kglite-networkx-smoke/bin/python -c "import networkx as nx; import pandas; import kglite; graph = kglite.from_networkx(nx.path_graph(3)); assert graph.to_networkx().number_of_nodes() == 3"
-          /tmp/kglite-networkx-smoke/bin/kglite --help | grep -- 'code-tree'
+          /tmp/kglite-networkx-smoke/bin/kglite --help | grep -- 'skill'
           /tmp/kglite-networkx-smoke/bin/kglite-mcp-server --help | grep -- '--selftest'
 
       - name: Prefetch all-feature dependency metadata

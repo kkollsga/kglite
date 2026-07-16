@@ -1,5 +1,0 @@
-{
-  "_comment": "Anonymous-function call attribution: the call inside the arrow callback `items.map(x => helper(x))` belongs to the enclosing `caller`.",
-  "family": "web-ts",
-  "call_edge": [{ "from": "a.ts::caller", "to": "a.ts::helper" }]
-}

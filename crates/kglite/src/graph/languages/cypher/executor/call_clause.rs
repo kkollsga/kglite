@@ -922,7 +922,7 @@ impl<'a> CypherExecutor<'a> {
                     ),
                     (
                         "rev_diff",
-                        "Multi-rev code graphs: added/removed/changed code entities between two revs {from, to}. Reads revs/rev_fp list props (built by code_tree.build(revs=[...])). Optional {node_type} scoping.",
+                        "Multi-rev code graphs: added/removed/changed code entities between two revs {from, to}. Reads revs/rev_fp list props (stamped by a multi-rev code-graph build, e.g. codingest --revs). Optional {node_type} scoping.",
                         "bucket, type, qualified_name, name, file, line",
                     ),
                     (

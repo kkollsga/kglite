@@ -536,7 +536,7 @@ fn determine_column_type(series: &Bound<'_, PyAny>, col_name: &str) -> PyResult<
             if let Some(ct) = first_non_null_collection_type(series)? {
                 return Ok(ct);
             }
-            // Object dtype may contain booleans mixed with None (common in code_tree
+            // Object dtype may contain booleans mixed with None (common in code-graph
             // metadata like is_test, is_abstract).  Use pandas' own type inference
             // which handles skipna correctly.
             let pd = series.py().import("pandas")?.getattr("api")?.getattr("types")?;

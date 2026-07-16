@@ -1425,7 +1425,7 @@ pub(super) fn write_cypher_overview(xml: &mut String) {
     xml.push_str("    <proc name=\"connected_components\" yields=\"node, component\">Weakly connected components.</proc>\n");
     xml.push_str("    <proc name=\"cluster\" yields=\"node, cluster\">DBSCAN/K-means clustering on spatial or property data.</proc>\n");
     xml.push_str("    <proc name=\"dead_code\" yields=\"node\">Functions with no inbound use edge (CALLS / REFERENCES_FN / HANDLES / IMPLEMENTED_BY / DECORATES) — graph-native dead-code detection. Excludes tests, dunder and main; pass exclude_public to also drop pub/exported, include_tests to keep tests.</proc>\n");
-    xml.push_str("    <proc name=\"rev_diff\" yields=\"bucket, type, qualified_name, name, file, line\">Multi-rev code graphs: added/removed/changed code entities between two revs {from, to}. Reads the revs/rev_fp list props built by code_tree.build(revs=[...]). Optional {node_type} scoping. E.g. CALL rev_diff({from: 'v1', to: 'v2'}) YIELD bucket, qualified_name.</proc>\n");
+    xml.push_str("    <proc name=\"rev_diff\" yields=\"bucket, type, qualified_name, name, file, line\">Multi-rev code graphs: added/removed/changed code entities between two revs {from, to}. Reads the revs/rev_fp list props stamped by a multi-rev code-graph build (codingest build --revs). Optional {node_type} scoping. E.g. CALL rev_diff({from: 'v1', to: 'v2'}) YIELD bucket, qualified_name.</proc>\n");
     xml.push_str("  </procedures>\n");
 
     // Patterns

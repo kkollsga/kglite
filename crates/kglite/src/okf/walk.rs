@@ -4,7 +4,7 @@
 //! Reserved filenames (`index.md`, `log.md`) are not concepts. `index.md` is
 //! captured per directory (it describes the directory — it enriches the `Folder`
 //! node in the builder); `log.md` is skipped. Hidden directories (`.git`,
-//! `.obsidian`, …) are pruned, mirroring `code_tree`'s `walk_filter`.
+//! `.obsidian`, …) are pruned, mirroring codingest's `walk_filter`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

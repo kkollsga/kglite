@@ -33,7 +33,7 @@ use crate::graph::{SourceLocation, SourceLookup};
 
 /// Code-entity node types used by `source_location` / `resolve_code_entity`
 /// when the caller doesn't specify a `node_type`. Matches what the
-/// `code_tree` parser emits — language-specific subsets (Rust:
+/// code-graph builders (e.g. codingest) emit — language-specific subsets (Rust:
 /// `Struct`/`Enum`/`Trait`; Python: `Class`/`Mixin`/`Protocol`; etc.)
 /// are all listed so a single search covers every supported source
 /// language.
@@ -424,7 +424,7 @@ pub fn discover_property_keys_from_data(
 ///
 /// All optional fields on [`SourceLocation`] mirror the
 /// corresponding node fields. Graphs built from non-code-tree
-/// sources (e.g. a hand-built `code_tree::build` output, or a
+/// sources (e.g. a codingest-built code graph, or a
 /// manually-constructed graph) may have fewer populated.
 pub fn source_location(dir: &Arc<DirGraph>, name: &str, node_type: Option<&str>) -> SourceLookup {
     // Arena guard: disk-backed node reads materialize into the query arena
@@ -494,7 +494,7 @@ pub struct KnowledgeGraph {
 impl KnowledgeGraph {
     /// Wrap an existing `Arc<DirGraph>` (e.g. one returned by
     /// [`crate::graph::io::file::load_file`] or
-    /// [`crate::code_tree::builder::run_with_options`]) into a
+    /// an external code-graph builder such as codingest) into a
     /// `KnowledgeGraph` handle with no embedder set.
     pub fn from_arc(inner: Arc<DirGraph>) -> Self {
         KnowledgeGraph {

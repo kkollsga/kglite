@@ -1,6 +1,7 @@
 {
   "graph_readonly": [
     {
+      "name": "cypher_query",
       "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15,11 +16,11 @@
         ],
         "title": "ReadCypherArgs",
         "type": "object"
-      },
-      "name": "cypher_query"
+      }
     },
     {
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "name": "explore",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
       "inputSchema": {
         "properties": {
           "include_source": {
@@ -54,10 +55,10 @@
           "query"
         ],
         "type": "object"
-      },
-      "name": "explore"
+      }
     },
     {
+      "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
         "$defs": {
@@ -112,10 +113,10 @@
         },
         "title": "OverviewArgs",
         "type": "object"
-      },
-      "name": "graph_overview"
+      }
     },
     {
+      "name": "grep",
       "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -158,10 +159,10 @@
         ],
         "title": "GrepArgs",
         "type": "object"
-      },
-      "name": "grep"
+      }
     },
     {
+      "name": "list_source",
       "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -193,10 +194,10 @@
         },
         "title": "ListSourceArgs",
         "type": "object"
-      },
-      "name": "list_source"
+      }
     },
     {
+      "name": "ping",
       "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -211,11 +212,11 @@
         },
         "title": "PingArgs",
         "type": "object"
-      },
-      "name": "ping"
+      }
     },
     {
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "name": "read_code_source",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
       "inputSchema": {
         "properties": {
           "end_line": {
@@ -257,7 +258,7 @@
             ]
           },
           "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
             "type": "string"
           },
           "start_line": {
@@ -273,10 +274,10 @@
           "qualified_name"
         ],
         "type": "object"
-      },
-      "name": "read_code_source"
+      }
     },
     {
+      "name": "read_source",
       "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -350,12 +351,12 @@
         ],
         "title": "ReadSourceArgs",
         "type": "object"
-      },
-      "name": "read_source"
+      }
     }
   ],
   "graph_writable": [
     {
+      "name": "create_graph",
       "description": "Create a fresh, empty graph bound to a path (its save_graph target) and make it active. storage = memory (default) | mapped | disk. Write-enabled servers only.",
       "inputSchema": {
         "$defs": {
@@ -391,10 +392,10 @@
         ],
         "title": "CreateGraphArgs",
         "type": "object"
-      },
-      "name": "create_graph"
+      }
     },
     {
+      "name": "cypher_query",
       "description": "Query, explore, and understand the active knowledge graph with Cypher, and modify it \u2014 reads AND writes (CREATE/SET/DELETE/MERGE) are accepted; this is a write-enabled graph. The primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Pass write_scope=[...] to restrict mutations to those node types. Mutations are in-memory; call save_graph to persist. Append FORMAT CSV to export results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -433,11 +434,11 @@
         ],
         "title": "CypherArgs",
         "type": "object"
-      },
-      "name": "cypher_query"
+      }
     },
     {
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "name": "explore",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
       "inputSchema": {
         "properties": {
           "include_source": {
@@ -472,10 +473,10 @@
           "query"
         ],
         "type": "object"
-      },
-      "name": "explore"
+      }
     },
     {
+      "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
         "$defs": {
@@ -530,10 +531,10 @@
         },
         "title": "OverviewArgs",
         "type": "object"
-      },
-      "name": "graph_overview"
+      }
     },
     {
+      "name": "grep",
       "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -576,10 +577,10 @@
         ],
         "title": "GrepArgs",
         "type": "object"
-      },
-      "name": "grep"
+      }
     },
     {
+      "name": "list_source",
       "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -611,10 +612,10 @@
         },
         "title": "ListSourceArgs",
         "type": "object"
-      },
-      "name": "list_source"
+      }
     },
     {
+      "name": "load_graph",
       "description": "Load a .kgl file as the new active graph (replaces the current one \u2014 save_graph first to keep unsaved changes). Write-enabled servers only.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -629,10 +630,10 @@
         ],
         "title": "LoadGraphArgs",
         "type": "object"
-      },
-      "name": "load_graph"
+      }
     },
     {
+      "name": "ping",
       "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -647,11 +648,11 @@
         },
         "title": "PingArgs",
         "type": "object"
-      },
-      "name": "ping"
+      }
     },
     {
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "name": "read_code_source",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
       "inputSchema": {
         "properties": {
           "end_line": {
@@ -693,7 +694,7 @@
             ]
           },
           "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
             "type": "string"
           },
           "start_line": {
@@ -709,10 +710,10 @@
           "qualified_name"
         ],
         "type": "object"
-      },
-      "name": "read_code_source"
+      }
     },
     {
+      "name": "read_source",
       "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -786,19 +787,19 @@
         ],
         "title": "ReadSourceArgs",
         "type": "object"
-      },
-      "name": "read_source"
+      }
     },
     {
+      "name": "save_graph",
       "description": "Persist the active graph to its source .kgl file (single-graph mode only).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "SaveGraphArgs",
         "type": "object"
-      },
-      "name": "save_graph"
+      }
     },
     {
+      "name": "save_graph_as",
       "description": "Save the active graph to an explicit path and rebind the save target there. Write-enabled servers only.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -813,12 +814,12 @@
         ],
         "title": "SaveGraphAsArgs",
         "type": "object"
-      },
-      "name": "save_graph_as"
+      }
     }
   ],
   "local_workspace": [
     {
+      "name": "cypher_query",
       "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -833,11 +834,11 @@
         ],
         "title": "ReadCypherArgs",
         "type": "object"
-      },
-      "name": "cypher_query"
+      }
     },
     {
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "name": "explore",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
       "inputSchema": {
         "properties": {
           "include_source": {
@@ -872,10 +873,10 @@
           "query"
         ],
         "type": "object"
-      },
-      "name": "explore"
+      }
     },
     {
+      "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
         "$defs": {
@@ -930,10 +931,10 @@
         },
         "title": "OverviewArgs",
         "type": "object"
-      },
-      "name": "graph_overview"
+      }
     },
     {
+      "name": "grep",
       "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -976,10 +977,10 @@
         ],
         "title": "GrepArgs",
         "type": "object"
-      },
-      "name": "grep"
+      }
     },
     {
+      "name": "list_source",
       "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1011,10 +1012,10 @@
         },
         "title": "ListSourceArgs",
         "type": "object"
-      },
-      "name": "list_source"
+      }
     },
     {
+      "name": "ping",
       "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1029,11 +1030,11 @@
         },
         "title": "PingArgs",
         "type": "object"
-      },
-      "name": "ping"
+      }
     },
     {
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "name": "read_code_source",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
       "inputSchema": {
         "properties": {
           "end_line": {
@@ -1075,7 +1076,7 @@
             ]
           },
           "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
             "type": "string"
           },
           "start_line": {
@@ -1091,10 +1092,10 @@
           "qualified_name"
         ],
         "type": "object"
-      },
-      "name": "read_code_source"
+      }
     },
     {
+      "name": "read_source",
       "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1168,10 +1169,10 @@
         ],
         "title": "ReadSourceArgs",
         "type": "object"
-      },
-      "name": "read_source"
+      }
     },
     {
+      "name": "set_root_dir",
       "description": "Swap the active source root (local-workspace mode only). Pass `path` to a directory; the framework canonicalises it, rebinds the source tools (`read_source`, `grep`, `list_source`), and fires the post-activate hook so any downstream graph rebuilds against the new root. Pass `revs` (an integer N, or a list of git revspecs) to load multiple revisions of the root into one graph \u2014 N loads the newest N stable release tags of the dominant tag family plus HEAD (prereleases and unrelated tag families skipped); requires the root to be a git repo. Inventory persists across swaps; SHA-gating skips rebuilds when the same root is re-bound with no content changes.",
       "inputSchema": {
         "$defs": {
@@ -1217,12 +1218,12 @@
         ],
         "title": "SetRootDirArgs",
         "type": "object"
-      },
-      "name": "set_root_dir"
+      }
     }
   ],
   "manifest_tool": [
     {
+      "name": "cypher_query",
       "description": "Query, explore, and understand the active knowledge graph with Cypher \u2014 the primary tool for structural questions: how things relate, where an entity/function/type is defined, what references or calls what, counts, and multi-hop paths (for code graphs: call graphs, definitions, imports \u2014 navigate the codebase structure). Returns up to 15 rows inline; append FORMAT CSV to export full results to a CSV string.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1237,11 +1238,11 @@
         ],
         "title": "ReadCypherArgs",
         "type": "object"
-      },
-      "name": "cypher_query"
+      }
     },
     {
-      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code-tree graph.",
+      "name": "explore",
+      "description": "One-call codebase exploration. Lexically ranks Function / Class / Interface nodes against `query`, takes the top entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES / REFERENCES_FN, and returns a markdown report with entry points, a relationship map, and grouped source slices. Designed to replace chains of grep + read calls when answering 'how does X work' over a code graph.",
       "inputSchema": {
         "properties": {
           "include_source": {
@@ -1276,10 +1277,10 @@
           "query"
         ],
         "type": "object"
-      },
-      "name": "explore"
+      }
     },
     {
+      "name": "graph_overview",
       "description": "Inspect and explore the active graph's schema \u2014 start here to understand a codebase or dataset: node types, properties, connections, sample values, and a per-type example query (anchored on each type's real identifier property). With no args returns the inventory; pass types=[...] / connections=true|[...] / cypher=true|[...] for drill-down.",
       "inputSchema": {
         "$defs": {
@@ -1334,10 +1335,10 @@
         },
         "title": "OverviewArgs",
         "type": "object"
-      },
-      "name": "graph_overview"
+      }
     },
     {
+      "name": "grep",
       "description": "Search source files using ripgrep. `pattern` is a regex (Rust syntax). `glob` filters file paths (e.g. \"*.py\"). `context` adds N surrounding lines per match. Set `case_insensitive=true` for case-insensitive matching. `max_results` caps total matches (default 50).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1380,10 +1381,10 @@
         ],
         "title": "GrepArgs",
         "type": "object"
-      },
-      "name": "grep"
+      }
     },
     {
+      "name": "list_source",
       "description": "List directory contents under the configured source root. `path` is resolved against the first source root (\".\" lists the root itself). `depth` controls recursion (1 = flat ls, 2+ = tree). `glob` filters entry names. `dirs_only=true` shows only directories.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1415,10 +1416,10 @@
         },
         "title": "ListSourceArgs",
         "type": "object"
-      },
-      "name": "list_source"
+      }
     },
     {
+      "name": "people_in_city",
       "description": "Find people in one city.",
       "inputSchema": {
         "city": {
@@ -1426,10 +1427,10 @@
           "required": true,
           "type": "string"
         }
-      },
-      "name": "people_in_city"
+      }
     },
     {
+      "name": "ping",
       "description": "Liveness probe \u2014 returns 'pong' (or echoes `message` if supplied). Use to confirm the server framework is wired correctly before relying on graph- or source-aware tools.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1444,11 +1445,11 @@
         },
         "title": "PingArgs",
         "type": "object"
-      },
-      "name": "ping"
+      }
     },
     {
-      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-tree node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
+      "name": "read_code_source",
+      "description": "Read source code by fully-qualified entity name. Resolves the name through the active graph's `graph.source()` (which uses the code-graph node attributes), then reads the corresponding file slice from the configured source root(s). Equivalent to cypher \u2192 graph.source \u2192 read_source in a single MCP call. Same line-range / grep / max_chars filters as `read_source`.",
       "inputSchema": {
         "properties": {
           "end_line": {
@@ -1490,7 +1491,7 @@
             ]
           },
           "qualified_name": {
-            "description": "Fully-qualified entity name to resolve (e.g. 'kglite.code_tree.builder.build', 'KnowledgeGraph::cypher').",
+            "description": "Fully-qualified entity name to resolve (e.g. 'mypkg.parser.parse_file', 'KnowledgeGraph::cypher').",
             "type": "string"
           },
           "start_line": {
@@ -1506,10 +1507,10 @@
           "qualified_name"
         ],
         "type": "object"
-      },
-      "name": "read_code_source"
+      }
     },
     {
+      "name": "read_source",
       "description": "Read a file from the configured source root(s). Pass `start_line`/`end_line` to slice, `grep` to filter to matching lines, `max_chars` to cap output. Pass `rev` (a tag, branch, or commit SHA) to read the file's content at that git revision via `git show` instead of the working tree \u2014 useful for comparing a file across releases (requires a git repo source root). Path traversal attempts are rejected. Available only when source roots are configured.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1583,8 +1584,7 @@
         ],
         "title": "ReadSourceArgs",
         "type": "object"
-      },
-      "name": "read_source"
+      }
     }
   ]
 }

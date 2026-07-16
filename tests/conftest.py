@@ -198,7 +198,7 @@ def build_file_imports_graph() -> KnowledgeGraph:
     """Synthetic code-tree-shaped graph for testing File→File IMPORTS edges
     and the `affected_tests` Cypher procedure.
 
-    Mimics the schema emitted by `kglite.code_tree.build()` without paying
+    Mimics the code-graph schema (as emitted by builders like codingest) without paying
     the tree-sitter parse cost — five Files (three source, two tests) and
     a small import web:
 

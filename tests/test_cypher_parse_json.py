@@ -6,8 +6,6 @@ that string into a structured map/list/scalar so Cypher can predicate over it
 with the existing any()/all()/comprehension/subscript machinery.
 """
 
-from pathlib import Path
-
 import kglite
 
 
@@ -38,36 +36,32 @@ def test_parse_json_invalid_returns_null() -> None:
 
 def test_parse_json_predicate_over_parameters() -> None:
     """The operator's reproducer: find functions with a parameter of a given
-    type, predicating over the JSON-string `parameters` property."""
-    from kglite import code_tree
+    type, predicating over the JSON-string `parameters` property.
 
-    root = Path(__file__).parent / "fixtures_parse_json_proj"
-    if root.exists():
-        import shutil
+    Uses a hand-built code-schema graph — two Function nodes whose
+    ``parameters`` property is a JSON string, exactly as the columnar store
+    holds a code graph's structured parameter list (scalars only, so the
+    list is serialized to JSON)."""
+    g = kglite.KnowledgeGraph()
+    # `parameters` mirrors what a code-graph build emits: a JSON string
+    # holding a list of {name, type_annotation} maps.
+    takes_dataset_params = '[{"name": "codes", "type_annotation": "Dataset"}, {"name": "n", "type_annotation": "int"}]'
+    g.cypher(
+        "CREATE (f:Function {id: 'm.takes_dataset', name: 'takes_dataset', parameters: $p})",
+        params={"p": takes_dataset_params},
+    )
+    g.cypher("CREATE (f:Function {id: 'm.takes_nothing', name: 'takes_nothing', parameters: '[]'})")
 
-        shutil.rmtree(root)
-    root.mkdir()
-    try:
-        (root / "m.py").write_text(
-            "def takes_dataset(codes: Dataset, n: int):\n    return 1\n\ndef takes_nothing():\n    return 2\n"
+    # Sanity: parameters is a JSON string with a type_annotation field.
+    raw = list(g.cypher("MATCH (f:Function {name:'takes_dataset'}) RETURN f.parameters AS p"))[0]["p"]
+    assert isinstance(raw, str) and "type_annotation" in raw, raw
+
+    hits = {
+        r["n"]
+        for r in g.cypher(
+            "MATCH (f:Function) "
+            "WHERE any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset') "
+            "RETURN f.name AS n"
         )
-        g = code_tree.build(str(root))
-
-        # Sanity: parameters is a JSON string with a type_annotation field.
-        raw = list(g.cypher("MATCH (f:Function {name:'takes_dataset'}) RETURN f.parameters AS p"))[0]["p"]
-        assert isinstance(raw, str) and "type_annotation" in raw, raw
-
-        hits = {
-            r["n"]
-            for r in g.cypher(
-                "MATCH (f:Function) "
-                "WHERE any(p IN parse_json(f.parameters) WHERE p.type_annotation = 'Dataset') "
-                "RETURN f.name AS n"
-            )
-        }
-        assert hits == {"takes_dataset"}, hits
-    finally:
-        import shutil
-
-        if root.exists():
-            shutil.rmtree(root)
+    }
+    assert hits == {"takes_dataset"}, hits

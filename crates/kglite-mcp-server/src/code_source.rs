@@ -30,7 +30,7 @@ use crate::tools::GraphState;
 type DynFut<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Register `read_code_source` on the given server. The tool is only
-/// useful when both (a) a graph is loaded with code-tree nodes and
+/// useful when both (a) a code graph is loaded (e.g. built by codingest) and
 /// (b) source roots are bound — when either is missing it returns a
 /// friendly error rather than failing the call.
 pub fn register(
@@ -47,7 +47,7 @@ pub fn register(
             "qualified_name": {
                 "type": "string",
                 "description": "Fully-qualified entity name to resolve (e.g. \
-                                'kglite.code_tree.builder.build', \
+                                'mypkg.parser.parse_file', \
                                 'KnowledgeGraph::cypher')."
             },
             "node_type": {
@@ -94,7 +94,7 @@ pub fn register(
         Some(std::borrow::Cow::Borrowed(
             "Read source code by fully-qualified entity name. Resolves the \
              name through the active graph's `graph.source()` (which uses \
-             the code-tree node attributes), then reads the corresponding \
+             the code-graph node attributes), then reads the corresponding \
              file slice from the configured source root(s). Equivalent to \
              cypher → graph.source → read_source in a single MCP call. \
              Same line-range / grep / max_chars filters as `read_source`.",

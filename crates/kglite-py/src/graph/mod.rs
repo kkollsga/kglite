@@ -267,7 +267,7 @@ impl KnowledgeGraph {
     /// Wrap an `Arc<DirGraph>` in a `KnowledgeGraph` with default
     /// binding-ergonomic state (no embedder, default temporal context,
     /// no timeout, no row cap). Used by the pyapi `load()` pyfunction,
-    /// the `code_tree.build()` / `code_tree.repo_tree()` pyfunctions,
+    /// code-graph builders (e.g. codingest),
     /// and the sibling Rust crates (kglite-bolt-server,
     /// kglite-mcp-server) that consume `kglite_core::api::io::load_file ->
     /// Arc<DirGraph>` and need to wrap it into a `KnowledgeGraph`

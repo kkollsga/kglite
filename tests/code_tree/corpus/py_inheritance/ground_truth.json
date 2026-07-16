@@ -1,5 +1,0 @@
-{
-  "_comment": "Inheritance-aware resolution: Derived.caller's self.run() resolves to inherited Base.run, NOT the unrelated Other.run. The single labeled edge means any connection to Other.run is a precision failure.",
-  "family": "scripting-python",
-  "call_edge": [{ "from": "pkg/a.py::Derived.caller", "to": "pkg/a.py::Base.run" }]
-}

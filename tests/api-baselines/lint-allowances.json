@@ -17,14 +17,6 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/code_tree/pyapi/entry.rs::fn:build:pub fn build( py: Python<'_>, src_dir: PathBuf, save_to: Option<PathBuf>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, rev: Option<String>, revs: Option<Vec<String>>, repo_root: Option<PathBuf>, ) -> PyResult<KnowledgeGraph>::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
-      "identity": "crates/kglite-py/src/code_tree/pyapi/entry.rs::fn:repo_tree:pub fn repo_tree( py: Python<'_>, repo: String, save_to: Option<PathBuf>, clone_to: Option<PathBuf>, branch: Option<String>, token: Option<String>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, ) -> PyResult<KnowledgeGraph>::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
       "identity": "crates/kglite-py/src/graph/mod.rs::fn:compare_inner:pub(crate) fn compare_inner( inner: &Arc<DirGraph>, selection: &mut CowSelection, target_type: Option<&str>, config: &kglite_core::api::fluent::MethodConfig, conditions: Option<&HashMap<String, FilterCondition>>, sort_fields: Option<&Vec<(String, bool)>>, limit: Option<usize>, estimated: usize, ) ->::clippy::too_many_arguments",
       "classification": "boundary"
     },
@@ -171,90 +163,6 @@
     {
       "identity": "crates/kglite-py/src/sec.rs::fn:run_batch:fn run_batch<T, F>( py: Python<'_>, user_agent: &str, workdir: String, batch: Vec<T>, phase: &str, label: &str, unit: &str, progress: Option<&Py<PyAny>>, fetch_one: F, ) -> PyResult<(usize, usize)> where T: Send, // shared `&F` *inside* `py.detach`, whose `Ungil` bound requires // that borrow be `Se::clippy::too_many_arguments",
       "classification": "boundary"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:finalize_and_load:fn finalize_and_load( mut combined: ParseResult, project_info: Option<crate::code_tree::models::ProjectInfo>, project_root: &Path, include_docs: bool, verbose: bool, save_to: Option<&Path>, ) -> Result<(Arc<DirGraph>, call_edges::CallResolutionStats), String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:run_with_options:pub fn run_with_options( input: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/builder/mod.rs::fn:run_with_options_stats:pub fn run_with_options_stats( input: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<(Arc<DirGraph>, call_edges::CallResolutionStats), String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/cpp.rs::fn:parse_class_body:fn parse_class_body( &self, node: Node, source: &[u8], module_path: &str, rel_path: &str, class_name: &str, class_qname: &str, result: &mut ParseResult, default_vis: &str, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/csharp.rs::fn:parse_type_body:fn parse_type_body( node: Node, source: &[u8], module_path: &str, rel_path: &str, type_name: &str, type_qname: &str, result: &mut ParseResult, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/csharp.rs::fn:parse_type_declaration:fn parse_type_declaration( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, outer_name: Option<&str>, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/css.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
-      "classification": "api-shape"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/dart.rs::fn:emit_function:fn emit_function( result: &mut ParseResult, rel_path: &str, source: &[u8], sig: Node, body: Option<Node>, name: String, owner_prefix: &str, is_method: bool, metadata: MetadataMap, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/dart.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
-      "classification": "api-shape"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/html.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
-      "classification": "api-shape"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/java.rs::fn:parse_class:fn parse_class( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, outer_name: Option<&str>, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/java.rs::fn:parse_class_body:fn parse_class_body( node: Node, source: &[u8], module_path: &str, rel_path: &str, class_name: &str, class_qname: &str, result: &mut ParseResult, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/php.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
-      "classification": "api-shape"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/python.rs::fn:parse_class:fn parse_class( node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, decorators: Option<Vec<String>>, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/rust_lang.rs::fn:parse_function:fn parse_function( node: Node, source: &[u8], module_path: &str, file_path: &str, is_method: bool, owner: Option<&str>, impl_is_pymethods: bool, in_test_mod: bool, ) -> FunctionInfo::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/swift.rs::fn:new:pub fn new() -> Self::clippy::new_without_default",
-      "classification": "api-shape"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/parsers/typescript.rs::fn:parse_top_level:fn parse_top_level( &self, node: Node, source: &[u8], module_path: &str, rel_path: &str, result: &mut ParseResult, file_info: &mut FileInfo, )::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/repo.rs::fn:clone_and_build:pub fn clone_and_build( repo: &str, save_to: Option<&Path>, clone_to: Option<&Path>, branch: Option<&str>, token: Option<&str>, verbose: bool, include_tests: bool, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/rev.rs::fn:archive_and_build:pub fn archive_and_build( src_dir: &Path, rev: &str, repo_root: Option<&Path>, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/rev.rs::fn:archive_and_build_into:fn archive_and_build_into( repo_root: &Path, rev: &str, src_dir: &Path, snapshot_dir: &Path, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/code_tree/rev.rs::fn:build_code_tree_revs:pub fn build_code_tree_revs( src_dir: &Path, revs: &[String], repo_root: Option<&Path>, verbose: bool, include_tests: bool, save_to: Option<&Path>, max_loc_per_file: Option<usize>, include_docs: bool, ) -> Result<Arc<DirGraph>, String>::clippy::too_many_arguments",
-      "classification": "transitional"
     },
     {
       "identity": "crates/kglite/src/datasets/sec/extract/forms/eightk.rs::fn:emit_8k:fn emit_8k( items: &[EightKItem], officer_changes: &[OfficerChange], issuer_cik_raw: &str, path: &Path, sinks: &mut Sinks, identities: &mut Identities, extracted_at: &str, report: &mut FormReport, ) -> Result<()>::clippy::too_many_arguments",

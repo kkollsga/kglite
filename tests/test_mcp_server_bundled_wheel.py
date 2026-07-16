@@ -239,7 +239,7 @@ def _write_wide_local_workspace(tmp_path: Path, n_files: int = 400) -> tuple[Pat
 
 def test_selftest_wide_local_workspace_does_not_build_root(tmp_path: Path) -> None:
     """Regression (wide-root hang): `--selftest` against a local-workspace
-    server with a *wide* root must NOT build a code_tree over the whole root
+    server with a *wide* root must NOT build a code graph over the whole root
     (that path no client uses; for a broad root it's unbounded → a silent
     hang). It stays registration-only and completes fast. Runs on the wheel
     install, the deployed shape."""

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: the in-tree code-graph builder moved to the standalone
+  codingest project.** `kglite.code_tree`, `kglite.build_code_tree`, and
+  `kglite.repo_tree` are gone from the wheel; `kglite code-tree …` is gone
+  from the CLI; `kglite::api::code_tree` is gone from the Rust API; and the
+  bundled MCP server no longer builds code graphs itself (workspace modes
+  report "code-graph building is not available" unless an embedding binary
+  injects `CodeTreeHooks` — codingest-mcp does exactly that). Everything
+  read-side survives unchanged and works on codingest-built graphs:
+  `graph.source()/find()/context()`, `read_code_source`/`explore` MCP tools,
+  and the `rev_diff`/`affected_tests`/`dead_code` procedures. The wheel drops
+  all 15 bundled tree-sitter grammars. Migrate builds to codingest (same
+  builder, verified graph-equivalent by its golden parity suite).
+
 ### Added
 
 - **`kglite-mcp-server` accepts an external code-tree builder.**

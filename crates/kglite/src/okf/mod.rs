@@ -2,10 +2,10 @@
 //!
 //! Parses a directory of markdown files with YAML frontmatter, cross-linked by
 //! markdown links (Google's OKF, but also Claude memory dirs, skills, and
-//! Obsidian vaults), into a [`crate::graph::DirGraph`]. Conceptually `code_tree`
+//! Obsidian vaults), into a [`crate::graph::DirGraph`]. Conceptually a code-graph builder
 //! for prose knowledge instead of source code.
 //!
-//! Ingestion is **partial** (like `code_tree`): each concept becomes a node
+//! Ingestion is **partial** (like code-graph building): each concept becomes a node
 //! carrying its frontmatter as properties plus a `file_path` pointer; the body
 //! is read on demand and is *not* stored unless [`BuildOptions::with_body`] is
 //! set. Links become typed edges; dangling link targets become `_provisional`
@@ -49,7 +49,7 @@ pub fn parse_bundle(root: &Path, opts: &BuildOptions) -> Result<Vec<ConceptDoc>,
 }
 
 /// Parse already-discovered concept files into [`ConceptDoc`]s (parallel). Used
-/// by [`parse_bundle`], the builder, and `code_tree`'s docs pass (which reuses
+/// by [`parse_bundle`], the builder, and codingest's docs pass (which reuses
 /// the OKF parser to ingest a repo's markdown).
 pub fn parse_concepts(files: &[walk::DiscoveredFile], opts: &BuildOptions) -> Vec<ConceptDoc> {
     let mut docs: Vec<ConceptDoc> = files
@@ -174,7 +174,7 @@ fn stem(concept_id: &str) -> &str {
 }
 
 /// Directory portion of a concept-id (`""` at the bundle root). `pub(crate)` so
-/// `code_tree`'s docs pass reuses it to resolve relative markdown links.
+/// codingest's docs pass reuses it to resolve relative markdown links.
 pub(crate) fn parent_dir(concept_id: &str) -> &str {
     match concept_id.rfind('/') {
         Some(i) => &concept_id[..i],

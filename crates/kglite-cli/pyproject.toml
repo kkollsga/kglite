@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "kglite-cli"
-description = "Pure-Rust KGLite CLI: Cypher shell, code-graph builder, and offline code-review skill installer."
+description = "Pure-Rust KGLite CLI: Cypher shell and offline code-review skill installer."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

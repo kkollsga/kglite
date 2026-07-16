@@ -10,12 +10,16 @@ ROOT = Path(__file__).parents[1]
 BASELINE = ROOT / "tests" / "benchmarks" / "baselines" / "hardening_0_13_2.json"
 BENCHMARK_SOURCES = [
     ROOT / "tests" / "benchmarks" / "test_bench_phase19.py",
-    ROOT / "tests" / "benchmarks" / "test_bench_code_tree_new.py",
 ]
+# The live workloads the hardening baseline tracks. `test_bench_code_tree_build`
+# was retired when the code-tree builder moved out of kglite (to codingest); its
+# source benchmark file was deleted with the builder. The 0.13.2 baseline
+# snapshot still carries the retired entry until the next release-time constant
+# refresh prunes it — so EXPECTED covers only the surviving workloads and the
+# baseline membership check below is a subset test, not an equality.
 EXPECTED = {
     "test_bench_complex_expression_dispatch",
     "test_bench_count_subquery",
-    "test_bench_code_tree_build",
     "test_bench_ntriples_load_memory",
     "test_bench_ntriples_load_mapped",
     "test_bench_ntriples_load_disk",
@@ -31,7 +35,9 @@ def test_hardening_release_minima_have_provenance_and_live_workloads() -> None:
     assert baseline["machine_info"]["pytest_benchmark"] == "5.2.3"
 
     entries = baseline["benchmarks"]
-    assert {entry["name"] for entry in entries} == EXPECTED
+    # Every surviving live workload is tracked in the baseline. (`<=` rather
+    # than `==`: the snapshot may still carry the retired code-tree entry.)
+    assert EXPECTED <= {entry["name"] for entry in entries}
     assert all(set(entry["stats"]) == {"min"} for entry in entries)
     assert all(entry["stats"]["min"] > 0 for entry in entries)
     assert all(entry["rounds"] >= 5 for entry in entries)
