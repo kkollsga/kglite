@@ -2,6 +2,11 @@
 
 KGLite has a set of how-to guides. Most projects only need three.
 
+> **Coming from 0.13?** The code-graph builder (now
+> [codingest](https://codingest.readthedocs.io)) and dataset loaders (now
+> [kglite-datasets](https://kglite-datasets.readthedocs.io)) moved out of the
+> wheel in 0.14 — see the [0.13 → 0.14 migration guide](../migrations/0.13-to-0.14.md).
+
 ## Start here (the load-bearing path)
 
 Every project that loads its own data and queries it goes through these

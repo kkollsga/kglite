@@ -30,6 +30,25 @@ in; once it's in, you query with Cypher.
 | One-file persistence | `.kgl` snapshots — copy, share, reload elsewhere |
 | Rust-embeddable | Pure-Rust core; embed without PyO3 — see [Rust track](rust/index.md) |
 
+```{rubric} Ecosystem
+```
+
+kglite is the engine. Two companion projects build graphs it serves — each
+released and versioned on its own cadence:
+
+- **[kglite](https://github.com/kkollsga/kglite)** — the embedded Cypher
+  knowledge-graph engine (this project): graph + Cypher + fluent API + bundled
+  MCP server.
+- **[codingest](https://codingest.readthedocs.io)** — parses codebases into
+  code graphs (14 languages, web-framework route detection). Build with it,
+  query the `.kgl` here. Requires kglite ≥ 0.14.
+- **[kglite-datasets](https://kglite-datasets.readthedocs.io)** —
+  fetch-build-cache loaders for public registries (SEC EDGAR, Wikidata, Sodir).
+
+**Coming from 0.13?** The code-graph builder and dataset loaders moved out of
+the wheel in 0.14 — see the [0.13 → 0.14 migration guide](python/migrations/0.13-to-0.14.md).
+Pin back anytime with `pip install "kglite<0.14"`.
+
 ```{rubric} Pick your track
 ```
 

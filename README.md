@@ -7,46 +7,12 @@
 [![License: MIT](https://img.shields.io/pypi/l/kglite)](https://github.com/kkollsga/kglite/blob/main/LICENSE)
 [![Docs](https://img.shields.io/readthedocs/kglite)](https://kglite.readthedocs.io)
 
-## Give your coding agent a code graph
-
-Install KGLite as a code-review skill for Codex and Claude Code:
-
-```bash
-pip install kglite && kglite skill install
-```
-
-Then ask your agent to review a change, trace callers, find affected tests,
-inspect routes and dependencies, or compare symbols across git revisions. The
-`kglite-code-review` skill builds a local, Cypher-queryable code graph and
-combines it with the diff and literal search. Every reported finding is checked
-against exact source lines; repository code is never executed.
-
-This is the lowest-friction way to use KGLite: one package install, one offline
-skill install, and no MCP configuration. The bundled Rust CLI handles graph
-construction, schema discovery, queries, revision comparison, and
-artifact-freshness checks. Use the MCP server later when you want a warm graph,
-watch mode, typed tools, or a persistent multi-repository workspace.
-
-Use `--host codex` or `--host claude` to select one host, and `--project` to
-install into the current repository instead of your home directory. The
-standards-based, multi-host alternative in GitHub CLI 2.90+ is currently in
-public preview:
-
-```bash
-gh skill preview kkollsga/kglite kglite-code-review
-gh skill install kkollsga/kglite kglite-code-review
-```
-
-> **Try it now:** tell your coding agent, “Install the KGLite code-review skill
-> and review this repository. Run
-> `pip install kglite && kglite skill install`.”
-
-KGLite is an embedded, Cypher-queryable knowledge graph for Python,
-built so you can hand it to an LLM agent. `pip install kglite` and
-point codingest (the sibling code-graph builder) at any source directory — your
-first queryable graph in seconds. It ships with a bundled MCP server,
-a `describe()` method that emits a system-prompt-shaped schema, and
-structural validators that compose with Cypher.
+KGLite is an embedded, Cypher-queryable knowledge graph for Python, built
+so you can hand it to an LLM agent. `pip install kglite`, shape your data as
+DataFrames, and query it with Cypher — your first graph in seconds. The 18 MB
+wheel links **zero network code** and ships a bundled MCP server, a
+`describe()` method that emits a system-prompt-shaped schema, and structural
+validators that compose with Cypher.
 
 > kglite is a **pure-Rust knowledge graph engine**
 > ([`crates/kglite`](https://github.com/kkollsga/kglite/tree/main/crates/kglite))
@@ -61,12 +27,24 @@ structural validators that compose with Cypher.
 > standalone CLI-only install, use `pip install kglite-cli` or `cargo install
 > kglite-cli`.
 
-> ### Public datasets → graph
->
-> Pre-packaged loaders for SEC EDGAR filings, Wikidata, and Sodir
-> petroleum data live in the separate **kglite-datasets** project.
-> Each handles the *fetch + build + cache* cycle and returns a
-> Cypher-queryable `KnowledgeGraph` that kglite serves and queries.
+## Ecosystem
+
+kglite is the engine. Two companion projects build graphs it serves — each
+released and versioned on its own cadence:
+
+- **[kglite](https://github.com/kkollsga/kglite)** — the embedded Cypher
+  knowledge-graph engine (this project): graph + Cypher + fluent API + bundled
+  MCP server.
+- **[codingest](https://codingest.readthedocs.io)** — parses codebases into
+  code graphs (14 languages, web-framework route detection). Build with it,
+  query the `.kgl` here. Requires kglite ≥ 0.14.
+- **[kglite-datasets](https://kglite-datasets.readthedocs.io)** —
+  fetch-build-cache loaders for public registries (SEC EDGAR, Wikidata, Sodir).
+
+**Upgrading from 0.13?** The code-graph builder and dataset loaders moved out
+of the wheel in 0.14 — see the
+[0.13 → 0.14 migration guide](https://kglite.readthedocs.io/en/latest/python/migrations/0.13-to-0.14.html).
+Pin back anytime with `pip install "kglite<0.14"`.
 
 ## Use cases
 
@@ -88,7 +66,7 @@ parsed codebase.
   relationships without you writing a server. **→
   [Data Loading guide](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html).**
 - 🌐 **Public datasets.** Pre-packaged loaders for SEC EDGAR, Wikidata,
-  and Sodir live in the separate **kglite-datasets** project — they
+  and Sodir live in the companion **kglite-datasets** project — they
   handle the *fetch + build + cache* cycle and return a queryable
   `KnowledgeGraph`. kglite's mapped and disk storage then query graphs
   that don't fit in RAM — a billion-edge Wikidata graph on a 16 GB
@@ -159,15 +137,15 @@ questions traverse it.
 | **MCP server for LLM agents**              | bundled in the `kglite` wheel     | [separate `mcp-server-ladybug` install](https://github.com/LadybugDB/mcp-server-ladybug) | — | — | — |
 | **`describe()` schema for LLM prompts**    | ✅                                 | —                                                   | —                  | —                  | —                      |
 | **Embeddable in Rust** (no Python in build) | pure-Rust [`kglite`](https://crates.io/crates/kglite) crate | [`lbug`](https://crates.io/crates/lbug) bindings to the C++ engine | — | ✅ | — |
-| **Codebase → graph parser**                | 14 languages, route detection     | —                                                   | —                  | —                  | —                      |
-| **Public dataset loaders**                 | SEC EDGAR, Wikidata, Sodir (via the companion kglite-datasets project) | — | toy graphs only    | —                  | —                      |
 | **License**                                | MIT                               | MIT                                                 | BSD-3              | Apache-2           | GPLv3                  |
 
 **Pick KGLite** when you want one embedded package that combines Python and
-pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, a
-14-language code-graph parser, companion dataset loaders, and agent-contract primitives:
-role-scoped writes (`write_scope`), ownership layers, `set_instructions`, and
-`CALL ready_set(...)`. **Pick LadybugDB** when columnar analytical scans and
+pure-Rust Cypher APIs with a bundled MCP binary, prompt-shaped `describe()`, and
+agent-contract primitives: role-scoped writes (`write_scope`), ownership layers,
+`set_instructions`, and `CALL ready_set(...)` — with companion projects
+([codingest](https://codingest.readthedocs.io),
+[kglite-datasets](https://kglite-datasets.readthedocs.io)) that build code and
+public-registry graphs it serves. **Pick LadybugDB** when columnar analytical scans and
 its broader language ecosystem are the priority; it also provides Rust
 bindings and a separately installed MCP server. **Pick NetworkX** when you need
 its enormous graph-algorithm library and your data fits in RAM. **Pick
@@ -276,12 +254,13 @@ confirm it with `kglite-mcp-server --selftest --graph path/to/graph.kgl`,
 which drives a real handshake and prints green/red per capability.
 
 **Two ready-made code-intelligence recipes** ship in
-[`examples/`](examples/):
+[`examples/`](examples/) — both build code graphs, so run them under
+**codingest-mcp** (it embeds this same tool surface and injects the builder):
 
 - **Clone-and-explore GitHub repos** —
   [`open_source_workspace_mcp.yaml`](examples/open_source_workspace_mcp.yaml):
   the agent calls `repo_management('org/repo')` to clone and build a
-  code graph on demand (via codingest-mcp).
+  code graph on demand.
 - **Review a local directory** —
   [`local_code_review_mcp.yaml`](examples/local_code_review_mcp.yaml):
   point it at a checked-out tree, `set_root_dir(path)` to swap roots,
@@ -332,7 +311,7 @@ graphs — **SEC EDGAR** filings (insider transactions, institutional
 holdings, board composition, XBRL financials), **Wikidata** (the full
 `latest-truthy` RDF dump, parallel-decoded and built into a billion-edge
 graph), and **Sodir** (Norwegian Offshore Directorate petroleum data) —
-live in the separate **kglite-datasets** project. Each handles the
+live in the companion **kglite-datasets** project. Each handles the
 *fetch + build + cache* cycle and returns a `KnowledgeGraph` you can
 `cypher()` against; kglite serves and queries the graphs they produce.
 The kglite engine itself links zero network code — the loaders are an

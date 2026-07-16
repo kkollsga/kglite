@@ -2,11 +2,15 @@
 
 The Python track. `pip install kglite`, then `import kglite`. This
 is the headline distribution path — the wheel ships a compiled
-extension (PyO3 wrapper over the pure-Rust `kglite` engine), the
-**and** the `kglite-mcp-server` command
-(the same pure-Rust MCP server, bundled into the wheel as of 0.10.26 —
-no separate install). A standalone `cargo install kglite-mcp-server`
-binary is also available; see {doc}`guides/mcp-servers`.
+extension (PyO3 wrapper over the pure-Rust `kglite` engine) **and** the
+`kglite-mcp-server` command (the same pure-Rust MCP server, bundled into
+the wheel as of 0.10.26 — no separate install). A standalone
+`cargo install kglite-mcp-server` binary is also available; see
+{doc}`guides/mcp-servers`.
+
+> **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
+> the wheel in 0.14 — see the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
+> Pin back anytime with `pip install "kglite<0.14"`.
 
 If you're embedding the engine directly in a Rust binary, the
 [Rust guide](../rust/index.md) is for you.

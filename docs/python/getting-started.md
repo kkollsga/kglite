@@ -1,14 +1,20 @@
 # Getting Started
 
+> **Coming from 0.13?** The code-graph builder and dataset loaders moved out of
+> the wheel in 0.14 — see the [0.13 → 0.14 migration guide](migrations/0.13-to-0.14.md).
+> Pin back anytime with `pip install "kglite<0.14"`.
+
 ## Installation
 
 ```bash
 pip install kglite
 ```
 
-The default install includes everything needed to ship the graph as
-an MCP server for Claude / Cursor / agents and to parse Python / Rust
-/ TS / Go / Java / C++ codebases into a graph.
+The default install is an 18 MB wheel that links zero network code and
+includes everything needed to ship the graph as an MCP server for Claude /
+Cursor / agents. (Parsing codebases into graphs now lives in the companion
+[codingest](https://codingest.readthedocs.io) project; kglite loads and queries
+the `.kgl` it builds.)
 
 Optional extras:
 
@@ -86,8 +92,9 @@ loaded = kglite.load("my_graph.kgl")
 loaded = kglite.from_bytes(graph.to_bytes())   # no filesystem path
 ```
 
-Building a code graph? The sibling codingest project parses a codebase into a
-kglite graph (kglite loads and queries it). Serving concurrent readers? Share a
+Building a code graph? The companion [codingest](https://codingest.readthedocs.io)
+project parses a codebase into a kglite graph (kglite loads and queries it).
+Serving concurrent readers? Share a
 `graph.freeze()` snapshot — immutable and lock-free across threads (see
 {doc}`/concepts/concurrency`).
 
@@ -134,9 +141,9 @@ register automatically. See {doc}`guides/mcp-servers`.
 ## Loading a Public Dataset
 
 The pre-packaged dataset loaders (SEC EDGAR, Sodir, Wikidata) live
-in the separate kglite-datasets project; kglite loads the graphs
-they produce. Point KGLite at a graph one of those loaders built
-and open it like any other:
+in the companion [kglite-datasets](https://kglite-datasets.readthedocs.io)
+project; kglite loads the graphs they produce. Point KGLite at a graph one of
+those loaders built and open it like any other:
 
 ```python
 import kglite
