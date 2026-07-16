@@ -483,6 +483,10 @@ fn bind_mode(
             let gs = graph_state.clone();
             let hook: workspace::PostActivateHook = Arc::new(move |path, name| {
                 tracing::info!(repo = name, "code_tree::build on activate");
+                if !gs.has_code_tree_hooks() {
+                    tracing::warn!("no code-tree builder injected; source tools only");
+                    return Ok(());
+                }
                 gs.build_code_tree(path)
             });
             // Revs-aware hook (mcp-methods 0.3.49 `with_post_activate_revs`):
@@ -543,6 +547,14 @@ fn bind_mode(
                 // panicked holder must not silently stop root updates.
                 *tools::write_lock(&active_root_for_hook) = Some(path.to_path_buf());
                 tracing::info!(repo = name, "code_tree::build on local-workspace activate");
+                // No injected builder: activation still succeeds (source
+                // tools bind) and the activation summary carries the
+                // builder-unavailable note — erroring here would make the
+                // framework skip that summary.
+                if !gs.has_code_tree_hooks() {
+                    tracing::warn!("no code-tree builder injected; source tools only");
+                    return Ok(());
+                }
                 // Surface a build failure instead of leaving the tools to
                 // report a bare "No active graph" (operator ask, 2026-06-23).
                 if let Err(e) = gs.build_code_tree(path) {

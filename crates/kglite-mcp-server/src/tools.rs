@@ -249,6 +249,14 @@ impl GraphState {
         self
     }
 
+    /// Whether an external builder is injected. Activation hooks branch on
+    /// this: without a builder, "no graph after activate" is a permanent
+    /// configuration state (surfaced via the activation summary), not a
+    /// build failure worth erroring the activation for.
+    pub fn has_code_tree_hooks(&self) -> bool {
+        self.code_tree_hooks.is_some()
+    }
+
     /// Whether a changed path should tag a code-tree rebuild: any file the
     /// active builder handles, plus `.md` files when the docs pass is
     /// enabled (so editing a README re-links it to the code).
@@ -533,7 +541,16 @@ impl GraphState {
     /// the handshake `instructions`. `None` when no graph is active.
     pub fn activation_summary(&self) -> Option<String> {
         let guard = read_lock(&self.inner);
-        let active = guard.as_ref()?;
+        let Some(active) = guard.as_ref() else {
+            // Activation ran but no graph landed. Without builder hooks
+            // that's expected, not silent: the framework swallows the
+            // post-activate hook's error, so this summary is the only
+            // channel that reaches the activation message.
+            if self.code_tree_hooks.is_none() {
+                return Some(NO_BUILDER_MSG.to_string());
+            }
+            return None;
+        };
         let overview = compute_schema(active.kg.dir());
         if overview.node_count == 0 {
             return None;
