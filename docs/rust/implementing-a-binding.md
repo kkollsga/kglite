@@ -494,10 +494,9 @@ will likely want the same shape in its own language idiom.
 ### 3. Build from a source tree (code intelligence)
 
 ```rust
-use kglite::api::build_code_tree;
-use kglite::code_tree::CodeTreeOptions;
+use codingest::build_code_tree; // the standalone builder crate
 
-let graph = build_code_tree(Path::new("./my_project/"), &CodeTreeOptions::default())?;
+let graph = build_code_tree(Path::new("./my_project/"), /* options */)?;
 ```
 
 This walks a source tree with tree-sitter parsers and produces a
@@ -776,7 +775,7 @@ by depending on `kglite`:
 | Schema validation pipeline | `kglite::api::cypher::validate_schema` | ~800 |
 | Blueprint loader + builder | `kglite::api::blueprint` | ~5,000 |
 | `.kgl` format reader + writer (v3, v4) | `kglite::api::{load_file, save_graph}` | ~3,000 |
-| Code-tree builder (tree-sitter) | `kglite::api::build_code_tree` | ~4,000 |
+| Code-graph builder (tree-sitter) | the `codingest` crate | ~4,000 |
 | Dataset fetchers (SEC, Sodir, Wikidata) | `kglite::datasets::*` (feature-gated) | ~8,000 |
 | Embedder trait + FastEmbed adapter | `kglite::api::Embedder`, `FastEmbedAdapter` | ~600 |
 | Cypher result types + path/node/rel | `kglite::api::{Value, NodeValue, RelValue, PathValue}` | ~2,000 |

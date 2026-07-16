@@ -1265,7 +1265,7 @@ a `cypher()` result.
 
 ## Code-graph analysis
 
-When the graph was built by `kglite.code_tree` (a parsed codebase), the
+When the graph is a parsed codebase (built by e.g. codingest), the
 data needed for the analyses other tools ship as bespoke commands is
 *already on the graph* — most are one query. The metrics are captured at
 parse time (`branch_count`, `max_nesting`, `loc`) and the relationships
@@ -1297,7 +1297,7 @@ methods (`__x__`), and `main`. Options:
 ### `CALL rev_diff({from, to})` — what changed between two revisions
 
 For a **multi-rev code graph** built with
-`code_tree.build(path, revs=['v1', 'v2', ...])` (one graph holding N git
+a multi-rev codingest build (one graph holding N git
 revisions — see the Python guide), `rev_diff` reports the code entities
 `added`, `removed`, or `changed` between any two loaded revs:
 
@@ -1314,7 +1314,7 @@ Each merged node carries `revs: [str]` (the revisions it appears in) and
 at `to` only → `added`; present at both with a divergent `rev_fp` → `changed`. It
 is a pure set-and-fingerprint membership check — it reports *that* an entity
 changed (and its current/newest value via the ordinary property columns), never
-re-parsing source, matching the two-graph `code_tree.diff` contract.
+re-parsing source, matching the two-graph structural-diff contract.
 
 | Param | Required | Effect |
 |---|---|---|
@@ -1863,7 +1863,7 @@ Query by the string form via `{nid: 'Q42'}` (or by the integer via `{id: 42}`)
 | **Semantic** | `text_score(n, prop, query [, metric])` — auto-embeds query via `set_embedder()`, cosine/dot_product/euclidean/poincare; `embedding_norm(n, prop)` — L2 norm (hierarchy depth) |
 | **Timeseries** | `ts_sum`, `ts_avg`, `ts_min`, `ts_max`, `ts_count`, `ts_at`, `ts_first`, `ts_last`, `ts_delta`, `ts_series` — date-string args with resolution validation |
 | **Mutations** | `CREATE (n:Label {props})`, `CREATE (a)-[:TYPE]->(b)`, `SET n.prop = expr`, `SET n += map`, `SET n = map`, `DELETE`, `DETACH DELETE`, `REMOVE n.prop`, `MERGE ... ON CREATE SET ... ON MATCH SET` |
-| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code-tree graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
+| **Procedures** | `CALL pagerank/betweenness/degree/closeness() YIELD node, score`, `CALL louvain/leiden() YIELD node, community [, level]` (multilevel, hierarchical — `leiden` guarantees well-connected communities), `CALL label_propagation() YIELD node, community`, `CALL connected_components() YIELD node, component`, `CALL k_core/coreness() YIELD node, coreness`, `CALL clustering_coefficient() YIELD node, coefficient`, `CALL cluster({method, ...}) YIELD node, cluster`, `CALL affected_tests({files: [...], max_depth?}) YIELD test_file, depth` (0.9.34+, code graphs), `CALL refresh_stats() YIELD src_type, edge_type, tgt_type, count` (0.9.35+, planner cardinality cache refresh), `CALL list_procedures()` |
 | **Scoped algorithms** | `connected_components`, `k_core`/`coreness`, and `clustering_coefficient` accept an optional `{node_type, relationship}` map to run over a subgraph — e.g. `CALL k_core({node_type: 'Person', relationship: ['KNOWS', 'OWNS']})`. Each field is a string or list of strings; omit the map for the whole graph. Computed lazily over the live graph (identical across memory/mapped/disk modes). |
 | **Schema** | `CALL db.labels() YIELD label`, `CALL db.relationshipTypes() YIELD relationshipType`, `CALL db.indexes() YIELD name, type, entityType, labelsOrTypes, properties, state` |
 | **Rule procedures** | `CALL orphan_node/self_loop/missing_required_edge/missing_inbound_edge/duplicate_title/duplicate_id/null_property({type[,edge\|property]}) YIELD node`, `CALL cycle_2step({type, edge}) YIELD node_a, node_b`, `CALL inverse_violation({rel_a, rel_b}) YIELD a, b`, `CALL transitivity_violation({rel}) YIELD a, b, c`, `CALL cardinality_violation({type, edge[, min, max]}) YIELD node, count`, `CALL type_domain_violation/type_range_violation({edge, expected_*}) YIELD source, target`, `CALL parallel_edges({edge}) YIELD a, b, count` |

@@ -121,7 +121,7 @@ cargo run -p kglite --example embedded_blueprint
 - `embedded_session.rs` — two concurrent transactions; OCC catches
   the conflict.
 - `embedded_blueprint.rs` — parse the kglite source tree itself
-  via `code_tree::build_code_tree`, then query the resulting
+  via the codingest builder crate, then query the resulting
   graph.
 
 All three are pyo3-free; `cargo tree -p kglite --example

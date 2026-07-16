@@ -10,7 +10,7 @@ field:
   code-review against a checked-out project tree.
 - **No `workspace:` block (default github-clone-tracker)** — the agent
   calls `repo_management('org/repo')` to clone repos into the
-  workspace; kglite builds a code-tree graph over each; queries flow
+  workspace; the injected codingest builder produces a code graph for each; queries flow
   against the active one. Best for exploring open-source codebases on
   demand.
 
@@ -30,7 +30,7 @@ to confirm it stands up correctly (see the guide's
 ## Variant 1 — `workspace.kind: local` + `watch`
 
 Bind a local source directory as the active source root for source
-tools (`read_source` / `grep` / `list_source`), build a code-tree
+tools (`read_source` / `grep` / `list_source`), build a code
 graph over it, and auto-rebuild on file changes. The agent can swap
 between sibling project directories with `set_root_dir(path)`
 without restarting the server.
@@ -72,14 +72,14 @@ workspace:
    sandbox to it.
 2. The watcher starts on the root with a 500 ms debounce.
 3. First agent action: `cypher_query` against the auto-built
-   code-tree graph (modules, functions, calls, imports).
+   code graph (modules, functions, calls, imports).
 4. Agent narrows interest to a specific file → calls `read_source`.
 5. Agent decides to switch to a different project under Koding/:
    `set_root_dir("/Volumes/EksternalHome/Koding/Rust/KGLite")`.
    The active root atomically swaps; source tools rebind; the watch
    handle moves to the new root.
 6. On any file change inside the new root, the watcher fires (after
-   the 500 ms debounce window), the code-tree rebuilds on a
+   the 500 ms debounce window), the code graph rebuilds on a
    background thread, and the new graph atomically swaps in. Queries
    against the previous graph keep working until the swap.
 
@@ -114,7 +114,7 @@ name (there's nothing to clone). It accepts:
 
 `force_rebuild: true` bypasses the SHA gating that's otherwise on
 top of the post-activate hook — useful after upgrading kglite
-itself or after a code-tree-builder change.
+itself or after a builder change.
 
 ## github_issues integration
 
@@ -270,7 +270,7 @@ mode. The two modes are mutually exclusive.
 ### Lifecycle
 
 - First call: `repo_management('pydata/xarray')` does a shallow
-  `git clone --depth 1`, kglite builds the code-tree graph,
+  `git clone --depth 1`, the injected builder produces the code graph,
   graph is active for subsequent queries.
 - Subsequent calls: `repo_management('pydata/xarray')` again
   short-circuits to "already cloned, activated."

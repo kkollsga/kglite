@@ -86,8 +86,8 @@ loaded = kglite.load("my_graph.kgl")
 loaded = kglite.from_bytes(graph.to_bytes())   # no filesystem path
 ```
 
-Building a code graph? `kglite.build_code_tree("path/to/repo")` parses a codebase
-into a graph (see {doc}`guides/code-tree`). Serving concurrent readers? Share a
+Building a code graph? The sibling codingest project parses a codebase into a
+kglite graph (kglite loads and queries it). Serving concurrent readers? Share a
 `graph.freeze()` snapshot — immutable and lock-free across threads (see
 {doc}`/concepts/concurrency`).
 

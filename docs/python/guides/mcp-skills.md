@@ -128,7 +128,7 @@ activating a repo).
 
 ```yaml
 applies_when:
-  graph_has_node_type: [Function, Class]   # code-tree graphs only
+  graph_has_node_type: [Function, Class]   # code graphs only
 ```
 
 ### Load-bearing vs decorative keys

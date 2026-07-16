@@ -1,6 +1,6 @@
 ---
 name: explore
-description: "TRIGGER when the user (or an Explore subagent) asks a `how does X work` / `where is Y` / `trace the Z flow` question against a code-tree graph. ONE call returns entry points (ranked by name + signature + docstring match), a 2-hop neighborhood, and grouped source slices — replacing the typical grep + read chain. SKIP for graph-schema questions (use graph_overview), exact symbol lookups when you already have a qualified_name (use read_code_source), or non-code graphs (no Function/Class nodes)."
+description: "TRIGGER when the user (or an Explore subagent) asks a `how does X work` / `where is Y` / `trace the Z flow` question against a code graph. ONE call returns entry points (ranked by name + signature + docstring match), a 2-hop neighborhood, and grouped source slices — replacing the typical grep + read chain. SKIP for graph-schema questions (use graph_overview), exact symbol lookups when you already have a qualified_name (use read_code_source), or non-code graphs (no Function/Class nodes)."
 applies_to:
   mcp_methods: ">=0.3.36"
   kglite_mcp_server: ">=0.9.34"
@@ -26,7 +26,7 @@ applies_when:
 
 ## Overview
 
-`explore` is the **one-call codebase exploration tool** for code-tree graphs.
+`explore` is the **one-call codebase exploration tool** for code graphs.
 It ranks Function/Class/Interface/Struct/Trait/Protocol/Enum nodes by lexical
 match against your query (name > signature > docstring), takes the top
 entries, 2-hop traverses CALLS / USES_TYPE / HAS_METHOD / DEFINES /
@@ -67,7 +67,7 @@ otherwise turn into a chain of grep + read calls.
 - **Graph-schema questions:** "what node types exist" → `graph_overview`.
 - **Exact symbol lookup:** if you already have a qualified_name and want
   just that one body, `read_code_source` is one fewer hop.
-- **Non-code graphs:** explore only ranks code-tree node types. On a
+- **Non-code graphs:** explore only ranks code-graph node types. On a
   domain graph (legal, sodir, wikidata) it emits a "no match" message
   rather than degrade silently.
 - **Structural queries:** "find every Function that returns Result<T>" is

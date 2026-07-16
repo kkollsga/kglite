@@ -77,5 +77,5 @@ If the operator's intent is **try-it-and-see** mutations (a Cypher CREATE to see
 ## When `save_graph` is the wrong tool
 
 - **Disk-backed mode** — disk graphs persist incrementally; no save call needed.
-- **Workspace mode** — the active graph is a code-tree built from cloned source, not a `.kgl` file. The graph is rebuilt every time the workspace is re-activated; persistence isn't the right model here.
+- **Workspace mode** — the active graph is a code graph built from cloned source, not a `.kgl` file. The graph is rebuilt every time the workspace is re-activated; persistence isn't the right model here.
 - **Read-only session** — if the operator's manifest doesn't enable save, the tool won't appear, and the session is read-only by design. Respect it.

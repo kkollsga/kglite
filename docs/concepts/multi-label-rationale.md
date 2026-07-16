@@ -73,7 +73,7 @@ Single-label workloads pay zero overhead. The `has_secondary_labels`
 flag (a single `bool` checked on every label-keyed read) gates
 the secondary index scan; when no node uses secondary labels, every
 read takes the original hot path. The Sodir, Wikidata, and
-code-tree workloads — none of which use secondary labels — show
+code-graph workloads — none of which use secondary labels — show
 no perf regression vs 0.10.4 on the tracked benchmarks.
 
 ## Cheaper alternatives we considered (and still recommend for some cases)

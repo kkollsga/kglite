@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "kglite"
-description = "Embedded Cypher knowledge graph for Python with a bundled MCP server, describe() schema, and code-graph parser for LLM agents"
+description = "Embedded Cypher knowledge graph for Python with a bundled MCP server and describe() schema for LLM agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [
     {name = "Kristian dF Kollsgård", email = "kkollsg@gmail.com"}
 ]
-keywords = ["graph", "database", "knowledge-graph", "cypher", "embedded-database", "mcp", "llm-agents", "code-analysis", "rust"]
+keywords = ["graph", "database", "knowledge-graph", "cypher", "embedded-database", "mcp", "llm-agents", "rust"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -39,7 +39,7 @@ dependencies = [
     # *inside* this wheel (statically linked into the extension, sharing the
     # one engine; the `kglite-mcp-server` console script just forwards argv to
     # it). The shared Rust CLI library is bundled the same way and exposed by
-    # the `kglite` console script. The engine + code_tree + CLI + server are all
+    # the `kglite` console script. The engine + CLI + server are all
     # in the compiled extension; nothing here links another Python package at
     # import time.
 ]

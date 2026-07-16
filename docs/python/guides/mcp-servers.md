@@ -464,7 +464,7 @@ kglite-mcp-server --graph conference.kgl
 Tools registered (visible in any MCP-aware agent):
 
 - `graph_overview`, `cypher_query`, `save_graph`, `ping` — bundled
-- `read_code_source`, `explore` — bundled, code-tree-graph-aware
+- `read_code_source`, `explore` — bundled, code-graph-aware
   (0.9.31+ / 0.9.34+ respectively)
 - `read_source`, `grep`, `list_source` — from `source_root`
 - `similar_sessions` — inline Cypher
@@ -610,7 +610,7 @@ RETURN bucket, type, qualified_name, file, line
 ```
 
 See the [Cypher reference](../../reference/cypher-reference.md) `rev_diff` entry and the
-[code-tree guide](code-tree.md) for the full semantics.
+codingest project for the full build semantics.
 
 **Two operator caveats:**
 
@@ -1162,7 +1162,7 @@ same server, so it rarely matters).
 
 #### Watch mode rebuild costs
 
-`workspace.watch: true` + `--watch DIR` rebuilds the code-tree graph
+`workspace.watch: true` + `--watch DIR` rebuilds the code graph (requires an injected builder — codingest-mcp)
 on every debounced file change (500 ms default debounce). For source
 trees over 100k LoC this costs a few seconds per rebuild. The
 rebuild runs on a background thread; queries against the previous

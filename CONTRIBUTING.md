@@ -31,7 +31,6 @@ crates/kglite/                 Rust engine and shared API
   src/graph/core/              Shared matching/filtering/traversal primitives
   src/graph/languages/cypher/  Tokenizer, parser, planner, executor
   src/graph/storage/           Memory, mapped, and disk backends
-  src/code_tree/               Rust tree-sitter parsers and graph builder
 crates/kglite-py/              PyO3 wrapper
   src/graph/pyapi/             All #[pymethods] blocks
 crates/kglite-c/               C ABI and generated public header

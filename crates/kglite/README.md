@@ -73,7 +73,6 @@ cargo tree -p your-crate | grep pyo3   # → (empty)
 | `kglite::api::session::execute_read` / `execute_mut` | The canonical Cypher pipeline — parse, validate, optimise, execute. |
 | `kglite::api::cypher::*` | Lower-level pipeline primitives for building custom orchestrations. |
 | `kglite::api::load_file` / `save_graph` | `.kgl` portable graph snapshots — copy, share, reload across bindings. |
-| `kglite::api::build_code_tree` | Tree-sitter codebase parser → graph of Function / Class / Module / Route nodes for 14 languages. |
 | `kglite::api::compute_description` / `compute_schema` | Schema introspection: XML for LLM system prompts, structured types for programmatic use. |
 
 ## Transactions
@@ -137,7 +136,7 @@ Polars-io style: opt in only to what you use.
 
 | Feature | What it pulls in |
 |---|---|
-| `default` | The engine + the `code_tree` parser. No dataset loaders. |
+| `default` | The engine. No dataset loaders. (Code-graph building lives in the codingest crate.) |
 | `sec` | SEC EDGAR dataset loader (`kglite::datasets::sec::*`). |
 | `sodir` | Norwegian Continental Shelf petroleum loader. |
 | `wikidata` | Wikimedia truthy-NT dump fetcher + parser. |

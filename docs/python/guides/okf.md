@@ -10,10 +10,10 @@ OKF deliberately ships *no* query engine. KGLite supplies the missing half:
 once a bundle is a graph, you get Cypher, `CALL leiden` / `pagerank`, the
 `orphan_node` rule, and temporal filters over it for free.
 
-> **Ingesting a repo's docs?** The same parser powers `code_tree`'s
+> **Ingesting a repo's docs?** The same parser powers codingest's
 > `include_docs=True` option, which ingests a codebase's markdown as `:Doc`
 > nodes and links them to the code they describe. See
-> [Code Tree → Documentation nodes](code-tree.md#documentation-nodes-include_docs).
+> docs pass (`include_docs=True` in codingest builds).
 
 The YAML parser is bundled in the wheel — no extra needed:
 
@@ -70,7 +70,7 @@ g = okf.build("~/code", skip_dirs=["node_modules", "vendor/repos", "mistral.rs"]
 
 ## How a bundle maps to a graph
 
-Ingestion is **read-only and partial** — conceptually [`code_tree`](code-tree.md)
+Ingestion is **read-only and partial** — conceptually a code-graph build
 for prose instead of source code. The directory stays the source of truth; the
 graph is a rebuildable lens over it.
 

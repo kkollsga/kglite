@@ -84,7 +84,7 @@ See `crates/kglite/examples/embedded_*.rs` for runnable
 end-to-end examples (`embedded_basic` reads a `.kgl`,
 `embedded_session` demonstrates OCC transactions,
 `embedded_blueprint` builds a graph from a Rust source tree
-via `build_code_tree`).
+via the codingest builder crate).
 
 ## The stable API surface
 
@@ -102,7 +102,7 @@ use kglite::api::Embedder;
 ```
 
 - **`DirGraph`** — the in-memory graph. Built from blueprint,
-  loaded from a `.kgl`, or constructed via the code_tree
+  loaded from a `.kgl`, or constructed via the codingest
   builder. Owned by your binding's "graph handle" type.
 - **`Value`** — every value a Cypher query can return. Variants
   include scalars (`Int64`, `Float64`, `String`, `Bool`,

@@ -43,7 +43,7 @@ gh skill install kkollsga/kglite kglite-code-review
 
 KGLite is an embedded, Cypher-queryable knowledge graph for Python,
 built so you can hand it to an LLM agent. `pip install kglite` and
-point `kglite.code_tree.build(".")` at any source directory — your
+point codingest (the sibling code-graph builder) at any source directory — your
 first queryable graph in seconds. It ships with a bundled MCP server,
 a `describe()` method that emits a system-prompt-shaped schema, and
 structural validators that compose with Cypher.
@@ -119,14 +119,14 @@ parsed codebase.
   Scale to large corpora with an opt-in HNSW index
   (`build_vector_index()`).
   **→ [Semantic Search guide](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html).**
-- 📂 **Codebase analysis.** `kglite.code_tree.build(".")` parses 14
+- 📂 **Codebase analysis.** The [codingest](https://github.com/kkollsga/codingest) builder parses 14
   languages into Function / Class / Module / Route nodes with
   web-framework route detection (Flask, FastAPI, Django). Build from
   any git revision, or merge several into one multi-revision graph for
-  structural diffs (`rev=` / `revs=[…]`, `code_tree.diff`). See the
+  structural diffs (multi-rev builds). kglite serves and queries those graphs. See the
   [notebook above](https://github.com/kkollsga/kglite/blob/main/examples/codebase_to_claude_mcp.ipynb)
   for the full code → Claude Desktop workflow. **→
-  [Code analysis guide](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html).**
+  codingest project.**
 - 🤝 **A shared graph as an agent contract.** One `.kgl` can be the
   two-way contract between collaborating agents (e.g. a *research* agent
   that batch-rebuilds specs and *coding* agents that plan and mutate
@@ -286,7 +286,7 @@ The server exposes `cypher_query`, `graph_overview`, schema
 introspection, structural validators, and source-file tools over MCP
 stdio. Drop it into Claude Desktop / Cursor / any MCP-capable client
 and your graph is queryable. Works on every graph kglite can build —
-your own, Wikidata, Sodir, code-tree.
+your own, Wikidata, Sodir, code graphs.
 
 When you register it, point `command` at the **absolute path** to the
 binary (`/abs/path/to/venv/bin/kglite-mcp-server`), not a bare name — a
@@ -300,7 +300,7 @@ which drives a real handshake and prints green/red per capability.
 - **Clone-and-explore GitHub repos** —
   [`open_source_workspace_mcp.yaml`](examples/open_source_workspace_mcp.yaml):
   the agent calls `repo_management('org/repo')` to clone and build a
-  code-tree graph on demand.
+  code graph on demand (via codingest-mcp).
 - **Review a local directory** —
   [`local_code_review_mcp.yaml`](examples/local_code_review_mcp.yaml):
   point it at a checked-out tree, `set_root_dir(path)` to swap roots,
@@ -570,7 +570,7 @@ directory has runnable, self-contained artifacts:
   covering laws, regulations, court decisions with citation edges.
 - **[`code_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/code_graph.py)**
   — build a code knowledge graph from a source directory via
-  `code_tree.build`.
+  a code-graph builder such as codingest.
 - **[`spatial_graph.py`](https://github.com/kkollsga/kglite/blob/main/examples/spatial_graph.py)**
   — declarative CSV→graph loading via a JSON blueprint; lat/lon
   coordinates and pipeline-path traversal queries.
@@ -629,7 +629,7 @@ Quick reference. Each links into the appropriate guide.
 | **[Blueprints](https://kglite.readthedocs.io/en/latest/python/guides/blueprints.html)** | Declarative CSV-to-graph loading via JSON config |
 | **[Import/Export](https://kglite.readthedocs.io/en/latest/python/guides/import-export.html)** | Save/load snapshots (`.kgl`), GraphML, CSV export |
 | **[AI integration](https://kglite.readthedocs.io/en/latest/python/guides/ai-agents.html)** | `describe()` introspection, MCP server, agent prompts |
-| **[Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html)** | 14-language tree-sitter parser (`kglite.code_tree`) — functions, classes, calls, imports, web-framework routes |
+| **Code analysis** | serve + query 14-language code graphs built by the codingest project — functions, classes, calls, imports, web-framework routes |
 | **[OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html)** | Markdown + YAML-frontmatter bundles (`kglite.okf`) — Open Knowledge Format, Claude memory dirs, skills, Obsidian vaults → frontmatter as properties, links as typed edges |
 | **[Bundled datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html)** | Fetch-build-cache wrappers for public sources — SEC EDGAR filings, Wikidata, Sodir (Norwegian Offshore Directorate) — each returns a queryable `KnowledgeGraph` |
 
@@ -644,7 +644,6 @@ Full docs at **[kglite.readthedocs.io](https://kglite.readthedocs.io)**
 - [Data Loading](https://kglite.readthedocs.io/en/latest/python/guides/data-loading.html) — DataFrames in, DataFrames out
 - [Graph algorithms](https://kglite.readthedocs.io/en/latest/python/guides/graph-algorithms.html) — shortest path, PageRank, community detection
 - [Semantic Search](https://kglite.readthedocs.io/en/latest/python/guides/semantic-search.html) — embeddings, vector search, hybrid retrieval
-- [Code analysis](https://kglite.readthedocs.io/en/latest/python/guides/code-tree.html) — `code_tree.build`, framework route detection
 - [OKF ingestion](https://kglite.readthedocs.io/en/latest/python/guides/okf.html) — `okf.build`, markdown knowledge bases & agent memory
 - [Datasets](https://kglite.readthedocs.io/en/latest/python/guides/datasets.html) — SEC, Wikidata, Sodir wrappers
 - [MCP server config](https://kglite.readthedocs.io/en/latest/python/guides/mcp-servers.html) — manifests, skills, extensions

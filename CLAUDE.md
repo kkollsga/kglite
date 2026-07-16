@@ -25,7 +25,7 @@ CI gates on the `--check` variants separately from the auto-fix variants.
 - **Rust core** (`crates/kglite/src/`): the engine — `petgraph` storage; `KnowledgeGraph` is exposed to Python via PyO3 from the wrapper crate (`crates/kglite-py/src/`).
 - **Cypher engine** (`crates/kglite/src/graph/languages/cypher/`): parser → AST → planner → executor.
 - **Shared query primitives** (`crates/kglite/src/graph/core/`): pattern matching, filtering, traversal — used by both Cypher and the fluent API.
-- **Python package** (`kglite/`): thin wrapper + `code_tree/` (tree-sitter codebase parsing).
+- **Python package** (`kglite/`): thin wrapper. (Code-graph building lives in the sibling codingest project; kglite serves/queries its graphs.)
 - **Type stubs** (`kglite/__init__.pyi`): source of truth for API docs.
 - **Introspection** (`crates/kglite/src/graph/introspection/`): `describe()` XML schema for agents.
 

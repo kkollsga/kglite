@@ -61,7 +61,7 @@ command back to `pip` as the bundled Rust server.)
 ### Two workspace archetypes for code intelligence
 
 Beyond serving a single pre-built `--graph` file, the two most-wanted
-deployments both build a code-tree graph over source on the fly. Both
+deployments both build a code graph over source on the fly (builder injected by codingest-mcp). Both
 ship as copy-pasteable manifests in the repo's `examples/`:
 
 - **Clone-and-explore GitHub repos** (`workspace.kind: github`) —

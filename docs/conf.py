@@ -26,7 +26,6 @@ myst_heading_anchors = 6
 autoapi_dirs = ["../kglite"]
 autoapi_type = "python"
 autoapi_file_patterns = ["*.pyi"]
-autoapi_ignore = ["**/code_tree/**"]
 autoapi_options = [
     "members",
     "undoc-members",

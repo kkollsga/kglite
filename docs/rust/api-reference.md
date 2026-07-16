@@ -31,7 +31,6 @@ This page is the curated inventory.
 | `save_graph(&mut arc, path)` | `kglite::api::save_graph` | Write an `Arc<DirGraph>` → `Result<(), String>`. |
 | `write_kgl` / `write_kgl_with(..., fsync)` | `kglite::api::write_kgl*` | Atomic (temp+rename) + durable (`fsync`) `.kgl` write. `write_kgl_with` toggles the flush. |
 | `write_kgl_to(&graph, &mut writer)` | `kglite::api::write_kgl_to` | Serialize the `.kgl` byte stream into any `Write` (backs `to_bytes`). |
-| `build_code_tree(...)` | `kglite::api::build_code_tree` | Parse a source tree → `Result<Arc<DirGraph>, String>`. |
 
 `DirGraph::copy_embeddings_from(&src)` carries embedding stores across a rebuild
 by node id (the core behind the Python `copy_embeddings_from`). The other new
@@ -136,5 +135,4 @@ kglite::                    (the crate root)
 ├── datatypes::             (internal — use api::Value)
 ├── error                   (internal — use api::KgError)
 ├── graph::                 (internal — engine submodules)
-└── code_tree::             (internal — use api::build_code_tree)
 ```

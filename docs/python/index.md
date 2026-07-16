@@ -3,7 +3,7 @@
 The Python track. `pip install kglite`, then `import kglite`. This
 is the headline distribution path — the wheel ships a compiled
 extension (PyO3 wrapper over the pure-Rust `kglite` engine), the
-`code_tree` codebase parser, **and** the `kglite-mcp-server` command
+**and** the `kglite-mcp-server` command
 (the same pure-Rust MCP server, bundled into the wheel as of 0.10.26 —
 no separate install). A standalone `cargo install kglite-mcp-server`
 binary is also available; see {doc}`guides/mcp-servers`.
@@ -40,7 +40,6 @@ guides/timeseries
 guides/graph-algorithms
 guides/import-export
 guides/ai-agents
-guides/code-tree
 guides/okf
 guides/recipes
 guides/sec

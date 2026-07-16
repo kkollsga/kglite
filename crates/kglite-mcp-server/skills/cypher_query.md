@@ -59,7 +59,7 @@ Don't use FORMAT CSV when:
 
 ## Property shape across types
 
-In kglite's code-tree graphs, every entity carries a `module` property (the dotted module path of its file). This is uniform across `File`, `Module`, `Function`, `Class`, `Constant`, `Enum`, `Interface`, `Trait`, `Protocol`, `Struct` (since 0.9.30). So `WHERE n.module STARTS WITH 'foo.bar'` works against any node label without branching.
+In code graphs, every entity carries a `module` property (the dotted module path of its file). This is uniform across `File`, `Module`, `Function`, `Class`, `Constant`, `Enum`, `Interface`, `Trait`, `Protocol`, `Struct` (since 0.9.30). So `WHERE n.module STARTS WITH 'foo.bar'` works against any node label without branching.
 
 When in doubt about a property's name or value shape, look at `graph_overview`'s `<prop sample="..." />` output (since 0.9.30) — every property carries one example value the agent can pattern-match on.
 

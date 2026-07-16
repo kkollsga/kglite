@@ -20,7 +20,7 @@ applies_when:
 
 # Code-graph analysis: the sequencing strategy
 
-This is a **code-tree graph** — functions, classes, calls, imports, type
+This is a **code graph** — functions, classes, calls, imports, type
 references and inheritance are all first-class nodes and edges. The graph
 already encodes the structure you'd otherwise reconstruct by hand from grep
 output. Use it in this order:

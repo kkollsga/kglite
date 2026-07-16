@@ -41,7 +41,7 @@ the [boundary principle](../rust/boundary-principle.md) for the full rule.
 
 The six crates have distinct responsibilities:
 
-- `kglite` — engine, storage, Cypher, code-tree parsing, and shared API.
+- `kglite` — engine, storage, Cypher, and shared API. (Code-graph parsing moved to the standalone codingest project.)
 - `kglite-py` — PyO3 classes and Python-specific conversion.
 - `kglite-c` — stable C ABI for non-Rust bindings.
 - `kglite-mcp-server` — MCP protocol adapter over the core.
@@ -165,9 +165,10 @@ write completion metadata, rename it into `generations/`, then atomically
 replace `CURRENT`. A failed or incomplete stage is never selected by a new
 reader. Existing readers keep their old immutable generation alive.
 
-## Code-tree ingestion
+## Code-graph ingestion
 
-Code-tree parsers and graph construction are Rust-core functionality under
-`crates/kglite/src/code_tree/`. Tree-sitter grammars are compiled into the
-extension/core build. The Python package supplies the ergonomic entry points,
-not a second Python parser implementation.
+Code-graph parsing and construction live in the standalone codingest project
+(a sibling workspace that links this engine as a crate and emits ordinary
+kglite graphs). kglite itself carries no tree-sitter grammars; it serves,
+queries, and reads code graphs — `api::code_entities`, `read_code_source`,
+`explore`, and the rev procedures all operate on any code-schema graph.

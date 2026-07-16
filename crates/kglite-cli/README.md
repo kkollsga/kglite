@@ -62,9 +62,9 @@ $ kglite describe app.kgl --cypher
 Build a code-review graph without Python or MCP configuration:
 
 ```console
-$ kglite code-tree build . --output .kglite/code-review.kgl --format json
-$ kglite code-tree status --output .kglite/code-review.kgl --format json
-$ kglite code-tree build . --revs main HEAD --output .kglite/code-review.kgl
+# Code-graph builds live in the codingest project's CLI:
+$ codingest build . --output .kglite/code-review.kgl
+$ codingest status --output .kglite/code-review.kgl
 ```
 
 The adjacent metadata sidecar records the source and revision fingerprint so
@@ -114,8 +114,6 @@ dot-commands run on Enter. Tab completes dot-commands and the graph's labels.
 
 Non-interactive commands:
 
-- `code-tree build <path> [--output graph.kgl] [--rev REV | --revs REV...]` — build a current-tree or revision-aware code graph
-- `code-tree status [--output graph.kgl]` — report whether the graph matches its recorded source fingerprint
 - `skill install|uninstall [--host codex|claude] [--project] [--dry-run]` — manage the bundled code-review Agent Skill
 - `query <graph.kgl> <cypher> [--format table|csv|json]` — run a read-only Cypher query
 - `write <graph.kgl> <cypher> [--format table|csv|json] [--save]` — run a write-capable Cypher statement

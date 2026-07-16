@@ -16,7 +16,7 @@ applies_when:
 
 # Code-graph views: provenance filters & structured fields
 
-A code-tree graph mixes library code with test, benchmark, generated, and
+A code graph mixes library code with test, benchmark, generated, and
 external/stdlib nodes. These properties let you carve out the view you want
 (all are real booleans on in-repo nodes — `false`, not null — so the obvious
 filter works):

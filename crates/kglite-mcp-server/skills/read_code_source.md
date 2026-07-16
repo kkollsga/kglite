@@ -1,6 +1,6 @@
 ---
 name: read_code_source
-description: "Read source code by qualified_name — resolves a graph-indexed symbol (Function / Class / Method) to its source slice with a file_path:line header. TRIGGER when you have a qualified name from a Cypher query (e.g. `kglite.cypher.parse`) and want the body, the agent needs to inspect a function it just located, or you're tracing the implementation of a symbol whose location you already know. ALSO TRIGGER as the second leg of cypher-then-read — `cypher_query` locates by predicate, `read_code_source` fetches the body. SKIP when you only have a file path (use `read_source` — that's the file-path-keyed tool, not this one). SKIP when the graph has no Function / Class types — most non-code-tree graphs (legal-corpus, o&g) don't have code, and this tool will return errors against them. The framework auto-gates this skill via `applies_when` on those deployments."
+description: "Read source code by qualified_name — resolves a graph-indexed symbol (Function / Class / Method) to its source slice with a file_path:line header. TRIGGER when you have a qualified name from a Cypher query (e.g. `kglite.cypher.parse`) and want the body, the agent needs to inspect a function it just located, or you're tracing the implementation of a symbol whose location you already know. ALSO TRIGGER as the second leg of cypher-then-read — `cypher_query` locates by predicate, `read_code_source` fetches the body. SKIP when you only have a file path (use `read_source` — that's the file-path-keyed tool, not this one). SKIP when the graph has no Function / Class types — most non-code graphs (legal-corpus, o&g) don't have code, and this tool will return errors against them. The framework auto-gates this skill via `applies_when` on those deployments."
 applies_to:
   mcp_methods: ">=0.3.36"
   kglite_mcp_server: ">=0.9.31"
@@ -26,7 +26,7 @@ applies_when:
 
 `read_code_source` is the **symbol-to-slice tool**: given a qualified name (e.g. `foo.bar.MyClass.method`), it resolves to the source file, returns the slice covering the symbol's body, and prepends a `file_path:line_start-line_end` header. It collapses the "Cypher query found a Function; now I want to see its code" workflow into one call — saving the agent one round trip vs. `cypher_query` for the file_path + `read_source` for the slice.
 
-The tool only works against graphs that have **Function** and **Class** nodes (i.e. code-tree graphs built via `kglite.code_tree.build(...)`). It is not registered when those types are absent — and the framework auto-gates this skill via `applies_when: graph_has_node_type: [Function, Class]` so it doesn't appear in `prompts/list` for legal/o&g/data-only deployments.
+The tool only works against graphs that have **Function** and **Class** nodes (i.e. code graphs built by a code-graph builder such as codingest). It is not registered when those types are absent — and the framework auto-gates this skill via `applies_when: graph_has_node_type: [Function, Class]` so it doesn't appear in `prompts/list` for legal/o&g/data-only deployments.
 
 ## Quick Reference
 
@@ -40,7 +40,7 @@ The tool only works against graphs that have **Function** and **Class** nodes (i
 
 ## Qualified-name resolution
 
-Qualified names are the **node id** in code-tree graphs. Look at a Function or Class node's `id` property to see the canonical form:
+Qualified names are the **node id** in code graphs. Look at a Function or Class node's `id` property to see the canonical form:
 
 ```cypher
 MATCH (f:Function) WHERE f.name = 'parse' RETURN f.id, f.file_path, f.line_number LIMIT 5
@@ -101,5 +101,5 @@ Prefer `read_source` when:
 ## Behaviour notes
 
 - **Return shape.** A `file_path:line_start-line_end` header line, then the source slice. The header lets the agent quote a specific position in further messages without re-resolving.
-- **Workspace mode.** When the active code-tree was built from a repo cloned via `repo_management`, `read_code_source` resolves against that repo's source files. After `repo_management('other/repo')`, the resolver switches to the new clone — the qualified-name namespace also changes (it's tied to the repo's module structure).
-- **Disk-backed graphs.** Code-tree graphs aren't typically stored as disk-backed graphs (those exist for wikidata-scale entity data). If you somehow see a code-tree graph in disk mode, the resolver works the same; the underlying lookup goes through the index, not a full scan.
+- **Workspace mode.** When the active code graph was built from a repo cloned via `repo_management`, `read_code_source` resolves against that repo's source files. After `repo_management('other/repo')`, the resolver switches to the new clone — the qualified-name namespace also changes (it's tied to the repo's module structure).
+- **Disk-backed graphs.** Code graphs aren't typically stored as disk-backed graphs (those exist for wikidata-scale entity data). If you somehow see a code graph in disk mode, the resolver works the same; the underlying lookup goes through the index, not a full scan.

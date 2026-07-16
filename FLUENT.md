@@ -1342,7 +1342,7 @@ graph.read_only(False)
 
 ## Code Entity Methods
 
-Methods for code knowledge graphs built with the `code_tree` subpackage:
+Methods for code knowledge graphs (built by e.g. the codingest project):
 
 ```python
 # Find code entities by name
