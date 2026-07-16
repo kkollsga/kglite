@@ -1,5 +1,4 @@
-"""Progress reporters for ``KnowledgeGraph.load_ntriples`` and the
-dataset wrappers that delegate to it.
+"""Progress reporters for ``KnowledgeGraph.load_ntriples``.
 
 The Rust loader fires a structured event into a Python callable at
 phase boundaries and within Phase 1's streaming loop. Pass any
@@ -39,9 +38,10 @@ class TqdmBuildProgress:
 
     Usage::
 
+        from kglite import KnowledgeGraph
         from kglite.progress import TqdmBuildProgress
-        import kglite.datasets.wikidata as wd
-        wd.open(workdir, progress=TqdmBuildProgress())
+        g = KnowledgeGraph()
+        g.load_ntriples(path, progress=TqdmBuildProgress())
     """
 
     def __init__(self, memory: bool = True) -> None:

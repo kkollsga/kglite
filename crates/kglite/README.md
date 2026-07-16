@@ -6,9 +6,10 @@
 
 **Pure-Rust knowledge graph engine** — Cypher pipeline,
 snapshot/working CoW transactions, columnar / mmap / disk storage
-backends, optional dataset loaders (SEC EDGAR, Sodir, Wikidata).
-Zero PyO3 in the dependency tree; embed directly from any Rust
-binary.
+backends, optional RDF / OKF format loaders. Pre-packaged domain
+dataset loaders (SEC EDGAR, Sodir, Wikidata) live in the separate
+kglite-datasets project. Zero PyO3 in the dependency tree; embed
+directly from any Rust binary.
 
 > Looking for the Python wheel? `pip install kglite` — the wheel
 > is a separate PyO3 wrapper (`kglite-py`) built on top of this
@@ -136,15 +137,14 @@ Polars-io style: opt in only to what you use.
 
 | Feature | What it pulls in |
 |---|---|
-| `default` | The engine. No dataset loaders. (Code-graph building lives in the codingest crate.) |
-| `sec` | SEC EDGAR dataset loader (`kglite::datasets::sec::*`). |
-| `sodir` | Norwegian Continental Shelf petroleum loader. |
-| `wikidata` | Wikimedia truthy-NT dump fetcher + parser. |
+| `default` | The engine. No optional loaders. (Domain dataset loaders live in the kglite-datasets project; code-graph building in the codingest crate.) |
+| `rdf` | RDF loader (Turtle / N-Triples / N-Quads / TriG via oxttl). |
+| `okf` | Open Knowledge Format bundle loader (markdown + YAML frontmatter). |
 | `fastembed` | Rust-native ONNX embedder for `text_score()` semantic search. |
 
 ```toml
 [dependencies]
-kglite = { version = "0.10", features = ["sec", "sodir"] }
+kglite = { version = "0.13", features = ["rdf", "okf"] }
 ```
 
 ## Documentation

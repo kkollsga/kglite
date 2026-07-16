@@ -28,7 +28,6 @@
 
 pub mod abi;
 pub mod alloc;
-pub mod datasets;
 pub mod embedder;
 mod ffi;
 pub mod graph;
@@ -43,15 +42,6 @@ pub mod strings;
 // for binding authors to navigate.
 pub use abi::*;
 pub use alloc::*;
-// Datasets — each loader sits behind its own feature; re-exported
-// at the crate root so cbindgen picks the C functions up at the
-// flat namespace level.
-#[cfg(feature = "sec")]
-pub use datasets::sec::*;
-#[cfg(feature = "sodir")]
-pub use datasets::sodir::*;
-#[cfg(feature = "wikidata")]
-pub use datasets::wikidata::*;
 pub use embedder::*;
 pub use graph::*;
 pub use result::*;

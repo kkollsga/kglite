@@ -9,7 +9,6 @@ except ModuleNotFoundError:  # Python 3.10 support; installed via coverage[toml]
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text())
-CORE_MANIFEST = tomllib.loads((ROOT / "crates" / "kglite" / "Cargo.toml").read_text())
 CI_TEXT = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 
 
@@ -49,8 +48,3 @@ def test_rust_coverage_is_component_scoped_and_report_only() -> None:
     assert "flags: rust-core" in CI_TEXT
     assert "name: rust-core" in CI_TEXT
     assert "--fail-under" not in CI_TEXT
-
-
-def test_default_feature_coverage_excludes_sec_only_live_test() -> None:
-    live_test = next(target for target in CORE_MANIFEST["test"] if target["name"] == "datasets_sec_fetch_live")
-    assert live_test["required-features"] == ["sec"]

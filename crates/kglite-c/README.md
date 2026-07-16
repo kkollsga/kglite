@@ -7,7 +7,7 @@ napi, JVM via JNI, .NET via P/Invoke) consume a single C header
 host language.
 
 This crate is glue. The engine itself (Cypher pipeline, transaction
-model, storage backends, dataset loaders) lives in the sibling
+model, storage backends) lives in the sibling
 `kglite` crate. `kglite-c` exposes a curated subset of
 `kglite::api::*` via `#[no_mangle] extern "C"` functions plus
 cbindgen-generated header.
@@ -17,7 +17,7 @@ cbindgen-generated header.
 This is the initial skeleton — top-12 entry points (lifecycle /
 session / Cypher / result accessors / error introspection / ABI
 version). See `docs/rust/c-abi.md` for the design conventions and
-the full Phase H roadmap (H.3 datasets + embedder, H.4 Go PoC
+the full Phase H roadmap (H.3 embedder, H.4 Go PoC
 consumer, H.5 release coordination).
 
 ## Use from C
@@ -118,9 +118,9 @@ uint16_t    kglite_status_code_http_status(KgliteStatusCode);
 
 The C ABI is fully synchronous. Bindings own their own async/threading
 model — Go uses goroutines, JS uses worker threads, JVM uses thread
-pools, each wrapping the sync C calls. Async dataset fetchers
-(`kglite::api::datasets::*`) are exposed via their `*_blocking`
-companions in Phase H.3.
+pools, each wrapping the sync C calls. Any long-running engine calls
+run to completion on the calling thread; bindings release their own
+runtime's equivalent of the GIL around them.
 
 Fallible calls initialize every non-null output slot before validation. Rust
 panics caused by valid calls are contained at the boundary and reported as

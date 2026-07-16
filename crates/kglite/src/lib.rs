@@ -1,11 +1,11 @@
 //! kglite — pure-Rust knowledge graph engine.
 //!
 //! Cypher pipeline, snapshot/working CoW transactions, columnar /
-//! mmap / disk storage backends, optional dataset loaders
-//! (SEC EDGAR, Sodir, Wikidata). The Python wheel
-//! (`pip install kglite`) is built by the sibling `kglite-py`
-//! crate; the Bolt and MCP protocol servers are separate
-//! workspace binaries.
+//! mmap / disk storage backends, and optional format loaders (RDF,
+//! OKF). Pre-packaged domain dataset loaders live in the separate
+//! kglite-datasets project. The Python wheel (`pip install kglite`)
+//! is built by the sibling `kglite-py` crate; the Bolt and MCP
+//! protocol servers are separate workspace binaries.
 //!
 //! ## Public API
 //!
@@ -17,12 +17,6 @@
 //!
 //! See `docs/rust/embedding.md` for the embedder guide.
 
-// Dataset loaders — sealed behind the curated `api::datasets` facade (the
-// same chokepoint treatment as `graph`). `pub(crate)` so no wrapper can reach
-// `kglite::datasets::*` directly; the `api::datasets` re-exports still resolve
-// (re-exporting a `pub` item out of a `pub(crate)` module is legal). The CI
-// grep (`scripts/check_api_chokepoint.sh`) keeps wrappers honest.
-pub(crate) mod datasets;
 pub mod datatypes;
 pub mod error;
 // Engine internals — sealed behind the curated `api` facade (roadmap Piece 4).
@@ -50,7 +44,7 @@ pub mod api {
     // (`graphgen`, `explore_markdown`). Everything else is clustered into a
     // submodule by concern: `param`, `mutation`, `fluent`, `algorithms`,
     // `timeseries`, `introspection`, `io`, `blueprint`,
-    // `cypher`, `session`, `datasets`. Per-cluster items live in exactly one
+    // `cypher`, `session`. Per-cluster items live in exactly one
     // place (no root↔submodule duplication).
     pub use crate::datatypes::values::{NodeValue, PathValue, RelValue};
     pub use crate::datatypes::Value;
@@ -445,89 +439,5 @@ pub mod api {
             execute_mut, execute_read, resolve_noderefs, CommitOutcome, ExecuteOptions,
             ExecuteOutcome, Session, Transaction,
         };
-    }
-
-    /// Dataset fetch + extract building blocks for bindings that
-    /// want to wrap SEC EDGAR, Sodir (Norwegian Continental Shelf),
-    /// or Wikidata. Each submodule re-exports the same surface the
-    /// Python wheel uses today via `_sec_internal` / `_sodir_internal`
-    /// / `_wikidata_internal`; future Go / JS / JVM bindings consume
-    /// the same items here through the stable api namespace.
-    ///
-    /// **Lifecycle orchestration is NOT in core.** The "fetch what's
-    /// missing, build if cache is stale, return a ready-to-query
-    /// graph" loop lives in each binding's wrapper (the Python
-    /// wheel's wrappers at `kglite/datasets/*/wrapper.py` are the
-    /// reference implementation). The engine ships the building
-    /// blocks; bindings compose them in their own language idiom.
-    /// See `docs/rust/implementing-a-binding.md` → "Wrapping a
-    /// dataset for your binding" for the pattern.
-    ///
-    /// **All `fetch_*` entry points are synchronous.** They run to
-    /// completion on the calling thread, backed by the shared
-    /// `datasets::http` client (ureq + rate gate + retry). No async
-    /// runtime is needed — bindings call them directly and release the
-    /// GIL / manage threads in their own idiom.
-    pub mod datasets {
-        /// SEC EDGAR — quarterly filings index, bulk submissions
-        /// archive, per-form fetchers (Form 3/4/5, 13F, 8-K, SC 13D/G,
-        /// DEF 14A, Form 144, Exhibit 21, XBRL company facts).
-        #[cfg(feature = "sec")]
-        pub mod sec {
-            // Workdir layout, storage-mode sizing, slicing + the error type.
-            pub use crate::datasets::sec::{
-                pick_storage_mode, predict_graph_size_gb, SecError, SliceSpec, StorageMode,
-                Workdir, YearRange,
-            };
-            // HTTP client + per-form fetch entry points. Synchronous —
-            // call directly (no runtime needed); backed by the shared
-            // `DatasetClient` (ureq + rate gate + retry).
-            pub use crate::datasets::sec::{
-                fetch_13f_info_table, fetch_company_facts, fetch_company_submission,
-                fetch_company_tickers, fetch_exhibit21_attachment, fetch_filing_primary_doc,
-                fetch_form4_filing, fetch_quarterly_master_idx, fetch_submissions_bulk, FetchMode,
-                SecClient,
-            };
-            // Form-type → fetch-bucket resolution + per-filing dispatch
-            // planning (reads filing_index.csv, applies CIK/year/form filters).
-            pub use crate::datasets::sec::{
-                all_buckets, prepare_dispatch_plan, resolve_fetch_buckets, DispatchScope,
-                SecFormBucket,
-            };
-            // company_tickers.json parser + the raw→processed extract pipeline.
-            pub use crate::datasets::sec::{parse_tickers_json, run_all, ExtractReport};
-        }
-
-        /// Sodir — Norwegian Continental Shelf petroleum data
-        /// (fields, wells, prospects, licences, …) via the
-        /// ArcGIS FactMaps REST API.
-        #[cfg(feature = "sodir")]
-        pub mod sodir {
-            pub use crate::datasets::sodir::{SodirError, Workdir};
-            // Single synchronous fetch entry — pulls all referenced
-            // datasets into csv/, applies preprocessing, returns the
-            // report. Call directly (no runtime needed); backed by the
-            // shared `DatasetClient` (ureq + rate gate + retry).
-            pub use crate::datasets::sodir::{fetch_all, FetchAllReport};
-            // Blueprint utilities the wheel composes with from_blueprint.
-            pub use crate::datasets::sodir::{datasets_used_by_blueprint, merge_blueprint_json};
-        }
-
-        /// Wikidata — resumable download of the
-        /// `latest-truthy.nt.bz2` RDF dump. Building the graph from
-        /// the dump is a separate concern (the wheel uses
-        /// `KnowledgeGraph::load_ntriples`); this surface is the
-        /// dump-management half only.
-        #[cfg(feature = "wikidata")]
-        pub mod wikidata {
-            pub use crate::datasets::wikidata::{
-                ensure_dump, remote_last_modified, WikidataError, Workdir,
-            };
-            // Cache-freshness decision — every binding's `open()` flow asks
-            // the same question; the decision lives in core, each binding
-            // handles the outcome (verbose prints, process-local cache) in its
-            // own idiom. Lifted from `kglite/datasets/wikidata.py`.
-            pub use crate::datasets::wikidata::{decide, CacheDecision, FreshnessInputs};
-        }
     }
 }

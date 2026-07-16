@@ -95,13 +95,6 @@
       "nesting": 6
     },
     {
-      "path": "crates/kglite/src/datasets/sec/extract/sinks.rs",
-      "qualified_name": "crate::Sinks::open",
-      "lines": 84,
-      "branches": 67,
-      "nesting": 1
-    },
-    {
       "path": "crates/kglite/src/graph/algorithms/centrality.rs",
       "qualified_name": "crate::betweenness_centrality",
       "lines": 286,

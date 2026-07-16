@@ -595,7 +595,7 @@ ex:carol rdf:type foaf:Person, foaf:Agent .
     /// Throughput comparison: oxttl parse-only vs `load_rdf` vs the
     /// hand-tuned Wikidata `load_ntriples`, on identical Wikidata-shaped
     /// N-Triples. Ignored by default — run in release:
-    /// `cargo test -p kglite --release --features rdf,sec,sodir,wikidata,okf \
+    /// `cargo test -p kglite --release --features rdf,okf \
     ///   bench_vs_wikidata -- --ignored --nocapture`
     #[test]
     #[ignore = "perf benchmark"]

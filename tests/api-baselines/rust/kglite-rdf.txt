@@ -605,7 +605,6 @@ pub fn kglite::api::cypher::resolve_edge_property(graph: &kglite::api::DirGraph,
 pub fn kglite::api::cypher::resolve_node_property(node: &kglite::api::NodeData, property: &str, graph: &kglite::api::DirGraph) -> kglite::datatypes::values::Value
 pub fn kglite::api::cypher::rewrite_text_score(query: &mut kglite::api::cypher::CypherQuery, params: &std::collections::hash::map::HashMap<alloc::string::String, kglite::datatypes::values::Value>) -> core::result::Result<kglite::api::cypher::planner::simplification::TextScoreRewrite, alloc::string::String>
 pub fn kglite::api::cypher::validate_schema(query: &kglite::api::cypher::CypherQuery, graph: &kglite::api::DirGraph) -> core::result::Result<(), kglite::api::cypher::planner::schema_check::SchemaError>
-pub mod kglite::api::datasets
 pub mod kglite::api::durable
 pub struct kglite::api::durable::RecordingGraph<G: kglite::api::GraphRead>
 impl<G: kglite::api::GraphRead> kglite::api::durable::RecordingGraph<G>

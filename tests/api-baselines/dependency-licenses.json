@@ -44,24 +44,108 @@
     "MPL-2.0"
   ],
   "reviewed_packages": [
-    ["approx", "0.5.1", "Apache-2.0", "runtime geometry dependency"],
-    ["aws-lc-sys", "0.42.0", "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)", "runtime TLS cryptography implementation"],
-    ["cbindgen", "0.27.0", "MPL-2.0", "build-only C header generator"],
-    ["esaxx-rs", "0.1.10", "Apache-2.0", "optional tokenizer dependency"],
-    ["fastembed", "5.13.4", "Apache-2.0", "optional embedding backend"],
-    ["hf-hub", "0.5.0", "Apache-2.0", "optional embedding model transport"],
-    ["lzma-rust2", "0.15.7", "Apache-2.0", "optional archive codec"],
-    ["openssl", "0.10.79", "Apache-2.0", "optional TLS dependency"],
-    ["option-ext", "0.2.0", "MPL-2.0", "optional fastembed filesystem helper"],
-    ["ring", "0.17.14", "Apache-2.0 AND ISC", "runtime cryptography dependency"],
-    ["rmcp", "1.6.0", "Apache-2.0", "runtime MCP protocol implementation"],
-    ["rmcp-macros", "1.6.0", "Apache-2.0", "MCP build-time proc macro"],
-    ["safetensors", "0.7.0", "Apache-2.0", "optional embedding model format"],
-    ["spm_precompiled", "0.1.4", "Apache-2.0", "optional tokenizer dependency"],
-    ["sync_wrapper", "1.0.2", "Apache-2.0", "optional HTTP adapter"],
-    ["target-lexicon", "0.13.5", "Apache-2.0 WITH LLVM-exception", "build target parser"],
-    ["tokenizers", "0.22.2", "Apache-2.0", "optional embedding tokenizer"],
-    ["zopfli", "0.8.3", "Apache-2.0", "runtime ZIP compression dependency"]
+    [
+      "approx",
+      "0.5.1",
+      "Apache-2.0",
+      "runtime geometry dependency"
+    ],
+    [
+      "aws-lc-sys",
+      "0.42.0",
+      "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
+      "runtime TLS cryptography implementation"
+    ],
+    [
+      "cbindgen",
+      "0.27.0",
+      "MPL-2.0",
+      "build-only C header generator"
+    ],
+    [
+      "esaxx-rs",
+      "0.1.10",
+      "Apache-2.0",
+      "optional tokenizer dependency"
+    ],
+    [
+      "fastembed",
+      "5.13.4",
+      "Apache-2.0",
+      "optional embedding backend"
+    ],
+    [
+      "hf-hub",
+      "0.5.0",
+      "Apache-2.0",
+      "optional embedding model transport"
+    ],
+    [
+      "lzma-rust2",
+      "0.15.7",
+      "Apache-2.0",
+      "optional archive codec"
+    ],
+    [
+      "openssl",
+      "0.10.79",
+      "Apache-2.0",
+      "optional TLS dependency"
+    ],
+    [
+      "option-ext",
+      "0.2.0",
+      "MPL-2.0",
+      "optional fastembed filesystem helper"
+    ],
+    [
+      "ring",
+      "0.17.14",
+      "Apache-2.0 AND ISC",
+      "runtime cryptography dependency"
+    ],
+    [
+      "rmcp",
+      "1.6.0",
+      "Apache-2.0",
+      "runtime MCP protocol implementation"
+    ],
+    [
+      "rmcp-macros",
+      "1.6.0",
+      "Apache-2.0",
+      "MCP build-time proc macro"
+    ],
+    [
+      "safetensors",
+      "0.7.0",
+      "Apache-2.0",
+      "optional embedding model format"
+    ],
+    [
+      "spm_precompiled",
+      "0.1.4",
+      "Apache-2.0",
+      "optional tokenizer dependency"
+    ],
+    [
+      "sync_wrapper",
+      "1.0.2",
+      "Apache-2.0",
+      "optional HTTP adapter"
+    ],
+    [
+      "target-lexicon",
+      "0.13.5",
+      "Apache-2.0 WITH LLVM-exception",
+      "build target parser"
+    ],
+    [
+      "tokenizers",
+      "0.22.2",
+      "Apache-2.0",
+      "optional embedding tokenizer"
+    ]
   ],
   "schema_version": 1
 }

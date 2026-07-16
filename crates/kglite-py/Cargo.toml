@@ -23,11 +23,12 @@ publish = false
 # (via plain cargo) can share the same kglite-py rlib. Maturin is
 # wired to enable it; cargo build leaves it off.
 [features]
-# `loaders` + `mcp-server` are on by default so the shipped wheel is
-# feature-identical to before this split. They exist as separate features
-# purely so diagnostic variant wheels can drop them (via
-# `--no-default-features`) to bisect the pyarrow-24 coexistence SIGSEGV.
-default = ["abi3", "loaders", "mcp-server"]
+# `mcp-server` is on by default so the shipped wheel is feature-identical
+# to before this split. It exists as a separate feature purely so
+# diagnostic variant wheels can drop it (via `--no-default-features`) to
+# bisect the pyarrow-24 coexistence SIGSEGV. The OKF + RDF format loaders
+# are enabled unconditionally via the `kglite_core` dep's feature list.
+default = ["abi3", "mcp-server"]
 python-extension = ["pyo3/extension-module"]
 # Single-cdylib-for-many-Pythons mode. On by default so existing
 # `cargo build` / `cargo install` / `maturin develop` flows behave
@@ -35,17 +36,6 @@ python-extension = ["pyo3/extension-module"]
 # `--no-default-features --features python-extension` to produce
 # per-Python-version wheels alongside the bundled binary.
 abi3 = ["pyo3/abi3-py310"]
-# Dataset loaders (SEC / SODIR / Wikidata / OKF) + RDF import. Pulls the
-# matching core-crate features. The loaders are synchronous (they drive
-# the shared ureq-based `DatasetClient` on the calling thread), so no
-# async runtime is needed here. On by default; a diagnostic build drops it.
-loaders = [
-    "kglite_core/sec",
-    "kglite_core/sodir",
-    "kglite_core/wikidata",
-    "kglite_core/okf",
-    "kglite_core/rdf",
-]
 # Bundled in-process MCP server (`_run_mcp_server` + the `kglite-mcp-server`
 # console script). On by default; a diagnostic build drops it.
 mcp-server = ["dep:kglite-mcp-server"]
@@ -87,10 +77,9 @@ pyo3 = { version = "0.29", features = ["multiple-pymethods", "chrono"] }
 # crate's source to avoid an extern-crate collision with this
 # crate's own `[lib] name = "kglite"` (the cdylib that becomes
 # the wheel's `kglite.abi3.so`).
-# Dataset features (sec/sodir/wikidata/okf/rdf) are NOT hard-wired here;
-# they are pulled in via this crate's `loaders` feature (default-on) so a
-# diagnostic variant can drop them.
-kglite_core = { package = "kglite", path = "../kglite" }
+# The OKF + RDF format loaders are enabled unconditionally — they are
+# pure-Rust parsers (no network code) that the wheel always ships.
+kglite_core = { package = "kglite", path = "../kglite", features = ["okf", "rdf"] }
 
 # Shared CLI implementation. The standalone `kglite-cli` package builds the
 # same crate as a libpython-free binary; the main Python wheel calls its Rust

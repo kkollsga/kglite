@@ -9,7 +9,7 @@ version.workspace = true
 edition = "2021"
 authors = ["Kristian dF Kollsgård <kkollsg@gmail.com>"]
 license = "MIT"
-description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, agent-facing schema introspection, and optional dataset loaders"
+description = "Pure-Rust embedded Cypher knowledge graph engine with in-memory, mmap, and disk storage, and agent-facing schema introspection"
 readme = "README.md"
 repository = "https://github.com/kkollsga/kglite"
 homepage = "https://github.com/kkollsga/kglite"
@@ -36,10 +36,6 @@ name = "bz2_bench"
 path = "src/bin/bz2_bench.rs"
 required-features = ["parallel-bz2"]
 
-[[test]]
-name = "datasets_sec_fetch_live"
-required-features = ["sec"]
-
 [features]
 default = []
 # Rust-native embedder backend behind the `fastembed` Cargo feature.
@@ -61,19 +57,6 @@ fastembed = ["dep:fastembed"]
 # feature.
 parallel-bz2 = ["dep:parallel-bz2-redux"]
 
-# Pre-packaged dataset loaders. Polars-io style: opt in to only the
-# loaders you actually use. Phase G.3a folded the standalone
-# `kglite-{sec,sodir,wikidata}` sibling crates into here.
-sec = [
-    "dep:thiserror",
-    "dep:ureq",
-    "dep:zip",
-    "dep:quick-xml",
-]
-sodir = [
-    "dep:thiserror",
-    "dep:ureq",
-]
 # OKF (Open Knowledge Format) bundle loader — parses a directory of
 # markdown files with YAML frontmatter, cross-linked by markdown links,
 # into a knowledge graph (read-only ingestion, like `code_tree` but for
@@ -81,13 +64,6 @@ sodir = [
 # crate pulls no YAML parser; the Python wheel enables it. `regex` (link
 # extraction) and `walkdir` (tree walk) are already non-optional deps.
 okf = ["dep:yaml-rust2"]
-wikidata = [
-    "dep:thiserror",
-    "dep:ureq",
-    # `wikidata` intentionally does not imply `parallel-bz2`: the sequential
-    # fallback remains the minimal dependency path, while callers loading the
-    # 50+ GB truthy dump can opt into block-parallel decompression explicitly.
-]
 # General-purpose RDF loader (Turtle / N-Triples / N-Quads / TriG via
 # the oxttl parser family). Off by default so the bare crate pulls no
 # RDF parser; `oxttl` + `oxrdf` are only in the dep tree when `rdf` is
@@ -132,21 +108,6 @@ csv = "1.3"
 geojson = "0.24"
 indexmap = { version = "2", features = ["serde"] }
 
-# ── Dataset loader deps (feature-gated, all `optional = true`) ──
-# Folded from the standalone `kglite-{sec,sodir,wikidata}` crates in
-# G.3a. Each is `optional = true` so users who don't enable the
-# `sec` / `sodir` / `wikidata` features get a build without these
-# in their dep tree.
-thiserror = { version = "1", optional = true }
-# Shared synchronous HTTP client for all dataset loaders (SEC / SODIR /
-# Wikidata). Pinned to 2.x — 3.x is also in the lockfile via mcp-methods
-# but has a different API and pulls native-tls. ureq 2's default features
-# give rustls TLS + automatic gzip; `json` adds serde_json body helpers.
-# This replaced the former async reqwest + governor + tokio-bridge stack.
-ureq = { version = "2", optional = true, features = ["json"] }
-zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
-quick-xml = { version = "0.41", optional = true }
-
 # OKF loader YAML frontmatter parser — gated behind the `okf` feature.
 # `yaml-rust2` is a pure-Rust, actively-maintained YAML 1.2 parser (no
 # `unsafe`/libyaml, no unmaintained advisory); only pulled when `okf` is
@@ -175,9 +136,9 @@ tempfile = "3"
 loom = "0.7"
 
 # docs.rs builds with these features so the published API page covers
-# the dataset loaders + fastembed adapter, which would otherwise be
+# the optional loaders + fastembed adapter, which would otherwise be
 # missing (defaults are intentionally empty). `rustdoc-args` enables doc-cfg
 # annotations so feature-gated APIs are visually marked on the page.
 [package.metadata.docs.rs]
-features = ["sec", "sodir", "wikidata", "fastembed", "okf", "rdf", "parallel-bz2"]
+features = ["fastembed", "okf", "rdf", "parallel-bz2"]
 rustdoc-args = ["--cfg", "docsrs"]

@@ -21,6 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the `rev_diff`/`affected_tests`/`dead_code` procedures. The wheel drops
   all 15 bundled tree-sitter grammars. Migrate builds to codingest (same
   builder, verified graph-equivalent by its golden parity suite).
+- **BREAKING: the pre-packaged domain dataset loaders moved to the standalone
+  kglite-datasets project.** `kglite.datasets` (the `sec` / `sodir` /
+  `wikidata` Python wrappers) is gone from the wheel; the `kglite::api::datasets`
+  Rust facade and the core `sec` / `sodir` / `wikidata` Cargo features are gone;
+  and the 13 `kglite_datasets_*` C-ABI functions (plus their `sec` / `sodir` /
+  `wikidata` features) are gone from `kglite-c`. With the loaders out, the
+  default engine build links **zero network code** — the datasets' `ureq` /
+  `rustls` HTTP stack drops out, and `zip` + `quick-xml` leave the workspace
+  dependency tree entirely (the engine crate's normal dep count drops from 309
+  to 171; `ureq`/`rustls` remain only under the opt-in `fastembed` model
+  transport and the separately-bundled MCP server). The RDF loader
+  (`load_rdf` / `load_ntriples`), the OKF
+  loader (`kglite.okf`), `graphgen`, and blueprints all stay — they are engine
+  formats/features, not domain loaders, and the Wikidata-scale mmap/disk
+  storage that serves billion-edge graphs is untouched. Migrate to the
+  kglite-datasets project (same loaders, verified byte-identical to the former
+  in-tree copy by a golden parity suite); kglite continues to serve and query
+  the `.kgl` graphs they produce.
 
 ### Added
 

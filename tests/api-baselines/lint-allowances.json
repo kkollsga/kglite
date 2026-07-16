@@ -157,26 +157,6 @@
       "classification": "boundary"
     },
     {
-      "identity": "crates/kglite-py/src/sec.rs::fn:fetch_raw:fn fetch_raw( py: Python<'_>, workdir: String, user_agent: &str, years: u16, current_year: u16, current_quarter: u8, force_refetch: bool, staleness_hours: u64, ) -> PyResult<Py<PyDict>>::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
-      "identity": "crates/kglite-py/src/sec.rs::fn:run_batch:fn run_batch<T, F>( py: Python<'_>, user_agent: &str, workdir: String, batch: Vec<T>, phase: &str, label: &str, unit: &str, progress: Option<&Py<PyAny>>, fetch_one: F, ) -> PyResult<(usize, usize)> where T: Send, // shared `&F` *inside* `py.detach`, whose `Ungil` bound requires // that borrow be `Se::clippy::too_many_arguments",
-      "classification": "boundary"
-    },
-    {
-      "identity": "crates/kglite/src/datasets/sec/extract/forms/eightk.rs::fn:emit_8k:fn emit_8k( items: &[EightKItem], officer_changes: &[OfficerChange], issuer_cik_raw: &str, path: &Path, sinks: &mut Sinks, identities: &mut Identities, extracted_at: &str, report: &mut FormReport, ) -> Result<()>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/datasets/sec/extract/identity/companies.rs::fn:emit_one_submission:fn emit_one_submission( sub: &crate::datasets::sec::parsers::submissions::Submission, slice: &SliceSpec, sinks: &mut Sinks, identities: &mut Identities, filing_index: &mut csv::Writer<File>, sic_index: &mut HashMap<String, String>, report: &mut CompanyEmitReport, ) -> Result<()>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
-      "identity": "crates/kglite/src/datasets/sec/extract/identity/mod.rs::fn:ensure_company:pub fn ensure_company( &mut self, sinks: &mut Sinks, cik: &str, name: &str, sic: &str, sic_description: &str, state_of_incorporation: &str, fiscal_year_end: &str, tickers: &str, exchanges: &str, entity_type: &str, former_names: &str, ) -> Result<()>::clippy::too_many_arguments",
-      "classification": "transitional"
-    },
-    {
       "identity": "crates/kglite/src/datatypes/values.rs::fn:test_as_string_with_string_value:fn test_as_string_with_string_value()::clippy::approx_constant",
       "classification": "test"
     },
@@ -472,14 +452,6 @@
     },
     {
       "identity": "crates/kglite-py/src/graph/embedder/py_adapter.rs::fn:instance:pub fn instance(&self) -> &Py<PyAny>::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/datasets/sec/fetch.rs::fn:raw_master_idx_path:pub(crate) fn raw_master_idx_path(workdir: &Workdir, year: u16, q: u8) -> PathBuf::dead_code",
-      "classification": "dead-code"
-    },
-    {
-      "identity": "crates/kglite/src/datasets/sodir/client.rs::fn:fetch_bytes:pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>>::dead_code",
       "classification": "dead-code"
     },
     {

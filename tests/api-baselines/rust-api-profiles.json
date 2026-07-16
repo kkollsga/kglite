@@ -8,10 +8,7 @@
     "fastembed": "public-api",
     "okf": "public-api",
     "parallel-bz2": "implementation-only",
-    "rdf": "public-api",
-    "sec": "public-api",
-    "sodir": "public-api",
-    "wikidata": "public-api"
+    "rdf": "public-api"
   },
   "profiles": [
     {
@@ -33,21 +30,6 @@
       "name": "rdf",
       "features": ["rdf"],
       "baseline": "tests/api-baselines/rust/kglite-rdf.txt"
-    },
-    {
-      "name": "sec",
-      "features": ["sec"],
-      "baseline": "tests/api-baselines/rust/kglite-sec.txt"
-    },
-    {
-      "name": "sodir",
-      "features": ["sodir"],
-      "baseline": "tests/api-baselines/rust/kglite-sodir.txt"
-    },
-    {
-      "name": "wikidata",
-      "features": ["wikidata"],
-      "baseline": "tests/api-baselines/rust/kglite-wikidata.txt"
     },
     {
       "name": "all-features",

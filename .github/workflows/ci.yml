@@ -167,18 +167,18 @@ jobs:
           shared-key: kglite-c
           workspaces: ". -> target"
 
-      # Build + lint + test with every dataset feature on. fastembed
-      # is off here because it pulls a ~200 MB ONNX runtime we don't
-      # want on every CI run; the default-feature build below
+      # Build + lint + test with the optional format loader on.
+      # fastembed is off here because it pulls a ~200 MB ONNX runtime
+      # we don't want on every CI run; the default-feature build below
       # verifies the no-fastembed path stays compilable.
-      - name: Clippy (sec + sodir + wikidata + rdf)
-        run: cargo clippy -p kglite-c --all-targets --features sec,sodir,wikidata,rdf -- -D warnings
+      - name: Clippy (rdf)
+        run: cargo clippy -p kglite-c --all-targets --features rdf -- -D warnings
 
-      - name: Tests (sec + sodir + wikidata + rdf)
-        run: cargo test -p kglite-c --features sec,sodir,wikidata,rdf
+      - name: Tests (rdf)
+        run: cargo test -p kglite-c --features rdf
 
       # Default-feature build — what consumers get without opting
-      # into any dataset / embedder feature. Keeps the no-extras
+      # into any format / embedder feature. Keeps the no-extras
       # path honest.
       - name: Clippy (default features)
         run: cargo clippy -p kglite-c --all-targets -- -D warnings
@@ -199,9 +199,9 @@ jobs:
           # against the committed copy.
           rm -f crates/kglite-c/include/kglite.h
           touch crates/kglite-c/build.rs
-          cargo build -p kglite-c --features sec,sodir,wikidata,fastembed,rdf
+          cargo build -p kglite-c --features fastembed,rdf
           git diff --exit-code -- crates/kglite-c/include/kglite.h || {
-            echo "::error::Committed include/kglite.h is out of date — re-run 'cargo build -p kglite-c --features sec,sodir,wikidata,fastembed,rdf' and commit the result."
+            echo "::error::Committed include/kglite.h is out of date — re-run 'cargo build -p kglite-c --features fastembed,rdf' and commit the result."
             exit 1
           }
 
@@ -366,8 +366,8 @@ jobs:
       - name: Build extension into a free-threaded venv (abi3 off)
         # abi3 (the limited API) doesn't cover the free-threaded build, so the
         # extension is built per-version with `--no-default-features` (drops the
-        # `abi3` default) + `python-extension,loaders,mcp-server` (re-adds the
-        # default loaders/server the wheel ships, minus abi3). The build itself is
+        # `abi3` default) + `python-extension,mcp-server` (re-adds the
+        # default server the wheel ships, minus abi3). The build itself is
         # a real test: PyO3 0.29 enforces `Sync` on every `#[pyclass]` for a
         # free-threaded target, so a non-thread-safe class fails to compile here.
         #
@@ -381,7 +381,7 @@ jobs:
           python -m venv .ftvenv
           ./.ftvenv/bin/pip install -q maturin pytest pandas
           VIRTUAL_ENV="$PWD/.ftvenv" ./.ftvenv/bin/maturin develop --release \
-            --no-default-features --features python-extension,loaders,mcp-server
+            --no-default-features --features python-extension,mcp-server
 
       - name: Assert GIL is actually disabled + run concurrency suite
         # Backs the module's `gil_used = false` declaration with a real run:
