@@ -98,12 +98,11 @@ def test_graph_copy_cow_correctness_mapped():
 #: (run on each platform; the script writes whichever entry matches the
 #: current host).
 BINARY_SIZE_BASELINES = {
-    "darwin": 19_767_648,  # post-code_tree-removal darwin capture (2026-07-16)
-    "linux": 30_200_000,  # estimate: pre-removal Linux baseline (64,656,000)
-    # scaled by the same −53% the macOS removal measured. Deliberately
-    # recaptured DOWNWARD in the same change that deleted the builder — the
-    # old ceiling would have let ~22 MB of regression pass silently. Refresh
-    # with the real value on the next CI run.
+    "darwin": 18_857_776,  # post-dataset-loader-removal darwin capture (2026-07-16)
+    "linux": 28_810_000,  # estimate: the post-code_tree Linux estimate (30.2 MB)
+    # scaled by the same −4.6% the macOS loader removal measured. Both
+    # removals deliberately recaptured DOWNWARD so the +10% budget guards
+    # the real binary. Refresh with the real value on the next CI run.
 }
 
 
@@ -151,6 +150,11 @@ def test_binary_size_regression():
                       tree-sitter grammars moved to the standalone codingest
                       project. Baseline deliberately recaptured downward so
                       the +10% budget guards the new, smaller binary.
+      - post-0.13.4b: 18,857,776 bytes (≈18.0 MB, macOS .dylib) — the
+                      sec/sodir/wikidata dataset loaders moved to the
+                      kglite-datasets project (zip/quick-xml gone; the
+                      remaining ureq/rustls belong to the bundled MCP
+                      server via mcp-methods, not the engine).
 
       - 0.13.1:       41,367,232 bytes (≈39.5 MB). The 33 KB increase adds
                       fused grouped/global count operators, mutation-safe
